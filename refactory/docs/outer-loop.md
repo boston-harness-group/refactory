@@ -223,6 +223,67 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
   run and are kept on resume.
 
+## An evaluation that dies with the run is not a result (exit 75, `--resume`)
+
+A failed item is the candidate's result only when it ran and failed. An item whose
+process died with the run has an unknown outcome (`items.interrupted_item`). That is
+an item whose model calls kept failing on the wire through the client's retries (a
+proxy or provider outage), whose completion process was killed by SIGKILL or SIGTERM
+(exit -9 or -15: the host's out-of-memory killer, a stop from outside), whose product
+worker was killed (`signal: SIGKILL`), whose op child exited before it reported, or
+whose model call the run's stop cancelled. Only an item with no verdict qualifies (an
+error, or "no answer" because a step's answer is missing). An item the Task graded is
+always its result. A model timeout, a wrong or garbled answer, an output limit, a
+product's own failure and any other signal (SIGABRT from a runtime out of heap,
+SIGSEGV) are the candidate's failures, as before. A wire failure is only ever called
+one when the session's last cause is the wire's. The model's streamed reasoning (which
+may say "429") never decides it.
+
+- **In-run retries.** A train evaluation, a val or test rollout or a fresh-evidence
+  re-score with such an item, or whose run failed outside any item for one of these
+  reasons, is tried again inside the run after 2 minutes, then after 5 more
+  (`INTERRUPTED_RETRY_WAITS_S`). There is no wall-clock cap: each attempt has the run's
+  usual limits. Each attempt is journaled as `evaluation_interrupted` (attempt, outcome,
+  causes, how many items died) and shown. Before an attempt runs again, the earlier
+  attempt's folder is moved to the run's archive.
+- **The stop.** Still interrupted after its retries, the evaluation stops the run with
+  exit status **75** (`EX_TEMPFAIL`, `EXIT_INTERRUPTED`) and `"resumable": true` in the
+  error JSON. Exit 2 means a refused configuration. Nothing of the evaluation is
+  recorded: no score, records, val occasion, re-score or rollouts. What `refactory
+  optimize ... --resume` does then depends on what stopped:
+  - **A train evaluation:** the candidate stays unevaluated and its epoch open, so the
+    resume evaluates it again from the start and gates it as any other.
+  - **A val or test rollout:** the candidate's train score stands. The interrupted
+    rollout is no val or test score, and the resume rolls it out again in a fresh
+    occasion.
+  - **A fresh-evidence re-score:** the parent keeps its earlier records. The resume
+    tries the re-score again only while that epoch's children are still unevaluated
+    (a known gap, listed as a follow-up).
+- **The cap.** Each stop counts for that candidate and part (a re-score counts per
+  epoch), from the journal, so a resume keeps the count. An in-run retry is not a stop.
+  The run stops on the first two. On the third (`INTERRUPTION_CAP`), the evaluation is
+  recorded as failed, with the error "`<part>` evaluation interrupted 3 times; recorded
+  as failed", and the run goes on. An evaluation that dies every time therefore cannot
+  hold a run in a stop-and-resume loop.
+- **Receipts are kept.** When an unevaluated candidate's train evaluation or an epoch's
+  re-score runs again, in a retry or after a resume, what the earlier attempt left (its
+  per-item passes and receipts) is moved to `.refactory/archive/<UTC time>/runs/<id>/...`
+  inside the run (`evaluation_archived` in the journal), never deleted.
+  - A train attempt's archive leaves the candidate's `occasions/` in place.
+  - A val or test rollout retried in the run is archived from its own occasion folder.
+    After a resume it runs in a fresh occasion, and the interrupted occasion stays
+    where it was.
+  - A re-score's folder (`occasions/train_epoch_<n>`) is archived whole.
+- **Seed results.** A `--seed-results` part with such an item is a miss: it is
+  measured instead.
+- **Runtimes.** The item records come from the same code on both runtimes, and a model
+  call fails with the same text in the spine's worker as in the walker. Known gap: when
+  the spine's own worker or op process is killed and leaves no stderr, the spine records
+  only `exited with code null`, which names no signal. Such an item is still counted as
+  the candidate's failure on the spine, where the walker counts it as interrupted.
+- **Out of scope.** An interrupted evaluation runs again from its start. Resuming inside
+  forks, loops and per-item passes is separate work.
+
 ## Train minibatches (`--train-minibatch N`)
 
 By default every candidate is scored on the whole train part. With

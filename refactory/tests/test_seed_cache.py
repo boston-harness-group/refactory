@@ -461,3 +461,47 @@ def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path
     misses = _events(root, "seed_cache_miss")
     assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]
     assert "train" not in {h["part"] for h in _events(root, "seed_cache_hit")}
+
+
+def test_a_cached_part_with_items_that_died_is_measured(tmp_path):
+    """A cached train part one of whose items died with its run's processes (its model
+    calls kept failing on the wire) is no result to replay: train is measured here and
+    the miss says why; val is still served."""
+    with _patch_mode(PartsProbe):
+        path = _source_run(tmp_path)
+        cache = json.loads(path.read_text())
+        entry = cache["parts"]["train"]
+        records = (entry.get("trials") or [entry["result"]])[0]["item_records"]
+        records[0].update(passed=False, score=0.0, error_kind="RuntimeError",
+                          error_text="work: CompletionFailed: model completion failed on the "
+                                     "wire 3 time(s); last cause: dsh: TRANSPORT: fetch failed")
+        path.write_text(json.dumps(cache))
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(path))
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed)
+        Run(_loop=loop).evaluate(seed, part="val")
+        assert seed.raw_score == 1.0 and loop.rollouts == len(PARTS["train"])
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [
+            ("train", "cached items died with their run's processes")]
+        assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
+
+
+def test_the_export_reads_the_occasion_its_result_names(tmp_path):
+    """An interrupted val rollout took occasion 0 and left no result; the first result is
+    occasion 1, and the export reads that occasion's records, not occasion 0's."""
+    with _patch_mode(PartsProbe):
+        loop = _loop(tmp_path / "source", _manifest(tmp_path))
+        loop.init()
+        seed = loop.population[0]
+        run = Run(_loop=loop)
+        run.evaluate(seed)
+        stale = tmp_path / "source" / "runs" / seed.id / "occasions" / "val_0"
+        stale.mkdir(parents=True)
+        (stale / "item_records.json").write_text(json.dumps([{"id": "stale", "score": 0.0}]))
+        loop._occasion_counters.setdefault(seed.id, {})["val"] = 1
+        run.evaluate(seed, part="val")
+        cache = seed_cache.export(tmp_path / "source", project=Path("."))
+    assert cache["parts"]["val"]["workdir"].endswith("occasions/val_1")
+    assert cache["parts"]["val"]["items"] == PARTS["val"]

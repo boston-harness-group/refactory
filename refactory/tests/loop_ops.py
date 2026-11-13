@@ -787,3 +787,28 @@ def write_brief(ctx: Any) -> dict[str, Any]:
     """Write the brief file a gate reads, and set the brief as a fact."""
     ctx.write_text("brief.json", "{\"goal\": \"answer it\"}\n")
     return {"brief": "answer it"}
+
+
+def keep_answer(ctx: Any) -> None:
+    """Copy the solver's answer to the graded file; a missing answer fails this step,
+    naming ``answer.txt`` (so the item has no answer, `items.no_answer`)."""
+    ctx.write_text("final.txt", ctx.read_text("answer.txt"))
+
+
+#: A file whose presence in any folder above an op's pass makes `die_if_flagged` kill
+#: its own process before it reports, as the host's out-of-memory killer would.
+DIE_FLAG = "die.flag"
+
+
+def die_if_flagged(ctx: Any) -> None:
+    """Kill this op's child process when a `DIE_FLAG` above its pass folder names its
+    ``level`` knob."""
+    import os
+    import signal
+    from pathlib import Path
+
+    here = Path(ctx.workdir).resolve()
+    level = str(ctx.knobs.get("level"))
+    if any((folder / DIE_FLAG).exists() and (folder / DIE_FLAG).read_text().strip() == level
+           for folder in here.parents):
+        os.kill(os.getpid(), signal.SIGKILL)

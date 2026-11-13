@@ -109,6 +109,40 @@ class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
 
 
+class EvaluationInterrupted(LoopError):
+    """An evaluation whose items died with the run's own processes, not on their answers.
+
+    A failed item is the candidate's result only when it ran and failed. One whose
+    process was killed, whose wire to the model kept failing, or that the run's stop
+    cancelled has an unknown outcome (`items.interrupted_item`), so the evaluation is
+    no measurement: nothing of it is recorded as the candidate's score, records or
+    val result. The loop runs it again inside the run after each wait of
+    `INTERRUPTED_RETRY_WAITS_S`; still interrupted, it stops the run here (exit
+    `EXIT_INTERRUPTED`), as it would had its own process died. The candidate stays
+    unevaluated, so ``--resume`` evaluates it again from the start -- up to
+    `INTERRUPTION_CAP` stops, after which the evaluation is recorded as failed.
+    """
+
+
+#: The waits, in seconds, before each in-run retry of an interrupted evaluation; the
+#: evaluation is tried once more after each, so ``1 + len(...)`` attempts before the run
+#: stops on it. No wall-clock cap: each attempt has the run's usual limits.
+INTERRUPTED_RETRY_WAITS_S: tuple[float, ...] = (120.0, 300.0)
+
+#: How many times the same candidate's evaluation of the same part (a re-score counts
+#: per epoch) may stop the run as interrupted. An in-run retry is not a stop: one stop is
+#: an evaluation still interrupted after all its in-run retries. The run stops on the
+#: first ``INTERRUPTION_CAP - 1``; the ``INTERRUPTION_CAP``-th is recorded as a failed
+#: evaluation ("interrupted N times; recorded as failed") and the run goes on, so an
+#: evaluation that dies every time cannot hold a run in a stop-and-resume loop. Counted
+#: from the journal, so a resume keeps the count.
+INTERRUPTION_CAP = 3
+
+#: The exit status of a run stopped by an interrupted evaluation (`EvaluationInterrupted`):
+#: ``EX_TEMPFAIL``, safe to ``--resume``, unlike a refused configuration (2).
+EXIT_INTERRUPTED = 75
+
+
 
 def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
     """Which items each data node of a state would read.
@@ -801,6 +835,10 @@ class Loop(OuterLoop):
         self.selection_warning = ""
         #: What a resume put back from the run's record (``_keep_recorded_run_shape``).
         self._resumed_shape: dict[str, Any] = {}
+        #: How many times each evaluation (``<id>:<part>[@<rescore epoch>]``) stopped the
+        #: run as interrupted, or was recorded failed at the cap (`INTERRUPTION_CAP`);
+        #: rebuilt from the journal on resume.
+        self._interrupted_stops: dict[str, int] = {}
         self._gate_accepted: list[str] = []
         self._gate_rejected: list[str] = []
         #: The ids each gating judged, in order (``_pool_entered``).
@@ -1664,16 +1702,22 @@ class Loop(OuterLoop):
                 return False
         batch = self._minibatch(epoch)
         workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{epoch}"
-        if batch:
-            task_module.make_manifest(workdir, train_ids=batch)
-        elif self._parts_manifest is not None and (self.root / task_module.MANIFEST).exists():
-            # The whole train part, as the candidate's first evaluation read it.
-            workdir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(self.root / task_module.MANIFEST, workdir / task_module.MANIFEST)
-        result, measurements = self._measure(parent, workdir, task_module.TRAIN,
-                                             seed=self._train_seed(epoch), items=batch,
-                                             item_gate=item_gate, item_slots=item_slots,
-                                             stop_event=stop_event)
+        # A re-score of this epoch that did not count (it failed, or the run died in
+        # it) left its passes here: kept in the archive, not overwritten.
+        self._archive_unfinished(parent.id, workdir)
+
+        def prepare() -> None:
+            if batch:
+                task_module.make_manifest(workdir, train_ids=batch)
+            elif self._parts_manifest is not None and (self.root / task_module.MANIFEST).exists():
+                # The whole train part, as the candidate's first evaluation read it.
+                workdir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.root / task_module.MANIFEST, workdir / task_module.MANIFEST)
+
+        result, measurements = self._settled_measure(
+            parent, workdir, task_module.TRAIN, prepare, rescore_epoch=epoch,
+            seed=self._train_seed(epoch), items=batch, item_gate=item_gate,
+            item_slots=item_slots, stop_event=stop_event)
         if not measurements.get("count"):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.
@@ -1777,19 +1821,28 @@ class Loop(OuterLoop):
         """
         workdir = self.root / "runs" / candidate.id
         mode = self.mode_class(state=candidate.state)
-        # Copy the loop-level manifest so select_subset finds it.
-        if self._parts_manifest is not None:
-            workdir.mkdir(parents=True, exist_ok=True)
-            manifest_src = self.root / task_module.MANIFEST
-            if manifest_src.exists():
-                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
-        # When explicit items are given, write a per-candidate manifest.
-        if items is not None:
-            workdir.mkdir(parents=True, exist_ok=True)
-            task_module.make_manifest(workdir, train_ids=items)
-        result, measurements = self._measure(
-            candidate, workdir, task_module.TRAIN, seed=seed, items=items,
-            item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
+        if not candidate.evaluated:
+            # An earlier attempt that never finished (the run was killed or its
+            # evaluation interrupted, and this is the resume) left its passes and
+            # per-item receipts here; the evaluation starts clean, so keep them.
+            self._archive_unfinished(candidate.id, workdir, keep=("occasions",))
+
+        def prepare() -> None:
+            # Copy the loop-level manifest so select_subset finds it.
+            if self._parts_manifest is not None:
+                workdir.mkdir(parents=True, exist_ok=True)
+                manifest_src = self.root / task_module.MANIFEST
+                if manifest_src.exists():
+                    shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
+            # When explicit items are given, write a per-candidate manifest.
+            if items is not None:
+                workdir.mkdir(parents=True, exist_ok=True)
+                task_module.make_manifest(workdir, train_ids=items)
+
+        result, measurements = self._settled_measure(
+            candidate, workdir, task_module.TRAIN, prepare, keep=("occasions",),
+            seed=seed, items=items, item_gate=item_gate, item_slots=item_slots,
+            stop_event=stop_event,
         )
         if measurements.get("budget_stopped"):
             self._budget_stopped(candidate, task_module.TRAIN, result, measurements)
@@ -1855,6 +1908,135 @@ class Loop(OuterLoop):
         raise BudgetStopped(f"the budget stopped {candidate.id}'s {part} evaluation: {result.error}",
                             reason=self.bound or str(result.error or ""))
 
+    def _settled_measure(
+        self, candidate: Candidate, workdir: Path, part: str, prepare: Any, *,
+        keep: tuple[str, ...] = (), rescore_epoch: int | None = None,
+        stop_event: threading.Event | None = None, **measure: Any,
+    ) -> tuple[Any, dict[str, Any]]:
+        """``_measure`` after ``prepare``, run again while it is interrupted and an
+        in-run retry is left (`_settle_interruption`), each earlier attempt archived
+        first (``keep`` stays). A measurement a budget stopped is returned as it is: the
+        budget, not an interruption, is why it ended."""
+        attempt = 0
+        while True:
+            prepare()
+            result, measurements = self._measure(candidate, workdir, part,
+                                                 stop_event=stop_event, **measure)
+            if measurements.get("budget_stopped") or not self._settle_interruption(
+                    candidate, part, result, workdir, attempt,
+                    rescore_epoch=rescore_epoch, stop_event=stop_event):
+                return result, measurements
+            attempt += 1
+            self._archive_unfinished(candidate.id, workdir, keep=keep)
+
+    @staticmethod
+    def _interruption(result: Any) -> dict[str, int]:
+        """Why ``result`` was interrupted rather than measured, as ``{cause: items}``, or
+        ``{}``: any of its items, or (with none of them) the run itself outside any item,
+        failed because a process of the run died (`items.interrupted_item`)."""
+        from collections import Counter
+
+        from refactory_dsh.items import interrupted_cause, interrupted_item
+
+        causes = Counter(cause for cause in map(interrupted_item, result.item_records or ())
+                         if cause)
+        if not causes and not result.exit_ok and (cause := interrupted_cause(result.error)):
+            causes[cause] = 0  # the run's own error, outside any item
+        return dict(causes)
+
+    def _settle_interruption(self, candidate: Candidate, part: str, result: Any, workdir: Path,
+                             attempt: int, *, rescore_epoch: int | None = None,
+                             stop_event: threading.Event | None = None) -> bool:
+        """What to do with ``candidate``'s ``part`` evaluation when it was interrupted
+        (`_interruption`); False when it was not, so it is the candidate's result.
+
+        Interrupted, it is journaled (``evaluation_interrupted``, with how many items died
+        and why, and the outcome) and shown. While an in-run retry is left
+        (`INTERRUPTED_RETRY_WAITS_S`) the loop waits and returns True: run it again.
+        Otherwise it is one stop of this evaluation: below `INTERRUPTION_CAP` stops the
+        run stops (`EvaluationInterrupted`), and nothing of the evaluation is recorded --
+        no score, records, val occasion or rollouts; at the cap ``result`` becomes a
+        failed evaluation ("interrupted N times; recorded as failed") and False is
+        returned, so it is recorded as one. A model's own failure -- a timeout, a wrong
+        or garbled answer, an output limit -- is never interrupted."""
+        causes = self._interruption(result)
+        if not causes:
+            return False
+        key = f"{candidate.id}:{part}" + (f"@{rescore_epoch}" if rescore_epoch is not None else "")
+        waits = INTERRUPTED_RETRY_WAITS_S
+        stops = None
+        if attempt < len(waits):
+            outcome = "retrying"
+        else:
+            with self._state_lock:
+                stops = self._interrupted_stops.get(key, 0) + 1
+                self._interrupted_stops[key] = stops
+            outcome = "recorded_failed" if stops >= INTERRUPTION_CAP else "stopped"
+        records = len(result.item_records or ())
+        fields = {
+            "part": part, "attempt": attempt + 1, "outcome": outcome,
+            "interrupted": sum(causes.values()), "items": records, "causes": causes,
+            "error": result.error,
+            **({"retry_in_s": waits[attempt]} if outcome == "retrying" else {"stops": stops}),
+            **({"rescore_epoch": rescore_epoch} if rescore_epoch is not None else {}),
+        }
+        with self._state_lock:
+            self._journal("evaluation_interrupted", id=candidate.id, key=key,
+                          workdir=str(workdir.relative_to(self.root)), **fields)
+        self._progress("evaluation_interrupted", candidate=candidate.id, **fields)
+        said = ", ".join(f"{cause} {count}" for cause, count in sorted(causes.items()))
+        if outcome == "retrying":
+            if stop_event is not None:
+                if stop_event.wait(waits[attempt]):
+                    raise EvaluationInterrupted(
+                        f"{candidate.id}'s {part} evaluation was interrupted ({said}) and the "
+                        "run was stopped before its retry; resume the run (--resume)")
+            else:
+                time.sleep(waits[attempt])
+            return True
+        if outcome == "recorded_failed":
+            result.exit_ok = False
+            result.score = 0.0
+            result.error = (f"{part} evaluation interrupted {stops} times; recorded as failed "
+                            f"(last: {sum(causes.values())} of {records} item(s) died: {said})")
+            return False
+        raise EvaluationInterrupted(
+            f"{candidate.id}'s {part} evaluation was interrupted: {sum(causes.values())} of "
+            f"{records} item(s) died with the run's own processes ({said}) in "
+            f"{attempt + 1} attempt(s), so it is not a result; resume the run (--resume) to "
+            f"evaluate it again (stop {stops} of {INTERRUPTION_CAP - 1} before it is "
+            "recorded as failed)")
+
+    def _archive_unfinished(self, candidate_id: str, workdir: Path, *,
+                            keep: tuple[str, ...] = ()) -> Path | None:
+        """Move what an evaluation that never finished left in ``workdir`` -- its
+        per-item passes and receipts -- to the run's archive
+        (``.refactory/archive/<UTC time>/<workdir relative to the run>``), so the
+        evaluation that replaces it starts clean and nothing of the earlier one is
+        deleted. ``keep`` names entries that are not the earlier attempt's (a
+        candidate's ``occasions``). Journaled (``evaluation_archived``); returns the
+        archive folder, or None when there was nothing to move."""
+        from datetime import datetime, timezone
+
+        from refactory_dsh.run_artifacts import archive_root
+
+        if not workdir.is_dir():
+            return None
+        leftovers = sorted(path for path in workdir.iterdir() if path.name not in keep)
+        if not leftovers:
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        relative = workdir.relative_to(self.root)
+        target = archive_root(self.root, "archive") / stamp / relative
+        target.mkdir(parents=True)
+        for path in leftovers:
+            path.rename(target / path.name)
+        with self._state_lock:
+            self._journal("evaluation_archived", id=candidate_id, workdir=str(relative),
+                          archive=str(target.relative_to(self.root)),
+                          entries=[path.name for path in leftovers])
+        return target
+
     def _evaluate_part(
         self, candidate: Candidate, part: str,
         items: list[str] | None, seed: int | None,
@@ -1871,20 +2053,23 @@ class Loop(OuterLoop):
             self._journal("occasion_counter", id=candidate.id, part=part,
                           counter=counters[part])
         workdir = self.root / "runs" / candidate.id / "occasions" / f"{part}_{counter}"
-        workdir.mkdir(parents=True, exist_ok=True)
-        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
-        # Copy or build the manifest so select_subset finds it.
-        if items is not None:
-            task_module.make_manifest(workdir, train_ids=items if part == "train" else [],
-                                     val_ids=items if part == "val" else None,
-                                     test_ids=items if part == "test" else None)
-        elif self._parts_manifest is not None:
-            manifest_src = self.root / task_module.MANIFEST
-            if manifest_src.exists():
-                shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
-        self._carry_ledger(workdir)
-        result, measurements = self._measure(
-            candidate, workdir, part, seed=seed, items=items,
+
+        def prepare() -> None:
+            workdir.mkdir(parents=True, exist_ok=True)
+            task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+            # Copy or build the manifest so select_subset finds it.
+            if items is not None:
+                task_module.make_manifest(workdir, train_ids=items if part == "train" else [],
+                                         val_ids=items if part == "val" else None,
+                                         test_ids=items if part == "test" else None)
+            elif self._parts_manifest is not None:
+                manifest_src = self.root / task_module.MANIFEST
+                if manifest_src.exists():
+                    shutil.copyfile(manifest_src, workdir / task_module.MANIFEST)
+            self._carry_ledger(workdir)
+
+        result, measurements = self._settled_measure(
+            candidate, workdir, part, prepare, seed=seed, items=items,
             item_gate=item_gate, item_slots=item_slots, stop_event=stop_event,
         )
         # Score-only occasion record for optimizer-facing storage (no records,
@@ -2078,17 +2263,24 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
+        # A cached item that died with its run's processes is no result to replay
+        # (`items.interrupted_item`): the part is measured here instead.
+        from refactory_dsh.items import interrupted_item
+        died = any(interrupted_item(record) for trial in trials
+                   for record in trial.get("item_records") or ())
         if (set(entry.get("items") or ()) != expected_ids or other_seed
-                or len(trials) != self.config.repeats):
+                or len(trials) != self.config.repeats or died):
             # The cache's own candidate on a part it covers, measured on other items
-            # (a train minibatch) or with another rollout seed: said once per part, so
-            # the run shows why the cache was not used.
+            # (a train minibatch), with another rollout seed, or with items that died:
+            # said once per part, so the run shows why the cache was not used.
             with self._state_lock:
                 if part not in self._seed_cache_missed and part not in self._seed_cache_used:
                     self._seed_cache_missed.add(part)
                     reason = ("other items" if set(entry.get("items") or ()) != expected_ids
                               else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
-                              else f"{len(trials)} cached trial(s), {self.config.repeats} requested")
+                              else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
+                              if len(trials) != self.config.repeats
+                              else "cached items died with their run's processes")
                     self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
                                   cached_items=len(entry.get("items") or ()), items=len(expected_ids))
             return None
@@ -5793,6 +5985,9 @@ class Loop(OuterLoop):
                     self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
             elif event == "rollouts":
                 self.rollouts = int(record.get("rollouts") or 0)
+            elif event == "evaluation_interrupted":
+                if record.get("outcome") in ("stopped", "recorded_failed") and record.get("key"):
+                    self._interrupted_stops[str(record["key"])] = int(record.get("stops") or 0)
             elif event == "seed_cache_hit":
                 if record.get("part"):
                     self._seed_cache_used.add(str(record["part"]))
@@ -6352,6 +6547,10 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             project=project, model=model,
         )
         report = loop.run()
+    except EvaluationInterrupted as exc:
+        # Not a refused configuration: the run is whole and resumable.
+        print(json.dumps({"error": str(exc), "resumable": True}), file=sys.stderr)
+        return EXIT_INTERRUPTED
     except LoopError as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
