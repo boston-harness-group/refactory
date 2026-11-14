@@ -1386,8 +1386,13 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>}.',
     ]
     if any(op.get("op") == "set_knob" for op in catalogue):
-        lines.append("- A str parameter may be patched instead of rewritten: "
-                     + nn_edits.PATCH_FORMAT + ".")
+        # SkillOpt's patch mode edits its skill only by local append/insert/replace/delete
+        # patches; a whole new value stays available for what a patch cannot express.
+        lines += ["- To change a text parameter such as a prompt, patch it: "
+                  + nn_edits.PATCH_FORMAT + ".",
+                  "  Patch the parts the evidence says to change and keep the rest. A whole new",
+                  "  `value` is for a setting that is not text, a new step's own prompt, or a",
+                  "  prompt that has to be replaced outright."]
     if structural is not None:
         lines += [
             "- A structural move is one of the structural operations above, with the fields it "
@@ -1410,8 +1415,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
             size += "; compare it with the size of the score differences between candidates"
         lines.append(size + ".")
     lines += [
-        "- Few well-argued changes, not many guesses. Prefer an edit whose effect you can",
-        "  state, and vary what you touch.",
+        "- Few well-argued changes, not many guesses: a concise set of edits, only the ones",
+        "  that are needed. Prefer an edit whose effect you can state, and vary what you touch.",
         "- Your prediction is recorded and later checked against the outcome, so say what",
         "  you expect and how you could be wrong.",
         "- If the evidence justifies no change, return an empty proposal list and say why.",
@@ -1429,8 +1434,9 @@ def bundle_examples(catalogue: Sequence[dict[str, Any]]) -> list[list[dict[str, 
     then -- when the run also permits a structural op that takes a node and
     ``set_knob`` -- a structural edit that adds a node and the new node's own prompt
     knob."""
-    out = [[{"op": "set_knob", "name": "<step A's prompt knob>", "value": "<text>"},
-            {"op": "set_knob", "name": "<step B's prompt knob>", "value": "<text>"}]]
+    patch = [{"kind": "replace", "target": "<exact text in it>", "content": "<new text>"}]
+    out = [[{"op": "set_knob", "name": "<step A's prompt knob>", "patch": patch},
+            {"op": "set_knob", "name": "<step B's prompt knob>", "patch": patch}]]
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
     if structural is not None and "node" in structural and "set_knob" in ops:
