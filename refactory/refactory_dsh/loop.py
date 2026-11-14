@@ -2207,6 +2207,7 @@ class Loop(OuterLoop):
 
         cached = self._cached_measure(candidate, workdir, part, expected_ids, seed)
         if cached is not None:
+            self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
             return cached
 
         trials = []
@@ -2317,7 +2318,23 @@ class Loop(OuterLoop):
         last.item_records = all_item_records
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
+        self._write_traces(candidate, workdir, part, seed, all_item_records)
         return last, summary
+
+    def _write_traces(self, candidate: Candidate, workdir: Path, part: str,
+                      seed: int | None, records: Sequence[dict[str, Any]] | None) -> None:
+        """Write each record of this evaluation as files (`refactory_dsh.traces`), for
+        people and a later trace-reading analyst; nothing in the run reads them back.
+
+        Every evaluation passes through ``_measure`` on both runtimes (train, re-score,
+        memory rollout, val, test, holdout), and its records here are the evaluator's
+        own, whole. The occasion is the evaluation directory's name (``train_epoch_3``,
+        ``val_0``, ``memory_epoch_2_<key>``), empty for a candidate's own first
+        evaluation and the holdout audit. Adds no journal event; never raises."""
+        from refactory_dsh import traces
+
+        occasion = "" if workdir.name == candidate.id else workdir.name
+        traces.write_evaluation(self.root, candidate.id, part, occasion, seed, records or ())
 
     def _cached_measure(
         self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
