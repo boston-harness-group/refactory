@@ -208,16 +208,19 @@ def metadata_text(record: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-_CLIPPED = "(This item's texts are clipped head and tail to fit the analyst's room.)"
+#: What a clipped item says of itself; ``{room}`` names the request it was clipped for.
+_CLIPPED = "(This item's texts are clipped head and tail to fit {room}.)"
 
 
-def fit_item(record: dict[str, Any], budget: int) -> str:
+def fit_item(record: dict[str, Any], budget: int, room_name: str = "the analyst's room") -> str:
     """``item_text`` whole when it fits ``budget``; else step inputs are clipped first
-    (down to ``INPUT_FLOOR``), then outputs, each to the largest limit that fits."""
+    (down to ``INPUT_FLOOR``), then outputs, each to the largest limit that fits. The
+    cut is said, naming ``room_name``: the request it was clipped to fit."""
     whole = item_text(record)
     if len(whole) <= budget:
         return whole
-    room = budget - len(_CLIPPED) - 1
+    clipped = _CLIPPED.format(room=room_name)
+    room = budget - len(clipped) - 1
 
     def largest(make: Any, low: int) -> int | None:
         if len(make(low)) > room:
@@ -233,13 +236,13 @@ def fit_item(record: dict[str, Any], budget: int) -> str:
 
     inputs = largest(lambda n: item_text(record, n, None), INPUT_FLOOR)
     if inputs is not None:
-        return item_text(record, inputs, None) + "\n" + _CLIPPED
+        return item_text(record, inputs, None) + "\n" + clipped
     # Limits stay at TEXT_FLOOR or more (`_clip_middle` keeps head and tail halves).
     outputs = largest(lambda n: item_text(record, INPUT_FLOOR, n), TEXT_FLOOR)
     if outputs is not None:
-        return item_text(record, INPUT_FLOOR, outputs) + "\n" + _CLIPPED
+        return item_text(record, INPUT_FLOOR, outputs) + "\n" + clipped
     both = largest(lambda n: item_text(record, n, n), TEXT_FLOOR) or TEXT_FLOOR
-    return item_text(record, both, both) + "\n" + _CLIPPED
+    return item_text(record, both, both) + "\n" + clipped
 
 
 def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
@@ -290,6 +293,17 @@ def _memory_text(ctx: Any) -> str:
     from .memory import context_block
 
     return context_block(getattr(ctx, "memory", None))
+
+
+def _objective_text(ctx: Any) -> str:
+    """"What the score measures" (`base.objective_text`), from the run's settings the
+    request carries; empty when they are not known."""
+    from .base import objective_text
+
+    text = objective_text(getattr(ctx, "parsimony", None),
+                          item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
+                          gated=bool(getattr(ctx, "selection", "")))
+    return f"## What the score measures\n{text}\n\n" if text else ""
 
 
 FAILURE_SYSTEM = """\
@@ -439,7 +453,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
              f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
-             f"{_memory_text(ctx)}"
+             f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              "Each item in full: its input, every step's input and output in the order the "
              "steps ran, the expected answer, the prediction, the score and the grader's "
@@ -603,7 +617,7 @@ def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
         head = (f"# Merging the {step} analysts' findings -- {len(lists)} lists, "
                 f"merge level {level}")
     return (f"{head}\n\nMode: `{ctx.mode_name}`.\n\n"
-            f"## The pipeline\n{pipeline}\n\n{_memory_text(ctx)}"
+            f"## The pipeline\n{pipeline}\n\n{_objective_text(ctx)}{_memory_text(ctx)}"
             f"{body}\n\n## Answer\n{MERGE_ANSWER}")
 
 

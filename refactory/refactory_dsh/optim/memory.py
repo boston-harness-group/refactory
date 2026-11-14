@@ -26,7 +26,11 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
   sample, :1843-1844). Rolled out with the epoch's own train seed rather than SkillOpt's
   ``seed + epoch * 2000``, so the loop's own rollouts of the epoch are reused; only the
   sampled items a side has no record of are evaluated.
-- **What is shown**: both pipelines, the previous note with "reflect on whether it
+- **What is shown**: both pipelines, what the score measures (`base.objective_text`),
+  every change the optimizer tried in the epoch -- evaluated, with its train fixed/broken
+  counts and the gate's word, or refused before it ran, with why (`tried_lines`; the facts
+  the proposal request already shows, never a validation score) -- so a pass with
+  nothing kept still sees what was tried; the previous note with "reflect on whether it
   improved or harmed" (meta_skill.py:51-60), and the comparison by category
   (slow_update.py:287-349): a summary, then regressions (highest priority),
   persistent failures, improvements, each item with both outcomes, answers, grader
@@ -73,6 +77,14 @@ CATEGORIES = (
 )
 #: A pipeline text or setting value in the memory request, head and tail.
 PIPELINE_TEXT_CHARS = 20000
+#: The most characters "What was tried this epoch" takes: its entries newest first, the
+#: older ones past it cut with the cut said. And the most one entry's edits and one
+#: refusal's reason take.
+TRIED_CHARS = 8000
+TRIED_EDITS_CHARS = 300
+TRIED_REASON_CHARS = 300
+#: How a clipped trace names this request (`analysts.fit_item`).
+ROOM_NAME = "the memory request's room"
 
 
 def sample_ids(train_ids: Sequence[str], seed: int, epoch: int,
@@ -137,8 +149,10 @@ produce better changes to the pipeline in this run.
 
 1. The pipeline at the start of this epoch.
 2. The pipeline now, and what changed between them.
-3. A longitudinal comparison on the SAME sampled items under those two pipelines.
-4. The previous optimizer memory, if one existed.
+3. Every change the optimizer tried this epoch: each one evaluated, with what it fixed
+   and broke and whether it was kept, and each one refused before it ran, with why.
+4. A longitudinal comparison on the SAME sampled items under those two pipelines.
+5. The previous optimizer memory, if one existed.
 
 ## Your Goal
 
@@ -208,25 +222,29 @@ def _reason(record: Mapping[str, Any]) -> str:
 def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
                  curr: Mapping[str, Any], changes: Sequence[str], previous_note: str,
                  entries: Sequence[Mapping[str, Any]], room: int = MEMORY_ROOM,
-                 system: str = MEMORY_SYSTEM) -> tuple[str, dict[str, int]]:
+                 system: str = MEMORY_SYSTEM, tried: Sequence[str] = (),
+                 objective: str = "") -> tuple[str, dict[str, int]]:
     """The memory request within ``room`` characters (the system prompt counted), and
     what was clipped: ``{"items", "chars"}``.
 
     ``prev``/``curr`` describe the two sides: ``{"id", "pipeline", "rollout"}`` (the
     candidate, its pipeline as an analyst reads it, which rollout its records are).
-    ``changes`` are the lines saying what changed between them. Every trace is whole
+    ``changes`` are the lines saying what changed between them; ``tried`` the lines of
+    "What was tried this epoch" (`tried_lines`) and ``objective`` what the score
+    measures (`base.objective_text`), each left out when empty. Every trace is whole
     when they all fit; otherwise the longest are cut to one length (`item_cap`), step
     inputs first (`fit_item`), each cut said."""
     same = prev.get("id") == curr.get("id")
     shown = [e for e in entries if dict((n, t) for n, t, _ in CATEGORIES)[e["category"]]]
     head, tail = _frame(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
-                        changes=changes, previous_note=previous_note, entries=entries)
+                        changes=changes, previous_note=previous_note, entries=entries,
+                        tried=tried, objective=objective)
     wholes = {(e["id"], side): item_text(e[side]) for e in shown for side in ("prev", "curr")}
     blank = _comparison(entries, {key: "" for key in wholes}, same)
     fixed = len(system) + len(head) + len(blank) + len(tail)
     cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
     texts = {key: (text if cap is None else fit_item(
-        next(e for e in shown if e["id"] == key[0])[key[1]], cap))
+        next(e for e in shown if e["id"] == key[0])[key[1]], cap, ROOM_NAME))
         for key, text in wholes.items()}
     clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
     return head + _comparison(entries, texts, same) + tail, {
@@ -236,10 +254,14 @@ def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
 
 def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping[str, Any],
            same: bool, changes: Sequence[str], previous_note: str,
-           entries: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
+           entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
+           objective: str = "") -> tuple[str, str]:
     if same:
         pipelines = (f"## The pipeline (candidate `{curr.get('id')}`)\n"
-                     "Nothing this epoch replaced it: the comparison below is two rollouts of "
+                     "Nothing this epoch replaced it"
+                     + (" (what was tried and not kept is under \"What was tried this "
+                        "epoch\")" if tried else "")
+                     + ": the comparison below is two rollouts of "
                      f"this one pipeline ({prev.get('rollout')}, and {curr.get('rollout')}), so "
                      "what moved between them moved without any change to the pipeline.\n\n"
                      f"{curr.get('pipeline')}\n\n")
@@ -252,8 +274,11 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
     note = previous_note.strip() or "(No previous optimizer memory -- this is the first update.)"
     head = (f"# Writing the optimizer's memory -- epoch {epoch}\n\n"
-            f"Mode: `{mode_name}`.\n\n{pipelines}"
-            "## Previous optimizer memory\n"
+            f"Mode: `{mode_name}`.\n\n"
+            + (f"## What the score measures\n{objective}\n\n" if objective else "")
+            + pipelines
+            + ("\n".join(tried) + "\n\n" if tried else "")
+            + "## Previous optimizer memory\n"
             "The following optimizer memory was available during this epoch. Reflect on "
             "whether it improved or harmed the quality of the changes.\n\n"
             f"{note}\n\n"
@@ -316,6 +341,101 @@ def _meta_text(record: Mapping[str, Any]) -> str:
 
     text = metadata_text(record)
     return f" -- {text}" if text else ""
+
+
+def edits_text(edits: Any, chars: int = TRIED_EDITS_CHARS) -> str:
+    """A proposal's edits in short: each edit's op and what it touches (the knob it sets,
+    the steps it adds, removes, rewires or targets; `feedback.touched`), within
+    ``chars``. No value or prompt text: the memory reads what kind of change was tried
+    and where, not its wording."""
+    from .feedback import touched
+
+    parts = []
+    for edit in edits if isinstance(edits, (list, tuple)) else [edits]:
+        if not isinstance(edit, Mapping) or not edit.get("op"):
+            parts.append("(no readable edit)")
+            continue
+        names = touched([edit])
+        parts.append(f"{edit['op']}" + (f": {', '.join(names)}" if names else ""))
+    return _clip("; ".join(parts) or "(none)", chars)
+
+
+def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
+                round_: int | None, current: str | None, gated: bool,
+                chars: int = TRIED_CHARS) -> list[str]:
+    """"What was tried this epoch": every change the optimizer proposed in ``round_`` (the
+    proposal round the start-of-epoch pipeline opened, which this epoch evaluated and
+    judged), newest first -- the evaluated ones, then the ones refused before they ran.
+
+    ``tried`` entries (oldest first): ``{"id", "parent", "round", "kind", "structural",
+    "edits", "score", "exit_ok", "evaluated", "fixed", "broken", "shared", "same_seed",
+    "gate", "integrity"}`` -- train records and the gate's word only, as the proposal
+    request's history and change ledger show them; never a validation score.
+    ``refused`` entries (oldest first): ``{"round", "attempt", "kind", "structural",
+    "edits", "reasons"}``. Within ``chars``: past it, the older entries are cut and the
+    cut is said."""
+    lines = ["## What was tried this epoch",
+             f"Every change the optimizer proposed in round {round_ if round_ is not None else '?'}, "
+             "while the start-of-epoch pipeline was current (this epoch evaluated and judged "
+             "them), newest first: the ones evaluated, then the ones refused before they ran. `fixed/broken` compares a candidate with its parent on the "
+             "train items both were scored on with the same seed (parent wrong and child "
+             "right / the reverse)"
+             + ("; `gate` is what the validation gate decided (kept, rejected, or current: "
+                "the pipeline now)" if gated else "")
+             + ". A change tried and not kept, or refused, is evidence too."]
+    if not tried and not refused:
+        return [*lines, "(nothing was proposed in that round)"]
+    entries = [_tried_line(entry, current, gated) for entry in reversed(list(tried))]
+    entries += [_refused_line(entry) for entry in reversed(list(refused))]
+    used = sum(len(line) + 1 for line in lines)
+    for index, line in enumerate(entries):
+        if used + len(line) + 1 > chars and index:
+            lines.append(f"[cut: the {len(entries) - index} older entr"
+                         f"{'y' if len(entries) - index == 1 else 'ies'} of this round "
+                         "not shown]")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines
+
+
+def _change_text(entry: Mapping[str, Any]) -> str:
+    """Structural or knob, and the kind (`feedback.change_kind`); ``structural`` ``None``
+    is a proposal with no readable edit."""
+    if entry.get("structural") is None:
+        return "no readable edit"
+    kind = entry.get("kind") or "other"
+    return (f"structural change: {kind}" if entry.get("structural")
+            else f"knob change: {kind}")
+
+
+def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> str:
+    fixed, broken = entry.get("fixed"), entry.get("broken")
+    if not entry.get("evaluated", True):
+        outcome = "not evaluated"
+    elif entry.get("exit_ok") is False:
+        outcome = "its train run failed"
+    else:
+        outcome = f"train score {entry.get('score')}"
+        if isinstance(fixed, int) and isinstance(broken, int):
+            outcome += (f"; vs its parent fixed {fixed} / broken {broken} of "
+                        f"{entry.get('shared')} train items")
+        elif entry.get("same_seed") is False:
+            outcome += "; fixed/broken n/a (its parent was not scored with the same seed)"
+    gate = entry.get("gate")
+    return (f"- `{entry.get('id')}` (round {entry.get('round')}, from `{entry.get('parent')}`; "
+            f"{_change_text(entry)}): {entry.get('edits')} -- {outcome}"
+            + (f" -- gate: {gate or 'not gated'}" if gated else "")
+            + (" -- the pipeline now" if entry.get("id") == current and not gated else "")
+            + (f" -- integrity: {entry['integrity']}" if entry.get("integrity") else ""))
+
+
+def _refused_line(entry: Mapping[str, Any]) -> str:
+    reasons = [str(r) for r in entry.get("reasons") or () if r]
+    return (f"- refused before it ran (round {entry.get('round')}, attempt "
+            f"{entry.get('attempt')}; {_change_text(entry)}): {entry.get('edits')} -- "
+            + (" | ".join(_clip(r, TRIED_REASON_CHARS) for r in reasons[:2])
+               or "(no reason recorded)"))
 
 
 def changes_lines(lineage: Mapping[str, Any]) -> list[str]:

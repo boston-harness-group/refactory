@@ -487,6 +487,16 @@ spine through its runner, the walker in memory).
   be any metric of the run; otherwise it says to compare it with the score differences
   between candidates.
   The template carries no task or domain vocabulary (`test_proposal_presentation`).
+- **What the score measures.** Said from the run's settings (`objective_text`), under
+  the request's first line and in every analyst, merge and memory call. With
+  `parsimony` 0: the score is the task's own score and nothing else; inference cost,
+  latency and the number of steps or model calls are not scored. The "Evidence from the
+  traces" table then leaves out its `cost` row (seconds and inner model calls per
+  candidate), which gradient.json, the journal and the report keep. With `parsimony`
+  above 0 it states the size cost as scored (raw score minus parsimony per node) and,
+  under the validation gate, that the gate decides on the validation task score, which
+  carries no size cost, a train score breaking only a tie; the `cost` row stays. Nothing
+  is added to steer toward any kind of change.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
   (with their error, whether or not any step ran; they are in the cause table too),
@@ -931,7 +941,19 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   node in full, every setting) and what changed between them: from their nearest common
   ancestor, each candidate on the way to either with its own edits and rationale (said
   plainly when they are on different branches, as a sibling train leader or a pool's
-  pick can be, or share no ancestor), or the one pipeline when unchanged; the
+  pick can be, or share no ancestor), or the one pipeline when unchanged; what the score
+  measures (as every optimizer request says it, below); "What was tried this epoch":
+  every change the optimizer proposed in the round the start-of-epoch pipeline opened,
+  newest first -- each candidate evaluated, with its kind (structural or knob, and the
+  change kind of the run ledger), its edits in short (each op and what it touches, no
+  values), its train score, its train fixed/broken counts against its parent and the
+  gate's word (with the integrity verdict when the judge is on), then each proposal
+  refused before it ran (`E-integrity` with its verdict and categories,
+  `E-proposal-shape`, `E-noop`, `E-too-many-edits` and the rest) with why. These are
+  the facts the proposal request's history, change ledger, integrity and refusal
+  sections already show; never a validation score. The section is at most 8000
+  characters (`TRIED_CHARS`); older entries past it are cut, the cut said. So a pass in
+  an epoch that kept nothing sees what was tried rather than "no changes". Then the
   previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
   comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
   highest priority), persistent failures, improvements -- each item headed by what it
@@ -940,7 +962,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   input and output, as the analysts render them) -- then stable successes without
   traces, as SkillOpt shows them. SkillOpt never clips; here the traces share 400000
   characters with the frame and the system prompt (the analysts' room), the longest cut
-  head and tail to one length, each cut said, and a call refused as too long is retried
+  head and tail to one length, each cut said ("to fit the memory request's room"), and a
+  call refused as too long is retried
   once at half the length. The prompt is SkillOpt's `meta_skill.md` for a graph: address
   the future optimizer, what changes help or hurt here, regression risks, revise or drop
   what did not help, no instructions for the pipeline's own steps. Domain-free; train
