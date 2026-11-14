@@ -53,6 +53,14 @@ def _isolate_refactory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatc
 
 
 @pytest.fixture(autouse=True)
+def _optimizer_retries_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An optimizer call that fails is attempted again after SkillOpt's wait (1, 2, 4 s,
+    `optim.random_optimizer.retry_delay`); the suite does not sleep through it. A test of
+    the waits records them by replacing ``_sleep`` itself."""
+    monkeypatch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _seconds: None)
+
+
+@pytest.fixture(autouse=True)
 def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """The checkout guard (dm-164) never watches the checkout under test.
 

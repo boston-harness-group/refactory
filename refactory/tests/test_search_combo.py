@@ -533,9 +533,13 @@ def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, n
         assert unscored <= sweep | {loop.population[0].id}
     else:
         assert unscored == set(), f"{name} left its last round unscored"
-    assert loop.evaluations == len(loop.population) - len(unscored)
+    # The memory pass's own rollouts (an unchanged current rolled out again, ungated)
+    # are evaluations too.
+    remembered = sum(int(p.get("evaluated") or 0) for p in loop._memory_passes)
+    assert loop.evaluations == len(loop.population) - len(unscored) + remembered
     assert loop.rollouts == sum(len(loop._train_item_records[c.id])
-                                for c in loop.population if c.evaluated)
+                                for c in loop.population if c.evaluated) + sum(
+        int(p.get("rollouts") or 0) for p in loop._memory_passes)
 
 
 @pytest.mark.parametrize("name", GATED_STRATEGIES)

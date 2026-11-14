@@ -24,11 +24,11 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   only when both sides found something. An unreadable merge reply keeps every input
   finding (SkillOpt's fallback concatenation).
 
-SkillOpt's patch, slow-update and meta-skill steps are not here: the proposer writes the
-edits (it is the step SkillOpt's rank and patch are), and its ``lessons`` carry
-optimizer-side memory across rounds. The ranked findings reach the proposal request as
-"What the analysts found, ranked" and replace the readers' summaries
-(``AutoresearchOptimizer._analyse``).
+SkillOpt's patch and slow-update steps are not here: the proposer writes the edits (it
+is the step SkillOpt's rank and patch are). Its meta skill is the loop's memory pass
+(`optim.memory`): the per-epoch note every analyst and merge call reads here. The
+ranked findings reach the proposal request as "What the analysts found, ranked" and
+replace the readers' summaries (``AutoresearchOptimizer._analyse``).
 
 Domain-free: the prompts name no dataset or task. Train records only: the analysts see
 ``ProposalContext.item_records`` (the loop hands over train records only) and the graph.
@@ -153,7 +153,9 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
     ins, outs = input_chars or big, output_chars or big
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
-    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"]
+    declared = metadata_text(record)
+    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"
+             + (f" — {declared}" if declared else "")]
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
     if key is not None:
         lines += [f"Input ({key}):", _clip_middle(meta[key], outs)]
@@ -183,6 +185,27 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
     if record.get("error_text"):
         lines.append(f"Error: {_clip_middle(record['error_text'], outs)}")
     return "\n".join(lines)
+
+
+#: The most characters one declared metadata value shows in an item's header.
+METADATA_CHARS = 200
+
+
+def metadata_text(record: Mapping[str, Any]) -> str:
+    """The item's declared metadata (``record["item_meta"]``, the fields its Task names in
+    ``Task.item_metadata``, set by the loop; SkillOpt's analysts see each item's task
+    type) as ``name: value`` pairs; empty without any."""
+    meta = record.get("item_meta") if isinstance(record.get("item_meta"), Mapping) else {}
+    parts = []
+    for name, value in meta.items():
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value if v not in (None, ""))
+        elif isinstance(value, Mapping):
+            value = json.dumps(value, default=str, sort_keys=True)
+        text = _clip(value, METADATA_CHARS) if value not in (None, "") else ""
+        if text:
+            parts.append(f"{name}: {text}")
+    return "; ".join(parts)
 
 
 _CLIPPED = "(This item's texts are clipped head and tail to fit the analyst's room.)"
@@ -261,16 +284,12 @@ def _changes_text(ctx: Any) -> str:
                      for op in ctx.catalogue)
 
 
-def _lessons_text(ctx: Any) -> str:
-    text = str((ctx.lessons or {}).get("text") or "").strip() if ctx.ask_lessons else ""
-    if not text:
-        return ""
-    # SkillOpt's analysts and merges read its optimizer meta skill; the proposer's
-    # lessons are this loop's optimizer-side memory.
-    return ("## The optimizer's lessons so far\n"
-            "Optimizer-side memory from earlier rounds of this run. Use it when the "
-            "evidence is ambiguous; do not force it where the items contradict it.\n\n"
-            f"{text}\n\n")
+def _memory_text(ctx: Any) -> str:
+    """The loop's memory note (`optim.memory`), as SkillOpt's analysts and merges read
+    its optimizer meta skill; empty without one."""
+    from .memory import context_block
+
+    return context_block(getattr(ctx, "memory", None))
 
 
 FAILURE_SYSTEM = """\
@@ -373,7 +392,7 @@ def item_cap(lengths: Sequence[int], room: int, floor: int = ITEM_FLOOR) -> int 
 def round_key(ctx: Any, model: str = "") -> str:
     """What one proposal step's analysis is made from: the epoch, the generation, the
     edited candidate, its train records, the stage's settings and the optimizer's model.
-    Not the lessons: a retry in the same step reuses the step's analysis."""
+    Not the memory note: a retry in the same step reuses the step's analysis."""
     import hashlib
 
     return hashlib.sha256(json.dumps(
@@ -392,7 +411,7 @@ def analyst_batch(ctx: Any, kind: str, index: int, total: int,
                   group: Sequence[dict[str, Any]], pipeline: str,
                   room: int = ANALYST_ROOM) -> tuple[str, dict[str, int]]:
     """One analyst's request -- the pipeline, the changes possible, the optimizer's
-    lessons and the batch's items in full -- and what was clipped:
+    memory note and the batch's items in full -- and what was clipped:
     ``{"items", "chars"}``. The items share what ``room`` (``ANALYST_ROOM``) leaves after
     the rest of the prompt; only when together they do not fit are the longest cut, all to one
     length (`item_cap`), step inputs first (`fit_item`). SkillOpt never clips."""
@@ -420,7 +439,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
              f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
-             f"{_lessons_text(ctx)}"
+             f"{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              "Each item in full: its input, every step's input and output in the order the "
              "steps ran, the expected answer, the prediction, the score and the grader's "
@@ -573,7 +592,7 @@ def _for_merge(found: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
                  level: int, pipeline: str) -> str:
     """A merge request: the pipeline (SkillOpt's merges read the current skill), the
-    optimizer's lessons and the lists to merge."""
+    optimizer's memory note and the lists to merge."""
     if step == "final":
         body = (f"## Failure findings\n{json.dumps(_for_merge(lists[0]), indent=1)}\n\n"
                 f"## Success findings\n{json.dumps(_for_merge(lists[1]), indent=1)}")
@@ -584,7 +603,7 @@ def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
         head = (f"# Merging the {step} analysts' findings -- {len(lists)} lists, "
                 f"merge level {level}")
     return (f"{head}\n\nMode: `{ctx.mode_name}`.\n\n"
-            f"## The pipeline\n{pipeline}\n\n{_lessons_text(ctx)}"
+            f"## The pipeline\n{pipeline}\n\n{_memory_text(ctx)}"
             f"{body}\n\n## Answer\n{MERGE_ANSWER}")
 
 
