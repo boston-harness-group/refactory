@@ -214,7 +214,8 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
   }
 
   /** Walk to `until`, answering the scale gates with `scale` and every other gate proceed.
-   *  route_refine_design always gets 'proceed' because these tests test the full design path. */
+   *  route_refine_design and route_sizing always get 'proceed' because these tests test the
+   *  full design path of a run that is not a refine. */
   function advance(s: Spine, until: string, scale: 'proceed' | 'scoped'): string[] {
     const visited: string[] = []
     while (!ids(s).includes(until)) {
@@ -222,7 +223,7 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
         visited.push(n)
         const view = s.view(n)
         if (view._type === 'GateNode') {
-          if (n === 'route_refine_design') s.verdict(n, 'proceed')
+          if (n === 'route_refine_design' || n === 'route_sizing') s.verdict(n, 'proceed')
           else s.verdict(n, n.startsWith('route_') ? scale : 'proceed')
         }
         else s.complete(n)
@@ -248,10 +249,13 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
   it('the sizer runs before research, and a sizer that fails is missing and research still runs', () => {
     const s = new Spine(graph)
     expect(spineEdges(graph, 'route_refine_design')).toEqual(
-      [['clear_sizing', 'proceed'], ['design_doc', 'light']])
+      [['design_doc', 'light'], ['route_sizing', 'proceed']])
+    // A refine keeps its scale, so route_sizing sends it to research past the sizer.
+    expect(spineEdges(graph, 'route_sizing')).toEqual(
+      [['clear_sizing', 'proceed'], ['research_director', 'refine']])
     expect(s.view('fork_size').optional_targets).toEqual(['size_change'])
     const before = advance(s, 'size_change', 'proceed')
-    expect(before).toEqual(['prepare', 'route_refine_design', 'clear_sizing', 'fork_size'])
+    expect(before).toEqual(['prepare', 'route_refine_design', 'route_sizing', 'clear_sizing', 'fork_size'])
     expect(ids(s)).toEqual(['size_change'])
     // The sizer is the fork's only optional branch: its failure goes on to the join.
     s.complete('size_change', { failed: true })
@@ -262,6 +266,23 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     expect(() => s.complete('presize_scale', { failed: true })).toThrow(/is not optional/)
     s.complete('presize_scale')
     expect(ids(s)).toEqual(['research_director'])
+  })
+
+  it('a full refine goes from route_sizing to research_director, and the sizer never runs', () => {
+    const s = new Spine(graph)
+    while (!ids(s).includes('route_sizing')) {
+      for (const n of ids(s)) {
+        if (s.view(n)._type === 'GateNode') s.verdict(n, 'proceed')
+        else s.complete(n)
+      }
+    }
+    s.verdict('route_sizing', 'refine', 'a refine keeps its scale: research without sizing it')
+    expect(ids(s)).toEqual(['research_director'])
+    const after = advance(s, 'pitfalls_researcher', 'proceed')
+    expect(after.slice(0, 4)).toEqual(['research_director', 'record_findings', 'gate_research', 'classify_scale'])
+    for (const sizer of ['clear_sizing', 'fork_size', 'size_change', 'join_size', 'presize_scale']) {
+      expect(after).not.toContain(sizer)
+    }
   })
 
   it('a lean research is widened once: widen_research reloops to research_director, then pitfalls run', () => {

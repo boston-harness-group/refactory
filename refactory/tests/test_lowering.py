@@ -629,6 +629,14 @@ def test_design_lowers_the_sizer_and_widening():
     assert declared["size_change"].get("optional") is True
     for op in ("clear_sizing", "presize_scale"):
         assert not declared[op].get("required_reads"), op
-    assert declared["presize_scale"]["reads"] == ["sizing.json"]
+    # Every file the sizing ops and the widening gate touch is declared (a deletion or a
+    # move included), so the lowered contract shows what they do.
+    assert declared["presize_scale"]["reads"] == ["reviews/size_change-missing.txt", "sizing.json"]
+    assert sorted(state["graph"]["nodes"]["clear_sizing"]["writes"]) == [
+        "reviews/size_change-missing.txt", "sizing.json"]
+    assert set(state["graph"]["nodes"]["widen_research"]["writes"]) == {
+        "research-review.txt", "research-lean/", "research-plan.json", "research/"}
+    assert set(state["graph"]["nodes"]["widen_research"]["reads"]) == {
+        "research-plan.json", "research/"}
     agents = [node for node, entry in declared.items() if entry["kind"] == "agent"]
     assert [node for node in agents if "sizing.json" in declared[node]["reads"]] == []

@@ -322,8 +322,8 @@ def _design_answers(emit: list[str]) -> list[str]:
 
 def test_the_design_graph_is_a_different_shape_from_a_package_one():
     graph = DesignMode().graph()
-    # The sizing chain and the widening gate (clear_sizing, fork_size, join_size,
-    # presize_scale, size_change, widen_research) were added on purpose.
+    # The sizing chain and the widening gate (route_sizing, clear_sizing, fork_size,
+    # join_size, presize_scale, size_change, widen_research) were added on purpose.
     assert sorted(graph.nodes) == [
         "apply_corrections", "audit_corrections", "check", "check_design_claims",
         "classify_reloop", "classify_scale", "clear_sizing", "code_reviewer", "deliver",
@@ -336,7 +336,7 @@ def test_the_design_graph_is_a_different_shape_from_a_package_one():
         "prepare", "prepare_check", "presize_scale", "qa_director", "qa_director_rerun",
         "qa_judge", "record_findings",
         "report", "rerun_probes", "research_director", "route_refine_design",
-        "route_strategy",
+        "route_sizing", "route_strategy",
         "scope_reloop", "size_change", "strategy_director", "synthesize_qa",
         "synthesize_strategy", "verifier", "widen_research",
     ], "the graph is design-v2's phases, not v1's"

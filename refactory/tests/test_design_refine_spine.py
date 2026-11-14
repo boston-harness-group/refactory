@@ -146,6 +146,7 @@ def test_a_full_refine_on_the_spine_is_classified_as_a_refine(opened_pull, tmp_p
     spine = _refine(opened_pull.url, tmp_path, refine_design="full")
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
+    assert spine.node("route_sizing") == "refine"
     # Research with no footprint, which on its own classifies a change as full.
     spine.agent("research_director", {"research-plan.json": "[]\n"}, {"research": "(nothing found)"})
     spine.node("record_findings")
@@ -213,6 +214,8 @@ def _plan(engine=()) -> str:
 
 
 ONE_FUNCTION = "touches 1 existing function(s) (main at app.py:1), adds nothing new, no shared engine"
+#: The strategy director's guidance for a change the sizer found small.
+SMALL_CHANGE = "A small, contained change usually needs few perspectives, and short ones"
 UNRENDERED = re.compile(r"\{\{\s*[A-Za-z_]\w*\s*\}\}")
 
 
@@ -234,6 +237,7 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
     """prepare, the route and the sizing chain; the sizer writes ``sizing``, or goes missing."""
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
+    assert spine.node("route_sizing") == "proceed"
     spine.node("clear_sizing")
     if sizing is None:
         (spine.run / "reviews").mkdir(exist_ok=True)
@@ -299,6 +303,22 @@ def test_widening_on_the_spine(tmp_path):
     assert f"Before research: scoped — {ONE_FUNCTION}\n" in strategy
     assert "Research was widened after a lean pass: changes a shared engine: app.py:1\n" in strategy
     assert "After research: full — changes a shared engine: app.py:1\n" in strategy
+    assert SMALL_CHANGE in strategy
+    assert not UNRENDERED.findall(strategy) and "{%" not in strategy
+
+
+def test_full_sizing_on_the_spine_keeps_the_strategy_depth(tmp_path):
+    """Sized full before research: the strategy director's prompt, as the worker renders it,
+    names both scales and says nothing about a small change."""
+    spine = _fresh(tmp_path)
+    _to_research(spine, _sizing(engine=["app.py:1"]))
+    assert spine.facts()["presize_scope"] == "full"
+    _research(spine, RESEARCH_ANSWER)
+    assert spine.node("widen_research") == "proceed"
+    assert _pitfalls(spine) == "proceed"
+    strategy = spine.agent("strategy_director", {"strategy-plan.json": "[]\n"}, {"strategy_plan": "[]"})
+    assert "Before research: full — changes a shared engine: app.py:1\n" in strategy
+    assert SMALL_CHANGE not in strategy and "short file" not in strategy
     assert not UNRENDERED.findall(strategy) and "{%" not in strategy
 
 
@@ -321,15 +341,18 @@ def test_unknown_sizing_on_the_spine_is_full(tmp_path):
     assert spine.node("widen_research") == "proceed"
 
 
-def test_a_full_refine_through_the_sizing_chain_on_the_spine(opened_pull, tmp_path):
-    """refine_design=full: a scoped sizing leaves the refine's scale, and the widening gate
-    never widens a refine, whatever its research's footprint."""
+def test_a_full_refine_skips_the_sizer_on_the_spine(opened_pull, tmp_path):
+    """refine_design=full: route_sizing's lowered command sends the refine to research, which
+    the lowered graph routes past the sizer, so no sizer call is made; the widening gate never
+    widens a refine, whatever its research's footprint."""
     spine = _refine(opened_pull.url, tmp_path, refine_design="full")
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
-    spine.node("clear_sizing")
-    spine.agent("size_change", {"sizing.json": _sizing()}, {})
-    spine.node("presize_scale")
+    assert spine.node("route_sizing") == "refine"
+    assert {(edge.target, edge.condition) for edge in spine.workflow.edges
+            if edge.source == "route_sizing"} == {("research_director", "refine"),
+                                                  ("clear_sizing", "proceed")}
+    assert not (spine.run / "sizing.json").exists()
     assert "presize_scope" not in spine.facts()
     _research(spine, _plan(engine=["app.py:1"]))
     assert spine.node("widen_research") == "proceed"

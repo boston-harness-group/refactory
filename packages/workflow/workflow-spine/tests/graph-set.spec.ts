@@ -5,7 +5,7 @@
  * nodes due together, checking five invariants on each run.
  */
 import { describe, expect, it } from 'vitest'
-import { shapes, crossContainerReloopGraph, dataInsideForkGraph, dataInsideBranch, designGraphRefineLightRelooped } from './graph-shapes.ts'
+import { shapes, crossContainerReloopGraph, dataInsideForkGraph, dataInsideBranch, designGraphRefineFull, designGraphRefineLightRelooped } from './graph-shapes.ts'
 import { allOrders, seededOrders, driveToEnd } from './shape-driver.ts'
 import {
   checkCompletedOncePerVisit, checkJoinAfterBranches, checkNoDueDrop,
@@ -53,7 +53,7 @@ describe('graph shape invariants', () => {
 
 describe('designGraphRefineLightRelooped', () => {
   const shape = designGraphRefineLightRelooped
-  const research = ['clear_sizing', 'fork_size', 'size_change', 'join_size', 'presize_scale',
+  const research = ['route_sizing', 'clear_sizing', 'fork_size', 'size_change', 'join_size', 'presize_scale',
     'research_director', 'record_findings', 'gate_research', 'classify_scale', 'widen_research',
     'pitfalls_researcher', 'gate_pitfalls', 'route_strategy', 'strategy_director']
 
@@ -71,6 +71,21 @@ describe('designGraphRefineLightRelooped', () => {
       expect(order.slice(first + 1, second)).toEqual(
         ['classify_reloop', 'scope_reloop', 'synthesize_strategy', 'design_doc', 'check_design_claims', 'gate_design_review'])
       for (const skipped of research) expect(order).not.toContain(skipped)
+    })
+  })
+})
+
+// ─── A full refine: researched without the sizer ─────────────────
+
+describe('designGraphRefineFull', () => {
+  const sizer = ['clear_sizing', 'fork_size', 'size_change', 'join_size', 'presize_scale']
+
+  seededOrders(designGraphRefineFull, 42, 20).forEach((result, i) => {
+    it(`ordering ${i}: route_sizing sends it to research, and no sizer node runs`, () => {
+      const order = result.completedOrder
+      expect(order.slice(0, 4)).toEqual(['prepare', 'route_refine_design', 'route_sizing', 'research_director'])
+      for (const skipped of sizer) expect(order).not.toContain(skipped)
+      expect(order).toContain('pitfalls_researcher')
     })
   })
 })

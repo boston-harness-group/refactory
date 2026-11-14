@@ -19,7 +19,8 @@ from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECO
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
 from refactory_dsh.nn import Graph, Knob, Mode, Node, RunResult
 from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
-                                      EARLY_ASKS_VERDICT, SIZER_MARK, SIZING, UPDATED_TESTS)
+                                      EARLY_ASKS_VERDICT, SIZER_MARK, SIZER_MISSING, SIZING,
+                                      UPDATED_TESTS)
 
 OPS = "refactory_dsh.design_ops"
 
@@ -550,7 +551,13 @@ class DesignMode(Mode):
         # ── sizing before research: a bounded agent reads the code the change touches,
         # and the shared rule turns its verdict into the research scope ──
         graph.add(Node(
+            "route_sizing", "gate", evaluator=f"{OPS}:route_sizing",
+            notes="a refine keeps its scale, so it goes to research without a sizer; "
+                  "everything else is sized first",
+        ))
+        graph.add(Node(
             "clear_sizing", "op", call=f"{OPS}:clear_sizing",
+            writes=(SIZING, SIZER_MISSING),
             notes="remove an earlier visit's sizing verdict, so only this visit's is read",
         ))
         graph.add(Node("fork_size", "fork", targets=("size_change",),
@@ -571,7 +578,7 @@ class DesignMode(Mode):
                        notes="wait for the change sizer"))
         graph.add(Node(
             "presize_scale", "op", call=f"{OPS}:presize_scale",
-            reads=(SIZING,),
+            reads=(SIZING, SIZER_MISSING),
             produces=("research_scope", "research_scope_reason", "presize_scope",
                       "presize_scope_reason"),
             notes="the research scope before research, from the sizer's verdict and the "
@@ -711,11 +718,13 @@ class DesignMode(Mode):
                 "{% if research_widened %}Research was widened after a lean pass: "
                 "{{research_widened}}\n{% endif %}"
                 "After research: {{research_scope}} — {{research_scope_reason}}\n\n"
-                "{% if presize_scope %}A small, contained change usually needs few "
-                "perspectives, and short ones; the simplest-thing and what-the-check-misses "
-                "angles may be one perspective. Tell each subagent the scale and its reason, "
-                "and ask for a short file that states only findings that change what gets "
-                "built. You decide how many perspectives and how long.\n\n{% endif %}"
+                # Only when the sizer found it small: a full change keeps today's depth.
+                "{% if presize_scope == 'scoped' %}A small, contained change usually needs "
+                "few perspectives, and short ones; the simplest-thing and "
+                "what-the-check-misses angles may be one perspective. Tell each subagent the "
+                "scale and its reason, and ask for a short file that states only findings "
+                "that change what gets built. You decide how many perspectives and how "
+                "long.\n\n{% endif %}"
                 "You are the strategy director. From the research, choose between two "
                 "and five perspectives on how this artifact could be built — including "
                 "the simplest thing that could pass the check, and one that says what "
@@ -1333,7 +1342,9 @@ class DesignMode(Mode):
         ))
 
         graph.connect("prepare", "route_refine_design")
-        graph.connect("route_refine_design", "clear_sizing", condition="proceed")
+        graph.connect("route_refine_design", "route_sizing", condition="proceed")
+        graph.connect("route_sizing", "clear_sizing", condition="proceed")
+        graph.connect("route_sizing", "research_director", condition="refine")
         graph.connect("clear_sizing", "fork_size")
         # No edge from size_change to join_size, as fork_qa's branches have none.
         graph.connect("fork_size", "join_size")
@@ -1353,8 +1364,10 @@ class DesignMode(Mode):
         # A lean research whose footprint reaches further goes once more at full scope.
         graph.add(Node(
             "widen_research", "gate", evaluator=f"{OPS}:widen_research",
-            reads=("research-plan.json",),
-            writes=("research-review.txt", "research-lean/"),
+            reads=("research-plan.json", "research/"),
+            # The lean round's plan and notes move to research-lean/, so the full round
+            # writes them afresh.
+            writes=("research-review.txt", "research-lean/", "research-plan.json", "research/"),
             produces=("research_scope", "research_scope_reason", "research_review",
                       "research_widenings_used", "research_widened"),
             max_iterations=1, on_exhausted="continue",

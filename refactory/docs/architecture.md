@@ -695,7 +695,9 @@ Non-refine research is guided to 3 to 5 directions. A full design keeps the
 perspectives step.
 
 **Sizing before research.** On `route_refine_design`'s `proceed` edge the change is
-sized before research, so a small fix gets a lean research plan. `clear_sizing` removes
+sized before research, so a small fix gets a lean research plan. `route_sizing` sends a
+refine, which keeps its scale, straight to `research_director` with no sizer call
+(`refine`); everything else goes on (`proceed`). `clear_sizing` removes
 an earlier visit's verdict; `fork_size` starts `size_change`, its only and optional
 branch: a tool-using agent bounded by `SIZER_TIMEOUT_S` (600 s), told to read only, to
 spawn no subagents and to use no web. It locates where a bug's behaviour lives, or where
@@ -706,7 +708,8 @@ turns it into `research_scope` and `presize_scope` with the same rule
 is full unless the sizer answered `scoped`, saw no cross-cutting sign, and cited code that
 resolves in the target's checkout and passes the rule; a sizer that failed or timed out is
 missing, and full. The research and strategy directors are given the scale and its reason
-as context, never as a cap. After `classify_scale`, `widen_research` sends a lean research
+as context, never as a cap; only a change sized scoped before research tells the strategy
+director that a small change usually needs few, short perspectives. After `classify_scale`, `widen_research` sends a lean research
 back to `research_director` once, at full scope, when its footprint shows a shared engine,
 more functions than a scoped change allows, a citation that does not resolve or no usable
 footprint; new items alone do not widen it. The approval card's scale line adds the scale
@@ -725,7 +728,8 @@ as GitHub has it now ("unavailable" when that cannot be read, never "empty"). A 
 reloop at `gate_strategy` goes to `synthesize_strategy`, which gets the same block as its
 `strategy_plan`, and the next design still gets `refine_context`. With
 `refine_design=full` (`--refine-design full`), or on any run that is not a refine, the
-gate answers `proceed` and the full phase runs. Prepare reads the refine from the task
+gate answers `proceed` and the full phase runs; a full refine skips only the sizer
+(`route_sizing`), since it keeps its scale. Prepare reads the refine from the task
 (the walker) or the `refine` knob (the spine, where a node's task names only the node).
 
 The `deliverable_kind` fact, computed by `prepare_design`, distinguishes repository

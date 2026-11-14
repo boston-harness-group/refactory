@@ -321,9 +321,11 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
                                  output_only=PLANNING_STEPS)
 
     # Compute research_scope.  A refine is always scoped; everything else starts
-    # as full and is reclassified by classify_scale after research.  The walker
-    # passes `refine` in the task, but a run on DSH carries it as a knob, and there
-    # the task names only the node: read both, as `delivery.refine_task` does.
+    # as full.  In design's graph the sizer may make it scoped before research
+    # (`presize_scale`), and classify_scale reclassifies it after research; a graph
+    # with no sizer researches it at this full scope.  The walker passes `refine` in
+    # the task, but a run on DSH carries it as a knob, and there the task names only
+    # the node: read both, as `delivery.refine_task` does.
     if str(task.get("refine") or ctx.knob("refine", "") or "").strip():
         research_scope = "scoped"
         research_scope_reason = REFINE_SCOPE_REASON
@@ -1096,6 +1098,21 @@ SIZING = "sizing.json"
 SIZER_MISSING = "reviews/size_change-missing.txt"
 
 
+def route_sizing(ctx: Any) -> Any:
+    """Send a refine straight to research; size everything else first.
+
+    A refine keeps its scale (`REFINE_SCOPE_REASON`, set by prepare), so a sizer's verdict
+    would be thrown away (`presize_scale` returns nothing for one): the refine goes to
+    `research_director` without the model call. ``proceed`` sizes the change, which is
+    also what a person's skip of this gate sends on the spine, and loses nothing.
+    """
+    from refactory_dsh.nn import Verdict
+
+    if ctx.facts.get("research_scope_reason") == REFINE_SCOPE_REASON:
+        return Verdict("refine", "a refine keeps its scale: research without sizing it")
+    return Verdict("proceed", "size the change before research")
+
+
 def clear_sizing(ctx: Any) -> dict[str, Any]:
     """Op: remove an earlier visit's sizing verdict and missing marker, before the sizer runs.
 
@@ -1118,7 +1135,8 @@ def presize_scale(ctx: Any) -> dict[str, Any]:
     Conservative: anything but a ``scoped`` answer whose footprint resolves in the
     target's checkout and passes the rule (`scale_from_footprints`) is full -- a missing
     or unparseable verdict, a sizer that did not finish, any cross-cutting sign, a
-    footprint that cites no code. A refine keeps its scale (``{}``). Never raises; it
+    footprint that cites no code. A refine keeps its scale (``{}``; design's graph sends
+    it past the sizer, `route_sizing`). Never raises; it
     reads only ``sizing.json`` and its missing marker, never the brief, and the target's
     code from the ``source`` fact, never ``ctx.workdir``.
     """

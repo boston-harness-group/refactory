@@ -103,7 +103,10 @@
     "clear_sizing": {
       "id": "clear_sizing",
       "reads": [],
-      "writes": [],
+      "writes": [
+        "reviews/size_change-missing.txt",
+        "sizing.json"
+      ],
       "blocking": true,
       "command": "python -m refactory_dsh.run refactory_dsh.design_ops:clear_sizing",
       "callable_name": "refactory_dsh.design_ops:clear_sizing",
@@ -599,6 +602,7 @@
     "presize_scale": {
       "id": "presize_scale",
       "reads": [
+        "reviews/size_change-missing.txt",
         "sizing.json"
       ],
       "writes": [],
@@ -760,6 +764,18 @@
       "max_iterations": 2,
       "_type": "GateNode"
     },
+    "route_sizing": {
+      "id": "route_sizing",
+      "reads": [],
+      "writes": [],
+      "blocking": true,
+      "evaluator_type": "fn",
+      "evaluator_role": null,
+      "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:route_sizing",
+      "gate_prompt": "a refine keeps its scale, so it goes to research without a sizer; everything else is sized first",
+      "max_iterations": 1,
+      "_type": "GateNode"
+    },
     "route_strategy": {
       "id": "route_strategy",
       "reads": [],
@@ -821,7 +837,7 @@
       "blocking": true,
       "role": "ceo",
       "model": "",
-      "prompt_template": "Artifact name: {{name}}\nBrief: {{brief}}\nIt is built in {{source}}; read what is there before choosing.\n\n## Pitfalls\n{{pitfalls}}\n\n## What the research found\n{{research}}\n\n## Research scope\n{{research_scope}}\n\n{% if presize_scope %}{% if presize_scope_reason %}Before research: {{presize_scope}} \u2014 {{presize_scope_reason}}\n{% endif %}{% endif %}{% if research_widened %}Research was widened after a lean pass: {{research_widened}}\n{% endif %}After research: {{research_scope}} \u2014 {{research_scope_reason}}\n\n{% if presize_scope %}A small, contained change usually needs few perspectives, and short ones; the simplest-thing and what-the-check-misses angles may be one perspective. Tell each subagent the scale and its reason, and ask for a short file that states only findings that change what gets built. You decide how many perspectives and how long.\n\n{% endif %}You are the strategy director. From the research, choose between two and five perspectives on how this artifact could be built \u2014 including the simplest thing that could pass the check, and one that says what the check will not catch. Spawn one subagent per perspective and have it write `strategy/<slug>.md` under the run directory, with each finding as a heading `### FND-<slug>-<n> \u2014 <the finding>`, numbered from 1 within the file. Then write `strategy-plan.json` as an array of `{\"perspective\", \"slug\", \"intent_items\", \"ids\"}` objects, where `intent_items` lists the asks from the brief that perspective covers and `ids` lists the `FND-<slug>-<n>` ids from that perspective's file. Every ask must be covered.",
+      "prompt_template": "Artifact name: {{name}}\nBrief: {{brief}}\nIt is built in {{source}}; read what is there before choosing.\n\n## Pitfalls\n{{pitfalls}}\n\n## What the research found\n{{research}}\n\n## Research scope\n{{research_scope}}\n\n{% if presize_scope %}{% if presize_scope_reason %}Before research: {{presize_scope}} \u2014 {{presize_scope_reason}}\n{% endif %}{% endif %}{% if research_widened %}Research was widened after a lean pass: {{research_widened}}\n{% endif %}After research: {{research_scope}} \u2014 {{research_scope_reason}}\n\n{% if presize_scope == 'scoped' %}A small, contained change usually needs few perspectives, and short ones; the simplest-thing and what-the-check-misses angles may be one perspective. Tell each subagent the scale and its reason, and ask for a short file that states only findings that change what gets built. You decide how many perspectives and how long.\n\n{% endif %}You are the strategy director. From the research, choose between two and five perspectives on how this artifact could be built \u2014 including the simplest thing that could pass the check, and one that says what the check will not catch. Spawn one subagent per perspective and have it write `strategy/<slug>.md` under the run directory, with each finding as a heading `### FND-<slug>-<n> \u2014 <the finding>`, numbered from 1 within the file. Then write `strategy-plan.json` as an array of `{\"perspective\", \"slug\", \"intent_items\", \"ids\"}` objects, where `intent_items` lists the asks from the brief that perspective covers and `ids` lists the `FND-<slug>-<n>` ids from that perspective's file. Every ask must be covered.",
       "tools": [],
       "timeout": null,
       "max_iterations": 1,
@@ -907,11 +923,14 @@
     "widen_research": {
       "id": "widen_research",
       "reads": [
-        "research-plan.json"
+        "research-plan.json",
+        "research/"
       ],
       "writes": [
         "research-lean/",
-        "research-review.txt"
+        "research-plan.json",
+        "research-review.txt",
+        "research/"
       ],
       "blocking": true,
       "evaluator_type": "fn",
@@ -1171,13 +1190,23 @@
     },
     {
       "source": "route_refine_design",
+      "target": "design_doc",
+      "condition": "light"
+    },
+    {
+      "source": "route_refine_design",
+      "target": "route_sizing",
+      "condition": "proceed"
+    },
+    {
+      "source": "route_sizing",
       "target": "clear_sizing",
       "condition": "proceed"
     },
     {
-      "source": "route_refine_design",
-      "target": "design_doc",
-      "condition": "light"
+      "source": "route_sizing",
+      "target": "research_director",
+      "condition": "refine"
     },
     {
       "source": "route_strategy",

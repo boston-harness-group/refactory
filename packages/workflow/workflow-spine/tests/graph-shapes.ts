@@ -343,6 +343,14 @@ export const designGraphScoped: ShapeEntry = {
   fixedVerdicts: { route_strategy: 'scoped', route_refine_design: 'proceed', scope_reloop: 'approach' },
 }
 
+/** A full refine (`refine_design=full`): it keeps its scale, so route_sizing sends it
+ *  straight to research_director, past the sizer, and the rest of the design phase runs. */
+export const designGraphRefineFull: ShapeEntry = {
+  ...designGraph,
+  name: 'designGraphRefineFull',
+  fixedVerdicts: { ...designGraph.fixedVerdicts, route_sizing: 'refine' },
+}
+
 /** A light refine: skips research and strategy, goes straight to design_doc.
  *  gate_strategy is not relooped here, because the redo invariant cannot hold
  *  for its reloop: the only way into synthesize_strategy on the light route is
@@ -483,5 +491,6 @@ export const shapes: ShapeEntry[] = [
   alternativeEnds_halt,
   designGraph,
   designGraphScoped,
+  designGraphRefineFull,
   designGraphRefineLight,
 ]

@@ -1025,6 +1025,7 @@ from refactory_dsh.design_ops import (  # noqa: E402
     SIZER_MARK,
     clear_sizing,
     presize_scale,
+    route_sizing,
     scale_from_footprints,
     widen_research,
 )
@@ -1174,6 +1175,15 @@ def test_presize_decision_table(tmp_path):
         result = presize_scale(_presize_ctx(tmp_path, f"row{n}", **given))
         assert result == expected, (n, result)
         assert REFINE_SCOPE_REASON not in result.values()
+
+
+def test_route_sizing_sends_only_a_refine_past_the_sizer(tmp_path):
+    refine = _presize_ctx(tmp_path, "refine", facts={"research_scope": "scoped",
+                                                    "research_scope_reason": REFINE_SCOPE_REASON})
+    assert route_sizing(refine) == "refine"
+    for name, reason in (("fresh", ""), ("other", "a reason prepare never writes")):
+        assert route_sizing(_presize_ctx(tmp_path, name, facts={"research_scope_reason": reason})) \
+            == "proceed"
 
 
 def test_clear_sizing_removes_a_stale_verdict(tmp_path):
@@ -1484,6 +1494,18 @@ def test_strategy_director_gets_both_scales(tmp_path):
     addition = strategy.split("A small, contained change", 1)[1].split("You are the strategy director")[0]
     assert not re.search(r"\d", addition)
 
+    # Sized full before research: the strategy director is told both scales, and keeps
+    # today's depth, with no word about a small change.
+    run, model = _design_run(tmp_path / "sized-full", "Fix main in app.py.",
+                             [RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
+                              DESIGN_DOC_ANSWER],
+                             sizer=[_sizing(engine=("app.py:1",))], to_gate=True)
+    [strategy] = _asked(model, STRATEGY_DIRECTOR)
+    assert "Before research: full — changes a shared engine: app.py:1\n" in strategy
+    assert "After research: full — " in strategy
+    assert "A small, contained change" not in strategy and "short file" not in strategy
+    assert not re.findall(r"\{\{\s*[A-Za-z_]\w*\s*\}\}", strategy) and "{%" not in strategy
+
     # Scoped before and after research: the perspectives step is skipped, as today.
     run, model = _design_run(tmp_path / "scoped", "Fix main in app.py.",
                              [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
@@ -1529,9 +1551,9 @@ def test_card_shows_both_scales(tmp_path):
     assert f"(before research: scoped — {ONE_FUNCTION})" in run.facts["design_card"]
 
 
-def test_full_refine_through_the_chain_stays_a_refine(opened_pull, tmp_path):
-    """refine_design=full passes the sizing chain: a scoped verdict leaves the refine's scale,
-    and the widening gate never widens it."""
+def test_full_refine_skips_the_sizer_and_stays_a_refine(opened_pull, tmp_path):
+    """refine_design=full keeps its scale, so route_sizing sends it to research past the
+    sizer: no sizer call is made, and the widening gate never widens it."""
     from test_delivery import NAME
 
     mode = DesignMode()
@@ -1545,7 +1567,8 @@ def test_full_refine_through_the_chain_stays_a_refine(opened_pull, tmp_path):
                    task={"name": NAME, "brief": "Add more.py that prints two.",
                          "check": "python tool.py", "refine": opened_pull.url})
     assert run.gate_stop == "gate_strategy", run.error
-    assert len(_asked(model, SIZER_MARK)) == 1
+    assert _asked(model, SIZER_MARK) == [] and model.sizer == [_sizing()]
+    assert not (run.workdir / "sizing.json").exists()
     assert len(_asked(model, RESEARCH_DIRECTOR)) == 1
     assert (run.facts["research_scope"], run.facts["research_scope_reason"]) == (
         "scoped", REFINE_SCOPE_REASON)
@@ -1555,8 +1578,8 @@ def test_full_refine_through_the_chain_stays_a_refine(opened_pull, tmp_path):
 def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
     from refactory_dsh.nn.validate import validate_state
 
-    sizing_nodes = ("clear_sizing", "fork_size", "size_change", "join_size", "presize_scale",
-                    "widen_research")
+    sizing_nodes = ("route_sizing", "clear_sizing", "fork_size", "size_change", "join_size",
+                    "presize_scale", "widen_research")
 
     def without_sizer(state):
         graph = state["graph"]

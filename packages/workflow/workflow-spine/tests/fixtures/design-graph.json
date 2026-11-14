@@ -243,6 +243,12 @@
       "max_iterations": 2,
       "_type": "GateNode"
     },
+    "route_sizing": {
+      "id": "route_sizing",
+      "evaluator_type": "fn",
+      "max_iterations": 1,
+      "_type": "GateNode"
+    },
     "route_strategy": {
       "id": "route_strategy",
       "evaluator_type": "fn",
@@ -538,13 +544,23 @@
     },
     {
       "source": "route_refine_design",
+      "target": "design_doc",
+      "condition": "light"
+    },
+    {
+      "source": "route_refine_design",
+      "target": "route_sizing",
+      "condition": "proceed"
+    },
+    {
+      "source": "route_sizing",
       "target": "clear_sizing",
       "condition": "proceed"
     },
     {
-      "source": "route_refine_design",
-      "target": "design_doc",
-      "condition": "light"
+      "source": "route_sizing",
+      "target": "research_director",
+      "condition": "refine"
     },
     {
       "source": "route_strategy",
