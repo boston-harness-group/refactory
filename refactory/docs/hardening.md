@@ -757,6 +757,119 @@ reported the change only at materialise, 45 minutes later.
   `test_vitest_guard_reports_inactive_when_python_missing`,
   `test_vitest_guard_reports_inactive_on_non_git_dir` (inactive guard reporting).
 
+**Follow-up (o55-dm149d, 2026-11-13).** A run's `research_director` was failed
+for a change it did not make. Another session had run
+`git worktree add -b fix/early-check-probe … origin/main` in the person's
+checkout, and git wrote `branch.fix/early-check-probe.remote` and `.merge` to the
+shared config. Two changes followed:
+
+- `shared_change` names what changed in its message: the config key or hook file,
+  as added, removed or changed. Values are never shown, since a remote URL can
+  carry a token. The record keeps a hash per key and per hook file for this, and
+  `shared_changed` stays as its boolean form.
+- The guard does not count the tracking lines that creating a branch writes:
+  `branch.<b>.remote` and `branch.<b>.merge`, as `git branch --track` and
+  `worktree add -b` write them. They are not counted only when all of these hold:
+  - `<b>` is not the run's own branch;
+  - neither its ref nor any `branch.<b>.*` key existed in the record;
+  - the remote it names is `.` or was already defined in the record.
+
+  Each record keeps every local branch of the target it has ever seen, so a
+  branch that is deleted and made again with an upstream is not new. Remotes are
+  matched by their full name. Retargeting an existing branch, giving one an upstream
+  with `--set-upstream-to`, and tracking a remote added during the step are still
+  caught. So is every other `branch.*` key (pushRemote, rebase, mergeOptions), and
+  `remote.*`, `core.*`, `alias.*` and the hooks. A record written before this
+  change has only its all-lines digest. It is compared on that digest once and then
+  moved on, so live runs are not failed when they upgrade.
+
+`LEFTHOOK=0` does not stop lefthook's npm postinstall. Only a truthy `CI` without
+`LEFTHOOK` enabled does that, and `_install_env` sets `CI=true`, while
+`check_environment`, which is setup's environment, does not. A setup that runs
+`pnpm install` therefore runs `lefthook install`. Hook isolation (part 4) sends
+that install to the worktree's own hooks. When a global `core.hooksPath` is set,
+lefthook refuses the install instead.
+
+Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkout_is_not_a_shared_change`,
+`test_every_other_shared_config_change_is_still_caught_and_named`,
+`test_tracking_a_remote_added_meanwhile_is_caught`,
+`test_tracking_an_undefined_remote_is_caught`,
+`test_tracking_config_for_the_run_s_own_branch_is_caught`,
+`test_retargeting_the_person_s_tracked_branch_is_caught`,
+`test_giving_an_existing_branch_an_upstream_is_caught`,
+`test_a_branch_made_in_one_step_and_given_an_upstream_in_a_later_one_is_caught`,
+`test_a_new_branch_s_other_settings_are_caught`,
+`test_retargeting_config_left_by_a_deleted_branch_is_caught`,
+`test_deleting_a_branch_and_making_it_again_with_an_upstream_is_caught`,
+`test_a_remote_is_matched_by_name_not_prefix`,
+`test_a_branch_named_like_a_tag_is_known_by_its_name`,
+`test_a_shared_hook_change_is_named_by_file`,
+`test_a_record_from_before_the_detail_still_works`) and
+`test_agent_delivery.py`
+(`test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected`).
+
+**Worktree config and includes (review of #644).** The snapshot read only the
+common `config`, so two changes went unseen: `git config --worktree
+core.hooksPath` in the person's checkout, which `extensions.worktreeConfig` (set
+by hook isolation) makes live, and an edit inside a file the config already
+`[include]`s. The snapshot now also records:
+
+- the checkout's own `config.worktree` (from its `--git-dir`, so a checkout that
+  is itself a linked worktree is read correctly), named `worktree:<key>`. It is
+  recorded whether or not the extension is on, so turning it on cannot bring an
+  unseen file into force. The run's own worktrees have their own git dirs, so
+  their isolated hooks path is not counted;
+- a hash of every file an `include.path` or `includeIf.<cond>.path` in either
+  file names, followed recursively and whatever the condition, named
+  `include:<path>`. Paths resolve as git resolves them (`~/` from HOME, relative
+  from the including file; `%(prefix)/` is not expanded). A missing file is
+  recorded as missing, so creating it counts. Paths are normalised (`sub/../x`
+  is `x`) and followed no deeper than git's own limit of 10, so a self-including
+  file ends at once. Config is read with `--list -z`, since an `includeIf`
+  condition may hold `=`, and each file is listed once; one `rev-parse` gives
+  both git dirs, so a plain target costs two git spawns per check. An `includeIf` file
+  git never opens for this checkout may be unreadable or not config; it is
+  recorded as such, or by its bytes, rather than failing the guard.
+
+Both feed the all-lines digest only when present, so a target with neither keeps
+the digest it had. A record now says what it read (`shared_reads`). A record
+without that, from a run live at upgrade, is compared once without the new keys,
+which then become its baseline: a sparse checkout's `config.worktree` or an
+existing include does not fail the run, though a change to them in that one step
+goes unseen. Held by
+`test_worktree.py` (`test_the_checkout_s_worktree_config_is_shared_state`,
+`test_a_worktree_config_written_before_the_extension_is_on_is_seen`,
+`test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config`,
+`test_a_change_inside_an_included_file_is_caught`,
+`test_includes_are_followed_relative_conditional_nested_and_from_worktree_config`,
+`test_an_include_cycle_ends_after_reading_each_file_once`,
+`test_ordinary_work_with_includes_and_worktree_config_is_not_a_change`,
+`test_an_old_record_still_sees_a_worktree_config_change`,
+`test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline`,
+`test_a_digest_only_record_takes_worktree_config_as_its_baseline`,
+`test_an_include_whose_condition_holds_an_equals_sign_is_followed`,
+`test_an_include_git_does_not_read_here_may_be_unparsable`,
+`test_an_include_git_does_not_read_here_may_be_unreadable`,
+`test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder`,
+`test_the_snapshot_spawns_git_twice_for_a_plain_target`,
+`test_the_config_lines_are_what_git_config_list_prints`,
+`test_an_include_path_is_normalised_so_a_dot_dot_loop_ends`,
+`test_includes_are_followed_no_deeper_than_git_follows_them`).
+
+**Another run turning on `extensions.worktreeConfig`.** Every run's setup enables
+it in the shared config (hook isolation). The line was always left out of the
+digest, so enabling it was never a change, but neither was turning it off. The
+record now keeps it on its own: turning it on, from absent or `false`, is not a
+change (the checkout's `config.worktree` is recorded, so this brings nothing
+unseen into force); turning it off or removing it is, as is any other
+`extensions.*` key. A record from before this keeps whatever it finds as its
+baseline. A run's record is written before its own setup enables the extension, so
+its first step moves the baseline to "on". Held by `test_worktree.py`
+(`test_another_run_enabling_worktree_config_does_not_trip_this_run`,
+`test_enabling_worktree_config_from_absent_or_false_is_not_a_change`,
+`test_turning_worktree_config_off_or_any_other_extension_is_caught`,
+`test_a_record_from_before_holds_worktree_config_off_as_its_baseline`).
+
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
 with isolation on. `HOOK_SUPPRESS` (`HUSKY=0`) stops husky, and `shared_changed`
@@ -2680,10 +2793,9 @@ A verdict's `consumed` field now distinguishes two terminal states:
 - `consumed: expired` — the verdict was consumed because the scope changed (design.md
   was modified between the verdict and the resume) or the label was invalid.
 
-Legacy `consumed: yes` entries from older runs are treated as `used` for backward
-compatibility.
+A `consumed: yes` entry left by a run from before these three values reads as pending.
 
-`gate_corrections_due` counts only `consumed: used` (and legacy `yes`) verdicts as
+`gate_corrections_due` counts only `consumed: used` verdicts as
 "went on", preventing double-application of corrections when a stray proceed expires.
 An expired verdict does not trigger re-application of corrections.
 
@@ -2949,8 +3061,8 @@ and in both of the CLI's prints when a run stops at a user gate.
 
 ### Light refine
 
-A design-mode refine (`--refine <PR>`) follows up an open pull request.  By
-default (`refine_design=light`), the `route_refine_design` gate skips the
+A design-mode refine (`--refine <PR>`) follows up an open pull request.  The
+`route_refine_design` gate skips the
 research, pitfalls and strategy phases and goes from `prepare` straight to
 `design_doc`.  The gate writes sentinel facts and files — research, pitfalls,
 strategy_plan, strategy — so every downstream node finds its declared inputs on
@@ -2960,19 +3072,18 @@ characters, and its diff stat and changed files from where its head left its
 base branch, with the base read from GitHub by URL (never from a
 remote-tracking branch, nor from the run's worktree, whose base is the pull
 request's head).  When the base cannot be read the design is told the diff is
-unavailable, never that it is empty, and a warning says why.  With
-`refine_design=full`, or on any non-refine run, the gate returns `proceed` and
-the existing pipeline runs unchanged.
+unavailable, never that it is empty, and a warning says why.  On any non-refine
+run the gate returns `proceed` and the existing pipeline runs unchanged.
 
 Prepare reads the refine from the task or, failing that, the `refine` knob,
 as `delivery.refine_task` does.  On the spine `refine` is a knob and a node's
 task names only the node, so the task's `refine` key, which the first version
-read alone, never fired there: every refine walked the full phase, and
-`classify_scale`'s refine shortcut never ran.
+read alone, never fired there: every refine walked the full phase.
 
-The `refine_design` knob is frozen: it cannot change after the run starts.
-The default is `light`.  The CLI flag is `--refine-design light|full`, which
-is refused without `--refine`.
+There is no way to walk the full design phase on a refine: the
+`refine_design` knob and its `--refine-design light|full` flag were removed,
+and with them `classify_scale`'s refine shortcut, which only a full refine
+reached.
 
 If the person reloops at `gate_strategy`, the existing reloop edge goes to
 `synthesize_strategy`, which gets the pull request block as its
@@ -2983,15 +3094,13 @@ research, pitfalls or `strategy_director`.
 #### Tests that hold it
 
 - `test_design_refine_spine.py::test_the_spine_takes_the_light_route_when_refine_is_a_knob`
-- `test_design_refine_spine.py::test_a_full_refine_on_the_spine_is_classified_as_a_refine`
 - `test_design_refine.py::test_a_light_refine_designs_from_the_pull_request_and_delivers_onto_it`
 - `test_design_refine.py::test_a_light_refine_says_the_diff_is_unavailable_when_the_base_cannot_be_read`
 - `test_design_refine.py::test_a_light_refine_frames_the_pull_requests_description_and_caps_it`
 - `test_design_refine.py::test_a_light_refine_relooped_at_its_gate_keeps_the_pull_request_in_the_next_design`
-- `test_design_refine.py::test_a_full_refine_walks_the_design_phase_with_no_pull_request_block`
 - `test_design_refine.py::test_non_refine_unchanged`
-- `test_delivery.py::test_the_command_line_hands_refine_design_to_the_run`
-- `test_delivery.py::test_the_design_command_applies_refine_design_and_refuses_it_without_refine`
+- `test_design_refine.py::test_route_refine_design_proceeds_only_on_a_run_that_is_not_a_refine`
+- `test_delivery.py::test_the_refine_design_flag_is_gone`
 - `graph-set.spec.ts`: `designGraphRefineLight`, and `designGraphRefineLightRelooped` for the
   person's reloop
 

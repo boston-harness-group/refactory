@@ -3,8 +3,7 @@
 - ``run_ledger``: "Every change so far, by kind" lists every evaluated candidate of the
   run (not only the recent ones), with the kind of change it made, train fixed/broken
   against its parent and the gate's word, after a tally per kind; bounded.
-- ``lessons``: the answer's optional ``lessons`` are kept, journaled, shown back as "Your
-  lessons so far" and survive a resume; an answer without them keeps the old ones.
+- ``lessons``: the memory note (`optim.memory`; its tests are test_optimizer_memory.py).
 - ``step_review``: each step the last round added gets its train counts and one review
   call (``step_review``), cached, whose failure is shown and never fatal.
 - Readers' success patterns get their own heading and room.
@@ -175,63 +174,6 @@ def test_without_the_gate_the_ledger_has_no_gate_column():
     assert "| gate |" not in lines[-1] and "kept" not in "\n".join(lines)
 
 
-# ── lessons ─────────────────────────────────────────────────────────────────
-
-
-class Lessons(Recording):
-    """Writes lessons in rounds 1 and 3 (round 2's answer carries none)."""
-
-    WRITES = {1: "LESSON-ONE: prompt moves on level help", 3: "LESSON-THREE: revised"}
-
-    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
-        out = super().propose(ctx, n, parents)
-        self.last_lessons = self.WRITES.get(len(self.contexts), "")
-        return out
-
-
-def _lessons_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any):
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
-    proposer = Lessons(plan)
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, **overrides})
-        loop.optimizer = proposer
-        loop.run()
-    return loop, proposer
-
-
-def test_lessons_are_kept_shown_back_and_kept_when_an_answer_has_none(tmp_path, monkeypatch):
-    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)], []])
-    first, second, third, fourth = (c.render() for c in proposer.contexts[:4])
-    assert '"lessons": "<optional, short: what the results so far teach' in first
-    assert "## Your lessons so far" not in first, "nothing written yet"
-    assert "LESSON-ONE" in _section(second, "## Your lessons so far")
-    assert "in epoch 1 (generation" in second
-    assert "LESSON-ONE" in third, "round 2 wrote none: the old lessons stay"
-    assert "LESSON-THREE" in fourth and "LESSON-ONE" not in fourth
-    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
-    written = [e["text"] for e in events if e.get("event") == "optimizer_lessons"]
-    assert written == [Lessons.WRITES[1], Lessons.WRITES[3]]
-    _no_val(_section(fourth, "## Your lessons so far"), loop)
-
-
-def test_lessons_survive_a_resume(tmp_path, monkeypatch):
-    _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)]])
-    again = Recording([[]])
-    with _patch_mode(LevelProbe):
-        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
-        resumed.optimizer = again
-        resumed.run()
-    assert resumed._lessons["text"] == Lessons.WRITES[3]
-    assert "LESSON-THREE" in _section(again.contexts[0].render(), "## Your lessons so far")
-
-
-def test_without_the_lessons_switch_nothing_is_asked_kept_or_shown(tmp_path, monkeypatch):
-    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], []], lessons=False)
-    text = proposer.contexts[1].render()
-    assert '"lessons"' not in text and "## Your lessons so far" not in text
-    assert "optimizer_lessons" not in (loop.root / "journal.jsonl").read_text()
-
-
 class _Answering:
     """A proposal client answering with ``answer``; step reviews with ``review``."""
 
@@ -250,35 +192,6 @@ class _Answering:
             return self.review if isinstance(self.review, str) else json.dumps(self.review)
         self.proposals.append(prompt)
         return json.dumps(self.answer)
-
-
-def test_the_proposer_reads_lessons_from_its_answer_only_when_asked():
-    long = "L" * 5000
-    optimizer = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": long}))
-    optimizer.propose(ProposalContext(ask_lessons=True), 1, [])
-    assert optimizer.last_lessons == "L" * (feedback.LESSONS_CHARS - 1) + "…"
-    listed = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": ["a", "b"]}))
-    listed.propose(ProposalContext(ask_lessons=True), 1, [])
-    assert listed.last_lessons == "- a\n- b"
-    unasked = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": "x"}))
-    unasked.propose(ProposalContext(ask_lessons=False), 1, [])
-    assert unasked.last_lessons == ""
-
-
-def test_a_parent_picker_hands_its_proposers_lessons_through():
-    from refactory_dsh.optim import compose, policies
-
-    proposer = AutoresearchOptimizer(_Answering({"proposals": []}))
-    paired = compose.PickedParent(policies.HillClimbSelector(), proposer)
-    proposer.last_lessons = "FROM-PROPOSER"
-    assert paired.last_lessons == "FROM-PROPOSER"
-    paired.last_lessons = ""
-    assert proposer.last_lessons == ""
-
-
-def test_lessons_shown_are_bounded():
-    lines = feedback.lessons_lines({"text": "x" * 9000, "epoch": 2, "generation": 3})
-    assert len(lines[-1]) == feedback.LESSONS_CHARS
 
 
 # ── added steps ─────────────────────────────────────────────────────────────
@@ -404,7 +317,7 @@ def test_each_added_step_is_reviewed_once_shown_and_kept_for_a_resume(tmp_path):
             "shared train item(s); final answer changed on 2/6 (33%; the answer the grader "
             "read); review: restates_inputs "
             '-- "THINK 4" -- It repeats the notes.') in section
-    assert "- `check` (code, added by c1" in section and "recorded no text output" in section
+    assert "- `check` (code, added by c1" in section and "its records hold no visit of it" in section
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     assert [t["verdict"] for t in trace if t["kind"] == "step_review"] == ["restates_inputs"]
     optimizer.propose(ctx, 1, [])
@@ -434,7 +347,10 @@ def test_a_failed_review_is_recorded_shown_and_never_fatal(tmp_path, review):
     assert "- `think` (agent" in section and "review: not available (" in section
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     failed = [t for t in trace if t["kind"] == "step_review"]
-    assert len(failed) == 1 and failed[0]["error"]
+    # A failed call is attempted three times (SkillOpt's retries); an unreadable reply once.
+    assert len(failed) == (3 if isinstance(review, Exception) else 1)
+    assert all(t["error"] for t in failed)
+    assert [t["attempt"] for t in failed] == list(range(1, len(failed) + 1))
     assert not list((tmp_path / "step_reviews").glob("*.json")), "a failure is not cached"
 
 
@@ -749,12 +665,12 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
     proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
     with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=True,
+        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2,
                      max_concurrent_evaluations=3)
         loop.optimizer = proposer
         loop.run()
     ids = {_level(c): c.id for c in loop.population}
-    assert loop.config.fresh_evidence and loop.config.train_minibatch == 0
+    assert loop.config.train_minibatch == 0
     # Two children and three slots: the re-score runs in the children's wave.
     assert sorted(batches[0]) == [(5, 2), (6, None), (7, None)]
     assert sorted(batches[1]) == [(2, None), (3, None), (7, 3)]
@@ -775,21 +691,6 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
     assert all(rows[ids[level]]["same_seed"] for level in expected)
     table = feedback.ledger_lines(proposer.contexts[-1].ledger)[-1]
     assert table.count("| prompt/setting |") == 4 and "n/a" not in table
-
-
-def test_without_fresh_evidence_no_parent_is_scored_beside_its_children(tmp_path, monkeypatch):
-    from refactory_dsh.loop import Loop
-    from test_gate_aware_context import Reasoning
-
-    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(lambda run, c: _level(c) / 10))
-    proposer = Reasoning([[(5, 7), (5, 6)], [(7, 3), (7, 2)], []])
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True, batch_size=2, fresh_evidence=False)
-        loop.optimizer = proposer
-        loop.run()
-    assert '"rescore"' not in (loop.root / "journal.jsonl").read_text()
-    assert loop.evaluations == sum(1 for c in loop.population if c.evaluated)
 
 
 def test_the_parents_rescore_takes_one_of_the_concurrent_slots(tmp_path, monkeypatch):
@@ -840,7 +741,7 @@ def _rescore_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any)
     proposer = Reasoning(plan)
     with _patch_mode(LevelProbe):
         loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, "batch_size": 2,
-                                  "fresh_evidence": True, **overrides})
+                                  **overrides})
         loop.optimizer = proposer
         loop.run()
     events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
@@ -922,7 +823,7 @@ def test_the_parents_rescore_stays_under_the_run_wide_item_cap(tmp_path, monkeyp
     proposer = Reasoning(plan)
     with _patch_mode(ParallelProbe):
         loop = _loop(tmp_path, epochs=2, val_gate=True, batch_size=children,
-                     fresh_evidence=True, max_concurrent_evaluations=slots,
+                     max_concurrent_evaluations=slots,
                      max_items_in_flight=2)
         loop.optimizer = proposer
         loop.run()
@@ -1002,3 +903,372 @@ def test_a_rescore_after_full_slots_still_needs_room(tmp_path, monkeypatch, cap,
     assert loop.evaluations <= cap
     assert sum(1 for c in loop.population if c.parent and c.evaluated) == 4
     assert bool(rescores) == rescored
+
+
+# ── a broken answer is never read in part ───────────────────────────────────
+
+
+FIRST_EDIT = {"op": "set_knob", "name": "k", "value": 2}
+#: The shape of the D-s42 epoch-5 answer: two proposals, the first one's ``edits`` list
+#: never closed, so the outer object is not JSON; the first edit alone parses.
+BROKEN = ('{"diagnosis": "D-TEXT", "considered": "C-TEXT",\n'
+          ' "proposals": [\n'
+          '  {"edits": [' + json.dumps(FIRST_EDIT) + ',\n'
+          '    {"op": "set_knob", "name": "k2", "patch": [{"kind": "append", "content": "x"}]\n'
+          '  }, "rationale": "prompt", "confidence": 0.4},\n'
+          '  {"edits": [{"op": "insert_after", "target": "a", "node": {"id": "chk", "kind": "op",'
+          ' "call": "refactory_dsh.snippet:run", "code": "def main(i): ..."}}],'
+          ' "rationale": "structure", "confidence": 0.3}\n'
+          ' ]}')
+
+
+class _Raw(_Answering):
+    """Answers proposal requests with ``text`` as written."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__({})
+        self.text = text
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        self.proposals.append(prompt)
+        return self.text
+
+
+@pytest.mark.parametrize("text,why", [
+    (BROKEN, "Expecting ',' delimiter at line 5 column 17, here: …"),
+    (BROKEN[:200], "its object opened at character 1 is never closed (cut off?"),
+])
+def test_a_broken_answer_is_read_as_nothing_and_each_asked_proposal_counted(tmp_path, text, why):
+    from refactory_dsh.optim.base import proposal_refusal
+    from refactory_dsh.optim.random_optimizer import answer_json, extract_json
+
+    assert extract_json(BROKEN) == FIRST_EDIT, "the repro: one edit was read as the answer"
+    assert answer_json(BROKEN)[0] == {}
+    optimizer = AutoresearchOptimizer(_Raw(text))
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.last_diagnosis = optimizer.last_considered = "AN EARLIER ROUND'S"
+    proposals = optimizer.propose(ProposalContext(), 2, [])
+    assert len(proposals) == 2, "one refused stand-in per proposal asked for"
+    for proposal in proposals:
+        refused = proposal_refusal(proposal)
+        assert refused[0].startswith("E-proposal-shape: your whole answer was not valid JSON ("
+                                     + why), refused
+        assert "none of its proposals, nor its diagnosis;" in refused[0]
+    assert (optimizer.last_diagnosis, optimizer.last_considered) == ("", "")
+    record = json.loads(optimizer.trace_path.read_text().splitlines()[-1])
+    assert (record["proposals"], record["unreadable"]) == (0, 2)
+    assert record["error"].startswith("malformed answer: " + why)
+
+
+def test_an_answer_after_prose_braces_is_still_read():
+    """Braces in prose before the answer are not the answer, and not a broken one."""
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json('I weigh {a, b} first. {"proposals": []}') == ({"proposals": []}, "")
+    assert answer_json('```json\n{"proposals": [{"edit": {"op": "x"}}]}\n```') == (
+        {"proposals": [{"edit": {"op": "x"}}]}, "")
+    with pytest.raises(ValueError):
+        answer_json("no braces at all")
+
+
+# ── code steps and gates: measured, not reviewed ────────────────────────────
+
+
+GATED_CHILD = {"graph": {"nodes": {**CHILD_STATE["graph"]["nodes"],
+                                   "g": {"id": "g", "kind": "gate"}}}}
+
+
+def _visited_records() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The pair's records, the child's with the visits of its code step ``check`` (output
+    on t1 and t4 only) and its gate ``g`` (sends t4 back once, passes the rest)."""
+    parent, child = _pair_records()
+    for record in child:
+        item = record["id"]
+        said = item in ("t1", "t4")
+        record["steps"] = [
+            {"node": "check", "kind": "op", "output": f"signal={item}" if said else "signal=''",
+             "digest": item if said else "none", "empty": not said},
+            {"node": "g", "kind": "gate", "verdict": "reloop" if item == "t4" else "proceed",
+             "reason": "look again" if item == "t4" else ""},
+            *([{"node": "g", "kind": "gate", "verdict": "proceed", "reason": ""}]
+              if item == "t4" else [])]
+    return parent, child
+
+
+def test_a_code_step_and_a_gate_show_on_which_items_they_acted_and_how_the_answer_moved():
+    """Child vs parent: t4 fixed and its answer changed, t0 broken, t5's answer changed.
+    The code step gave output on t1 and t4; the gate sent t4 back."""
+    parent, child = _visited_records()
+    code = feedback.step_evidence("check", parent_records=parent, child_records=child,
+                                  graph=GATED_CHILD)
+    assert code["samples"] == [] and "decision" not in code
+    assert code["visits"] == {
+        "kind": "op", "ran": 6, "distinct_outputs": 2, "example": "signal=t1",
+        "fired": {"items": ["t1", "t4"], "shared": 2, "changed": 1, "fixed": 1, "broken": 0},
+        "silent": {"items": ["t0", "t2", "t3", "t5"], "shared": 4, "changed": 1, "fixed": 0,
+                   "broken": 1}}
+    gate = feedback.step_evidence("g", parent_records=parent, child_records=child,
+                                  graph=GATED_CHILD)["visits"]
+    assert gate["routes"] == {
+        "proceed": {"items": ["t0", "t1", "t2", "t3", "t5"], "shared": 5, "changed": 1,
+                    "fixed": 0, "broken": 1},
+        "reloop": {"items": ["t4"], "shared": 1, "changed": 1, "fixed": 1, "broken": 0}}
+    assert gate["relooped"]["items"] == ["t4"]
+    assert feedback.visit_text(code["visits"]) == (
+        "gave output on 2 of 6 item(s) it ran on: t1, t4 (final answer changed on 1/2; "
+        '1 fixed / 0 broken), 2 distinct output(s), e.g. "signal=t1"; empty output on 4 '
+        "(final answer changed on 1/4; 0 fixed / 1 broken)")
+    assert feedback.visit_text(gate) == (
+        "ran on 6 item(s); first verdict `proceed` on 5: t0, t1, t2, t3, t5 (final answer "
+        "changed on 1/5; 0 fixed / 1 broken); `reloop` on 1: t4 (final answer changed on "
+        "1/1; 1 fixed / 0 broken); relooped (visited more than once) on 1: t4 (final answer "
+        "changed on 1/1; 1 fixed / 0 broken)")
+    assert "final answer changed" not in feedback.visit_text(gate, counts=False)
+
+
+def test_code_steps_and_gates_are_shown_measured_and_cost_no_review_call():
+    parent, child = _visited_records()
+    base = {"candidate": "c1", "parent": "p0", "kind": "added code step", "same_seed": True}
+    entries = [{**base, "node_kind": kind, **feedback.step_evidence(
+        step, parent_records=parent, child_records=child, graph=GATED_CHILD)}
+        for step, kind in (("think", "agent"), ("check", "code"), ("g", "gate"))]
+    client = _Answering({"proposals": []}, REVIEW)
+    AutoresearchOptimizer(client).propose(ProposalContext(added_steps=entries), 1, [])
+    assert len(client.reviews) == 1 and "`think`" in client.reviews[0]
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    code = next(line for line in section.splitlines() if line.startswith("- `check`"))
+    assert "gave output on 2 of 6 item(s) it ran on: t1, t4" in code
+    assert code.endswith("no reviewer (a code step or gate: the measured behaviour above)")
+    gate = next(line for line in section.splitlines() if line.startswith("- `g`"))
+    assert "first verdict `proceed` on 5" in gate and "relooped (visited more than once) on 1: t4" in gate
+    assert "A code step or gate gets no reviewer" in section
+
+
+# ── a decision step is judged by whether it follows its inputs ──────────────
+
+
+DECIDING = {"graph": {"nodes": {
+    "notes": {"id": "notes", "kind": "agent", "writes": ["notes.txt"]},
+    "decide": {"id": "decide", "kind": "agent", "reads": ["notes.txt"], "writes": ["answer.txt"],
+               "system_prompt_template": "TEMPLATE",
+               "field_bindings": [["system_prompt_template", "decide__system_prompt"]]},
+    "extract": {"id": "extract", "kind": "op", "reads": ["answer.txt"], "produces": ["label"]},
+    "check": {"id": "check", "kind": "gate", "reads": ["answer.txt"]}}},
+    "knobs": {"decide__system_prompt": {"value": "DECIDE-INSTRUCTIONS: pick one."}}}
+
+
+def _deciding_entry() -> dict[str, Any]:
+    records = [_rec(f"t{i}", True, {"notes": f"NOTES {i} recommend B", "decide": "<answer>B</answer>"},
+                    "B") for i in range(3)]
+    entry = feedback.step_evidence("decide", parent_records=[], child_records=records,
+                                   graph=DECIDING)
+    return {**entry, "candidate": "c1", "kind": "split", "node_kind": "agent", "same_seed": True}
+
+
+def test_a_step_whose_output_only_code_or_gates_read_is_a_decision_step():
+    assert feedback.decision_step(DECIDING, "decide") is True
+    assert feedback.decision_step(DECIDING, "notes") is False, "a model step reads it"
+    assert feedback.decision_step(DECIDING, "decide", [{"next_step": "notes"}]) is False
+    assert feedback.decision_step(None, "decide") is False
+    entry = _deciding_entry()
+    assert entry["decision"] is True
+    assert entry["instructions"] == "DECIDE-INSTRUCTIONS: pick one.", "the bound knob's value"
+    notes = feedback.step_evidence("notes", parent_records=[], child_records=[
+        _rec("t0", True, {"notes": "N", "decide": "D"})], graph=DECIDING)
+    assert "decision" not in notes
+
+
+DECISION_REPLY = {"items": [
+    {"item": "t0", "inputs_recommend": "B", "decided": "B", "same": True},
+    {"item": "t1", "inputs_recommend": "B", "decided": "C", "same": False},
+    {"item": "t2", "inputs_recommend": "none", "decided": "B", "same": False}],
+    "example": "I choose C", "note": "It overrode its notes once."}
+
+
+def test_a_decision_step_is_asked_whether_it_decides_as_its_inputs_recommended(tmp_path):
+    entry = _deciding_entry()
+    prompt = feedback.review_prompt(entry, "m")
+    assert prompt.startswith("# Reviewing an added decision step: `decide`")
+    assert "repeating the chosen answer is its job" in prompt
+    assert "DECIDE-INSTRUCTIONS: pick one." in prompt and "GIVEN decide t0" in prompt
+    assert '"inputs_recommend"' in prompt and "restates_inputs" not in prompt
+    client = _Answering({"proposals": []}, DECISION_REPLY)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(added_steps=[entry]), 1, [])
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert ("review: overrides_inputs (decides as its inputs recommended on 1 of 2 item(s) "
+            'where they recommended one) -- "I choose C" -- It overrode its notes once.') in section
+    again = _Answering({"proposals": []}, DECISION_REPLY)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(added_steps=[entry]), 1, [])
+    assert again.reviews == [] and "decides as its inputs recommended on 1 of 2" in again.proposals[0]
+
+
+@pytest.mark.parametrize("rows,verdict,agree,of", [
+    ([{"inputs_recommend": "A", "same": True}], "follows_inputs", 1, 1),
+    ([{"inputs_recommend": "A", "same": True}, {"inputs_recommend": "A", "same": "yes"}],
+     "overrides_inputs", 1, 2),
+    ([{"inputs_recommend": "None", "same": True}, {"inputs_recommend": ""}], "no_recommendation", 0, 0),
+])
+def test_a_decision_review_counts_agreement_where_the_inputs_recommended(rows, verdict, agree, of):
+    found = feedback.parse_decision_review({"items": rows})
+    assert (found["verdict"], found["agree"], found["of"], found["items"]) == (
+        verdict, agree, of, len(rows))
+    assert feedback.parse_review(found) == found, "kept and read back for a resume"
+
+
+@pytest.mark.parametrize("payload", [{}, {"items": []}, {"verdict": "restates_inputs"}, "x"])
+def test_a_decision_review_without_items_is_refused(payload):
+    with pytest.raises(ValueError):
+        feedback.parse_decision_review(payload)
+
+
+# ── a reviewer reads the step's texts whole ─────────────────────────────────
+
+
+def test_a_review_reads_each_text_whole_and_any_cut_the_room_forces_is_said():
+    long_input = "HEAD " + "x" * 20000 + " TAIL"
+    records = [_rec("t0", True, {"a": "A", "think": "y" * 9000, "decide": "z" * 5000})]
+    records[0]["exchanges"][1]["prompt"] = long_input
+    entry = feedback.step_evidence("think", parent_records=[], child_records=records)
+    assert entry["samples"][0]["output"] == "y" * 9000
+    prompt = feedback.review_prompt({**entry, "candidate": "c", "kind": "k"})
+    assert long_input in prompt and "y" * 9000 in prompt and "z" * 5000 in prompt
+    assert "omitted" not in prompt
+    fitted = feedback.fit_samples([{"input": long_input, "output": "o" * 3000,
+                                    "next_output": "n" * 100}], room=8000)
+    assert fitted[0]["next_output"] == "n" * 100 and fitted[0]["output"] == "o" * 3000
+    assert fitted[0]["input"].startswith("HEAD ") and fitted[0]["input"].endswith(" TAIL")
+    assert "characters omitted" in fitted[0]["input"]
+
+
+# ── review follow-ups: fences, long reviews, handovers ──────────────────────
+
+
+def test_a_code_fence_inside_a_proposed_prompt_does_not_cut_the_answer():
+    """A fenced answer whose first proposal's prompt carries its own ```python example:
+    the fence pattern stops at that inner fence, so the answer is read by its braces."""
+    from refactory_dsh.optim.random_optimizer import answer_json, extract_json
+
+    answer = {"diagnosis": "d", "proposals": [
+        {"edit": {"op": "set_knob", "name": "k", "value": "Use:\n```python\nprint(1)\n```\nDone."}},
+        {"edit": {"op": "set_knob", "name": "k2", "value": 2}}]}
+    reply = "```json\n" + json.dumps(answer, indent=1) + "\n```"
+    assert extract_json(reply) != answer, "the repro: the old reader lost the first proposal"
+    assert answer_json(reply) == (answer, "")
+    assert answer_json("Here:\n```json\n{\"proposals\": []}\n```\nthanks {") == ({"proposals": []}, "")
+    # A fenced object counts only as its fence's whole content.
+    broken = 'Plan: {"proposals": [\n```json\n{"proposals": [{"edit": 1}]} and {\n```'
+    found, why = answer_json(broken)
+    assert found == {} and "never closed" in why
+
+
+def test_of_two_whole_answers_the_last_is_read():
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json('Draft: {"proposals": [{"edit": 1}]}\nFinal: {"proposals": []}') == (
+        {"proposals": []}, "")
+
+
+@pytest.mark.parametrize("prose", ['I will write {"op": ...} objects.\n',
+                                   'Each edit is like {"op": "set_knob"}.\n'])
+def test_json_like_braces_in_prose_before_the_answer_are_passed_over(prose):
+    from refactory_dsh.optim.random_optimizer import answer_json
+
+    assert answer_json(prose + '{"diagnosis": "d", "proposals": []}') == (
+        {"diagnosis": "d", "proposals": []}, "")
+
+
+class _TooLongOnce(_Answering):
+    """Refuses the first review as longer than the model's context, then answers."""
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        if system == feedback.STEP_REVIEW_SYSTEM and not self.reviews:
+            with self.lock:
+                self.reviews.append(prompt)
+            raise RuntimeError("prompt is too long: 250000 tokens > 200000 maximum")
+        return super().complete(prompt, system=system)
+
+
+def test_a_review_too_long_for_the_context_is_retried_once_at_half_its_length(tmp_path):
+    entry = {**_added()[0], "instructions": "OWN-INSTRUCTIONS"}
+    entry["samples"] = [{**s, "input": "i" * 60000} for s in entry["samples"]]
+    client = _TooLongOnce({"proposals": []}, REVIEW)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(added_steps=[entry]), 1, [])
+    first, second = client.reviews
+    assert len(second) <= len(first) // 2 and "OWN-INSTRUCTIONS" in second
+    assert "characters omitted" in second
+    section = _section(client.proposals[0], "## Did the added steps contribute?")
+    assert "review: restates_inputs" in section
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()
+             if '"step_review"' in line]
+    assert [bool(t.get("context_retry")) for t in trace] == [False, True]
+    assert trace[0]["error"] and trace[1]["error"] is None
+    again = _Answering({"proposals": []}, REVIEW)
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(ProposalContext(added_steps=[entry]), 1, [])
+    assert again.reviews == [], "kept under the first call's key"
+
+
+def test_other_review_errors_are_retried_as_skillopt_retries_a_call(monkeypatch):
+    from refactory_dsh.optim import random_optimizer
+
+    waits: list[float] = []
+    monkeypatch.setattr(random_optimizer, "_sleep", waits.append)
+    client = _Answering({"proposals": []}, RuntimeError("503 overloaded"))
+    AutoresearchOptimizer(client).propose(ProposalContext(added_steps=_added()), 1, [])
+    assert len(client.reviews) == 3 and waits == [1, 2, 4]
+
+
+def test_a_review_keeps_its_frame_and_instructions_inside_the_room():
+    entry = {**_deciding_entry(), "instructions": "I" * 5000}
+    entry["samples"] = [{**s, "input": "x" * 50000, "output": "y" * 50000}
+                        for s in entry["samples"]]
+    for decision in (True, False):
+        prompt = feedback.review_prompt({**entry, "decision": decision}, "m", room=40000)
+        assert len(prompt) <= 40000 and "I" * 5000 in prompt and "characters omitted" in prompt
+
+
+def _handover_graph(**solver: Any) -> dict[str, Any]:
+    """``solve`` answers, ``check`` (an agent) writes its critique, a code gate reads the
+    critique and sends ``solve`` back with it; ``solve`` does not read the file itself."""
+    from refactory_dsh import nn
+
+    graph = nn.Graph()
+    graph.add(nn.Node("items", "data", subgraph_entry="solve", subgraph_exit="extract",
+                      writes=("current_item.json",)))
+    graph.add(nn.Node("solve", "agent", prompt_template="Solve.", writes=("answer.txt",), **solver))
+    graph.add(nn.Node("check", "agent", prompt_template="Check.", reads=("answer.txt",),
+                      writes=("critique.txt",)))
+    graph.add(nn.Node("gate", "gate", evaluator="loop_ops:always_proceed",
+                      reads=("critique.txt",)))
+    graph.add(nn.Node("extract", "op", call="loop_ops:noop", reads=("answer.txt",)))
+    graph.connect("solve", "check")
+    graph.connect("check", "gate")
+    graph.connect("gate", "solve", condition="reloop")
+    graph.connect("gate", "extract", condition="proceed")
+    return {"graph": graph.to_state()}
+
+
+def test_a_step_a_code_gate_hands_to_a_solver_is_not_the_decision():
+    state = _handover_graph()
+    assert feedback.handed_to(state, "check") == {"solve"}
+    assert feedback.handed_to(state, "solve") == set(), "sent back to itself: no other reader"
+    assert feedback.decision_step(state, "check") is False
+    seen = _handover_graph(reads=("critique.txt",))
+    assert feedback.handed_to(seen, "check") == set(), "a solver that reads it is no handover"
+    assert feedback.decision_step(seen, "check") is False, "it reads it: a model reader"
+
+
+def test_a_step_whose_writes_nothing_reads_is_not_the_decision_unless_it_ends_the_pass():
+    state = {"graph": {"nodes": {
+        "items": {"id": "items", "kind": "data", "subgraph_exit": "final"},
+        "side": {"id": "side", "kind": "agent", "writes": ["side.txt"]},
+        "final": {"id": "final", "kind": "agent", "writes": ["answer.txt"]}}}}
+    assert feedback.decision_step(state, "side") is False, "unread: a no_effect question"
+    assert feedback.decision_step(state, "final") is True, "the grader reads the pass's end"

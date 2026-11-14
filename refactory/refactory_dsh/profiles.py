@@ -19,8 +19,17 @@ SCHEMA_VERSION = 1
 PROFILE_ROOT = Path(".factory/profiles")
 SNAPSHOT = "resolved-profile.json"
 SELECTION_RULE = "max_valid_mean_score_minus_parsimony"
+#: ``LoopConfig`` fields that are not search settings: where and how a run is
+#: driven, and ``val_gate``, which the run decides from its parts manifest (on when
+#: it has val items, for a built-in strategy) and records in ``config.json``.
 RUNTIME_FIELDS = {"runs_root", "resume", "progress", "print_events", "verbose",
-                  "control_poll_s", "memory_global_root", "resolved_profile"}
+                  "control_poll_s", "memory_global_root", "resolved_profile", "val_gate"}
+#: Settings that no longer exist. A saved profile, a run's ``config.json`` or a
+#: resolved snapshot that holds one still loads: the key is dropped, and the run
+#: behaves as the setting's last default (``fresh_evidence`` on, at most
+#: ``MAX_EDITS_PER_PROPOSAL`` edits per proposal, ``val_gate`` decided by the parts
+#: manifest; a saved ``val_gate: false``, the default before #627, is read as unset).
+OBSOLETE_SETTINGS = frozenset({"fresh_evidence", "max_edits_per_proposal", "val_gate"})
 
 
 class ProfileError(ValueError):
@@ -102,7 +111,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     from refactory_dsh import optim, strategies
     from refactory_dsh.nn.edits import PRESETS, catalogue, removed
 
-    settings = dict(settings)
+    settings = {key: value for key, value in settings.items() if key not in OBSOLETE_SETTINGS}
     if "preset" in settings:
         settings["edit_preset"] = settings.pop("preset")
     for option, target in PAIR_OPTIONS.items():
@@ -141,11 +150,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         value = result.get(key)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0):
             raise ProfileError(f"{key} must be a finite nonnegative number")
-    # val_gate: a switch; the command line passes it as 0 or 1. Unset (None) is the
-    # default: the run turns it on when its parts manifest has val items.
-    if result.get("val_gate") not in (True, False, 0, 1, None):
-        raise ProfileError("val_gate must be true or false (1 or 0 on the command line)")
-    result["val_gate"] = None if result.get("val_gate") is None else bool(result["val_gate"])
     # The default loop's early stop (needs val_gate): a count of stale epochs, 0 off,
     # and a switch the command line passes as 0 or 1.
     patience = result.get("early_stop_patience")
@@ -162,10 +166,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("allow_code_nodes") not in (True, False, 0, 1, None):
         raise ProfileError("allow_code_nodes must be true or false (1 or 0 on the command line)")
     result["allow_code_nodes"] = result.get("allow_code_nodes") not in (False, 0)
-    # fresh_evidence: a switch; the command line passes it as 0 or 1.
-    if result.get("fresh_evidence") not in (True, False, 0, 1):
-        raise ProfileError("fresh_evidence must be true or false (1 or 0 on the command line)")
-    result["fresh_evidence"] = bool(result.get("fresh_evidence"))
     # What the model proposer is shown (optim.feedback): switches, 0 or 1 on the command line.
     for key in ("run_ledger", "lessons", "step_review", "structure_guidance", "analysts"):
         if result.get(key) not in (True, False, 0, 1):
@@ -190,9 +190,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         parse_setting(judge)
     except ValueError as error:
         raise ProfileError(str(error)) from error
-    max_edits = result.get("max_edits_per_proposal")
-    if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
-        raise ProfileError("max_edits_per_proposal must be a positive integer (1 is single edits)")
     minibatch = result.get("train_minibatch")
     if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
         raise ProfileError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
@@ -201,9 +198,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if selection not in SELECTIONS:
         raise ProfileError(f"unknown selection: {selection}; known: "
                            f"{', '.join(s for s in SELECTIONS if s)}")
-    if selection and result["val_gate"] is False:
-        raise ProfileError(f"selection {selection} chooses by validation score, which only "
-                           "val_gate measures; turn val_gate on, or leave selection empty")
     result["selection"] = selection
     pool_size = result.get("pool_size")
     if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
@@ -306,6 +300,9 @@ def _read_profile(path: Path) -> dict[str, Any]:
     # immutable version or broadening its next launch to the new default.
     if not result["settings"].get("permission_mode"):
         result["settings"]["permission_mode"] = "default"
+    # Settings since removed are dropped in memory, the file left as it was.
+    for key in OBSOLETE_SETTINGS & set(result["settings"]):
+        del result["settings"][key]
     return result
 
 
@@ -376,7 +373,8 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         # The profile's strategy options belong to the profile's strategy: a launch that
         # names another strategy starts from none, and the snapshot records the drop.
         overrides["strategy_options"] = {}
-    chosen = {**profile["settings"], **overrides}
+    chosen = {key: value for key, value in {**profile["settings"], **overrides}.items()
+              if key not in OBSOLETE_SETTINGS}
     routing = None
     if recipe is None and validate_settings:
         routing = resolve_workers(project, {key: value for key, value in (overrides or {}).items() if key in FIELDS},
@@ -430,9 +428,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
         "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
         "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
-        "max_concurrent_evaluations", "max_items_in_flight", "val_gate",
+        "max_concurrent_evaluations", "max_items_in_flight",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
-        "fresh_evidence", "max_edits_per_proposal", "selection", "pool_size",
+        "selection", "pool_size",
         # What the proposer is shown, not how anything is scored (optim.feedback,
         # optim.analysts).
         "run_ledger", "lessons", "step_review", "structure_guidance",
@@ -512,13 +510,11 @@ def runtime_identity(settings: dict[str, Any], project: Path, *, uses_models: bo
 SETTING_HELP = {
     "claude_executable": "claude_code workers only: the Claude Code executable they run, an "
                          "absolute path (default: the one bundled with the Agent SDK)",
-    "val_gate": "1 selects on the parts manifest's val part (the validation gate), 0 on "
-                "train scores (default: on when the manifest has val items, else train "
-                "selection with a warning)",
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
-    "selection": "with --val-gate: pool keeps the --pool-size best candidates on validation "
+    "selection": "with val items (the validation gate): pool keeps the --pool-size best "
+                 "candidates on validation "
                  "as parents, the incumbent (the winner) changing only on a strictly higher "
                  "val score; single is SkillOpt's line, the incumbent the only parent "
                  "(default: single for the default loop with a single-parent optimizer, "
@@ -527,8 +523,10 @@ SETTING_HELP = {
                  "ties at the edge kept (default: 8)",
     "run_ledger": "1 (default) shows the model proposer every candidate of the run by kind "
                   "of change, with train fixed/broken counts and the gate's word; 0 off",
-    "lessons": "1 (default) lets the model proposer write lessons that are kept, survive a "
-               "resume and are shown back next round; 0 off",
+    "lessons": "1 (default) runs the memory pass: once per epoch from epoch 2 one "
+               "optimizer-model call compares the previous and current candidate on 20 "
+               "train items and writes the memory note every analyst, merge and proposal "
+               "call reads (SkillOpt's meta skill); 0 off",
     "step_review": "1 (default) reviews each step the last round added (train counts and one "
                    "optimizer-model call per step) and shows the verdicts; 0 off",
     "structure_guidance": "1 adds what makes a new step pay off to the request's "
@@ -562,7 +560,10 @@ SETTING_HELP = {
 
 
 def add_arguments(parser: Any) -> None:
-    """All launch surfaces parse this same optional configuration vocabulary."""
+    """Every setting as a flag, for the console's ``start`` and ``profile-resolve``: the
+    machine interface the Web panel and the CEO tool pass settings through. A person's
+    command line, ``refactory optimize``, takes the short list instead
+    (:func:`add_cli_arguments`)."""
     for key, value in defaults().items():
         flag = "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
         # provider_config travels in the project file and saved profile
@@ -570,7 +571,7 @@ def add_arguments(parser: Any) -> None:
         if key in ("knobs", "frozen", "allowed_ops", "role_routes", "node_routes", "provider_config", "strategy_options"):
             continue
         # A path given as ~/... is stored expanded: a route's executable is absolute.
-        kind = os.path.expanduser if key == "claude_executable" else float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight", "val_gate") else str
+        kind = os.path.expanduser if key == "claude_executable" else float if key in ("holdout", "parsimony", "max_elapsed_s", "validation_reserve_s") else int if isinstance(value, int) or key in ("max_tokens", "max_rollouts", "max_items_in_flight") else str
         parser.add_argument(flag, dest=key, type=kind, default=None, help=SETTING_HELP.get(key))
     parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE")
     parser.add_argument("--frozen", action="append", default=None, metavar="KNOB")
@@ -582,3 +583,108 @@ def add_arguments(parser: Any) -> None:
         parser.add_argument("--" + key.replace("_", "-"), type=json.loads, default=None)
     parser.add_argument("--profile", default="")
     parser.add_argument("--profile-version", type=int, default=None)
+
+
+#: The settings ``refactory optimize`` (and ``python -m refactory_dsh.loop``, which it
+#: forwards to) takes as flags, with their ``--help``. Every other setting is set in a
+#: profile (``refactory profile-save --spec``, then ``--profile NAME``): a flag per
+#: ``LoopConfig`` field made a command line of sixty options nobody could read. These are
+#: the ones a person types to start or vary one search: the README's first search, the
+#: per-run values lab launchers vary between seeds, and the model route.
+CLI_SETTINGS: dict[str, str] = {
+    "seed": "seed the search, and the seed every evaluation passes its Task (default: 0)",
+    "epochs": "rounds of propose, validate, evaluate, select (default: 2)",
+    "batch_size": "candidates proposed per epoch (default: 4)",
+    "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
+    "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
+                 "islands, map_elites or autoresearch (default: autoresearch)",
+    "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
+                   "(default: broad)",
+    "evaluator": "which runtime scores a candidate: walker (fast) or dsh (the spine) "
+                 "(default: walker)",
+    "strategy": "which outer loop drives the search, e.g. default or skillopt "
+                "(default: default)",
+    "intent": "what the run is for, in your words; seeds the ledger the agents read",
+    "seed_results": "seed results exported from an earlier run "
+                    "(python -m refactory_dsh.seed_cache export)",
+    "max_items_in_flight": "run-wide cap on items evaluated at once (default: the mode's "
+                           "data_parallelism)",
+    "provider": "the provider route for the run's model (default: the stored choice)",
+    "model": "the model id for proposals and agent nodes (default: the stored choice)",
+    "effort": "the workers' reasoning effort (default: the backend's)",
+}
+
+def _flag(key: str) -> str:
+    return "--" + ("preset" if key == "edit_preset" else key.replace("_", "-"))
+
+
+def removed_flag_message(flag: str, key: str, value: Any) -> str:
+    """What a command line that gives a setting only a profile takes is told: the
+    profile key, and a ``profile-save`` spec that sets it."""
+    shown: Any = value
+    if isinstance(value, str):
+        try:
+            shown = json.loads(value)
+        except ValueError:
+            shown = value
+    if key in ("frozen", "allowed_ops") and not isinstance(shown, list):
+        shown = [shown]
+    if value is None:
+        # A bare switch means "on"; a bare value-taking flag shows the default's form.
+        default = defaults().get(key)
+        shown = True if isinstance(default, bool) else default
+    spec = json.dumps({"settings": {key: shown}}, default=str)
+    return (f"{flag} is not a command-line flag; it is the profile setting {key!r}. Save it in "
+            f"a profile and run with that: refactory profile-save --name NAME --spec '{spec}', "
+            f"then --profile NAME (`refactory profile-resolve <mode> --profile NAME` shows "
+            f"every setting the run would use)")
+
+
+def add_cli_arguments(parser: Any) -> None:
+    """The short command line of ``refactory optimize`` and ``python -m
+    refactory_dsh.loop``: :data:`CLI_SETTINGS`, ``--knob``, ``--strategy-option``,
+    ``--profile``, and where and how the run is driven. Any other setting's flag is
+    refused with the profile key that sets it (:func:`removed_flag_message`)."""
+    import argparse
+
+    known = defaults()
+    integers = ("seed", "epochs", "batch_size", "max_evaluations", "max_items_in_flight")
+    for key, text in CLI_SETTINGS.items():
+        parser.add_argument(_flag(key), dest=key, type=int if key in integers else str,
+                            default=None, help=text)
+    parser.add_argument("--knob", action="append", default=None, metavar="NAME=VALUE",
+                        help="a starting value for one of the mode's knobs; may be repeated, "
+                             "and adds to a profile's knobs")
+    parser.add_argument("--strategy-option", action="append", default=None, metavar="KEY=VALUE",
+                        help="strategy-specific option as KEY=VALUE; may be repeated, and adds to "
+                             "a profile's strategy_options")
+    parser.add_argument("--profile", default="", help="a saved profile: every setting this "
+                        "command line does not give comes from it")
+    parser.add_argument("--profile-version", type=int, default=None,
+                        help="the profile's version (default: its latest)")
+    parser.add_argument("--project", default=None,
+                        help="the project root packages resolve against (default: the checkout)")
+    parser.add_argument("--runs-root", default=None,
+                        help="the run directory itself (default: .factory/loop)")
+    parser.add_argument("--resume", action="store_true", help="continue the saved search in --runs-root")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print every event, and each candidate's own run output, not only "
+                             "the meaningful ones")
+
+    def profile_only(key: str) -> type:
+        class ProfileOnly(argparse.Action):
+            def __call__(self, parser: Any, namespace: Any, values: Any, option_string: Any = None) -> None:
+                # The message alone: the usage lists the flags it does take.
+                parser.exit(2, f"{parser.prog}: error: "
+                               f"{removed_flag_message(option_string or self.option_strings[0], key, values)}\n")
+        return ProfileOnly
+
+    # Hidden, and never set: giving one stops the parse with the profile key to use. The
+    # loop's old ``--parts`` reaches ``--parts-manifest`` as argparse's abbreviation of it.
+    removed = {_flag(key): key for key in known if key not in CLI_SETTINGS}
+    for flag, key in removed.items():
+        parser.add_argument(flag, action=profile_only(key), nargs="?", dest="_profile_only_" + key,
+                            default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.epilog = ("Every other setting is set in a profile: refactory profile-save --name NAME "
+                     "--spec '{\"settings\": {...}}', then --profile NAME. "
+                     "See docs/optimization-profiles.md.")

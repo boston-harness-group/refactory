@@ -2,8 +2,9 @@
 applied together to the parent as one candidate and judged once.
 
 Each edit goes through the per-edit checks in order, the combined state through every
-state rule, and a refusal names the edit it is about. ``max_edits_per_proposal`` caps
-the list (default 4; 1 is single edits). A proposal with one ``edit`` works as before.
+state rule, and a refusal names the edit it is about. ``MAX_EDITS_PER_PROPOSAL`` caps
+the list at 4 (an optimizer built with ``max_edits=1`` asks for single edits). A
+proposal with one ``edit`` works as before.
 Each test fails when the behaviour it names is reverted.
 """
 
@@ -17,9 +18,9 @@ from typing import Any
 import pytest
 
 from refactory_dsh import nn, profiles
-from refactory_dsh.loop import Loop, LoopError
+from refactory_dsh.loop import Loop
 from refactory_dsh.optim import AutoresearchOptimizer, Candidate, Optimizer, Proposal, ProposalContext
-from refactory_dsh.optim.base import DEFAULT_MAX_EDITS, proposal_refusal
+from refactory_dsh.optim.base import MAX_EDITS_PER_PROPOSAL, proposal_refusal
 from refactory_dsh.outerloop import Run
 
 from test_skillopt import TASK_REF, _patch_mode
@@ -116,9 +117,10 @@ def test_the_cap_is_enforced_and_one_is_todays_behaviour():
     four = (_knob("extra", 1), _knob("level", 2), _knob("note", "New."),
             {"op": "set_knob", "name": "note", "patch": [{"kind": "append", "content": "More."}]})
     assert isinstance(_attempt(Proposal(edits=four)), Candidate), "the default allows 4"
-    assert DEFAULT_MAX_EDITS == 4
+    assert MAX_EDITS_PER_PROPOSAL == 4
     refused = _attempt(Proposal(edits=(*four, _knob("level", 1))))
-    assert refused[0].startswith("E-too-many-edits") and "at most 4" in refused[0]
+    assert refused[0].startswith("E-too-many-edits") and "the limit is 4 changes per proposal" in refused[0]
+    assert "makes 5 changes (5 edits)" in refused[0], "knob edits each count"
     single_only = _attempt(Proposal(edits=four[:2]), max_edits=1)
     assert single_only[0].startswith("E-too-many-edits")
     assert isinstance(_attempt(Proposal(edit=_knob("level", 1)), max_edits=1), Candidate)
@@ -164,7 +166,7 @@ def _run(tmp_path: Path, monkeypatch: Any, plan: list[list[Proposal]], **overrid
     with _patch_mode(TwoLevels):
         loop = _loop(tmp_path, **{"epochs": 2, "batch_size": 2, **overrides})
         loop.optimizer = Scripted(plan)
-        loop.optimizer.max_edits = loop.config.max_edits_per_proposal
+        loop.optimizer.max_edits = MAX_EDITS_PER_PROPOSAL
         loop.run()
     return loop
 
@@ -200,25 +202,22 @@ def test_the_loop_refuses_an_unpermitted_edit_inside_a_list_by_index(tmp_path, m
     assert any(r.edit == bundle.edit for r in loop.rejections), "the refusal records the list"
 
 
-def test_the_run_setting_caps_the_list(tmp_path, monkeypatch):
-    bundle = Proposal(edits=(_knob("level", 3), _knob("extra", 8)))
-    loop = _run(tmp_path, monkeypatch, [[bundle], []], max_edits_per_proposal=1)
+def test_the_loop_caps_the_list_at_the_constant(tmp_path, monkeypatch):
+    """The cap is a constant, not a run setting: the loop hands it to its optimizer
+    and refuses a longer list, and there is no flag or profile key to move it."""
+    bundle = Proposal(edits=tuple(_knob("level", value) for value in range(1, 6)))
+    loop = _run(tmp_path, monkeypatch, [[bundle], []])
     assert any(reason.startswith("E-too-many-edits") for r in loop.rejections for reason in r.reasons)
     assert all(not c.parent for c in loop.population), "nothing was accepted"
     with _patch_mode(TwoLevels):
-        fresh = _loop(tmp_path / "default", max_edits_per_proposal=3)
-    assert fresh.optimizer.max_edits == 3, "the loop hands its cap to the optimizer"
-    with _patch_mode(TwoLevels), pytest.raises(LoopError, match="max_edits_per_proposal"):
-        _loop(tmp_path / "zero", max_edits_per_proposal=0)
-    with pytest.raises(profiles.ProfileError, match="max_edits_per_proposal"):
-        profiles.normalize({"max_edits_per_proposal": 0})
-    parser = argparse.ArgumentParser()
-    profiles.add_arguments(parser)
-    args = parser.parse_args(["--max-edits-per-proposal", "2", "--fresh-evidence", "0"])
-    settings = profiles.normalize({"max_edits_per_proposal": args.max_edits_per_proposal,
-                                   "fresh_evidence": args.fresh_evidence})
-    assert (settings["max_edits_per_proposal"], settings["fresh_evidence"]) == (2, False)
-    assert profiles.normalize({})["max_edits_per_proposal"] == 4
+        fresh = _loop(tmp_path / "default")
+    assert fresh.optimizer.max_edits == MAX_EDITS_PER_PROPOSAL, "the loop hands its cap over"
+    assert "max_edits_per_proposal" not in profiles.normalize({})
+    for add in (profiles.add_arguments, profiles.add_cli_arguments):
+        parser = argparse.ArgumentParser()
+        add(parser)
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--max-edits-per-proposal", "2"])
 
 
 def test_two_proposals_of_one_batch_reaching_one_state_are_one_candidate(tmp_path, monkeypatch):
@@ -256,7 +255,9 @@ def test_autoresearch_parses_lists_and_says_it_may_bundle():
     assert [p.steps for p in proposals[1:]] == [pair, [_knob("level", 1)]]
     assert proposal_refusal(proposals[0])[0].startswith("E-proposal-shape: entry 2 of its 2")
     assert proposals[1].rationale == "cascade"
-    assert "up to\n4 edits" in client.prompts[0] or "up to 4 edits" in client.prompts[0].replace("\n", " ")
+    flat = client.prompts[0].replace("\n", " ")
+    assert "up to 4 changes as an ordered list of edits" in flat
+    assert "A structural edit and the edits that only connect it count as one change" in flat
     assert '"edits": [' in client.prompts[0]
     optimizer.propose(ProposalContext(max_edits=1), 1, [parent])
     assert '"edits": [' not in client.prompts[1], "a run of single edits does not mention bundles"

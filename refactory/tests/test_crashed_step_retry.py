@@ -392,9 +392,10 @@ def test_a_declared_times_zero_turns_the_default_off(tmp_path, runtime):
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path, runtime):
-    """[both runtimes] A wire that keeps failing (a proxy outage) is not retried as a crash
-    and does not become a missing step: the item fails with an error, as before."""
-    dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: socket hang up", "right"]})
+    """[both runtimes] A wire that keeps failing (a provider error, not an outage the
+    client waits out) is not retried as a crash and does not become a missing step: the
+    item fails with an error, as before."""
+    dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: 500 Internal Server Error", "right"]})
     scores, run = _run(runtime, _straight(), tmp_path, dsh)
     [(item, passed, score, kind), *rest] = _keys(scores)
     assert (item, passed, score) == ("0", False, 0.0) and kind is not None
@@ -402,6 +403,23 @@ def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path, r
     assert dsh.calls() == 4
     assert _events(_pass(run, "0"), RETRY_EVENT) == []
     assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_network_outage_is_waited_out_and_the_item_is_scored(tmp_path, runtime):
+    """[both runtimes] The proxy drops the first session (an outage, not a model failure):
+    the model client waits it out and asks again inside the same step, without using an
+    attempt (the client has one) or a node retry, and the item is scored. The outage is
+    traced in the item's pass (`model.NETWORK_WAIT_EVENT`)."""
+    from refactory_dsh.model import NETWORK_WAIT_EVENT
+
+    dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: socket hang up", "right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls() == 5
+    assert _events(_pass(run, "0"), RETRY_EVENT) == []
+    states = [event["state"] for event in _events(_pass(run, "0"), NETWORK_WAIT_EVENT)]
+    assert states == ["waiting", "recovered"]
 
 
 RATE_LIMITED = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "

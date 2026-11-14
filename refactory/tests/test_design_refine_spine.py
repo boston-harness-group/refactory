@@ -139,22 +139,6 @@ def test_the_spine_takes_the_light_route_when_refine_is_a_knob(opened_pull, tmp_
         assert "tool.py" in prompt.split("### Changed files\n", 1)[1].splitlines()
 
 
-def test_a_full_refine_on_the_spine_is_classified_as_a_refine(opened_pull, tmp_path):
-    """refine_design=full: the route proceeds into research, and classify_scale keeps the run
-    scoped as a refine whatever the research found, through its refine shortcut, which reads
-    what prepare decided."""
-    spine = _refine(opened_pull.url, tmp_path, refine_design="full")
-    spine.node("prepare")
-    assert spine.node("route_refine_design") == "proceed"
-    assert spine.node("route_sizing") == "refine"
-    # Research with no footprint, which on its own classifies a change as full.
-    spine.agent("research_director", {"research-plan.json": "[]\n"}, {"research": "(nothing found)"})
-    spine.node("record_findings")
-    spine.node("classify_scale")
-    assert (spine.facts()["research_scope"], spine.facts()["research_scope_reason"]) == (
-        "scoped", REFINE_SCOPE_REASON)
-
-
 def _run_node_main(run, target, node_id, node_type, monkeypatch):
     import io
 
@@ -181,7 +165,7 @@ def test_spine_route_refine_design_proceed_on_non_refine(tmp_path, monkeypatch):
     (run / "facts.json").write_text(json.dumps({
         "research_scope_reason": "",
     }))
-    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"refine_design": "light"}))
+    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({}))
 
     target = "refactory_dsh.design_ops:route_refine_design"
     code, stdout, stderr = _run_node_main(run, target, "route_refine_design", "gate", monkeypatch)

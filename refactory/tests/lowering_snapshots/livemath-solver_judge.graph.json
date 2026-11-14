@@ -202,8 +202,6 @@
   "terminal": true,
   "knob_values": {
     "skill": "",
-    "use_theorem": 0.0,
-    "use_sketch": 0.0,
     "max_completion_tokens": 0.0,
     "data_parallelism": 1.0,
     "solve_a__system_prompt": "You are an expert mathematical reasoning agent solving multiple-choice questions.\n\n{{skill_section}}## Task Format\nYou will receive one mathematics multiple-choice question and its answer choices.\nReason carefully about quantifiers, hypotheses, extremal wording, and exact equality conditions.\n\n## Answer Format\nThink step by step, then provide your final answer inside <answer>...</answer> tags.\nInside the tags, output only the single choice label, such as A or C.\n\nExample:\n<answer>B</answer>\n",
@@ -220,28 +218,6 @@
       "values": [],
       "frozen": false,
       "description": "skill prompt injected into the system message",
-      "required": false
-    },
-    "use_theorem": {
-      "default": false,
-      "kind": "bool",
-      "lo": null,
-      "hi": null,
-      "enum": [],
-      "values": [],
-      "frozen": true,
-      "description": "include the item's theorem as a ## Theorem section",
-      "required": false
-    },
-    "use_sketch": {
-      "default": false,
-      "kind": "bool",
-      "lo": null,
-      "hi": null,
-      "enum": [],
-      "values": [],
-      "frozen": true,
-      "description": "include the item's proof sketch as a ## Proof Sketch section",
       "required": false
     },
     "max_completion_tokens": {

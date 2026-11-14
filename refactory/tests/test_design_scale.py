@@ -282,16 +282,6 @@ def test_classify_scale_shared_engine():
     assert "shared engine" in result["research_scope_reason"]
 
 
-def test_classify_scale_refine_stays_scoped():
-    plan = [
-        {"focus": "q1", "slug": "s1", "finding": "f1", "ids": []},
-    ]
-    ctx = _scale_ctx(plan, facts={"research_scope_reason": REFINE_SCOPE_REASON})
-    result = classify_scale(ctx)
-    assert result["research_scope"] == "scoped"
-    assert result["research_scope_reason"] == REFINE_SCOPE_REASON
-
-
 def test_classify_scale_brief_cannot_classify_itself():
     plan = [
         {"focus": "q1", "slug": "s1", "finding": "f1", "ids": [],
@@ -402,10 +392,6 @@ def test_a_new_project_still_goes_full_on_a_shared_engine_or_a_cited_function(tm
     cited = [{"focus": "q", "slug": "s", "finding": "f", "ids": [], "footprint": {
         "existing_functions": ["app.py:1 main"], "new_items": ["tool.py:1 new"], "shared_engine": []}}]
     assert classify_scale(_scale_ctx(cited, facts={"source": source}))["research_scope"] == "full"
-    # A refine is decided before the footprint is read, new project or not.
-    refine = classify_scale(_scale_ctx(_WORDCOUNT_PLAN, facts={
-        "source": source, "research_scope_reason": REFINE_SCOPE_REASON}))
-    assert refine == {"research_scope": "scoped", "research_scope_reason": REFINE_SCOPE_REASON}
     # Without a checkout to read, nothing says the project is empty: full, as before.
     assert classify_scale(_scale_ctx(_WORDCOUNT_PLAN))["research_scope"] == "full"
 
@@ -788,7 +774,8 @@ def test_brief_calling_itself_scoped_is_still_full(tmp_path):
 
 
 def test_refine_run_stays_scoped(tmp_path, monkeypatch):
-    """A refine run stays scoped: classify_scale sees REFINE_SCOPE_REASON and skips."""
+    """A refine run is scoped from the start: prepare decides it (and route_refine_design
+    then skips research and classify_scale)."""
     from refactory_dsh import delivery, design_ops, nn, repo_change, sandbox
 
     monkeypatch.setattr(repo_change, "wants_worktree", lambda ctx: False)
@@ -808,14 +795,6 @@ def test_refine_run_stays_scoped(tmp_path, monkeypatch):
     result = design_ops.prepare_design(ctx, deliver=True, in_worktree=False)
     assert result["research_scope"] == "scoped"
     assert result["research_scope_reason"] == REFINE_SCOPE_REASON
-
-    # classify_scale sees the refine reason and preserves scoped
-    scale_result = classify_scale(_scale_ctx(
-        [{"focus": "q", "slug": "s", "finding": "f", "ids": []}],
-        facts={"research_scope_reason": REFINE_SCOPE_REASON},
-    ))
-    assert scale_result["research_scope"] == "scoped"
-    assert scale_result["research_scope_reason"] == REFINE_SCOPE_REASON
 
 
 def test_no_footprint_means_full_end_to_end(tmp_path):
@@ -851,16 +830,9 @@ def test_classify_scale_through_run(tmp_path):
     }))
     (decl_dir / "knobs.json").write_text("{}")
 
-    # Case 1: refine run
-    facts_refine = {"research_scope_reason": REFINE_SCOPE_REASON}
-    (workdir / "facts.json").write_text(json.dumps(facts_refine))
     plan = [{"focus": "q", "slug": "s", "finding": "f", "ids": []}]
-    (workdir / "research-plan.json").write_text(json.dumps(plan))
-    ctx = build_op_context(workdir, "classify_scale")
-    result = classify_scale(ctx)
-    assert result["research_scope"] == "scoped"
 
-    # Case 2: scoped footprint
+    # Case 1: scoped footprint
     facts_full = {"research_scope": "full", "research_scope_reason": ""}
     (workdir / "facts.json").write_text(json.dumps(facts_full))
     plan_scoped = [{"focus": "q", "slug": "s", "finding": "f", "ids": [],
@@ -870,7 +842,7 @@ def test_classify_scale_through_run(tmp_path):
     result2 = classify_scale(ctx2)
     assert result2["research_scope"] == "scoped"
 
-    # Case 3: missing footprint
+    # Case 2: missing footprint
     (workdir / "facts.json").write_text(json.dumps(facts_full))
     (workdir / "research-plan.json").write_text(json.dumps(plan))
     ctx3 = build_op_context(workdir, "classify_scale")

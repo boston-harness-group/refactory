@@ -1,4 +1,4 @@
-"""Tests for the LiveMath solver-block library, dual-runtime equivalence, and grid CLI.
+"""Tests for the LiveMath solver-block library and dual-runtime equivalence.
 
 Coverage:
 - Block construction and graph validation
@@ -7,7 +7,6 @@ Coverage:
 - Walker integration for each block at parallelism 1 and 3
 - Spine+walker equivalence for each block (gated by @needs_spine)
 - Failed-branch and failed-solve scoring (F4: item scores 0, run continues)
-- Grid command output with shortcut split
 """
 from __future__ import annotations
 
@@ -249,8 +248,9 @@ def _make_route_client():
 #: knob, and the solve node's system prompt is now a (frozen) knob, so the knob
 #: table gains ``solve__system_prompt``. The solve node's prompts are unchanged. The
 #: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen. The
-#: solve node now carries the data pass's crash retry and ``missing_on_crash``.
-BASELINE_SNAPSHOT_SHA256 = "3ae6391a181fb45c9ccb0ab0c090fe1e1ea9ed8db86bcc30a736cdc4bf61ede1"
+#: solve node now carries the data pass's crash retry and ``missing_on_crash``. Then
+#: ``use_theorem`` and ``use_sketch`` were removed (the theorem states the answer).
+BASELINE_SNAPSHOT_SHA256 = "8627082f3bf3debab0ee70ff98987aabc434184aeeef671aaa38febc95615cb5"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -957,277 +957,7 @@ def test_failed_fork_branch_spine(parallelism, tmp_path, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 7. Grid command output
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def test_grid_shortcut_split():
-    """A shortcut item (correct_choice text containing 'stronger result can be proven')
-    is classified correctly by the grid's split logic."""
-    from refactory_packages.livemath.grid import _shortcut_split
-
-    records = [
-        {
-            "id": "1", "passed": True, "score": 1.0,
-            "metadata": {"correct_choice": {
-                "text": "A stronger result can be proven: the sequence converges absolutely",
-            }},
-        },
-        {
-            "id": "2", "passed": False, "score": 0.0,
-            "metadata": {"correct_choice": {"text": "Diverges"}},
-        },
-        {
-            "id": "3", "passed": True, "score": 1.0,
-            "metadata": {"correct_choice": {"text": "Converges"}},
-        },
-    ]
-    shortcut_acc, other_acc, shortcut_count, other_count = _shortcut_split(records)
-    assert shortcut_count == 1
-    assert other_count == 2
-    assert shortcut_acc == 1.0
-    assert other_acc == 0.5
-
-
-def _parts(tmp_path) -> Path:
-    from refactory_packages.livemath.tasks import LiveMathTask
-
-    items = LiveMathTask(data_path=str(FIXTURE_DIR), shuffle_choices=False).instances()
-    parts_path = tmp_path / "parts.json"
-    parts_path.write_text(json.dumps({"val": [item.id for item in items], "test": []}))
-    return parts_path
-
-
-_ALL_ANSWERS = {node: "<answer>B</answer>" for node in (
-    "solve", "solve_draft", "verify", "self_check", "solve_a", "solve_b", "judge")}
-
-
-class _Factory:
-    """Stands in for DshModelClient in loop.main: records each route, answers with a stub."""
-
-    def __init__(self, model: Any = None):
-        self.routes: list[dict[str, Any]] = []
-        self.model = model
-
-    def __call__(self, **kwargs: Any) -> Any:
-        self.routes.append(kwargs)
-        return self.model or _NodeScriptedModel(_ALL_ANSWERS)
-
-
-def _grid(tmp_path, monkeypatch, extra=(), factory=None, blocks=None):
-    from refactory_packages.livemath.grid import main as grid_main
-
-    _patch_task(monkeypatch)
-    factory = factory or _Factory()
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    output = tmp_path / "grid_results.json"
-    rc = grid_main([
-        "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
-        "--seed", "42", "--part", "val",
-        "--blocks", *(blocks or ["baseline", "solve_then_verify",
-                                 "two_attempts_then_judge", "solve_then_self_check"]),
-        *extra,
-    ], _client_factory=factory)
-    return rc, output, factory
-
-
-def test_grid_command_produces_table(tmp_path, monkeypatch):
-    """The grid evaluates every block through loop.main, counts each block's model
-    calls (1, 2, 3, 2 per item), and keeps each block's run under <output>.runs/."""
-    import refactory_dsh.loop as loop_mod
-
-    calls = []
-    real_main = loop_mod.main
-    monkeypatch.setattr(loop_mod, "main", lambda argv, **kw: calls.append(argv) or real_main(argv, **kw))
-    rc, output, _ = _grid(tmp_path, monkeypatch)
-    assert rc == 0
-    assert len(calls) == 4, "each block must go through refactory optimize's loop.main"
-    result = json.loads(output.read_text())
-    assert result["seed"] == 42 and result["part"] == "val" and result["complete"] is True
-    rows = {row["block"]: row for row in result["blocks"]}
-    expected_calls = {"baseline": 5, "solve_then_verify": 10,
-                      "two_attempts_then_judge": 15, "solve_then_self_check": 10}
-    for block, calls_expected in expected_calls.items():
-        row = rows[block]
-        assert row["model_calls"] == calls_expected, (block, row["model_calls"])
-        assert len(row["item_records"]) == 5
-        assert row["accuracy"] == 0.6  # three label-B items of five
-        run_dir = Path(row["run_dir"])
-        assert run_dir == tmp_path / "grid_results.runs" / block and run_dir.is_dir()
-        for key in ("shortcut_accuracy", "other_accuracy", "errors", "timeouts", "wall_time_s"):
-            assert key in row
-
-
-#: Every route flag the grid forwards. claude_code takes no provider override, so the
-#: provider is checked on the DSH route.
-_CLAUDE_ARGS = ["--worker-backend", "claude_code", "--model", "claude-opus-4-6",
-                "--effort", "medium", "--permission-mode", "dontAsk",
-                "--setting-sources", "project",
-                "--data-parallelism", "3", "--max-completion-tokens", "4096"]
-_DSH_ARGS = ["--worker-backend", "dsh", "--provider", "anthropic", "--model", "claude-opus-4-6",
-             "--effort", "high", "--data-parallelism", "2"]
-_ROUTE_ARGS = _CLAUDE_ARGS
-
-
-def _flag_values(args: list[str]) -> dict[str, str]:
-    return {args[at][2:].replace("-", "_"): args[at + 1] for at in range(0, len(args), 2)}
-
-
-@pytest.mark.parametrize("args", [_CLAUDE_ARGS, _DSH_ARGS], ids=["claude_code", "dsh"])
-def test_grid_route_flags_reach_every_block(args, tmp_path, monkeypatch):
-    """Each route flag reaches every block's model route, and the knob flags its
-    run config."""
-    rc, output, factory = _grid(tmp_path, monkeypatch, extra=args)
-    assert rc == 0
-    assert len(factory.routes) == 4
-    given = _flag_values(args)
-    knob_flags = {"data_parallelism", "max_completion_tokens"}
-    for route in factory.routes:
-        for flag, value in given.items():
-            if flag not in knob_flags:
-                assert route[flag] == value, (flag, route[flag])
-    for block in ("baseline", "solve_then_verify", "two_attempts_then_judge",
-                  "solve_then_self_check"):
-        config = json.loads((tmp_path / "grid_results.runs" / block / "config.json").read_text())
-        for flag, value in given.items():
-            if flag in knob_flags:
-                assert config["knobs"][flag] == value, (block, flag)
-            else:
-                assert config[flag] == value, (block, flag)
-
-
-def test_grid_through_cli_forwards_skill_route_and_evaluator(tmp_path, monkeypatch):
-    """`refactory grid` through cli.main: the skill file's text reaches the block's
-    knobs, --setting-sources and --evaluator reach its config, and a failed model call
-    shows in the row's errors."""
-    from refactory_dsh import cli
-    import refactory_dsh.model as model_mod
-
-    _patch_task(monkeypatch)
-    factory = _Factory(model=_FailOnceModel(RuntimeError("model exploded")))
-    monkeypatch.setattr(model_mod, "DshModelClient", factory)
-    import refactory_dsh.loop as loop_mod
-
-    seen: list[list[str]] = []
-    real_main = loop_mod.main
-    monkeypatch.setattr(loop_mod, "main", lambda argv, **kw: seen.append(argv) or real_main(argv, **kw))
-    skill = tmp_path / "skill.txt"
-    skill.write_text("Read every option twice.")
-    output = tmp_path / "grid_results.json"
-    rc = cli.main([
-        "grid", "livemath/solver", "--parts", str(_parts(tmp_path)), "--output", str(output),
-        "--blocks", "baseline", "--skill", str(skill),
-        "--worker-backend", "claude_code", "--model", "claude-opus-4-6",
-        "--setting-sources", "project", "--claude-executable", "/opt/claude/bin/claude",
-        "--evaluator", "walker",
-    ])
-    assert rc == 0
-    assert factory.routes and factory.routes[0]["setting_sources"] == "project"
-    assert factory.routes[0]["claude_executable"] == "/opt/claude/bin/claude"
-    config = json.loads((tmp_path / "grid_results.runs" / "baseline" / "config.json").read_text())
-    assert config["knobs"]["skill"] == "Read every option twice."
-    assert config["setting_sources"] == "project"
-    assert config["evaluator"] == "walker"
-    # walker is also the default, so check the flag itself reached optimize's argv.
-    assert len(seen) == 1 and "--evaluator" in seen[0], seen
-    assert seen[0][seen[0].index("--evaluator") + 1] == "walker"
-    row = json.loads(output.read_text())["blocks"][0]
-    assert row["errors"] == 1, row["errors"]
-
-
-@pytest.mark.parametrize("extra", [[], _CLAUDE_ARGS, _DSH_ARGS],
-                         ids=["no-flags", "claude_code", "dsh"])
-def test_grid_route_matches_refactory_optimize(extra, tmp_path, monkeypatch):
-    """A block's resolved route is the one `refactory optimize` resolves from the same
-    flags -- with no flags, the route optimize would pick."""
-    from refactory_dsh import loop
-    from refactory_dsh import strategies
-    from refactory_packages.livemath.grid import grid_strategy
-
-    rc, _, grid_factory = _grid(tmp_path / "g", monkeypatch, extra=extra, blocks=["baseline"])
-    assert rc == 0
-    knobs = []
-    route_extra = list(extra)
-    for flag in ("--data-parallelism", "--max-completion-tokens"):
-        if flag in route_extra:
-            at = route_extra.index(flag)
-            knobs += ["--knob", f"{flag[2:].replace('-', '_')}={route_extra[at + 1]}"]
-            del route_extra[at:at + 2]
-    optimize_factory = _Factory()
-    (tmp_path / "o").mkdir()
-    before = strategies.names()
-    with grid_strategy("val", 42) as name:
-        rc = loop.main([
-            "livemath/solver", "--strategy", name,
-            "--runs-root", str(tmp_path / "o" / "loop"), "--parts", str(_parts(tmp_path / "o")),
-            "--holdout", "0", "--epochs", "1", "--max-evaluations", "1", "--seed", "42",
-            *route_extra, *knobs,
-        ], _client_factory=optimize_factory)
-    # The grid (above) and the context manager leave the registry as they found it.
-    assert strategies.names() == before
-    assert "_grid_eval_val_42" not in before
-    # An evaluate-only strategy has no trained winner, so optimize exits 1 after
-    # evaluating; the grid reads the evaluation either way.
-    assert rc in (0, 1)
-    assert len(grid_factory.routes) == 1
-    assert grid_factory.routes == optimize_factory.routes
-
-
-class _InterruptingModel(_NodeScriptedModel):
-    """Raises KeyboardInterrupt (a Ctrl-C) on the nth call overall."""
-
-    def __init__(self, at: int):
-        super().__init__(_ALL_ANSWERS)
-        self.at = at
-        self.count = [0]
-        #: The results file, read at the moment of the interrupt.
-        self.output: Path | None = None
-        self.on_disk: Any = None
-
-    def for_node(self, node_id: str, role: str = "") -> "_InterruptingModel":
-        copy = _InterruptingModel(self.at)
-        copy._current_node, copy.log, copy.count = node_id, self.log, self.count
-        copy.output, copy._parent = self.output, self
-        return copy
-
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        self.count[0] += 1
-        if self.count[0] == self.at:
-            if self.output is not None:
-                getattr(self, "_parent", self).on_disk = (
-                    json.loads(self.output.read_text()) if self.output.exists() else None)
-            raise KeyboardInterrupt
-        return super().complete(prompt, **kwargs)
-
-
-def test_interrupted_grid_keeps_finished_blocks_and_stops(tmp_path, monkeypatch):
-    """A Ctrl-C in the second block: the first block's row is already on disk, the
-    grid exits 130 without starting another call or block, and the runs stay."""
-    model = _InterruptingModel(at=5 + 3)  # baseline's 5 calls, then 3 into verify
-    model.output = tmp_path / "grid_results.json"
-    rc, output, factory = _grid(tmp_path, monkeypatch, factory=_Factory(model))
-    assert rc == 130
-    # Written when the baseline finished, before the second block's calls.
-    assert model.on_disk is not None, "the first block's row was not on disk yet"
-    assert [row["block"] for row in model.on_disk["blocks"]] == ["baseline"]
-    result = json.loads(output.read_text())
-    assert result["complete"] is False
-    assert [row["block"] for row in result["blocks"]] == ["baseline"]
-    assert model.count[0] == 8, "a call started after the interrupt"
-    assert len(factory.routes) == 2, "a block started after the interrupt"
-    runs = tmp_path / "grid_results.runs"
-    assert (runs / "baseline").is_dir() and (runs / "solve_then_verify").is_dir()
-
-
-def test_grid_refuses_to_reuse_run_dirs(tmp_path, monkeypatch):
-    rc, _, _ = _grid(tmp_path, monkeypatch, blocks=["baseline"])
-    assert rc == 0
-    rc, _, _ = _grid(tmp_path, monkeypatch, blocks=["baseline"])
-    assert rc == 2
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 8. Mode registration
+# 7. Mode registration
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -1248,7 +978,7 @@ def test_ops_registered():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 9. Lowering works for all blocks
+# 8. Lowering works for all blocks
 # ══════════════════════════════════════════════════════════════════════════
 
 

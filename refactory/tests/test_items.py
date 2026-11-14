@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 
@@ -60,6 +61,21 @@ def _data_graph(**fields) -> nn.Graph:
     ))
     graph.connect("data", "report")
     return graph
+
+
+def _drive(node: nn.Node, workdir: Path, index: int) -> None:
+    """One item as DSH drives it: begin, the body op through the runner in the item's
+    pass (`run.run_node`, which keeps its visit for the record), end."""
+    from unittest import mock
+
+    import refactory_dsh.run
+
+    begun = items.command_begin(node, workdir, index)
+    if "pass_dir" in begun:
+        with mock.patch.object(refactory_dsh.run, "install_workspace_packages", lambda: None):
+            refactory_dsh.run.run_node("loop_ops:record_item", workdir=Path(begun["pass_dir"]),
+                                       node_id="work")
+    items.command_end(node, workdir, index)
 
 
 def _declared(graph: nn.Graph, workdir: Path) -> nn.Node:
@@ -245,8 +261,10 @@ def test_driving_the_commands_produces_the_walkers_facts(tmp_path):
     """The acceptance the issue is about: same facts, either runtime.
 
     The walking executor runs the whole loop itself; DSH runs the subgraph from
-    outside and drives the item loop through these three commands. Both must land on
-    the same `item_scores`, or a mode means two different things.
+    outside and drives the item loop through these three commands, each body op
+    through the runner (`run.run_node`, in the item's pass). Both must land on the
+    same `item_scores` -- the op's visit in each record's ``steps`` included -- or a
+    mode means two different things.
     """
     _probe_task()
     graph = _data_graph(task_ref="counting")
@@ -259,8 +277,10 @@ def test_driving_the_commands_produces_the_walkers_facts(tmp_path):
     node = _declared(graph, driven)
     count = items.command_list(node, driven)["count"]
     for index in range(count):
-        items.command_begin(node, driven, index)
-        items.command_end(node, driven, index)
+        _drive(node, driven, index)
+
+    assert [record.get("steps") for record in result.facts["item_scores"]] == [
+        [{"node": "work", "kind": "op", "output": ANY, "digest": ANY, "empty": False}]] * 2
 
     assert json.loads((driven / "facts.json").read_text())["item_scores"] == (
         result.facts["item_scores"]
@@ -341,8 +361,7 @@ def test_both_runtimes_iterate_the_part_the_run_directory_names(tmp_path):
         node = _declared(graph, driven)
         ids = items.command_list(node, driven)["ids"]
         for index in range(len(ids)):
-            items.command_begin(node, driven, index)
-            items.command_end(node, driven, index)
+            _drive(node, driven, index)
 
         assert ids == expected
         assert json.loads((driven / "facts.json").read_text())["item_scores"] == (
@@ -615,8 +634,7 @@ def test_failure_records_match_between_runtimes(tmp_path):
     node = _declared(graph, driven)
     count = items.command_list(node, driven)["count"]
     for index in range(count):
-        items.command_begin(node, driven, index)
-        items.command_end(node, driven, index)
+        _drive(node, driven, index)
 
     driven_facts = json.loads((driven / "facts.json").read_text())
     assert driven_facts["item_scores"] == result.facts["item_scores"]
@@ -1197,3 +1215,89 @@ def test_part_and_seed_reach_only_the_hooks_that_take_them(tmp_path):
     result = execute(_data_graph(task_ref="seed_only"), tmp_path)
     assert result.exit_ok, result.error
     assert seen == {"instances": 9, "setup": {"part": "train", "seed": 9}, "verify": True}
+
+
+# ── op and gate visits: what an item's record keeps of its code steps ──────
+
+
+def _gated_graph() -> nn.Graph:
+    """A data pass whose body op is sent back once per item by a code gate."""
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="work", subgraph_exit="next",
+                      task_ref="counting", writes=(CURRENT_ITEM,), produces=("item_scores",)))
+    graph.add(nn.Node("work", "op", call="loop_ops:record_item", reads=(CURRENT_ITEM,),
+                      writes=("seen.json",), produces=("seen",)))
+    graph.add(nn.Node("check", "gate", evaluator="loop_ops:retry_each_item_once",
+                      max_iterations=4, writes=("tried.json",)))
+    graph.add(nn.Node("next", "op", call="loop_ops:noop"))
+    graph.connect("work", "check")
+    graph.connect("check", "work", condition="retry")
+    graph.connect("check", "next", condition="proceed")
+    return graph
+
+
+def test_both_runtimes_keep_each_op_and_gate_visit_of_an_item_apart_from_its_model_calls(
+        tmp_path):
+    """Every visit, in run order, under ``steps``: the op's output (and whether it was
+    empty), the gate's verdict and reason, the op it sent back run again. The walker
+    keeps them in memory; DSH's runner (`run.run_node`, inside the item's pass) in the
+    sidecar ``command_end`` reads. Both land on the same records; ``exchanges`` stays
+    one entry per model call (none here)."""
+    from unittest import mock
+
+    import refactory_dsh.run
+
+    _probe_task()
+    graph = _gated_graph()
+    walked = tmp_path / "walked"
+    result = execute(graph, walked)
+    assert result.exit_ok, result.error
+    records = result.facts["item_scores"]
+    for record in records:
+        assert record["exchanges"] == []
+        assert [(s["node"], s["kind"], s.get("verdict"), s.get("empty")) for s in record["steps"]] == [
+            ("work", "op", None, False), ("check", "gate", "retry", None),
+            ("work", "op", None, False), ("check", "gate", "proceed", None),
+            ("next", "op", None, True)]
+        assert record["steps"][1]["reason"] == f"item {record['id']} needs another look"
+    assert records[0]["steps"][0]["digest"] != records[1]["steps"][0]["digest"]
+
+    driven = tmp_path / "driven"
+    node = _declared(graph, driven)
+    for index in range(items.command_list(node, driven)["count"]):
+        pass_dir = Path(items.command_begin(node, driven, index)["pass_dir"])
+        with mock.patch.object(refactory_dsh.run, "install_workspace_packages", lambda: None):
+            for target, node_id, kind in (("loop_ops:record_item", "work", "FnNode"),
+                                          ("loop_ops:retry_each_item_once", "check", "GateNode"),
+                                          ("loop_ops:record_item", "work", "FnNode"),
+                                          ("loop_ops:retry_each_item_once", "check", "GateNode"),
+                                          ("loop_ops:noop", "next", "FnNode")):
+                with mock.patch.dict("os.environ", {refactory_dsh.run.NODE_ENV: json.dumps(
+                        {"id": node_id, "type": kind})}):
+                    refactory_dsh.run.run_node(target, workdir=pass_dir, node_id=node_id)
+        items.command_end(node, driven, index)
+    assert json.loads((driven / "facts.json").read_text())["item_scores"] == records
+
+
+def test_no_visit_is_kept_outside_a_data_pass(tmp_path, monkeypatch):
+    """A run-level op (``report``, after the pass) is no item's: nothing is written."""
+    import refactory_dsh.run
+
+    monkeypatch.setattr(refactory_dsh.run, "install_workspace_packages", lambda: None)
+    (tmp_path / CURRENT_ITEM).write_text("{}")  # left by a pass, as the commands do
+    refactory_dsh.run.run_node("loop_ops:noop", workdir=tmp_path, node_id="report")
+    assert not (tmp_path / items.EXCHANGES_SIDECAR).exists()
+
+
+def test_an_op_visit_says_what_it_gave_and_whether_it_was_empty(tmp_path):
+    (tmp_path / "out.txt").write_text("  \n")
+    silent = items.op_visit(tmp_path, "op", {"signal": "", "list": [], "none": None}, ["out.txt"])
+    assert silent["empty"] is True
+    (tmp_path / "out.txt").write_text("found it")
+    loud = items.op_visit(tmp_path, "op", {"signal": "x" * 2000}, ["out.txt", "missing.txt"])
+    assert loud["empty"] is False and loud["digest"] != silent["digest"]
+    assert loud["output"].endswith("chars]") and "[cut:" in loud["output"]
+    assert len(loud["output"]) < items.STEP_PREVIEW_CHARS + 40
+    assert items.op_visit(tmp_path, "op", 0)["empty"] is True, "no facts returned"
+    wrote = items.op_visit(tmp_path, "op", {}, ["out.txt"])
+    assert wrote["empty"] is False and "out.txt: found it" in wrote["output"], "a file it wrote"

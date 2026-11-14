@@ -1,12 +1,12 @@
 """Light refine: a design-mode refine skips research and strategy.
 
-A refine (the default, refine_design=light) runs no research, pitfalls or strategy
+A refine runs no research, pitfalls or strategy
 agent: its one design is shown the pull request it follows up -- the description, framed
 as other people's words and capped, and the diff stat and changed files against the
 base branch as GitHub has it -- and the run then builds and delivers onto the same pull
 request. A person's reloop at its gate replans with synthesize_strategy and keeps the
-pull request in front of the next design. refine_design=full walks the whole phase, and
-a run that is not a refine is unchanged.
+pull request in front of the next design. A run that is not a refine walks the whole
+phase.
 
 The refines run against the fake GitHub of `test_delivery` (gh and git reach bare
 repositories on disk), so prepare resolves, fetches and plans the pull request for real.
@@ -205,30 +205,8 @@ def test_a_light_refine_relooped_at_its_gate_keeps_the_pull_request_in_the_next_
     assert _record(run)["status"] == "updated" and done.facts["pull_request"] == url
 
 
-def test_a_full_refine_walks_the_design_phase_with_no_pull_request_block(opened_pull, tmp_path):
-    """refine_design=full: research and pitfalls run (a refine is scoped, so no perspectives
-    step), the design's prompt is the one a refine had before the light route, and the run
-    delivers onto the pull request."""
-    url = opened_pull.url
-    mode = DesignMode()
-    state = mode.state_dict()
-    state["knobs"]["refine_design"]["value"] = "full"
-    mode.load_state_dict(state)
-    model = FakeModel([SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER,
-                       *_build({"tool.py": "print('one')\n", "more.py": "print('two')\n"})])
-    run = tmp_path / "refine"
-    result = mode.run(run, model=model, verdicts={"gate_strategy": "proceed"}, task=_refine(url))
-    assert result.exit_ok, result.error
-    assert _steps(model.prompts) == {"research": 1, "pitfalls": 1, "strategy_director": 0,
-                                     "synthesize": 1, "design_doc": 1}
-    [design] = _asked(model.prompts, "design_doc")
-    assert "## The pull request this refines" not in design
-    assert "## The plan\none plan\n\n## Pitfalls\n" in design
-    assert _record(run)["status"] == "updated"
-
-
 def test_non_refine_unchanged(tmp_path):
-    """A non-refine run walks the full design phase regardless of the knob."""
+    """A non-refine run walks the full design phase."""
     repo = git_repo(tmp_path / "repo")
     model = FakeModel([
         RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
@@ -256,17 +234,18 @@ def test_non_refine_unchanged(tmp_path):
     assert run.facts["refine_context"] == ""
 
 
-def test_route_refine_design_proceeds_on_a_run_that_is_not_a_refine_and_on_a_full_refine(tmp_path):
-    """The gate's two `proceed` answers, which write nothing: the full phase writes it all."""
+def test_route_refine_design_proceeds_only_on_a_run_that_is_not_a_refine(tmp_path):
+    """The gate's `proceed` answer writes nothing: the full phase writes it all. A refine
+    always takes the light route, even from a run saved with the removed
+    ``refine_design=full`` knob."""
     from refactory_dsh.nn.executor import RunContext
 
     not_a_refine = RunContext(tmp_path / "full", knobs={}, task={}, facts={"research_scope_reason": ""})
     assert route_refine_design(not_a_refine) == "proceed"
     assert "strategy" not in not_a_refine.facts and "refine_context" not in not_a_refine.facts
 
-    full = RunContext(tmp_path / "refine_full", knobs={"refine_design": "full"}, task={},
-                      facts={"research_scope_reason": REFINE_SCOPE_REASON})
-    assert route_refine_design(full) == "proceed"
-    assert "strategy" not in full.facts
-    assert not [name for name in ("strategy.json", "research-plan.json", "pitfalls.json")
-                if (tmp_path / "refine_full" / name).exists()]
+    old = RunContext(tmp_path / "refine_full", knobs={"refine_design": "full"}, task={},
+                     facts={"research_scope_reason": REFINE_SCOPE_REASON,
+                            "delivery_plan": {"inputs": {"refine": {"body": "", "url": ""}}}})
+    assert route_refine_design(old) == "light"
+    assert (tmp_path / "refine_full" / "strategy.json").exists()

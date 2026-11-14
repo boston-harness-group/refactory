@@ -25,22 +25,19 @@ def skill_section(skill: Any) -> str:
 
 
 # Ported from skillopt/envs/livemathematicianbench/rollout.py:31-53 (MIT)
-def build_user_prompt(item: dict, *, use_theorem: bool = False, use_sketch: bool = False) -> str:
-    """The solver's user prompt for one item (``_build_user``)."""
+def build_user_prompt(item: dict) -> str:
+    """The solver's user prompt for one item (``_build_user``).
+
+    SkillOpt's ``use_theorem`` / ``use_sketch`` options (rollout.py:41-44, both off in
+    configs/livemathematicianbench/default.yaml:21-22) are not ported: an item's
+    theorem states the correct option, so the prompt never carries it or its sketch.
+    """
     question = item.get("question", "")
     choices = item.get("choices", [])
-    parts = [
+    return "\n\n".join([
         f"## Question\n{question}",
         f"## Choices\n{_format_choices(choices)}",
-    ]
-    # Gated by the use_theorem / use_sketch knobs exactly as SkillOpt's
-    # _build_user() at rollout.py:41-44; both default False per
-    # configs/livemathematicianbench/default.yaml:21-22
-    if use_theorem and item.get("theorem"):
-        parts.append(f"## Theorem\n{item['theorem']}")
-    if use_sketch and item.get("sketch"):
-        parts.append(f"## Proof Sketch\n{item['sketch']}")
-    return "\n\n".join(parts)
+    ])
 
 
 #: What arm A's Claude backend puts before and after the one user message.
@@ -90,11 +87,7 @@ def format_prompt(ctx: Any) -> dict[str, Any]:
     frames it (:func:`claude_backend_prompt`).
     """
     item = ctx.read_json("current_item.json", {}) or {}
-    user_prompt = build_user_prompt(
-        item,
-        use_theorem=bool(ctx.knob("use_theorem", False)),
-        use_sketch=bool(ctx.knob("use_sketch", False)),
-    )
+    user_prompt = build_user_prompt(item)
     return {
         "user_prompt": user_prompt,
         "solver_prompt": claude_backend_prompt(user_prompt),

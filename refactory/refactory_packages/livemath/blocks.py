@@ -1,4 +1,4 @@
-"""Solver block library for the structure ablation grid.
+"""Solver block library: alternative structures for LiveMath's solve step.
 
 Each builder returns a ``BlockResult``: the nodes and edges that replace
 LiveMath's single ``solve`` node inside the per-item data pass.  Every block
@@ -43,7 +43,7 @@ def frozen_system_prompt_knobs(agent_node_ids) -> dict[str, nn.Knob]:
     """One frozen system-prompt knob per agent node of a block.
 
     Every agent node's system prompt is a knob by default (F14). LiveMath freezes
-    each one, so grid cells differ only in structure and the optimizer edits only
+    each one, so blocks differ only in structure and the optimizer edits only
     the ``skill`` knob. A block declares exactly its own agent nodes' knobs, so
     none is declared without a consumer.
     """
@@ -73,7 +73,7 @@ def _format_prompt_node() -> nn.Node:
         "format_prompt", "op",
         call=f"{OPS}:format_prompt",
         reads=("current_item.json",),
-        knobs=("skill", "use_theorem", "use_sketch"),
+        knobs=("skill",),
         produces=("user_prompt", "solver_prompt", "skill_section"),
     )
 

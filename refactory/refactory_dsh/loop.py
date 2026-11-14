@@ -58,8 +58,11 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    DEFAULT_MAX_EDITS, available_before, edit_level, proposal_refusal, summarise_reasons,
+    MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
+    summarise_reasons,
 )
+from refactory_dsh.optim.memory import report as memory_report
+from refactory_dsh.optim.memory import report_lines as memory_report_lines
 from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
@@ -328,11 +331,13 @@ class LoopConfig:
     #: strictly higher val score. Needs a manifest with a val part; a custom strategy
     #: (SkillOpt) keeps its own gate instead.
     #:
-    #: ``None`` (the default) turns it on when the parts manifest has val items and the
-    #: strategy is a built-in one, and off otherwise: a run with no validation items
-    #: selects on train scores and says so (``NO_VALIDATION``). ``True`` or ``False``
-    #: is honoured as given (``--val-gate 1``/``0``). ``Loop.init`` replaces ``None``
-    #: with the decision before anything runs, so ``config.json`` records it.
+    #: Not a setting: the run decides it (``Loop._resolve_val_gate``). On when the parts
+    #: manifest has val items and the strategy is a built-in one, off otherwise: a run
+    #: with no validation items selects on train scores and says so
+    #: (``NO_VALIDATION``). ``Loop.init`` replaces ``None`` with the decision before
+    #: anything runs, so ``config.json`` records it. A value given in code must be the
+    #: one the run decides; there is no way to turn the gate off for a run with val
+    #: items.
     val_gate: bool | None = None
     #: Train items per epoch: 0 (the default) scores every candidate on the whole train
     #: part. N > 0, when the train part has more than N items, samples N train ids each
@@ -342,19 +347,6 @@ class LoopConfig:
     #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
     #: batch). Val and test are unaffected. Each epoch's ids are journaled.
     train_minibatch: int = 0
-    #: With ``val_gate``: at the start of each epoch's proposal step, re-score the
-    #: candidate the optimizer edits on that epoch's train sample (the whole train part,
-    #: or the ``train_minibatch`` sample) with that epoch's seed, unless its records
-    #: already come from this epoch (it was just created and scored), so the optimizer
-    #: and its readers work from fresh trajectories every epoch, as SkillOpt rolls out
-    #: its current candidate every epoch. The re-score replaces only the evidence
-    #: records: the candidate's id, train score and gate val score stay. 0 turns it
-    #: off (the minibatch re-score of ``train_minibatch`` then stays on). No effect
-    #: without ``val_gate``.
-    fresh_evidence: bool = True
-    #: The most edits one proposal may bundle (``Proposal.edits``): applied together,
-    #: in order, as one candidate the gate judges once. 1 allows single edits only.
-    max_edits_per_proposal: int = DEFAULT_MAX_EDITS
     #: Whether an agent node an edit adds may run with tools. Off by default: a new
     #: agent node runs with ``tool_policy: none``, and one that asks for tools is
     #: refused (``E-new-node-tools``).
@@ -412,9 +404,13 @@ class LoopConfig:
     #: (`optim.feedback.change_kind`), what it touched, its train fixed/broken counts
     #: against its parent and the gate's word, after a tally per kind. On by default.
     run_ledger: bool = True
-    #: The model proposer's answer may carry ``lessons`` (which changes help here); the
-    #: latest are journaled, kept across a resume and shown back as "Your lessons so
-    #: far". An answer without them keeps the previous ones. On by default.
+    #: The memory pass (`optim.memory`, SkillOpt's optimizer meta skill): once per
+    #: epoch from epoch 2, before a model proposer's proposal, one optimizer-model call
+    #: compares the candidate current when the previous epoch proposed with the one
+    #: current now on 20 sampled train items (reusing the epoch's own rollouts; only
+    #: what is missing is evaluated) and writes one memory note that every analyst
+    #: call, every merge call and the proposal request read. Journaled, kept across a
+    #: resume; a failed pass keeps the earlier note, marked not updated. On by default.
     lessons: bool = True
     #: Each step a candidate of the last round added is reviewed before the next
     #: proposal: its train fixed/broken counts, how often the final answer changed,
@@ -543,6 +539,11 @@ class Loop(OuterLoop):
             return
         if self.model is not None:
             self.model = budget.bind_model(self.model)
+            stop_check = getattr(self.model, "with_stop_check", None)
+            if callable(stop_check):
+                # A call waiting out a network outage ends its wait when a person asks
+                # the run to stop (`RunStopped`), so the stop is not held up for hours.
+                self.model = stop_check(self._stop_requested)
             self.evaluator.model = self.model
             proposer = self.model.for_node("optimizer", role="optimizer") if callable(getattr(self.model, "for_node", None)) else self.model
             self.optimizer.bind_model(proposer, workdir=self.root / "proposer")
@@ -553,15 +554,18 @@ class Loop(OuterLoop):
 
     def run(self) -> dict[str, Any]:
         """Own strategy execution; a report-only replay does not start a search."""
+        from concurrent.futures import CancelledError
+
         from refactory_dsh.control import running_search
         from refactory_dsh.budgets import BudgetExhausted, RunBudget, ResourceLimits, LEDGER
+        from refactory_dsh.model import ModelChoiceError
 
         if (self.config.analysts and self._custom_strategy is None
                 and not getattr(self.optimizer, "uses_model", False)):
             # Checked here, not at construction, against the optimizer the run uses.
             raise LoopError(f"analysts read the train items for a model proposer; the "
                             f"{self.optimizer.name} optimizer asks no model, so they would "
-                            "never run (use --optimizer autoresearch, or --analysts 0)")
+                            "never run (use --optimizer autoresearch, or analysts off)")
         ledger_path = self.root / LEDGER
         inherited_budget = self.budget or RunBudget.inherited(self.model)
         self._owns_resource_budget = inherited_budget is None
@@ -590,6 +594,14 @@ class Loop(OuterLoop):
                                         "route); turn it off or give the run a model")
                 try:
                     result = super().run()
+                except (CancelledError, ModelChoiceError) as exc:
+                    # A cancelled model client or a missing model choice ends the run,
+                    # but it still says why and leaves its report. (A person's stop,
+                    # `RunStopped`, ended the search inside ``super().run()``.)
+                    self.bound = self.bound or f"{type(exc).__name__}: {exc}"
+                    self._journal("bound", bound=self.bound)
+                    self.report()
+                    raise
                 except (BudgetExhausted, BudgetStopped) as exc:
                     # BudgetStopped: a strategy's evaluation the budget stopped
                     # (``Run.evaluate``); the bound is the budget _measure recorded.
@@ -632,9 +644,6 @@ class Loop(OuterLoop):
         minibatch = self.config.train_minibatch
         if isinstance(minibatch, bool) or not isinstance(minibatch, int) or minibatch < 0:
             raise LoopError("train_minibatch must be a nonnegative integer (0 is the whole train part)")
-        max_edits = self.config.max_edits_per_proposal
-        if isinstance(max_edits, bool) or not isinstance(max_edits, int) or max_edits < 1:
-            raise LoopError("max_edits_per_proposal must be a positive integer (1 is single edits)")
         self.measurements = 0
         self.rollouts = 0
         self.holdout_measurements: dict[str, Any] = {}
@@ -711,8 +720,8 @@ class Loop(OuterLoop):
         #: This round's edit levels (``portfolio``) and the ones already accepted.
         self._levels_wanted: list[str] = []
         self._levels_done: list[str] = []
-        # The run's cap on edits per proposal, enforced where every proposal is applied.
-        self.optimizer.max_edits = int(self.config.max_edits_per_proposal)
+        # The cap on edits per proposal, enforced where every proposal is applied.
+        self.optimizer.max_edits = MAX_EDITS_PER_PROPOSAL
         # Whether edits may add code nodes, and what their code may never contain.
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
         self.optimizer.grader_secrets = self._grader_secrets
@@ -764,9 +773,21 @@ class Loop(OuterLoop):
         #: The strategy's own state, backing store for the default
         #: strategy_state_dict / load_strategy_state implementations.
         self._strategy_state: dict[str, Any] = {}
-        #: The latest ``lessons`` the model proposer wrote (``LoopConfig.lessons``):
-        #: ``{"text", "epoch", "generation"}``, journaled as ``optimizer_lessons``.
-        self._lessons: dict[str, Any] = {}
+        #: The loop's memory note (``LoopConfig.lessons``, `optim.memory`): ``{"text",
+        #: "epoch", "generation", ...}`` and ``not_updated`` after a failed pass,
+        #: journaled as ``optimizer_memory`` with each epoch's pass (``_memory_passes``).
+        self._memory: dict[str, Any] = {}
+        self._memory_passes: list[dict[str, Any]] = []
+        #: The candidate current when each epoch proposed (``epoch_current``): the next
+        #: epoch's memory pass compares it with the one current then.
+        self._epoch_currents: dict[int, str] = {}
+        #: Rollouts the memory pass made for sampled items a side lacked, by (candidate,
+        #: side key: ``e<epoch>`` for a side read from that epoch's rollouts, ``fresh<epoch>``
+        #: for a fresh rollout of an unchanged current without the gate): ``{id: record}``.
+        self._memory_rollouts: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        #: How the Tasks' declared item metadata is read for the analysts
+        #: (`task.item_metadata_reader`), held once as a one-element tuple.
+        self._item_metadata: tuple[Any] | None = None
         #: Each round's analysis the analyst stage journaled (``LoopConfig.analysts``;
         #: `optim.analysts.journal_entry` with the epoch and generation), for report.md.
         self._analyses: list[dict[str, Any]] = []
@@ -1032,6 +1053,7 @@ class Loop(OuterLoop):
         self.root.mkdir(parents=True, exist_ok=True)
         from refactory_dsh import profiles
         self._keep_recorded_run_shape()
+        self._note_removed_settings()
         settings = {k: v for k, v in self.config.to_dict().items() if k not in profiles.RUNTIME_FIELDS}
         snapshot = profiles.refresh(self.project, self.mode_id, settings, self.config.resolved_profile, model_client=self.model) if self.config.resolved_profile else profiles.resolve(
             self.project, self.mode_id, overrides=settings, validate_settings=False, model_client=self.model)
@@ -1113,36 +1135,31 @@ class Loop(OuterLoop):
             except seed_cache.SeedCacheError as exc:
                 raise LoopError(str(exc)) from exc
         self._check_optimizer_route()
-        if self.config.val_gate:
-            if self._custom_strategy is not None:
-                raise LoopError(
-                    f"val_gate is the default loop's gate; the {self._custom_strategy.name} "
-                    "strategy keeps its own, so turn val_gate off"
-                )
-            if not (self._parts_manifest and task_module.VAL in self._parts_manifest):
-                raise LoopError(
-                    "val_gate needs a parts manifest with a 'val' part (--parts); "
-                    "give the run one, or turn val_gate off"
-                )
-        elif (self.config.train_minibatch
-              and len(self._train_ids()) > self.config.train_minibatch):
+        # Without the gate (no val items, or a custom strategy's own gate) the run selects
+        # on train scores, which some settings cannot work with.
+        ungated = not self.config.val_gate
+        if (ungated and self.config.train_minibatch
+                and len(self._train_ids()) > self.config.train_minibatch):
             # Without the gate the winner and the parents are picked by train score,
             # and on minibatches those come from different samples.
             raise LoopError(
                 f"train_minibatch {self.config.train_minibatch} scores each epoch on a "
                 "different train sample, so train scores of different epochs cannot pick "
-                "the winner or the parents; turn val_gate on (--val-gate 1), or score the "
-                "whole train part (train_minibatch 0)")
-        elif self.config.early_stop_patience or self.config.early_stop_at_full_val:
+                "the winner or the parents; give the run val items (a parts_manifest with a "
+                "val part) so the validation gate selects, or score the whole train part "
+                "(train_minibatch 0)")
+        if ungated and (self.config.early_stop_patience or self.config.early_stop_at_full_val):
             raise LoopError(
                 "early_stop_patience and early_stop_at_full_val measure the validation "
-                "gate's best score; turn val_gate on, or leave them off"
+                "gate's best score, and this run has no validation gate (no val items, or a "
+                "custom strategy with its own gate); give it val items (a parts_manifest with "
+                "a val part), or leave them off"
             )
-        elif self.config.selection:
+        if ungated and self.config.selection:
             raise LoopError(
                 f"selection {self.config.selection} chooses by validation score, which only "
-                "the validation gate measures, and this run has none (val_gate 0, or a "
-                "parts manifest without val items); give it val items, or leave selection "
+                "the validation gate measures, and this run has none (no val items, or a "
+                "custom strategy with its own gate); give it val items, or leave selection "
                 "empty"
             )
 
@@ -1183,7 +1200,7 @@ class Loop(OuterLoop):
 
     #: The settings that shape how a run selects, which a resumed run keeps as it
     #: recorded them (``_keep_recorded_run_shape``): the epochs already run selected so.
-    RESUME_KEEPS = ("val_gate", "selection", "pool_size")
+    RESUME_KEEPS = ("selection", "pool_size")
 
     def _keep_recorded_run_shape(self) -> None:
         """On resume, put back the run's recorded ``RESUME_KEEPS`` settings from its
@@ -1211,36 +1228,60 @@ class Loop(OuterLoop):
         defaults = LoopConfig()
         for key in self.RESUME_KEEPS:
             value = recorded.get(key)
-            if key == "val_gate" and not isinstance(value, bool):
-                continue
             if key == "selection" and value not in SELECTIONS:
                 continue
             if key == "pool_size" and (isinstance(value, bool) or not isinstance(value, int)
                                        or value < 1):
                 continue
             current = getattr(self.config, key)
-            if key == "val_gate" and current is not None:
-                current = bool(current)
             if self._shape_value(key, current) == self._shape_value(key, value):
                 continue
             given = (key in overrides if isinstance(overrides, dict)
                      else current != getattr(defaults, key))
             if given:
-                flag = "--" + key.replace("_", "-")
                 raise LoopError(
                     f"this run was started with {key} {self._shown(key, value)} and this "
                     f"resume asks for {key} {self._shown(key, current)}; resume it without "
-                    f"{flag} (or with {flag} {self._shown(key, value)}), or start a new run")
+                    f"setting {key} (or with {key} {self._shown(key, value)}), or start a new run")
             setattr(self.config, key, value)
             self._resumed_shape[key] = value
             Run(_loop=self).log(f"resume: keeping the run's recorded {key} {value!r} "
                                 f"(this launch said {current!r})")
 
+    def _note_removed_settings(self) -> None:
+        """On resume, say in the run's log when its recorded ``config.json`` held a
+        removed setting at a value other than the one every run now uses (#640):
+        ``fresh_evidence`` false, or ``max_edits_per_proposal`` other than
+        ``MAX_EDITS_PER_PROPOSAL``. The resumed epochs run as every run now does, so the
+        run behaves differently from here on; the log is where a reader of its results
+        finds out."""
+        saved = self.root / "config.json"
+        if not self.config.resume or not saved.exists():
+            return
+        try:
+            recorded = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(recorded, dict):
+            return
+        # The old command line stored switches as integers, so a run launched with
+        # ``--fresh-evidence 0`` recorded ``0``; ``None`` (unset) meant the default, on.
+        fresh = recorded.get("fresh_evidence")
+        if fresh is not None and not isinstance(fresh, str) and not fresh:
+            Run(_loop=self).log(
+                "resume: this run was recorded with fresh_evidence false; that setting is "
+                "gone and fresh evidence is always on, so the epochs from here on gather "
+                "fresh evidence where the earlier ones did not")
+        edits = recorded.get("max_edits_per_proposal")
+        if edits is not None and edits != MAX_EDITS_PER_PROPOSAL:
+            Run(_loop=self).log(
+                f"resume: this run was recorded with max_edits_per_proposal {edits!r}; that "
+                f"setting is gone and the limit is {MAX_EDITS_PER_PROPOSAL} edits per proposal, "
+                "so the epochs from here on take proposals under that limit")
+
     def _shown(self, key: str, value: Any) -> str:
-        """A ``RESUME_KEEPS`` value as its flag takes it: ``val_gate`` as 1 or 0, an
-        empty ``selection`` as the default it resolves to."""
-        if isinstance(value, bool):
-            return str(int(value))
+        """A ``RESUME_KEEPS`` value as the run's settings hold it: an empty ``selection``
+        as the default it resolves to."""
         if key == "selection" and not value:
             return f"{self._shape_value(key, value)} (unset: the default)"
         return str(value)
@@ -1254,31 +1295,58 @@ class Loop(OuterLoop):
         return value
 
     def _resolve_val_gate(self) -> None:
-        """Decide ``val_gate`` when the run left it unset (``None``): on when the parts
-        manifest it will load has val items and the strategy is a built-in one (a
-        custom strategy such as SkillOpt keeps its own gate), off otherwise. Off for
-        want of val items, the run says it selects on train scores (``NO_VALIDATION``),
-        in its events and its strategy log now, and in its report. An explicit value is
-        kept. Runs before ``config.json`` is written, so the run records the decision."""
-        self._val_gate_basis = "explicit"
+        """Decide ``val_gate``: on when the parts manifest the run will load has val
+        items and the strategy is a built-in one (a custom strategy such as SkillOpt
+        keeps its own gate), off otherwise. Off for want of val items, the run says it
+        selects on train scores (``NO_VALIDATION``), in its events and its strategy log
+        now, and in its report. Runs before ``config.json`` is written, so the run
+        records the decision.
+
+        It is not a setting: a value given in code that differs from the decision is
+        refused, and so is resuming a run that recorded another decision -- one started
+        with the gate off although it had val items (``--val-gate 0``, the default
+        before #627), whose epochs selected on train scores."""
         self.selection_warning = ""
-        if "val_gate" in self._resumed_shape:
-            # Restored by _keep_recorded_run_shape: the epochs already run selected so.
-            self._val_gate_basis = "resumed: the run's recorded decision"
-        if self.config.val_gate is not None:
-            self.config.val_gate = bool(self.config.val_gate)
-            return
         if self._custom_strategy is not None:
-            self.config.val_gate = False
+            decided = False
             self._val_gate_basis = f"the {self._custom_strategy.name} strategy keeps its own gate"
-            return
-        has_val = bool(self._manifest_val_ids())
-        self.config.val_gate = has_val
-        self._val_gate_basis = ("default: the parts manifest has val items" if has_val
-                                else "default: no val items")
-        if not has_val:
+        else:
+            decided = bool(self._manifest_val_ids())
+            self._val_gate_basis = ("the parts manifest has val items" if decided
+                                    else "no val items")
+        recorded = self._recorded_val_gate()
+        if isinstance(recorded, bool) and recorded != decided:
+            raise LoopError(
+                f"this run recorded val_gate {str(recorded).lower()}, and the run now decides "
+                f"{str(decided).lower()} ({self._val_gate_basis}). "
+                + ("Selecting on train scores while the run has val items (--val-gate 0) "
+                   "is no longer supported" if decided else
+                   "Its validation gate cannot run without val items")
+                + "; start a new run instead of resuming this one")
+        given = self.config.val_gate
+        if given is not None and bool(given) != decided:
+            raise LoopError(
+                f"val_gate is not a setting: this run decides {str(decided).lower()} "
+                f"({self._val_gate_basis}), and {str(bool(given)).lower()} was given")
+        if isinstance(recorded, bool):
+            self._val_gate_basis = f"resumed: {self._val_gate_basis}"
+        self.config.val_gate = decided
+        if not decided and self._custom_strategy is None:
             self.selection_warning = NO_VALIDATION
             Run(_loop=self).log(f"warning: {NO_VALIDATION}")
+
+    def _recorded_val_gate(self) -> bool | None:
+        """The ``val_gate`` a resumed run recorded in its ``config.json``; ``None`` for a
+        new run or one that recorded none."""
+        saved = self.root / "config.json"
+        if not self.config.resume or not saved.exists():
+            return None
+        try:
+            recorded = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            return None
+        value = recorded.get("val_gate") if isinstance(recorded, dict) else None
+        return value if isinstance(value, bool) else None
 
     def _manifest_val_ids(self) -> list[str]:
         """The val ids of the parts manifest this run will load (``parts_manifest``, else
@@ -1639,17 +1707,16 @@ class Loop(OuterLoop):
         return sample
 
     def _fresh_evidence(self) -> bool:
-        """Whether the edited candidate is re-scored each epoch on the whole train part
-        (``fresh_evidence`` under ``val_gate``, the default loop's own gate)."""
-        return bool(self.config.val_gate and self.config.fresh_evidence
-                    and self._custom_strategy is None)
+        """Whether the edited candidate is re-scored each epoch on the whole train part:
+        always under ``val_gate``, the default loop's own gate."""
+        return bool(self.config.val_gate and self._custom_strategy is None)
 
     def _refresh_edited_records(self) -> None:
         """Fresh evidence: score the edited candidate on this epoch's train sample with
         this epoch's seed when its train records come from another epoch, so the
         proposal evidence (and every reader's input) is this epoch's rollout.
 
-        On under ``val_gate`` with ``fresh_evidence`` (the whole train part, or the
+        On under ``val_gate`` (the whole train part, or the
         ``train_minibatch`` sample), and with a minibatch in any case. A candidate
         created and scored this epoch already has this epoch's records and is not
         scored again; a resumed run reads the epoch from the journal, so it does not
@@ -2739,6 +2806,12 @@ class Loop(OuterLoop):
             selected = self.select_parents(1)
             self._editing_parent = selected[0].id if selected else None
         self._refresh_edited_records()
+        # A retry's wait inside an optimizer call ends early on a person's stop.
+        try:
+            self.optimizer.stop_check = self._stop_requested
+        except AttributeError:  # an optimizer that takes no attribute keeps plain waits
+            pass
+        self._memory_pass()
         before = len(self.rejections)
         self._levels_wanted, self._levels_done = self._round_levels(), []
         self._proposal_attempt = 0
@@ -2764,6 +2837,8 @@ class Loop(OuterLoop):
                 "prediction": str(notes.get("prediction") or ""),
                 "confidence": float(notes.get("confidence") or 0.0),
                 "origin": "optimizer",
+                # Its edits counted as the per-proposal cap counts them (`optim.edit_count`).
+                "edit_count": self._edit_count(candidate),
                 **({"level": notes["level"]} if notes.get("level") else {}),
                 "diagnosis": str(notes.get("diagnosis")
                                  or getattr(self.optimizer, "last_diagnosis", "") or ""),
@@ -2880,13 +2955,8 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.base import edit_level
 
         setting = self.selection_mode() or ("train" if self._custom_strategy is None else "")
-        if setting == "train":
-            val_ids = (task_module.manifest_part_ids(self._parts_manifest, task_module.VAL)
-                       if self._parts_manifest is not None else self._manifest_val_ids())
-            warning = (NO_VALIDATION if not val_ids else
-                       "val_gate 0: selecting on train scores, though the run has val items")
-        else:
-            warning = ""
+        # Without the gate a built-in strategy's run has no val items: it selects on train.
+        warning = NO_VALIDATION if setting == "train" else ""
         if setting == "pool":
             members = self._judged_ranked() if self._population_policy() else self._pool()
         elif setting == "single":
@@ -3287,8 +3357,6 @@ class Loop(OuterLoop):
         try:
             context = self._context()
             context.attempt = self._proposal_attempt
-            if hasattr(self.optimizer, "last_lessons"):
-                self.optimizer.last_lessons = ""
             if hasattr(self.optimizer, "last_analysis"):
                 self.optimizer.last_analysis = None
             try:
@@ -3297,10 +3365,14 @@ class Loop(OuterLoop):
                 # Journaled whether or not the proposal call succeeded: the analysts'
                 # calls were paid either way.
                 self._keep_analysis()
-            self._keep_lessons()
             return proposals
         except BudgetExhausted as exc:
             self.optimizer.proposal_failures.append(f"{type(exc).__name__}: {exc}")
+            raise
+        except RunStopped:
+            # A person's stop during a retry wait is a stop, not a failed round (nor a
+            # round counted): it is made again on resume (the epoch stays open).
+            self.optimizer.proposal_rounds -= 1
             raise
         except Exception as exc:  # a proposer that is down is not a crash
             detail = f"{type(exc).__name__}: {exc}"
@@ -3359,8 +3431,10 @@ class Loop(OuterLoop):
                 # one that exists but is outside this run's permitted edits. Calling
                 # both E-policy hides which fix the refusal is asking for. Each edit of
                 # a compound proposal is checked, and a refusal names the one.
+                parent = next((p for p in parents if p.id == proposal.parent), parents[0])
                 refused = proposal_refusal(proposal, permitted=self.permitted_ops(),
-                                           max_edits=self.config.max_edits_per_proposal)
+                                           max_edits=MAX_EDITS_PER_PROPOSAL,
+                                           parent_state=parent.state)
                 level = edit_level(proposal.steps)
                 missing = [l for l in self._levels_wanted if l not in self._levels_done]
                 if not refused and self._levels_wanted and level not in missing:
@@ -3373,7 +3447,6 @@ class Loop(OuterLoop):
                 if refused:
                     self.rejections.append(Rejection(rounds, proposal.edit, refused))
                     continue
-                parent = next((p for p in parents if p.id == proposal.parent), parents[0])
                 outcome = run.attempt(proposal, parent)
                 if isinstance(outcome, Candidate):
                     if outcome.id in accepted_ids:
@@ -4405,6 +4478,8 @@ class Loop(OuterLoop):
             **({"portfolio": self._portfolio_report()} if self.config.portfolio else {}),
             **({"analysts": _analysts_report(self._analyses, self.config)}
                if self.config.analysts else {}),
+            **({"optimizer_memory": memory_report(self._memory_passes, self._memory)}
+               if self._memory_passes else {}),
             "selection": self._selection_report(),
             **({"integrity": self._integrity_report(best)} if self._integrity_on() else {}),
         }
@@ -4451,7 +4526,7 @@ class Loop(OuterLoop):
         if manifest is not None:
             # The parts manifest decides the parts: the search ran its train ids,
             # the audit runs its val ids, and its test ids are never touched here.
-            # The fraction then only says whether to audit: --holdout 0 turns it off.
+            # The fraction then only says whether to audit: holdout 0 turns it off.
             held = (task_module.manifest_part_ids(manifest, task_module.HOLDOUT) or ()
                     if self.config.holdout > 0 else ())
             instances: dict[str, int | None] = {
@@ -4634,10 +4709,10 @@ class Loop(OuterLoop):
         (``task.manifest_part_ids``): under ``val_gate`` that is the part the search
         selected on, so the audit is not independent, and the report says so rather
         than present it as a check on unseen items. Without a manifest they are the
-        Task's ``--holdout`` fraction, which nothing selects on."""
+        Task's ``holdout`` fraction, which nothing selects on."""
         if self._parts_manifest is None:
             return {"split": task_module.HOLDOUT, "independent": True,
-                    "split_note": "the --holdout fraction of the Task's items, which nothing "
+                    "split_note": "the holdout fraction of the Task's items, which nothing "
                                   "selected on"}
         if self._custom_strategy is not None:
             return {"split": task_module.VAL, "independent": None,
@@ -4802,6 +4877,8 @@ class Loop(OuterLoop):
                     "raw_delta": raw_delta,
                     "exit_ok": candidate.exit_ok,
                     "error": candidate.error,
+                    "edit_count": (record.get("edit_count") or self._edit_count(candidate)
+                                   if candidate.parent else None),
                 }
             )
         return out
@@ -4830,6 +4907,7 @@ class Loop(OuterLoop):
             *_strategy_report_section(payload.get("strategy_report") or {}),
             *_portfolio_section(payload.get("portfolio") or {}),
             *_analysts_section(payload.get("analysts") or {}),
+            *memory_report_lines(payload.get("optimizer_memory")),
             *_selection_section(payload.get("selection") or {}),
             *_integrity_section(payload.get("integrity")),
             "## Leaderboard",
@@ -4944,11 +5022,12 @@ class Loop(OuterLoop):
             "",
             _md_table(
                 ["id", "origin", "parent_score", "score", "delta", "raw_score",
-                 "raw_delta", "rationale"],
+                 "raw_delta", "changes", "rationale"],
                 [
                     [
                         p["id"], p.get("origin"), p.get("parent_score"), p.get("score"),
                         p.get("delta"), p.get("raw_score"), p.get("raw_delta"),
+                        _changes_cell(p.get("edit_count")),
                         (p.get("rationale") or "")[:80],
                     ]
                     for p in payload["proposal_outcomes"]
@@ -5020,19 +5099,18 @@ class Loop(OuterLoop):
             # Read now, not at construction: the point of steering a search is that a
             # note added while it runs reaches the next proposal.
             steering=self._steering_block(),
-            item_records=self._parent_train_records(board),
-            parent_item_records=self._parent_train_records(board),
+            item_records=self._with_item_meta(self._parent_train_records(board)),
+            parent_item_records=self._with_item_meta(self._parent_train_records(board)),
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
             ledger=self._ledger() if self.config.run_ledger else [],
-            ask_lessons=bool(self.config.lessons),
-            lessons=dict(self._lessons) if self.config.lessons else {},
+            memory=dict(self._memory) if self.config.lessons else {},
             added_steps=self._added_steps() if self.config.step_review else [],
             structure_guidance=bool(self.config.structure_guidance),
             analysts=self._analyst_settings(),
             integrity=self._integrity_feedback(),
-            max_edits=int(self.config.max_edits_per_proposal),
+            max_edits=MAX_EDITS_PER_PROPOSAL,
             parsimony=float(self.config.parsimony),
             code_nodes=self._code_nodes_offered(sandbox),
             sandbox=sandbox,
@@ -5224,15 +5302,297 @@ class Loop(OuterLoop):
             })
         return entries
 
-    def _keep_lessons(self) -> None:
-        """Keep the lessons the proposer's answer carried (``LoopConfig.lessons``), with
-        the epoch and generation they were written in, and journal them so a resumed run
-        shows them back; an answer without lessons keeps the previous ones."""
-        written = str(getattr(self.optimizer, "last_lessons", "") or "").strip()
-        if not self.config.lessons or not written or written == self._lessons.get("text"):
+    # ── the memory pass (``LoopConfig.lessons``; `optim.memory`) ──────────────
+    def _stopped_inside(self, exc: BaseException) -> None:
+        """Journal a person's stop met inside a step (`RunStopped`), as the stop it is."""
+        self._journal("stopped_inside_step", epoch=self.epoch, why=str(exc))
+        self._progress("control", action="stop", inside_step=True)
+
+    def _stop_requested(self) -> bool:
+        """Whether a person has asked this run to stop (``refactory stop``), read from the
+        control file without consuming the request (`_apply_control` acts on it)."""
+        from refactory_dsh.control import Control
+
+        try:
+            request = Control(self.root).read_request()
+        except Exception:  # noqa: BLE001 - an unreadable request is not a stop
+            return False
+        return bool(request) and str(request.get("action")) == "stop"
+
+    def _memory_on(self) -> bool:
+        """Whether this run makes memory notes: the switch on, a model proposer that can
+        write one, and the loop's own epochs (a custom strategy, such as the SkillOpt
+        port, keeps its own)."""
+        return (bool(self.config.lessons) and self._custom_strategy is None
+                and callable(getattr(self.optimizer, "write_memory", None)))
+
+    def _current_now(self) -> str | None:
+        """The current candidate: the gate's under ``val_gate``, else the train leader."""
+        return self._incumbent_id()
+
+    def _memory_pass(self) -> None:
+        """This epoch's memory pass, once (`optim.memory`): from epoch 2, the candidate
+        current when the previous epoch proposed against the one current now, on
+        ``MEMORY_SAMPLES`` train items, one optimizer-model call writing the note every
+        later request reads. A pass already made (a resumed epoch) is not made again.
+        Records the candidate current now for the next epoch's pass."""
+        if not self._memory_on():
             return
-        self._lessons = {"text": written, "epoch": self.epoch, "generation": self.generation}
-        self._journal("optimizer_lessons", **self._lessons)
+        epoch, current = self.epoch, self._current_now()
+        if current and epoch not in self._epoch_currents:
+            self._epoch_currents[epoch] = current
+            self._journal("epoch_current", epoch=epoch, id=current)
+        if epoch < 2 or any(p.get("epoch") == epoch for p in self._memory_passes):
+            return
+        prev = self._epoch_currents.get(epoch - 1)
+        current = self._epoch_currents.get(epoch, current)
+        by_id = {c.id: c for c in self.population}
+        if not prev or not current or prev not in by_id or current not in by_id:
+            # SkillOpt skips a pass with no previous epoch's skill (the port's
+            # skip_no_prev_skill): nothing to compare.
+            return
+        self._make_memory(epoch, by_id[prev], by_id[current])
+
+    def _side_records(self, cid: str, epoch: int, key: str) -> dict[str, dict[str, Any]]:
+        """One side of a memory pass, by item: for a side read from the run's rollouts
+        (``key`` ``e<epoch>``), ``cid``'s records from ``epoch``'s rollout (that epoch's
+        train seed: fresh evidence, or a candidate created then), or without the gate (one
+        seed for the whole run) its records; then what memory passes rolled out for this
+        side (``key``). A fresh side (``fresh<epoch>``) holds only the latter."""
+        from refactory_dsh.optim.base import _by_item
+
+        found: dict[str, dict[str, Any]] = {}
+        if not key.startswith("fresh"):
+            held = (self._records_by_epoch.get(cid) or {}).get(epoch)
+            if held is None and not self.config.val_gate:
+                held = self._train_item_records.get(cid)
+            found.update(_by_item(held or ()))
+        for item, record in (self._memory_rollouts.get((cid, key)) or {}).items():
+            found.setdefault(item, record)
+        return found
+
+    def _memory_rollout(self, candidate: Candidate, items: list[str], epoch: int,
+                        for_epoch: int, key: str) -> int:
+        """Roll ``candidate`` out on ``items`` with ``epoch``'s train seed for the memory
+        pass of ``for_epoch``: counted as an evaluation, its rollouts counted, its records
+        journaled (``memory_rollout``) so a resumed run reuses them; the candidate's own
+        records and score are left alone. Returns the rollouts made (0 when a cap or a
+        budget leaves no room)."""
+        if self.evaluations >= self.config.max_evaluations:
+            return 0
+        if (self.config.max_rollouts is not None
+                and self.rollouts + len(items) * max(1, int(self.config.repeats or 1))
+                > self.config.max_rollouts):
+            return 0
+        if self.budget:
+            from refactory_dsh.budgets import BudgetExhausted
+            try:
+                self.budget.checkpoint("work" if self._owns_resource_budget else None)
+            except BudgetExhausted as exc:
+                self.bound = str(exc)
+                return 0
+        workdir = (self.root / "runs" / candidate.id / "occasions"
+                   / f"memory_epoch_{for_epoch}_{key}")
+        self._archive_unfinished(candidate.id, workdir)
+
+        def prepare() -> None:
+            task_module.make_manifest(workdir, train_ids=items)
+
+        result, measurements = self._settled_measure(
+            candidate, workdir, task_module.TRAIN, prepare, seed=self._train_seed(epoch),
+            items=items)
+        if not measurements.get("count"):
+            return 0
+        records = [dict(r) for r in result.item_records or ()]
+        with self._state_lock:
+            self.evaluations += 1
+            if not measurements.get("cached_from"):
+                self.rollouts += len(records) or 1
+            held = self._memory_rollouts.setdefault((candidate.id, key), {})
+            for record in records:
+                held.setdefault(str(record.get("id")), record)
+            self._journal("memory_rollout", id=candidate.id, epoch=epoch, for_epoch=for_epoch,
+                          key=key,
+                          seed=self._train_seed(epoch), items=list(items),
+                          exit_ok=result.exit_ok, error=result.error, records=records,
+                          measurements=measurements)
+            self._journal("rollouts", rollouts=self.rollouts)
+        self._progress("memory_rollout", candidate=candidate.id, epoch=for_epoch,
+                       items=len(items), records=len(records), exit_ok=result.exit_ok)
+        return len(records) or 1
+
+    def _lineage_edits(self, prev: Candidate, current: Candidate) -> dict[str, Any]:
+        """What separates ``prev`` from ``current``: their nearest common ancestor and the
+        candidates from it (exclusive) to each, with their own edits, oldest first
+        (``{"common", "prev", "curr"}``). ``prev`` an ancestor of ``current`` leaves
+        ``prev``'s path empty; with no common ancestor ``common`` is ``None`` and each
+        path is its candidate's whole lineage."""
+        by_id = {c.id: c for c in self.population}
+
+        def chain(candidate: Candidate) -> list[Candidate]:
+            out, at, seen = [], candidate, set()
+            while at is not None and at.id not in seen:
+                seen.add(at.id)
+                out.append(at)
+                at = by_id.get(at.parent) if at.parent else None
+            return out
+
+        def entry(candidate: Candidate) -> dict[str, Any]:
+            record = self.proposals.get(candidate.id) or {}
+            return {"id": candidate.id, "parent": candidate.parent,
+                    "edits": candidate.own_edits(), "rationale": record.get("rationale")}
+
+        before, after = chain(prev), chain(current)
+        ids = {c.id for c in before}
+        common = next((c.id for c in after if c.id in ids), None)
+
+        def path(line: list[Candidate]) -> list[dict[str, Any]]:
+            upto = [c for c in line[: next((i for i, c in enumerate(line) if c.id == common),
+                                           len(line))]]
+            return [entry(c) for c in reversed(upto)]
+
+        return {"common": common, "prev": path(before), "curr": path(after)}
+
+    def _make_memory(self, epoch: int, prev: Candidate, current: Candidate) -> None:
+        """The pass itself (`_memory_pass`): sample, gather or roll out both sides, ask,
+        keep and journal."""
+        from concurrent.futures import CancelledError
+
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.model import ModelChoiceError
+        from refactory_dsh.optim import analysts, memory
+
+        same = prev.id == current.id
+        # The two rollouts, each (candidate, the epoch whose seed it used, its key, what it
+        # is). Under the gate: both candidates' rollouts of this epoch, or, when nothing
+        # replaced the current, its previous epoch's and this epoch's. Without the gate
+        # (one seed for the run): each candidate's rollout when it was scored, or, when
+        # nothing replaced it, that rollout and a fresh one made for this pass.
+        if self.config.val_gate:
+            def gated(at: int) -> str:
+                return f"the rollout of epoch {at} (that epoch's train seed)"
+
+            sides = [(prev, epoch - 1 if same else epoch, f"e{epoch - 1 if same else epoch}",
+                      gated(epoch - 1 if same else epoch)),
+                     (current, epoch, f"e{epoch}", gated(epoch))]
+        else:
+            scored = "its rollout when it was scored (the run's seed)"
+            sides = [(prev, epoch, f"e{epoch}", scored),
+                     (current, epoch, f"fresh{epoch}" if same else f"e{epoch}",
+                      f"a rollout made for this epoch's memory pass (the run's seed)"
+                      if same else scored)]
+        sample = memory.sample_ids(self._train_ids(), int(self.config.seed), epoch)
+        evaluated = rolled = 0
+        records = []
+        for candidate, at, key, _label in sides:
+            held = self._side_records(candidate.id, at, key)
+            missing = [item for item in sample if item not in held]
+            if missing:
+                made = self._memory_rollout(candidate, missing, at, epoch, key)
+                evaluated += 1 if made else 0
+                rolled += made
+                held = self._side_records(candidate.id, at, key)
+            records.append({item: dict(rec, item_meta=self._item_meta(rec))
+                            if self._item_meta_reader() is not None else dict(rec)
+                            for item, rec in held.items()})
+        entries, missing = memory.pairs(records[0], records[1], sample)
+
+        view = {c.id: analysts.pipeline_text(memory.state_view(c.state),
+                                            memory.PIPELINE_TEXT_CHARS)
+                for c in {prev.id: prev, current.id: current}.values()}
+        previous = str(self._memory.get("text") or "")
+        record: dict[str, Any] = {
+            "epoch": epoch, "generation": self.generation, "prev": prev.id, "curr": current.id,
+            "same": same, "sample": sample, "pairs": len(entries), "missing": missing,
+            "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
+
+        def build(room: int) -> tuple[str, dict[str, int]]:
+            return memory.build_prompt(
+                epoch=epoch, mode_name=self.mode_id,
+                prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
+                curr={"id": current.id, "pipeline": view[current.id],
+                      "rollout": sides[1][3]},
+                changes=memory.changes_lines(self._lineage_edits(prev, current)),
+                previous_note=previous, entries=entries, room=room)
+
+        outcome: dict[str, Any] = {}
+        if not entries:
+            outcome = {"note": None, "error": "no sampled train item had a record under both "
+                                              "pipelines, so there was nothing to compare"}
+        else:
+            try:
+                outcome = self.optimizer.write_memory(epoch=epoch, generation=self.generation,
+                                                      build=build)
+            except (BudgetExhausted, CancelledError, ModelChoiceError):
+                # A spent budget, a cancelled run or a missing model choice is no answer
+                # about the memory: no pass is recorded, so a resume makes it (its
+                # rollouts are journaled), and the error goes where a proposal's would.
+                raise
+            except Exception as exc:  # a failed pass keeps the earlier note
+                outcome = {"note": None, "error": f"{type(exc).__name__}: {exc}"}
+        record.update({key: outcome[key] for key in
+                       ("calls", "context_retry", "cached", "clipped_items", "clipped_chars",
+                        "prompt_chars") if key in outcome})
+        note = outcome.get("note")
+        if note:
+            record["reasoning"] = note.get("reasoning", "")
+        self._keep_memory({**record, **({"error": outcome.get("error")}
+                                         if not note else {})}, note)
+
+    def _keep_memory(self, record: dict[str, Any], note: dict[str, Any] | None) -> None:
+        """Keep a pass's note (or, when it wrote none, the earlier note marked not
+        updated in this epoch and why) and journal both (``optimizer_memory``)."""
+        if note:
+            self._memory = {"text": note["text"], "epoch": record["epoch"],
+                            "generation": record.get("generation"), "prev": record.get("prev"),
+                            "curr": record.get("curr")}
+            record = {**record, "updated": True, "chars": len(note["text"])}
+        else:
+            self._memory = {**self._memory, "not_updated": {
+                "epoch": record["epoch"], "why": str(record.get("error") or "no note")}}
+            record = {**record, "updated": False}
+        self._memory_passes.append(record)
+        self._journal("optimizer_memory", memory=dict(self._memory), **record)
+        self._progress("optimizer_memory", epoch=record["epoch"], updated=record["updated"],
+                       pairs=record.get("pairs"), evaluated=record.get("evaluated"),
+                       **({"error": str(record.get("error"))[:300]} if record.get("error")
+                          else {}))
+
+    def _item_meta_reader(self) -> Any:
+        """How a record's declared metadata is read (`task.item_metadata_reader`), once;
+        ``None`` when no Task declares any."""
+        if self._item_metadata is None:
+            from refactory_dsh.task import item_metadata_reader
+
+            try:
+                self._item_metadata = (item_metadata_reader(self.mode.state_dict()),)
+            except Exception:  # noqa: BLE001 - a mode that cannot say declares nothing
+                self._item_metadata = (None,)
+        return self._item_metadata[0]
+
+    def _item_meta(self, record: dict[str, Any]) -> dict[str, Any]:
+        read = self._item_meta_reader()
+        return read(record) if read is not None else {}
+
+    def _with_item_meta(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Train records with their declared metadata (``item_meta``) for the item headers
+        the analysts and the proposal's evidence show; unchanged when none is declared."""
+        if self._item_meta_reader() is None:
+            return records
+        return [{**record, "item_meta": self._item_meta(record)} for record in records]
+
+    def _edit_count(self, candidate: Candidate) -> dict[str, int] | None:
+        """``candidate``'s own edits counted by logical change (`optim.edit_count`) against
+        its parent's state; ``None`` without a parent in the population."""
+        from refactory_dsh.optim.edit_count import count, summary
+
+        parent = next((c for c in self.population if c.id == candidate.parent), None)
+        if parent is None:
+            return None
+        try:
+            return summary(count(candidate.own_edits(), parent.state))
+        except Exception:  # noqa: BLE001 - a count is a report, never a failure
+            return None
 
     def _analyst_settings(self) -> dict[str, int]:
         """``ProposalContext.analysts``: the analyst stage's settings, empty when off."""
@@ -5961,8 +6321,20 @@ class Loop(OuterLoop):
             elif event == "strategy_state":
                 if "state" in record:
                     self.load_strategy_state(record["state"])
-            elif event == "optimizer_lessons":
-                self._lessons = {key: record.get(key) for key in ("text", "epoch", "generation")}
+            elif event == "optimizer_memory":
+                self._memory = dict(record.get("memory") or {})
+                self._memory_passes.append({k: v for k, v in record.items()
+                                            if k not in ("event", "at", "ts", "memory")})
+            elif event == "epoch_current":
+                self._epoch_currents[int(record.get("epoch") or 0)] = str(record.get("id"))
+            elif event == "memory_rollout":
+                rescores += 1
+                rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
+                held = self._memory_rollouts.setdefault(
+                    (str(record.get("id")),
+                     str(record.get("key") or f"e{int(record.get('epoch') or 0)}")), {})
+                for item in record.get("records") or ():
+                    held.setdefault(str(item.get("id")), dict(item))
             elif event == "analyst_findings":
                 self._analyses.append({key: value for key, value in record.items()
                                        if key not in ("event", "at", "ts")})
@@ -6156,6 +6528,15 @@ def node_count(state: dict[str, Any]) -> int:
     """How many nodes a candidate's graph holds, which is what the size cost counts."""
     graph = state.get("graph") or {}
     return len(graph.get("nodes") or {})
+
+
+def _changes_cell(tally: dict[str, Any] | None) -> str:
+    """A proposal's edits as the cap counts them (`optim.edit_count`): its changes, then
+    its raw edits, structural and knob, and the knob text characters it changed."""
+    if not tally:
+        return ""
+    return (f"{tally.get('logical')} ({tally.get('raw')} edits: {tally.get('structural')} "
+            f"structural, {tally.get('knob')} knob; {tally.get('chars')} chars)")
 
 
 def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
@@ -6476,13 +6857,9 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
     )
     parser.add_argument("mode", help="the mode to optimize, as <package>/<name>")
     from refactory_dsh import profiles, strategies
-    profiles.add_arguments(parser)
-    parser.add_argument("--runs-root", default=".factory/loop")
-    parser.add_argument("--project", default=str(project_root()))
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--parts", default=None, dest="parts_manifest",
-                        help="path to a parts.json manifest with train/val/test id lists")
+    # `refactory optimize`'s own short list: every other setting comes from a profile.
+    profiles.add_cli_arguments(parser)
+    parser.set_defaults(project=str(project_root()), runs_root=".factory/loop")
     parser.add_argument("--resolved-config", default="", help="exact resolved snapshot prepared by the console")
     args = parser.parse_args(argv)
     project = Path(args.project)
@@ -6494,8 +6871,8 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if snapshot.get("mode") != args.mode:
                 raise profiles.ProfileError("resolved snapshot belongs to another mode")
             return snapshot
-        # `--parts`, `--strategy-option` and `--knob` are overrides like any other: a
-        # setting the command line leaves out keeps the profile's value.
+        # `--strategy-option` and `--knob` are overrides like any other: a setting the
+        # command line leaves out keeps the profile's value.
         overrides = profiles.cli_overrides(args)
         prior_path = Path(args.runs_root) / "config.json"
         if args.resume and not args.profile and prior_path.exists():
@@ -6503,21 +6880,7 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
             if previous.get("mode") != args.mode:
                 raise profiles.ProfileError("the resume directory belongs to another mode")
             previous_settings = {k: v for k, v in previous.items() if k in profiles.defaults()}
-            for key in Loop.RESUME_KEEPS:
-                # Refused here, before the settings are checked together, with the
-                # loop's wording (``Loop._keep_recorded_run_shape``): a recorded
-                # selection with --val-gate 0 would fail that check less clearly.
-                was, asked = previous.get(key), overrides.get(key)
-                if asked is None or was in (None, ""):
-                    continue
-                if key == "val_gate":
-                    was, asked = int(bool(was)), int(bool(asked))
-                if asked != was:
-                    flag = "--" + key.replace("_", "-")
-                    raise profiles.ProfileError(
-                        f"this run was started with {key} {was} and this resume asks for "
-                        f"{key} {asked}; resume it without {flag} (or with {flag} {was}), "
-                        "or start a new run")
+            # The recorded ``RESUME_KEEPS`` settings stay: no flag of this command sets one.
             return profiles.refresh(project, args.mode, profiles.normalize({**previous_settings, **overrides}),
                                     previous.get("resolved_profile") or {}, overrides=overrides)
         return profiles.resolve(project, args.mode, name=args.profile,
@@ -6545,6 +6908,9 @@ def main(argv: list[str] | None = None, *, _client_factory: Any = None) -> int:
                 gated = client(snapshot)
             model = gated
         settings = snapshot["settings"]
+        # A snapshot written before a setting was removed still carries it; the run
+        # decides val_gate itself (``Loop._resolve_val_gate``).
+        settings = {k: v for k, v in settings.items() if k not in profiles.OBSOLETE_SETTINGS}
         config = LoopConfig.from_dict({**settings, "runs_root": args.runs_root,
                                       "print_events": True, "verbose": args.verbose,
                                       "resume": args.resume, "resolved_profile": snapshot})

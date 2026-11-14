@@ -159,7 +159,8 @@ class LiveMathTask(Task):
     Configuration defaults match SkillOpt's configs/livemathematicianbench/default.yaml:
     - shuffle_choices=True  (default.yaml:20)
 
-    use_theorem / use_sketch (default.yaml:21-22) are the solver mode's knobs.
+    use_theorem / use_sketch (default.yaml:21-22) are not ported: the theorem states
+    the correct option, so no node ever sees it or its sketch.
     """
 
     name = "livemath"
@@ -167,9 +168,16 @@ class LiveMathTask(Task):
     #: and the theorem and its sketch, which state the correct option. The grader
     #: reads them from the instance; ``current_item.json`` never carries them.
     grader_fields = ("correct_choice", "label", "label_text", "theorem", "sketch")
-    #: A run that turns ``use_theorem`` or ``use_sketch`` on (both frozen off in every
-    #: LiveMath mode) shows that field to the nodes, as SkillOpt's option does.
-    revealed_by = {"theorem": "use_theorem", "sketch": "use_sketch"}
+    #: What the optimizer's analysts see of each item's kind: SkillOpt's task type
+    #: (`item_meta`).
+    item_metadata = ("task_type",)
+
+    def item_meta(self, metadata: dict) -> dict:
+        """SkillOpt's task type, exactly (rollout.py:132): the item's first theorem type,
+        else ``math_mcq``."""
+        from .skillopt_view import task_type
+
+        return {"task_type": task_type(metadata)}
 
     def __init__(
         self,

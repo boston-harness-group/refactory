@@ -8,6 +8,7 @@ PATH.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1668,3 +1669,465 @@ def test_colon_prefixed_path_does_not_expand_pathspec(repo, tmp_path):
     tree = git(path, "ls-tree", "--name-only", "-r", "HEAD").splitlines()
     assert ":(glob)**" in tree, "the literal file must be committed"
     assert ".env" not in tree, "the ignored file must NOT be committed"
+
+
+# ── tracking config from ordinary branch creation, and naming what changed ────
+
+def _with_origin(repo: Path) -> None:
+    """Give ``repo`` an ``origin`` remote with a remote-tracking ``origin/main``."""
+    git(repo, "remote", "add", "origin", "https://example.invalid/repo.git")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def test_a_tracking_branch_made_in_the_person_s_checkout_is_not_a_shared_change(repo, tmp_path):
+    """`git worktree add -b <b> origin/main` writes branch.<b>.remote/merge: not the run's doing."""
+    _with_origin(repo)
+    found = worktree.create(repo, "HEAD", "trk0000aaaa", _run(tmp_path))
+    git(repo, "worktree", "add", "-q", "-b", "fix/early-check-probe",
+        str(tmp_path / "session"), "origin/main")
+    assert "branch.fix/early-check-probe.remote=origin" in git(repo, "config", "--list")
+    git(repo, "branch", "--track", "local-tracker", "main")  # names the remote "."
+    assert worktree.shared_change(found) is None
+
+
+@pytest.mark.parametrize("change, named", [
+    (("config", "branch.main.pushRemote", "origin"), "config branch.main.pushremote added"),
+    (("config", "branch.main.rebase", "true"), "config branch.main.rebase added"),
+    (("config", "core.hooksPath", "/elsewhere"), "config core.hookspath added"),
+    (("config", "alias.ci", "commit"), "config alias.ci added"),
+    (("config", "remote.origin.url", "https://example.invalid/other.git"),
+     "config remote.origin.url changed"),
+])
+def test_every_other_shared_config_change_is_still_caught_and_named(repo, tmp_path, change, named):
+    _with_origin(repo)
+    git(repo, "branch", "--set-upstream-to", "origin/main", "main")  # main's own tracking is left out
+    found = worktree.create(repo, "HEAD", "trk1111bbbb", _run(tmp_path))
+    git(repo, *change)
+    assert worktree.shared_change(found) == named
+    assert worktree.shared_change(found) is None, "each change is reported once"
+
+
+def test_tracking_a_remote_added_meanwhile_is_caught(repo, tmp_path):
+    _with_origin(repo)
+    found = worktree.create(repo, "HEAD", "trk2222cccc", _run(tmp_path))
+    git(repo, "remote", "add", "upstream", "https://example.invalid/fork.git")
+    git(repo, "config", "branch.other.remote", "upstream")
+    git(repo, "config", "branch.other.merge", "refs/heads/main")
+    change = worktree.shared_change(found)
+    assert change is not None and "config remote.upstream.url added" in change
+    assert "config branch.other.remote added" in change, "the remote is judged as it was before"
+
+
+def test_tracking_an_undefined_remote_is_caught(repo, tmp_path):
+    found = worktree.create(repo, "HEAD", "trk3333dddd", _run(tmp_path))
+    git(repo, "config", "branch.other.remote", "nowhere")
+    git(repo, "config", "branch.other.merge", "refs/heads/main")
+    assert worktree.shared_change(found) == (
+        "config branch.other.merge added; config branch.other.remote added")
+
+
+def test_tracking_config_for_the_run_s_own_branch_is_caught(repo, tmp_path):
+    _with_origin(repo)
+    found = worktree.create(repo, "HEAD", "trk4444eeee", _run(tmp_path))
+    git(repo, "config", f"branch.{found.branch}.remote", "origin")
+    assert worktree.shared_change(found) == f"config branch.{found.branch}.remote added"
+
+
+def test_a_shared_hook_change_is_named_by_file(repo, tmp_path):
+    found = worktree.create(repo, "HEAD", "trk5555ffff", _run(tmp_path))
+    hooks = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text("#!/bin/sh\n")
+    assert worktree.shared_change(found) == "hook pre-commit added"
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
+    assert worktree.shared_change(found) == "hook pre-commit changed"
+
+
+def test_a_record_from_before_the_detail_still_works(repo, tmp_path):
+    """A live run's record holds only the old all-lines digest: no spurious report on upgrade."""
+    _with_origin(repo)
+    git(repo, "config", "branch.main.remote", "origin")
+    found = worktree.create(repo, "HEAD", "trk6666aaaa", _run(tmp_path))
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    legacy = worktree._shared_state(repo)
+    record = {key: value for key, value in record.items()
+              if key not in ("shared_config", "shared_hooks")}
+    record_path.write_text(json.dumps({**record, "shared": legacy}))
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "core.hooksPath", "/elsewhere")
+    assert worktree.shared_change(found) == "config core.hookspath added"
+
+
+def test_an_old_record_s_change_is_reported_without_detail(repo, tmp_path):
+    found = worktree.create(repo, "HEAD", "trk7777bbbb", _run(tmp_path))
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items()
+                                       if key not in ("shared_config", "shared_hooks")}))
+    git(repo, "config", "core.hooksPath", "/elsewhere")
+    assert worktree.shared_change(found) == ""
+    assert worktree.shared_changed(found) is False
+
+
+def _with_fork(repo: Path) -> None:
+    git(repo, "remote", "add", "fork", "https://example.invalid/fork.git")
+    git(repo, "update-ref", "refs/remotes/fork/main", "HEAD")
+
+
+def test_retargeting_the_person_s_tracked_branch_is_caught(repo, tmp_path):
+    """Review of #644: an existing branch's tracking moved to another remote is a change."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "--set-upstream-to", "origin/main", "main")
+    found = worktree.create(repo, "HEAD", "trk8888cccc", _run(tmp_path))
+    git(repo, "config", "branch.main.remote", "fork")
+    git(repo, "config", "branch.main.merge", "refs/heads/evil")
+    assert worktree.shared_change(found) == (
+        "config branch.main.merge changed; config branch.main.remote changed")
+
+
+def test_giving_an_existing_branch_an_upstream_is_caught(repo, tmp_path):
+    """Review of #644: `--set-upstream-to` on a branch that was there is not branch creation."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "feature")
+    found = worktree.create(repo, "HEAD", "trk9999dddd", _run(tmp_path))
+    git(repo, "branch", "--set-upstream-to", "fork/main", "feature")
+    assert worktree.shared_change(found) == (
+        "config branch.feature.merge added; config branch.feature.remote added")
+
+
+def test_a_branch_made_in_one_step_and_given_an_upstream_in_a_later_one_is_caught(repo, tmp_path):
+    _with_origin(repo)
+    found = worktree.create(repo, "HEAD", "trkaaaaeeee", _run(tmp_path))
+    git(repo, "branch", "later")
+    assert worktree.shared_change(found) is None
+    git(repo, "branch", "--set-upstream-to", "origin/main", "later")
+    assert worktree.shared_change(found) == (
+        "config branch.later.merge added; config branch.later.remote added")
+
+
+def test_a_new_branch_s_other_settings_are_caught(repo, tmp_path):
+    """Only a new branch's remote and merge are left out; its pushRemote is not."""
+    _with_origin(repo)
+    _with_fork(repo)
+    found = worktree.create(repo, "HEAD", "trkbbbbffff", _run(tmp_path))
+    git(repo, "worktree", "add", "-q", "-b", "newb", str(tmp_path / "session"), "origin/main")
+    git(repo, "config", "branch.newb.pushRemote", "fork")
+    assert worktree.shared_change(found) == "config branch.newb.pushremote added"
+
+
+def test_retargeting_config_left_by_a_deleted_branch_is_caught(repo, tmp_path):
+    """A branch with config but no ref is not new: its tracking lines are guarded."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "config", "branch.ghost.remote", "origin")
+    git(repo, "config", "branch.ghost.merge", "refs/heads/main")
+    found = worktree.create(repo, "HEAD", "trkcccc0000", _run(tmp_path))
+    git(repo, "config", "branch.ghost.remote", "fork")
+    assert worktree.shared_change(found) == "config branch.ghost.remote changed"
+
+
+def test_deleting_a_branch_and_making_it_again_with_an_upstream_is_caught(repo, tmp_path):
+    """Re-review of #644: a branch once seen is never new again."""
+    _with_origin(repo)
+    _with_fork(repo)
+    git(repo, "branch", "feature")
+    found = worktree.create(repo, "HEAD", "trkdddd1111", _run(tmp_path))
+    git(repo, "branch", "-D", "feature")
+    assert worktree.shared_change(found) is None
+    git(repo, "branch", "--track", "feature", "fork/main")
+    assert worktree.shared_change(found) == (
+        "config branch.feature.merge added; config branch.feature.remote added")
+
+
+def test_a_remote_is_matched_by_name_not_prefix(repo, tmp_path):
+    """Re-review of #644: an existing remote `a.b` does not make remote `a` defined."""
+    git(repo, "remote", "add", "a.b", "https://example.invalid/ab.git")
+    found = worktree.create(repo, "HEAD", "trkeeee2222", _run(tmp_path))
+    git(repo, "branch", "newb")
+    git(repo, "config", "branch.newb.remote", "a")
+    git(repo, "config", "branch.newb.merge", "refs/heads/main")
+    assert worktree.shared_change(found) == (
+        "config branch.newb.merge added; config branch.newb.remote added")
+
+
+def test_a_branch_named_like_a_tag_is_known_by_its_name(repo, tmp_path):
+    """Re-review of #644: with a tag `x`, `refname:short` would list branch `x` as `heads/x`."""
+    _with_origin(repo)
+    git(repo, "tag", "x")
+    git(repo, "branch", "x")
+    found = worktree.create(repo, "HEAD", "trkffff3333", _run(tmp_path))
+    git(repo, "branch", "--set-upstream-to", "origin/main", "x")
+    assert worktree.shared_change(found) == "config branch.x.merge added; config branch.x.remote added"
+
+
+# ── the checkout's config.worktree and included files (review of #644) ────────
+
+def test_the_checkout_s_worktree_config_is_shared_state(repo, tmp_path):
+    """`_isolate_hooks` turns on worktreeConfig, so the checkout's config.worktree takes effect."""
+    found = worktree.create(repo, "HEAD", "wtc0000aaaa", _run(tmp_path))
+    assert git(repo, "config", "extensions.worktreeConfig").strip() == "true"
+    assert worktree.shared_change(found) is None, "the run's own isolated hooks path is not a change"
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert git(repo, "config", "core.hooksPath").strip() == "/evil"
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+    assert worktree.shared_change(found) is None, "each change is reported once"
+    git(repo, "config", "--worktree", "core.hooksPath", "/eviler")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath changed"
+
+
+def test_a_worktree_config_written_before_the_extension_is_on_is_seen(repo, tmp_path):
+    """A file git does not read yet is recorded too: turning the extension on would load it."""
+    found = worktree.create(repo, "HEAD", "wtc1111bbbb", _run(tmp_path))
+    git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    (git_dir / "config.worktree").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config(repo, tmp_path):
+    """When the target is itself a linked worktree, its own config.worktree is the one read."""
+    git(repo, "worktree", "add", "-q", "--no-track", "-b", "person", str(tmp_path / "checkout"), "HEAD")
+    checkout = tmp_path / "checkout"
+    found = worktree.create(checkout, "HEAD", "wtc2222cccc", _run(tmp_path))
+    git(checkout, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_a_change_inside_an_included_file_is_caught(repo, tmp_path):
+    included = tmp_path / "extra.gitconfig"
+    included.write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(included))
+    found = worktree.create(repo, "HEAD", "inc0000aaaa", _run(tmp_path))
+    assert worktree.shared_change(found) is None
+    included.write_text("[alias]\n\tci = commit\n[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{included} changed"
+    assert worktree.shared_change(found) is None, "each change is reported once"
+
+
+def test_includes_are_followed_relative_conditional_nested_and_from_worktree_config(repo, tmp_path):
+    """A relative path, an includeIf whatever its condition, a nested include, a missing file."""
+    git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir").strip())
+    (git_dir / "rel.inc").write_text("[include]\n\tpath = nested.inc\n")
+    (git_dir / "nested.inc").write_text("[alias]\n\tst = status\n")
+    (tmp_path / "cond.inc").write_text("[alias]\n\tco = checkout\n")
+    git(repo, "config", "include.path", "rel.inc")
+    git(repo, "config", "includeIf.gitdir:/nowhere/.path", str(tmp_path / "cond.inc"))
+    found = worktree.create(repo, "HEAD", "inc1111bbbb", _run(tmp_path))
+    git(repo, "config", "--worktree", "include.path", str(tmp_path / "wt.inc"))
+    assert worktree.shared_change(found) == (
+        f"config include:{tmp_path / 'wt.inc'} added; config worktree:include.path added")
+    (tmp_path / "wt.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'wt.inc'} changed"
+    (git_dir / "nested.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{git_dir / 'nested.inc'} changed"
+    (tmp_path / "cond.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'cond.inc'} changed"
+
+
+def test_an_include_cycle_ends_after_reading_each_file_once(repo, tmp_path, monkeypatch):
+    """An inactive includeIf may cycle (git never opens it); each file is listed once."""
+    (tmp_path / "a.inc").write_text(f"[include]\n\tpath = {tmp_path / 'b.inc'}\n")
+    (tmp_path / "b.inc").write_text(f"[include]\n\tpath = {tmp_path / 'a.inc'}\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "a.inc"))
+    calls: list[tuple[str, ...]] = []
+    real = worktree.git
+
+    def counted(where, *args, **kwargs):
+        calls.append(args)
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(worktree, "git", counted)
+    assert set(worktree._shared_snapshot(repo)["included"]) == {
+        str(tmp_path / "a.inc"), str(tmp_path / "b.inc")}
+    assert len(calls) == 4, "rev-parse, the shared config, a.inc and b.inc"
+
+
+def test_ordinary_work_with_includes_and_worktree_config_is_not_a_change(repo, tmp_path):
+    """Branches, commits and a tracking branch in the checkout trip nothing new."""
+    _with_origin(repo)
+    (tmp_path / "extra.gitconfig").write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(tmp_path / "extra.gitconfig"))
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    git(repo, "config", "--worktree", "user.name", "Person")
+    found = worktree.create(repo, "HEAD", "inc2222cccc", _run(tmp_path))
+    git(repo, "worktree", "add", "-q", "-b", "fix/thing", str(tmp_path / "session"), "origin/main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+    worktree.commit_attempt(Path(found.run), {Path("f.txt"): "x\n"}, "attempt")
+    assert worktree.shared_change(found) is None
+
+
+def test_an_old_record_still_sees_a_worktree_config_change(repo, tmp_path):
+    """A record from before the detail compares only the digest, which covers config.worktree."""
+    found = worktree.create(repo, "HEAD", "wtc3333dddd", _run(tmp_path))
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items()
+                                       if key not in ("shared_config", "shared_hooks")}))
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == ""
+
+
+def test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline(repo, tmp_path):
+    """A live run's record from before they were read is not failed on upgrade, only after."""
+    (tmp_path / "extra.gitconfig").write_text("[alias]\n\tci = commit\n")
+    git(repo, "config", "include.path", str(tmp_path / "extra.gitconfig"))
+    found = worktree.create(repo, "HEAD", "upg0000aaaa", _run(tmp_path))
+    git(repo, "config", "--worktree", "core.sparseCheckout", "true")  # as `sparse-checkout init`
+    record_path = worktree._record_path(found)
+    snapshot = worktree._shared_snapshot(repo)
+    legacy = worktree._shared_digest({**snapshot, "worktree_lines": [], "included": {}})
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({
+        **{key: value for key, value in record.items() if key != "shared_reads"},
+        "shared": legacy,
+        "shared_config": {key: value for key, value in record["shared_config"].items()
+                          if not key.startswith(("worktree:", "include:"))}}))
+    assert worktree.shared_change(found) is None
+    (tmp_path / "extra.gitconfig").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'extra.gitconfig'} changed"
+
+
+def test_a_digest_only_record_takes_worktree_config_as_its_baseline(repo, tmp_path):
+    found = worktree.create(repo, "HEAD", "upg1111bbbb", _run(tmp_path))
+    git(repo, "config", "--worktree", "core.sparseCheckout", "true")
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items()
+                                       if key not in ("shared_config", "shared_hooks", "shared_reads")}))
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "--worktree", "core.hooksPath", "/evil")
+    assert worktree.shared_change(found) == "config worktree:core.hookspath added"
+
+
+def test_an_include_whose_condition_holds_an_equals_sign_is_followed(repo, tmp_path):
+    (tmp_path / "eq.inc").write_text("[alias]\n\tst = status\n")
+    git(repo, "config", "includeIf.onbranch:a=b.path", str(tmp_path / "eq.inc"))
+    found = worktree.create(repo, "HEAD", "inc3333dddd", _run(tmp_path))
+    (tmp_path / "eq.inc").write_text("[core]\n\thooksPath = /evil\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'eq.inc'} changed"
+
+
+def test_an_include_git_does_not_read_here_may_be_unparsable(repo, tmp_path):
+    """An includeIf for another checkout is never opened by git, so it need not be config."""
+    (tmp_path / "other.inc").write_text("not [ config\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "other.inc"))
+    found = worktree.create(repo, "HEAD", "inc4444eeee", _run(tmp_path))
+    assert worktree.shared_change(found) is None
+    (tmp_path / "other.inc").write_text("still not [ config\n")
+    assert worktree.shared_change(found) == f"config include:{tmp_path / 'other.inc'} changed"
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads any file")
+def test_an_include_git_does_not_read_here_may_be_unreadable(repo, tmp_path):
+    (tmp_path / "locked.inc").write_text("[alias]\n\tst = status\n")
+    (tmp_path / "locked.inc").chmod(0)
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "locked.inc"))
+    try:
+        assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked.inc"): "unreadable"}
+    finally:
+        (tmp_path / "locked.inc").chmod(0o600)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root reads any file")
+def test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder(repo, tmp_path):
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked" / "cfg").write_text("[alias]\n\tst = status\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "locked" / "cfg"))
+    (tmp_path / "locked").chmod(0)
+    try:
+        assert worktree._shared_snapshot(repo)["included"] == {str(tmp_path / "locked" / "cfg"): "missing"}
+    finally:
+        (tmp_path / "locked").chmod(0o700)
+
+
+def test_the_snapshot_spawns_git_twice_for_a_plain_target(repo, monkeypatch):
+    """One rev-parse and one listing of the shared config: it runs after every agent step."""
+    calls: list[tuple[str, ...]] = []
+    real = worktree.git
+
+    def counted(where, *args, **kwargs):
+        calls.append(args)
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(worktree, "git", counted)
+    worktree._shared_snapshot(repo)
+    assert len(calls) == 2, calls
+
+
+def test_the_config_lines_are_what_git_config_list_prints(repo):
+    """Read with -z, they still match `--list` line for line, so live digests do not move."""
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    with (common / "config").open("a") as config:
+        config.write('[alias]\n\tbare\n\tempty =\n\tmulti = "one\\ntwo"\n')
+    listed = git(repo, "config", "--file", str(common / "config"), "--list").splitlines()
+    assert "alias.bare" in listed and "alias.empty=" in listed and "two" in listed
+    assert worktree._shared_snapshot(repo)["config_lines"] == [
+        line for line in listed if not line.lower().startswith("extensions.worktreeconfig=")]
+
+
+def test_an_include_path_is_normalised_so_a_dot_dot_loop_ends(repo, tmp_path):
+    """Review of #646: `sub/../loop` including itself made a new name at every level."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "loop").write_text("[include]\n\tpath = sub/../loop\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "sub" / ".." / "loop"))
+    assert worktree._shared_snapshot(repo)["included"] == {
+        str(tmp_path / "loop"): hashlib.sha256((tmp_path / "loop").read_bytes()).hexdigest()}
+
+
+def test_includes_are_followed_no_deeper_than_git_follows_them(repo, tmp_path):
+    for level in range(1, 13):
+        (tmp_path / f"f{level}").write_text(f"[include]\n\tpath = f{level + 1}\n")
+    git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "f1"))
+    assert sorted(worktree._shared_snapshot(repo)["included"]) == sorted(
+        str(tmp_path / f"f{level}") for level in range(1, 11))
+
+
+# ── another run's setup enabling worktreeConfig (live, scale-first build) ─────
+
+def test_another_run_enabling_worktree_config_does_not_trip_this_run(repo, tmp_path):
+    """Run B's setup turns on extensions.worktreeConfig; run A's next step is not failed."""
+    run_a = worktree.create(repo, "HEAD", "two0000aaaa", _run(tmp_path, "a"))
+    git(repo, "config", "--unset", "extensions.worktreeConfig")  # as before any run's setup
+    assert worktree.shared_change(run_a) is None
+    worktree.create(repo, "HEAD", "two1111bbbb", _run(tmp_path, "b"))  # its setup enables it
+    assert git(repo, "config", "extensions.worktreeConfig").strip() == "true"
+    assert worktree.shared_change(run_a) is None
+
+
+@pytest.mark.parametrize("before", [None, "false"])
+def test_enabling_worktree_config_from_absent_or_false_is_not_a_change(repo, tmp_path, before):
+    found = worktree.create(repo, "HEAD", "ext0000aaaa", _run(tmp_path))
+    git(repo, "config", "--unset", "extensions.worktreeConfig")
+    if before is not None:
+        git(repo, "config", "extensions.worktreeConfig", before)
+    worktree.shared_change(found)  # the record moves on to the starting state
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    assert worktree.shared_change(found) is None
+
+
+@pytest.mark.parametrize("change, named", [
+    (("config", "extensions.worktreeConfig", "false"), "config extensions.worktreeconfig changed"),
+    (("config", "--unset", "extensions.worktreeConfig"), "config extensions.worktreeconfig removed"),
+    (("config", "extensions.noop", "true"), "config extensions.noop added"),
+])
+def test_turning_worktree_config_off_or_any_other_extension_is_caught(repo, tmp_path, change, named):
+    found = worktree.create(repo, "HEAD", "ext1111bbbb", _run(tmp_path))
+    assert worktree.shared_change(found) is None, "the run's own isolation turned it on"
+    git(repo, *change)
+    assert worktree.shared_change(found) == named
+
+
+def test_a_record_from_before_holds_worktree_config_off_as_its_baseline(repo, tmp_path):
+    """A run live at upgrade whose target has the extension set false is not failed for it."""
+    found = worktree.create(repo, "HEAD", "ext2222cccc", _run(tmp_path))
+    git(repo, "config", "extensions.worktreeConfig", "false")
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items() if key != "shared_reads"}))
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "extensions.worktreeConfig", "false")
+    assert worktree.shared_change(found) == "config extensions.worktreeconfig changed"

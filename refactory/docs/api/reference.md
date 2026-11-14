@@ -416,7 +416,6 @@ The SRF strategies, as outer loops.
 | class | `ReflectiveSampler` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `ResearchThenOptimize` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `StagedCurriculum` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `StagedV1` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
 | class | `TreeArchive` | `(members: 'list[Candidate]' = <factory>, parents: 'dict[str, str]' = <factory>, children: 'dict[str, list[str]]' = <factory>) -> None` |
 | class | `TreeSearch` | `(*args: 'Any', **kwargs: 'Any') -> 'None'` |
 | function | `available` | `(project: 'Path \| None' = None) -> 'list[str]'` |
@@ -437,7 +436,6 @@ The SRF strategies, as outer loops.
 - **`ReflectiveSampler`** — SRF `shinka`: reflection inside sampling.
 - **`ResearchThenOptimize`** — SRF `autoresearch`: a pre-phase, then the loop.
 - **`StagedCurriculum`** — SRF `ai_sci_v2`: a staged curriculum, not a loop.
-- **`StagedV1`** — SRF `ai_sci_v1`: the earlier staged variant.
 - **`TreeArchive`** — A tree. A node's parent is the node it was expanded from.
 - **`TreeSearch`** — SRF `aide`: `policy → action_gate(draft|improve|debug) → tree_update`.
 - **`available`** — Every selectable strategy: the library's own and the packages'.
@@ -459,7 +457,7 @@ The optimizer loop, named like one.
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `EvaluationInterrupted` | `` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, fresh_evidence: 'bool' = True, max_edits_per_proposal: 'int' = 4, allow_new_node_tools: 'bool' = False, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, allow_new_node_tools: 'bool' = False, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
 | class | `LoopError` | `` |
 | function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'str'` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
@@ -1033,6 +1031,7 @@ Versioned search recipes and immutable, resolved run snapshots.
 |---|---|---|
 | class | `ProfileError` | `` |
 | function | `add_arguments` | `(parser: 'Any') -> 'None'` |
+| function | `add_cli_arguments` | `(parser: 'Any') -> 'None'` |
 | function | `cli_overrides` | `(args: 'Any') -> 'dict[str, Any]'` |
 | function | `defaults` | `() -> 'dict[str, Any]'` |
 | function | `digest` | `(value: 'Any') -> 'str'` |
@@ -1040,14 +1039,17 @@ Versioned search recipes and immutable, resolved run snapshots.
 | function | `load` | `(project: 'Path', name: 'str', version: 'int \| None' = None) -> 'dict[str, Any]'` |
 | function | `normalize` | `(settings: 'dict[str, Any]') -> 'dict[str, Any]'` |
 | function | `refresh` | `(project: 'Path', mode_id: 'str', settings: 'dict[str, Any]', previous: 'dict[str, Any]', *, model_client: 'Any' = None, overrides: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
+| function | `removed_flag_message` | `(flag: 'str', key: 'str', value: 'Any') -> 'str'` |
 | function | `resolve` | `(project: 'Path', mode_id: 'str', *, name: 'str' = '', version: 'int \| None' = None, overrides: 'dict[str, Any] \| None' = None, validate_settings: 'bool' = True, recipe: 'dict[str, Any] \| None' = None, model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `runtime_identity` | `(settings: 'dict[str, Any]', project: 'Path', *, uses_models: 'bool', model_client: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `save` | `(project: 'Path', name: 'str', spec: 'dict[str, Any]') -> 'dict[str, Any]'` |
 
 - **`ProfileError`** — A profile cannot be resolved without changing its declared contract.
-- **`add_arguments`** — All launch surfaces parse this same optional configuration vocabulary.
+- **`add_arguments`** — Every setting as a flag, for the console's ``start`` and ``profile-resolve``: the
+- **`add_cli_arguments`** — The short command line of ``refactory optimize`` and ``python -m
 - **`cli_overrides`** — The settings a command line gave explicitly, to override a profile's.
 - **`refresh`** — Recheck source/input identity without relying on a still-existing recipe.
+- **`removed_flag_message`** — What a command line that gives a setting only a profile takes is told: the
 - **`runtime_identity`** — Read nonsecret effective configuration; this is not authentication evidence.
 - **`save`** — Save a new immutable version. Editing a recipe always creates a version.
 
@@ -1073,6 +1075,7 @@ The per-item half of a data node, from the command line.
 | function | `detach_read_through` | `(workdir: 'Path', name: 'str') -> 'None'` |
 | function | `error_kind` | `(error: 'BaseException') -> 'str'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
+| function | `gate_visit` | `(node: 'str', verdict: 'Any') -> 'dict[str, Any]'` |
 | function | `interrupted_cause` | `(text: 'str \| None') -> 'str \| None'` |
 | function | `interrupted_item` | `(record: 'dict[str, Any]') -> 'str \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
@@ -1083,10 +1086,12 @@ The per-item half of a data node, from the command line.
 | function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
 | function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, dict[str, Any]]'` |
 | function | `no_answer` | `(pass_dir: 'Path', error_text: 'str', outputs_of: 'Callable[[str], Iterable[str]]') -> 'dict[str, dict[str, Any]]'` |
+| function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
@@ -1104,6 +1109,7 @@ The per-item half of a data node, from the command line.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
 - **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
+- **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None
 - **`interrupted_item`** — Why an item record's outcome is unknown, or None when it is the item's own result.
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
@@ -1113,10 +1119,12 @@ The per-item half of a data node, from the command line.
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
 - **`missing_steps`** — The steps a pass went on without, each with why: ``cause`` (``output_limit``,
 - **`no_answer`** — The missing steps whose absent output is why a later step of the pass failed, or {}.
+- **`op_visit`** — One op visit of an item's pass, as its record's ``steps`` keep it: the facts it
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.

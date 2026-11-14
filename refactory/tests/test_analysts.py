@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh.optim import ProposalContext, analysts
+from refactory_dsh.optim import ProposalContext, analysts, memory
 from refactory_dsh.optim.base import Candidate
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 from refactory_dsh.outerloop import ValidationGate
@@ -91,13 +91,16 @@ class Client:
                 json.loads(prompt.split("## Failure findings\n")[1].split("\n\n## Success")[0]),
                 json.loads(prompt.split("## Success findings\n")[1].split("\n\n## Answer")[0])]
             return json.dumps({"findings": [f for found in lists for f in found]})
+        if system == memory.MEMORY_SYSTEM:
+            return json.dumps({"reasoning": "r", "memory": "MEMORY-NOTE"})
         return json.dumps({"diagnosis": "d", "proposals": []})
 
     def of(self, systems: tuple[str, ...]) -> list[str]:
         return [prompt for system, prompt in self.calls if system in systems]
 
     def proposal(self) -> str:
-        return [p for s, p in self.calls if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS][-1]
+        return [p for s, p in self.calls
+                if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS + (memory.MEMORY_SYSTEM,)][-1]
 
 
 def _ctx(records: list[dict[str, Any]], **settings: Any) -> ProposalContext:
@@ -329,7 +332,9 @@ def test_a_failed_analyst_is_recorded_shown_and_never_fatal(tmp_path):
     assert "could not be analysed: RuntimeError: 503 overloaded" in request
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     failed = [t for t in trace if t["kind"] == "analyst_failure" and t["error"]]
-    assert len(failed) == 1 and failed[0]["items"] == ["f0"]
+    # Attempted three times, as SkillOpt retries a failed call, each attempt traced.
+    assert [t["attempt"] for t in failed] == [1, 2, 3]
+    assert all(t["items"] == ["f0"] for t in failed)
     stored = tmp_path / "analyst_findings"
     assert len(list(stored.glob("[!r]*.json"))) == 1, "failures not cached"
     assert not list(stored.glob("round-*.json")), "nor the step that had one"
@@ -363,9 +368,9 @@ def test_calls_are_cached_for_a_retry_and_a_resume_and_traced(tmp_path):
                      "analyst_merge_final", "analyst_success"]
     assert all(t["findings"] for t in trace if t["kind"].startswith("analyst_"))
     first = optimizer.last_analysis
-    optimizer.propose(replace(ctx, ask_lessons=True, lessons={"text": "NEW LESSON"}), 1, [])
+    optimizer.propose(replace(ctx, attempt=2), 1, [])
     assert len(client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)) == paid, "a retry pays for none"
-    assert optimizer.last_analysis is first, "the step's analysis, its first lessons"
+    assert optimizer.last_analysis is first, "the step's analysis"
     # Each call is cached on its own too: a fresh optimizer without the step's file
     # answers every call from the per-call cache.
     for held in (tmp_path / "analyst_findings").glob("round-*.json"):
@@ -381,9 +386,8 @@ def test_calls_are_cached_for_a_retry_and_a_resume_and_traced(tmp_path):
     again = Client()
     resumed = AutoresearchOptimizer(again)  # a fresh process: only the run directory
     resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
-    # A resumed run whose lessons have changed since the step's first attempt reuses
-    # the step's analysis from the run directory.
-    resumed.propose(replace(ctx, ask_lessons=True, lessons={"text": "NEW LESSON"}), 1, [])
+    # A resumed run reuses the step's analysis from the run directory.
+    resumed.propose(replace(ctx, attempt=2), 1, [])
     assert again.of(ANALYST_SYSTEMS + MERGE_SYSTEMS) == []
     assert resumed.last_analysis["calls"] == 0 and resumed.last_analysis["cached"] == paid
     assert "## What the analysts found, ranked" in again.proposal()
@@ -663,22 +667,19 @@ def test_every_model_proposer_strategy_runs_the_stage_on_real_traces(
     its prompt and answer): every strategy asking the model proposer runs the analysts
     over the train items' real step traces, the request shows the ranked findings, and
     no val or test item reaches an analyst."""
-    from test_search_combo import GATED_STRATEGIES, TEST, VAL, ComboModel, _parts, _run
+    from test_search_combo import TEST, VAL, ComboModel, _parts, _run
 
     seen = _answering_analysts(monkeypatch)
     model = ComboModel()
-    # The parts manifest for every strategy, gated or not, so val and test items exist
-    # beside the train ones (without one every item is a train item).
-    loop = _run(name, tmp_path, model, val_gate=name in GATED_STRATEGIES, epochs=3,
+    # The parts manifest for every strategy, so val and test items exist beside the
+    # train ones (without one every item is a train item); its val items gate the run.
+    loop = _run(name, tmp_path, model, val_gate=None, epochs=3,
                 parts_manifest=str(_parts(tmp_path)), analysts=True, analyst_group_size=2,
                 **overrides)
     assert loop.optimizer.proposal_failures == []
     asked = [r for r in model.requests if "## Item results" in r.text]
-    if name in ("best_of_n", "autoscientists"):
-        # Single sampling rounds proposed before any train records exist: nothing to
-        # analyse, so no analyst runs (nor would a reader).
-        assert model.requests and not asked and seen == []
-        return
+    # Under the gate the single-round strategies (best_of_n, autoscientists) score the
+    # seed before sampling, so their one request has train evidence to analyse too.
     assert asked, f"{name}: no request carried train evidence"
     assert all("## What the analysts found, ranked" in r.text for r in asked), name
     analyst_prompts = [p for s, p in seen if s in ANALYST_SYSTEMS]
@@ -696,31 +697,29 @@ def test_every_model_proposer_strategy_runs_the_stage_on_real_traces(
 
 
 class Retrying(Client):
-    """Every proposal answer is refused (an unknown knob) and writes new lessons, so the
-    loop retries the step with a request whose lessons changed."""
+    """Every proposal answer is refused (an unknown knob), so the loop retries the step."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.answers = 0
 
     def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
-        if system in ANALYST_SYSTEMS + MERGE_SYSTEMS:
+        if system in ANALYST_SYSTEMS + MERGE_SYSTEMS + (memory.MEMORY_SYSTEM,):
             return super().complete(prompt, system=system, **kwargs)
         with self.lock:
             self.calls.append((system, prompt))
             self.answers += 1
-            number = self.answers
-        return json.dumps({"diagnosis": "d", "lessons": f"LESSON-{number}", "proposals": [
+        return json.dumps({"diagnosis": "d", "proposals": [
             {"edit": {"op": "set_knob", "name": "no_such_knob", "value": 1}}]})
 
 
 def test_retries_in_a_step_reuse_its_analysis_and_journal_it_once(tmp_path, monkeypatch):
     client = Retrying()
     loop = _loop_run(tmp_path, monkeypatch, client, epochs=2, attempts=3)
-    proposals = [p for s, p in client.calls if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS]
+    proposals = [p for s, p in client.calls
+                 if s not in ANALYST_SYSTEMS + MERGE_SYSTEMS + (memory.MEMORY_SYSTEM,)]
     events = _journal(loop, "analyst_findings")
     assert len(proposals) >= 2 * len(events), "setup: every step was retried"
-    assert any("LESSON-1" in p for p in proposals[1:]), "setup: the lessons changed"
     assert len({e["key"] for e in events}) == len(events) == 2, "one analysis per step"
     paid = client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)
     assert len(paid) == sum(e["calls"] for e in events), "every call paid once"
@@ -761,17 +760,26 @@ def test_a_spent_budget_mid_stage_journals_what_was_paid(tmp_path, monkeypatch):
     assert analysts.journal_entry(partial)["error"].startswith("BudgetExhausted")
 
 
-def test_the_lessons_reach_the_analysts_and_the_merges():
+def test_the_memory_note_reaches_every_analyst_and_merge_and_the_proposal():
     client = Client()
     records = [_rec(f"f{i}", False) for i in range(2)] + [_rec(f"s{i}", True) for i in range(2)]
-    ctx = replace(_ctx(records, group_size=1), ask_lessons=True,
-                  lessons={"text": "LESSON-TEXT: prefer checks"})
+    ctx = replace(_ctx(records, group_size=1),
+                  memory={"text": "NOTE-TEXT: prefer checks", "epoch": 2})
     AutoresearchOptimizer(client).propose(ctx, 1, [])
-    for prompt in client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS):
-        assert "## The optimizer's lessons so far" in prompt and "LESSON-TEXT" in prompt
-    unasked = Client()
-    AutoresearchOptimizer(unasked).propose(replace(ctx, ask_lessons=False), 1, [])
-    assert not any("LESSON-TEXT" in p for p in unasked.of(ANALYST_SYSTEMS + MERGE_SYSTEMS))
+    shown = client.of(ANALYST_SYSTEMS + MERGE_SYSTEMS)
+    assert len(shown) == 4 + 3, "every analyst, every merge"
+    for prompt in shown:
+        assert "## Optimizer memory" in prompt and "NOTE-TEXT: prefer checks" in prompt
+        assert "do not force it if the current traces clearly contradict it" in prompt
+    assert "NOTE-TEXT: prefer checks" in client.proposal()
+    stale = Client()
+    AutoresearchOptimizer(stale).propose(replace(ctx, memory={
+        **ctx.memory, "not_updated": {"epoch": 3, "why": "TimeoutError: slow"}}), 1, [])
+    for prompt in stale.of(ANALYST_SYSTEMS + MERGE_SYSTEMS):
+        assert "NOT UPDATED in epoch 3" in prompt and "TimeoutError: slow" in prompt
+    without = Client()
+    AutoresearchOptimizer(without).propose(replace(ctx, memory={}), 1, [])
+    assert not any("## Optimizer memory" in p for p in without.calls for p in p)
 
 
 def test_a_level_merge_drops_ids_no_analyst_read():
@@ -1061,7 +1069,7 @@ def test_an_analyst_too_long_for_the_context_is_retried_once_at_half_its_length(
     assert batch["context_retry"] is True and batch["clipped"] == 4
 
 
-def test_a_retry_that_is_still_too_long_gives_up_and_other_errors_are_not_retried():
+def test_a_retry_that_is_still_too_long_gives_up_and_other_errors_are_retried_as_skillopt():
     group = [_long(f"f{i}", 60000) for i in range(4)]
     client = Overflowing(limit=1000)
     optimizer = AutoresearchOptimizer(client)
@@ -1076,7 +1084,7 @@ def test_a_retry_that_is_still_too_long_gives_up_and_other_errors_are_not_retrie
     other = Client(analyst=down)
     plain = AutoresearchOptimizer(other)
     plain.propose(_ctx([_rec("f0", False)]), 1, [])
-    assert len(other.of((analysts.FAILURE_SYSTEM,))) == 1
+    assert len(other.of((analysts.FAILURE_SYSTEM,))) == 3, "SkillOpt's three attempts"
     (batch,) = plain.last_analysis["batches"]
     assert "context_retry" not in batch and "503" in batch["error"]
 
@@ -1214,3 +1222,51 @@ def test_context_retries_are_reported():
     assert report["context_retries"] == 2
     assert ("2 call(s) were too long for the model's context and retried once at half "
             "the length" in "\n".join(_analysts_section(report)))
+
+
+# ── the findings are shown whole ───────────────────────────────────────────
+
+
+LONG_CHANGE = "Rewrite the decide prompt:\n## Rules\n- line one\n- line two\n" + "c" * 1400
+#: The D-run shape: a finding and its change past the old 600-character cut, six quotes,
+#: a structure note past the old 200, and both a change and what to keep.
+FULL = {"source": "failure", "finding": "F" * 900, "change": LONG_CHANGE, "preserve": "KEEP-TOO",
+        "where": {"nodes": ["final"], "structure": "S" * 400}, "items": ["f0"],
+        "evidence": [f"QUOTE-{k} " + "q" * 300 for k in range(6)]}
+
+
+def test_a_finding_is_shown_whole_with_its_line_breaks_quotes_and_both_actions():
+    section = "\n".join(analysts.section_lines({"findings": [FULL], "batches": []}))
+    assert "F" * 900 in section and LONG_CHANGE in section, "no 600-character cut"
+    assert "## Rules\n- line one\n- line two\n" in section, "the change keeps its layout"
+    assert "S" * 400 in section
+    assert all(f"QUOTE-{k} " + "q" * 300 in section for k in range(6)), "every quote, whole"
+    assert f"-- change: {LONG_CHANGE} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
+    success = {**FULL, "source": "success"}
+    assert "-- keep: KEEP-TOO -- change: " in analysts.finding_line(1, success)
+    assert "[cut:" not in section
+
+
+def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
+    many = [{**FULL, "finding": f"FINDING-{k} " + "F" * 5000} for k in range(analysts.SHOWN_FINDINGS)]
+    lines = analysts.section_lines({"findings": many, "batches": []})
+    shown = [line for line in lines if __import__("re").match(r"\d+\. \[", line)]
+    assert len(shown) == analysts.SHOWN_FINDINGS, "every finding is still shown"
+    assert len("\n".join(lines)) <= analysts.SECTION_CHARS
+    assert all("FINDING-" in line and "… [cut: " in line for line in shown)
+    assert "more finding(s) not shown" not in "\n".join(lines)
+
+
+def test_the_op_catalogue_reaches_the_analysts_whole():
+    long = "Split a step into two steps " + "d" * 300 + " END."
+    ctx = replace(_ctx([_rec("f0", False)]), catalogue=[{"op": "split", "description": long}])
+    assert f"- `split`: {long}" in analysts._changes_text(ctx)
+
+
+def test_an_errored_items_error_is_said_once():
+    error = "compare: CompletionTimeout: model completion timed out after 1798s"
+    record = {**_rec("f0", False, error=error), "fail_reason": error}
+    text = analysts.item_text(record)
+    assert text.count(error) == 1 and f"Error: {error}" in text and "Grader:" not in text
+    other = analysts.item_text({**_rec("f1", False, error=error)})
+    assert "Grader: GRADER f1" in other and f"Error: {error}" in other

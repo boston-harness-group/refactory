@@ -354,11 +354,10 @@ def b_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry["n_success_patches"] = len(with_edits_s)
             entry["n_patches"] = len(with_edits_f) + len(with_edits_s)
             # A writes a file for every group whose reply carried a patch, with
-            # edits or without; traces older than ``returned_patch`` fall back
-            # to the groups with edits.
+            # edits or without (the trace is the replay's own run's).
             entry["patch_files"] = _patch_files(
-                [d for d in failure if d.get("returned_patch", int(d.get("n_edits") or 0) > 0)],
-                [d for d in success if d.get("returned_patch", int(d.get("n_edits") or 0) > 0)],
+                [d for d in failure if d.get("returned_patch")],
+                [d for d in success if d.get("returned_patch")],
             )
         else:
             entry["n_failure_patches"] = None
@@ -467,8 +466,6 @@ def run_replay(
     output_dir: Path,
     split_dir: Path | None = None,
     data_path: Path | None = None,
-    *,
-    claude_backend_wrapper: bool = False,
 ) -> dict[str, Any]:
     """Run the offline replay: drive arm B's SkillOpt strategy with A's recordings.
 
@@ -480,21 +477,18 @@ def run_replay(
     run's parts manifest through livemath's ``build_parts_manifest`` (#558).
     ``data_path`` is the LiveMath item corpus ``LiveMathTask`` loads.
 
-    ``claude_backend_wrapper`` runs arm B with that strategy option on (its optimizer
-    calls framed as A's Claude backend frames them), and the replay takes the framing
-    off before matching, as it does for solver prompts.
+    Arm B frames its optimizer calls as A's Claude backend frames them, and the replay
+    takes the framing off before matching, as it does for solver prompts.
 
     When a ``ReplayMismatch`` occurs (B asks for a call A never made), that
     mismatch is itself the report: it names the call site where B diverges.
     """
     a_out_dir = recording_dir / "out"
     strategy_options = load_a_config(a_out_dir)
-    if claude_backend_wrapper:
-        strategy_options["claude_backend_wrapper"] = True
     unsupported = unsupported_a_settings(a_out_dir)
 
     matcher, a_timeouts = recording_matcher(recording_dir)
-    client = ReplayClient(matcher, unframe_optimizer=claude_backend_wrapper)
+    client = ReplayClient(matcher)
     # Rollout completion order is conceded in replay only — see RecordedRolloutOrder.
     rollout_order = RecordedRolloutOrder(a_out_dir)
     # So is the analysts' completion order — see RecordedPatchOrder.
@@ -552,7 +546,7 @@ def run_replay(
         split_dir = Path(split_dir)
         report["split_dir"] = str(split_dir)
 
-        # The parts manifest is the only item channel: #558's --parts format,
+        # The parts manifest is the only item channel: #558's parts_manifest format,
         # built from A's own split so B evaluates A's 35/17/125.
         parts_path = build_parts_manifest(split_dir, output_dir)
 
@@ -833,16 +827,10 @@ def main() -> None:
         required=True,
         help="Path for B's output",
     )
-    parser.add_argument(
-        "--claude-backend-wrapper",
-        action="store_true",
-        help="run arm B with --strategy-option claude_backend_wrapper=true",
-    )
     args = parser.parse_args()
 
     report = run_replay(
         args.recording_dir, args.output_dir, args.split_dir, args.data_path,
-        claude_backend_wrapper=args.claude_backend_wrapper,
     )
 
     print(f"Replay status: {report['replay_status']}")

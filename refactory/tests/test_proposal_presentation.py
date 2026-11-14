@@ -163,7 +163,7 @@ def test_the_template_names_no_task_or_domain():
 
 
 SEPARATE = "separate ideas go in separate proposals"
-WHOLE_PATH = "make this one proposal's edits cover every step it names on that\nfailure path (up to 4 edits)"
+WHOLE_PATH = "make this one proposal's edits cover every step it names on that\nfailure path (up to 4 changes)"
 
 
 def test_one_proposal_asks_to_cover_the_whole_failure_path():

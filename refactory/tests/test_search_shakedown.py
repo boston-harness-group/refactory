@@ -24,10 +24,8 @@ from refactory_dsh.optim import Candidate
 
 from test_livemath_blocks import (
     FIXTURE_DIR,
-    _FailOnceModel,
     _NodeScriptedModel,
     _facts,
-    _grid,
     _patch_task,
     _scores,
     _spine,
@@ -133,20 +131,20 @@ def test_spine_items_follow_the_seed_the_loop_writes(tmp_path, monkeypatch):
     assert _scores(walker.facts["item_scores"]) == _scores(_facts(spine_dir)["item_scores"])
 
 
-# ── 2. LiveMath's answer-bearing switches are frozen ─────────────────────
+# ── 2. LiveMath has no answer-bearing switch ─────────────────────────────
 
 
 @pytest.mark.parametrize("block", ["baseline", "solve_then_verify",
                                    "two_attempts_then_judge", "solve_then_self_check"])
 @pytest.mark.parametrize("knob", ["use_theorem", "use_sketch"])
 def test_theorem_and_sketch_cannot_be_turned_on_by_a_search(block, knob):
-    """The theorem text states the correct option, so no edit may turn it on."""
+    """The theorem text states the correct option, so no knob shows it and no edit
+    can add one that does."""
     from refactory_packages.livemath.mode import Solver
 
     state = Solver(block=block).state_dict()
-    assert state["knobs"][knob]["spec"]["frozen"] is True
-    assert state["knobs"][knob]["value"] is False
-    with pytest.raises(nn_edits.EditError, match="frozen"):
+    assert knob not in state["knobs"]
+    with pytest.raises(nn_edits.EditError, match="no knob"):
         nn_edits.apply({"op": "set_knob", "name": knob, "value": True}, state)
 
 
@@ -264,9 +262,8 @@ def _parts_run(tmp_path: Path, parts: dict[str, list[str]],
     with _patch_mode(PartsProbe):
         loop = Loop(PARTS_MODE, LoopConfig(epochs=1, batch_size=1, optimizer="random", seed=1,
                                            runs_root=tmp_path / "run", holdout=holdout,
-                                           parts_manifest=str(manifest),
-                                           # the audit of an ungated run's val part
-                                           val_gate=False), project=Path("."))
+                                           parts_manifest=str(manifest)),
+                    project=Path("."))
         report = loop.run()
     return loop, report
 
@@ -278,18 +275,6 @@ def _every_record_id(root: Path) -> set[str]:
     return ids
 
 
-def test_the_holdout_audit_runs_the_manifest_val_part_and_never_test(tmp_path):
-    loop, report = _parts_run(tmp_path, {"train": ["alpha", "beta", "gamma", "delta"],
-                                         "val": ["epsilon"], "test": ["zeta"]})
-    audit = report["holdout"]
-    assert audit["status"] == "measured", audit
-    assert audit["instances"] == {"train": 4, "holdout": 1}
-    winner = audit["winner"]
-    held = json.loads((tmp_path / "run" / "holdout" / winner / "item_records.json").read_text())
-    assert [r["id"] for r in held] == ["epsilon"]
-    assert "zeta" not in _every_record_id(tmp_path / "run")
-
-
 def test_a_manifest_without_val_has_no_holdout_rather_than_a_test_one(tmp_path):
     _loop, report = _parts_run(tmp_path, {"train": ["alpha", "beta", "gamma", "delta"],
                                           "test": ["epsilon", "zeta"]})
@@ -298,16 +283,6 @@ def test_a_manifest_without_val_has_no_holdout_rather_than_a_test_one(tmp_path):
     assert audit["instances"] == {"train": 4, "holdout": 0}
     assert not (tmp_path / "run" / "holdout").exists()
     assert not {"epsilon", "zeta"} & _every_record_id(tmp_path / "run")
-
-
-def test_holdout_zero_turns_the_manifest_audit_off(tmp_path):
-    """Arm B runs with --holdout 0 and a manifest: its winner is not re-run on val."""
-    _loop, report = _parts_run(tmp_path, {"train": ["alpha", "beta", "gamma", "delta"],
-                                          "val": ["epsilon"], "test": ["zeta"]}, holdout=0.0)
-    audit = report["holdout"]
-    assert audit["status"] == "not_applicable", audit
-    assert audit["instances"] == {"train": 4, "holdout": 0}
-    assert not (tmp_path / "run" / "holdout").exists()
 
 
 # ── 5. the optimizer sees the parent's graph ─────────────────────────────
@@ -519,22 +494,3 @@ def test_a_node_timeout_is_recorded_as_a_timeout_on_both_runtimes():
     for error in (walker, spine):
         assert make_item_record("x", None, error=error)["error_kind"] == "timeout"
     assert make_item_record("x", None, error=RuntimeError("boom"))["error_kind"] == "RuntimeError"
-
-
-def test_the_grid_counts_and_prints_timeouts(tmp_path, monkeypatch, capsys):
-    from refactory_dsh.model import CompletionTimeout
-
-    class Factory:
-        def __call__(self, **kwargs: Any) -> Any:
-            return _FailOnceModel(CompletionTimeout(
-                "model completion timed out after 3s; requested runtime shutdown"))
-
-    rc, output, _ = _grid(tmp_path, monkeypatch, factory=Factory(), blocks=["baseline"])
-    assert rc == 0
-    (row,) = json.loads(output.read_text())["blocks"]
-    assert row["timeouts"] == 1 and row["errors"] == 1
-    lines = capsys.readouterr().out.splitlines()
-    header = next(line for line in lines if line.startswith("Block"))
-    assert "T/O" in header.split()
-    baseline = next(line for line in lines if line.startswith("baseline "))
-    assert baseline.split()[header.split().index("T/O")] == "1"

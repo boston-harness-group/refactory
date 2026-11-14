@@ -24,11 +24,11 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   only when both sides found something. An unreadable merge reply keeps every input
   finding (SkillOpt's fallback concatenation).
 
-SkillOpt's patch, slow-update and meta-skill steps are not here: the proposer writes the
-edits (it is the step SkillOpt's rank and patch are), and its ``lessons`` carry
-optimizer-side memory across rounds. The ranked findings reach the proposal request as
-"What the analysts found, ranked" and replace the readers' summaries
-(``AutoresearchOptimizer._analyse``).
+SkillOpt's patch and slow-update steps are not here: the proposer writes the edits (it
+is the step SkillOpt's rank and patch are). Its meta skill is the loop's memory pass
+(`optim.memory`): the per-epoch note every analyst and merge call reads here. The
+ranked findings reach the proposal request as "What the analysts found, ranked" and
+replace the readers' summaries (``AutoresearchOptimizer._analyse``).
 
 Domain-free: the prompts name no dataset or task. Train records only: the analysts see
 ``ProposalContext.item_records`` (the loop hands over train records only) and the graph.
@@ -86,9 +86,11 @@ CONCURRENCY = 8
 #: The ranked findings the proposal request shows, and their room.
 SHOWN_FINDINGS = 16
 SECTION_CHARS = 30000
-FINDING_CHARS = 600
-QUOTES = 3
-QUOTE_CHARS = 240
+#: The least a finding's text or suggested change is cut to when the shown findings do
+#: not fit ``SECTION_CHARS`` whole (`section_lines`); each cut says how much it cut.
+FINDING_FLOOR = 100
+#: The evidence quotes a finding keeps (twice SkillOpt's three, for a merged finding).
+EVIDENCE_PER_FINDING = 6
 ITEM_IDS = 20
 
 KINDS = ("failure", "success")
@@ -151,7 +153,9 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
     ins, outs = input_chars or big, output_chars or big
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
-    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"]
+    declared = metadata_text(record)
+    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"
+             + (f" — {declared}" if declared else "")]
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
     if key is not None:
         lines += [f"Input ({key}):", _clip_middle(meta[key], outs)]
@@ -170,7 +174,9 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
         lines.append(f"Expected: {_clip_middle(expected, outs)}")
     if record.get("prediction") is not None:
         lines.append(f"Predicted: {_clip_middle(record.get('prediction'), outs)}")
-    if record.get("fail_reason") and not record.get("passed"):
+    # An errored item's grader feedback is often its error again: said once, as the error.
+    if (record.get("fail_reason") and not record.get("passed")
+            and str(record["fail_reason"]).strip() != str(record.get("error_text") or "").strip()):
         lines.append(f"Grader: {_clip_middle(record['fail_reason'], outs)}")
     for step, info in sorted((record.get("missing_steps") or {}).items()):
         if isinstance(info, dict):
@@ -179,6 +185,27 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
     if record.get("error_text"):
         lines.append(f"Error: {_clip_middle(record['error_text'], outs)}")
     return "\n".join(lines)
+
+
+#: The most characters one declared metadata value shows in an item's header.
+METADATA_CHARS = 200
+
+
+def metadata_text(record: Mapping[str, Any]) -> str:
+    """The item's declared metadata (``record["item_meta"]``, the fields its Task names in
+    ``Task.item_metadata``, set by the loop; SkillOpt's analysts see each item's task
+    type) as ``name: value`` pairs; empty without any."""
+    meta = record.get("item_meta") if isinstance(record.get("item_meta"), Mapping) else {}
+    parts = []
+    for name, value in meta.items():
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value if v not in (None, ""))
+        elif isinstance(value, Mapping):
+            value = json.dumps(value, default=str, sort_keys=True)
+        text = _clip(value, METADATA_CHARS) if value not in (None, "") else ""
+        if text:
+            parts.append(f"{name}: {text}")
+    return "; ".join(parts)
 
 
 _CLIPPED = "(This item's texts are clipped head and tail to fit the analyst's room.)"
@@ -253,20 +280,16 @@ def _changes_text(ctx: Any) -> str:
     """The kinds of change the optimizer may make, so a finding can say which fits."""
     if not ctx.catalogue:
         return "(not listed)"
-    return "\n".join(f"- `{op.get('op')}`: {_clip(op.get('description', ''), 160)}"
+    return "\n".join(f"- `{op.get('op')}`: {op.get('description', '')}"
                      for op in ctx.catalogue)
 
 
-def _lessons_text(ctx: Any) -> str:
-    text = str((ctx.lessons or {}).get("text") or "").strip() if ctx.ask_lessons else ""
-    if not text:
-        return ""
-    # SkillOpt's analysts and merges read its optimizer meta skill; the proposer's
-    # lessons are this loop's optimizer-side memory.
-    return ("## The optimizer's lessons so far\n"
-            "Optimizer-side memory from earlier rounds of this run. Use it when the "
-            "evidence is ambiguous; do not force it where the items contradict it.\n\n"
-            f"{text}\n\n")
+def _memory_text(ctx: Any) -> str:
+    """The loop's memory note (`optim.memory`), as SkillOpt's analysts and merges read
+    its optimizer meta skill; empty without one."""
+    from .memory import context_block
+
+    return context_block(getattr(ctx, "memory", None))
 
 
 FAILURE_SYSTEM = """\
@@ -348,15 +371,15 @@ Rules:
 """
 
 
-def item_cap(lengths: Sequence[int], room: int) -> int | None:
+def item_cap(lengths: Sequence[int], room: int, floor: int = ITEM_FLOOR) -> int | None:
     """The one length the batch's items are cut to so that together they fit ``room``,
     or ``None`` when they fit whole. Room a short item leaves goes to the long ones:
     the cap is the largest that fits (water-filling), so every clipped item is cut to
-    the same length, and never below ``ITEM_FLOOR``."""
+    the same length, and never below ``floor`` (``ITEM_FLOOR``)."""
     if sum(lengths) <= room:
         return None
     # Never below the floor: when even the floor does not fit, the search ends there.
-    low, high = ITEM_FLOOR, max(ITEM_FLOOR, max(lengths))
+    low, high = floor, max(floor, max(lengths))
     while low < high:
         middle = (low + high + 1) // 2
         if sum(min(n, middle) for n in lengths) <= room:
@@ -369,7 +392,7 @@ def item_cap(lengths: Sequence[int], room: int) -> int | None:
 def round_key(ctx: Any, model: str = "") -> str:
     """What one proposal step's analysis is made from: the epoch, the generation, the
     edited candidate, its train records, the stage's settings and the optimizer's model.
-    Not the lessons: a retry in the same step reuses the step's analysis."""
+    Not the memory note: a retry in the same step reuses the step's analysis."""
     import hashlib
 
     return hashlib.sha256(json.dumps(
@@ -388,7 +411,7 @@ def analyst_batch(ctx: Any, kind: str, index: int, total: int,
                   group: Sequence[dict[str, Any]], pipeline: str,
                   room: int = ANALYST_ROOM) -> tuple[str, dict[str, int]]:
     """One analyst's request -- the pipeline, the changes possible, the optimizer's
-    lessons and the batch's items in full -- and what was clipped:
+    memory note and the batch's items in full -- and what was clipped:
     ``{"items", "chars"}``. The items share what ``room`` (``ANALYST_ROOM``) leaves after
     the rest of the prompt; only when together they do not fit are the longest cut, all to one
     length (`item_cap`), step inputs first (`fit_item`). SkillOpt never clips."""
@@ -416,7 +439,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
              f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
-             f"{_lessons_text(ctx)}"
+             f"{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              "Each item in full: its input, every step's input and output in the order the "
              "steps ran, the expected answer, the prediction, the score and the grader's "
@@ -468,7 +491,7 @@ def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
             "preserve": str(raw.get("preserve") or "").strip(),
             "items": kept, "not_in_batch": [i for i in cited if i not in items],
             "support": len(kept), "impact": impact if impact in IMPACTS else "",
-            "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:QUOTES * 2]}
+            "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:EVIDENCE_PER_FINDING]}
 
 
 def parse_findings(payload: Any, kind: str, items: Sequence[str],
@@ -569,7 +592,7 @@ def _for_merge(found: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
                  level: int, pipeline: str) -> str:
     """A merge request: the pipeline (SkillOpt's merges read the current skill), the
-    optimizer's lessons and the lists to merge."""
+    optimizer's memory note and the lists to merge."""
     if step == "final":
         body = (f"## Failure findings\n{json.dumps(_for_merge(lists[0]), indent=1)}\n\n"
                 f"## Success findings\n{json.dumps(_for_merge(lists[1]), indent=1)}")
@@ -580,7 +603,7 @@ def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
         head = (f"# Merging the {step} analysts' findings -- {len(lists)} lists, "
                 f"merge level {level}")
     return (f"{head}\n\nMode: `{ctx.mode_name}`.\n\n"
-            f"## The pipeline\n{pipeline}\n\n{_lessons_text(ctx)}"
+            f"## The pipeline\n{pipeline}\n\n{_memory_text(ctx)}"
             f"{body}\n\n## Answer\n{MERGE_ANSWER}")
 
 
@@ -610,16 +633,47 @@ def merge_system(step: str) -> str:
 # ── the request section ────────────────────────────────────────────────────
 
 
-def _where_text(where: Mapping[str, Any]) -> str:
+def _where_text(where: Mapping[str, Any], cap: int | None = None) -> str:
     parts = [f"step `{n}`" for n in where.get("nodes") or ()]
     parts += [f"edge `{e}`" for e in where.get("edges") or ()]
     parts += [f"setting `{k}`" for k in where.get("knobs") or ()]
     if where.get("structure"):
-        parts.append(f"structure: {_clip(where['structure'], 200)}")
+        parts.append(f"structure: {_cut(where['structure'], cap)}")
     return "; ".join(parts) or "unclear"
 
 
-def finding_line(rank: int, entry: Mapping[str, Any]) -> str:
+def _cut(text: Any, cap: int | None) -> str:
+    """``text`` whole, its line breaks kept (a proposed prompt keeps its layout); past
+    ``cap`` characters, cut there with how much was cut said (``… [cut: N chars]``)."""
+    text = str(text or "").strip()
+    if cap is None or len(text) <= cap:
+        return text
+    return f"{text[:cap]}… [cut: {len(text) - cap} chars]"
+
+
+def _actions(entry: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """A finding's advice, each part it carries: what to change and what to keep, the
+    one its side leads with first (a success finding's keep, a failure's change)."""
+    parts = [("change", str(entry.get("change") or "").strip()),
+             ("keep", str(entry.get("preserve") or "").strip())]
+    if entry.get("source") == "success":
+        parts.reverse()
+    return [(label, text) for label, text in parts if text]
+
+
+def _texts(entry: Mapping[str, Any]) -> list[str]:
+    """Every text of a finding the section may have to cut: the finding, its advice,
+    where it places itself in the structure, and each evidence quote."""
+    return [str(entry.get("finding") or "").strip(),
+            *(text for _label, text in _actions(entry)),
+            str((entry.get("where") or {}).get("structure") or "").strip(),
+            *(str(q).strip() for q in entry.get("evidence") or ())]
+
+
+def finding_line(rank: int, entry: Mapping[str, Any], cap: int | None = None) -> str:
+    """One ranked finding with every text whole -- the finding, what to change and what
+    to keep, where, all its evidence quotes, line breaks kept (SkillOpt never cuts its
+    analysts' edits); each text cut to ``cap`` only when the section must fit."""
     ids = list(entry.get("items") or ())
     id_text = ", ".join(ids[:ITEM_IDS]) + (f" and {len(ids) - ITEM_IDS} more"
                                            if len(ids) > ITEM_IDS else "")
@@ -629,14 +683,10 @@ def finding_line(rank: int, entry: Mapping[str, Any]) -> str:
         head.append(f"impact {entry['impact']}")
     if int(entry.get("batches") or 1) > 1:
         head.append(f"from {entry['batches']} findings")
-    action = (f" -- keep: {_clip(entry['preserve'], FINDING_CHARS)}"
-              if entry.get("source") == "success" and entry.get("preserve")
-              else f" -- change: {_clip(entry['change'], FINDING_CHARS)}" if entry.get("change")
-              else f" -- keep: {_clip(entry['preserve'], FINDING_CHARS)}" if entry.get("preserve")
-              else "")
-    quotes = [f'"{_clip(q, QUOTE_CHARS)}"' for q in list(entry.get("evidence") or ())[:QUOTES]]
-    return (f"{rank}. [{'; '.join(head)}] {_clip(entry.get('finding'), FINDING_CHARS)} "
-            f"-- where: {_where_text(entry.get('where') or {})}{action}"
+    action = "".join(f" -- {label}: {_cut(text, cap)}" for label, text in _actions(entry))
+    quotes = [f'"{_cut(q, cap)}"' for q in entry.get("evidence") or ()]
+    return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'), cap)} "
+            f"-- where: {_where_text(entry.get('where') or {}, cap)}{action}"
             + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
 
 
@@ -663,8 +713,18 @@ def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
     if not found:
         lines.append("(The analysts found no common pattern.)")
     used = len("\n".join(lines))
-    for rank, entry in enumerate(found[:SHOWN_FINDINGS], 1):
-        line = finding_line(rank, entry)
+    shown = found[:SHOWN_FINDINGS]
+    whole = [finding_line(rank, entry) for rank, entry in enumerate(shown, 1)]
+    cap = None
+    if used + sum(len(line) + 1 for line in whole) > SECTION_CHARS:
+        # Too long whole: the findings' texts and suggested changes share the room left
+        # after everything else on their lines (each cut is said), longest cut first.
+        texts = [len(text) for entry in shown for text in _texts(entry)]
+        fixed = sum(len(line) + 1 for line in whole) - sum(texts)
+        marks = len(texts) * len("… [cut: 00000 chars]")
+        cap = item_cap(texts, SECTION_CHARS - used - fixed - marks, floor=FINDING_FLOOR)
+    for rank, entry in enumerate(shown, 1):
+        line = whole[rank - 1] if cap is None else finding_line(rank, entry, cap)
         if used + len(line) + 1 > SECTION_CHARS:
             lines.append(f"({len(found) - rank + 1} more finding(s) not shown: the findings "
                          f"are kept within {SECTION_CHARS} characters)")

@@ -684,72 +684,12 @@ def main(argv: list[str] | None = None) -> int:
         description="Run one mode with a person in the loop, on DSH.",
     )
     parser.add_argument("mode", help="the mode to run, as <package>/<name>")
-    parser.add_argument(
-        "--intent", default="",
-        help="what the run is for, in the person's words; seeds the ledger the agent "
-             "nodes read and a resumed run is judged against",
-    )
-    parser.add_argument("--workdir", default="", help="the run directory")
+    from refactory_dsh import run_flags
+    # A run's flags, as `refactory ceo` spells them: one definition, so they cannot drift.
+    run_flags.add_run_arguments(parser)
     parser.add_argument("--resume", action="store_true", help="recover a stopped known boundary, preserving completed stages")
-    parser.add_argument(
-        "--source", default="", metavar="PATH",
-        help="read the items from here instead of the source the mode declares, so a "
-             "harness built for a class of work is pointed at items it has not seen",
-    )
-    parser.add_argument(
-        "--source-format", default="directory", choices=["directory", "jsonl", "csv"],
-        help="how to read --source (default: a directory of one item per subdirectory)",
-    )
-    parser.add_argument(
-        "--knob", action="append", default=[], metavar="NAME=VALUE",
-        help="set one of the mode's knobs for this run (repeatable)",
-    )
-    parser.add_argument(
-        "--approve", action="append", default=[], metavar="GATE=VALUE",
-        help="state a gate's answer before the run, e.g. gate_strategy=proceed "
-             "(repeatable); without it the run asks you at the terminal",
-    )
-    parser.add_argument("--timeout", type=int, default=0, help="seconds; 0 waits for the person")
-    parser.add_argument(
-        "--provider", default="",
-        help="provider route for this run's model (default: the stored choice; see `refactory model set`)",
-    )
-    parser.add_argument(
-        "--model", default="",
-        help="model id for this run, e.g. deepseek-v4-pro (default: the stored choice; see `refactory model set`)",
-    )
-    parser.add_argument(
-        "--headless", action="store_true", default=False,
-        help="run without a conversation: one task, one report, then exit, as scripts "
-             "and CI expect; without it the run is live and a line you type between "
-             "turns reaches the CEO",
-    )
-    parser.add_argument("--worker-backend", choices=["dsh", "codex", "claude_code"], default="")
-    parser.add_argument("--effort", default="")
-    parser.add_argument("--setting-sources", default="",
-                        help="claude_code workers only: the Claude Code settings they load, "
-                             "none or a comma list of user, project and local")
-    parser.add_argument("--claude-executable", default="", type=os.path.expanduser,
-                        help="claude_code workers only: the Claude Code executable they run, an "
-                             "absolute path (default: the one bundled with the Agent SDK)")
-    parser.add_argument("--permission-mode", default="", help="worker permissions: skip (new-run default), default (native policy), or a backend-specific mode")
-    parser.add_argument(
-        "--model-timeout", type=int, default=None, dest="model_timeout_s",
-        help="seconds one model completion may take before it is called hung (default: 1800)",
-    )
-    import json
-    parser.add_argument("--role-routes", type=json.loads, default=None)
-    parser.add_argument("--node-routes", type=json.loads, default=None)
-    parser.add_argument("--max-elapsed-s", type=float, default=None)
-    parser.add_argument("--max-tokens", type=int, default=None)
-    parser.add_argument("--validation-reserve-s", type=float, default=0)
-    parser.add_argument("--validation-reserve-tokens", type=int, default=0)
-    parser.add_argument("--warn-tokens", type=int, default=None)
-    parser.add_argument("--omit-steering", action="store_true", default=False,
-                        help="omit the steering ledger from agent prompts (benchmark runs)")
     args = parser.parse_args(argv)
 
-    from refactory_dsh import run_flags
     from refactory_dsh.model import ModelChoiceError
 
     workdir = Path(args.workdir) if args.workdir else None
@@ -761,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
             source_format=args.source_format,
             intent=args.intent,
             knobs=args.knob,
-            approve=args.approve,
+            approve=args.verdict,
             timeout_s=args.timeout or None,
             model_timeout_s=getattr(args, 'model_timeout_s', None),
             provider=args.provider,

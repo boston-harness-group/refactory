@@ -533,9 +533,13 @@ def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, n
         assert unscored <= sweep | {loop.population[0].id}
     else:
         assert unscored == set(), f"{name} left its last round unscored"
-    assert loop.evaluations == len(loop.population) - len(unscored)
+    # The memory pass's own rollouts (an unchanged current rolled out again, ungated)
+    # are evaluations too.
+    remembered = sum(int(p.get("evaluated") or 0) for p in loop._memory_passes)
+    assert loop.evaluations == len(loop.population) - len(unscored) + remembered
     assert loop.rollouts == sum(len(loop._train_item_records[c.id])
-                                for c in loop.population if c.evaluated)
+                                for c in loop.population if c.evaluated) + sum(
+        int(p.get("rollouts") or 0) for p in loop._memory_passes)
 
 
 @pytest.mark.parametrize("name", GATED_STRATEGIES)
@@ -566,8 +570,8 @@ def test_a_finished_curriculum_scores_its_last_stage(tmp_path, gated):
     (``curriculum_complete``): its last stage's batch is scored (and, under the gate,
     judged)."""
     model = ComboModel()
-    loop = _run("staged_v1", tmp_path, model, epochs=20, val_gate=gated)
-    assert loop.bound == "curriculum_complete" and len(loop.epochs) == 4
+    loop = _run("staged_curriculum", tmp_path, model, epochs=20, val_gate=gated)
+    assert loop.bound == "curriculum_complete" and len(loop.epochs) == 8
     assert loop.epochs[-1].accepted
     assert loop._unevaluated() == []
     if gated:
@@ -855,10 +859,14 @@ def test_a_failed_round_names_the_parent_the_picker_chose(tmp_path):
     loop = _run("default", tmp_path, model, parent_picker="map_elites", epochs=5)
     events = _failed_events(loop)
     assert events, "the model never failed"
-    failing = model.requests[3:]  # one event per failing request, in order
-    assert len(events) == len(failing)
-    for event, request in zip(events, failing):
-        assert request.picked and event["parent"] == request.picked
+    # One event per failed round, in order; a round's proposal call makes 3 attempts,
+    # all with the same request (`AutoresearchOptimizer._ask_proposal`).
+    failing = model.requests[3:]
+    assert len(failing) == 3 * len(events)
+    for index, event in enumerate(events):
+        attempts = failing[3 * index: 3 * index + 3]
+        assert {request.picked for request in attempts} == {event["parent"]}
+        assert attempts[0].picked
 
 
 class _NamesParentInPropose(Loop):
@@ -1018,3 +1026,62 @@ def test_the_skillopt_matched_default_leaderboard_is_unchanged(tmp_path):
     board = [(c.id, round(c.score or 0.0, 6)) for c in loop.leaderboard()]
     print("LEADERBOARD", json.dumps(board))
     assert board == DEFAULT_LEADERBOARD
+
+
+# ── a broken answer is asked again, never read in part ─────────────────────
+
+
+class BreaksFirst(ComboModel):
+    """Answers the run's first proposal request as D-s42's epoch-5 answer was written:
+    the proposals as the script made them, every one written with an ``edits`` list,
+    the first one's list never closed (so only its first edit parses on its own)."""
+
+    def for_node(self, node_id: str, role: str | None = None) -> "BreaksFirst":
+        view = super().for_node(node_id, role)
+        view.__class__ = BreaksFirst
+        return view  # type: ignore[return-value]
+
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+        root = getattr(self, "_root", self)
+        text = super().complete(prompt, system=system, **kwargs)
+        if not prompt.startswith("# Update request") or len(root.requests) != 1:
+            return text
+        proposals = [{"edits": p.get("edits") or [p["edit"]],
+                      **{k: v for k, v in p.items() if k not in ("edit", "edits")}}
+                     for p in json.loads(text)["proposals"]]
+        first, edits = json.dumps(proposals[0]), json.dumps(proposals[0]["edits"])
+        broken = first.replace(edits, edits[:-1], 1)
+        return ('{"diagnosis": "BROKEN-DIAGNOSIS", "proposals": ['
+                + ", ".join([broken, *(json.dumps(p) for p in proposals[1:])]) + "]}")
+
+
+@pytest.mark.parametrize("settings,asked", [
+    ({"portfolio": "prompt+pipeline", "batch_size": 1}, 2),
+    ({"batch_size": 1}, 1),
+])
+def test_a_broken_answer_is_asked_again_in_its_round_and_counted(tmp_path, settings, asked):
+    """Before: the first edit of the first proposal was read as the whole answer, the
+    other proposal dropped, nothing counted. Now nothing of it is read: one refusal per
+    proposal asked for (``E-proposal-shape``, with where the JSON broke), journaled and
+    reported, and the same round asks again with why, for the same candidates."""
+    model = BreaksFirst(portfolio if settings.get("portfolio") else fixer)
+    loop = _run("default", tmp_path, model, val_gate=True, epochs=2, **settings)
+    assert model.requests[0].wanted == asked
+    again = model.requests[1]
+    assert again.wanted == asked, "the re-ask is for every candidate the broken answer held"
+    assert "your whole answer was not valid JSON (Expecting ',' delimiter" in again.text
+    if settings.get("portfolio"):
+        assert again.levels == ["prompt_knob", "pipeline"]
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    refused = [e for e in events if e.get("event") == "rejection"
+               and any("E-proposal-shape" in reason for reason in e["reasons"])]
+    assert len(refused) == asked
+    trace = [json.loads(line) for line in (loop.root / "optimizer_trace.jsonl").read_text().splitlines()
+             if '"kind": "proposal"' in line]
+    assert (trace[0]["unreadable"], trace[0]["proposals"]) == (asked, 0)
+    assert "E-proposal-shape" in (loop.root / "report.md").read_text()
+    first_round = [c for c in _children(loop) if loop.proposals[c.id].get("epoch") == 1]
+    assert len(first_round) == asked, "the round still made every candidate it asked for"
+    if settings.get("portfolio"):
+        assert {loop.proposals[c.id]["level"] for c in first_round} == {"prompt_knob", "pipeline"}
+    assert all(loop.proposals[c.id].get("diagnosis") != "BROKEN-DIAGNOSIS" for c in first_round)

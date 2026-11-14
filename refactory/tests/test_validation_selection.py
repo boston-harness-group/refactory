@@ -24,7 +24,7 @@ from refactory_dsh.optim.policies import (
 from refactory_dsh.optim.random_optimizer import _elite
 from refactory_dsh.outerloop import Run, ValidationGate
 
-from test_skillopt import MODE_ID, _patch_mode, _write_parts
+from test_skillopt import MODE_ID, TEST_IDS, TRAIN_IDS, _patch_mode, _write_parts
 from test_val_gate import LevelProbe
 
 FIXTURE = Path(__file__).parent / "fixtures" / "livemath_gate_decisions.json"
@@ -212,7 +212,7 @@ def _manifest(tmp_path: Path, **parts: list[str]) -> str:
 
 
 def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_path):
-    """No --val-gate: a parts manifest with val items turns the gate on (single for
+    """A parts manifest with val items turns the gate on (single for
     the default loop), config.json records it, adopt and the report agree, and the
     audit says its items are the val part the search selected on when there is no
     test part."""
@@ -222,7 +222,7 @@ def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_pa
         report = loop.run()
     assert loop.config.val_gate is True and loop.selection_mode() == "single"
     assert json.loads((loop.root / "config.json").read_text())["val_gate"] is True
-    assert report["selection"]["val_gate_basis"].startswith("default")
+    assert report["selection"]["val_gate_basis"] == "the parts manifest has val items"
     assert "warning" not in report["selection"]
     assert report["best_score_basis"].startswith("val")
     holdout = report["holdout"]
@@ -234,16 +234,6 @@ def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_pa
     rendered = (loop.root / "report.md").read_text()
     assert "not an independent check" in rendered
     assert "holds up" not in rendered and "— overfit" not in rendered
-
-
-def test_val_gate_0_turns_validation_selection_off(tmp_path):
-    with _patch_mode(FitProbe):
-        loop = Loop(MODE_ID, _config(tmp_path, val_gate=False), project=Path("."))
-        report = loop.run()
-    assert loop.config.val_gate is False and loop.selection_mode() == ""
-    assert report["selection"]["setting"] == "train"
-    assert report["selection"]["warning"].startswith("val_gate 0")
-    assert report["holdout"]["independent"] is True, "train selected: val is unseen"
 
 
 @pytest.mark.parametrize("where", ["manifest without val", "no manifest"])
@@ -294,17 +284,16 @@ def test_a_custom_strategy_keeps_its_own_gate_by_default(tmp_path):
     assert loop.config.val_gate is False and loop.selection_warning == ""
 
 
-def test_profiles_and_the_command_line_leave_val_gate_unset_unless_given():
+def test_profiles_and_the_command_line_have_no_val_gate():
+    """The run decides the gate; a saved ``val_gate`` (0 or 1) is dropped on load."""
     import argparse
 
-    assert profiles.defaults()["val_gate"] is None
-    assert profiles.normalize({})["val_gate"] is None
-    assert profiles.normalize({"val_gate": 0})["val_gate"] is False
-    assert profiles.normalize({"val_gate": 1})["val_gate"] is True
+    assert "val_gate" not in profiles.defaults()
+    assert "val_gate" not in profiles.normalize({"val_gate": 0})
+    assert "val_gate" not in profiles.normalize({"val_gate": 1})
     parser = argparse.ArgumentParser()
     profiles.add_arguments(parser)
     assert "val_gate" not in profiles.cli_overrides(parser.parse_args([]))
-    assert profiles.cli_overrides(parser.parse_args(["--val-gate", "0"]))["val_gate"] == 0
 
 
 def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_else(tmp_path):
@@ -325,30 +314,30 @@ def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_e
                                  project=Path(".")).selection_mode() == "pool"
         assert strategies.create("tree_search", MODE_ID, _config(tmp_path, selection="single"),
                                  project=Path(".")).selection_mode() == "single"
-        assert Loop(MODE_ID, _config(tmp_path, val_gate=False)).selection_mode() == ""
+        assert Loop(MODE_ID, _config(tmp_path, val_gate=False, parts_manifest=_manifest(
+            tmp_path, train=["t1"]))).selection_mode() == ""
 
 
 def test_selection_needs_the_gate_and_a_known_value(tmp_path):
-    with pytest.raises(profiles.ProfileError, match="val_gate"):
-        profiles.normalize({"selection": "pool", "val_gate": False})
-    assert profiles.normalize({"selection": "pool"})["val_gate"] is None, "unset: the run decides"
+    assert profiles.normalize({"selection": "pool"})["selection"] == "pool"
     with pytest.raises(profiles.ProfileError, match="unknown selection"):
-        profiles.normalize({"val_gate": True, "selection": "pareto"})
+        profiles.normalize({"selection": "pareto"})
     with pytest.raises(profiles.ProfileError, match="pool_size"):
-        profiles.normalize({"val_gate": True, "pool_size": 0})
+        profiles.normalize({"pool_size": 0})
     with _patch_mode(FitProbe):
         with pytest.raises(LoopError, match="unknown selection"):
             Loop(MODE_ID, _config(tmp_path, selection="pareto"))
-        with pytest.raises(LoopError, match="needs|only the validation gate"):
-            Loop(MODE_ID, _config(tmp_path, val_gate=False, selection="pool")).run()
+        with pytest.raises(LoopError, match="only the validation gate"):
+            Loop(MODE_ID, _config(tmp_path, val_gate=None, selection="pool",
+                                  parts_manifest=_manifest(tmp_path, train=["t1", "t2"]))).run()
 
 
 @pytest.mark.parametrize("optimizer", ["archive", "evolutionary", "islands", "map_elites"])
 def test_population_optimizers_and_pickers_run_with_the_gate(tmp_path, optimizer):
     """The refusal is gone: a population optimizer, or the same policy as a parent
     picker, runs with val_gate (pool by default) through the final evaluation."""
-    assert profiles.normalize({"val_gate": True, "optimizer": optimizer})["optimizer"] == optimizer
-    assert profiles.normalize({"val_gate": True, "parent_picker": optimizer})["val_gate"] is True
+    assert profiles.normalize({"optimizer": optimizer})["optimizer"] == optimizer
+    assert profiles.normalize({"parent_picker": optimizer})["parent_picker"] == optimizer
     with _patch_mode(FitProbe):
         loop = Loop(MODE_ID, _config(tmp_path, optimizer=optimizer, batch_size=2,
                                      edit_preset="knob_only"), project=Path("."))
@@ -579,16 +568,23 @@ def test_edit_kind_survives_a_child_whose_parent_has_no_val_score():
 
 
 def test_a_resumed_run_keeps_its_recorded_val_gate(tmp_path, monkeypatch):
-    """A run started with val_gate 0 and resumed with the setting left unset stays
-    train-selected (the manifest has val items, which would turn the gate on), and
-    names the winner an uninterrupted train-selected run names."""
+    """A train-selected run (no val items) resumed stays train-selected, and names the
+    winner an uninterrupted train-selected run names. (One recorded with the gate off
+    although it had val items is refused: test_val_gate.)"""
     _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
     plan = [[(0, 1), (0, 2), (0, 3)], [(3, 4)]]
+
+    def no_val(root: Path) -> str:
+        return _manifest(root, train=list(TRAIN_IDS), test=list(TEST_IDS))
+
     straight, _, expected = _run(tmp_path / "straight", monkeypatch, plan, epochs=2,
-                                 batch_size=3, val_gate=False)
-    _run(tmp_path / "stopped", monkeypatch, plan[:1], epochs=1, batch_size=3, val_gate=False)
+                                 batch_size=3, val_gate=None,
+                                 parts_manifest=no_val(tmp_path / "straight"))
+    _run(tmp_path / "stopped", monkeypatch, plan[:1], epochs=1, batch_size=3, val_gate=None,
+         parts_manifest=no_val(tmp_path / "stopped"))
     loop, _, report = _run(tmp_path / "stopped", monkeypatch, plan[1:], epochs=2,
-                           batch_size=3, val_gate=None, resume=True)
+                           batch_size=3, val_gate=None, resume=True,
+                           parts_manifest=no_val(tmp_path / "stopped"))
     assert loop.config.val_gate is False and report["selection"]["setting"] == "train"
     assert report["selection"]["val_gate_basis"].startswith("resumed")
     winner = _level(next(c for c in loop.population if c.id == report["best"]["id"]))
@@ -707,7 +703,7 @@ def test_tree_search_debugs_a_failed_candidate_outside_the_pool(tmp_path):
 
 @pytest.mark.parametrize("strategy", [
     "default", "reflective", "reflective_sampler", "adaptive_meta", "tree_search",
-    "staged_curriculum", "staged_v1", "research_then_optimize", "best_of_n", "autoscientists"])
+    "staged_curriculum", "research_then_optimize", "best_of_n", "autoscientists"])
 def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val(
         tmp_path, monkeypatch, strategy):
     """Every built-in strategy under the gate with pool: it ends normally, the final
@@ -1117,31 +1113,34 @@ def test_a_seed_that_wins_is_scored_on_test_once_and_its_delta_is_zero(tmp_path,
 # ── resume keeps the run's selection ───────────────────────────────────────
 
 
-def _cli(tmp_path: Path, *argv: str, profile: bool = True) -> int:
+def _cli(tmp_path: Path, *argv: str, profile: str = "pool-probe") -> int:
     from refactory_dsh import loop as loop_module
 
     with _patch_mode(FitProbe):
         return loop_module.main([MODE_ID, "--project", str(tmp_path), "--runs-root",
                                  str(tmp_path / "run"),
-                                 *(["--profile", "pool-probe"] if profile else []), *argv])
+                                 *(["--profile", profile] if profile else []), *argv])
 
 
 @pytest.fixture
 def pool_profile(tmp_path, monkeypatch):
-    """A saved profile (selection left to its default, single) and a run launched from
-    it with ``--selection pool --pool-size 3`` for one epoch."""
+    """A saved profile (selection left to its default, single) and a run launched for
+    one epoch from another that says selection pool, pool size 3."""
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _scores(monkeypatch, {}, {})
-    profiles.save(tmp_path, "pool-probe", {"settings": {
-        "optimizer": "random", "allowed_ops": ["set_knob"], "val_gate": True, "seed": 7,
+    settings = {
+        "optimizer": "random", "allowed_ops": ["set_knob"], "seed": 7,
         "holdout": 0.0, "batch_size": 1, "max_evaluations": 50,
-        "parts_manifest": str(_write_parts(tmp_path, test=True))}})
-    assert _cli(tmp_path, "--epochs", "1", "--selection", "pool", "--pool-size", "3") == 0
+        "parts_manifest": str(_write_parts(tmp_path, test=True))}
+    profiles.save(tmp_path, "pool-probe", {"settings": settings})
+    profiles.save(tmp_path, "pool-launch", {"settings": {**settings, "selection": "pool",
+                                                         "pool_size": 3}})
+    assert _cli(tmp_path, "--epochs", "1", profile="pool-launch") == 0
     return tmp_path / "run"
 
 
 def test_a_resume_keeps_the_selection_and_pool_size_its_launch_gave(tmp_path, pool_profile):
-    """Resumed with the profile and ``--resume`` only: the run keeps the selection and
+    """Resumed with another profile and ``--resume``: the run keeps the selection and
     pool size it was launched with (the profile says single and 8), in its config, its
     gate state and its report."""
     assert _cli(tmp_path, "--epochs", "2", "--resume") == 0
@@ -1151,21 +1150,29 @@ def test_a_resume_keeps_the_selection_and_pool_size_its_launch_gave(tmp_path, po
     assert report["selection"]["setting"] == "pool" and report["selection"]["pool_size"] == 3
 
 
-@pytest.mark.parametrize("profile", [True, False])
-@pytest.mark.parametrize("flag,named", [
-    (("--pool-size", "5"), "pool_size 3 and this resume asks for pool_size 5"),
-    (("--selection", "single"), "selection pool and this resume asks for selection single"),
-    (("--val-gate", "0"), "val_gate 1 and this resume asks for val_gate 0"),
-])
-def test_a_resume_that_names_another_selection_is_refused(
-        tmp_path, pool_profile, capsys, flag, named, profile):
-    """A resume command, with its profile or without one, that gives a different
-    selection, pool size or val_gate explicitly is refused, as a different
-    train_minibatch is, naming both values; the recorded run is left as it was."""
+@pytest.mark.parametrize("flag", ["--pool-size", "--selection"])
+def test_a_resume_cannot_name_another_selection_on_the_command_line(
+        tmp_path, pool_profile, capsys, flag):
+    """``--selection`` and ``--pool-size`` are profile settings: a resume that gives one
+    is refused naming the profile key, and the recorded run is left as it was."""
     before = (pool_profile / "config.json").read_text()
-    assert _cli(tmp_path, "--epochs", "2", "--resume", *flag, profile=profile) == 2
-    assert named in capsys.readouterr().err
+    with pytest.raises(SystemExit) as refused:
+        _cli(tmp_path, "--epochs", "2", "--resume", flag, "5")
+    assert refused.value.code == 2
+    key = flag[2:].replace("-", "_")
+    assert f"it is the profile setting {key!r}" in capsys.readouterr().err
     assert (pool_profile / "config.json").read_text() == before
+
+
+def test_a_loop_whose_launch_names_another_selection_on_resume_is_refused(tmp_path, monkeypatch):
+    """A resumed loop whose launch gave another pool size explicitly (here, in code) is
+    refused naming both values, as a different train_minibatch is."""
+    _scores(monkeypatch, POOL_TRAIN, POOL_VAL)
+    _run(tmp_path, monkeypatch, POOL_PLAN[:1], epochs=1, batch_size=3,
+         selection="pool", pool_size=2)
+    with pytest.raises(LoopError, match="pool_size 2 and this resume asks for pool_size 5"):
+        _run(tmp_path, monkeypatch, POOL_PLAN[1:], epochs=3, batch_size=3, resume=True,
+             selection="pool", pool_size=5)
 
 
 def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):
@@ -1174,7 +1181,7 @@ def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _scores(monkeypatch, {}, {})
     profiles.save(tmp_path, "pool-probe", {"settings": {
-        "optimizer": "random", "allowed_ops": ["set_knob"], "val_gate": True, "seed": 7,
+        "optimizer": "random", "allowed_ops": ["set_knob"], "seed": 7,
         "holdout": 0.0, "batch_size": 1, "max_evaluations": 50,
         "parts_manifest": str(_write_parts(tmp_path, test=True))}})
     assert _cli(tmp_path, "--epochs", "1") == 0

@@ -611,3 +611,53 @@ def test_reused_pending_dispatch_moves_nothing(tmp_path):
     # Same dispatch reused — nothing moved
     assert record2['id'] == record['id']
     assert (tmp_path / 'emit.txt').exists(), 'reused dispatch must not move files'
+
+
+def test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected(tmp_path):
+    """o55-dm149d: another run's setup and another session's branch must not fail this run's step.
+
+    Run B's setup installs a hook the way lefthook and husky's postinstall do (into
+    `git rev-parse --git-path hooks`), and a session makes a tracking branch in the
+    person's checkout. Run A's output-only step is still delivered, and a real change
+    to the shared hooks still fails it, naming the file.
+    """
+    import subprocess
+    from refactory_dsh import repo_change, target_guard, worktree
+    from tests_support import git, git_repo
+
+    repo = git_repo(tmp_path / 'repo')
+    git(repo, 'remote', 'add', 'origin', 'https://example.invalid/repo.git')
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    run_a, run_b = tmp_path / 'run-a', tmp_path / 'run-b'
+    worktree.create(repo, 'HEAD', 'twoA0000aaaa', run_a)
+    found_b = worktree.create(repo, 'HEAD', 'twoB0000bbbb', run_b)
+    target_guard.record(run_a, repo, output_only=('design_doc',))
+    agent_delivery.begin(run_a, 'design_doc', 'Write the design.', ['design.md'])
+
+    install = ('hooks=$(git rev-parse --git-path hooks) && mkdir -p "$hooks" && '
+               'printf "#!/bin/sh\\nexit 0\\n" > "$hooks/pre-commit" && chmod +x "$hooks/pre-commit"')
+    home = tmp_path / 'home-b'
+    home.mkdir()
+    env = worktree.check_environment(Path(found_b.path), home)
+    _found, problems, failed = repo_change.prepare_commands(
+        repo_change._PrepCtx({'setup': install}, workdir=run_b), found_b, env, home, 60, None,
+        amend=False)
+    assert problems == [] and failed is None
+    installed = Path(git(Path(found_b.path), 'rev-parse', '--path-format=absolute',
+                         '--git-path', 'hooks')) / 'pre-commit'
+    assert installed.is_file(), "run B's setup installed its hook in its own hooks"
+    git(repo, 'worktree', 'add', '-q', '-b', 'fix/other-session', str(tmp_path / 'session'),
+        'origin/main')
+
+    (run_a / 'design.md').write_text('the design\n')
+    assert agent_delivery.finish(run_a, 'design_doc')['status'] == 'delivered'
+
+    agent_delivery.begin(run_a, 'design_doc', 'Write the design again.', ['design.md'])
+    shared_hooks = Path(subprocess.run(
+        ['git', '-C', str(repo), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+        capture_output=True, text=True, check=True).stdout.strip()) / 'hooks'
+    shared_hooks.mkdir(exist_ok=True)
+    (shared_hooks / 'pre-commit').write_text('#!/bin/sh\nexit 0\n')
+    (run_a / 'design.md').write_text('the design, again\n')
+    with pytest.raises(ValueError, match=r'changed shared git state: .*\(hook pre-commit added\)'):
+        agent_delivery.finish(run_a, 'design_doc')

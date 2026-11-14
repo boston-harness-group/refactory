@@ -33,9 +33,6 @@ Defaults from SkillOpt's ``_base_/default.yaml`` (with file:line citations):
   - analyst_edit_budget = 4 (envs/base.py:265 — the analysts' L is the adapter's
                              constant ``edit_budget``, not the schedule)
   - seed = 42               (_base_/default.yaml:84, ``seed: 42``)
-  - claude_backend_wrapper = False (not a SkillOpt setting: True frames every
-                optimizer call's user message as SkillOpt's Claude backend does,
-                claude_backend.py; SkillOpt's other backends send it bare)
   - eval_test = on when the parts manifest has a test part (_base_/default.yaml:111
                 ``eval_test: true``; trainer.py:2241). After training: the final
                 skill's val check and promotion, then the initial, best and final
@@ -100,11 +97,18 @@ class SkillOptLoop(OuterLoop):
     #: The strategy options ``configure`` reads; any other is refused
     #: (``strategies.check_options``), so a misspelled one is not silently ignored.
     accepted_options = (
-        "analyst_edit_budget", "analyst_prompts", "claude_backend_wrapper",
-        "early_stop_at_full_val", "early_stop_patience", "edit_budget_max", "edit_budget_min",
-        "eval_test", "group_size", "knob", "knobs", "max_epochs", "merge_batch_size",
-        "patch_order", "rollout_order", "seed", "slow_update_samples",
+        "analyst_edit_budget", "analyst_prompts", "early_stop_at_full_val",
+        "early_stop_patience", "edit_budget_max", "edit_budget_min", "eval_test",
+        "group_size", "knob", "knobs", "max_epochs", "merge_batch_size", "patch_order",
+        "rollout_order", "seed", "slow_update_samples",
     )
+    #: Options that no longer exist, with the one value the strategy now always behaves
+    #: as (``strategies.check_options``). A saved run or profile that gave that value
+    #: still loads and resumes; one that asked for the old behaviour is refused.
+    removed_options = {
+        # Every optimizer call is framed as arm A's Claude backend frames it.
+        "claude_backend_wrapper": True,
+    }
 
     # ── configure (overrides OuterLoop.configure) ─────────────────────────
 
@@ -177,16 +181,6 @@ class SkillOptLoop(OuterLoop):
                 f"patches or None, not {type(patch_order).__name__}"
             )
         self.patch_order = patch_order
-        # Frame every optimizer call's user message as arm A's Claude backend does
-        # (``claude_backend.claude_backend_prompt``). Off by default: SkillOpt frames
-        # only on that backend, so a mode or backend compared with anything else
-        # keeps the bare message.
-        wrapper = options.get("claude_backend_wrapper", False)
-        if not isinstance(wrapper, bool):
-            raise TypeError(
-                f"skillopt: claude_backend_wrapper must be true or false, not {wrapper!r}"
-            )
-        self.claude_backend_wrapper = wrapper
         # Which analyst prompts the analysts get: the mode package's own (SkillOpt's
         # env override) or SkillOpt's generic ones (``env.SkillOptEnv``).
         self.analyst_prompts = check_analyst_prompts(options.get("analyst_prompts", "task"))
@@ -249,9 +243,9 @@ class SkillOptLoop(OuterLoop):
         self._train_stop: str = ""
 
     def _optimizer_client(self) -> Any:
-        """The client every optimizer call goes through: ``self.model``, framed as arm
-        A's Claude backend frames it when ``claude_backend_wrapper`` is on."""
-        if self.claude_backend_wrapper and self.model is not None:
+        """The client every optimizer call goes through: ``self.model``, each user
+        message framed as arm A's Claude backend frames it (``claude_backend``)."""
+        if self.model is not None:
             return ClaudeBackendFraming(self.model)
         return self.model
 

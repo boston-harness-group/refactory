@@ -293,18 +293,21 @@ class _Client:
 
 def test_every_autoresearch_call_is_recorded(tmp_path):
     """System, prompt, reply, epoch, generation, parsed proposals and error, one line
-    per call, written as it happens, including a call that failed."""
+    per call, written as it happens, including a call that failed (each of its three
+    attempts: `AutoresearchOptimizer._ask_proposal`)."""
     reply = json.dumps({"diagnosis": "the decide step trusts compare",
                         "proposals": [{"edit": {"op": "set_knob", "name": "k", "value": 1}}]})
-    optimizer = AutoresearchOptimizer(_Client([reply, RuntimeError("503 overloaded")]))
+    optimizer = AutoresearchOptimizer(_Client([reply, *[RuntimeError("503 overloaded")] * 3]))
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
     ctx = ProposalContext(epoch=2, generation=5, nodes=NODES, item_records=[_record("i1")])
     assert len(optimizer.propose(ctx, 2, [])) == 1
     with pytest.raises(RuntimeError):
         optimizer.propose(ctx, 2, [])
     calls = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
-    assert len(calls) == 2
-    first, failed = calls
+    assert len(calls) == 4
+    first, *failed_attempts = calls
+    failed = failed_attempts[-1]
+    assert [call["attempt"] for call in calls] == [1, 1, 2, 3]
     assert (first["epoch"], first["generation"], first["proposals"], first["error"]) == (2, 5, 1, None)
     assert first["reply"] == reply and first["system"] == optimizer._system
     assert "Which statement holds in i1?" in first["prompt"]

@@ -238,10 +238,17 @@ def test_a_cache_from_other_repeats_stops_the_run(tmp_path):
 from refactory_dsh import loop as loop_module, profiles  # noqa: E402
 
 
-def _main(tmp_path: Path, name: str, *argv: str, manifest: Path | None = None) -> tuple[int, Path]:
+def _main(tmp_path: Path, name: str, *argv: str, manifest: Path | None = None,
+          **settings: object) -> tuple[int, Path]:
+    """``refactory optimize`` with its flags; the settings it takes only from a profile
+    (the parts manifest, holdout 0 and any ``settings``) go in one, unless ``argv``
+    names a profile of its own."""
     root = tmp_path / name
+    if "--profile" not in argv:
+        profiles.save(tmp_path, f"run-{name.lower()}", {"settings": {
+            "parts_manifest": str(manifest or tmp_path / "parts.json"), "holdout": 0.0, **settings}})
+        argv = (*argv, "--profile", f"run-{name.lower()}")
     code = loop_module.main([MODE, "--project", str(tmp_path), "--runs-root", str(root),
-                             "--parts", str(manifest or tmp_path / "parts.json"), "--holdout", "0",
                              "--seed", "3", *argv])
     return code, root
 
@@ -252,8 +259,8 @@ def exported(tmp_path, monkeypatch):
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _manifest(tmp_path)
     with _patch_mode(PartsProbe):
-        code, root = _main(tmp_path, "A", "--optimizer", "random", "--val-gate", "1",
-                           "--epochs", "1", "--batch-size", "1", "--repeats", "3")
+        code, root = _main(tmp_path, "A", "--optimizer", "random",
+                           "--epochs", "1", "--batch-size", "1", repeats=3)
         assert code == 0
         out = tmp_path / "seed-results.json"
         assert seed_cache.main(["export", str(root), str(out), "--project", str(tmp_path)]) == 0
@@ -261,13 +268,13 @@ def exported(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("search", [
-    ["--optimizer", "hill_climb", "--val-gate", "1", "--epochs", "2"],
-    ["--optimizer", "random", "--val-gate", "1", "--epochs", "2", "--batch-size", "2"],
-    ["--optimizer", "random", "--val-gate", "1", "--strategy", "tree_search", "--epochs", "1"],
+    ["--optimizer", "hill_climb", "--epochs", "2"],
+    ["--optimizer", "random", "--epochs", "2", "--batch-size", "2"],
+    ["--optimizer", "random", "--strategy", "tree_search", "--epochs", "1"],
 ])
 def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exported, search):
     with _patch_mode(PartsProbe):
-        code, root = _main(tmp_path, "B", *search, "--repeats", "3", "--seed-results", str(exported))
+        code, root = _main(tmp_path, "B", *search, "--seed-results", str(exported), repeats=3)
     assert code == 0
     hits = _events(root, "seed_cache_hit")
     assert hits and hits[0]["part"] == "train" and hits[0]["trials"] == 3
@@ -282,8 +289,9 @@ def test_runs_with_other_search_settings_reuse_the_seed_and_say_so(tmp_path, exp
 
 def test_a_profile_carries_the_seed_results(tmp_path, exported):
     profiles.save(tmp_path, "reuse", {"settings": {
-        "optimizer": "random", "val_gate": True, "epochs": 1, "batch_size": 1, "repeats": 3,
-        "parts_manifest": str(tmp_path / "parts.json"), "seed_results": str(exported)}})
+        "optimizer": "random", "epochs": 1, "batch_size": 1, "repeats": 3,
+        "parts_manifest": str(tmp_path / "parts.json"), "holdout": 0.0,
+        "seed_results": str(exported)}})
     with _patch_mode(PartsProbe):
         code, root = _main(tmp_path, "B", "--profile", "reuse")
     assert code == 0
@@ -294,12 +302,12 @@ def test_another_item_set_or_evaluator_is_refused_naming_it(tmp_path, exported, 
     other = _manifest(tmp_path, {**PARTS, "train": ["alpha", "beta", "gamma"], "val": ["delta"]},
                       name="other.json")
     with _patch_mode(PartsProbe):
-        code, root = _main(tmp_path, "C1", "--optimizer", "random", "--repeats", "3",
-                           "--seed-results", str(exported), manifest=other)
+        code, root = _main(tmp_path, "C1", "--optimizer", "random",
+                           "--seed-results", str(exported), manifest=other, repeats=3)
         assert code == 2
         assert "items of val" in capsys.readouterr().err
-        code, _ = _main(tmp_path, "C2", "--optimizer", "random", "--repeats", "3",
-                        "--evaluator", "dsh", "--seed-results", str(exported))
+        code, _ = _main(tmp_path, "C2", "--optimizer", "random",
+                        "--evaluator", "dsh", "--seed-results", str(exported), repeats=3)
         assert code == 2
         assert "different score context (evaluator)" in capsys.readouterr().err
 
@@ -452,11 +460,14 @@ def test_the_export_records_each_parts_rollout_seed(tmp_path, exported):
 
 
 def test_an_ungated_run_measures_train_rather_than_reuse_a_gated_export(tmp_path, exported):
-    """Without the gate train rollouts use the run's seed, not the gated export's
-    per-epoch one, so train is measured for real and the miss says why."""
+    """Without the gate (a run with no val items) train rollouts use the run's seed, not
+    the gated export's per-epoch one, so train is measured for real and the miss says
+    why."""
+    no_val = _manifest(tmp_path, {key: ids for key, ids in PARTS.items() if key != "val"},
+                       name="noval.json")
     with _patch_mode(PartsProbe):
         code, root = _main(tmp_path, "B", "--optimizer", "hill_climb", "--epochs", "1",
-                           "--repeats", "3", "--seed-results", str(exported), "--val-gate", "0")
+                           "--seed-results", str(exported), manifest=no_val, repeats=3)
     assert code == 0
     misses = _events(root, "seed_cache_miss")
     assert [(m["part"], m["reason"]) for m in misses] == [("train", "rollout seed 3, cached 1004")]

@@ -146,6 +146,10 @@ class FakeClient:
     too (#493 G30). The call key is read from ``trace.current_call_key()``, the
     optimizer call in flight. When a specific call_key is not in the responses
     dict, returns a default response based on the step_type.
+
+    The strategy frames every optimizer call as arm A's Claude backend does
+    (``claude_backend``); ``prompt`` records the message inside the framing and
+    ``sent`` the prompt as it arrived.
     """
 
     def __init__(self, responses: dict[tuple, str] | None = None) -> None:
@@ -153,10 +157,14 @@ class FakeClient:
         self.calls: list[dict[str, Any]] = []
 
     def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_packages.livemath.ops import unwrap_claude_backend_prompt
+
         key = current_call_key()
+        sent, prompt = prompt, unwrap_claude_backend_prompt(prompt)
         self.calls.append({
             "system": system,
             "prompt": prompt,
+            "sent": sent,
             "call_key": key,
         })
         if key and key in self.responses:
@@ -253,6 +261,14 @@ def _write_parts(root: Path, *, test: bool = False) -> Path:
     return parts_path
 
 
+def _parts_profile(tmp_path: Path, **settings: Any) -> None:
+    """A profile named ``parts`` holding the run's parts manifest (and ``settings``):
+    ``refactory optimize`` takes them only from a profile."""
+    from refactory_dsh import profiles
+
+    profiles.save(tmp_path, "parts", {"settings": {
+        "parts_manifest": str(_write_parts(tmp_path)), **settings}})
+
 def _config(root: Path, **overrides: Any) -> LoopConfig:
     """Build a LoopConfig for SkillOpt tests."""
     parts_path = _write_parts(root)
@@ -321,7 +337,9 @@ def _run_loop(
         assert isinstance(strategy, SkillOptLoop)
         _INFRA[id(strategy)] = loop
         if preload_state is not None:
-            strategy.load_strategy_state(preload_state)
+            # A saved state always records the knobs its proposer optimized.
+            strategy.load_strategy_state(
+                {"proposer_knobs": list(strategy.proposer.knobs), **preload_state})
         report = loop.run()
     return strategy, report
 
@@ -761,7 +779,7 @@ def test_replay_client_reproduces_decisions(tmp_path, monkeypatch):
     trace2 = _read_trace(tmp_path / "run2")
 
     assert [c["call_key"] for c in replay.calls] == keys1
-    assert [c["prompt"] for c in replay.calls] == [c["prompt"] for c in client1.calls]
+    assert [c["prompt"] for c in replay.calls] == [c["sent"] for c in client1.calls]
 
     def strip(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -1172,7 +1190,7 @@ def test_optimize_cli_takes_analyst_prompts_and_records_it(tmp_path, monkeypatch
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
 
     def run(value: str, root: str) -> int:
         with _patch_mode(SkillProbe):
@@ -1180,7 +1198,7 @@ def test_optimize_cli_takes_analyst_prompts_and_records_it(tmp_path, monkeypatch
                 MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
                 "--strategy-option", f"analyst_prompts={value}",
                 "--optimizer", "random", "--seed", "42",
-                "--runs-root", str(tmp_path / root), "--project", ".", "--parts", str(parts),
+                "--runs-root", str(tmp_path / root), "--project", str(tmp_path), "--profile", "parts",
             ])
 
     assert run("generic", "run") == 0
@@ -1671,7 +1689,8 @@ def test_resume_at_epoch_done_still_checks_the_early_stop(tmp_path):
 def test_early_stop_best_survives_a_resume():
     loop = SkillOptLoop()
     loop.configure()
-    loop.load_strategy_state({"early_stop_best": 0.7, "best_score": 0.9})
+    loop.load_strategy_state({"early_stop_best": 0.7, "best_score": 0.9,
+                              "proposer_knobs": ["skill"]})
     assert loop.strategy_state_dict()["early_stop_best"] == 0.7
 
 
@@ -2367,13 +2386,13 @@ def test_cli_runs_skillopt_end_to_end(tmp_path, monkeypatch):
         return original(self, **kwargs)
 
     monkeypatch.setattr(SkillOptLoop, "configure", spy)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
             "--optimizer", "random", "--seed", "42",
-            "--runs-root", str(tmp_path / "run"), "--project", ".",
-            "--parts", str(parts),
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path),
+            "--profile", "parts",
         ])
 
     assert code == 0
@@ -3410,13 +3429,13 @@ def test_a_later_all_failed_epoch_exits_the_optimize_cli_non_zero(tmp_path, monk
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=2",
             "--optimizer", "random", "--seed", "42",
-            "--runs-root", str(tmp_path / "run"), "--project", ".",
-            "--parts", str(parts),
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path),
+            "--profile", "parts",
         ])
     assert code != 0
     assert [d["all_failed"] for d in _decisions(_read_trace(tmp_path), "optimizer_calls")] == [False, True]
@@ -3889,17 +3908,20 @@ def test_run_header_names_the_custom_strategy(tmp_path):
     assert events.render(init).startswith("run · optimizer skillopt · ")
 
 
-def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
-    """``refactory optimize --setting-sources user,project`` reaches the run's
-    client, as ``--effort`` does; the flag did not exist and the project file's
-    run-level field was refused ("unknown search settings: setting_sources")."""
+def test_a_profile_sets_setting_sources_and_the_cli_names_the_key(tmp_path, monkeypatch, capsys):
+    """A profile's ``setting_sources`` reaches the run's client and its config, with
+    ``--effort`` from the command line; ``refactory optimize --setting-sources`` is
+    refused, naming the profile key."""
     from refactory_dsh import cli
     from refactory_dsh import loop as loop_module
     from refactory_dsh import model as model_module
 
-    parsed = cli.build_parser().parse_args(
-        ["optimize", MODE_ID, "--setting-sources", "user,project", "--effort", "medium"])
-    assert (parsed.setting_sources, parsed.effort) == ("user,project", "medium")
+    parsed = cli.build_parser().parse_args(["optimize", MODE_ID, "--effort", "medium"])
+    assert parsed.effort == "medium"
+    with pytest.raises(SystemExit) as refused:
+        cli.build_parser().parse_args(["optimize", MODE_ID, "--setting-sources", "user,project"])
+    assert refused.value.code == 2
+    assert "the profile setting 'setting_sources'" in capsys.readouterr().err
 
     client = FakeClient()
     built: list[dict[str, Any]] = []
@@ -3910,23 +3932,22 @@ def test_optimize_cli_takes_setting_sources_like_effort(tmp_path, monkeypatch):
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    _parts_profile(tmp_path, worker_backend="claude_code", setting_sources="user,project")
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
-            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
-            "--effort", "medium", "--setting-sources", "user,project",
-            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+            "--optimizer", "random", "--seed", "42", "--effort", "medium",
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path), "--profile", "parts",
         ])
     assert code == 0
     assert built and all(kwargs["setting_sources"] == "user,project" for kwargs in built)
+    assert all(kwargs["effort"] == "medium" for kwargs in built)
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["setting_sources"] == "user,project"
 
 
-def test_optimize_cli_takes_claude_executable_like_setting_sources(tmp_path, monkeypatch):
-    """``refactory optimize --claude-executable PATH`` reaches the run's client and its
-    recorded config; a run that leaves it unset digests as before it existed."""
+def test_a_profile_sets_claude_executable_like_setting_sources(tmp_path, monkeypatch):
+    """A profile's ``claude_executable`` reaches the run's client and its recorded config."""
     from refactory_dsh import loop as loop_module
     from refactory_dsh import model as model_module
 
@@ -3939,16 +3960,15 @@ def test_optimize_cli_takes_claude_executable_like_setting_sources(tmp_path, mon
             return client
 
     monkeypatch.setattr(model_module, "DshModelClient", ScriptedRoute)
-    parts = _write_parts(tmp_path)
+    expected = str(tmp_path / "bin" / "claude")
+    _parts_profile(tmp_path, worker_backend="claude_code", claude_executable=expected)
     with _patch_mode(SkillProbe):
         code = loop_module.main([
             MODE_ID, "--strategy", "skillopt", "--strategy-option", "max_epochs=1",
-            "--optimizer", "random", "--seed", "42", "--worker-backend", "claude_code",
-            "--claude-executable", "~/bin/claude",
-            "--runs-root", str(tmp_path / "run"), "--project", ".", "--parts", str(parts),
+            "--optimizer", "random", "--seed", "42",
+            "--runs-root", str(tmp_path / "run"), "--project", str(tmp_path), "--profile", "parts",
         ])
     assert code == 0
-    expected = str(Path.home() / "bin" / "claude")
     assert built and all(kwargs["claude_executable"] == expected for kwargs in built)
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["claude_executable"] == expected
@@ -4008,7 +4028,7 @@ def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeyp
     assert set(categories) <= {"improved", "regressed"}, categories
 
 
-# ── claude_backend_wrapper ────────────────────────────────────────────────
+# ── arm A's Claude backend framing of optimizer calls ─────────────────────
 
 _ARM_A_OPTIMIZER_PROMPTS = json.loads(
     (Path(__file__).resolve().parent / "fixtures" / "skillopt_arm_a_optimizer_prompts.json")
@@ -4052,19 +4072,28 @@ def test_claude_backend_prompt_edges_in_the_strategy_package():
         "History:\n- User: a\n   b\n\nAnswer the latest user request.")
 
 
-def test_claude_backend_wrapper_option_is_off_by_default_and_a_boolean():
+def test_every_optimizer_call_is_framed_and_the_old_option_is_read_not_honoured():
+    """The framing is always on. A run or profile saved with
+    ``claude_backend_wrapper=true`` still loads (the option is dropped); one saved
+    with ``false`` (bare optimizer prompts, the old default) is refused clearly."""
+    from refactory_dsh import profiles, strategies
     from refactory_packages.skillopt.claude_backend import ClaudeBackendFraming
     from refactory_packages.skillopt.loop import SkillOptLoop
 
     model = object()
     loop = SkillOptLoop.__new__(SkillOptLoop)
     loop.configure(model=model)
-    assert loop.claude_backend_wrapper is False and loop._optimizer_client() is model
-    loop.configure(model=model, claude_backend_wrapper=True)
     framed = loop._optimizer_client()
     assert isinstance(framed, ClaudeBackendFraming) and framed.client is model
-    with pytest.raises(TypeError, match="claude_backend_wrapper"):
-        loop.configure(model=model, claude_backend_wrapper="true")
+    assert "claude_backend_wrapper" not in SkillOptLoop.accepted_options
+    strategies.check_options("skillopt", {"claude_backend_wrapper": True, "seed": 1})
+    with pytest.raises(ValueError, match="no longer has option claude_backend_wrapper"):
+        strategies.check_options("skillopt", {"claude_backend_wrapper": False})
+    with pytest.raises(profiles.ProfileError, match="claude_backend_wrapper=false is no longer"):
+        profiles.normalize({"strategy": "skillopt",
+                            "strategy_options": {"claude_backend_wrapper": False}})
+    with pytest.raises(ValueError, match="has no option claude_backend_wrapperr"):
+        strategies.check_options("skillopt", {"claude_backend_wrapperr": True})
 
 
 # ── loop-owned search: the proposer is a part, every candidate is attempted ──

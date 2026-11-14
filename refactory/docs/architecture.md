@@ -179,7 +179,7 @@ on purpose:
 - **`Optimizer`** — proposes. `propose()` returns `Proposal`s; the harness
   validates and evaluates them. It cannot run anything, so it cannot waste budget.
   Seven ship: `random`, `hill_climb`, `evolutionary`, `archive`, `islands`, `map_elites`, and `autoresearch` (which asks a model).
-  The five that choose parents are also **parent pickers**: `--parent-picker map_elites`
+  The five that choose parents are also **parent pickers**: `parent_picker: map_elites`
   with `--optimizer autoresearch` pairs a picker (where to search) with a proposer (what
   to write) as one optimizer (`optim.compose.PickedParent`). Each step the picker
   chooses the candidate; the request the model reads describes that candidate's
@@ -227,7 +227,8 @@ is the library's, not one strategy's:
 - `Run.keep` journals what it keeps and `Run.candidate(id)` returns it, so a strategy
   saves candidate ids (not knob values) and gets the candidates back after a resume.
 
-The default loop uses the gate when `--val-gate 1` is set, with any optimizer, and then
+The default loop uses the gate whenever the parts manifest has val items, with any
+optimizer (there is no switch), and then
 evaluates as SkillOpt does; only where edit ideas come from differs. Train rollouts use
 SkillOpt's per-epoch seed (`train_batch_seed`: `seed + epoch*1000 + 1`). Each candidate
 evaluated on train, one whose train run failed included, is rolled out on val and is
@@ -237,14 +238,14 @@ a population of parents (`archive`, `evolutionary`, `islands`, `map_elites`;
 `autoscientists`, `best_of_n`, `reflective`) are refused with it. After a normal end the last epoch's proposals are scored,
 and with a test part `FinalEvaluation` runs, so the held-out audit compares the winner's
 val and test scores. A round's train evaluations run concurrently, then its val
-rollouts, up to `--max-concurrent-evaluations` at once under the run-wide item limit;
+rollouts, up to `max_concurrent_evaluations` at once under the run-wide item limit;
 the gate's decisions are still taken in population order. The best on val among the accepted candidates a person has not
 rejected is the winner, in the report and for `adopt`. Without the gate every built-in strategy
 also scores the last epoch's proposals when the run ends normally (its epoch bound, or a
 curriculum's last stage), so a run of N epochs scores all N proposal rounds; strategies
 that drive their own epochs (`reflective`, `adaptive_meta`, the curricula) included.
 Under the gate those strategies now get the same ending as the default loop: the last
-proposals gated, then `FinalEvaluation`. `--early-stop-patience N` and `--early-stop-at-full-val 1` add SkillOpt's early
+proposals gated, then `FinalEvaluation`. `early_stop_patience: N` and `early_stop_at_full_val` on add SkillOpt's early
 stop (see [outer-loop.md](outer-loop.md)). SkillOpt (`refactory_packages/skillopt`)
 is built from the same pieces plus `SkillOptProposer`, its optimizer steps (analysts,
 failure-first merge, ranked edit budget, patch, slow update, meta skill) as a part
@@ -258,23 +259,25 @@ its target. An append, or a target found nowhere, goes to the last knob, which a
 holds the SLOW_UPDATE region. An edit whose target crosses a section boundary or a
 SECTION line is refused on its own, never split, and the rest of the patch applies.
 
-**SRF's thirteen modes split across both buckets**, and the split is asserted so a
-port cannot go missing or be filed wrongly:
+**Twelve of SRF's thirteen modes are ported, split across both buckets** (the
+thirteenth, `ai_sci_v1`, was an earlier staged variant and was deleted in favour of
+`staged_curriculum`), and the split is asserted so a port cannot go missing or be
+filed wrongly:
 
 ```bash
 python -c "import refactory_dsh.strategies as S, refactory_dsh.optim as O; \
 print('loops  ', S.names()); print('propose', O.names())"
 # loops   ['adaptive_meta', 'autoscientists', 'best_of_n', 'default', 'reflective',
 #          'reflective_sampler', 'research_then_optimize', 'staged_curriculum',
-#          'staged_v1', 'tree_search']
+#          'tree_search']
 # propose ['archive', 'autoresearch', 'evolutionary', 'hill_climb', 'islands',
 #          'map_elites', 'random']
 ```
 
-Four of the thirteen are **optimizers** — `scs`, `evox`, `openevolve` and `karpathy`
+Four of the twelve are **optimizers** — `scs`, `evox`, `openevolve` and `karpathy`
 — plus `map_elites`, which lives in `srf/lab/` rather than among the modes and is
-counted by `SRF_LAB_PORT_COUNT`. The other nine are outer loops. `SRF_PORT_COUNT` is
-the total, so `13 - len(SRF_OPTIMIZER_PORTS)` is the loop count rather than a number
+counted by `SRF_LAB_PORT_COUNT`. The other eight are outer loops. `SRF_PORT_COUNT` is
+the total, so `12 - len(SRF_OPTIMIZER_PORTS)` is the loop count rather than a number
 kept in step by hand.
 
 They were all loops until issue #32, and the cause was the contract rather than the
@@ -441,10 +444,9 @@ What the two share, rather than each doing its own way:
 - **Verdict lifecycle.** A verdict's `consumed` field tracks its state through three
   values: `no` (pending), `used` (the walk applied it) and `expired` (consumed because
   the scope changed or the label was invalid). `take_verdict` marks the field on the
-  original verdict entry in the ledger; old runs that wrote `consumed: yes` are treated
-  as `used` for backward compatibility. `gate_corrections_due` counts only `used` (and
-  legacy `yes`) verdicts as "went on", so an expired verdict's corrections are never
-  re-applied.
+  original verdict entry in the ledger. `gate_corrections_due` counts only `used`
+  verdicts as "went on", so an expired verdict's corrections are never re-applied (a
+  `consumed: yes` left by a run from before the three values reads as pending).
 - **Corrections with `proceed`.** A feedback note given with `proceed` at a gate
   (e.g. `refactory steer --verdict gate=proceed --kind correction --note ...`) is
   recorded as a correction on both runtimes. `pick_gate_corrections` collects it and
@@ -718,18 +720,16 @@ decision; the findings stay in `research/` and `strategy/` for the design writer
 read.
 
 **Light refine.** A refine skips more than the perspectives step. `route_refine_design`,
-right after `prepare`, answers `light` on a refine (the default, `refine_design=light`)
-and the run goes straight to `design_doc`: no research, pitfalls or strategy agent runs.
+right after `prepare`, answers `light` on every refine and the run goes straight to `design_doc`: no research, pitfalls or strategy agent runs.
 The gate writes those steps' files and facts as "skipped" sentinels, so every later node
 finds its declared reads on both runtimes, and gives `design_doc` the pull request it
 follows up as `refine_context`: its description (framed as other people's words and
 capped at 6,000 characters), and its diff stat and changed files against its base branch
 as GitHub has it now ("unavailable" when that cannot be read, never "empty"). A person's
 reloop at `gate_strategy` goes to `synthesize_strategy`, which gets the same block as its
-`strategy_plan`, and the next design still gets `refine_context`. With
-`refine_design=full` (`--refine-design full`), or on any run that is not a refine, the
-gate answers `proceed` and the full phase runs; a full refine skips only the sizer
-(`route_sizing`), since it keeps its scale. Prepare reads the refine from the task
+`strategy_plan`, and the next design still gets `refine_context`. On any run that is
+not a refine the gate answers `proceed` and the full phase runs; a refine never does
+(the old `--refine-design full` is gone). Prepare reads the refine from the task
 (the walker) or the `refine` knob (the spine, where a node's task names only the node).
 
 The `deliverable_kind` fact, computed by `prepare_design`, distinguishes repository
@@ -1002,7 +1002,7 @@ promises more than it delivers.
   `processBoundTests` while its sibling `app-boot.spec.ts` is.
 
 **Not a gap, but worth knowing.** Several strategies — `research_then_optimize`,
-`staged_curriculum`, `staged_v1`, `tree_search`, `adaptive_meta`, `reflective` — make
+`staged_curriculum`, `tree_search`, `adaptive_meta`, `reflective` — make
 a decision that is only readable by a proposer that reads `ProposalContext.strategy`.
 The model proposer reads it: the request's "What this round is for" section shows the
 decision as data (its purpose, its reason, and every other key the strategy
@@ -1016,7 +1016,7 @@ prompt/knob edits stopped beating their parents; otherwise a prompt/knob-level c
 `best_of_n` and `autoscientists` ask a model proposer for their N samples of the seed
 in one request; with `random` they keep sampling knob values.
 
-**The edit-level portfolio** (`--portfolio prompt+pipeline`, off by default). The model
+**The edit-level portfolio** (`portfolio: prompt+pipeline`, off by default). The model
 proposer, asked to choose, rates its prompt change more confident nearly every time,
 and asked for one candidate it rarely writes a structural one. So under the portfolio
 each round asks it for one candidate per edit level (`optim.base.EDIT_LEVELS`), the

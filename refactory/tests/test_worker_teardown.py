@@ -115,14 +115,14 @@ def test_a_retry_is_recorded_and_the_receipt_adds_up_both_sessions(tmp_path):
     on the wire, the second reports 12 and answers. The retry event carries the cause,
     the attempt and the discarded session's usage; the receipt's usage is 42, with the
     first session kept beside it."""
-    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: socket hang up", "code": 1},
+    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: 500 Internal Server Error", "code": 1},
                                   {"usage": 12, "out": "right"}])
     run = tmp_path / "run"
     assert dsh.client().complete("Solve.", workdir=run).strip() == "right"
     assert dsh.calls() == 2
     [retried] = _events(run, RETRY_EVENT)
     assert (retried["attempt"], retried["attempts"]) == (1, 3)
-    assert retried["cause"] == "dsh: TRANSPORT: socket hang up"
+    assert retried["cause"] == "dsh: TRANSPORT: 500 Internal Server Error"
     assert retried["usage"]["tokens"] == 30
     [path] = list((run / ".refactory/workers").glob("worker-*.json"))
     receipt = json.loads(path.read_text())
@@ -134,9 +134,30 @@ def test_a_retry_is_recorded_and_the_receipt_adds_up_both_sessions(tmp_path):
 
 
 @needs_node
-def test_a_third_session_counts_each_earlier_one_once(tmp_path):
+def test_an_outage_that_reported_usage_is_counted_once_and_traced(tmp_path, monkeypatch):
+    """A session the network dropped had already reported 30 tokens; the client waits the
+    outage out and the next session reports 12 and answers. The receipt adds up both
+    (42), as for a retry; the outage's trace carries the dropped session's usage, and no
+    attempt was used."""
+    monkeypatch.setattr(model_mod, "NETWORK_FIRST_WAIT_S", 0.01)
     dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: socket hang up", "code": 1},
-                                  {"usage": 12, "err": "dsh: TRANSPORT: ECONNRESET", "code": 1},
+                                  {"usage": 12, "out": "right"}])
+    run = tmp_path / "run"
+    assert dsh.client().complete("Solve.", workdir=run).strip() == "right"
+    assert dsh.calls() == 2 and _events(run, RETRY_EVENT) == []
+    waiting, recovered = _events(run, model_mod.NETWORK_WAIT_EVENT)
+    assert (waiting["state"], recovered["state"]) == ("waiting", "recovered")
+    assert [usage["tokens"] for usage in recovered["usage"]] == [30]
+    [path] = list((run / ".refactory/workers").glob("worker-*.json"))
+    receipt = json.loads(path.read_text())
+    assert receipt["usage"]["tokens"] == 42
+    assert [s["usage"]["tokens"] for s in receipt["earlier_sessions"]] == [30]
+
+
+@needs_node
+def test_a_third_session_counts_each_earlier_one_once(tmp_path):
+    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: 500 Internal Server Error", "code": 1},
+                                  {"usage": 12, "err": "dsh: TRANSPORT: 429 Too Many Requests", "code": 1},
                                   {"usage": 5, "out": "right"}])
     run = tmp_path / "run"
     assert dsh.client().complete("Solve.", workdir=run).strip() == "right"
@@ -155,7 +176,7 @@ def test_retries_on_a_native_backend_share_the_nodes_wall(monkeypatch):
     seen: list[tuple[float | None, float]] = []
 
     class Wire:
-        returncode, stdout, stderr = 1, "", "dsh: TRANSPORT: socket hang up"
+        returncode, stdout, stderr = 1, "", "dsh: TRANSPORT: 500 Internal Server Error"
 
     class Done:
         returncode, stdout, stderr = 0, "done\n", ""
@@ -257,8 +278,8 @@ def test_a_session_that_reports_nothing_is_not_counted_as_the_one_before(tmp_pat
     """Three sessions under one receipt: 30 tokens, then one that reports none (after its
     request, or before it), then 5. The total is 35, the first session is kept once, and
     each retry event carries its own session's usage (none for the silent one)."""
-    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: socket hang up", "code": 1},
-                                  {"usage": middle, "err": "dsh: TRANSPORT: ECONNRESET", "code": 1},
+    dsh = Fake(tmp_path / "dsh", [{"usage": 30, "err": "dsh: TRANSPORT: 500 Internal Server Error", "code": 1},
+                                  {"usage": middle, "err": "dsh: TRANSPORT: 429 Too Many Requests", "code": 1},
                                   {"usage": 5, "out": "right"}])
     run = tmp_path / "run"
     assert dsh.client().complete("Solve.", workdir=run).strip() == "right"
@@ -290,7 +311,7 @@ def _clocked(monkeypatch, outcomes, step_s):  # type: ignore[no-untyped-def]
 
 
 class _Wire:
-    returncode, stdout, stderr = 1, "", "dsh: TRANSPORT: socket hang up"
+    returncode, stdout, stderr = 1, "", "dsh: TRANSPORT: 500 Internal Server Error"
 
 
 class _Answer:
@@ -324,7 +345,7 @@ def test_a_retry_the_wait_leaves_no_time_for_fails_on_the_wire_not_as_a_timeout(
     assert len(seen) == 1
     assert raised.value.kind == "transport" and failure_kind(raised.value) is None
     assert "time ran out before it could ask again" in str(raised.value)
-    assert "dsh: TRANSPORT: socket hang up" in str(raised.value)
+    assert "dsh: TRANSPORT: 500 Internal Server Error" in str(raised.value)
 
 
 class _Bridged:

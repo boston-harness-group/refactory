@@ -14,6 +14,8 @@ be a description of the repair rather than of the idea.
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 import hashlib
 import json
 import re
@@ -281,10 +283,26 @@ def candidate_id(state: dict[str, Any]) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
-#: How many edits one proposal may bundle by default (``LoopConfig.max_edits_per_proposal``):
-#: SkillOpt's edit budget, so a coordinated fix across a pipeline's steps can be one
-#: candidate rather than a chain of single edits the gate judges one by one.
-DEFAULT_MAX_EDITS = 4
+class RunStopped(CancelledError):
+    """A person asked the run to stop (``refactory stop``) while an optimizer call waited
+    to try again (`random_optimizer.AutoresearchOptimizer._wait`). The search ends there
+    as a stop at an epoch boundary ends it (``OuterLoop.run``): the stop is the bound,
+    the report is written, and the open epoch's step is made again on resume."""
+
+    reason = "a person asked the run to stop"
+
+
+#: How many changes one proposal may bundle: SkillOpt's edit budget, so a coordinated
+#: fix across a pipeline's steps can be one candidate rather than a chain of single
+#: edits the gate judges one by one. Counted by logical change (`optim.edit_count`):
+#: a structural edit and the edits that only connect it are one. A constant, not a run
+#: setting.
+MAX_EDITS_PER_PROPOSAL = 4
+#: How the cap counts, as a refusal and the bundling instructions say it.
+COUNTING_RULE = ("A structural edit and the edits that only connect it count as one change: "
+                 "the new step's own prompt and settings, its direct neighbours' prompt "
+                 "lines that name it or what it writes, and edges between it and them. "
+                 "Every other edit counts as one more.")
 
 
 @dataclass(frozen=True)
@@ -412,14 +430,19 @@ def unreadable_proposal(raw: Any, why: str) -> Proposal:
 
 
 def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = None,
-                     max_edits: int | None = None) -> list[str]:
-    """Why a proposal is refused before any edit is applied; empty when it is not.
+                     max_edits: int | None = None,
+                     parent_state: dict[str, Any] | None = None) -> list[str]:
+    """Why a proposal is refused before it becomes a candidate; empty when it is not.
 
-    An answer's entry that carried no edit (``E-proposal-shape``), too many edits
+    An answer's entry that carried no edit (``E-proposal-shape``), too many changes
     (``E-too-many-edits``), an edit that is not an object (``E-op``), an op outside
     the catalogue, and, given ``permitted``, an op outside this run's permitted edits
     (``E-policy``). Each refusal of a compound proposal names the edit (its index,
     from 1) it is about.
+
+    Given the ``parent_state`` the proposal applies to, its edits are counted by
+    logical change (`optim.edit_count`): a structural edit and the edits that only
+    connect it count as one. Without it every edit counts.
     """
     steps = proposal.steps
     if (len(steps) == 1 and isinstance(steps[0], dict) and "op" not in steps[0]
@@ -428,9 +451,20 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
                 'as {"edit": {"op": ...}} or {"edits": [{"op": ...}, ...]}, with '
                 "rationale, prediction and confidence beside it"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
-        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and this run "
-                f"allows at most {max(1, int(max_edits))} per proposal "
-                "(max_edits_per_proposal); split it, or keep the edits the fix needs together"]
+        limit = max(1, int(max_edits))
+        # A limit of one asks for single edits only; a bundle counts by logical change.
+        if (limit == 1 or parent_state is None
+                or not all(isinstance(step, dict) for step in steps)):
+            return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and the limit "
+                    f"is {limit} edits per proposal; split it, or "
+                    "keep the edits the fix needs together"]
+        from .edit_count import count
+
+        made = count(steps, parent_state)["logical"]
+        if made > limit:
+            return [f"E-too-many-edits: the proposal makes {made} changes ({len(steps)} edits) "
+                    f"and the limit is {limit} changes per proposal. {COUNTING_RULE} Split "
+                    "it, or keep the edits the fix needs together"]
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             return [_at(f"E-op: an edit is a JSON object naming its op, not "
@@ -647,7 +681,7 @@ class ProposalContext:
     #: ``Optimizer.propose_valid`` count from 1).
     attempt: int = 0
     #: How many edits one proposal may bundle (``Proposal.edits``;
-    #: ``LoopConfig.max_edits_per_proposal``). 1 asks for single edits only, and the
+    #: ``MAX_EDITS_PER_PROPOSAL`` in a run). 1 asks for single edits only, and the
     #: request does not mention bundling.
     max_edits: int = 1
     #: The run's size cost per node (``LoopConfig.parsimony``), stated in the answer
@@ -716,11 +750,10 @@ class ProposalContext:
     #: fixed/broken counts against its parent and the gate's word (``Loop._ledger``,
     #: ``LoopConfig.run_ledger``), for "Every change so far, by kind"; empty says nothing.
     ledger: list[dict[str, Any]] = field(default_factory=list)
-    #: Whether the answer format asks for ``lessons`` (``LoopConfig.lessons``), and the
-    #: latest the optimizer wrote, ``{"text", "epoch", "generation"}`` (``Loop._lessons``),
-    #: for "Your lessons so far".
-    ask_lessons: bool = False
-    lessons: dict[str, Any] = field(default_factory=dict)
+    #: The loop's memory note (`optim.memory`; ``LoopConfig.lessons``): ``{"text",
+    #: "epoch", ...}`` and, when the epoch's pass failed, ``not_updated``; for
+    #: "Optimizer memory" here and in every analyst and merge call. Empty says nothing.
+    memory: dict[str, Any] = field(default_factory=dict)
     #: The steps the last round's candidates added, with their train evidence
     #: (``feedback.step_evidence``; ``LoopConfig.step_review``) and, once a model
     #: optimizer has reviewed them, each step's ``review`` or ``review_error``, for "Did
@@ -897,7 +930,7 @@ class ProposalContext:
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
             items=_item_count(self.item_records) if self.score_is_item_mean else 0,
-            code_nodes=self.code_nodes, lessons=self.ask_lessons)]
+            code_nodes=self.code_nodes)]
         if self.max_edits > 1:
             sections += ["", bundle_instructions(self.max_edits, self.catalogue,
                                                  proposals=self.proposals)]
@@ -908,15 +941,15 @@ class ProposalContext:
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
     """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
-    the last round's added steps contributed, the optimizer's own lessons, and the
-    integrity judge's verdicts on its proposals (`optim.integrity`); each only when its
-    field holds something."""
-    from . import feedback, integrity
+    the last round's added steps contributed, the loop's memory note (`optim.memory`),
+    and the integrity judge's verdicts on its proposals (`optim.integrity`); each only
+    when its field holds something."""
+    from . import feedback, integrity, memory
 
     out: list[str] = []
     for lines in (feedback.ledger_lines(ctx.ledger),
                   feedback.step_review_lines(ctx.added_steps),
-                  feedback.lessons_lines(ctx.lessons) if ctx.ask_lessons else [],
+                  memory.request_lines(ctx.memory),
                   integrity.feedback_lines(ctx.integrity)):
         if lines:
             out += ["", *lines]
@@ -1265,12 +1298,11 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
-                        items: int = 0, code_nodes: bool = False, lessons: bool = False) -> str:
+                        items: int = 0, code_nodes: bool = False) -> str:
     """The answer format and its rules, with examples for what this run permits.
 
     ``items`` is the number of train items when the raw score is known to be their
     mean (0 otherwise): only then does the size cost line compare a node with one item.
-    ``lessons`` asks for the optional ``lessons`` field (``LoopConfig.lessons``).
     """
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
@@ -1285,8 +1317,6 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         '{"diagnosis": "<what the evidence shows is limiting the score>",',
         ' "considered": "<optional, short: the kinds of change you weighed for this '
         f'diagnosis ({", ".join(kinds)}) and why you chose yours>",',
-        *([' "lessons": "<optional, short: what the results so far teach about which changes '
-           'help here -- keep, revise or drop your earlier lessons>",'] if lessons else []),
         ' "proposals": [{"edit": {"op": "<operation>", ...},',
         '                "rationale": "<why, citing the evidence>",',
         '                "prediction": "<expected effect on the score>",',
@@ -1326,9 +1356,6 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "  you expect and how you could be wrong.",
         "- If the evidence justifies no change, return an empty proposal list and say why.",
     ]
-    if lessons:
-        lines.append("- `lessons` replaces the lessons you wrote before and is shown back to you "
-                     "next round; leave it out to keep them as they are.")
     return "\n".join(lines) + "\n"
 
 
@@ -1373,7 +1400,7 @@ def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = ()
 Only one proposal is asked for, so only one candidate is evaluated: an idea left for a
 separate proposal is not run this round. When your diagnosis traces a failure through
 several steps, make this one proposal's edits cover every step it names on that
-failure path (up to {max_edits} edits), so the fix is evaluated as a whole; changes that
+failure path (up to {max_edits} changes), so the fix is evaluated as a whole; changes that
 only work together each fail when tried alone."""
     else:
         scope = """\
@@ -1382,10 +1409,10 @@ is judged on its own."""
     return f"""\
 Bundling: when one fix needs coordinated changes -- several steps' prompts that have
 to agree, or a new node and the knob that feeds it -- one proposal may carry up to
-{max_edits} edits as an ordered list under "edits" instead of "edit". They are applied in
-order to the same parent, each to the state the one before it left, and the result is
-evaluated and judged once as one candidate; if any edit is refused, the whole proposal
-is, and the refusal names the edit.
+{max_edits} changes as an ordered list of edits under "edits" instead of "edit". {COUNTING_RULE}
+They are applied in order to the same parent, each to the state the one before it left,
+and the result is evaluated and judged once as one candidate; if any edit is refused,
+the whole proposal is, and the refusal names the edit.
 
 {scope}
 
@@ -1537,7 +1564,11 @@ def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE) -> str:
     """
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
-    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"]
+    from .analysts import metadata_text
+
+    declared = metadata_text(record)
+    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"
+             + (f" — {declared}" if declared else "")]
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
     if key is not None:
         lines += [f"Input ({key}):", _clip_middle(meta[key], text_chars)]
@@ -2417,7 +2448,9 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     used = len("\n".join(lines))
     rest: list[list[Any]] = []
     for block, row in turns:
-        if rest or used + len(block) + 2 > budget:
+        # A block that does not fit goes to the table; a later, shorter one that does
+        # still gets its trajectories.
+        if used + len(block) + 2 > budget:
             rest.append(row)
             continue
         lines += ["", block]
@@ -2538,8 +2571,8 @@ class Optimizer:
     trace_path: Any = None
 
     #: The most edits one proposal may bundle (``Proposal.edits``); more is refused
-    #: with ``E-too-many-edits``. The loop sets it from ``max_edits_per_proposal``.
-    max_edits: int = DEFAULT_MAX_EDITS
+    #: with ``E-too-many-edits``.
+    max_edits: int = MAX_EDITS_PER_PROPOSAL
 
     #: Whether an edit may add a code node (`refactory_dsh.snippet`); one that does
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from
@@ -2751,7 +2784,7 @@ class Optimizer:
         grader-derived data (V17).
         """
         steps = proposal.steps
-        refusal = proposal_refusal(proposal, max_edits=self.max_edits)
+        refusal = proposal_refusal(proposal, max_edits=self.max_edits, parent_state=parent.state)
         if refusal:
             return refusal
         frozen = set(frozen or ())

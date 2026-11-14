@@ -25,9 +25,3 @@ PACKAGE = Package(
     modes=(),
     strategies=(SkillOptLoop,),
 )
-
-
-def register() -> None:
-    """Register the SkillOpt strategy in ``STRATEGIES`` by hand (optional)."""
-    from refactory_dsh import strategies
-    strategies.register("skillopt", SkillOptLoop)

@@ -2408,36 +2408,19 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
     return {"qa": body, "qa_blocking": blocking, "qa_missing": len(missing)}
 
 
-def _legacy_reviews_match(ctx: Any, text: str, snapshot: dict[str, Any]) -> bool:
-    """Compare complete legacy report sections, never a matching substring."""
-    headings = list(re.finditer(r"^## (reviews/(?:health-check|code-review|qa)\.md)\s*$", text, re.M))
-    names = [heading[1] for heading in headings]
-    expected = [review["path"] for review in snapshot["reviews"]]
-    if names != expected or len(names) != len(set(names)):
-        return False
-    for index, heading in enumerate(headings):
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
-        if text[heading.end():end].strip() != ctx.read_text(heading[1]).strip():
-            return False
-    return True
-
-
 def gate_qa(ctx: Any) -> str:
     """Route from current findings, checking the synthesis's review snapshots."""
     text = ctx.read_text("reviews/qa-synthesized.md")
     snapshot = _review_snapshot(ctx)
     manifest = {"version": 1, "digests": {review["path"]: review["sha256"] for review in snapshot["reviews"]},
                 "missing": snapshot["missing"]}
+    # A synthesis without its snapshot (one written before synthesize_qa recorded it)
+    # is not known to be fresh: the reviews and the synthesis run again.
     recorded = re.search(r"<!-- refactory-qa-snapshot (.+) -->\s*$", text)
-    if recorded is not None:
-        try:
-            fresh = json.loads(recorded[1]) == manifest
-        except ValueError:
-            fresh = False
-    else:
-        # Historical synthesis already embeds each report verbatim. Accept that
-        # representation only while every present report still matches its text.
-        fresh = _legacy_reviews_match(ctx, text, snapshot)
+    try:
+        fresh = recorded is not None and json.loads(recorded[1]) == manifest
+    except ValueError:
+        fresh = False
     from refactory_dsh import authoring_evidence as evidence
 
     for review in snapshot["reviews"]:

@@ -525,12 +525,32 @@ def run_node(
             ctx.set_fact(key, value)
     ctx._check_produces()  # noqa: SLF001
     _write_facts()
+    record_visit(directory, node_id, produced, gate=not is_retryable)
     if not is_retryable:
         # A reloop to a step that cannot see what the gate read hands it those files.
         produced = with_unseen_reads(produced, node_id,
                                      declarations(directory, node_id).get("blind_reloops"),
                                      ctx.workdir)
     return produced
+
+
+def record_visit(directory: Path, node_id: str, produced: Any, *, gate: bool) -> None:
+    """Inside a data-node pass (its ``items.PASS_MARKER`` is there), keep what this op
+    produced, or the verdict this code gate answered, for the item's record (`items.
+    op_visit`, `items.gate_visit`); the walker keeps the same in memory. A visit that
+    cannot be kept never fails the node."""
+    from refactory_dsh import items
+
+    if not (directory / items.PASS_MARKER).exists():
+        return
+    try:
+        visit = (items.gate_visit(node_id, produced) if gate else
+                 items.op_visit(directory, node_id, produced,
+                                declarations(directory, node_id).get("writes") or ()))
+        items.record_visit(directory, visit)
+    except Exception as exc:  # noqa: BLE001 - the item's evidence, never its outcome
+        print(f"refactory: run warning: could not record the visit of {node_id}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

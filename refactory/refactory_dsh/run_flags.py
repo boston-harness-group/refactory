@@ -55,17 +55,21 @@ def slug(text: str, *, words: int = 3) -> str:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """The flags every run takes, spelled and parsed the same on every command."""
+    """The flags every run takes, spelled and parsed the same on every command: an
+    authoring run's (:func:`add_authoring_arguments`) and any run's
+    (:func:`add_run_arguments`)."""
+    add_authoring_arguments(parser)
+    add_run_arguments(parser)
+
+
+def add_authoring_arguments(parser: argparse.ArgumentParser) -> None:
+    """What an authoring run (create, edit, design and their _fast variants) is told:
+    its name, check, attempts, and where it works and delivers."""
     from refactory_dsh import repo_change
 
     parser.add_argument("--name", default="", help="the package or artifact name (default: from what you said)")
     parser.add_argument("--check", default="",
                         help="required for design; optional focused check for create_fast/edit_fast")
-    parser.add_argument(
-        "--knob", action="append", default=[], metavar="NAME=VALUE",
-        help="set one of the mode's knobs for this run, e.g. allow_regression=1 (repeatable)",
-    )
-    parser.add_argument("--workdir", default="", help="the run directory")
     parser.add_argument(
         "--attempts", type=int, default=None, metavar="N",
         help="an alias: --knob check_attempts=N for design, attempts=N for create and edit, "
@@ -98,9 +102,18 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--review-comments", action="store_true",
                         help="design only, with --refine: add the pull request's reviews and comments to the "
                              "run's steering")
-    parser.add_argument("--refine-design", default=None, choices=["light", "full"],
-                        help="design only, with --refine: light (default) skips research and strategy; "
-                             "full walks the whole design phase")
+
+
+def add_run_arguments(parser: argparse.ArgumentParser) -> None:
+    """What any run is told: its knobs and directory, the model route, the resource
+    limits, the gates it answers up front, the items it reads, and how it is driven.
+    The spine's own launcher (``python -m refactory_dsh.interactive``) takes exactly
+    these, so its flags cannot drift from ``refactory ceo``'s."""
+    parser.add_argument(
+        "--knob", action="append", default=[], metavar="NAME=VALUE",
+        help="set one of the mode's knobs for this run, e.g. allow_regression=1 (repeatable)",
+    )
+    parser.add_argument("--workdir", default="", help="the run directory")
     parser.add_argument("--worker-backend", default="",
                         help="the backend every agent node runs on: dsh (default), codex or claude_code")
     parser.add_argument("--effort", default="", help="the workers' reasoning effort")
@@ -204,8 +217,6 @@ def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, labe
         return "refactory: --refine starts from the pull request's head, so it takes no --base"
     if args.review_comments and not args.refine:
         return "refactory: --review-comments goes with --refine: they are the pull request's comments"
-    if args.refine_design and not args.refine:
-        return "refactory: --refine-design goes with --refine: it says how a refine designs its change"
     timeout = args.model_timeout_s
     if timeout is not None and not (1 <= timeout <= 7200):
         return f"refactory: --model-timeout must be between 1 and 7200 seconds, got {timeout}"
@@ -307,8 +318,6 @@ def worktree_knobs(args: argparse.Namespace, *, deliver: bool = True) -> list[st
         found.append(f"refine={args.refine}")
     if args.review_comments:
         found.append("review_comments=1")
-    if args.refine_design:
-        found.append(f"refine_design={args.refine_design}")
     return found
 
 

@@ -372,7 +372,7 @@ def test_records_have_prediction_and_label(walker_result):
     assert item_1["label_text"] == "Converges conditionally"
 
 
-# ── correction #2: use_theorem / use_sketch gating ───────────────────────
+# ── correction #2: the theorem and sketch never reach the prompt ─────────
 
 _GATING_ITEM = {
     "question": "Which series converges?",
@@ -396,53 +396,28 @@ class _GatingCtx:
         return self._knobs.get(name, default)
 
 
-def test_gating_knobs_default_to_skillopt_values():
-    """use_theorem / use_sketch are mode knobs defaulting to False
-    (SkillOpt configs/livemathematicianbench/default.yaml:21-22), and the
-    format_prompt node reads them."""
+def test_no_mode_declares_a_knob_that_shows_the_theorem():
+    """SkillOpt's use_theorem / use_sketch (default.yaml:21-22) are not ported: the
+    theorem states the correct option."""
     from refactory_packages.livemath.mode import Solver
 
     knobs = Solver.declare()
-    assert knobs["use_theorem"].default is False
-    assert knobs["use_sketch"].default is False
+    assert not {"use_theorem", "use_sketch"} & set(knobs)
     node = Solver().build().nodes["format_prompt"]
-    assert {"use_theorem", "use_sketch"} <= set(node.knobs)
+    assert not {"use_theorem", "use_sketch"} & set(node.knobs)
 
 
-def test_default_prompt_is_byte_exact_without_theorem_and_sketch():
-    """Defaults (both knobs off): SkillOpt's _build_user (rollout.py:41-44)
-    emits only Question and Choices, even when the item has theorem/sketch."""
+def test_prompt_is_byte_exact_without_theorem_and_sketch():
+    """SkillOpt's _build_user (rollout.py:41-44) with both options off: only Question
+    and Choices, even when the item has theorem/sketch -- and even when a state saved
+    before the knobs were removed still turns them on."""
     from refactory_packages.livemath.ops import format_prompt
 
-    prompt = format_prompt(_GatingCtx({}))["user_prompt"]
-    assert prompt == (
-        "## Question\nWhich series converges?\n\n"
-        "## Choices\nA. Diverges\nB. Converges"
-    )
-
-
-def test_enabled_prompt_is_byte_exact_with_theorem_and_sketch():
-    """Both knobs on: Theorem then Proof Sketch, joined by blank lines."""
-    from refactory_packages.livemath.ops import format_prompt
-
-    prompt = format_prompt(_GatingCtx({"use_theorem": True, "use_sketch": True}))["user_prompt"]
-    assert prompt == (
-        "## Question\nWhich series converges?\n\n"
-        "## Choices\nA. Diverges\nB. Converges\n\n"
-        "## Theorem\nLet $f$ be continuous on $[0,1]$.\n\n"
-        "## Proof Sketch\nApply the intermediate value theorem."
-    )
-
-
-def test_each_gate_is_independent():
-    from refactory_packages.livemath.ops import format_prompt
-
-    only_theorem = format_prompt(_GatingCtx({"use_theorem": True}))["user_prompt"]
-    assert only_theorem.endswith("## Theorem\nLet $f$ be continuous on $[0,1]$.")
-    assert "## Proof Sketch" not in only_theorem
-    only_sketch = format_prompt(_GatingCtx({"use_sketch": True}))["user_prompt"]
-    assert only_sketch.endswith("## Proof Sketch\nApply the intermediate value theorem.")
-    assert "## Theorem" not in only_sketch
+    expected = ("## Question\nWhich series converges?\n\n"
+                "## Choices\nA. Diverges\nB. Converges")
+    assert format_prompt(_GatingCtx({}))["user_prompt"] == expected
+    assert format_prompt(_GatingCtx({"use_theorem": True, "use_sketch": True}))[
+        "user_prompt"] == expected
 
 
 # ── correction #3: solve node role ────────────────────────────────────────

@@ -22,49 +22,50 @@ call.  This means:
 `command_timeout_s` on each node's subprocess.  It does not use
 `enable_recovery`.
 
-## The default loop's validation gate (on by default with val items)
+## The default loop's validation gate (on whenever there are val items)
 
-When the run's parts manifest (`--parts-manifest`) has val items, the default loop
+When the run's parts manifest (`parts_manifest`) has val items, the default loop
 evaluates candidates the way the SkillOpt strategy does, using the same
 `ValidationGate` and `FinalEvaluation` from `outerloop.py`; only the optimizer, where
-edit ideas come from, differs. No flag is needed: an unset `val_gate` (the command
-line's, a profile's or the library's default) turns the gate on when there are val
-items. `--val-gate 0` turns it off, and `--val-gate 1` insists on it (refused without
-val items). `config.json` records the decision, and the report's `selection` section
-says why (`val_gate_basis`).
+edit ideas come from, differs. It is not a setting: there is no flag or profile key,
+and the run decides from its manifest. `config.json` records the decision (`val_gate`),
+and the report's `selection` section says why (`val_gate_basis`). A profile saved with
+a `val_gate` key (before the switch was removed; `false` was the default then) still
+loads: the key is dropped.
 
 - **No val items.** A run with no parts manifest, or one without a val part, selects
   on train scores and says so: "no validation items: selecting on train scores", in its
-  events, its `strategy.log` and its report (`selection.warning`). With `--val-gate 0`
-  the report says the run selected on train though it had val items.
-- **`--holdout`.** The validation set for selection is always the manifest's val part.
-  The `--holdout` fraction of a Task's items (a run without a manifest) is never
+  events, its `strategy.log` and its report (`selection.warning`).
+- **`holdout`.** The validation set for selection is always the manifest's val part.
+  The `holdout` fraction of a Task's items (a run without a manifest) is never
   selected on: it stays the end-of-run audit's independent split. With a manifest the
   audit's held-out items are the val part, so under the gate the audit runs on the part
   the search selected on. It then gives no overfit verdict and rolls nothing out: it
   says that no independent check was possible (`holdout.split` is `val`,
   `holdout.independent` is false, `status` is `not_applicable`, and the report names
   the split). With a test part the audit compares val with test, which nothing selects
-  on (`split` `test`). A resumed run keeps the `val_gate`, `selection` and `pool_size`
-  its `config.json` recorded, whatever its profile or the defaults now say; a resume
+  on (`split` `test`). A resumed run keeps the `selection` and `pool_size` its
+  `config.json` recorded, whatever its profile or the defaults now say; a resume
   command that gives one of them explicitly with another value is refused, naming both.
+  A run that recorded `val_gate` false although it had val items (started with the old
+  `--val-gate 0`) is refused on resume: start a new run.
   A launch that leaves `selection` unset records the rule it resolved (`single` or
   `pool`).
-- **Custom strategies** (SkillOpt) keep their own gate: an unset `val_gate` stays off
-  for them, and `--val-gate 1` is refused.
+- **Custom strategies** (SkillOpt) keep their own gate: the default loop's stays off
+  for them.
 
 Train is the proposer's feedback, validation decides every choice and test is scored
 once at the end. The validation average is the fitness for the parents, the pool and
 the winner, in every strategy, optimizer and parent picker; the proposer never sees a
-val score. `--selection` says how it selects:
+val score. `selection` says how it selects:
 
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
   parent. The default for the default loop with a single-parent optimizer (`random`,
-  `autoresearch`, `hill_climb`, alone or as `--parent-picker hill_climb`), the
+  `autoresearch`, `hill_climb`, alone or as `parent_picker: hill_climb`), the
   SkillOpt-matched setting; its decisions are those of the gate before pools existed.
 - **`pool`**: entry is permissive. Every judged candidate may enter a pool of the
-  `--pool-size` (8 by default) best by val score, with any tied with the last of them.
+  `pool_size` (8 by default) best by val score, with any tied with the last of them.
   Parents come from the pool, the incumbent first, and each strategy chooses among
   them by val (a tie by train): `random` takes the best on val, and a model proposer
   may name any pool member as the parent. The population optimizers and pickers
@@ -92,7 +93,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 - **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
   train run failed, and must strictly beat the gate's current candidate (the last one
   accepted), not its parent. The candidates of one round (`--batch-size` above 1, or a
-  `--portfolio` round's one per edit level) are judged together, each against the
+  `portfolio` round's one per edit level) are judged together, each against the
   current candidate as the round starts, so the order they were proposed in decides
   nothing: of those that beat it, the one with the highest val score is accepted and
   becomes current; a tie goes to the higher train score, then to the one proposed first.
@@ -109,7 +110,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 - **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
   every epoch, the candidate the optimizer edits is scored again at the start of each
   epoch's proposal step, on that epoch's train sample (the whole train part, or the
-  `--train-minibatch` sample) with that epoch's seed. A candidate created and scored
+  `train_minibatch` sample) with that epoch's seed. A candidate created and scored
   this epoch is not scored twice. The optimizer, and every reader, reads these fresh
   records; the reader cache is keyed by the records' text, so new records are read
   again. Only the evidence changes: the candidate keeps its id, its gate val score and
@@ -122,13 +123,13 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   `rescore_failed` (still counted as an evaluation). The re-score runs in the round
   itself: when an epoch evaluates children of the candidate the last proposal step
   edited, that parent is scored on the epoch's train sample with them. The children
-  keep the `--max-concurrent-evaluations` slots: the re-score joins the round's last
+  keep the `max_concurrent_evaluations` slots: the re-score joins the round's last
   wave when that wave leaves a slot free (two portfolio children and three slots, the
   live shape), else it runs after the children, alone. Either way it is a request of a
   `Run.evaluate_many` batch: its items count against `--max-items-in-flight` with the
   children's, and a stop ends it with them (a child's error is the one raised). It goes
   in only when there is room for every child still to score and it: `--max-evaluations`
-  must hold all of them, and `--max-rollouts`, when set, each child's train and val
+  must hold all of them, and `max_rollouts`, when set, each child's train and val
   rollouts and then the re-score's train rollouts, so a re-score never takes what a
   child needs to be scored or judged. It is skipped when it already has this epoch's
   records.
@@ -139,8 +140,8 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   re-score (no request reads their comparison). Train records are kept per epoch, so
   "What the last edit changed", "Your earlier reasoning" and the run-wide feedback
   sections compare a child with its parent's records from the child's epoch (the same
-  seed); a pair from different epochs is marked as such. `--fresh-evidence 0`
-  turns it off (the minibatch re-score of `--train-minibatch` stays). On LiveMath's
+  seed); a pair from different epochs is marked as such. It is always on under the
+  gate (there is no switch). On LiveMath's
   35-item train part this is one train evaluation of 35 rollouts per epoch, the epochs
   whose gate kept a child included; with 3 concurrent evaluations (two portfolio
   children and the re-score) the round's wall clock is unchanged. Every gated strategy
@@ -195,7 +196,7 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   stop in the same epoch) and says why it skipped. The report's `strategy_report`
   holds `final_selection`, `baseline_test`, `best_test`, `final_test` and the two deltas
   (`test_eval` says `done`, `skipped` or `incomplete`, and `test_eval_reason` why). The
-  held-out audit then compares the winner's val and test scores, so a `--holdout 0` run
+  held-out audit then compares the winner's val and test scores, so a `holdout: 0` run
   is audited. Each phase is saved: a resumed run continues it. Without a test part it is
   skipped with that reason.
 - **Overfit audit.** The val-vs-test audit counts only the gap the search added:
@@ -213,14 +214,14 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   - **Train vs holdout:** that audit uses the same fixed threshold and the same seed
     rule; it has no seed holdout score to subtract, so an optimized winner's whole gap
     counts.
-- **Early stop.** `--early-stop-patience N` (0, off, by default) stops the run after N
+- **Early stop.** `early_stop_patience: N` (0, off, by default) stops the run after N
   epochs in a row whose gating did not raise the best val score.
-  `--early-stop-at-full-val 1` stops it once the best val score reaches 1.0. The first
+  `early_stop_at_full_val` on stops it once the best val score reaches 1.0. The first
   epoch gates the starting population, which sets the best the count starts from
   (SkillOpt's initial val score) and is never a reason to stop. Each later epoch gates
   the batch the previous one proposed, and is checked right after that gating, before
   it proposes, as SkillOpt checks at an epoch's end; so a seed already at 1.0 still gets
-  one batch proposed and gated. Both settings need the gate (val items, or `--val-gate 1`), are saved with the
+  one batch proposed and gated. Both settings need the gate (val items), are saved with the
   run and are kept on resume.
 
 ## An evaluation that dies with the run is not a result (exit 75, `--resume`)
@@ -228,7 +229,8 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 A failed item is the candidate's result only when it ran and failed. An item whose
 process died with the run has an unknown outcome (`items.interrupted_item`). That is
 an item whose model calls kept failing on the wire through the client's retries (a
-proxy or provider outage), whose completion process was killed by SIGKILL or SIGTERM
+proxy or provider outage, or a network outage longer than the client waits one out:
+2 hours, or its node's wall; `models.md`), whose completion process was killed by SIGKILL or SIGTERM
 (exit -9 or -15: the host's out-of-memory killer, a stop from outside), whose product
 worker was killed (`signal: SIGKILL`), whose op child exited before it reported, or
 whose model call the run's stop cancelled. Only an item with no verdict qualifies (an
@@ -284,11 +286,11 @@ may say "429") never decides it.
 - **Out of scope.** An interrupted evaluation runs again from its start. Resuming inside
   forks, loops and per-item passes is separate work.
 
-## Train minibatches (`--train-minibatch N`)
+## Train minibatches (`train_minibatch: N`)
 
 By default every candidate is scored on the whole train part. With
-`--train-minibatch N` and a train part of more than N items, each epoch samples N train
-ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items, or `--val-gate 1`):
+`train_minibatch: N` and a train part of more than N items, each epoch samples N train
+ids with SkillOpt's per-epoch seed (`train_batch_seed`). It needs the gate (val items):
 without the gate the winner and the parents are picked by train scores, which would
 then come from different samples, so the run is refused before anything is rolled
 out.
@@ -309,7 +311,7 @@ out.
 
 `0`, or a train part of N items or fewer, scores the whole train part as before.
 
-## Compound proposals (`--max-edits-per-proposal N`)
+## Compound proposals (up to 4 changes)
 
 A proposal may carry an ordered list of edits, `{"edits": [...]}`, instead of one
 `edit`. They are applied together to the parent as one candidate, which is evaluated
@@ -327,11 +329,28 @@ sections at once; this is the default loop's equivalent.
   does not depend on -- one that changes nothing, or that a later edit overwrites or
   undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
   `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
-  list longer than N is refused `E-too-many-edits`.
-- **Cap.** `--max-edits-per-proposal` (default 4, SkillOpt's edit budget) caps the
-  list; `1` is single edits only, as before.
-- **Who emits lists.** The `autoresearch` request says it may bundle up to N edits when a
-  fix needs coordinated changes, with a JSON example (not shown when N is 1). When it
+  list that makes more changes than the cap is refused `E-too-many-edits`, saying how
+  many changes and edits it makes and how they are counted.
+- **Cap.** 4 changes per proposal, SkillOpt's edit budget (`MAX_EDITS_PER_PROPOSAL`, a
+  constant, not a run setting), counted by logical change (`optim/edit_count.py`): a
+  structural edit and the edits that only connect it count as ONE change -- the new (or
+  removed) step's own prompt and settings (an `add_knob`/`set_knob`/`remove_knob` of a
+  knob it ALONE binds or reads; a knob another step binds or reads too counts on its
+  own), its DIRECT neighbours' prompt lines that refer to it (a
+  `set_knob` of a knob a step one hop away binds or reads -- reading what it writes,
+  writing what it reads, or on an edge with it, in the graph the structural edit itself
+  leaves -- whose every changed line names the
+  step or a file or fact it writes), and edges between it and those neighbours. Every
+  other edit counts as one more, and two structural edits are two changes. Only one-hop
+  neighbours qualify, so one change cannot sprawl over the pipeline. A limit of one (a
+  caller's `max_edits=1`) still means single edits.
+- **Counts per candidate.** Each candidate's proposal record (journal `proposal`,
+  report.json `proposal_outcomes`) carries `edit_count`: its changes (`logical`), raw
+  edits (`raw`), structural and knob edits, and the knob text characters it changed
+  (the lines added and removed); report.md's "Proposal versus outcome" shows them.
+- **Who emits lists.** The `autoresearch` request says it may bundle up to 4 changes
+  when a fix needs coordinated changes, and how they are counted, with a JSON example.
+  When it
   asks for one proposal (one candidate per epoch), it asks that the proposal's edits
   cover every step the diagnosis names on the failure path, since an idea left for a
   separate proposal is never run; when it asks for several, separate ideas go in
@@ -346,7 +365,23 @@ sections at once; this is the default loop's equivalent.
   or an answer with nothing to read, is refused `E-proposal-shape` with the reason: it
   is counted with the epoch's refusals (and in the refusal pressure that can add an
   attempt) and shown under "Why your last proposals were refused" in the retry and the
-  next request, never dropped. An empty `proposals` list proposes nothing.
+  next request, never dropped. An empty `proposals` list proposes nothing. An answer
+  whose outermost object is not valid JSON (a list left open, a reply cut off) is read
+  as nothing: no object nested in it (one edit of one proposal) is taken for the
+  answer. The reply is read by its own braces first (so a code fence inside a proposed
+  prompt cannot cut it), the last top-level object with a `proposals` LIST being the
+  answer (an object whose `proposals` is not a list, or an example `proposal`, is not);
+  after a broken answer, a fenced object is read only when it is a whole answer (a
+  fenced example edit before a cut-off answer is not the answer). Only when no object
+  with a `proposals` list parses anywhere in the reply is it read as a top-level array
+  of objects (`[{"...": ...}, ...]`, bare or fenced, a bracket then a brace then a key):
+  its LAST such list (a draft list before a final one is a draft), every entry; a list
+  holding anything else, or left open, is refused whole, and so is a reply with a JSON
+  object after its last list (which is the answer is unclear). An object inside or after
+  such a list is never read alone as the answer. Brackets in prose (`[{op, knob}]`) and
+  an example list before an answer are not such a list. Each proposal the request asked for is refused `E-proposal-shape`, saying
+  where the JSON broke, so the round asks again within its attempts and the refusals
+  are counted.
 - **Records.** The candidate's `edits` hold its lineage's edits in order;
   `Candidate.step_edits` says how many its own proposal added and `own_edits()` returns
   them. The proposal record, the journal (`candidate` with `step_edits`, `proposal`),
@@ -432,6 +467,11 @@ or `problem`, `task_description`, `instruction`, `input` or `prompt`, else the f
 step's prompt) and its `choices`. Then it shows each step's output from the record's
 `exchanges`, in the order the pass ran them (a fork's branches in branch order), then
 the expected answer (`label` and `label_text`), the prediction and the grader's reason.
+A record also keeps, under `steps` and in run order, each op visit of the item's pass
+(the facts it returned and the declared files it wrote: a 600-character preview, a
+digest and whether all of it was empty) and each code-gate visit (its verdict and
+reason); `exchanges` stays one entry per model call. Both runtimes record them (the
+spine through its runner, the walker in memory).
 
 - **Answer rules.** Built from the run's edit catalogue and the node schema, with
   placeholders only. When the run permits a structural op, the rules show a structural
@@ -473,7 +513,7 @@ the expected answer (`label` and `label_text`), the prediction and the grader's 
   the `dsh` and `claude_code` backends can run a call without tools, so a run whose
   optimizer role is routed elsewhere (`codex`, `openshell`) is refused at launch,
   before anything runs. The message says how to route the role, for example
-  `--role-routes '{"optimizer": {"worker_backend": "claude_code"}}'`. It never runs
+  `role_routes`: `{"optimizer": {"worker_backend": "claude_code"}}`. It never runs
   the optimizer with tools.
 - **What the proposal call then gets.** The readers' findings, verbatim but bounded:
   at most 12 patterns per reader, each pattern's text at most 400 characters, at most 3
@@ -579,7 +619,8 @@ optimizer, at no extra compute (train records only):
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
   rises and drops among the rest. Each changed item is shown with both trajectories, as
-  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); the rest go in a table. It also
+  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); an item that no longer fits goes
+  in a table, and a later, shorter one that still fits is shown in full. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -623,11 +664,45 @@ proposals are kept. The other library optimizers call no model; SkillOpt records
 calls in `skillopt_trace.jsonl`, one line per attempt (`attempt`, from 1): as SkillOpt
 does, a failed optimizer call is tried up to 3 times, waiting 1, 2 and 4 s after each
 failure, before its fallback; a spent budget, a cancellation or a missing model choice
-is never retried.
+is never retried. The loop's own analyst, merge, memory and step-review calls are
+retried the same way (`AutoresearchOptimizer._complete`): up to 3 attempts, waiting 1,
+2 and 4 s after each failed one, any exception from an attempt counting, each attempt
+traced with its `attempt`; a spent budget, a cancellation or a missing model choice
+stop at once. So is the proposal call (`AutoresearchOptimizer._ask_proposal`), where a
+reply with no JSON object at all (empty, or prose only) also counts as a failed attempt;
+a reply whose JSON object is broken is an answer, refused and asked again with why
+(`E-proposal-shape`), not an attempt retry, and a proposal call whose attempts all fail
+ends the round as a failed one, as a failed proposal call did before (it used to have
+one attempt, so one transient failure lost the round's proposal). Otherwise a reply is
+never retried, however unusable: the analyst, merge, memory and step-review calls parse
+what they get, and the proposal call retries only a reply with no JSON at all; a call
+refused as longer than
+the model's context is not tried again at the same length but once at half of it, and
+not at all when the request cannot be made shorter. A retry's wait ends early on a stop
+(the client's cancellation scope, or a person's `refactory stop` request, checked every
+0.25 s), and the call is not attempted again. A person's stop then ends the search as a
+stop at an epoch boundary does: the stop is the run's bound (journaled, with
+`stopped_inside_step`), report.md is written, and the open epoch's step -- the memory
+pass, or the proposal round, which is not counted as a failed one -- is made again on
+resume. In the memory pass, a cancelled client scope or a missing model choice ends the
+run with its error, after journaling it as the bound and writing the report; in a
+proposal round they are counted as that round's failure, as any failed proposal is. These attempts stack
+on the model client's own: a `DshModelClient` completion already makes up to 3 attempts
+on a transport failure (`model.DEFAULT_ATTEMPTS`), waiting up to 60 s in all between
+them (`RETRY_WINDOW_S`), so one analyst, merge, memory, step-review or proposal call may in the
+worst case start 9 model sessions, each up to the client's own timeout, and wait up to
+3 x 60 + 1 + 2 + 4 = 187 s between them. A network, DNS or credential-refresh outage
+uses none of these attempts, the SkillOpt port's or the loop's: the model client waits it
+out inside the attempt (up to 2 hours, `models.md`), and the SkillOpt port's trace line
+lists the outages an attempt waited out as `network_waits`. The bound is waited once, not
+once per attempt: after a call has waited the whole 2 hours, an outage met by the next
+call (that call's next attempt included) fails at once until some call gets through. So
+the worst case of one optimizer call in an outage that never ends is about 2 hours plus
+the attempts' own waits (1 + 2 + 4 s), not 3 x 2 hours.
 
-### Run-wide feedback: changes by kind, lessons, added-step reviews
+### Run-wide feedback: changes by kind, the memory note, added-step reviews
 
-Three more request sections (`optim/feedback.py`) carry what the run has taught so
+Three more request sections (`optim/feedback.py`, `optim/memory.py`) carry what the run has taught so
 far, beyond the recent candidates above. Each has a switch (a profile setting, or `0`/`1`
 on the command line), none changes how anything is scored, and none reads anything but
 the graph, train records and the gate's outcome words: no answer or option is parsed,
@@ -636,7 +711,7 @@ request (the default loop, `reflective`, `best_of_n`, `autoscientists`, a parent
 picker paired with `autoresearch`); SkillOpt builds its own requests and is unchanged.
 The Python walker and the optimizer only; nothing here touches the TypeScript spine.
 
-- **Every change so far, by kind** (`--run-ledger`, default `1`). Every candidate the
+- **Every change so far, by kind** (`run_ledger`, default `1`). Every candidate the
   run has evaluated (under the gate, every one it judged), oldest first: id, round,
   parent, the kind of change its own edits made, the knobs and steps they touched, its
   train fixed/broken counts against its parent on shared items, the gate's word and its
@@ -651,13 +726,11 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   several is filed under its most specific structure. A tally line per kind comes
   first (tried, kept, best train fixed−broken). The newest 40 rows (within 9000
   characters) are listed; older ones are only in the tally.
-- **Your lessons so far** (`--lessons`, default `1`). The answer format has an optional
-  `lessons` field: what the results so far teach about which changes help here, keeping,
-  revising or dropping earlier lessons. The latest (at most 1500 characters) is kept with
-  the epoch and generation it was written in, journaled (`optimizer_lessons`), restored
-  on resume and shown back in the next request; an answer without it keeps the previous
-  lessons.
-- **Did the added steps contribute?** (`--step-review`, default `1`). For every step a
+- **Optimizer memory** (`lessons`, default `1`). The memory pass's note (below, "The
+  memory pass"): the loop's cross-round memory, shown in the request, to every analyst
+  and to every merge. The proposer writes no `lessons` any more; the answer format has
+  no such field.
+- **Did the added steps contribute?** (`step_review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
   loop's gate; not the fork and join themselves), on the train items it shares with its
   parent: the candidate's fixed and broken items, how many items' final answer changed
@@ -668,18 +741,35 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   step's median duration and tokens when its records carry them. These counts follow
   the ledger's same-round rule; without a same-round parent they are `n/a (different
   seed)`. Then one call of the optimizer's model per step that recorded
-  text output (at most 8 per request): it reads, on up to 4 train items (changed outcomes
-  first), the step's prompt as sent, its output and the output of the next recorded step
-  that reads it (through the graph's reads, inputs and `{{fact}}` slots, so a sibling
-  fork branch is not taken for it), and answers
+  text output (at most 8 per request): it reads the step's own system prompt and, on up
+  to 4 train items (changed outcomes first), the step's prompt as sent, its output and
+  the output of the next recorded step that reads it (through the graph's reads, inputs
+  and `{{fact}}` slots, so a sibling fork branch is not taken for it), each text whole
+  unless together with the request's frame, instructions and system prompt they pass
+  400000 characters (then the longest are cut head and tail to one length, the cut said,
+  and when the step's own instructions leave the items less than 2000 characters each
+  they are cut too; a call the provider refuses as too long is retried once at half its
+  length, never when that request would be no shorter), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
-  quote and a note. The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
+  quote and a note. A step that makes the decision -- something reads what it writes
+  (or it ends the data pass, for the grader) but no model step does, not even one a
+  code gate's reloop hands it to -- is asked instead, item by item, what its
+  inputs recommended and what it decided, and is shown as `follows_inputs`,
+  `overrides_inputs` or `no_recommendation` with "decides as its inputs recommended on N
+  of M item(s)": repeating the chosen answer is its job. A code step or gate gets no
+  call: from the records' `steps`, the line says on which items a code step gave
+  output (and how many distinct outputs), or which way a gate routed each item first
+  and which items it sent back, each group with how the final answer moved there
+  (changed, fixed, broken against the parent). The call is recorded in `optimizer_trace.jsonl` (kind `step_review`)
   and cached in memory and in `<run root>/step_reviews/` (cleared by a fresh run in the
   same directory, as the trace is), so a retry or a resumed run pays for none again.
   The section keeps full entries within 9000 characters; steps past that get one line
-  of counts each. A failed or unreadable review is recorded and the step is shown
-  without a verdict; it never fails the proposal.
-- **What makes a new step pay off** (`--structure-guidance`, default `0`). When on,
+  of counts each. A failed call is retried as every optimizer call is (above); a failed
+  or unreadable review is recorded and the step is shown without a verdict; it never
+  fails the proposal. Without a data node, a step no edge leaves (the graph's own end,
+  read by the scorer) counts as ending the pass, so a final agent step added there is
+  asked the decision question.
+- **What makes a new step pay off** (`structure_guidance`, default `0`). When on,
   "How nodes compose" adds one generic paragraph: a step helps when it adds work or
   information the pipeline lacks (an independent attempt, several attempts combined by
   a vote or a check, a computation or check in code, a retry with a specific reason);
@@ -690,22 +780,26 @@ The readers' success patterns (what the passing items do right) have their own h
 after the failure patterns, up to 4 per reader whatever its failure patterns, and a
 quarter of the findings' room the failure patterns cannot take.
 
-### The analyst stage: SkillOpt's per-round analysis (`--analysts`)
+### The analyst stage: SkillOpt's per-round analysis (`analysts`)
 
-`--analysts 1` (default `0`) gives the model proposer the analysis SkillOpt's reflect
+`analysts` on (default `0`) gives the model proposer the analysis SkillOpt's reflect
 stage gives its patch step (`optim/analysts.py`; the SkillOpt port's `analysts.py` and
-`merge.py`). Before each proposal of `autoresearch` (alone, under `--portfolio`, or
+`merge.py`). Before each proposal of `autoresearch` (alone, under `portfolio`, or
 paired with a parent picker), on the train records the request carries:
 
 - **Failure analysts.** Every item not passed (answered wrong, no answer, or an error),
   each once, shuffled with the epoch as seed and cut into batches of
-  `--analyst-group-size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
+  `analyst_group_size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
   batch. At most 8 calls of the stage are in flight at once, merges included (the two
   sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
   analysts. Each reads the pipeline (its nodes and edges, each node in
   full with the settings bound to it, every other setting's value) and each item's full
   trace: its input, every step's input and output in the order they ran, the expected
-  answer, the prediction, the score and the grader's feedback. A call's prompt has
+  answer, the prediction, the score and the grader's feedback. Each item's heading
+  carries the item fields its Task declares (`Task.item_metadata`, read by
+  `Task.item_meta`; LiveMath shows `task_type` exactly as SkillOpt's analysts see it,
+  rollout.py:132: the item's first theorem type, else `math_mcq`), never a
+  field the Task names in `grader_fields`. A call's prompt has
   400000 characters of room (`ANALYST_ROOM`): the optimizer model (Opus 4.6) reads 200k
   tokens, of which Claude Code's own system prompt and the reserved reply take about
   30-40k, and traces dense in notation run 2.5-3.5 characters a token, so 400000
@@ -716,8 +810,10 @@ paired with a parent picker), on the train records the request carries:
   clipped items and the characters left out are counted. A call the provider still
   refuses as longer than the model's context ("prompt is too long", "context length",
   ...) is retried once within half the refused prompt's length, re-clipped the same
-  way (a merge has its pipeline texts clipped instead; its findings stay whole); a
-  retry still too long fails the batch as any failed call does. Only the model call's
+  way (a merge has its pipeline texts clipped instead; its findings stay whole), and
+  not at all when that request would be no shorter; a retry still too long fails the
+  batch as any failed call does. Any other failed call is attempted up to 3 times with
+  SkillOpt's waits (above). Only the model call's
   own failure is read this way: an answer that cannot be read is a failed batch even
   when its prose mentions a context window. The report counts clipped items and
   context retries only for calls paid in that step, so a step remade after a resume,
@@ -728,23 +824,28 @@ paired with a parent picker), on the train records the request carries:
 - **Success analysts.** The passed items likewise (seed + 1): what made them work, where
   it comes from, and what a change must preserve.
 - **Merge and rank.** Failure findings merge level by level in batches of
-  `--analyst-merge-batch-size` lists (8), then success findings; a final merge with
+  `analyst_merge_batch_size` lists (8), then success findings; a final merge with
   failure priority returns one de-duplicated list ranked by items covered and impact.
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
 - **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
-  characters) before the item results, and the analysts take the readers' place: no
+  characters) before the item results. Each finding is shown whole, as SkillOpt shows
+  its analysts' edits: its text, what to change and what to keep, where (a structure
+  note too), every evidence quote, line breaks kept; only when the findings pass the
+  section's room are the longest texts cut to one length (never below 100 characters),
+  each cut marked `… [cut: N chars]`. The analysts read the edit catalogue's
+  descriptions whole. The analysts' item texts show an errored item's error once (not
+  again as the grader's reason). The analysts take the readers' place: no
   reader call runs, and when the items do not fit one request the items they cite are
   shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
   running both would give this loop more analysis than SkillOpt's.
-- `--analyst-max-batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
+- `analyst_max_batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
   failure batches first; the request says how many items went unanalysed.
 
 The analysis is made once per proposal step: it is keyed by the epoch, the generation,
 the edited candidate, its train records, the stage's settings and the optimizer's model,
-not by the lessons, so a retry after a refusal (whose request carries the lessons the
-refused answer wrote) reuses it and makes no call; the analysts and merges read the
-lessons of the step's first attempt. The step's analysis is also kept in
+so a retry after a refusal reuses it and makes no call; the analysts and merges read the
+epoch's memory note, the same for every attempt of the step. The step's analysis is also kept in
 `<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
 resumed run reuses it; a step with a failed call is made again on resume, its successful
 calls answered from their own cache, and that analysis (the one its proposal sees) is
@@ -767,7 +868,7 @@ proposal; a spent budget, a cancelled run or a missing model choice stop it, as 
 SkillOpt port. The calls go through the optimizer's model route and count in the run's
 budget like the readers'.
 
-A run with `--analysts 1` whose optimizer asks no model (the random proposer, a parent
+A run with `analysts` on whose optimizer asks no model (the random proposer, a parent
 policy alone) is refused when it starts. A custom strategy (`--strategy skillopt`)
 builds its own optimizer requests: setting it warns, and the stage runs only for
 proposals the strategy asks of the loop's model proposer.
@@ -782,19 +883,95 @@ ceil(F/8) + ceil(S/8) analyst calls, then the merges (one per side with more tha
 list, at most 8 lists each, plus the final one when both sides found something), then
 the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
 analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
-budget), slow update and meta skill are not run: the proposer chooses and writes the
-edits, and its `lessons` are this loop's optimizer-side memory (they are shown to the
-analysts and merges, as SkillOpt shows its meta skill).
+budget) and slow update are not run: the proposer chooses and writes the edits. Its
+meta skill is the memory pass (below), whose note the analysts and merges read, as
+SkillOpt's read its meta skill.
 
 Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
 LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
 these are generic by design (no dataset hints); SkillOpt never clips a trace (here a
 batch over the call's room has its longest items clipped, and counted); SkillOpt shows
-each item's task type (here the item's input, and its choices when it has them); and SkillOpt's analysts never
+each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
+with its input and its choices when it has them); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
 with its error.
 
-### The integrity judge (`--integrity-judge`, default `off`)
+### The memory pass: SkillOpt's meta skill (`lessons`, default `1`)
+
+Once per epoch, from epoch 2, before a model proposer (`autoresearch`, alone, under
+`portfolio` or paired with a parent picker) writes the epoch's proposal, one call of the
+optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta skill
+(`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does:
+
+- **Which two pipelines.** SkillOpt compares the previous epoch's last-step skill with
+  this epoch's. Here: the candidate current when the previous epoch proposed (journaled
+  `epoch_current`) and the one current now -- the validation gate's current, or without
+  the gate the train leader. Each epoch scores and gates what the one before proposed,
+  then the pass runs, then the proposal, so the note is read by the proposal it precedes
+  and every later one until the next pass. When nothing replaced the current, SkillOpt
+  rolls the same skill out twice; here the two rollouts are, under the gate, that
+  candidate's previous-epoch rollout and this epoch's, and without the gate (one seed
+  for the run) its rollout when it was scored and a fresh one made for the pass; each
+  side is labelled with which it is (the comparison then shows run-to-run noise, and the
+  request says so).
+- **Which items.** SkillOpt's 20 (`slow_update_samples`): the train ids, sorted,
+  shuffled with `seed + epoch * 2000`, the first 20 (all of them when there are fewer).
+- **What it costs.** Each side's records come from the epoch's own rollouts with the
+  epoch's train seed (rather than SkillOpt's `seed + epoch * 2000`): under the gate the
+  edited candidate is re-scored on every epoch's train sample (fresh evidence) and the
+  epoch's children are scored on it, so on the whole train part a pass usually costs no
+  evaluation. Only sampled items a side has no record of are rolled out
+  (`memory_rollout`, an evaluation counted against the evaluation, rollout, time and
+  token budgets, journaled with its records so a resume reuses them; the candidate's own
+  records and score are untouched): with `train_minibatch` up to 20 rollouts per side,
+  and without the gate (one seed for the run) 20 rollouts when the current did not
+  change. A cap or a spent budget leaves the missing items out; the pass compares what
+  both sides hold. Plus one optimizer-model call per epoch.
+- **What the call reads.** Both pipelines (as an analyst reads one: nodes, edges, each
+  node in full, every setting) and what changed between them: from their nearest common
+  ancestor, each candidate on the way to either with its own edits and rationale (said
+  plainly when they are on different branches, as a sibling train leader or a pool's
+  pick can be, or share no ancestor), or the one pipeline when unchanged; the
+  previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
+  comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
+  highest priority), persistent failures, improvements -- each item headed by what it
+  asks (SkillOpt's `Task <id>: <question>`), with both outcomes,
+  answers and grader reasons, its declared metadata and both full traces (every step's
+  input and output, as the analysts render them) -- then stable successes without
+  traces, as SkillOpt shows them. SkillOpt never clips; here the traces share 400000
+  characters with the frame and the system prompt (the analysts' room), the longest cut
+  head and tail to one length, each cut said, and a call refused as too long is retried
+  once at half the length. The prompt is SkillOpt's `meta_skill.md` for a graph: address
+  the future optimizer, what changes help or hurt here, regression risks, revise or drop
+  what did not help, no instructions for the pipeline's own steps. Domain-free; train
+  items only.
+- **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
+  wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
+  a longer one cut with the cut said.
+- **Who reads it.** Every analyst call and every merge call (with SkillOpt's
+  `format_meta_skill_context` wording: prefer it when the evidence is ambiguous, do not
+  force it where the traces contradict it) and the proposal request ("Optimizer
+  memory"). It replaces the proposer's former `lessons`; the run ledger and the step
+  reviews stay. It never edits the graph.
+- **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
+  note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
+  next pass that writes one clears the mark. The call is retried as every optimizer call
+  is. A spent budget, a cancelled run or a missing model choice is no answer about the
+  memory: no pass is recorded, so a resume makes the pass; a spent budget or a person's
+  stop ends the search as it does elsewhere, and the run's report is written either way.
+- **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`) and cached
+  in `<run root>/analyst_findings/` like an analyst call; each pass is journaled
+  (`optimizer_memory`: the two candidates, whether they are one, the sample, the items
+  compared and missing, the counts per category, the evaluations and rollouts it made,
+  the call's clipping and retry, and the note); a resume replays the note and the passes
+  and does not make a pass again. report.json's `optimizer_memory` and report.md's
+  "Optimizer memory" list every pass and the latest note.
+
+`lessons` `0` turns it off: no pass, no note, no section. A custom strategy (the
+SkillOpt port) keeps its own meta skill and runs no pass; an optimizer that asks no
+model (random, a parent policy alone) has none.
+
+### The integrity judge (`integrity_judge`, default `off`)
 
 An optimizer paid by a score finds whatever raises it, and some of that is not the task
 done better but a regularity of how the data, the grader or the environment happens to
@@ -877,10 +1054,10 @@ prompt names no dataset, task or answer format.
   audit of the winner's combined change from the seed. This holds for every way a change
   gets through: the judge failed, its reply was salvaged, its category only warns, the
   judge was off when it was proposed, or the judge called the finding inherited.
-- **Setting it.** `--integrity-judge on` (or `veto`): every category `veto`.
-  `--integrity-judge flag` (or `warn`): every category `warn`. An object sets
+- **Setting it.** `integrity_judge: on` (or `veto`): every category `veto`.
+  `integrity_judge: flag` (or `warn`): every category `warn`. An object sets
   categories one by one, in a profile or as JSON on the command line:
-  `--integrity-judge '{"mode": "on", "policy": {"answer_leak": "off", "train_overfit": "warn"}}'`.
+  `integrity_judge`: `{"mode": "on", "policy": {"answer_leak": "off", "train_overfit": "warn"}}`.
   A category's policy, most specific first: the run's setting for that category; a
   Task's allowance for it (`off`); the run's default (a bare value, or the object's
   `mode`/`default`), which covers every other category and overrides the Tasks'
@@ -949,9 +1126,10 @@ Each step has two open text knobs, one per piece of text it sends:
 seeded with the solver's system prompt and that step's section, and `<step>_task`
 (`compare_task`, ...) is the task text ending its user message. The question and the
 earlier steps' notes are data, not knobs. With the defaults decide's system prompt is
-the solver's, byte for byte. `max_completion_tokens`, `data_parallelism`,
-`use_theorem` and `use_sketch` are frozen. An item's theorem states the correct option,
-so the last two stay off. Each item takes 4 model calls.
+the solver's, byte for byte. `max_completion_tokens` and `data_parallelism` are frozen.
+No knob shows an item's theorem or proof sketch (SkillOpt's `use_theorem` and
+`use_sketch` are not ported): the theorem states the correct option. Each item takes 4
+model calls.
 
 `data`, `extract_answer` and `finish` are protected (`SkillGraph.protected_nodes`): a
 search edits the steps between them, never the pass, the answer extraction or the run's
@@ -1060,9 +1238,8 @@ state is promised, on any graph shape:
 - **Items reach the nodes without their answer.** A Task names the item fields only its
   grader may see (`Task.grader_fields`, default none). `current_item.json`, the file the
   graph's nodes read, never carries them, on either runtime; the grader gets the whole
-  item. A field in `Task.revealed_by` is shown when the run's knob for it is on.
-  LiveMath hides `correct_choice`, `label`, `label_text`, `theorem` and `sketch`; its
-  frozen `use_theorem` and `use_sketch` reveal the theorem and the sketch.
+  item; no knob shows a grader-only field. LiveMath hides `correct_choice`, `label`,
+  `label_text`, `theorem` and `sketch`.
 - **New agents run without tools.** An agent node an edit adds gets `tool_policy: none`
   unless it asks for tools (`tool_policy: null` or a `tools` list), and asking is refused
   `E-new-node-tools` unless the run allows it (`LoopConfig.allow_new_node_tools`, off by
@@ -1217,7 +1394,7 @@ grader-derived inputs, and items reach nodes without their grader fields. The sc
 code only; scanning prompts is a follow-up.
 
 **Turning it off.** Code nodes are on by default wherever the run permits structural
-edits. `--allow-code-nodes 0` (`LoopConfig.allow_code_nodes`) refuses every new code node
+edits. `allow_code_nodes` off (`LoopConfig.allow_code_nodes`) refuses every new code node
 with `E-code-nodes` and leaves code nodes out of the request. Verdict gates and `parallel`
 stay, because they run no optimizer-written code. A run that keeps the default produces
 the same digest as before, so it still resumes.

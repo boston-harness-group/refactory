@@ -1,4 +1,4 @@
-"""Arm A's Claude backend framing for optimizer calls (``claude_backend_wrapper``).
+"""Arm A's Claude backend framing for optimizer calls.
 
 SkillOpt's Claude backend (microsoft/SkillOpt, MIT) sends every optimizer call
 (``chat_optimizer``, skillopt/model/claude_backend.py:327-329) through
@@ -6,9 +6,8 @@ SkillOpt's Claude backend (microsoft/SkillOpt, MIT) sends every optimizer call
 into a ``History:`` block as ``- User: <text>`` (stripped, every continuation line
 indented two spaces; ``- User:`` alone when empty), followed by ``Answer the latest
 user request.``. The system message goes to ``--append-system-prompt-file``, so it
-is not part of the prompt. SkillOpt's other backends send the messages as they are,
-so the strategy frames its optimizer calls only when asked to
-(``--strategy-option claude_backend_wrapper=true``).
+is not part of the prompt. The strategy frames every optimizer call this way: arm A
+runs on that backend.
 """
 from __future__ import annotations
 
@@ -39,20 +38,10 @@ class ClaudeBackendFraming:
     def __init__(self, client: Any) -> None:
         self.client = client
 
-    def complete(
-        self,
-        prompt: str,
-        *,
-        system: str = "",
-        workdir: Any = None,
-        cwd: Any = None,
-        env: Any = None,
-        confine: bool = False,
-    ) -> str:
-        return self.client.complete(
-            claude_backend_prompt(prompt), system=system, workdir=workdir, cwd=cwd,
-            env=env, confine=confine,
-        )
+    def complete(self, prompt: str, **options: Any) -> str:
+        """Send ``prompt`` framed; the call's keywords (``system`` and any other) pass
+        through exactly as the caller gave them."""
+        return self.client.complete(claude_backend_prompt(prompt), **options)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
