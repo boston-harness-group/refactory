@@ -182,8 +182,8 @@ def _is_emission(text: str) -> bool:
 
 def _meet(scenario: Path, node: str, visit: int, others: list[str], timeout_s: float) -> None:
     """Say this completion has started, then wait until each of ``others`` has started its
-    completion of the same visit, or ``timeout_s`` has passed. Run one after another, the
-    first waits out the timeout and answers alone, which the overlap check then reports."""
+    completion of the same visit, or ``timeout_s`` has passed. Run one after another, each
+    but the last waits out the timeout and answers alone, which the overlap check reports."""
     meeting = scenario / "meet"
     meeting.mkdir(exist_ok=True)
     (meeting / f"{node}.{visit}").touch()

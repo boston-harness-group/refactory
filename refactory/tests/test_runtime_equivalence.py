@@ -88,10 +88,10 @@ TARGET_FILES = {
     "tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 1\n",
 }
 REVIEWERS = ("health_checker", "code_reviewer", "qa_director", "verifier")
-#: Each reviewer answers once all four have started, waiting at most 30 s: far above any
-#: one's preparation, and short enough that four run one after another still finish
-#: inside the driver's timeout and fail the overlap check rather than hang.
-MEET = {"meet": list(REVIEWERS), "meet_timeout_s": 30}
+#: Each reviewer answers once all four have started, waiting at most 20 s: far above any
+#: one's preparation, and short enough that four run one after another (three waits)
+#: still finish inside the driver's timeout and fail the overlap check rather than hang.
+MEET = {"meet": list(REVIEWERS), "meet_timeout_s": 20}
 QA_PROCEED = json.dumps({"verdict": "proceed", "must_fix": [], "follow_ups": [], "dismissed": []})
 OVERWATCH_PASS = json.dumps({"verdict": "pass", "must_fix": [], "follow_ups": [], "corrections": []})
 

@@ -1115,9 +1115,9 @@ def test_worktree_gets_isolated_hooks_path_and_hook_manager_leaves_target_unchan
         hooks_resolved = wt_path / hooks_resolved
     assert hooks_resolved.resolve() == hooks_isolated.resolve()
 
-    # Real lefthook writes into the isolated directory, not the shared hooks. It reads the
-    # global git config without the worktree layer and refuses when that sets a hooksPath
-    # (some machines' security tooling does), so it runs under an empty global config.
+    # Real lefthook writes into the isolated directory, not the shared hooks. It refuses
+    # when a global core.hooksPath is set (some machines' security tooling sets one), and
+    # it sees that but not the worktree's own, so it runs under an empty global config.
     empty_global = tmp_path / "empty-gitconfig"
     empty_global.write_text("")
     result = subprocess.run(
