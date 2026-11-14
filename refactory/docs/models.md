@@ -369,13 +369,24 @@ agent may already have written files or started tool work.
 a credential refresh or the local model proxy is down (`model.is_infrastructure_failure`:
 `getaddrinfo`, `ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`,
 `ENETUNREACH`, `EHOSTUNREACH`, `socket hang up`, `fetch failed`, `Could not resolve host`,
-`Connection error`, a failed OAuth token refresh, or a gateway 502/503/504) is asked again
-once the network is back, without using an attempt: the client waits 5 s, doubling to
-60 s between tries, for up to 2 hours per call (`NETWORK_WAIT_S`). The match is
-conservative: a rate limit (429), an overloaded provider (529, `overloaded`), any other
-provider error (such as a 500), a refused credential (`invalid_grant`, an invalid key), an
-output or context limit, a refusal and a timed-out session are never outages, and are
-handled as below. On the `claude_code` route a DNS failure is only in the product
+`Connection error`, a failed OAuth token refresh, or a gateway 502/503/504 as the error
+line's own status, `API Error: 503` or `TRANSPORT: 502 Bad Gateway`) is asked again once
+the network is back, without using an attempt: the client waits 5 s, doubling to 60 s
+between tries, each wait drawn within 20% of that so the calls one outage stopped do not
+all ask again at once, for up to 2 hours per call (`NETWORK_WAIT_S`). Only what the CLI
+and the worker report decide it (`diagnostic_lines`), never the model's streamed
+reasoning or output. The match is conservative: a rate limit (429), an overloaded
+provider (529, `overloaded`), any other status the error line reports (a 500, a 401 or
+403, even when words like `Connection error` follow it), a refused credential
+(`invalid_grant`, `permission denied`, `unauthorized`, an invalid key), an output or
+context limit, a refusal and a timed-out session are never outages, and are handled as
+below. Two rules keep a request that itself fails from being taken for an outage: a call
+whose tries ran 300 s or more before failing 3 times (`NETWORK_SLOW_TRY_S`,
+`NETWORK_SLOW_TRIES`: the network carried each long generation; the request then ran past
+the proxy's timeout, say) stops waiting and fails; and once a call has waited the whole
+bound, an outage met by any later call in the process fails at once
+(`NETWORK_GIVEN_UP`), until some call answers or fails for another reason. So the worst
+case is one bound's wait per outage, not one per attempt of a retrying caller. On the `claude_code` route a DNS failure is only in the product
 adapter's detail (`API Error: getaddrinfo ENOTFOUND oauth2.googleapis.com`), which decides
 only for a session without tools. Waits happen where the client may ask again at all: on
 the `dsh` backend and, on any backend, for a session without tools (the optimizer's calls,

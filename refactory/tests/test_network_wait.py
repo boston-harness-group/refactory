@@ -69,6 +69,19 @@ def test_network_dns_auth_refresh_and_proxy_failures_are_infrastructure(cause):
     'the result was an error: API Error: 529 {"type":"overloaded_error"}',
     "dsh: TRANSPORT: 503 Service Unavailable: overloaded",
     "dsh: TRANSPORT: 500 Internal Server Error",
+    # A status the error line reports wins over the words after it (review of #649).
+    "the result was an error: API Error: 500 Internal Server Error: Connection error.",
+    "the result was an error: API Error: 500 {\"error\": \"socket hang up upstream\"}",
+    ("the result was an error: API Error: 403 Could not refresh access token: Permission "
+     "'iam.serviceAccounts.getAccessToken' denied"),
+    "dsh: TRANSPORT: 401 Unauthorized from oauth2.googleapis.com",
+    "the result was an error: Could not refresh access token: permission denied",
+    "dsh: TRANSPORT: HTTP/1.1 400 Bad Request (fetch failed to parse)",
+    "the result was an error: oauth2.googleapis.com answered 403 to the token refresh",
+    "the result was an error: Internal Server Error (the upstream socket hang up)",
+    "the result was an error: Unauthorized: could not refresh access token",
+    # A gateway code counts only as the error line's own status, not in free text.
+    "the result was an error: the test server answered status 503 Service Unavailable",
     "the result was an error: API Error: 400 prompt is too long",
     "the result was an error: invalid_grant: token refresh failed, the credential was revoked",
     "dsh: TRANSPORT: 401 invalid x-api-key",
@@ -110,6 +123,7 @@ def answers(monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: queue.pop(0))
     monkeypatch.setattr(model.time, "sleep", waits.append)
     monkeypatch.setattr(model, "NETWORK_POLL_S", 10_000.0)
+    monkeypatch.setattr(model, "_jitter", lambda: 1.0)
     return queue, waits
 
 
@@ -405,3 +419,101 @@ def test_the_loop_binds_a_person_stop_to_its_model_calls(tmp_path):
     assert loop.model._stop_requested() is True
     assert loop._judge_model._stop_requested() is True, "the optimizer's route has it too"
     assert loop.evaluator.model is loop.model
+
+
+# ── review of #649: what decides, slow tries, the bound once, jitter ───────
+
+
+def test_the_models_reasoning_never_decides_an_outage(answers):
+    """A session whose streamed reasoning quotes a connection error from its own tool
+    work, then ends without a diagnostic, is not the network's failure: it is not waited
+    out or asked again (a session with tools would repeat its work). A real diagnostic
+    after the same reasoning still is."""
+    queue, waits = answers
+    reasoning = ("dsh: reasoning:\nThe test database is down: connect ECONNREFUSED "
+                 "127.0.0.1:5432. Let me look at the fixture.\n")
+    queue.extend([_Failed(reasoning), _Done()])
+    with pytest.raises(CompletionFailed):
+        DshModelClient(worker_backend="dsh", provider="p", model="m").complete("hello")
+    assert len(queue) == 1 and waits == []
+    queue[:] = [_Failed(reasoning + "dsh: TRANSPORT: getaddrinfo ENOTFOUND api.anthropic.com"),
+                _Done()]
+    assert DshModelClient(worker_backend="dsh", provider="p", model="m").complete("hello") == "done\n"
+    assert queue == [] and waits == [5.0]
+
+
+def test_a_request_that_keeps_failing_slowly_is_not_an_outage(answers, monkeypatch):
+    """Each try runs 400 s and then the proxy hangs up (the request runs past its timeout):
+    the network carried every generation, so after three such tries the call fails
+    instead of paying for long generations for two hours."""
+    queue, waits = answers
+    clock = [1000.0]
+
+    def run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        clock[0] += 400
+        return queue.pop(0)
+
+    monkeypatch.setattr(DshModelClient, "_run_completion", run)
+    monkeypatch.setattr(model.time, "monotonic", lambda: clock[0])
+    queue.extend([_Failed("dsh: TRANSPORT: 504 Gateway Timeout")] * 10)
+    with pytest.raises(CompletionFailed, match="3 of its tries each ran 300s") as raised:
+        _text_client().complete("hello")
+    assert waits == [5.0, 10.0] and len(queue) == 7
+    assert interrupted_cause(str(raised.value)) == "transport"
+
+
+def test_after_one_call_waited_the_bound_the_next_fails_at_once(answers, monkeypatch):
+    """Once a call has waited the whole bound, an outage met by the next call (an
+    optimizer call's next attempt) fails at once instead of waiting the bound again,
+    until a call gets through; then outages are waited out again."""
+    queue, waits = answers
+    monkeypatch.setattr(model, "NETWORK_WAIT_S", 30.0)
+    queue.extend([_Failed(OAUTH_DNS)] * 3)
+    with pytest.raises(CompletionFailed, match="the most one call waits"):
+        _text_client().complete("one")
+    assert waits == [5.0, 10.0] and model.NETWORK_GIVEN_UP.is_set()
+    queue[:] = [_Failed(OAUTH_DNS), _Done()]
+    with pytest.raises(CompletionFailed, match="an earlier call already waited 30s"):
+        _text_client().complete("two")
+    assert waits == [5.0, 10.0] and len(queue) == 1
+    assert _text_client().complete("three") == "done\n"
+    assert not model.NETWORK_GIVEN_UP.is_set(), "an answer shows the network is up"
+    queue[:] = [_Failed(OAUTH_DNS), _Done()]
+    assert _text_client().complete("four") == "done\n"
+    assert waits == [5.0, 10.0, 5.0]
+
+
+def test_a_failure_that_is_not_an_outage_also_shows_the_network_is_up(answers):
+    queue, waits = answers
+    model.NETWORK_GIVEN_UP.set()
+    queue.extend([_Failed(RATE_LIMITED)])
+    with pytest.raises(CompletionFailed):
+        _text_client().complete("hello")
+    assert not model.NETWORK_GIVEN_UP.is_set()
+
+
+def test_skillopt_ask_waits_the_bound_once_not_per_attempt(answers, monkeypatch, tmp_path):
+    """The worst case of one optimizer call: its first attempt waits the bound, and its
+    other two fail at once (`NETWORK_GIVEN_UP`) rather than waiting it again."""
+    from refactory_packages.skillopt.trace import TraceRecorder, ask, no_retry_waits
+
+    queue, waits = answers
+    monkeypatch.setattr(model, "NETWORK_WAIT_S", 30.0)
+    queue.extend([_Failed(OAUTH_DNS)] * 10)
+    trace = TraceRecorder(tmp_path / "trace.jsonl")
+    with no_retry_waits():
+        assert ask(_text_client(), trace, "analyst", "u", system="s",
+                   call_key=("analyst", 1, 0, 0)) is None
+    assert waits == [5.0, 10.0] and len(queue) == 10 - 3 - 1 - 1
+    assert len(trace.optimizer_failures) == 3
+
+
+def test_waits_are_jittered(answers, monkeypatch):
+    queue, waits = answers
+    monkeypatch.setattr(model, "_jitter", lambda: 1.2)
+    queue.extend([_Failed(OAUTH_DNS)] * 3 + [_Done()])
+    assert _text_client().complete("hello") == "done\n"
+    assert waits == pytest.approx([6.0, 12.0, 24.0])
+    monkeypatch.undo()
+    draws = [model._jitter() for _ in range(2000)]
+    assert 0.8 <= min(draws) < 0.85 and 1.15 < max(draws) <= 1.2

@@ -673,7 +673,10 @@ reply with no JSON object at all (empty, or prose only) also counts as a failed 
 a reply whose JSON object is broken is an answer, refused and asked again with why
 (`E-proposal-shape`), not an attempt retry, and a proposal call whose attempts all fail
 ends the round as a failed one, as a failed proposal call did before (it used to have
-one attempt, so one transient failure lost the round's proposal). A reply is never retried, however unusable; a call refused as longer than
+one attempt, so one transient failure lost the round's proposal). Otherwise a reply is
+never retried, however unusable: the analyst, merge, memory and step-review calls parse
+what they get, and the proposal call retries only a reply with no JSON at all; a call
+refused as longer than
 the model's context is not tried again at the same length but once at half of it, and
 not at all when the request cannot be made shorter. A retry's wait ends early on a stop
 (the client's cancellation scope, or a person's `refactory stop` request, checked every
@@ -691,7 +694,11 @@ worst case start 9 model sessions, each up to the client's own timeout, and wait
 3 x 60 + 1 + 2 + 4 = 187 s between them. A network, DNS or credential-refresh outage
 uses none of these attempts, the SkillOpt port's or the loop's: the model client waits it
 out inside the attempt (up to 2 hours, `models.md`), and the SkillOpt port's trace line
-lists the outages an attempt waited out as `network_waits`.
+lists the outages an attempt waited out as `network_waits`. The bound is waited once, not
+once per attempt: after a call has waited the whole 2 hours, an outage met by the next
+call (that call's next attempt included) fails at once until some call gets through. So
+the worst case of one optimizer call in an outage that never ends is about 2 hours plus
+the attempts' own waits (1 + 2 + 4 s), not 3 x 2 hours.
 
 ### Run-wide feedback: changes by kind, the memory note, added-step reviews
 

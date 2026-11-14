@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -492,19 +493,27 @@ INFRASTRUCTURE_MARKERS = (
 )
 
 #: The same, where a marker needs context: a credential refresh that failed, and a
-#: gateway status (502, 503, 504) from the proxy in front of the provider.
+#: gateway status (502, 503, 504) from the proxy in front of the provider -- only as the
+#: error line's own status (``API Error: 503``, ``TRANSPORT: 502 Bad Gateway``), never a
+#: number somewhere in free text.
 INFRASTRUCTURE_PATTERNS = (
     re.compile(r"oauth2\.googleapis\.com"),
     re.compile(r"could not refresh (?:the |an )?access token"),
     re.compile(r"(?:failed|unable) to refresh (?:the |an )?(?:oauth2? |access )?token"),
     re.compile(r"token refresh (?:failed|error)"),
-    re.compile(r"(?:api error|status(?: code)?|http)[:\s]*50[234](?!\d)"),
-    re.compile(r"bad gateway|service unavailable|gateway time-?out"),
+    re.compile(r"(?:api error|transport):\s*(?:http\s*|status(?: code)?:?\s*)?50[234](?!\d)"),
 )
+
+#: An HTTP status the error line itself reports, other than a gateway's 502/503/504: the
+#: provider answered, so the network is up, whatever words follow (a 500 that says
+#: "Connection error", a 403 refusing a token refresh).
+_NON_GATEWAY_STATUS = re.compile(
+    r"(?:api error|transport|status(?: code)?|http(?:/[\d.]+)?):?\s*(?!50[234](?!\d))[45]\d\d(?!\d)")
 
 #: What makes a failure the model's, the account's or the request's even when it also
 #: names the wire: a rate limit or an overloaded provider (the transport retry answers
-#: those), a credential the provider refused, an output or context limit, a refusal.
+#: those), a credential the provider refused (401, 403, permission denied), a provider
+#: error (500), an output or context limit, a refusal.
 #: Such a failure is never waited out.
 NOT_INFRASTRUCTURE_MARKERS = (
     "overloaded",
@@ -512,9 +521,15 @@ NOT_INFRASTRUCTURE_MARKERS = (
     "rate_limit",
     "429",
     "529",
+    "401",
+    "403",
+    "internal server error",
+    "permission denied",
+    "forbidden",
+    "unauthorized",
+    "authentication_error",
     "invalid_grant",
     "invalid_client",
-    "unauthorized_client",
     "invalid api key",
     "invalid x-api-key",
     "permission_error",
@@ -534,7 +549,7 @@ def is_infrastructure_failure(cause: str) -> bool:
     session is never infrastructure."""
     lowered = (cause or "").lower()
     if any(re.search(rf"(?<!\d){marker}(?!\d)", lowered) if marker.isdigit() else marker in lowered
-           for marker in NOT_INFRASTRUCTURE_MARKERS):
+           for marker in NOT_INFRASTRUCTURE_MARKERS) or _NON_GATEWAY_STATUS.search(lowered):
         return False
     return (any(marker in lowered for marker in INFRASTRUCTURE_MARKERS)
             or any(pattern.search(lowered) for pattern in INFRASTRUCTURE_PATTERNS))
@@ -546,6 +561,27 @@ NETWORK_WAIT_S = 2 * 60 * 60.0
 #: The first wait after an infrastructure failure; each next one doubles, up to the cap.
 NETWORK_FIRST_WAIT_S = 5.0
 NETWORK_WAIT_CAP_S = 60.0
+#: Each wait is drawn within this fraction of its nominal length (5 s is 4 to 6 s), so
+#: the many calls an outage stops do not all ask again at the same moment.
+NETWORK_JITTER = 0.2
+#: A failed try that ran this long before failing is no sign of an outage: the network
+#: carried a long generation and then the request itself failed (it ran past the local
+#: proxy's timeout, say). After `NETWORK_SLOW_TRIES` such tries the call stops waiting
+#: and fails, rather than paying for long generations for hours.
+NETWORK_SLOW_TRY_S = 300.0
+NETWORK_SLOW_TRIES = 3
+#: Set when a call gave up after waiting `NETWORK_WAIT_S`, cleared when any call answers
+#: or fails for another reason (the network is up). While set, a call that meets an
+#: outage fails at once instead of waiting another two hours: a caller's own retries
+#: (an optimizer call's three attempts) do not each wait the bound again.
+NETWORK_GIVEN_UP = threading.Event()
+
+
+def _jitter() -> float:
+    """How much of its nominal length a wait lasts (`NETWORK_JITTER`; tests replace it)."""
+    return random.uniform(1 - NETWORK_JITTER, 1 + NETWORK_JITTER)
+
+
 #: How often a waiting call says so in the run log (stderr).
 NETWORK_LOG_EVERY_S = 60.0
 #: How often a wait looks for a cancellation or a person's stop.
@@ -1293,7 +1329,7 @@ class DshModelClient:
         #: the call has spent on outages so far. Neither counts as an attempt: only a
         #: failure the model or the provider caused uses one.
         outage: dict[str, Any] | None = None
-        network_spent = [0.0]
+        network = {"spent": 0.0, "slow": 0}
         attempt = 1
         try:
             while True:
@@ -1341,6 +1377,7 @@ class DshModelClient:
                 else:
                     self._raise_if_cancelled()
                     if proc.returncode == 0:
+                        NETWORK_GIVEN_UP.clear()
                         self._end_outage(run_dir, outage, "recovered")
                         outage = None
                         if warning := teardown_warning(proc.stderr):
@@ -1351,6 +1388,7 @@ class DshModelClient:
                         # The worker answered and only its cleanup failed: the answer is
                         # the node's. Re-asking would discard it, and repeat a tool
                         # session's work.
+                        NETWORK_GIVEN_UP.clear()
                         self._end_outage(run_dir, outage, "recovered")
                         outage = None
                         self._record_teardown(run_dir, cause)
@@ -1359,15 +1397,21 @@ class DshModelClient:
                         # Name the limit: a reader, or an optimizer, cannot weigh a
                         # shorter answer against a larger cap without the number.
                         cause = f"{cause} ({limit} tokens)"
-                    if self._waits_out_network(cause):
+                    # Only what the CLI and the worker said decide an outage, never the
+                    # model's streamed reasoning: a session whose reasoning quotes
+                    # "ECONNREFUSED" from its own tool work is not the network's failure.
+                    wire_cause = failure_cause("\n".join(diagnostic_lines(proc.stderr)))
+                    if self._waits_out_network(wire_cause):
                         # The network, DNS, a credential refresh or the local proxy is
                         # down: wait until it is back and ask again, without using an
                         # attempt -- the caller's own retries see only real failures.
                         if outage is None:
-                            outage = self._begin_outage(run_dir, cause)
-                        self._wait_for_network(run_dir, outage, cause, spent=network_spent,
+                            outage = self._begin_outage(run_dir, wire_cause)
+                        self._wait_for_network(run_dir, outage, wire_cause, state=network,
                                                attempt_s=time.monotonic() - now, stop_at=stop_at)
                         continue
+                    # An answer of any kind shows the network is up.
+                    NETWORK_GIVEN_UP.clear()
                     self._end_outage(run_dir, outage, "recovered")
                     outage = None
                     if not is_retryable_failure(proc.stderr) or failure_kind(cause) != "transport":
@@ -1443,31 +1487,38 @@ class DshModelClient:
 
     def _wait_for_network(
         self, run_dir: Path, outage: dict[str, Any], cause: str, *,
-        spent: list[float], attempt_s: float, stop_at: float | None,
+        state: dict[str, Any], attempt_s: float, stop_at: float | None,
     ) -> None:
         """Wait before asking again after an infrastructure failure (`is_infrastructure_failure`):
-        `NETWORK_FIRST_WAIT_S`, doubling up to `NETWORK_WAIT_CAP_S`, saying so in the run log
-        once a minute. Gives up -- a ``transport`` `CompletionFailed` that says it failed on
-        the wire, as a transport failure whose attempts ran out says it, so an evaluation
-        reads the item as interrupted rather than answered (`items.INTERRUPTED_MARKERS`) --
-        once the call has spent `NETWORK_WAIT_S` on outages, or when the wait would leave the
-        node's time (its wall) under a minute. A person's stop (`with_stop_check`) raises
-        ``RunStopped``, as an optimizer call's retry wait does (the search then ends as a
-        stop; an item reads as stopped); a cancelled scope raises ``CancelledError``. A budget that runs
-        out ends the call at the next attempt's checkpoint. ``spent`` is the call's total
-        so far, the failed tries included; the failed tries' own usage, when they reported
-        any, is kept in the outage's trace (the receipt already adds it to the call's
-        total)."""
+        `NETWORK_FIRST_WAIT_S`, doubling up to `NETWORK_WAIT_CAP_S`, each within
+        `NETWORK_JITTER`, saying so in the run log once a minute. Gives up -- a
+        ``transport`` `CompletionFailed` that says it failed on the wire, as a transport
+        failure whose attempts ran out says it, so an evaluation reads the item as
+        interrupted rather than answered (`items.INTERRUPTED_MARKERS`) -- once the call has
+        spent `NETWORK_WAIT_S` on outages (`NETWORK_GIVEN_UP` then makes later outages fail
+        at once until the network is seen up), when an earlier call already gave up so,
+        after `NETWORK_SLOW_TRIES` tries that each ran `NETWORK_SLOW_TRY_S` before failing,
+        or when the wait would leave the node's time (its wall) under a minute. A person's
+        stop (`with_stop_check`) raises ``RunStopped``, as an optimizer call's retry wait
+        does (the search then ends as a stop; an item reads as stopped); a cancelled scope
+        raises ``CancelledError``. A budget that runs out ends the call at the next
+        attempt's checkpoint. ``state`` is the call's: ``spent``, its seconds on outages so
+        far, the failed tries included, and ``slow``, its slow tries; the failed tries' own
+        usage, when they reported any, is kept in the outage's trace (the receipt already
+        adds it to the call's total)."""
         outage["failures"] += 1
         outage["error"] = cause[:500]
         receipt = self._receipt()
         usage = receipt.get("session_usage") if "session_usage" in receipt else None
         if usage:
             outage["usage"].append(usage)
-        spent[0] += max(0.0, attempt_s)
+        state["spent"] += max(0.0, attempt_s)
         outage["waited_s"] += max(0.0, attempt_s)
+        if attempt_s >= NETWORK_SLOW_TRY_S:
+            state["slow"] += 1
         delay = outage["next_wait_s"]
         outage["next_wait_s"] = min(delay * 2, NETWORK_WAIT_CAP_S)
+        wait = delay * _jitter()
 
         def give_up(outcome: str, why: str) -> None:
             self._end_outage(run_dir, outage, outcome)
@@ -1480,20 +1531,29 @@ class DshModelClient:
 
             self._end_outage(run_dir, outage, "stopped")
             raise RunStopped(f"model completion cancelled: a person asked the run to stop while "
-                             f"it waited {int(spent[0])}s for the network; not retried")
+                             f"it waited {int(state['spent'])}s for the network; not retried")
 
-        if spent[0] + delay > NETWORK_WAIT_S:
-            give_up("gave_up", f"it waited {int(spent[0])}s for the network to come back, "
+        if NETWORK_GIVEN_UP.is_set():
+            give_up("gave_up", f"an earlier call already waited {int(NETWORK_WAIT_S)}s for the "
+                               "network without it coming back, so it does not wait again "
+                               "until a call gets through")
+        if state["slow"] >= NETWORK_SLOW_TRIES:
+            give_up("gave_up", f"{state['slow']} of its tries each ran {int(NETWORK_SLOW_TRY_S)}s "
+                               "or more before failing: the network is up and the request "
+                               "itself fails (it may run past the proxy's timeout)")
+        if state["spent"] + wait > NETWORK_WAIT_S:
+            NETWORK_GIVEN_UP.set()
+            give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back, "
                                f"the most one call waits ({int(NETWORK_WAIT_S)}s)")
-        if stop_at is not None and stop_at - time.monotonic() - delay < NETWORK_WAIT_CAP_S:
-            give_up("gave_up", f"it waited {int(spent[0])}s for the network to come back "
+        if stop_at is not None and stop_at - time.monotonic() - wait < NETWORK_WAIT_CAP_S:
+            give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back "
                                "until the node's time ran out")
-        if outage["logged_at"] is None or spent[0] - outage["logged_at"] >= NETWORK_LOG_EVERY_S:
-            outage["logged_at"] = spent[0]
+        if outage["logged_at"] is None or state["spent"] - outage["logged_at"] >= NETWORK_LOG_EVERY_S:
+            outage["logged_at"] = state["spent"]
             who = self._node_id or "a model call"
             _log(f"refactory: {who}: waiting for network: {outage['error']} "
-                 f"({int(spent[0])}s so far; gives up after {int(NETWORK_WAIT_S)}s)")
-        left = delay
+                 f"({int(state['spent'])}s so far; gives up after {int(NETWORK_WAIT_S)}s)")
+        left = wait
         while left > 0:
             self._raise_if_cancelled()
             if self._stop_requested():
@@ -1504,8 +1564,8 @@ class DshModelClient:
             else:
                 time.sleep(step)
             left -= step
-        spent[0] += delay
-        outage["waited_s"] += delay
+        state["spent"] += wait
+        outage["waited_s"] += wait
 
     def _receipt(self) -> dict[str, Any]:
         try:
