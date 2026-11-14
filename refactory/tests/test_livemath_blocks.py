@@ -900,10 +900,13 @@ import json, os, sys
 from pathlib import Path
 node, writes, answer, fail_node, counter = sys.argv[1:6]
 if node == fail_node:
-    path = Path(counter)
-    seen = int(path.read_text()) if path.exists() else 0
-    path.write_text(str(seen + 1))
-    if seen == 0:
+    # Exactly one call fails: the first to create the marker (atomic, so parallel
+    # workers cannot both see "not yet" as a read-then-write counter let them).
+    try:
+        os.close(os.open(counter, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        pass
+    else:
         sys.exit("worker failed")
 for name in json.loads(writes):
     target = Path(os.environ["REFACTORY_WORKDIR"]) / name
