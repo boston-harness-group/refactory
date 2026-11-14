@@ -808,10 +808,67 @@ Held by `test_worktree.py` (`test_a_tracking_branch_made_in_the_person_s_checkou
 `test_agent_delivery.py`
 (`test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_unaffected`).
 
-**Not yet seen by the guard** (follow-ups). The snapshot reads only the common
-`config`. It does not read the person's checkout's `config.worktree`, which
-`extensions.worktreeConfig` makes live, so `git config --worktree core.hooksPath`
-there goes unseen. It also misses changes inside a file the config `[include]`s.
+**Worktree config and includes (review of #644).** The snapshot read only the
+common `config`, so two changes went unseen: `git config --worktree
+core.hooksPath` in the person's checkout, which `extensions.worktreeConfig` (set
+by hook isolation) makes live, and an edit inside a file the config already
+`[include]`s. The snapshot now also records:
+
+- the checkout's own `config.worktree` (from its `--git-dir`, so a checkout that
+  is itself a linked worktree is read correctly), named `worktree:<key>`. It is
+  recorded whether or not the extension is on, so turning it on cannot bring an
+  unseen file into force. The run's own worktrees have their own git dirs, so
+  their isolated hooks path is not counted;
+- a hash of every file an `include.path` or `includeIf.<cond>.path` in either
+  file names, followed recursively and whatever the condition, named
+  `include:<path>`. Paths resolve as git resolves them (`~/` from HOME, relative
+  from the including file; `%(prefix)/` is not expanded). A missing file is
+  recorded as missing, so creating it counts. Paths are normalised (`sub/../x`
+  is `x`) and followed no deeper than git's own limit of 10, so a self-including
+  file ends at once. Config is read with `--list -z`, since an `includeIf`
+  condition may hold `=`, and each file is listed once; one `rev-parse` gives
+  both git dirs, so a plain target costs two git spawns per check. An `includeIf` file
+  git never opens for this checkout may be unreadable or not config; it is
+  recorded as such, or by its bytes, rather than failing the guard.
+
+Both feed the all-lines digest only when present, so a target with neither keeps
+the digest it had. A record now says what it read (`shared_reads`). A record
+without that, from a run live at upgrade, is compared once without the new keys,
+which then become its baseline: a sparse checkout's `config.worktree` or an
+existing include does not fail the run, though a change to them in that one step
+goes unseen. Held by
+`test_worktree.py` (`test_the_checkout_s_worktree_config_is_shared_state`,
+`test_a_worktree_config_written_before_the_extension_is_on_is_seen`,
+`test_a_person_s_linked_worktree_checkout_has_its_own_worktree_config`,
+`test_a_change_inside_an_included_file_is_caught`,
+`test_includes_are_followed_relative_conditional_nested_and_from_worktree_config`,
+`test_an_include_cycle_ends_after_reading_each_file_once`,
+`test_ordinary_work_with_includes_and_worktree_config_is_not_a_change`,
+`test_an_old_record_still_sees_a_worktree_config_change`,
+`test_a_record_from_644_takes_worktree_config_and_includes_as_its_baseline`,
+`test_a_digest_only_record_takes_worktree_config_as_its_baseline`,
+`test_an_include_whose_condition_holds_an_equals_sign_is_followed`,
+`test_an_include_git_does_not_read_here_may_be_unparsable`,
+`test_an_include_git_does_not_read_here_may_be_unreadable`,
+`test_an_include_git_does_not_read_here_may_sit_in_a_locked_folder`,
+`test_the_snapshot_spawns_git_twice_for_a_plain_target`,
+`test_the_config_lines_are_what_git_config_list_prints`,
+`test_an_include_path_is_normalised_so_a_dot_dot_loop_ends`,
+`test_includes_are_followed_no_deeper_than_git_follows_them`).
+
+**Another run turning on `extensions.worktreeConfig`.** Every run's setup enables
+it in the shared config (hook isolation). The line was always left out of the
+digest, so enabling it was never a change, but neither was turning it off. The
+record now keeps it on its own: turning it on, from absent or `false`, is not a
+change (the checkout's `config.worktree` is recorded, so this brings nothing
+unseen into force); turning it off or removing it is, as is any other
+`extensions.*` key. A record from before this keeps whatever it finds as its
+baseline. A run's record is written before its own setup enables the extension, so
+its first step moves the baseline to "on". Held by `test_worktree.py`
+(`test_another_run_enabling_worktree_config_does_not_trip_this_run`,
+`test_enabling_worktree_config_from_absent_or_false_is_not_a_change`,
+`test_turning_worktree_config_off_or_any_other_extension_is_caught`,
+`test_a_record_from_before_holds_worktree_config_off_as_its_baseline`).
 
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
