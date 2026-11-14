@@ -182,7 +182,7 @@ def edit_kind_decision(population: Sequence[Candidate],
                            "deterministically -- rather than another prompt or setting "
                            "change"}
     settings = {"edit_kind": "prompt_knob",
-                "purpose": "this round: a prompt/knob-level change -- rewrite or patch a "
+                "purpose": "this round: a prompt/knob-level change -- patch or rewrite a "
                            "prompt, move a setting -- on the current pipeline"}
     if not top_keys & bottom_keys:
         return {**pipeline, "why": (

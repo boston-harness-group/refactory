@@ -479,7 +479,13 @@ spine through its runner, the walker in memory).
   schema's required fields) beside the parameter-move example, and the bundling example
   shows two prompt knobs first and then that node together with its own
   `<new step id>__system_prompt` knob, so neither kind leads; a run that permits
-  parameter moves only sees no structural example. A new node is written from
+  parameter moves only sees no structural example. A text parameter such as a prompt is
+  changed by a patch by default, as SkillOpt's patch mode edits its skill only by local
+  append, insert, replace and delete patches: the rules say to patch the parts the
+  evidence says to change and keep the rest, and the bundling example patches its two
+  prompt knobs. A whole new `value` stays available, for a setting that is not text, a
+  new step's own prompt, or a prompt that has to be replaced outright. The rules ask, in
+  SkillOpt's words, for a concise set of edits, only the ones that are needed. A new node is written from
   the node schema; the mode's blocks, when it declares any, may be used verbatim, and a
   mode with none says so ("New nodes"). The size cost states the run's parsimony per
   node; only when every train evaluation's score was the mean of its items' scores
