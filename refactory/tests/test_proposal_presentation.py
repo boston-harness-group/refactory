@@ -44,6 +44,19 @@ def test_structural_examples_appear_when_structure_is_permitted(preset):
     assert bundles[0]["edits"][1]["name"] == "<step B's prompt knob>"
 
 
+def test_a_prompt_is_patched_by_default_and_a_whole_value_stays_available():
+    # SkillOpt edits its skill only by local patches; round 2 (2026-11-14): candidates with
+    # a whole-prompt rewrite passed the gate 5/23, patch-only ones 23/46.
+    answer = _answer(_render("knob_only", max_edits=4))
+    flat = " ".join(answer.split())
+    assert "To change a text parameter such as a prompt, patch it:" in flat
+    assert "A whole new `value` is for a setting that is not text, a new step's own prompt" in flat
+    assert "a concise set of edits, only the ones that are needed" in flat
+    bundles = json.loads(next(line for line in answer.splitlines()
+                              if line.startswith('{"proposals": [{"edits"')))["proposals"]
+    assert all("patch" in e and "value" not in e for e in bundles[0]["edits"])
+
+
 def test_a_parameters_only_run_shows_no_structural_example():
     text = _render("knob_only", max_edits=4)
     answer = _answer(text)
