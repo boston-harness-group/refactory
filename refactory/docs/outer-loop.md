@@ -489,14 +489,19 @@ spine through its runner, the walker in memory).
   The template carries no task or domain vocabulary (`test_proposal_presentation`).
 - **What the score measures.** Said from the run's settings (`objective_text`), under
   the request's first line and in every analyst, merge and memory call. With
-  `parsimony` 0: the score is the task's own score and nothing else; inference cost,
-  latency and the number of steps or model calls are not scored. The "Evidence from the
-  traces" table then leaves out its `cost` row (seconds and inner model calls per
-  candidate), which gradient.json, the journal and the report keep. With `parsimony`
-  above 0 it states the size cost as scored (raw score minus parsimony per node) and,
-  under the validation gate, that the gate decides on the validation task score, which
-  carries no size cost, a train score breaking only a tie; the `cost` row stays. Nothing
-  is added to steer toward any kind of change.
+  `parsimony` 0: the score is the task's own score and nothing else; the loop adds no
+  cost term, so inference cost, latency and the number of steps or model calls are not
+  part of the score unless the task's own score measures them. When, in addition, the
+  score is the items' mean, the "Evidence from the traces" table leaves out its `cost`
+  row (seconds and inner model calls per candidate), which gradient.json, the journal
+  and the report keep. With `parsimony` above 0 it states the size cost as scored (raw
+  score minus parsimony per node); the `cost` row stays. Under the validation gate,
+  either way, it says how the gate decides (the analyst, merge and memory calls carry no
+  gate note of their own): on the task's validation score, which carries no size cost,
+  keeping a candidate only when it beats the current one; a train score only breaks a
+  tie between candidates that beat the current one by the same validation score, and a
+  tie with the current candidate is rejected. Nothing is added to steer toward any kind
+  of change.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
   (with their error, whether or not any step ran; they are in the cause table too),
@@ -952,8 +957,10 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   `E-proposal-shape`, `E-noop`, `E-too-many-edits` and the rest) with why. These are
   the facts the proposal request's history, change ledger, integrity and refusal
   sections already show; never a validation score. The section is at most 8000
-  characters (`TRIED_CHARS`); older entries past it are cut, the cut said. So a pass in
-  an epoch that kept nothing sees what was tried rather than "no changes". Then the
+  characters (`TRIED_CHARS`); past it the entries listed last are cut -- refusals first,
+  then the oldest evaluated -- and the cut says how many. So a pass in an epoch that
+  kept nothing sees what was tried rather than "no changes" (a round that proposed
+  nothing says so). Then the
   previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
   comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
   highest priority), persistent failures, improvements -- each item headed by what it

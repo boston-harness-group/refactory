@@ -9,8 +9,10 @@
   though candidates had been tried and refused.
 - **The optimizer is told the real objective.** With parsimony 0 every optimizer
   request (proposal, analysts, merges, memory) says the score is the task's own score
-  and that inference cost, latency and step count are not scored, and the proposal
-  request's trace table drops its ``cost`` row (gradient.json keeps it). With parsimony
+  and that inference cost, latency and step count are not part of it unless the task's
+  own score measures them, and -- when the score is the items' mean -- the proposal
+  request's trace table drops its ``cost`` row (gradient.json keeps it). Under the
+  validation gate each also says how the gate decides. With parsimony
   above 0 the size cost is said as it is scored.
 
 Each test fails when the behaviour it names is reverted.
@@ -140,7 +142,11 @@ def test_the_section_is_bounded_newest_first_with_the_cut_said():
     assert memory.TRIED_CHARS == 8000
     assert "`c59`" in text and "`c0`" not in text, "the newest kept, the oldest cut"
     assert text.index("`c59`") < text.index("`c58`")
-    assert lines[-1].startswith("[cut: the ") and "older entries of this round not shown]" in lines[-1]
+    assert lines[-1].startswith("[cut: ") and lines[-1].endswith(
+        " entries not shown: refusals first, then the oldest evaluated]")
+    assert "E-noop" not in text, "the refusal, listed last, is cut first"
+    cut = int(lines[-1].split()[1])
+    assert cut == 61 - sum(1 for line in lines if line.startswith("- "))
     whole = "\n".join(memory.tried_lines(_tried(2), [], round_=4, current="c1", gated=True))
     assert "[cut" not in whole and "`c0`" in whole
 
@@ -163,7 +169,22 @@ def test_the_entries_say_the_gate_the_integrity_verdict_and_the_refusal():
                                            gated=False))
     assert "gate:" not in ungated and "the pipeline now" in ungated
     empty = memory.tried_lines([], [], round_=4, current="c0", gated=True)
-    assert empty[-1] == "(nothing was proposed in that round)"
+    assert empty[-1] == memory.NOTHING_TRIED == "(nothing was proposed in that round)"
+
+
+def test_with_nothing_tried_the_unchanged_pipeline_points_nowhere():
+    entries, _ = memory.pairs([_rec("a", True)], [_rec("a", False)], ["a"])
+    side = {"id": "c1", "pipeline": "P", "rollout": "R"}
+
+    def built(tried: list[str]) -> str:
+        return memory.build_prompt(epoch=3, mode_name="m", prev=side, curr=side, changes=[],
+                                   previous_note="", entries=entries, tried=tried)[0]
+
+    nothing = built(memory.tried_lines([], [], round_=2, current="c1", gated=True))
+    assert "Nothing this epoch replaced it: the comparison" in nothing
+    assert memory.NOTHING_TRIED in nothing
+    some = built(memory.tried_lines(_tried(1), [], round_=2, current="c1", gated=True))
+    assert "Nothing this epoch replaced it (what was tried and not kept is under" in some
 
 
 def test_edits_in_short_name_the_op_and_what_it_touches_never_a_value():
@@ -192,6 +213,7 @@ def test_a_clipped_trace_names_the_memory_requests_room():
 # ── the objective ───────────────────────────────────────────────────────────
 
 
+UNLESS = "are not part of the score unless the task's own score measures them"
 GRADIENT = {"epoch": 1, "scoring": {"compared": "raw"},
             "cost": {"n": 1, "mean_s": 294.75, "inner_model_calls": 40}}
 
@@ -203,21 +225,34 @@ def test_with_no_size_cost_the_request_says_cost_is_not_scored_and_drops_the_cos
     assert ("The score is the task's own score (the mean of the items' scores) and nothing "
             "else.") in said
     assert "inference cost, latency, and the number of steps or model calls" in said
-    assert "are not scored" in said
+    assert "are not part of the score unless the task's own score measures them" in said
+    assert "validation gate" in said and "a tie with the current candidate is rejected" in said
     trace = _section(text, "## Evidence from the traces")
     assert "| cost |" not in trace and "294.75" not in text and "| scoring |" in trace
     assert text.index("## What the score measures") < text.index("## Parameters you may move")
+    # A score that is not the items' mean may carry cost itself: the row stays.
+    other = ProposalContext(parsimony=0.0, traces=[GRADIENT]).render()
+    assert "| cost |" in _section(other, "## Evidence from the traces")
+    assert "validation gate" not in _section(other, "## What the score measures")
 
 
 def test_with_a_size_cost_the_request_says_it_as_scored_and_keeps_the_cost_row():
-    text = ProposalContext(parsimony=0.01, traces=[GRADIENT]).render()
+    text = ProposalContext(parsimony=0.01, traces=[GRADIENT], score_is_item_mean=True).render()
     said = _section(text, "## What the score measures")
     assert "minus a size cost of 0.01 per node" in said and "raw score - 0.01 x nodes" in said
     assert "nothing else" not in said and "the number of steps" not in said
     assert "| cost |" in _section(text, "## Evidence from the traces")
     gated = objective_text(0.01, gated=True)
-    assert "The validation gate decides on the task's score on the validation items, which " \
-           "carries no size cost" in gated and "only breaks a tie" in gated
+    assert ("it keeps a candidate only when that score beats the current candidate's, and "
+            "that score carries no size cost; a train score, size cost included, only breaks "
+            "a tie between candidates that beat the current one by the same validation score; "
+            "a tie with the current candidate is rejected.") in gated
+    assert "Apart from that size cost, inference cost, latency and the number of model " \
+           f"calls {UNLESS}." in gated
+    plain = objective_text(0.0, gated=True)
+    assert ("it keeps a candidate only when that score beats the current candidate's; a "
+            "train score only breaks a tie between candidates that beat the current one by "
+            "the same validation score") in plain and "size cost" not in plain
     unknown = ProposalContext(traces=[GRADIENT]).render()
     assert "## What the score measures" not in unknown and "| cost |" in unknown
 
@@ -231,7 +266,7 @@ def test_analysts_and_merges_are_told_the_objective():
     merged = analysts.merge_prompt(ctx, "final", [[], []], 0, "PIPE")
     for text in (asked, merged):
         assert "## What the score measures\nThe score is the task's own score" in text
-        assert "are not scored" in text
+        assert "are not part of the score unless the task's own score measures them" in text
 
 
 def test_the_memory_request_is_told_the_objective_and_the_run_keeps_the_cost(
@@ -239,9 +274,11 @@ def test_the_memory_request_is_told_the_objective_and_the_run_keeps_the_cost(
     loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []], parsimony=0.0)
     prompt = proposer.asked[0]["prompt"]
     assert "## What the score measures\nThe score is the task's own score" in prompt
-    assert "are not scored" in prompt
-    request = proposer.contexts[-1].render()
-    assert "are not scored" in request and "| cost |" not in request
+    assert "are not part of the score unless the task's own score measures them" in prompt and "a tie with the current candidate is rejected" in prompt
+    ctx = proposer.contexts[-1]
+    request = ctx.render()
+    assert "are not part of the score unless the task's own score measures them" in request
+    assert ("| cost |" in request) is not ctx.score_is_item_mean
     gradient = json.loads((loop.root / "gradient.json").read_text())
     assert gradient["cost"]["n"] >= 1, "the run's own record keeps the cost"
     _, proposer2 = _run(tmp_path / "b", monkeypatch, [[(5, 7)], []], parsimony=0.05)

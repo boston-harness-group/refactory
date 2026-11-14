@@ -83,6 +83,8 @@ PIPELINE_TEXT_CHARS = 20000
 TRIED_CHARS = 8000
 TRIED_EDITS_CHARS = 300
 TRIED_REASON_CHARS = 300
+#: "What was tried this epoch" when the round proposed nothing.
+NOTHING_TRIED = "(nothing was proposed in that round)"
 #: How a clipped trace names this request (`analysts.fit_item`).
 ROOM_NAME = "the memory request's room"
 
@@ -260,7 +262,7 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
         pipelines = (f"## The pipeline (candidate `{curr.get('id')}`)\n"
                      "Nothing this epoch replaced it"
                      + (" (what was tried and not kept is under \"What was tried this "
-                        "epoch\")" if tried else "")
+                        "epoch\")" if tried and tried[-1] != NOTHING_TRIED else "")
                      + ": the comparison below is two rollouts of "
                      f"this one pipeline ({prev.get('rollout')}, and {curr.get('rollout')}), so "
                      "what moved between them moved without any change to the pipeline.\n\n"
@@ -372,8 +374,8 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
     "gate", "integrity"}`` -- train records and the gate's word only, as the proposal
     request's history and change ledger show them; never a validation score.
     ``refused`` entries (oldest first): ``{"round", "attempt", "kind", "structural",
-    "edits", "reasons"}``. Within ``chars``: past it, the older entries are cut and the
-    cut is said."""
+    "edits", "reasons"}``. Within ``chars``: past it, the entries listed last are cut --
+    the refusals first, then the oldest evaluated -- and the cut is said."""
     lines = ["## What was tried this epoch",
              f"Every change the optimizer proposed in round {round_ if round_ is not None else '?'}, "
              "while the start-of-epoch pipeline was current (this epoch evaluated and judged "
@@ -384,15 +386,15 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
                 "the pipeline now)" if gated else "")
              + ". A change tried and not kept, or refused, is evidence too."]
     if not tried and not refused:
-        return [*lines, "(nothing was proposed in that round)"]
+        return [*lines, NOTHING_TRIED]
     entries = [_tried_line(entry, current, gated) for entry in reversed(list(tried))]
     entries += [_refused_line(entry) for entry in reversed(list(refused))]
     used = sum(len(line) + 1 for line in lines)
     for index, line in enumerate(entries):
         if used + len(line) + 1 > chars and index:
-            lines.append(f"[cut: the {len(entries) - index} older entr"
-                         f"{'y' if len(entries) - index == 1 else 'ies'} of this round "
-                         "not shown]")
+            cut = len(entries) - index
+            lines.append(f"[cut: {cut} entr{'y' if cut == 1 else 'ies'} not shown: "
+                         "refusals first, then the oldest evaluated]")
             break
         lines.append(line)
         used += len(line) + 1
