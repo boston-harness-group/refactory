@@ -205,7 +205,31 @@ def test_a_failed_write_warns_once_and_does_not_raise(tmp_path, caplog):
     (tmp_path / traces.TRACES_DIR).write_text("a file where the folder goes")
     with caplog.at_level("WARNING"):
         traces.write_evaluation(tmp_path, "c1", "train", "", 1, [{"id": "a"}, {"id": "b"}])
-    assert len(caplog.records) == 1 and "could not write c1's train traces" in caplog.text
+    assert len(caplog.records) == 1 and "could not write 2 of c1's train item traces" in caplog.text
+
+
+def test_one_bad_item_leaves_the_others_written(tmp_path, caplog, monkeypatch):
+    """A lone surrogate in a reply is written escaped; an item whose write fails part
+    way is skipped without an item.json (written last), and the rest are written."""
+    bad = {"id": "bad", "exchanges": [{"node": "n", "prompt": "p", "response": "r"}],
+           "steps": [{"node": "s", "kind": "op", "output": "o"}]}
+    odd = {"id": "odd", "exchanges": [{"node": "n", "prompt": "p", "response": "x \udc80 y"}]}
+    fine = {"id": "fine", "exchanges": [{"node": "n", "prompt": "p", "response": "ok"}]}
+    dump = traces._dump
+
+    def failing(path, value):  # type: ignore[no-untyped-def]
+        if path.parent.name == "bad" and path.name == "steps.json":
+            raise OSError("disk full")
+        dump(path, value)
+
+    monkeypatch.setattr(traces, "_dump", failing)
+    with caplog.at_level("WARNING"):
+        traces.write_evaluation(tmp_path, "c1", "train", "", 1, [bad, odd, fine])
+    folder = tmp_path / traces.TRACES_DIR / "c1" / "train-seed1"
+    assert len(caplog.records) == 1 and "could not write 1 of c1's train item traces" in caplog.text
+    assert not (folder / "bad" / "item.json").exists()
+    assert json.loads((folder / "odd" / "01-n.json").read_text())["response"] == "x \udc80 y"
+    assert (folder / "odd" / "item.json").exists() and (folder / "fine" / "item.json").exists()
 
 
 def test_repeats_and_occasions_get_their_own_folders():
@@ -213,6 +237,96 @@ def test_repeats_and_occasions_get_their_own_folders():
     assert traces.occasion_name("val", "val_0", None) == "val-0"
     assert traces.occasion_name("holdout", "", 7) == "holdout-seed7"
     assert traces.occasion_name("val", "val_1", 2, repeat=2) == "val-1-seed2-repeat2"
+    assert traces.occasion_name("train", "", 3, number=2) == "train-seed3-eval2"
+
+
+def _probe_loop(root: Path, **config: Any) -> Loop:
+    with _patch_mode(TraceProbe):
+        loop = Loop("trace_probe/probe", LoopConfig(
+            epochs=1, batch_size=1, optimizer="random", seed=3, runs_root=root, holdout=0.0,
+            **config), project=Path("."), model=_Model())
+        loop.init()
+    return loop
+
+
+def test_two_train_rollouts_at_one_seed_keep_both_traces(tmp_path, monkeypatch):
+    """Each evaluation the journal records gets its own folder, counted again on
+    resume; an attempt it does not record (here: the run dies before the score is
+    journaled) rewrites its own folder rather than taking a new one."""
+    root = tmp_path / "run"
+    loop = _probe_loop(root)
+    seed = loop.population[0]
+    with _patch_mode(TraceProbe):
+        loop._evaluate(seed, seed=3)  # noqa: SLF001
+        loop._evaluate(seed, seed=3)  # noqa: SLF001 - SkillOpt's slow update does this
+    base = root / traces.TRACES_DIR / seed.id
+    assert sorted(p.name for p in base.iterdir()) == ["train-seed3", "train-seed3-eval2"]
+    scores = [e for e in _journal(root) if e["event"] == "score" and e["id"] == seed.id]
+    assert len(scores) == 2  # the journal keeps both, and so do the traces
+
+    # An attempt that never reaches the journal: its folder is the next number's.
+    journal = loop._journal
+
+    def dies(event, **payload):  # type: ignore[no-untyped-def]
+        if event == "train_records":
+            raise RuntimeError("killed")
+        journal(event, **payload)
+
+    monkeypatch.setattr(loop, "_journal", dies)
+    with _patch_mode(TraceProbe), pytest.raises(RuntimeError):
+        loop._evaluate(seed, seed=3)  # noqa: SLF001
+    monkeypatch.setattr(loop, "_journal", journal)
+    assert (base / "train-seed3-eval3").is_dir()
+    with _patch_mode(TraceProbe):
+        loop._evaluate(seed, seed=3)  # noqa: SLF001 - the same evaluation, done again
+    assert sorted(p.name for p in base.iterdir()) == [
+        "train-seed3", "train-seed3-eval2", "train-seed3-eval3"]
+
+    # A resume counts the recorded evaluations from the journal.
+    resumed = _probe_loop(root, resume=True)
+    with _patch_mode(TraceProbe):
+        resumed._evaluate(resumed.population[0], seed=3)  # noqa: SLF001
+    assert (base / "train-seed3-eval4").is_dir()
+    # A fresh run in the same directory starts the traces over, as it does the journal.
+    fresh = _probe_loop(root)
+    assert not (root / traces.TRACES_DIR).exists()
+    with _patch_mode(TraceProbe):
+        fresh._evaluate(fresh.population[0], seed=3)  # noqa: SLF001
+    assert sorted(p.name for p in base.iterdir()) == ["train-seed3"]
+
+
+def test_a_gated_run_writes_a_folder_per_evaluation(tmp_path):
+    """With val, test and the gate's fresh-evidence re-scores: train, re-score, val
+    and test folders, each named as the docs say."""
+    parts = tmp_path / "parts.json"
+    parts.write_text(json.dumps({"train": ["set:1", "set:2"], "val": ["a/b:3"],
+                                 "test": [".."]}))
+    root = tmp_path / "run"
+    recorder = _Recorder()
+    with _patch_mode(TraceProbe):
+        loop = Loop("trace_probe/probe", LoopConfig(
+            epochs=3, batch_size=1, optimizer="random", seed=3, runs_root=root,
+            allowed_ops=("set_knob",), holdout=0.0, val_gate=True,
+            parts_manifest=str(parts)), project=Path("."), model=_Model())
+        loop.optimizer = recorder
+        loop.run()
+    # The gate's train rollouts use SkillOpt's per-epoch seed (1004, 2004, ...).
+    kinds = {candidate.name: sorted(re.sub(r"\d+", "N", p.name) for p in candidate.iterdir())
+             for candidate in (root / traces.TRACES_DIR).iterdir()}
+    evaluated = [c.id for c in loop.population if c.evaluated]
+    assert sorted(kinds) == sorted(evaluated)
+    for candidate, folders in kinds.items():
+        assert "train-seedN" in folders and "val-N-seedN" in folders, (candidate, folders)
+        assert set(folders) <= {"train-seedN", "val-N-seedN", "train-epoch_N-seedN",
+                                "test-N-seedN"}, folders
+    every = [folder for folders in kinds.values() for folder in folders]
+    assert "train-epoch_N-seedN" in every and "test-N-seedN" in every, kinds
+    # Each folder holds only its part's items.
+    for folder in (root / traces.TRACES_DIR).glob("*/*"):
+        names = {p.name for p in folder.iterdir()}
+        part = folder.name.split("-")[0]
+        expected = {"train": {"set:1", "set:2"}, "val": {"a/b:3"}, "test": {".."}}[part]
+        assert names <= {traces.safe_name(i) for i in expected}, (folder, names)
 
 
 def test_spine_records_reach_the_writer(tmp_path, monkeypatch):
@@ -261,17 +375,82 @@ def test_spine_records_reach_the_writer(tmp_path, monkeypatch):
         assert json.loads((item / "steps.json").read_text()) == record["steps"]
 
 
-def test_nothing_but_the_writer_names_the_traces_folder():
-    """Write-only: no module of the package but `refactory_dsh.traces` names the
-    folder or its constant, and the loop only calls the writer."""
+#: The words that name the trace files, as a string literal would hold them.
+NAMES = re.compile(r"\btraces\b|\bitem\.json\b|\bsteps\.json\b")
+
+#: String literals outside the writer that hold one of ``NAMES`` today, and are not the
+#: trace files: prose ("the traces" the optimizer reads) or a Task's own ``item.json`` in
+#: a pass. Counted per file, so a new literal anywhere fails the test.
+OTHER_USES = {
+    ("refactory_dsh/nn/executor.py", "item.json"): 2,
+    ("refactory_dsh/optim/base.py", "traces"): 2,
+    ("refactory_dsh/optim/memory.py", "traces"): 2,
+    ("refactory_dsh/tools/gen_tutorial.py", "traces"): 2,
+    ("refactory_packages/java_build_pack/mode.py", "item.json"): 2,
+    ("refactory_packages/java_build_pack/ops.py", "item.json"): 1,
+    ("refactory_packages/java_build_pack/tasks.py", "item.json"): 1,
+    ("refactory_packages/loop_mode/mode.py", "traces"): 1,
+}
+
+
+def _literal_names(source: str) -> list[str]:
+    """``NAMES`` in every string literal of ``source`` (an f-string's text parts
+    included), docstrings aside: a docstring reads no file."""
+    import ast
+
+    tree = ast.parse(source)
+    docstrings = {id(node.body[0].value) for node in ast.walk(tree)
+                  if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                       ast.AsyncFunctionDef))
+                  and node.body and isinstance(node.body[0], ast.Expr)
+                  and isinstance(node.body[0].value, ast.Constant)}
+    return [match.group() for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in docstrings for match in NAMES.finditer(node.value)]
+
+
+def test_nothing_but_the_writer_names_the_trace_files():
+    """Write-only: outside `refactory_dsh.traces`, no string literal of the Python
+    package names the folder or its file names (beyond ``OTHER_USES``), no module but
+    the loop imports the writer and the loop only calls it, and the TypeScript sources
+    do not name them at all."""
+    from collections import Counter
+
     package = Path(traces.__file__).resolve().parent
-    pattern = re.compile(r"""TRACES_DIR|["']traces(?:/|["'])|/\s*["']traces["']""")
-    found = {}
-    roots = [package, package.parent / "refactory_packages"]
-    for path in (p for r in roots if r.is_dir() for p in r.rglob("*.py")):
-        hits = [n for n, line in enumerate(path.read_text().splitlines(), 1) if pattern.search(line)]
-        if hits:
-            found[str(path.relative_to(package.parent))] = hits
-    assert set(found) == {"refactory_dsh/traces.py"}, found
-    loop_source = (package / "loop.py").read_text()
-    assert loop_source.count("traces.") == 1 and "traces.write_evaluation(" in loop_source
+    top = package.parent
+    found: Counter[tuple[str, str]] = Counter()
+    importers = []
+    for path in (p for r in (package, top / "refactory_packages") if r.is_dir()
+                 for p in r.rglob("*.py")):
+        name = str(path.relative_to(top))
+        if name == "refactory_dsh/traces.py":
+            continue
+        source = path.read_text()
+        found.update((name, word) for word in _literal_names(source))
+        if re.search(r"TRACES_DIR|\bimport traces\b|refactory_dsh\.traces\b", source):
+            importers.append(name)
+    assert dict(found) == OTHER_USES, dict(found)
+    assert importers == ["refactory_dsh/loop.py"], importers
+    assert "TRACES_DIR" not in (package / "loop.py").read_text()
+    calls = re.findall(r"\btraces\.(\w+)", (package / "loop.py").read_text())
+    assert sorted(calls) == ["clear", "write_evaluation"], calls
+
+    repo = top.parent
+    sources = [p for p in (repo / "packages").glob("**/src/**/*")
+               if p.suffix in (".ts", ".mts", ".cts", ".tsx", ".mjs", ".js")
+               and "node_modules" not in p.parts and "generated" not in p.name]
+    assert sources, "no TypeScript sources found"
+    named = {}
+    for path in sources:
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(), flags=re.S)
+        if NAMES.search(code):
+            named[str(path.relative_to(repo))] = sorted(set(NAMES.findall(code)))
+    assert named == {}, named
+
+
+def test_the_literal_scan_sees_paths_and_f_strings():
+    """The scan of the test above catches the ways a reader would name the files."""
+    assert _literal_names('p = root / "traces" / cid') == ["traces"]
+    assert _literal_names('p = f"{root}/traces/{cid}/item.json"') == ["traces", "item.json"]
+    assert _literal_names('p = Path("x", "steps.json")') == ["steps.json"]
+    assert _literal_names('def f():\n    """Reads the traces."""\n') == []
