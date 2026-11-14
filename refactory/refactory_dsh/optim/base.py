@@ -963,7 +963,7 @@ def _feedback_sections(ctx: "ProposalContext") -> list[str]:
 #: The edit levels a portfolio round asks for, one proposal each (``edit_level``).
 EDIT_LEVELS = ("prompt_knob", "pipeline")
 _LEVEL_TEXT = {
-    "prompt_knob": "a prompt/knob-level change: only `set_knob` edits (rewrite or patch a "
+    "prompt_knob": "a prompt/knob-level change: only `set_knob` edits (patch or rewrite a "
                    "prompt, move a setting) on the current pipeline",
     "pipeline": "a pipeline-level change: at least one structural operation (add, remove, "
                 "rewire, gate, loop or parallelise steps{code}), with any knob moves it needs",
@@ -1189,7 +1189,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             f"{snippet.ALLOWED_IMPORTS_TEXT}; at most {snippet.MAX_CODE_BYTES} "
             f"bytes, {snippet.WALL_S} s, no files, network, open/exec/eval or dunders (rule "
             "V18). The code goes into the node's own `<id>__code` knob, which a later "
-            "`set_knob` rewrites.",
+            "`set_knob` patches or rewrites.",
         ]
     lines += [
         "- **gate**: routes by a verdict, to the out-edge whose `condition` is that verdict. "
@@ -1383,7 +1383,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         '                "confidence": 0.0}]}',
         "",
         "Rules:",
-        '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>}.',
+        '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>} or, '
+        'for a text parameter, the same with "patch" in place of "value" (below).',
     ]
     if any(op.get("op") == "set_knob" for op in catalogue):
         # SkillOpt's patch mode edits its skill only by local append/insert/replace/delete
@@ -1401,7 +1402,7 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
             "  " + json.dumps(structural),
             "  A new agent node gets its own `<new step id>__system_prompt` knob holding its "
             "system prompt and `<new step id>__task` knob holding its `prompt_template`, so a "
-            "later round can rewrite either with `set_knob`.",
+            "later round can patch or rewrite either with `set_knob`.",
         ]
     else:
         lines.append("- This run permits parameter moves only.")
