@@ -721,6 +721,54 @@ call (that call's next attempt included) fails at once until some call gets thro
 the worst case of one optimizer call in an outage that never ends is about 2 hours plus
 the attempts' own waits (1 + 2 + 4 s), not 3 x 2 hours.
 
+### Item traces as files (`traces/`, written, not read)
+
+After every evaluation (a candidate's train evaluation, a re-score, a memory rollout, a
+val or test rollout, the holdout audit), on either runtime, each item's whole record is
+also written as files under the run root (`refactory_dsh/traces.py`, called from
+`Loop._measure`), as SkillOpt keeps `predictions/<task>/conversation.json` per rollout,
+with one file per step since a candidate is a multi-step graph:
+
+```
+traces/<candidate id>/<part>-<occasion>[-seed<seed>][-eval<n>][-repeat<n>]/<item id>/
+  NN-<node>.json   one per model call, in run order: node, prompt and response, whole
+  steps.json       the op and code-gate visits, when the item has any
+  item.json        the record without its exchanges and steps (the original id in "id"),
+                   written last: an item folder with it is complete
+```
+
+- **Names.** The occasion is the evaluation folder's name without the part (`epoch_3`
+  for a re-score, `0` for the first val rollout, `memory_epoch_2_<key>`), and is left
+  out for a candidate's own train evaluation and for the holdout. An item id a file name
+  cannot hold as it is (`/`, `:`, `..`) is renamed as pass folders are
+  (`items.sanitize_item_id`, with a digest of the original).
+- **One folder per recorded evaluation.** `-eval<n>` numbers the second and later
+  evaluations the journal records in the same evaluation folder (`score`, `rescore`,
+  `rescore_failed`, `memory_rollout`), such as two train rollouts of one candidate at
+  one seed (SkillOpt's slow update). The count is taken from the journal's events, live
+  and on resume, and nothing new is journaled. An attempt the journal has not recorded
+  (an in-run retry, or a resume running an interrupted or budget-stopped evaluation
+  again) rewrites its own folder: each file atomically, with the call files it no
+  longer has removed. A fresh run in the same directory removes `traces/`, as it starts
+  the journal over.
+- **Failures.** An item that cannot be written is skipped, the others are written, and
+  the evaluation logs one warning line. Text that cannot be encoded (a lone surrogate)
+  is written escaped.
+- **Leftovers.** A process killed mid-write can leave a hidden `.<name>.*.tmp` file
+  beside the file it was writing. A rewritten evaluation that has fewer items than the
+  attempt before it leaves that attempt's other item folders in place.
+- **Size.** About 44k characters per LiveMath item. Train traces repeat what the
+  journal's `train_records` already holds, so a run's train records take about twice
+  the disk space.
+
+Nothing reads these files yet: not the loop, the optimizer, the analysts, the memory
+pass, the reports or a resume. A test holds that outside `traces.py` no string literal of
+the Python package names `traces`, `item.json` or `steps.json` (docstrings aside, and
+beyond a listed set of existing prose and a Task's own `item.json`), only the loop
+imports the writer, and the TypeScript sources do not name them. They add no journal
+event, and the journal stays the run's record. They are there for people and for a
+later trace-reading analyst.
+
 ### Run-wide feedback: changes by kind, the memory note, added-step reviews
 
 Three more request sections (`optim/feedback.py`, `optim/memory.py`) carry what the run has taught so

@@ -345,6 +345,8 @@ directory>`.
   can tail a run that is still going.
 - `manifest.json` — what to render and as what; `rejections.jsonl`.
 - `runs/<candidate-id>/candidate.json` — per-candidate measurement.
+- `traces/<candidate-id>/...` — every evaluated item's full trace, a file per model
+  call; written only, read by nothing in the run (`outer-loop.md`, "Item traces as files").
 
 The exception worth knowing: `report.json`'s `best` is a `describe()` — id, parent,
 score, edits — and carries **no state dict**. To get a candidate's architecture you

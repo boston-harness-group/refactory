@@ -823,6 +823,10 @@ class Loop(OuterLoop):
         self._part_results: dict[str, dict[str, list[dict[str, Any]]]] = {}
         #: Loop-private per-candidate, per-part occasion counters.
         self._occasion_counters: dict[str, dict[str, int]] = {}
+        #: How many evaluations the journal records per evaluation folder (relative to
+        #: the root), counted from its events live and on replay (`_note_recorded`); it
+        #: numbers the trace folders (`_write_traces`) and is never journaled.
+        self._recorded_evaluations: dict[str, int] = {}
         #: Loop-private per-candidate train item records.
         self._train_item_records: dict[str, list[dict[str, Any]]] = {}
         #: The loop-level parts manifest (train/val/test id lists), loaded from
@@ -1114,6 +1118,9 @@ class Loop(OuterLoop):
             shutil.rmtree(self.root / "step_reviews", ignore_errors=True)
             # And the analyst stage's (`AutoresearchOptimizer._ask`).
             shutil.rmtree(self.root / "analyst_findings", ignore_errors=True)
+            # And the item traces, numbered by this journal (`_write_traces`).
+            from refactory_dsh import traces
+            traces.clear(self.root)
         resumed = self._replay_if_asked()
         (self.root / run_history.RUN_FILE).write_text(
             json.dumps(
@@ -1786,7 +1793,7 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 return False
         batch = self._minibatch(epoch)
-        workdir = self.root / "runs" / parent.id / "occasions" / f"train_epoch_{epoch}"
+        workdir = self._rescore_dir(parent.id, epoch)
         # A re-score of this epoch that did not count (it failed, or the run died in
         # it) left its passes here: kept in the archive, not overwritten.
         self._archive_unfinished(parent.id, workdir)
@@ -2207,6 +2214,7 @@ class Loop(OuterLoop):
 
         cached = self._cached_measure(candidate, workdir, part, expected_ids, seed)
         if cached is not None:
+            self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
             return cached
 
         trials = []
@@ -2317,7 +2325,70 @@ class Loop(OuterLoop):
         last.item_records = all_item_records
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
+        self._write_traces(candidate, workdir, part, seed, all_item_records)
         return last, summary
+
+    def _write_traces(self, candidate: Candidate, workdir: Path, part: str,
+                      seed: int | None, records: Sequence[dict[str, Any]] | None) -> None:
+        """Write each record of this evaluation as files (`refactory_dsh.traces`), for
+        people and a later trace-reading analyst; nothing in the run reads them back.
+
+        Every evaluation passes through ``_measure`` on both runtimes (train, re-score,
+        memory rollout, val, test, holdout), and its records here are the evaluator's
+        own, whole. The occasion is the evaluation directory's name (``train_epoch_3``,
+        ``val_0``, ``memory_epoch_2_<key>``), empty for a candidate's own first
+        evaluation and the holdout audit.
+
+        The number is one past the evaluations the journal already records for this
+        folder (`_note_recorded`): a second train rollout of a candidate at one seed
+        gets a folder of its own, while an attempt the journal has not recorded (an
+        in-run retry, or a resume running an interrupted or budget-stopped evaluation
+        again) gets the same number and rewrites its own folder. Adds no journal
+        event; never raises."""
+        from refactory_dsh import traces
+
+        occasion = "" if workdir.name == candidate.id else workdir.name
+        with self._state_lock:
+            number = self._recorded_evaluations.get(self._relative(workdir), 0) + 1
+        traces.write_evaluation(self.root, candidate.id, part, occasion, seed, records or (),
+                                number=number)
+
+    def _relative(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return str(path)
+
+    def _rescore_dir(self, candidate_id: str, epoch: int) -> Path:
+        """Where ``candidate_id``'s fresh-evidence re-score on ``epoch`` runs."""
+        return self.root / "runs" / candidate_id / "occasions" / f"train_epoch_{epoch}"
+
+    def _memory_dir(self, candidate_id: str, for_epoch: int, key: str) -> Path:
+        """Where ``candidate_id``'s memory rollout ``key`` for ``for_epoch`` runs."""
+        return (self.root / "runs" / candidate_id / "occasions"
+                / f"memory_epoch_{for_epoch}_{key}")
+
+    def _note_recorded(self, event: Any, record: dict[str, Any]) -> None:
+        """Count a journal event that records a finished evaluation against the folder
+        it ran in: ``score`` (a candidate's train evaluation), ``rescore`` and
+        ``rescore_failed``, ``memory_rollout``. A val or test rollout runs in a fresh
+        occasion folder every time, and the holdout once, so they need no count. Called
+        for every event written (`_journal`) and replayed, so a resume counts alike."""
+        cid = record.get("id")
+        if cid is None or event not in ("score", "rescore", "rescore_failed", "memory_rollout"):
+            return
+        cid = str(cid)
+        if event == "score":
+            folder = self.root / "runs" / cid
+        elif event == "memory_rollout":
+            epoch = int(record.get("epoch") or 0)
+            folder = self._memory_dir(cid, int(record.get("for_epoch") or 0),
+                                      str(record.get("key") or f"e{epoch}"))
+        else:
+            folder = self._rescore_dir(cid, int(record.get("epoch") or 0))
+        counts = self.__dict__.setdefault("_recorded_evaluations", {})
+        key = self._relative(folder)
+        counts[key] = counts.get(key, 0) + 1
 
     def _cached_measure(
         self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
@@ -5397,8 +5468,7 @@ class Loop(OuterLoop):
             except BudgetExhausted as exc:
                 self.bound = str(exc)
                 return 0
-        workdir = (self.root / "runs" / candidate.id / "occasions"
-                   / f"memory_epoch_{for_epoch}_{key}")
+        workdir = self._memory_dir(candidate.id, for_epoch, key)
         self._archive_unfinished(candidate.id, workdir)
 
         def prepare() -> None:
@@ -6244,6 +6314,7 @@ class Loop(OuterLoop):
             self.root.mkdir(parents=True, exist_ok=True)
             with (self.root / JOURNAL).open("a") as handle:
                 handle.write(json.dumps({"event": event, **payload}, default=str) + "\n")
+            self._note_recorded(event, payload)
 
     def _journal_candidate(self, candidate: Candidate) -> None:
         self._journal(
@@ -6309,6 +6380,7 @@ class Loop(OuterLoop):
                 # it is the point of an append-only log.
                 break
             event = record.get("event")
+            self._note_recorded(event, record)
             if event == "candidate":
                 # F14: refuse journal entries that contain removed edit ops.
                 _removed_ops = {"set_node_field", "replace_node"}
