@@ -859,10 +859,14 @@ def test_a_failed_round_names_the_parent_the_picker_chose(tmp_path):
     loop = _run("default", tmp_path, model, parent_picker="map_elites", epochs=5)
     events = _failed_events(loop)
     assert events, "the model never failed"
-    failing = model.requests[3:]  # one event per failing request, in order
-    assert len(events) == len(failing)
-    for event, request in zip(events, failing):
-        assert request.picked and event["parent"] == request.picked
+    # One event per failed round, in order; a round's proposal call makes 3 attempts,
+    # all with the same request (`AutoresearchOptimizer._ask_proposal`).
+    failing = model.requests[3:]
+    assert len(failing) == 3 * len(events)
+    for index, event in enumerate(events):
+        attempts = failing[3 * index: 3 * index + 3]
+        assert {request.picked for request in attempts} == {event["parent"]}
+        assert attempts[0].picked
 
 
 class _NamesParentInPropose(Loop):

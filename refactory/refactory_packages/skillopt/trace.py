@@ -4,7 +4,9 @@ Each line is a JSON object with ``type`` (``model_call`` or ``decision``),
 ``timestamp``, ``epoch``, ``step_type``, and an optional ``call_key`` (the
 stable 4-tuple ``[step_type, epoch, group_index, call_order]`` that names the
 call site). A ``model_call`` made by :func:`ask` also has ``attempt`` (from 1):
-an optimizer call is retried as SkillOpt retries it, one line per attempt.
+an optimizer call is retried as SkillOpt retries it, one line per attempt; an
+attempt that waited out a network outage also has ``network_waits`` (one entry per
+outage: ``started_at``, ``ended_at``, ``waited_s``, ``error``, ``outcome``).
 
 The call key is never sent to the model client: an optimizer call uses the
 client protocol the walker uses, ``complete(prompt, *, system=...)``, so any
@@ -82,6 +84,7 @@ class TraceRecorder:
         call_key: tuple[str, int, int, int] | list | None = None,
         error: str | None = None,
         attempt: int | None = None,
+        network_waits: list[dict[str, Any]] | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "type": "model_call",
@@ -98,6 +101,8 @@ class TraceRecorder:
             entry["attempt"] = attempt
         if error is not None:
             entry["error"] = error
+        if network_waits:
+            entry["network_waits"] = network_waits
         self._write(entry)
 
     def record_decision(self, step_type: str, **fields: Any) -> None:
@@ -193,26 +198,35 @@ def ask(
 
     The client is called as the walker calls it, ``complete(user, system=...)``;
     ``call_key`` goes to the trace and to :func:`current_call_key` only.
+
+    A network, DNS or credential-refresh outage is not one of these attempts: the
+    model client waits it out inside one ``complete`` and asks again
+    (``DshModelClient._wait_for_network``), so an attempt here fails only for a reason
+    the model or the provider gave, or after the client's wait bound. The outages an
+    attempt waited out go on its trace line as ``network_waits``.
     """
+    from refactory_dsh.model import observe_network_waits
+
     for attempt in range(1, OPTIMIZER_ATTEMPTS + 1):
-        try:
-            with optimizer_call(call_key):
-                output = client.complete(user, system=system)
-        except _fatal() as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            trace.record_model_call(step_type, system, user, None, call_key=call_key,
-                                    error=error, attempt=attempt)
-            trace.count_call(error)
-            raise
-        except Exception as exc:  # noqa: BLE001 - SkillOpt's own handling, cited above
-            error = f"{type(exc).__name__}: {exc}"
-            trace.record_model_call(step_type, system, user, None, call_key=call_key,
-                                    error=error, attempt=attempt)
-            trace.count_call(error)
-            _sleep(retry_delay(attempt - 1))
-            continue
+        with observe_network_waits() as waits:
+            try:
+                with optimizer_call(call_key):
+                    output = client.complete(user, system=system)
+            except _fatal() as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                trace.record_model_call(step_type, system, user, None, call_key=call_key,
+                                        error=error, attempt=attempt, network_waits=waits)
+                trace.count_call(error)
+                raise
+            except Exception as exc:  # noqa: BLE001 - SkillOpt's own handling, cited above
+                error = f"{type(exc).__name__}: {exc}"
+                trace.record_model_call(step_type, system, user, None, call_key=call_key,
+                                        error=error, attempt=attempt, network_waits=waits)
+                trace.count_call(error)
+                _sleep(retry_delay(attempt - 1))
+                continue
         trace.record_model_call(step_type, system, user, output, call_key=call_key,
-                                attempt=attempt)
+                                attempt=attempt, network_waits=waits)
         trace.count_call(None)
         return output
     return None
