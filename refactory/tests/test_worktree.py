@@ -2082,3 +2082,52 @@ def test_includes_are_followed_no_deeper_than_git_follows_them(repo, tmp_path):
     git(repo, "config", "includeIf.gitdir:/elsewhere/.path", str(tmp_path / "f1"))
     assert sorted(worktree._shared_snapshot(repo)["included"]) == sorted(
         str(tmp_path / f"f{level}") for level in range(1, 11))
+
+
+# ── another run's setup enabling worktreeConfig (live, scale-first build) ─────
+
+def test_another_run_enabling_worktree_config_does_not_trip_this_run(repo, tmp_path):
+    """Run B's setup turns on extensions.worktreeConfig; run A's next step is not failed."""
+    run_a = worktree.create(repo, "HEAD", "two0000aaaa", _run(tmp_path, "a"))
+    git(repo, "config", "--unset", "extensions.worktreeConfig")  # as before any run's setup
+    assert worktree.shared_change(run_a) is None
+    worktree.create(repo, "HEAD", "two1111bbbb", _run(tmp_path, "b"))  # its setup enables it
+    assert git(repo, "config", "extensions.worktreeConfig").strip() == "true"
+    assert worktree.shared_change(run_a) is None
+
+
+@pytest.mark.parametrize("before", [None, "false"])
+def test_enabling_worktree_config_from_absent_or_false_is_not_a_change(repo, tmp_path, before):
+    found = worktree.create(repo, "HEAD", "ext0000aaaa", _run(tmp_path))
+    git(repo, "config", "--unset", "extensions.worktreeConfig")
+    if before is not None:
+        git(repo, "config", "extensions.worktreeConfig", before)
+    worktree.shared_change(found)  # the record moves on to the starting state
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    assert worktree.shared_change(found) is None
+
+
+@pytest.mark.parametrize("change, named", [
+    (("config", "extensions.worktreeConfig", "false"), "config extensions.worktreeconfig changed"),
+    (("config", "--unset", "extensions.worktreeConfig"), "config extensions.worktreeconfig removed"),
+    (("config", "extensions.noop", "true"), "config extensions.noop added"),
+])
+def test_turning_worktree_config_off_or_any_other_extension_is_caught(repo, tmp_path, change, named):
+    found = worktree.create(repo, "HEAD", "ext1111bbbb", _run(tmp_path))
+    assert worktree.shared_change(found) is None, "the run's own isolation turned it on"
+    git(repo, *change)
+    assert worktree.shared_change(found) == named
+
+
+def test_a_record_from_before_holds_worktree_config_off_as_its_baseline(repo, tmp_path):
+    """A run live at upgrade whose target has the extension set false is not failed for it."""
+    found = worktree.create(repo, "HEAD", "ext2222cccc", _run(tmp_path))
+    git(repo, "config", "extensions.worktreeConfig", "false")
+    record_path = worktree._record_path(found)
+    record = json.loads(record_path.read_text())
+    record_path.write_text(json.dumps({key: value for key, value in record.items() if key != "shared_reads"}))
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    assert worktree.shared_change(found) is None
+    git(repo, "config", "extensions.worktreeConfig", "false")
+    assert worktree.shared_change(found) == "config extensions.worktreeconfig changed"

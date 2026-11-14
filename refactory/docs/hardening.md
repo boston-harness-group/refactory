@@ -856,6 +856,20 @@ goes unseen. Held by
 `test_an_include_path_is_normalised_so_a_dot_dot_loop_ends`,
 `test_includes_are_followed_no_deeper_than_git_follows_them`).
 
+**Another run turning on `extensions.worktreeConfig`.** Every run's setup enables
+it in the shared config (hook isolation). The line was always left out of the
+digest, so enabling it was never a change, but neither was turning it off. The
+record now keeps it on its own: turning it on, from absent or `false`, is not a
+change (the checkout's `config.worktree` is recorded, so this brings nothing
+unseen into force); turning it off or removing it is, as is any other
+`extensions.*` key. A record from before this keeps whatever it finds as its
+baseline. A run's record is written before its own setup enables the extension, so
+its first step moves the baseline to "on". Held by `test_worktree.py`
+(`test_another_run_enabling_worktree_config_does_not_trip_this_run`,
+`test_enabling_worktree_config_from_absent_or_false_is_not_a_change`,
+`test_turning_worktree_config_off_or_any_other_extension_is_caught`,
+`test_a_record_from_before_holds_worktree_config_off_as_its_baseline`).
+
 **Known limit.** A hook manager that writes `core.hooksPath` itself, as husky
 does with `git config core.hooksPath .husky/_`, writes the common config even
 with isolation on. `HOOK_SUPPRESS` (`HUSKY=0`) stops husky, and `shared_changed`

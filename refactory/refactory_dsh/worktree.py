@@ -620,7 +620,8 @@ def shared_change(found: Worktree) -> str | None:
     compared["branches"] = current["branches"]
     changes = _shared_changes(record, compared)
     kept = [change for change in changes
-            if not _new_tracking(change, record, snapshot["config_lines"], found.branch)]
+            if not _new_tracking(change, record, snapshot["config_lines"], found.branch)
+            and not _enabled_worktree_config(change, snapshot)]
     if changes or record["branches"] != current["branches"] or compared is not current:
         _write_json(record_path, {**record, **current})
     if kept:
@@ -1248,7 +1249,9 @@ def _shared_snapshot(target: Path) -> dict:
     recorded whether or not the extension is on, so enabling it later cannot bring an
     unseen file into force. ``included`` hashes every file an ``include`` or
     ``includeIf`` in either file names, whatever its condition, so a change inside an
-    already-included file is seen as well as a new include line.
+    already-included file is seen as well as a new include line. ``worktree_extension``
+    holds the shared config's ``extensions.worktreeConfig`` values, kept out of the
+    digest so another run's setup turning it on is not a change, and turning it off is.
     """
     # One spawn for both dirs and one listing per file: this runs after every agent step.
     common, own = (Path(line) for line in git(
@@ -1271,6 +1274,7 @@ def _shared_snapshot(target: Path) -> dict:
             if item.is_file():
                 hook_files[item.name] = hashlib.sha256(item.read_bytes()).hexdigest()
     return {"config_lines": config_lines, "worktree_lines": worktree_lines, "included": included,
+            "worktree_extension": [value for key, value in shared_entries if key == _WORKTREE_EXTENSION],
             "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
 
 
@@ -1297,6 +1301,25 @@ def _as_lines(entries: list[tuple[str, str | None]]) -> list[str]:
     return "\n".join(key if value is None else f"{key}={value}" for key, value in entries).splitlines()
 
 
+#: The key ``_isolate_hooks`` turns on in the shared config. It is left out of the digest;
+#: the record keeps it on its own so that turning it off is a change and turning it on
+#: is not (`_enabled_worktree_config`).
+_WORKTREE_EXTENSION = "extensions.worktreeconfig"
+
+
+def _enabled_worktree_config(change: tuple[str, str, str], snapshot: dict) -> bool:
+    """Whether ``change`` is ``extensions.worktreeConfig`` turned on, as any run's setup does.
+
+    Since the checkout's own ``config.worktree`` is recorded, turning it on brings
+    nothing unseen into force; turning it off, or any other ``extensions.*`` key, is a
+    change.
+    """
+    label, key, _kind = change
+    values = snapshot["worktree_extension"]
+    return (label == "config" and key == _WORKTREE_EXTENSION and bool(values)
+            and (values[-1] is None or values[-1].lower() in ("true", "yes", "on", "1")))
+
+
 #: How deep git follows includes before refusing; the guard follows no further.
 _INCLUDE_DEPTH = 10
 
@@ -1304,8 +1327,8 @@ _INCLUDE_DEPTH = 10
 #: What a record whose ``shared_reads`` is ``SHARED_READS`` was taken with; the keys
 #: ``_READ_LATER`` names were not read before it. A further read needs its own marker
 #: value and prefix here, or older records lose these reads for one step.
-SHARED_READS = ["config", "hooks", "config.worktree", "includes"]
-_READ_LATER = ("worktree:", "include:")
+SHARED_READS = ["config", "hooks", "config.worktree", "includes", "extensions.worktreeconfig"]
+_READ_LATER = ("worktree:", "include:", "extensions.worktreeconfig")
 
 
 def _includes(target: Path, file: Path, entries: list[tuple[str, str | None]],
@@ -1422,6 +1445,10 @@ def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
             values.setdefault(prefix + key, []).append(value)
     config = {key: hashlib.sha256("\n".join(vals).encode()).hexdigest() for key, vals in values.items()}
     config.update({f"include:{name}": hashed for name, hashed in snapshot["included"].items()})
+    if snapshot["worktree_extension"]:
+        config[_WORKTREE_EXTENSION] = hashlib.sha256(
+            "\n".join("" if value is None else f"={value}"
+                      for value in snapshot["worktree_extension"]).encode()).hexdigest()
     branches = git(target, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads").split()
     return {"shared": _shared_digest(snapshot),
             "shared_config": config,
