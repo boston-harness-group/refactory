@@ -618,15 +618,23 @@ class AutoresearchOptimizer(Optimizer):
 
     def write_memory(self, *, epoch: int, generation: int,
                      build: Callable[[int], tuple[str, dict[str, int]]]) -> dict[str, Any]:
-        """The epoch's memory call (`optim.memory`): ``build(room)`` makes the request
-        within ``room`` characters and says what it clipped. One call of the optimizer's
-        model, traced (kind ``memory``), retried and cached as an analyst call is
-        (`_ask`), retried at half size after a context overflow. Returns ``{"note"
-        ({"text", "reasoning"}) or None, "error", "context_retry", "cached", "calls",
-        "clipped_items", "clipped_chars", "prompt_chars"}``; a spent budget, a cancelled
-        run or a missing model choice raise."""
+        """The epoch's memory pass (`optim.memory`): ``build(room)`` makes the single
+        request within ``room`` characters and says what it clipped. When it fits
+        ``MEMORY_ROOM`` whole (or ``build`` cannot split, having no ``parts``), one call
+        of the optimizer's model, SkillOpt's, traced (kind ``memory``), retried and
+        cached as an analyst call is (`_ask`), retried at half size after a context
+        overflow. When it does not fit, the evidence is split, never cut
+        (`memory.MemoryRequest`, `_write_memory_split`). Returns ``{"note" ({"text",
+        "reasoning"}) or None, "error", "context_retry", "cached", "calls",
+        "clipped_items", "clipped_chars", "prompt_chars"}`` (and ``"parts"`` when split);
+        a spent budget, a cancelled run or a missing model choice raise."""
         from . import memory
 
+        split = getattr(build, "parts", None)
+        parts = split(memory.MEMORY_ROOM) if callable(split) else None
+        if parts:
+            return self._write_memory_split(epoch=epoch, generation=generation,
+                                            request=build, parts=parts)
         prompt, clip = build(memory.MEMORY_ROOM)
         clip = dict(clip)
         counts = {"calls": 0, "cached": 0}
@@ -643,6 +651,71 @@ class AutoresearchOptimizer(Optimizer):
         return {"note": found, "error": error, "context_retry": retried, "cached": cached,
                 "calls": counts["calls"], "clipped_items": int(clip.get("items") or 0),
                 "clipped_chars": int(clip.get("chars") or 0), "prompt_chars": len(prompt)}
+
+    def _write_memory_split(self, *, epoch: int, generation: int, request: Any,
+                            parts: list[list[Any]]) -> dict[str, Any]:
+        """A memory pass too long for one call: one comparison call per part (kind
+        ``memory_compare``, concurrently, at most ``analysts.CONCURRENCY`` in flight),
+        each reading its pairs whole and writing observations, then one synthesis call
+        (kind ``memory``) that writes the note from them all. Every call is retried,
+        cached and traced as an analyst call is (`_ask`), so a resumed pass pays only for
+        the calls it did not finish: the synthesis request holds every observation, so
+        it is answered from the cache only when every comparison answered the same. A
+        failed comparison fails the pass (no synthesis on part of the evidence), as a
+        failed single call does."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from . import analysts, memory
+
+        ctx = ProposalContext(epoch=epoch, generation=generation)
+        counts = {"calls": 0, "cached": 0}
+        total = len(parts)
+
+        def compare(numbered: tuple[int, list[Any]]) -> dict[str, Any]:
+            number, part = numbered
+            items = [str(entry["id"]) for entry in part]
+            prompt, clip = request.compare_prompt(part, number, total, memory.MEMORY_ROOM)
+            clip = dict(clip)
+
+            def smaller(room: int) -> str:
+                text, used = request.compare_prompt(part, number, total, room)
+                clip.update(used)
+                return text
+
+            found, error, retried, cached = self._ask(
+                ctx, memory.COMPARE_SYSTEM, prompt,
+                {"kind": "memory_compare", "part": number, "parts": total, "items": items},
+                memory.parse_observations, counts, rebuild=smaller,
+                missing='the answer has no "observations" list')
+            return {"part": number, "items": items, "observations": found, "error": error,
+                    "context_retry": retried, "cached": cached,
+                    "clipped_items": int(clip.get("items") or 0),
+                    "clipped_chars": int(clip.get("chars") or 0), "prompt_chars": len(prompt)}
+
+        with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY, total))) as pool:
+            results = list(pool.map(compare, enumerate(parts, 1)))
+        out: dict[str, Any] = {
+            "parts": total,
+            "clipped_items": sum(r["clipped_items"] for r in results),
+            "clipped_chars": sum(r["clipped_chars"] for r in results),
+            "compare_chars": [r["prompt_chars"] for r in results]}
+        failed = [r for r in results if r["error"]]
+        if failed:
+            return {**out, "note": None, "calls": counts["calls"],
+                    "context_retry": any(r["context_retry"] for r in results),
+                    "cached": all(r["cached"] for r in results), "prompt_chars": 0,
+                    "error": f"comparison part {failed[0]['part']} of {total} failed: "
+                             f"{failed[0]['error']}"}
+        prompt = request.synthesis_prompt(results, memory.MEMORY_ROOM)
+        found, error, retried, cached = self._ask(
+            ctx, memory.SYNTHESIS_SYSTEM, prompt, {"kind": "memory", "parts": total},
+            memory.parse_note, counts,
+            rebuild=lambda room: request.synthesis_prompt(results, room),
+            missing='the answer has no "memory" note')
+        return {**out, "note": found, "error": error, "calls": counts["calls"],
+                "context_retry": retried or any(r["context_retry"] for r in results),
+                "cached": cached and all(r["cached"] for r in results),
+                "prompt_chars": len(prompt)}
 
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
@@ -706,9 +779,12 @@ class AutoresearchOptimizer(Optimizer):
         failures, successes = analysts.split(ctx.item_records, int(ctx.epoch))
         if not failures and not successes:
             return None
-        plan, left = analysts.batches(failures, successes, group_size=conf["group_size"],
-                                      max_batches=conf["max_batches"])
         pipeline = analysts.pipeline_text(ctx)
+        # Batches of up to group_size, each closed early rather than cut when the next
+        # item whole would not fit the call's room: every item whole, in one batch.
+        plan, left = analysts.batches(failures, successes, group_size=conf["group_size"],
+                                      max_batches=conf["max_batches"],
+                                      fits=analysts.packer(ctx, pipeline, failures, successes))
         totals = {kind: sum(1 for k, _i, _g in plan if k == kind) for kind in analysts.KINDS}
         analysed = {str(r.get("id")) for _k, _i, group in plan for r in group}
         counts = {"calls": 0, "cached": 0}
@@ -737,8 +813,7 @@ class AutoresearchOptimizer(Optimizer):
                 return text
 
             found, error, retried, cached = self._ask(
-                ctx, analysts.FAILURE_SYSTEM if kind == "failure" else analysts.SUCCESS_SYSTEM,
-                prompt,
+                ctx, analysts.system(kind), prompt,
                 {"kind": f"analyst_{kind}", "group": index, "items": items},
                 lambda payload: analysts.parse_findings(payload, kind, items), counts,
                 rebuild=smaller)

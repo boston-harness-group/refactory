@@ -857,7 +857,7 @@ stage gives its patch step (`optim/analysts.py`; the SkillOpt port's `analysts.p
 paired with a parent picker), on the train records the request carries:
 
 - **Failure analysts.** Every item not passed (answered wrong, no answer, or an error),
-  each once, shuffled with the epoch as seed and cut into batches of
+  each once, shuffled with the epoch as seed and cut into batches of up to
   `analyst_group_size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
   batch. At most 8 calls of the stage are in flight at once, merges included (the two
   sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
@@ -872,14 +872,21 @@ paired with a parent picker), on the train records the request carries:
   400000 characters of room (`ANALYST_ROOM`): the optimizer model (Opus 4.6) reads 200k
   tokens, of which Claude Code's own system prompt and the reserved reply take about
   30-40k, and traces dense in notation run 2.5-3.5 characters a token, so 400000
-  characters is about 115-160k tokens. The batch's items share what the rest of the
-  prompt leaves: a batch that fits is never
-  clipped, and one that does not has its longest items cut to one common length (never
-  below 4000 characters), step inputs first, then outputs. SkillOpt never clips, so the
-  clipped items and the characters left out are counted. A call the provider still
+  characters is about 115-160k tokens. The room counts the whole request: the system
+  prompt, the frame with the pipeline, and the items. Items are never cut to fit it:
+  walking the shuffled items in order, a batch is closed early, before 8, when the next
+  item whole would take its request past the room, and that item starts the next
+  batch. So every item is in exactly one batch, whole, and long traces make more calls
+  rather than shorter evidence. The room is the one setting tied to the model's
+  context: a model that reads more makes fewer calls and loses nothing, one that reads
+  less makes more. SkillOpt never clips, and neither does this, with one last resort:
+  an item longer than the room on its own (one item's trace was at most about 230000
+  characters in live runs) is a batch of its own, cut head and tail, step inputs first,
+  then outputs, and counted (clipped items and characters left out). A call the provider still
   refuses as longer than the model's context ("prompt is too long", "context length",
-  ...) is retried once within half the refused prompt's length, re-clipped the same
-  way (a merge has its pipeline texts clipped instead; its findings stay whole), and
+  ...) is retried once within half the refused prompt's length, its longest items cut
+  to one common length (never below 4000 characters) and counted (a merge has its
+  pipeline texts clipped instead; its findings stay whole), and
   not at all when that request would be no shorter; a retry still too long fails the
   batch as any failed call does. Any other failed call is attempted up to 3 times with
   SkillOpt's waits (above). Only the model call's
@@ -910,9 +917,13 @@ paired with a parent picker), on the train records the request carries:
   running both would give this loop more analysis than SkillOpt's.
 - `analyst_max_batches` (0, no limit, as SkillOpt) caps the analyst calls per round,
   failure batches first; the request says how many items went unanalysed.
+- More batches mean more lists to merge, but each merge call still reads at most
+  `analyst_merge_batch_size` lists of at most 4 findings each, so a merge request stays
+  as long as before (about 35000 characters in live runs); there are only more of them.
 
 The analysis is made once per proposal step: it is keyed by the epoch, the generation,
-the edited candidate, its train records, the stage's settings and the optimizer's model,
+the edited candidate, its train records, the stage's settings, the optimizer's model and
+the room (which sets the batches),
 so a retry after a refusal reuses it and makes no call; the analysts and merges read the
 epoch's memory note, the same for every attempt of the step. The step's analysis is also kept in
 `<run root>/analyst_findings/round-<key>.json` when every call of it succeeded, so a
@@ -948,7 +959,8 @@ byte-identical to a run without the stage; the four settings are excluded from t
 settings digest, so a run resumes whichever way they are set.
 
 Per round with SkillOpt's settings, for F failed and S passed train items:
-ceil(F/8) + ceil(S/8) analyst calls, then the merges (one per side with more than one
+ceil(F/8) + ceil(S/8) analyst calls when every batch of 8 fits the room (more when long
+traces close batches early), then the merges (one per side with more than one
 list, at most 8 lists each, plus the final one when both sides found something), then
 the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
 analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
@@ -958,8 +970,9 @@ SkillOpt's read its meta skill.
 
 Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
 LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
-these are generic by design (no dataset hints); SkillOpt never clips a trace (here a
-batch over the call's room has its longest items clipped, and counted); SkillOpt shows
+these are generic by design (no dataset hints); SkillOpt's batches always hold 8 items
+(here a batch holds fewer when 8 whole items would not fit one call; no trace is cut,
+except one longer than the room on its own, counted); SkillOpt shows
 each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
 with its input and its choices when it has them); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
@@ -968,7 +981,7 @@ with its error.
 ### The memory pass: SkillOpt's meta skill (`lessons`, default `1`)
 
 Once per epoch, from epoch 2, before a model proposer (`autoresearch`, alone, under
-`portfolio` or paired with a parent picker) writes the epoch's proposal, one call of the
+`portfolio` or paired with a parent picker) writes the epoch's proposal, the
 optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta skill
 (`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does:
 
@@ -995,7 +1008,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   records and score are untouched): with `train_minibatch` up to 20 rollouts per side,
   and without the gate (one seed for the run) 20 rollouts when the current did not
   change. A cap or a spent budget leaves the missing items out; the pass compares what
-  both sides hold. Plus one optimizer-model call per epoch.
+  both sides hold. Plus one optimizer-model call per epoch, or, when the evidence does
+  not fit one call (below), a few comparison calls and a synthesis call.
 - **What the call reads.** Both pipelines (as an analyst reads one: nodes, edges, each
   node in full, every setting) and what changed between them: from their nearest common
   ancestor, each candidate on the way to either with its own edits and rationale (said
@@ -1021,11 +1035,32 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   asks (SkillOpt's `Task <id>: <question>`), with both outcomes,
   answers and grader reasons, its declared metadata and both full traces (every step's
   input and output, as the analysts render them) -- then stable successes without
-  traces, as SkillOpt shows them. SkillOpt never clips; here the traces share 400000
-  characters with the frame and the system prompt (the analysts' room), the longest cut
-  head and tail to one length, each cut said ("to fit the memory request's room"), and a
-  call refused as too long is retried
-  once at half the length. The prompt is SkillOpt's `meta_skill.md` for a graph: address
+  traces, as SkillOpt shows them. SkillOpt never clips, and neither does this pass.
+  When the whole request, system prompt included, fits 400000 characters (the
+  analysts' room, the setting tied to the model's context), it is one call, exactly
+  SkillOpt's. When it does not (20 items with both full traces often pass 1M
+  characters), the evidence is split, not cut:
+  - **Comparison calls.** The items in the comparison's order (regressions, persistent
+    failures, improvements, then stable successes, still without traces) fill a call
+    until the next item's pair whole would pass the room; every item is in exactly one
+    call, both traces whole, in SkillOpt's comparison format. Each call also reads what
+    changed between the pipelines, what the score measures and the counts over all
+    items, and writes up to 8 observations for the future optimizer: what regressed,
+    improved or still fails, and why, each citing its items with short quotes. Its
+    prompt is the memory prompt's, adapted: address the future optimizer, use the
+    traces' evidence, no instructions for the pipeline's steps. Domain-free.
+  - **One synthesis call.** The single call's request -- both pipelines, what changed,
+    what was tried, the objective, the previous note with SkillOpt's reflect wording
+    -- with every comparison call's observations, whole, in place of the traces. It
+    writes the note exactly as the single call does, under the same system prompt
+    with its rules (one line says the comparison was read in parts).
+  A model that reads more makes fewer calls and loses nothing; with a large enough
+  context the pass is always the single call. Only an item pair longer than the room
+  on its own is cut (head and tail, each cut said, "to fit the memory request's room")
+  and counted. A failed comparison call fails the pass (no note from part of the
+  evidence). Any call refused as too long is retried once at half the length (a
+  comparison call with its traces cut to fit, counted; the synthesis with its pipeline
+  texts clipped, the observations whole). The prompt is SkillOpt's `meta_skill.md` for a graph: address
   the future optimizer, what changes help or hurt here, regression risks, revise or drop
   what did not help, no instructions for the pipeline's own steps -- plus one line
   SkillOpt needs no counterpart of, having one kind of edit: judge only kinds of change
@@ -1046,12 +1081,16 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   is. A spent budget, a cancelled run or a missing model choice is no answer about the
   memory: no pass is recorded, so a resume makes the pass; a spent budget or a person's
   stop ends the search as it does elsewhere, and the run's report is written either way.
-- **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`) and cached
-  in `<run root>/analyst_findings/` like an analyst call; each pass is journaled
+- **Records.** The call is traced (`optimizer_trace.jsonl`, kind `memory`; a split
+  pass's comparison calls are kind `memory_compare`) and cached in
+  `<run root>/analyst_findings/` like an analyst call; each pass is journaled
   (`optimizer_memory`: the two candidates, whether they are one, the sample, the items
   compared and missing, the counts per category, the evaluations and rollouts it made,
-  the call's clipping and retry, and the note); a resume replays the note and the passes
-  and does not make a pass again. report.json's `optimizer_memory` and report.md's
+  the comparison calls (`parts`) when split, the calls' clipping and retry, and the
+  note); a resume replays the note and the passes and does not make a pass again. A
+  pass stopped part way is made again on resume: its answered calls come from their
+  cache, and the synthesis, whose request holds every observation, is reused only when
+  every comparison answered the same. report.json's `optimizer_memory` and report.md's
   "Optimizer memory" list every pass and the latest note.
 
 `lessons` `0` turns it off: no pass, no note, no section. A custom strategy (the

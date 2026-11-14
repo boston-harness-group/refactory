@@ -6,8 +6,10 @@ SkillOpt's reflect stage reads its rollouts (``refactory_packages/skillopt/analy
 and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py``):
 
 - **Failure analysts**: the failed items (every item not passed: answered wrong, no
-  answer, or an error), shuffled with the round's seed and cut into batches of
-  ``group_size`` (SkillOpt's ``minibatch_size``, 8). One call per batch. Each analyst
+  answer, or an error), shuffled with the round's seed and cut into batches of up to
+  ``group_size`` (SkillOpt's ``minibatch_size``, 8), a batch closed early when the next
+  item whole would take its call past ``ANALYST_ROOM`` (`batches`, `packer`): no item
+  is cut to fit, the evidence is split across more calls. One call per batch. Each analyst
   sees the pipeline (its nodes, edges, each node in full and every setting's value, as
   SkillOpt's analyst sees the current skill) and each item's full trace: its input,
   every step's input and output in the order they ran, the expected answer, the
@@ -38,7 +40,7 @@ from __future__ import annotations
 
 import json
 import random
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .base import (
     TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _clip_middle, _expected, _node_spec,
@@ -53,7 +55,10 @@ MERGE_BATCH_SIZE = 8
 #: The most findings one analyst writes: SkillOpt's analyst edit budget L
 #: (``analyst_edit_budget``, 4).
 FINDINGS_PER_ANALYST = 4
-#: One analyst call's whole prompt, in characters. The optimizer model (Opus 4.6) reads
+#: One analyst call's whole prompt, system prompt included, in characters: the setting
+#: tied to the optimizer model's context. Items are never cut to fit it; a batch is
+#: closed when the next item would pass it (`packer`), so a larger room makes fewer
+#: calls and a smaller one more, with every item whole. The optimizer model (Opus 4.6) reads
 #: 200k tokens, of which Claude Code's own system prompt and the reserved reply take
 #: about 30-40k. Traces dense in notation run 2.5-3.5 characters a token, so 400000
 #: characters is about 115-160k tokens: inside the rest at all but the densest. A call
@@ -123,22 +128,53 @@ def split(records: Sequence[dict[str, Any]], seed: int
 
 
 def batches(failures: Sequence[dict[str, Any]], successes: Sequence[dict[str, Any]], *,
-            group_size: int, max_batches: int = 0
+            group_size: int, max_batches: int = 0,
+            fits: Callable[[str, Sequence[dict[str, Any]]], bool] | None = None
             ) -> tuple[list[tuple[str, int, list[dict[str, Any]]]], dict[str, int]]:
     """The analyst batches as ``(kind, index, records)``, failure batches first, and how
-    many items of each kind no batch holds. ``max_batches`` (0: no limit, SkillOpt's)
-    caps the calls: failure batches take the room first, as SkillOpt's merge gives
-    failures priority."""
+    many items of each kind no batch holds. Each kind's items, in order, fill a batch up
+    to ``group_size``; with ``fits`` (`packer`), a batch is also closed when adding the
+    next item whole would make its request too long (``fits(kind, group)`` false), so
+    every item is in exactly one batch, whole. An item too long even alone is a batch of
+    its own. ``max_batches`` (0: no limit, SkillOpt's) caps the calls: failure batches
+    take the room first, as SkillOpt's merge gives failures priority."""
     out: list[tuple[str, int, list[dict[str, Any]]]] = []
     left = {"failure": 0, "success": 0}
     for kind, items in (("failure", failures), ("success", successes)):
-        for index, start in enumerate(range(0, len(items), group_size), 1):
-            group = list(items[start:start + group_size])
+        groups: list[list[dict[str, Any]]] = []
+        for record in items:
+            if groups and len(groups[-1]) < group_size and (
+                    fits is None or fits(kind, [*groups[-1], record])):
+                groups[-1].append(record)
+            else:
+                groups.append([record])
+        for index, group in enumerate(groups, 1):
             if max_batches and len(out) >= max_batches:
                 left[kind] += len(group)
                 continue
             out.append((kind, index, group))
     return out, left
+
+
+def packer(ctx: Any, pipeline: str, failures: Sequence[dict[str, Any]],
+           successes: Sequence[dict[str, Any]], room: int = ANALYST_ROOM
+           ) -> Callable[[str, Sequence[dict[str, Any]]], bool]:
+    """``fits`` for `batches`: whether a batch's request, measured as `analyst_batch`
+    builds it -- the system prompt, the frame with the pipeline, every item whole and
+    the separators between them -- is within ``room``. The frame is measured with the
+    largest batch number the kind can reach, so the real request is never longer."""
+    lengths: dict[int, int] = {}
+    most = {"failure": len(failures), "success": len(successes)}
+
+    def fits(kind: str, group: Sequence[dict[str, Any]]) -> bool:
+        for record in group:
+            if id(record) not in lengths:
+                lengths[id(record)] = len(item_text(record))
+        head, tail = _analyst_frame(ctx, kind, most[kind], most[kind], len(group), pipeline)
+        return (len(system(kind)) + len(head) + len(tail) + 2 * max(0, len(group) - 1)
+                + sum(lengths[id(record)] for record in group)) <= room
+
+    return fits
 
 
 # ── what an analyst reads ──────────────────────────────────────────────────
@@ -347,6 +383,11 @@ these items keep passing.
 
 You reply with JSON only."""
 
+def system(kind: str) -> str:
+    """An analyst call's system prompt."""
+    return FAILURE_SYSTEM if kind == "failure" else SUCCESS_SYSTEM
+
+
 _WHERE = ('"where": {"nodes": ["<step id>", ...], "edges": ["<source> -> <target>", ...], '
           '"knobs": ["<setting name>", ...], "structure": "<what about the pipeline\'s '
           'shape, or empty>"}')
@@ -405,13 +446,17 @@ def item_cap(lengths: Sequence[int], room: int, floor: int = ITEM_FLOOR) -> int 
 
 def round_key(ctx: Any, model: str = "") -> str:
     """What one proposal step's analysis is made from: the epoch, the generation, the
-    edited candidate, its train records, the stage's settings and the optimizer's model.
+    edited candidate, its train records, the stage's settings, the optimizer's model and
+    the call's room.
     Not the memory note: a retry in the same step reuses the step's analysis."""
     import hashlib
 
+    # The room sets the batches (`packer`), so it is part of what the analysis is made
+    # from: an analysis batched for another room is not reused.
     return hashlib.sha256(json.dumps(
         {"epoch": ctx.epoch, "generation": ctx.generation, "parent": ctx.parent,
-         "records": ctx.item_records, "settings": dict(ctx.analysts), "model": model},
+         "records": ctx.item_records, "settings": dict(ctx.analysts), "model": model,
+         "room": ANALYST_ROOM},
         sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -427,13 +472,16 @@ def analyst_batch(ctx: Any, kind: str, index: int, total: int,
     """One analyst's request -- the pipeline, the changes possible, the optimizer's
     memory note and the batch's items in full -- and what was clipped:
     ``{"items", "chars"}``. The items share what ``room`` (``ANALYST_ROOM``) leaves after
-    the rest of the prompt; only when together they do not fit are the longest cut, all to one
-    length (`item_cap`), step inputs first (`fit_item`). SkillOpt never clips."""
+    the system prompt and the rest of the prompt. A batch made by `packer` fits whole;
+    only an item longer than the room on its own (alone in its batch), or a call retried
+    within half its length after the provider refused it as too long, is cut: the
+    longest items to one length (`item_cap`), step inputs first (`fit_item`), the cut
+    counted. SkillOpt never clips."""
     head, tail = _analyst_frame(ctx, kind, index, total, len(group), pipeline)
     wholes = [item_text(record) for record in group]
     separators = 2 * max(0, len(group) - 1)
     cap = item_cap([len(text) for text in wholes],
-                   room - len(head) - len(tail) - separators)
+                   room - len(system(kind)) - len(head) - len(tail) - separators)
     # `fit_item` keeps an item no longer than the cap whole.
     blocks = [text if cap is None else fit_item(record, cap)
               for record, text in zip(group, wholes)]
