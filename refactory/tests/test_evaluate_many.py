@@ -498,8 +498,11 @@ def test_results_order_mutation(tmp_path):
         with lock:
             completion_order.append(candidate.id)
 
+    # The delay comes before the evaluation's own work, so the margin must cover that
+    # work's jitter on a loaded runner (a cold start, the trace files): 0.4 s did not
+    # (CI, 2026-11-14), 2 s does.
     delays = {
-        candidates[0].id: 0.4,  # slow
+        candidates[0].id: 2.0,  # slow
         candidates[1].id: 0.01,  # fast
     }
     _patch_evaluate_with_delay(loop, delays)
