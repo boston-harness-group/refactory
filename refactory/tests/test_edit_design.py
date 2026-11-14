@@ -8,7 +8,9 @@ meta-mode, which produces software rather than a package of modes.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -413,8 +415,9 @@ def test_the_check_gate_refuses_an_artifact_that_does_not_run(tmp_path):
 def test_the_check_runs_without_the_real_credentials(tmp_path):
     """The check runs arbitrary code a brief named, so it is sandboxed like the rest."""
     workdir = tmp_path / "artifact"
+    # sys.executable, not `python`: macOS ships only `python3` on PATH.
     result = sandbox.run_command(
-        "python -c \"import os,sys; sys.exit(0 if 'DEEPSEEK_API_KEY' not in os.environ else 9)\"",
+        f"{shlex.quote(sys.executable)} -c \"import os,sys; sys.exit(0 if 'DEEPSEEK_API_KEY' not in os.environ else 9)\"",
         workdir=workdir,
         env={**__import__("os").environ, "DEEPSEEK_API_KEY": "sk-hidden"},
     )

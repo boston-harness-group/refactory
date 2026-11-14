@@ -585,15 +585,17 @@ def test_retry_cannot_outrun_the_run_wall(tmp_path, runtime, monkeypatch):
     monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
     workdir = tmp_path / "run"
     workdir.mkdir()
-    # Budget of 6 s: the first attempt's 4 s wall takes most of it; the retry wants 8 s
-    # but only ~2 s remain, which is below MIN_RETRY_WALL_S, so the retry is not started.
-    budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=6))
-    budget.resume()
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 60}, {"answer": "never asked"}])
     if runtime == "spine":
         from refactory_dsh import worktree
         from tests_support import git_repo
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
+    # Budget of 10 s, started after the test's own setup: the first attempt's 4 s wall
+    # leaves at most 6 s, below the 8 s the retry wants, so the retry is not started. The
+    # 6 s margin is the run's start-up before that wall begins, which a loaded machine
+    # (or a slow process spawn, as on macOS) can stretch past 2 s.
+    budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=10))
+    budget.resume()
     ok, error = _run(runtime, workdir, _graph(_builder_node(timeout_s=4)), dsh.client(), budget=budget)
     assert not ok
     assert "its declared retry was not started" in error
