@@ -10,6 +10,7 @@ the environment and the sandbox patch are the ones a real node gets.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -890,7 +891,13 @@ def test_a_file_name_that_is_not_utf8_is_refused_and_goes_back_to_emit(tmp_path)
     writing emit.txt (UnicodeEncodeError); it is refused by name like any unprintable path."""
     name = os.fsdecode(b"tool\xff.py")
     run, place = _workspace_with(tmp_path)
-    (place.path / name).write_text("x = 1\n")
+    try:
+        (place.path / name).write_text("x = 1\n")
+    except OSError as exc:
+        if exc.errno != errno.EILSEQ:
+            raise
+        pytest.skip("this file system (APFS) refuses names that are not UTF-8, "
+                    "so no such name can reach git here")
     (place.path / "ok.py").write_text("y\n")
     workspace.collect(place, run, ["emit.txt"], final_response="done")
     refusal = workspace.refusal_for(run, "emit.txt", (run / "emit.txt").read_text())

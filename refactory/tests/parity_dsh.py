@@ -27,6 +27,9 @@ completion, or an object:
   and every correction the prompt gives) or ``intent_audit`` (every requirement of
   `authoring-evidence.json` passed, written to `intent-audit.json`);
 - ``hold_s``: take that long to answer;
+- ``meet``: node ids whose completions of the same visit this one waits for before it
+  answers (at most ``meet_timeout_s``, default 120), so nodes asked at once overlap
+  however long each takes to reach its completion;
 - ``repo_questions``: append the repository-questions record a reviewer gives for the
   functions in `changed-functions.json`.
 
@@ -177,6 +180,20 @@ def _is_emission(text: str) -> bool:
     return any(marker in text for marker in ("===FILE:", "===EDIT:", "===DELETE:"))
 
 
+def _meet(scenario: Path, node: str, visit: int, others: list[str], timeout_s: float) -> None:
+    """Say this completion has started, then wait until each of ``others`` has started its
+    completion of the same visit, or ``timeout_s`` has passed. Run one after another, the
+    first waits out the timeout and answers alone, which the overlap check then reports."""
+    meeting = scenario / "meet"
+    meeting.mkdir(exist_ok=True)
+    (meeting / f"{node}.{visit}").touch()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if all((meeting / f"{other}.{visit}").exists() for other in others):
+            return
+        time.sleep(0.05)
+
+
 def _option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
@@ -242,6 +259,8 @@ def main(argv: list[str]) -> int:
         _intent_audit(cwd)
     elif judge == "correction_overwatch":
         _correction_overwatch(cwd)
+    if answer.get("meet"):
+        _meet(scenario, node, visit, answer["meet"], float(answer.get("meet_timeout_s", 120)))
     if answer.get("hold_s"):
         # A completion that takes a while, so concurrent sessions overlap visibly.
         time.sleep(float(answer["hold_s"]))

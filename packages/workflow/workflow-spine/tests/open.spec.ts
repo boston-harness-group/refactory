@@ -10,7 +10,7 @@
  * what it was.
  */
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -451,7 +451,9 @@ describe('opening a graph at run time', () => {
     const ctx = await mount({ openCommand: openStub(run, graph, log) })
     await call(ctx, 'wf_open', { mode: 'pkg/t', workdir: run, knobs: ['a=1', 'b=2'] }, as('session-1'))
     const argv = readFileSync(log, 'utf8').trim().split('\n')
-    expect(argv).toEqual(['pkg/t', '--workdir', run, '--knob', 'a=1', '--knob', 'b=2'])
+    // wf_open canonicalises the workdir (canonicalWorkdir), so a temp dir behind a
+    // symlink (macOS /var -> /private/var) arrives as its real path.
+    expect(argv).toEqual(['pkg/t', '--workdir', realpathSync(run), '--knob', 'a=1', '--knob', 'b=2'])
   })
 
   it('surfaces the open command\'s refusal rather than opening nothing', async () => {

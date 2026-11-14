@@ -87,9 +87,11 @@ TARGET_FILES = {
     "tool.py": "VERSION = 1\n",
     "tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 1\n",
 }
-#: How long each reviewer's completion takes.
-HOLD_S = 1.5
 REVIEWERS = ("health_checker", "code_reviewer", "qa_director", "verifier")
+#: Each reviewer answers once all four have started, waiting at most 30 s: far above any
+#: one's preparation, and short enough that four run one after another still finish
+#: inside the driver's timeout and fail the overlap check rather than hang.
+MEET = {"meet": list(REVIEWERS), "meet_timeout_s": 30}
 QA_PROCEED = json.dumps({"verdict": "proceed", "must_fix": [], "follow_ups": [], "dismissed": []})
 OVERWATCH_PASS = json.dumps({"verdict": "pass", "must_fix": [], "follow_ups": [], "corrections": []})
 
@@ -115,12 +117,13 @@ SCRIPT: dict[str, list[Any]] = {
     "emit": [_files({"tool.py": "VERSION = 2\nNAME = 'tool'\n"}),
              _files({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n    assert tool.NAME == 'tool'\n"})],
     "early_asks_check": [{"judge": "early_asks"}],
-    # The four reviewers each take a moment, so reviewers run one after another are told
-    # apart from reviewers run at once (`test_the_review_branches_run_at_once`).
-    "health_checker": [{"text": REVIEW_ANSWERS[0], "repo_questions": True, "hold_s": HOLD_S}],
-    "code_reviewer": [{"text": REVIEW_ANSWERS[1], "repo_questions": True, "hold_s": HOLD_S}],
-    "qa_director": [{"text": REVIEW_ANSWERS[2], "repo_questions": True, "hold_s": HOLD_S}],
-    "verifier": [{"text": VERIFICATION_ANSWER, "hold_s": HOLD_S}],
+    # Reviewers run at once overlap however long each one's preparation takes (the
+    # verifier's workspace is a clone, seconds on a machine with slow process spawns), and
+    # reviewers run one after another do not (`MEET`, `test_the_review_branches_run_at_once`).
+    "health_checker": [{"text": REVIEW_ANSWERS[0], "repo_questions": True, **MEET}],
+    "code_reviewer": [{"text": REVIEW_ANSWERS[1], "repo_questions": True, **MEET}],
+    "qa_director": [{"text": REVIEW_ANSWERS[2], "repo_questions": True, **MEET}],
+    "verifier": [{"text": VERIFICATION_ANSWER, **MEET}],
     "qa_judge": [{"text": QA_PROCEED, "judge": "intent_audit"}],
     "overwatch": [{"judge": "correction_overwatch"}],
 }
@@ -796,7 +799,8 @@ def test_parity_gap(runs, scenario, gap):
 @pytest.mark.parametrize("runtime", ["walker", "card", "resumed"])
 def test_the_review_branches_run_at_once(runs, runtime):
     """The review fork's four agents run concurrently on each runtime: every one has started
-    before any has finished. Each takes `HOLD_S`, so one after another would not overlap."""
+    before any has finished. Each answers only once all four have started (`meet`, bounded),
+    so one after another would not overlap."""
     receipts = _receipts(runs["worlds"][runtime])
     reviews = [receipts[node][-1] for node in REVIEWERS]
     assert all(receipt["state"] == "completed" for receipt in reviews), reviews

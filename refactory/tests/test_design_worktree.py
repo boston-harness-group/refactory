@@ -940,10 +940,10 @@ def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tm
     only_git.mkdir()
     (only_git / "git").symlink_to(next(Path(entry) / "git" for entry in os.environ["PATH"].split(os.pathsep)
                                        if (Path(entry) / "git").is_file()))
-    monkeypatch.setenv("PATH", str(only_git))
     (repo / "pyproject.toml").write_text("[project]\nname = 'app'\n")
     git(repo, "add", "pyproject.toml")
     git(repo, "commit", "-q", "-m", "manifest")
+    monkeypatch.setenv("PATH", str(only_git))
     emit = render({"tool.py": "print('built')\n"})
     result = _design(tmp_path / "run", FakeModel(_answers(emit, emit)), target=str(repo))
     assert result.exit_ok is False
