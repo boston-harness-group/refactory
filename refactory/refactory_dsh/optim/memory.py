@@ -175,6 +175,8 @@ This memory should capture things like:
 - Address the FUTURE OPTIMIZER directly, not the pipeline.
 - Focus on how to choose and write better changes.
 - Use evidence from the comparison, not generic advice.
+- Judge only kinds of change that were tried. A kind not tried yet in this run is
+  untested: say so, and do not advise for or against it.
 - Keep it compact and high-signal. Prefer a few durable principles.
 - Revise or remove parts of the previous memory if they did not help.
 - Do not output instructions for the pipeline's own steps.

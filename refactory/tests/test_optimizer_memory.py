@@ -114,6 +114,15 @@ def test_an_unchanged_candidate_is_compared_with_its_own_earlier_rollout():
     assert "First rollout: PASS" in text and "Second rollout: FAIL" in text
 
 
+def test_the_coach_is_told_not_to_rule_on_kinds_of_change_never_tried():
+    # Round 2 (2026-11-14): with no structural change tried, notes said "do not add new
+    # steps -- the pipeline is sound" and proposers cited them; SkillOpt, one edit kind,
+    # never meets this. The rule is symmetric: no advice either way on an untried kind.
+    flat = " ".join(memory.MEMORY_SYSTEM.split())
+    assert "Judge only kinds of change that were tried." in flat
+    assert "untested: say so, and do not advise for or against it." in flat
+
+
 def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted():
     prev = [_rec(f"i{n}", False, "x" * 60000) for n in range(4)]
     curr = [_rec(f"i{n}", n % 2 == 0, "y" * 60000) for n in range(4)]
