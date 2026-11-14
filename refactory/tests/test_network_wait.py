@@ -9,6 +9,7 @@ attempt, so the caller's retries see only real model failures.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from concurrent.futures import CancelledError
@@ -121,7 +122,18 @@ def answers(monkeypatch):  # type: ignore[no-untyped-def]
     queue: list[object] = []
     waits: list[float] = []
     monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: queue.pop(0))
-    monkeypatch.setattr(model.time, "sleep", waits.append)
+    # ``model.time`` is the process-wide ``time`` module: record only the sleeps the model
+    # client itself makes, so a background thread left by another test (polling with its
+    # own short sleeps) neither pollutes the recorded waits nor stops sleeping for real.
+    real_sleep = model.time.sleep
+
+    def sleep(seconds: float) -> None:
+        if sys._getframe(1).f_code.co_filename == model.__file__:
+            waits.append(seconds)
+        else:
+            real_sleep(seconds)
+
+    monkeypatch.setattr(model.time, "sleep", sleep)
     monkeypatch.setattr(model, "NETWORK_POLL_S", 10_000.0)
     monkeypatch.setattr(model, "_jitter", lambda: 1.0)
     return queue, waits
