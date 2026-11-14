@@ -21,10 +21,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import CancelledError
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar
 
@@ -464,6 +469,128 @@ def is_retryable_failure(stderr: str) -> bool:
     return is_transport_failure(without_product_detail("\n".join(diagnostic_lines(stderr))))
 
 
+#: What a failure says when the network, DNS, a credential refresh or the local model
+#: proxy is down -- nothing about the model or the prompt. The client waits these out
+#: (`DshModelClient._wait_for_network`) instead of failing the call. ``fetch failed`` is
+#: the Node runtime's own message for a request that never got a response. A DNS outage
+#: on the lab showed up as Claude Code's ``API Error: getaddrinfo ENOTFOUND
+#: oauth2.googleapis.com``: the Vertex token refresh could not resolve its host.
+INFRASTRUCTURE_MARKERS = (
+    "getaddrinfo",
+    "enotfound",
+    "eai_again",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "enetunreach",
+    "ehostunreach",
+    "network is unreachable",
+    "socket hang up",
+    "could not resolve host",
+    "connection error",
+    "fetch failed",
+)
+
+#: The same, where a marker needs context: a credential refresh that failed, and a
+#: gateway status (502, 503, 504) from the proxy in front of the provider.
+INFRASTRUCTURE_PATTERNS = (
+    re.compile(r"oauth2\.googleapis\.com"),
+    re.compile(r"could not refresh (?:the |an )?access token"),
+    re.compile(r"(?:failed|unable) to refresh (?:the |an )?(?:oauth2? |access )?token"),
+    re.compile(r"token refresh (?:failed|error)"),
+    re.compile(r"(?:api error|status(?: code)?|http)[:\s]*50[234](?!\d)"),
+    re.compile(r"bad gateway|service unavailable|gateway time-?out"),
+)
+
+#: What makes a failure the model's, the account's or the request's even when it also
+#: names the wire: a rate limit or an overloaded provider (the transport retry answers
+#: those), a credential the provider refused, an output or context limit, a refusal.
+#: Such a failure is never waited out.
+NOT_INFRASTRUCTURE_MARKERS = (
+    "overloaded",
+    "rate limit",
+    "rate_limit",
+    "429",
+    "529",
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid api key",
+    "invalid x-api-key",
+    "permission_error",
+    "prompt is too long",
+    "max-tokens:",
+    "category: output-limit",
+    "category: context-limit",
+    "refusal",
+)
+
+
+def is_infrastructure_failure(cause: str) -> bool:
+    """Whether a failed completion's cause (`failure_cause`) says the network, DNS, a
+    credential refresh or the local proxy failed, and nothing the model, the account
+    or the prompt caused (`NOT_INFRASTRUCTURE_MARKERS`). Deliberately conservative: a
+    rate limit, an overloaded provider, a refusal, an output limit or a timed-out
+    session is never infrastructure."""
+    lowered = (cause or "").lower()
+    if any(re.search(rf"(?<!\d){marker}(?!\d)", lowered) if marker.isdigit() else marker in lowered
+           for marker in NOT_INFRASTRUCTURE_MARKERS):
+        return False
+    return (any(marker in lowered for marker in INFRASTRUCTURE_MARKERS)
+            or any(pattern.search(lowered) for pattern in INFRASTRUCTURE_PATTERNS))
+
+
+#: How long one ``complete`` call may spend waiting out infrastructure failures, in
+#: seconds, over all its outages: long enough for an 85-minute DNS outage.
+NETWORK_WAIT_S = 2 * 60 * 60.0
+#: The first wait after an infrastructure failure; each next one doubles, up to the cap.
+NETWORK_FIRST_WAIT_S = 5.0
+NETWORK_WAIT_CAP_S = 60.0
+#: How often a waiting call says so in the run log (stderr).
+NETWORK_LOG_EVERY_S = 60.0
+#: How often a wait looks for a cancellation or a person's stop.
+NETWORK_POLL_S = 1.0
+#: The live event that marks an outage a call waited out: ``state`` ``waiting`` when it
+#: begins, then how it ended (`NETWORK_WAIT_OUTCOMES`).
+NETWORK_WAIT_EVENT = "model_call_waiting_for_network"
+#: ``recovered``: the network came back (the call then answered, or failed for another
+#: reason, handled as before). ``gave_up``: the wait bound or the node's time ran out
+#: and the original error was raised, or the call ended another way (a spent budget)
+#: before the network was back. ``stopped``: a person asked the run to stop
+#: (``RunStopped``). ``cancelled``: the call's scope was cancelled.
+NETWORK_WAIT_OUTCOMES = ("recovered", "gave_up", "stopped", "cancelled")
+
+#: Lists that collect the outages the calls in this context waited out
+#: (`observe_network_waits`).
+_NETWORK_WAIT_OBSERVERS: ContextVar[tuple[list[dict[str, Any]], ...]] = ContextVar(
+    "refactory_network_wait_observers", default=())
+
+
+@contextmanager
+def observe_network_waits() -> Iterator[list[dict[str, Any]]]:
+    """Collect every outage a model call made inside this block waited out, one dict
+    per outage (``started_at``, ``ended_at``, ``waited_s``, ``error``, ``failures``,
+    ``outcome``, ``usage``), so a caller's own trace can show it."""
+    episodes: list[dict[str, Any]] = []
+    token = _NETWORK_WAIT_OBSERVERS.set((*_NETWORK_WAIT_OBSERVERS.get(), episodes))
+    try:
+        yield episodes
+    finally:
+        _NETWORK_WAIT_OBSERVERS.reset(token)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _log(line: str) -> None:
+    """One line to the run log (stderr); a closed stream never fails the call."""
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def diagnostic_lines(stderr: str) -> list[str]:
     """``stderr`` without the model's streamed reasoning: after the ``dsh: reasoning:``
     header, only the lines ``dsh`` itself writes (``dsh: ...``) are diagnostics; every
@@ -539,7 +666,11 @@ class DshModelClient:
     """One-shot completions through ``dsh --profile headless``.
 
     Implements ``factory.outer_loop.optimizers.ModelClient``. A completion that fails
-    on the wire (`is_retryable_failure`) is retried, up to ``attempts`` in all, and each
+    because the network, DNS, a credential refresh or the local proxy is down
+    (`is_infrastructure_failure`) is waited out and asked again until the network is
+    back, for up to `NETWORK_WAIT_S` per call, without using an attempt
+    (`_wait_for_network`; traced as `NETWORK_WAIT_EVENT`). A completion that fails
+    on the wire otherwise (`is_retryable_failure`) is retried, up to ``attempts`` in all, and each
     retry is recorded (`RETRY_EVENT`); a worker whose cleanup failed after it answered
     keeps its answer, with a warning (`TEARDOWN_EVENT`). Retries come
     with waits that double and add up to ``retry_window_s`` (`retry_delays`); one that
@@ -708,6 +839,7 @@ class DshModelClient:
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
         self._cancellations: tuple[threading.Event, ...] = ()
+        self._stop_checks: tuple[Callable[[], bool], ...] = ()
         validate_route(self.route())
 
     def retry_attempts(self) -> int:
@@ -825,6 +957,38 @@ class DshModelClient:
     def _raise_if_cancelled(self) -> None:
         if any(event.is_set() for event in self._cancellations):
             raise CancelledError("model completion cancelled; not retried")
+
+    def with_stop_check(self, check: Callable[[], bool]) -> DshModelClient:
+        """A copy that ends a wait for the network (`_wait_for_network`) with
+        ``optim.base.RunStopped`` when ``check()`` is true: a person asked the run to stop
+        (the outer loop binds ``Loop._stop_requested``). Process-local, as the cancellation
+        scopes are."""
+        client = copy.copy(self)
+        client._stop_checks = (*getattr(self, "_stop_checks", ()), check)
+        return client
+
+    def _stop_requested(self) -> bool:
+        for check in getattr(self, "_stop_checks", ()):
+            try:
+                if check():
+                    return True
+            except Exception:  # noqa: BLE001 - an unreadable stop request is no stop
+                continue
+        return False
+
+    def _waits_out_network(self, cause: str) -> bool:
+        """Whether this failure is waited out (`is_infrastructure_failure`) rather than
+        failed or retried as an attempt: only where the client may ask again at all
+        (`retry_attempts`: the ``dsh`` backend, or a session without tools), since asking
+        again repeats the session. A session without tools has done no work to repeat, so
+        its product adapter's detail may decide (the Claude Code adapter reports a DNS
+        failure only there); a session with tools is judged by the wire's own errors, as
+        the transport retry judges it (`without_product_detail`)."""
+        if not ((getattr(self, "_worker_backend", "dsh") == "dsh")
+                or getattr(self, "_tool_policy", "") == "none"):
+            return False
+        text = cause if getattr(self, "_tool_policy", "") == "none" else without_product_detail(cause)
+        return is_infrastructure_failure(text)
 
     def context(self) -> dict[str, Any]:
         """Nonsecret settings safe to carry across the model subprocess boundary."""
@@ -1125,82 +1289,105 @@ class DshModelClient:
         stop_at = time.monotonic() + total_s if total_s is not None else None
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
-        for attempt in range(1, self._attempts + 1):
-            self._raise_if_cancelled()
-            self._checkpoint()
-            now = time.monotonic()
-            if stop_at is not None and attempt > 1 and stop_at - now <= 0:
-                # The wait before this retry used up the node's time: an attempt now
-                # would time out at once. It failed on the wire, and says so -- not a
-                # timeout, which a node's timeout retry would run again.
-                raise CompletionFailed(
-                    f"model completion failed on the wire {attempt - 1} time(s) and the node's "
-                    f"time ran out before it could ask again; last cause: {last}",
-                    kind="transport")
-            attempt_stop = now + cap_s if stop_at is None else min(stop_at, now + cap_s)
-            budget_s = max(1, int(round(attempt_stop - now)))
-            try:
-                proc = self._run_completion(cmd, run_dir, attempt_stop, budget_s, task=task,
-                                            target_workdir=target_workdir)
-            except subprocess.TimeoutExpired as exc:
-                # The deadline passed first, so this is a timeout even when the runtime
-                # then failed to shut down: that failure is the timeout's detail and a
-                # recorded warning, and the error still says it timed out.
-                unconfirmed = getattr(exc, "shutdown_failure", "")
-                if unconfirmed:
-                    who = self._node_id or "a model call"
-                    self._emit(run_dir, SHUTDOWN_EVENT, state="warning", error=unconfirmed[:500],
-                               summary=f"{who}: timed out, and its runtime did not finish shutting "
-                                       "down; child cleanup unconfirmed")
-                detail = f"; {unconfirmed}" if unconfirmed else ""
-                if isinstance(exc, InactivityTimeout):
-                    error = CompletionTimeout(
-                        f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
-                        "(no model output and no running tool command); requested runtime "
-                        f"shutdown; the client does not replay a deadline{detail}")
-                else:
-                    # A tool-using completion may already have changed its workdir.
-                    # A deadline is not a transport failure: replaying the prompt can
-                    # duplicate real work even after its subprocesses have shut down.
-                    error = CompletionTimeout(
-                        f"model completion timed out after {budget_s}s; "
-                        f"requested runtime shutdown; the client does not replay a deadline{detail}")
-                error.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
-                raise error from exc
-            else:
+        #: The outage this call is waiting out, if any (`_wait_for_network`), and how long
+        #: the call has spent on outages so far. Neither counts as an attempt: only a
+        #: failure the model or the provider caused uses one.
+        outage: dict[str, Any] | None = None
+        network_spent = [0.0]
+        attempt = 1
+        try:
+            while True:
                 self._raise_if_cancelled()
-                if proc.returncode == 0:
-                    if warning := teardown_warning(proc.stderr):
-                        self._record_teardown(run_dir, warning)
-                    return proc.stdout
-                cause = failure_cause(proc.stderr)
-                if answered_before_teardown(proc.stdout, proc.stderr):
-                    # The worker answered and only its cleanup failed: the answer is
-                    # the node's. Re-asking would discard it, and repeat a tool
-                    # session's work.
-                    self._record_teardown(run_dir, cause)
-                    return proc.stdout
-                if cause.startswith("dsh: max-tokens:") and (limit := self.output_limit()):
-                    # Name the limit: a reader, or an optimizer, cannot weigh a
-                    # shorter answer against a larger cap without the number.
-                    cause = f"{cause} ({limit} tokens)"
-                if not is_retryable_failure(proc.stderr) or failure_kind(cause) != "transport":
-                    # The model answered wrongly, the key is dead, the prompt is
-                    # rejected: retrying spends two more completions on the same
-                    # answer. Fail now and keep the diagnosis accurate. A transport
-                    # failure is infrastructure and is retried within the same
-                    # budget. A crashed session (a worker failure, an output limit) is
-                    # not replayed here either: a replay would run outside the node's
-                    # delivery bracket, unrecorded, with the same prompt. A node's retry
-                    # rule runs it again as a fresh, recorded session (`node_retry`).
-                    # The cause itself must be the wire's: a session that stopped for
-                    # any other reason is not called a wire failure, whatever else its
-                    # diagnostics mention.
+                self._checkpoint()
+                now = time.monotonic()
+                if stop_at is not None and attempt > 1 and stop_at - now <= 0:
+                    # The wait before this retry used up the node's time: an attempt now
+                    # would time out at once. It failed on the wire, and says so -- not a
+                    # timeout, which a node's timeout retry would run again.
                     raise CompletionFailed(
-                        f"model completion failed (exit {proc.returncode}): {cause}",
-                        kind=failure_kind(cause))
-                last = cause or f"exit {proc.returncode}"
-            if attempt < self._attempts:
+                        f"model completion failed on the wire {attempt - 1} time(s) and the node's "
+                        f"time ran out before it could ask again; last cause: {last}",
+                        kind="transport")
+                attempt_stop = now + cap_s if stop_at is None else min(stop_at, now + cap_s)
+                budget_s = max(1, int(round(attempt_stop - now)))
+                try:
+                    proc = self._run_completion(cmd, run_dir, attempt_stop, budget_s, task=task,
+                                                target_workdir=target_workdir)
+                except subprocess.TimeoutExpired as exc:
+                    # The deadline passed first, so this is a timeout even when the runtime
+                    # then failed to shut down: that failure is the timeout's detail and a
+                    # recorded warning, and the error still says it timed out.
+                    unconfirmed = getattr(exc, "shutdown_failure", "")
+                    if unconfirmed:
+                        who = self._node_id or "a model call"
+                        self._emit(run_dir, SHUTDOWN_EVENT, state="warning", error=unconfirmed[:500],
+                                   summary=f"{who}: timed out, and its runtime did not finish shutting "
+                                           "down; child cleanup unconfirmed")
+                    detail = f"; {unconfirmed}" if unconfirmed else ""
+                    if isinstance(exc, InactivityTimeout):
+                        error = CompletionTimeout(
+                            f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
+                            "(no model output and no running tool command); requested runtime "
+                            f"shutdown; the client does not replay a deadline{detail}")
+                    else:
+                        # A tool-using completion may already have changed its workdir.
+                        # A deadline is not a transport failure: replaying the prompt can
+                        # duplicate real work even after its subprocesses have shut down.
+                        error = CompletionTimeout(
+                            f"model completion timed out after {budget_s}s; "
+                            f"requested runtime shutdown; the client does not replay a deadline{detail}")
+                    error.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
+                    raise error from exc
+                else:
+                    self._raise_if_cancelled()
+                    if proc.returncode == 0:
+                        self._end_outage(run_dir, outage, "recovered")
+                        outage = None
+                        if warning := teardown_warning(proc.stderr):
+                            self._record_teardown(run_dir, warning)
+                        return proc.stdout
+                    cause = failure_cause(proc.stderr)
+                    if answered_before_teardown(proc.stdout, proc.stderr):
+                        # The worker answered and only its cleanup failed: the answer is
+                        # the node's. Re-asking would discard it, and repeat a tool
+                        # session's work.
+                        self._end_outage(run_dir, outage, "recovered")
+                        outage = None
+                        self._record_teardown(run_dir, cause)
+                        return proc.stdout
+                    if cause.startswith("dsh: max-tokens:") and (limit := self.output_limit()):
+                        # Name the limit: a reader, or an optimizer, cannot weigh a
+                        # shorter answer against a larger cap without the number.
+                        cause = f"{cause} ({limit} tokens)"
+                    if self._waits_out_network(cause):
+                        # The network, DNS, a credential refresh or the local proxy is
+                        # down: wait until it is back and ask again, without using an
+                        # attempt -- the caller's own retries see only real failures.
+                        if outage is None:
+                            outage = self._begin_outage(run_dir, cause)
+                        self._wait_for_network(run_dir, outage, cause, spent=network_spent,
+                                               attempt_s=time.monotonic() - now, stop_at=stop_at)
+                        continue
+                    self._end_outage(run_dir, outage, "recovered")
+                    outage = None
+                    if not is_retryable_failure(proc.stderr) or failure_kind(cause) != "transport":
+                        # The model answered wrongly, the key is dead, the prompt is
+                        # rejected: retrying spends two more completions on the same
+                        # answer. Fail now and keep the diagnosis accurate. A transport
+                        # failure is infrastructure and is retried within the same
+                        # budget. A crashed session (a worker failure, an output limit) is
+                        # not replayed here either: a replay would run outside the node's
+                        # delivery bracket, unrecorded, with the same prompt. A node's retry
+                        # rule runs it again as a fresh, recorded session (`node_retry`).
+                        # The cause itself must be the wire's: a session that stopped for
+                        # any other reason is not called a wire failure, whatever else its
+                        # diagnostics mention.
+                        raise CompletionFailed(
+                            f"model completion failed (exit {proc.returncode}): {cause}",
+                            kind=failure_kind(cause))
+                    last = cause or f"exit {proc.returncode}"
+                if attempt >= self._attempts:
+                    break
                 self._record_retry(run_dir, attempt, last)
                 delay = delays[attempt - 1]
                 if not self._cancellations:
@@ -1215,9 +1402,110 @@ class DshModelClient:
                         # The innermost event wakes immediately; inherited scopes
                         # are also observed within the bounded polling interval.
                         self._cancellations[-1].wait(min(remaining, 0.1))
-        raise CompletionFailed(
-            f"model completion failed on the wire {self._attempts} time(s); last cause: {last}",
-            kind="transport")
+                attempt += 1
+            raise CompletionFailed(
+                f"model completion failed on the wire {self._attempts} time(s); last cause: {last}",
+                kind="transport")
+        except BaseException as error:
+            # The call ended while an outage was open: cancelled, or ended some other way
+            # (a spent budget, a deadline) before the network was seen back.
+            self._end_outage(run_dir, outage, "cancelled" if isinstance(
+                error, (CancelledError, KeyboardInterrupt, SystemExit)) else "gave_up")
+            raise
+
+    def _begin_outage(self, run_dir: Path, cause: str) -> dict[str, Any]:
+        """Start tracing one outage: the live event, and the record `_end_outage` closes."""
+        outage: dict[str, Any] = {"started_at": _now_iso(), "error": cause[:500], "failures": 0,
+                                  "waited_s": 0.0, "usage": [], "next_wait_s": NETWORK_FIRST_WAIT_S,
+                                  "logged_at": None}
+        who = self._node_id or "a model call"
+        self._emit(run_dir, NETWORK_WAIT_EVENT, state="waiting", error=outage["error"],
+                   started_at=outage["started_at"],
+                   summary=f"{who}: waiting for network: {outage['error']}")
+        return outage
+
+    def _end_outage(self, run_dir: Path, outage: dict[str, Any] | None, outcome: str) -> None:
+        """Close an outage once (`NETWORK_WAIT_OUTCOMES`): the live event, the run log, and
+        every `observe_network_waits` block the call is in."""
+        if outage is None or "outcome" in outage:
+            return
+        outage["outcome"] = outcome
+        episode = {"started_at": outage["started_at"], "ended_at": _now_iso(),
+                   "waited_s": round(outage["waited_s"], 1), "error": outage["error"],
+                   "failures": outage["failures"], "outcome": outcome, "usage": outage["usage"]}
+        who = self._node_id or "a model call"
+        self._emit(run_dir, NETWORK_WAIT_EVENT, state=outcome, **episode,
+                   summary=f"{who}: {outcome} after waiting {int(outage['waited_s'])}s for the "
+                           f"network ({outage['failures']} failed tries): {outage['error']}")
+        _log(f"refactory: {who}: {outcome} after waiting {int(outage['waited_s'])}s for the network")
+        for episodes in _NETWORK_WAIT_OBSERVERS.get():
+            episodes.append(dict(episode))
+
+    def _wait_for_network(
+        self, run_dir: Path, outage: dict[str, Any], cause: str, *,
+        spent: list[float], attempt_s: float, stop_at: float | None,
+    ) -> None:
+        """Wait before asking again after an infrastructure failure (`is_infrastructure_failure`):
+        `NETWORK_FIRST_WAIT_S`, doubling up to `NETWORK_WAIT_CAP_S`, saying so in the run log
+        once a minute. Gives up -- a ``transport`` `CompletionFailed` that says it failed on
+        the wire, as a transport failure whose attempts ran out says it, so an evaluation
+        reads the item as interrupted rather than answered (`items.INTERRUPTED_MARKERS`) --
+        once the call has spent `NETWORK_WAIT_S` on outages, or when the wait would leave the
+        node's time (its wall) under a minute. A person's stop (`with_stop_check`) raises
+        ``RunStopped``, as an optimizer call's retry wait does (the search then ends as a
+        stop; an item reads as stopped); a cancelled scope raises ``CancelledError``. A budget that runs
+        out ends the call at the next attempt's checkpoint. ``spent`` is the call's total
+        so far, the failed tries included; the failed tries' own usage, when they reported
+        any, is kept in the outage's trace (the receipt already adds it to the call's
+        total)."""
+        outage["failures"] += 1
+        outage["error"] = cause[:500]
+        receipt = self._receipt()
+        usage = receipt.get("session_usage") if "session_usage" in receipt else None
+        if usage:
+            outage["usage"].append(usage)
+        spent[0] += max(0.0, attempt_s)
+        outage["waited_s"] += max(0.0, attempt_s)
+        delay = outage["next_wait_s"]
+        outage["next_wait_s"] = min(delay * 2, NETWORK_WAIT_CAP_S)
+
+        def give_up(outcome: str, why: str) -> None:
+            self._end_outage(run_dir, outage, outcome)
+            raise CompletionFailed(
+                f"model completion failed on the wire {outage['failures']} time(s) and {why}; "
+                f"last cause: {cause}", kind="transport")
+
+        def stopped() -> None:
+            from refactory_dsh.optim.base import RunStopped
+
+            self._end_outage(run_dir, outage, "stopped")
+            raise RunStopped(f"model completion cancelled: a person asked the run to stop while "
+                             f"it waited {int(spent[0])}s for the network; not retried")
+
+        if spent[0] + delay > NETWORK_WAIT_S:
+            give_up("gave_up", f"it waited {int(spent[0])}s for the network to come back, "
+                               f"the most one call waits ({int(NETWORK_WAIT_S)}s)")
+        if stop_at is not None and stop_at - time.monotonic() - delay < NETWORK_WAIT_CAP_S:
+            give_up("gave_up", f"it waited {int(spent[0])}s for the network to come back "
+                               "until the node's time ran out")
+        if outage["logged_at"] is None or spent[0] - outage["logged_at"] >= NETWORK_LOG_EVERY_S:
+            outage["logged_at"] = spent[0]
+            who = self._node_id or "a model call"
+            _log(f"refactory: {who}: waiting for network: {outage['error']} "
+                 f"({int(spent[0])}s so far; gives up after {int(NETWORK_WAIT_S)}s)")
+        left = delay
+        while left > 0:
+            self._raise_if_cancelled()
+            if self._stop_requested():
+                stopped()
+            step = min(left, NETWORK_POLL_S)
+            if self._cancellations:
+                self._cancellations[-1].wait(step)
+            else:
+                time.sleep(step)
+            left -= step
+        spent[0] += delay
+        outage["waited_s"] += delay
 
     def _receipt(self) -> dict[str, Any]:
         try:

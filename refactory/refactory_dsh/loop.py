@@ -539,6 +539,11 @@ class Loop(OuterLoop):
             return
         if self.model is not None:
             self.model = budget.bind_model(self.model)
+            stop_check = getattr(self.model, "with_stop_check", None)
+            if callable(stop_check):
+                # A call waiting out a network outage ends its wait when a person asks
+                # the run to stop (`RunStopped`), so the stop is not held up for hours.
+                self.model = stop_check(self._stop_requested)
             self.evaluator.model = self.model
             proposer = self.model.for_node("optimizer", role="optimizer") if callable(getattr(self.model, "for_node", None)) else self.model
             self.optimizer.bind_model(proposer, workdir=self.root / "proposer")

@@ -363,11 +363,45 @@ tokens stay visible and total usage is explicitly unavailable. A completed DSH
 request without valid usage likewise prevents claiming a measured total.
 
 A `DshModelClient` deadline fails the completion without replaying its prompt: the
-agent may already have written files or started tool work. Explicit transport
-failures retain their bounded retry policy: up to `attempts` completions (3 by
+agent may already have written files or started tool work.
+
+**Network outages are waited out.** A completion that fails because the network, DNS,
+a credential refresh or the local model proxy is down (`model.is_infrastructure_failure`:
+`getaddrinfo`, `ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`,
+`ENETUNREACH`, `EHOSTUNREACH`, `socket hang up`, `fetch failed`, `Could not resolve host`,
+`Connection error`, a failed OAuth token refresh, or a gateway 502/503/504) is asked again
+once the network is back, without using an attempt: the client waits 5 s, doubling to
+60 s between tries, for up to 2 hours per call (`NETWORK_WAIT_S`). The match is
+conservative: a rate limit (429), an overloaded provider (529, `overloaded`), any other
+provider error (such as a 500), a refused credential (`invalid_grant`, an invalid key), an
+output or context limit, a refusal and a timed-out session are never outages, and are
+handled as below. On the `claude_code` route a DNS failure is only in the product
+adapter's detail (`API Error: getaddrinfo ENOTFOUND oauth2.googleapis.com`), which decides
+only for a session without tools. Waits happen where the client may ask again at all: on
+the `dsh` backend and, on any backend, for a session without tools (the optimizer's calls,
+no-tools agent nodes such as LiveMath's solver); a native session with tools still makes
+one attempt. Both runtimes go through this client (the spine's dispatched agent nodes
+rebuild it in `worker_node`), so the waits hold on each. A wait ends early, raising the
+failure it was waiting out, when it would leave a node's wall under a minute. A person's
+stop (`refactory stop`; the outer loop binds its check with
+`DshModelClient.with_stop_check`) ends it at the next poll (1 s) with `RunStopped`, as an
+optimizer call's retry wait ends: the search ends as a stop, and an item it ends reads as
+stopped. A cancelled scope raises `CancelledError` at the next poll, and a spent budget
+ends the call at the next try. A call that gives up fails
+as a `transport` failure that says it failed on the wire, so an evaluation reads the item
+as interrupted, not answered (below and `outer-loop.md`). While waiting, the run log
+(stderr) says `waiting for network: <cause>` once a minute; each outage is a
+`model_call_waiting_for_network` event, `state: waiting` when it starts and then its end
+(`recovered`, `gave_up`, `stopped` or `cancelled`) with `started_at`, `ended_at`,
+`waited_s`, the failed tries and their usage, if any reported it (the receipt adds that
+usage to the call's total as for a retry). Callers can collect the outages their calls
+waited out with `model.observe_network_waits()`; the SkillOpt port puts them on each
+attempt's trace line as `network_waits`, and its three attempts per optimizer call
+(`trace.ask`) now see only real failures.
+
+Other explicit transport failures retain their bounded retry policy: up to `attempts` completions (3 by
 default), with waits between them that double and add up to `retry_window_s` (60 s by
-default), so a network or DNS blip of up to about a minute does not fail the node
-(dm-218). These retries happen on the `dsh` backend and, for a session without tools
+default), so a provider blip of up to about a minute does not fail the node (dm-218). These retries happen on the `dsh` backend and, for a session without tools
 (`tool_policy: none`, such as the optimizer's text-only calls and no-tools agent nodes),
 on every backend, `claude_code` and `codex` included; a native session with tools makes
 one attempt, since replaying it could repeat real work. The count follows each node's
