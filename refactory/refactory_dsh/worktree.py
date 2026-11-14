@@ -603,21 +603,30 @@ def shared_change(found: Worktree) -> str | None:
     current = _shared_record(target, snapshot)
     if record.get("shared") is None:
         return None
+    # A record from before the checkout's config.worktree and included files were read
+    # is compared without them once, and they become its baseline: a live run is not
+    # failed on upgrade for a file that was there all along.
+    compared = current if record.get("shared_reads") == SHARED_READS else {
+        **current, "shared": _shared_digest({**snapshot, "worktree_lines": [], "included": {}}),
+        "shared_config": {key: value for key, value in current["shared_config"].items()
+                          if not key.startswith(_READ_LATER)}}
     if "shared_config" not in record or "shared_hooks" not in record or "branches" not in record:
         # A record from before the detail: only its digest of every line can be compared.
         _write_json(record_path, {**record, **current})
-        return None if record["shared"] == current["shared"] else ""
+        return None if record["shared"] == compared["shared"] else ""
     # Every branch ever seen stays known, so deleting a branch and making it again with
     # an upstream is not mistaken for branch creation.
     current["branches"] = sorted(set(record["branches"]) | set(current["branches"]))
-    changes = _shared_changes(record, current)
+    compared["branches"] = current["branches"]
+    changes = _shared_changes(record, compared)
     kept = [change for change in changes
-            if not _new_tracking(change, record, snapshot["config_lines"], found.branch)]
-    if changes or record["branches"] != current["branches"]:
+            if not _new_tracking(change, record, snapshot["config_lines"], found.branch)
+            and not _enabled_worktree_config(change, snapshot)]
+    if changes or record["branches"] != current["branches"] or compared is not current:
         _write_json(record_path, {**record, **current})
     if kept:
         return "; ".join(f"{label} {name} {kind}" for label, name, kind in kept)
-    if not changes and record["shared"] != current["shared"]:
+    if not changes and record["shared"] != compared["shared"]:
         _write_json(record_path, {**record, **current})
         return ""
     return None
@@ -1228,27 +1237,135 @@ def check_environment(path: Path, home: Path) -> dict[str, str]:
 def _shared_snapshot(target: Path) -> dict:
     """A snapshot of the git configuration and hooks the worktree shares with the target.
 
-    Returns ``{"config_lines": [...], "hook_files": {"name": "sha256hex", ...},
-    "hooks_dir": "<path>"}``.  The ``hooks_dir`` key carries the path so
-    ``_shared_digest`` can re-read raw bytes for backward-compatible hashing.
-    The exclusion rules match what ``shared_changed`` ignores: ``submodule.`` lines
-    (initialising submodules is refactory's own doing) and the
-    ``extensions.worktreeconfig=`` line ``_isolate_hooks`` sets.
+    Returns ``{"config_lines": [...], "worktree_lines": [...], "included": {"path":
+    "sha256hex", ...}, "hook_files": {"name": "sha256hex", ...}, "hooks_dir": "<path>"}``.
+    The ``hooks_dir`` key carries the path so ``_shared_digest`` can re-read raw bytes
+    for backward-compatible hashing. The exclusion rules match what ``shared_changed``
+    ignores: ``submodule.`` lines (initialising submodules is refactory's own doing) and
+    the ``extensions.worktreeconfig=`` line ``_isolate_hooks`` sets.
+
+    ``worktree_lines`` are the target checkout's own ``config.worktree``, which git
+    reads once ``_isolate_hooks`` has enabled ``extensions.worktreeConfig``; it is
+    recorded whether or not the extension is on, so enabling it later cannot bring an
+    unseen file into force. ``included`` hashes every file an ``include`` or
+    ``includeIf`` in either file names, whatever its condition, so a change inside an
+    already-included file is seen as well as a new include line. ``worktree_extension``
+    holds the shared config's ``extensions.worktreeConfig`` values, kept out of the
+    digest so another run's setup turning it on is not a change, and turning it off is.
     """
-    common = Path(git(target, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    settings = git(target, "config", "--file", str(common / "config"), "--list").splitlines()
+    # One spawn for both dirs and one listing per file: this runs after every agent step.
+    common, own = (Path(line) for line in git(
+        target, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir").splitlines())
+    shared_entries = _config_entries(target, common / "config")
+    worktree_entries = _config_entries(target, own / "config.worktree")
     config_lines = [
-        line for line in settings
+        line for line in _as_lines(shared_entries)
         if not line.startswith("submodule.")
         and not line.lower().startswith("extensions.worktreeconfig=")
     ]
+    worktree_lines = _as_lines(worktree_entries)
+    included: dict[str, str] = {}
+    _includes(target, common / "config", shared_entries, included)
+    _includes(target, own / "config.worktree", worktree_entries, included)
     hook_files: dict[str, str] = {}
     hooks_dir = common / "hooks"
     if hooks_dir.is_dir():
         for item in sorted(hooks_dir.glob("*")):
             if item.is_file():
                 hook_files[item.name] = hashlib.sha256(item.read_bytes()).hexdigest()
-    return {"config_lines": config_lines, "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
+    return {"config_lines": config_lines, "worktree_lines": worktree_lines, "included": included,
+            "worktree_extension": [value for key, value in shared_entries if key == _WORKTREE_EXTENSION],
+            "hook_files": hook_files, "hooks_dir": str(hooks_dir)}
+
+
+def _config_entries(target: Path, file: Path) -> list[tuple[str, str | None]]:
+    """The ``(key, value)`` entries of one config file, without following its includes.
+
+    Read with ``-z``, which puts a newline between key and value, so a key that holds
+    ``=`` (an ``includeIf`` condition may) is kept whole. A key with no value, such as
+    a bare ``[core] bare``, has the value None.
+    """
+    if not file.is_file():
+        return []
+    listing = git(target, "config", "--file", str(file), "--no-includes", "--list", "-z")
+    entries: list[tuple[str, str | None]] = []
+    for entry in listing.split("\0"):
+        if entry:
+            key, newline, value = entry.partition("\n")
+            entries.append((key, value if newline else None))
+    return entries
+
+
+def _as_lines(entries: list[tuple[str, str | None]]) -> list[str]:
+    """The lines ``git config --list`` prints for ``entries``, which the digest is taken over."""
+    return "\n".join(key if value is None else f"{key}={value}" for key, value in entries).splitlines()
+
+
+#: The key ``_isolate_hooks`` turns on in the shared config. It is left out of the digest;
+#: the record keeps it on its own so that turning it off is a change and turning it on
+#: is not (`_enabled_worktree_config`).
+_WORKTREE_EXTENSION = "extensions.worktreeconfig"
+
+
+def _enabled_worktree_config(change: tuple[str, str, str], snapshot: dict) -> bool:
+    """Whether ``change`` is ``extensions.worktreeConfig`` turned on, as any run's setup does.
+
+    Since the checkout's own ``config.worktree`` is recorded, turning it on brings
+    nothing unseen into force; turning it off, or any other ``extensions.*`` key, is a
+    change.
+    """
+    label, key, _kind = change
+    values = snapshot["worktree_extension"]
+    return (label == "config" and key == _WORKTREE_EXTENSION and bool(values)
+            and (values[-1] is None or values[-1].lower() in ("true", "yes", "on", "1")))
+
+
+#: How deep git follows includes before refusing; the guard follows no further.
+_INCLUDE_DEPTH = 10
+
+
+#: What a record whose ``shared_reads`` is ``SHARED_READS`` was taken with; the keys
+#: ``_READ_LATER`` names were not read before it. A further read needs its own marker
+#: value and prefix here, or older records lose these reads for one step.
+SHARED_READS = ["config", "hooks", "config.worktree", "includes", "extensions.worktreeconfig"]
+_READ_LATER = ("worktree:", "include:", "extensions.worktreeconfig")
+
+
+def _includes(target: Path, file: Path, entries: list[tuple[str, str | None]],
+              found: dict[str, str], depth: int = 1) -> None:
+    """Add to ``found`` a hash of each file ``entries`` (read from ``file``) include, recursively.
+
+    A path is resolved as git resolves it: ``~/`` from HOME, a relative one from the
+    including file's directory (``%(prefix)/`` is not expanded and reads as missing).
+    A file that is not there is recorded as missing, so creating it is a change too. A
+    path is normalised (``sub/../x`` is ``x``) and a file already in ``found`` is not
+    read again, so a cycle ends; nothing deeper than git's own limit is followed. An
+    ``includeIf`` file git does not read here may be unreadable or not config at all:
+    it is recorded as such, or by its bytes, and not followed further.
+    """
+    for key, value in entries:
+        if not (key.startswith(("include.", "includeif.")) and key.endswith(".path")) or not value:
+            continue
+        path = Path(os.path.expanduser(value)) if value.startswith("~") else Path(value)
+        path = Path(os.path.normpath(path if path.is_absolute() else file.parent / path))
+        name = str(path)
+        if name in found:
+            continue
+        if not os.path.isfile(path):  # unlike Path.is_file, never raises on a locked folder
+            found[name] = "missing"
+            continue
+        try:
+            found[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            found[name] = "unreadable"
+            continue
+        if depth >= _INCLUDE_DEPTH:
+            continue
+        try:
+            nested = _config_entries(target, path)
+        except ValueError:
+            continue
+        _includes(target, path, nested, found, depth + 1)
 
 
 def _shared_digest(snapshot: dict) -> str:
@@ -1264,6 +1381,11 @@ def _shared_digest(snapshot: dict) -> str:
     hooks_dir = Path(snapshot["hooks_dir"])
     for name in sorted(snapshot["hook_files"]):
         digest.update(name.encode() + b"\0" + (hooks_dir / name).read_bytes())
+    # Fed only when there is any, so a target with neither keeps the digest it had.
+    for line in snapshot["worktree_lines"]:
+        digest.update(b"\0worktree\0" + line.encode())
+    for name, hashed in sorted(snapshot["included"].items()):
+        digest.update(b"\0include\0" + name.encode() + b"\0" + hashed.encode())
     return digest.hexdigest()
 
 
@@ -1311,19 +1433,28 @@ def _shared_record(target: Path, snapshot: dict | None = None) -> dict:
     ``shared`` is the digest of every line and hook; ``shared_config`` (key -> hash of
     its values) and ``shared_hooks`` (file -> hash) let a change be named by key or
     file; ``branches`` are the target's local branches, so a branch made meanwhile can
-    be told from one that was there.
+    be told from one that was there. A key of the checkout's ``config.worktree`` is
+    named ``worktree:<key>`` and an included file ``include:<path>``.
     """
     snapshot = snapshot if snapshot is not None else _shared_snapshot(target)
     values: dict[str, list[str]] = {}
-    for line in snapshot["config_lines"]:
-        key, _, value = line.partition("=")
-        values.setdefault(key, []).append(value)
+    for prefix, lines in (("", snapshot["config_lines"]),
+                          ("worktree:", snapshot["worktree_lines"])):
+        for line in lines:
+            key, _, value = line.partition("=")
+            values.setdefault(prefix + key, []).append(value)
+    config = {key: hashlib.sha256("\n".join(vals).encode()).hexdigest() for key, vals in values.items()}
+    config.update({f"include:{name}": hashed for name, hashed in snapshot["included"].items()})
+    if snapshot["worktree_extension"]:
+        config[_WORKTREE_EXTENSION] = hashlib.sha256(
+            "\n".join("" if value is None else f"={value}"
+                      for value in snapshot["worktree_extension"]).encode()).hexdigest()
     branches = git(target, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads").split()
     return {"shared": _shared_digest(snapshot),
-            "shared_config": {key: hashlib.sha256("\n".join(vals).encode()).hexdigest()
-                              for key, vals in values.items()},
+            "shared_config": config,
             "shared_hooks": dict(snapshot["hook_files"]),
-            "branches": sorted(branches)}
+            "branches": sorted(branches),
+            "shared_reads": SHARED_READS}
 
 
 def _shared_changes(before: dict, after: dict) -> list[tuple[str, str, str]]:
