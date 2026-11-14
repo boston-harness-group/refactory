@@ -1,7 +1,7 @@
 """The memory pass: SkillOpt's optimizer meta skill, for the model proposer, over a graph.
 
-Once per epoch, from epoch 2, before the epoch's proposal, one call of the optimizer's
-model compares two rollouts on the same train items and writes ONE memory note: an
+Once per epoch, from epoch 2, before the epoch's proposal, the optimizer's model
+compares two rollouts on the same train items and writes ONE memory note: an
 optimizer-only note on how to analyse, merge and propose changes in this run. It is
 the loop's cross-round memory, shown to every analyst call, every merge call and the
 proposal request (`format_context`, `request_lines`). It never edits the graph.
@@ -35,8 +35,15 @@ SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, 
   (slow_update.py:287-349): a summary, then regressions (highest priority),
   persistent failures, improvements, each item with both outcomes, answers, grader
   reasons and both full traces, then stable successes without traces. SkillOpt never
-  clips; here the traces share ``ANALYST_ROOM`` (clipped head and tail, each cut said)
-  and a call refused as longer than the model's context is retried once at half size.
+  clips, and neither does this pass: when the whole request fits ``MEMORY_ROOM`` (the
+  analysts' room, tied to the optimizer model's context) it is one call, SkillOpt's;
+  when it does not, the evidence is split (`MemoryRequest`): comparison calls each read
+  the pipelines and as many whole item pairs as fit and write observations for the
+  optimizer (``COMPARE_SYSTEM``), then one synthesis call reads both pipelines, the tries, the
+  previous note and every part's observations and writes the note
+  (``SYNTHESIS_SYSTEM``). A larger room makes fewer calls; no trace is cut, except a
+  pair longer than the room on its own (counted). A call refused as longer than the
+  model's context is retried once at half size.
 - **What it writes**: ``{"reasoning", "memory"}`` (``meta_skill_content``), the prompt
   being SkillOpt's ``meta_skill.md`` for a graph. SkillOpt sets no length; its real runs
   wrote 3.4-5.8k characters, so the note is asked for and kept within ``MEMORY_CHARS``.
@@ -56,7 +63,7 @@ import json
 import random
 from typing import Any, Mapping, Sequence
 
-from .analysts import ANALYST_ROOM, fit_item, item_cap, item_text
+from .analysts import ANALYST_ROOM, TEXT_FLOOR, fit_item, item_cap, item_text
 from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table
 
 #: SkillOpt's ``slow_update_samples`` (``_base_/default.yaml:99``): the train items the
@@ -87,6 +94,17 @@ TRIED_REASON_CHARS = 300
 NOTHING_TRIED = "(nothing was proposed in that round)"
 #: How a clipped trace names this request (`analysts.fit_item`).
 ROOM_NAME = "the memory request's room"
+#: The most observations one comparison call writes, and the characters they are asked
+#: to stay within (asked, not cut: the synthesis reads them whole).
+OBSERVATIONS_PER_CALL = 8
+OBSERVATION_CHARS = 6000
+#: The quotes an observation keeps.
+EVIDENCE_PER_OBSERVATION = 4
+#: The most characters one comparison call's observations take in the synthesis request
+#: (texts and quotes together): past it the longest are cut to one length, never below
+#: ``OBSERVATION_FLOOR``, each cut marked and counted (`fit_observations`).
+PART_OBSERVATION_CHARS = 2 * OBSERVATION_CHARS
+OBSERVATION_FLOOR = 200
 
 
 def sample_ids(train_ids: Sequence[str], seed: int, epoch: int,
@@ -185,6 +203,90 @@ This memory should capture things like:
 
 You reply with JSON only."""
 
+#: The memory system prompt for the synthesis call of a split pass: the same rules, the
+#: comparison read through the comparison calls' observations.
+SYNTHESIS_SYSTEM = MEMORY_SYSTEM.replace(
+    "4. A longitudinal comparison on the SAME sampled items under those two pipelines.",
+    "4. A longitudinal comparison on the SAME sampled items under those two pipelines,\n"
+    "   read in parts by comparison calls: their observations, each citing its items.",
+).replace("- Use evidence from the comparison, not generic advice.",
+          "- Use evidence from the comparison (the observations), not generic advice.")
+
+COMPARE_SYSTEM = """\
+You read evidence for an optimizer-coach in a system that optimizes an AI pipeline: a
+graph of steps (nodes) connected by edges, each step configured by settings (knobs)
+such as its prompt.
+
+Your job is not to solve tasks directly and not to write instructions for the pipeline.
+You read one part of a longitudinal comparison: the SAME sampled items under two
+pipelines (or two rollouts of one pipeline), each item with both full traces. Another
+call reads your observations, with those of the other parts, and writes a compact
+OPTIMIZER-SIDE memory that helps future optimizer calls produce better changes to the
+pipeline in this run.
+
+## What You Receive
+
+1. The pipeline(s) and what changed between the two (or that nothing did).
+2. Part of the comparison: items that regressed, persistently failed, improved or
+   stayed right, with both outcomes, the grader's reasons and both traces.
+
+## Your Goal
+
+Write observations for the future optimizer: what regressed, what improved, what
+persistently fails, and why -- where in the pipeline the traces show it starts (a step,
+a setting, the data passed along an edge, the structure), and whether the change
+between the pipelines explains it.
+
+## Important Constraints
+
+- Address the FUTURE OPTIMIZER directly, not the pipeline.
+- Use evidence from the traces, not generic advice: cite the items and quote briefly.
+- Patterns shared by several items first; say when one holds for a single item.
+- Report what these traces show; do not judge kinds of change in general (another
+  call weighs them against what was tried).
+- Do not output instructions for the pipeline's own steps.
+
+You reply with JSON only."""
+
+
+def compare_answer_text() -> str:
+    return ("Respond ONLY with a valid JSON object:\n"
+            "{\n"
+            '  "observations": [{"category": "regressed|persistent_fail|improved|stable_success",\n'
+            '                    "observation": "<what happened and why, for the optimizer>",\n'
+            '                    "items": ["<item id>", ...],\n'
+            '                    "evidence": ["<a short verbatim quote from a trace>", ...]}]\n'
+            "}\n"
+            f"At most {OBSERVATIONS_PER_CALL} observations, the most important first, together "
+            f"at most {OBSERVATION_CHARS} characters; every one names the items it covers "
+            "(ids from this part).")
+
+
+def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
+    """A comparison call's observations (at most ``OBSERVATIONS_PER_CALL``, each with
+    its category, text, items and up to ``EVIDENCE_PER_OBSERVATION`` quotes), or
+    ``None`` when the answer carries no ``observations`` list. Texts are kept whole."""
+    listed = payload.get("observations") if isinstance(payload, Mapping) else None
+    if not isinstance(listed, list):
+        return None
+    out = []
+    for raw in listed:
+        if not isinstance(raw, Mapping):
+            continue
+        text = str(raw.get("observation") or "").strip()
+        if not text:
+            continue
+        names = {name for name, _t, _l in CATEGORIES}
+        kind = str(raw.get("category") or "").strip()
+        items = raw.get("items") if isinstance(raw.get("items"), list) else []
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
+        out.append({"category": kind if kind in names else "",
+                    "observation": text,
+                    "items": [str(i) for i in items if i not in (None, "")],
+                    "evidence": [str(q) for q in evidence
+                                 if q not in (None, "")][:EVIDENCE_PER_OBSERVATION]})
+    return out[:OBSERVATIONS_PER_CALL]
+
 
 def answer_text(chars: int = MEMORY_CHARS) -> str:
     return ("Respond ONLY with a valid JSON object:\n"
@@ -261,6 +363,40 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
            same: bool, changes: Sequence[str], previous_note: str,
            entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
            objective: str = "") -> tuple[str, str]:
+    head = (_intro(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
+                   changes=changes, previous_note=previous_note, tried=tried,
+                   objective=objective)
+            + f"## Longitudinal comparison (the same {len(entries)} train items, "
+            + ("two rollouts" if same else "two pipelines") + ")\n"
+            f"Start of the epoch: {prev.get('rollout')}. Now: {curr.get('rollout')}. Each "
+            "trace is the item in full: its input, every step's input and output in the "
+            "order the steps ran, the expected answer, the prediction and the grader's "
+            "feedback.\n\n")
+    return head, f"\n\n## Answer\n{answer_text()}"
+
+
+def _intro(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping[str, Any],
+           same: bool, changes: Sequence[str], previous_note: str,
+           tried: Sequence[str] = (), objective: str = "") -> str:
+    """The memory request up to its comparison: the objective, the pipelines and what
+    changed, what was tried and the previous note to reflect on."""
+    pipelines = _pipelines_text(prev=prev, curr=curr, same=same, changes=changes, tried=tried)
+    note = previous_note.strip() or "(No previous optimizer memory -- this is the first update.)"
+    return (f"# Writing the optimizer's memory -- epoch {epoch}\n\n"
+            f"Mode: `{mode_name}`.\n\n"
+            + (f"## What the score measures\n{objective}\n\n" if objective else "")
+            + pipelines
+            + ("\n".join(tried) + "\n\n" if tried else "")
+            + "## Previous optimizer memory\n"
+            "The following optimizer memory was available during this epoch. Reflect on "
+            "whether it improved or harmed the quality of the changes.\n\n"
+            f"{note}\n\n")
+
+
+def _pipelines_text(*, prev: Mapping[str, Any], curr: Mapping[str, Any], same: bool,
+                    changes: Sequence[str], tried: Sequence[str] = ()) -> str:
+    """The pipeline(s) as the memory request shows them: the one pipeline when unchanged,
+    else both and what changed between them."""
     if same:
         pipelines = (f"## The pipeline (candidate `{curr.get('id')}`)\n"
                      "Nothing this epoch replaced it"
@@ -277,23 +413,7 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
                      f"{curr.get('pipeline')}\n\n"
                      "## What changed between them\n"
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
-    note = previous_note.strip() or "(No previous optimizer memory -- this is the first update.)"
-    head = (f"# Writing the optimizer's memory -- epoch {epoch}\n\n"
-            f"Mode: `{mode_name}`.\n\n"
-            + (f"## What the score measures\n{objective}\n\n" if objective else "")
-            + pipelines
-            + ("\n".join(tried) + "\n\n" if tried else "")
-            + "## Previous optimizer memory\n"
-            "The following optimizer memory was available during this epoch. Reflect on "
-            "whether it improved or harmed the quality of the changes.\n\n"
-            f"{note}\n\n"
-            f"## Longitudinal comparison (the same {len(entries)} train items, "
-            + ("two rollouts" if same else "two pipelines") + ")\n"
-            f"Start of the epoch: {prev.get('rollout')}. Now: {curr.get('rollout')}. Each "
-            "trace is the item in full: its input, every step's input and output in the "
-            "order the steps ran, the expected answer, the prediction and the grader's "
-            "feedback.\n\n")
-    return head, f"\n\n## Answer\n{answer_text()}"
+    return pipelines
 
 
 def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, str], str],
@@ -346,6 +466,230 @@ def _meta_text(record: Mapping[str, Any]) -> str:
 
     text = metadata_text(record)
     return f" -- {text}" if text else ""
+
+
+# ── a pass too long for one call: comparison calls, then a synthesis ────────
+
+
+def _tally_text(entries: Sequence[Mapping[str, Any]]) -> str:
+    tally = counts(entries)
+    return (f"improved {tally['improved']}, regressed {tally['regressed']}, persistent "
+            f"failures {tally['persistent_fail']}, stable successes {tally['stable_success']}")
+
+
+def _ordered(entries: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The pairs in the order the comparison lists them (`CATEGORIES`: regressions first,
+    then persistent failures, improvements, stable successes), sample order within."""
+    rank = {name: n for n, (name, _t, _l) in enumerate(CATEGORIES)}
+    return sorted(entries, key=lambda e: rank[e["category"]])
+
+
+def _cut(text: str, cap: int | None) -> str:
+    return text if cap is None or len(text) <= cap else f"{text[:cap]}… [cut: {len(text) - cap} chars]"
+
+
+def fit_observations(found: Sequence[Mapping[str, Any]], chars: int = PART_OBSERVATION_CHARS
+                     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """One part's observations within ``chars`` (their texts and quotes together): whole
+    when they fit; else the longest texts cut to one length (`item_cap`, never below
+    ``OBSERVATION_FLOOR``), each cut marked ``… [cut: N chars]``. Returns them and what
+    was cut: ``{"texts", "chars"}``."""
+    texts = [len(str(o.get("observation") or "")) for o in found] + [
+        len(str(q)) for o in found for q in o.get("evidence") or ()]
+    cap = item_cap(texts, chars, floor=OBSERVATION_FLOOR)
+    if cap is None:
+        return [dict(o) for o in found], {"texts": 0, "chars": 0}
+    out = [{**o, "observation": _cut(str(o.get("observation") or ""), cap),
+            "evidence": [_cut(str(q), cap) for q in o.get("evidence") or ()]} for o in found]
+    over = [n for n in texts if n > cap]
+    return out, {"texts": len(over), "chars": sum(n - cap for n in over)}
+
+
+def _observation_line(entry: Mapping[str, Any]) -> str:
+    items = ", ".join(entry.get("items") or ()) or "none named"
+    quotes = [f'"{q}"' for q in entry.get("evidence") or ()]
+    return (f"- [{entry.get('category') or 'general'}; items: {items}] "
+            f"{entry.get('observation')}"
+            + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
+
+
+class MemoryRequest:
+    """One pass's memory request, for `AutoresearchOptimizer.write_memory`.
+
+    Called with a room, it is `build_prompt`: the single request, SkillOpt's. When that
+    does not fit ``room`` whole, `parts` splits the pairs into comparison calls (each as
+    many whole pairs as fit, in the comparison's order), `compare_prompt` makes each
+    one's request, and `synthesis_prompt` the one request that writes the note from
+    their observations. No trace is cut, except a pair longer than the room on its own,
+    counted as clipped."""
+
+    def __init__(self, *, epoch: int, mode_name: str, prev: Mapping[str, Any],
+                 curr: Mapping[str, Any], changes: Sequence[str], previous_note: str,
+                 entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
+                 objective: str = "") -> None:
+        self.epoch, self.mode_name = epoch, mode_name
+        self.prev, self.curr = dict(prev), dict(curr)
+        self.changes, self.previous_note = list(changes), previous_note
+        self.entries, self.tried, self.objective = list(entries), list(tried), objective
+        self.same = self.prev.get("id") == self.curr.get("id")
+        self._texts: dict[tuple[str, str], str] = {}
+
+    def __call__(self, room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
+        return build_prompt(epoch=self.epoch, mode_name=self.mode_name, prev=self.prev,
+                            curr=self.curr, changes=self.changes,
+                            previous_note=self.previous_note, entries=self.entries,
+                            room=room, tried=self.tried, objective=self.objective)
+
+    def _whole(self, entry: Mapping[str, Any], side: str) -> str:
+        key = (str(entry["id"]), side)
+        if key not in self._texts:
+            self._texts[key] = item_text(entry[side])
+        return self._texts[key]
+
+    def parts(self, room: int = MEMORY_ROOM) -> list[list[Mapping[str, Any]]] | None:
+        """``None`` when the single request fits ``room`` whole (one call); else the
+        comparison calls' pairs: in the comparison's order, each part filled until the
+        next pair whole would take its request past ``room``. Every pair is in exactly
+        one part, whole; a pair too long alone is a part of its own."""
+        if self._single_length() <= room:
+            return None
+        out: list[list[Mapping[str, Any]]] = []
+        most = len(self.entries)
+        for entry in _ordered(self.entries):
+            if out and self._length([*out[-1], entry], most, most) <= room:
+                out[-1].append(entry)
+            else:
+                out.append([entry])
+        return out
+
+    def _single_length(self) -> int:
+        """The single request's length with every trace whole, system prompt included,
+        measured as `build_prompt` measures it."""
+        head, tail = _frame(epoch=self.epoch, mode_name=self.mode_name, prev=self.prev,
+                            curr=self.curr, same=self.same, changes=self.changes,
+                            previous_note=self.previous_note, entries=self.entries,
+                            tried=self.tried, objective=self.objective)
+        texts = {(str(e["id"]), side): self._whole(e, side) for e in self.entries
+                 for side in ("prev", "curr") if self._traced(e)}
+        return len(MEMORY_SYSTEM) + len(head) + len(_comparison(self.entries, texts, self.same)) \
+            + len(tail)
+
+    def _length(self, part: Sequence[Mapping[str, Any]], index: int, total: int) -> int:
+        texts = {(str(e["id"]), side): self._whole(e, side) for e in part
+                 for side in ("prev", "curr") if self._traced(e)}
+        return len(COMPARE_SYSTEM) + len(self._compare_text(part, index, total, texts))
+
+    @staticmethod
+    def _traced(entry: Mapping[str, Any]) -> bool:
+        return dict((n, t) for n, t, _l in CATEGORIES)[entry["category"]]
+
+    def _compare_text(self, part: Sequence[Mapping[str, Any]], index: int, total: int,
+                      texts: Mapping[tuple[str, str], str]) -> str:
+        # The pipeline(s) and what changed, as the single call shows them (not what was
+        # tried: weighing kinds of change is the synthesis call's).
+        changed = _pipelines_text(prev=self.prev, curr=self.curr, same=self.same,
+                                  changes=self.changes)
+        return (f"# Comparing two rollouts for the optimizer's memory -- epoch {self.epoch}, "
+                f"part {index} of {total}\n\n"
+                f"Mode: `{self.mode_name}`.\n\n"
+                + (f"## What the score measures\n{self.objective}\n\n" if self.objective
+                   else "")
+                + changed
+                + f"## Longitudinal comparison, part {index} of {total} ({len(part)} of the "
+                f"same {len(self.entries)} train items, "
+                + ("two rollouts" if self.same else "two pipelines") + ")\n"
+                f"Start of the epoch: {self.prev.get('rollout')}. Now: "
+                f"{self.curr.get('rollout')}. Over all {len(self.entries)} items: "
+                f"{_tally_text(self.entries)}. The comparison did not fit one request, so "
+                "each part is read by its own call; this part holds the items below, and "
+                "its summary counts only them. Each trace is the item in full: its input, "
+                "every step's input and output in the order the steps ran, the expected "
+                "answer, the prediction and the grader's feedback.\n\n"
+                + _comparison(part, texts, self.same)
+                + f"\n\n## Answer\n{compare_answer_text()}")
+
+    def compare_prompt(self, part: Sequence[Mapping[str, Any]], index: int, total: int,
+                       room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
+        """One comparison call's request and what was clipped (``{"items", "chars"}``):
+        every trace whole when the part fits ``room`` (a part from `parts` does, unless
+        it is one pair too long alone); else its longest traces cut to one length
+        (`item_cap`), step inputs first (`fit_item`), each cut said."""
+        traced = [e for e in part if self._traced(e)]
+        wholes = {(str(e["id"]), side): self._whole(e, side)
+                  for e in traced for side in ("prev", "curr")}
+        fixed = len(COMPARE_SYSTEM) + len(self._compare_text(
+            part, index, total, {key: "" for key in wholes}))
+        cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
+        by_id = {str(e["id"]): e for e in traced}
+        texts = {key: (text if cap is None else fit_item(by_id[key[0]][key[1]], cap, ROOM_NAME))
+                 for key, text in wholes.items()}
+        clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
+        return self._compare_text(part, index, total, texts), {
+            "items": len(clipped),
+            "chars": sum(max(0, len(whole) - len(text)) for whole, text in clipped)}
+
+    def synthesis_prompt(self, results: Sequence[Mapping[str, Any]],
+                         room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
+        """The request that writes the note from the comparison calls' ``results``
+        (each ``{"part", "items", "observations"}``) and what it cut: the same request
+        as the single call's -- the objective, both pipelines and what changed, what was
+        tried, the previous note -- with every part's observations in place of the
+        traces. Each part's observations are kept within ``PART_OBSERVATION_CHARS``
+        (`fit_observations`; a model asked for at most ``OBSERVATION_CHARS`` rarely
+        passes it). When the request is still past ``room`` -- pipelines so large that
+        they and the observations do not fit, or a call retried within half its length
+        after the provider refused it as too long -- the two pipelines' texts are
+        clipped head and tail to the largest length that fits. Both cuts are counted:
+        ``{"observation_texts", "observation_chars", "pipeline_chars"}``."""
+        fitted = [fit_observations(list(result.get("observations") or ())) for result in results]
+        cut = {"observation_texts": sum(c["texts"] for _f, c in fitted),
+               "observation_chars": sum(c["chars"] for _f, c in fitted), "pipeline_chars": 0}
+
+        def make(chars: int | None) -> str:
+            prev, curr = dict(self.prev), dict(self.curr)
+            if chars is not None:
+                prev["pipeline"] = _clip_middle(prev.get("pipeline"), chars)
+                curr["pipeline"] = _clip_middle(curr.get("pipeline"), chars)
+            parts = []
+            for result, (found, _cut_) in zip(results, fitted):
+                parts.append(f"### Part {result.get('part')} of {len(results)}: items "
+                             f"{', '.join(str(i) for i in result.get('items') or ())}\n"
+                             + ("\n".join(_observation_line(o) for o in found)
+                                or "(no observation)"))
+            return (_intro(epoch=self.epoch, mode_name=self.mode_name, prev=prev, curr=curr,
+                           same=self.same, changes=self.changes,
+                           previous_note=self.previous_note, tried=self.tried,
+                           objective=self.objective)
+                    + f"## Longitudinal comparison (the same {len(self.entries)} train items, "
+                    + ("two rollouts" if self.same else "two pipelines") + ")\n"
+                    f"Start of the epoch: {self.prev.get('rollout')}. Now: "
+                    f"{self.curr.get('rollout')}. Over all {len(self.entries)} items: "
+                    f"{_tally_text(self.entries)}. Both full traces of every item did not "
+                    f"fit one request, so {len(results)} comparison calls each read part of "
+                    "them whole (every item in exactly one part, regressions first, then "
+                    "persistent failures, improvements and stable successes) and wrote these "
+                    "observations for you. They are your evidence from the comparison.\n\n"
+                    + "\n\n".join(parts)
+                    + f"\n\n## Answer\n{answer_text()}")
+
+        whole = make(None)
+        if len(SYNTHESIS_SYSTEM) + len(whole) <= room:
+            return whole, cut
+        low, high = TEXT_FLOOR, max(TEXT_FLOOR, len(str(self.prev.get("pipeline") or "")),
+                                    len(str(self.curr.get("pipeline") or "")))
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(SYNTHESIS_SYSTEM) + len(make(middle)) <= room:
+                low = middle
+            else:
+                high = middle - 1
+        clipped = make(low)
+        pipelines = [str(self.curr.get("pipeline") or "")]
+        if not self.same:
+            pipelines.append(str(self.prev.get("pipeline") or ""))
+        cut["pipeline_chars"] = sum(len(text.strip()) - 2 * (low // 2) for text in pipelines
+                                    if len(text.strip()) > low)
+        return clipped, cut
 
 
 def edits_text(edits: Any, chars: int = TRIED_EDITS_CHARS) -> str:
@@ -555,8 +899,8 @@ def report(passes: Sequence[Mapping[str, Any]], memory: Mapping[str, Any] | None
     """What report.json says of the memory: each epoch's pass (without the note's text,
     which is in the journal) and the latest note."""
     keys = ("epoch", "prev", "curr", "same", "sample", "pairs", "missing", "counts",
-            "evaluated", "rollouts", "calls", "context_retry", "clipped_items",
-            "clipped_chars", "chars", "updated", "error", "skipped")
+            "evaluated", "rollouts", "calls", "parts", "context_retry", "clipped_items",
+            "clipped_chars", "synthesis_cuts", "chars", "updated", "error", "skipped")
     return {"passes": [{key: p.get(key) for key in keys if key in p} for p in passes],
             "updated": sum(1 for p in passes if p.get("updated")),
             "failed": sum(1 for p in passes if p.get("error")),
@@ -573,7 +917,8 @@ def report_lines(rep: Mapping[str, Any] | None) -> list[str]:
     for p in rep["passes"]:
         tally = p.get("counts") or {}
         rows.append([p.get("epoch"), p.get("prev"), p.get("curr"),
-                     f"{p.get('pairs', 0)} of {len(p.get('sample') or ())}",
+                     f"{p.get('pairs', 0)} of {len(p.get('sample') or ())}"
+                     + (f" in {p['parts']} parts" if p.get("parts") else ""),
                      "/".join(str(tally.get(name, 0)) for name, _t, _l in CATEGORIES),
                      p.get("evaluated", 0),
                      "written" if p.get("updated") else
@@ -585,10 +930,19 @@ def report_lines(rep: Mapping[str, Any] | None) -> list[str]:
              f"not updated); {rep.get('evaluations', 0)} extra evaluation(s) "
              f"({rep.get('rollouts', 0)} rollout(s)) for sampled items no rollout of the "
              "epoch held. Each pass is in journal.jsonl (`optimizer_memory`) and its call "
-             "in optimizer_trace.jsonl (`memory`).", "",
+             "in optimizer_trace.jsonl (`memory`; a pass too long for one call also has its "
+             "comparison calls, `memory_compare`, and the table says how many).", "",
              _table(["epoch", "start of epoch", "now", "items compared",
                      "regressed/still failing/improved/stable", "extra evaluations",
                      "note", "chars"], rows), ""]
+    cut = [p for p in rep["passes"] if p.get("synthesis_cuts")]
+    if cut:
+        texts = sum(int(p["synthesis_cuts"].get("observation_texts") or 0) for p in cut)
+        chars = sum(int(p["synthesis_cuts"].get("observation_chars") or 0) for p in cut)
+        piped = sum(int(p["synthesis_cuts"].get("pipeline_chars") or 0) for p in cut)
+        lines += [f"In {len(cut)} split pass(es) the synthesis request was cut to fit: "
+                  f"{texts} observation text(s) ({chars} characters) and {piped} characters "
+                  "of the pipelines' texts.", ""]
     latest = rep.get("latest") or {}
     if latest.get("text"):
         lines += [f"The latest note (epoch {latest.get('epoch')}):", "",

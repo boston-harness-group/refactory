@@ -384,7 +384,7 @@ NAMES = re.compile(r"\btraces\b|\bitem\.json\b|\bsteps\.json\b")
 OTHER_USES = {
     ("refactory_dsh/nn/executor.py", "item.json"): 2,
     ("refactory_dsh/optim/base.py", "traces"): 2,
-    ("refactory_dsh/optim/memory.py", "traces"): 2,
+    ("refactory_dsh/optim/memory.py", "traces"): 8,  # prompt prose ("both full traces"), split-evidence #655
     ("refactory_dsh/tools/gen_tutorial.py", "traces"): 2,
     ("refactory_packages/java_build_pack/mode.py", "item.json"): 2,
     ("refactory_packages/java_build_pack/ops.py", "item.json"): 1,

@@ -5587,15 +5587,14 @@ class Loop(OuterLoop):
                                          gated=bool(self.selection_mode()))
         objective = self._objective()
 
-        def build(room: int) -> tuple[str, dict[str, int]]:
-            return memory.build_prompt(
-                epoch=epoch, mode_name=self.mode_id,
-                prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
-                curr={"id": current.id, "pipeline": view[current.id],
-                      "rollout": sides[1][3]},
-                changes=memory.changes_lines(self._lineage_edits(prev, current)),
-                previous_note=previous, entries=entries, room=room, tried=tried_lines,
-                objective=objective)
+        # The request: one call when it fits the room whole, else split into comparison
+        # calls and a synthesis, never cut (`memory.MemoryRequest`).
+        build = memory.MemoryRequest(
+            epoch=epoch, mode_name=self.mode_id,
+            prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
+            curr={"id": current.id, "pipeline": view[current.id], "rollout": sides[1][3]},
+            changes=memory.changes_lines(self._lineage_edits(prev, current)),
+            previous_note=previous, entries=entries, tried=tried_lines, objective=objective)
 
         outcome: dict[str, Any] = {}
         if not entries:
@@ -5614,7 +5613,7 @@ class Loop(OuterLoop):
                 outcome = {"note": None, "error": f"{type(exc).__name__}: {exc}"}
         record.update({key: outcome[key] for key in
                        ("calls", "context_retry", "cached", "clipped_items", "clipped_chars",
-                        "prompt_chars") if key in outcome})
+                        "prompt_chars", "parts", "compare_chars", "synthesis_cuts") if key in outcome})
         note = outcome.get("note")
         if note:
             record["reasoning"] = note.get("reasoning", "")
