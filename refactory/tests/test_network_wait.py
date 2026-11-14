@@ -277,11 +277,24 @@ def test_a_node_wall_bounds_the_wait(answers, monkeypatch):
     queue, waits = answers
     clock = [1000.0]
 
+    real_sleep, real_monotonic = model.time.sleep, model.time.monotonic
+
+    def from_model() -> bool:
+        # ``model.time`` is the process-wide ``time`` module: only the model client's own
+        # calls see the test clock; any other thread keeps the real one.
+        return sys._getframe(2).f_code.co_filename == model.__file__
+
     def sleep(seconds: float) -> None:
+        if not from_model():
+            real_sleep(seconds)
+            return
         waits.append(seconds)
         clock[0] += seconds
 
-    monkeypatch.setattr(model.time, "monotonic", lambda: clock[0])
+    def monotonic() -> float:
+        return clock[0] if from_model() else real_monotonic()
+
+    monkeypatch.setattr(model.time, "monotonic", monotonic)
     monkeypatch.setattr(model.time, "sleep", sleep)
     queue.extend([_Failed(OAUTH_DNS)] * 10)
     with pytest.raises(CompletionFailed, match="until the node's time ran out"):
