@@ -406,7 +406,8 @@ def research_problems(ctx: Any, raw: str, research_scope: str, *,
         )
     else:
         if research_scope == "scoped":
-            if not 1 <= len(entries) <= 3:
+            # Design mode (count="suggested") leaves a scoped plan's size to the model.
+            if count == "required" and not 1 <= len(entries) <= 3:
                 problems.append(
                     f"the plan has {len(entries)} direction(s); one to three are {count} for a scoped change"
                 )

@@ -196,7 +196,12 @@ def test_every_scale_gets_one_rewrite_for_a_missing_section():
 
 def test_the_design_phase_prompts_scale_with_the_change():
     nodes = DesignMode().build().nodes
-    assert "one focused question for a scoped change" in nodes["research_director"].prompt_template
+    director = nodes["research_director"].prompt_template
+    assert "a scoped change often needs only one focused question" in director
+    # The counts are context in design mode, never a rule the model is held to.
+    assert "you decide" in director
+    assert "or one to three for a scoped change" not in director
+    assert "a scoped change often needs only one. You decide how many." in director
     assert "{{research_scope}}" in nodes["pitfalls_researcher"].prompt_template
     assert "list at most five" in nodes["pitfalls_researcher"].prompt_template
     # A scoped change has no perspectives step: route_strategy sends it past
@@ -1009,7 +1014,7 @@ RESEARCH_DIRECTOR = "You are the research director."
 PITFALLS_RESEARCHER = "You are the pitfalls researcher."
 STRATEGY_DIRECTOR = "You are the strategy director."
 SIZED_SCOPED = "Sized before research by reading the code: scoped"
-FULL_RESEARCH_GUIDANCE = "between three and five questions for a full design"
+FULL_RESEARCH_GUIDANCE = "usually three to five questions for a full design"
 #: What a scoped change's one question covers, and how its subagent answers it.
 SCOPED_QUESTION = ("For a scoped change, the question covers the changed function, every "
                    "caller of it and the tests that pin its current behaviour")
@@ -1446,6 +1451,17 @@ def test_strategy_director_gets_both_scales(tmp_path):
     addition = strategy.split("A small, contained change", 1)[1].split("You are the strategy director")[0]
     assert not re.search(r"\d", addition)
 
+    # Sized scoped, but research found a shared engine and was widened: research
+    # overruled the sizer, so the strategy keeps today's depth.
+    run, model = _design_run(tmp_path / "widened", "Fix main in app.py.",
+                             [ENGINE_PLAN, RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives",
+                              "one plan", DESIGN_DOC_ANSWER],
+                             sizer=[_sizing()], to_gate=True)
+    [strategy] = _asked(model, STRATEGY_DIRECTOR)
+    assert "Research was widened after a lean pass" in strategy
+    assert "A small, contained change" not in strategy and "short file" not in strategy
+    assert not re.findall(r"\{\{\s*[A-Za-z_]\w*\s*\}\}", strategy) and "{%" not in strategy
+
     # Sized full before research: the strategy director is told both scales, and keeps
     # today's depth, with no word about a small change.
     run, model = _design_run(tmp_path / "sized-full", "Fix main in app.py.",
@@ -1533,3 +1549,17 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
     assert "Before research:" not in strategy and "A small, contained change" not in strategy
     assert "After research: full — no usable footprint in the research\n" in strategy
     assert "presize_scope" not in run.facts
+
+
+def test_design_mode_leaves_a_scoped_plans_size_to_the_model(tmp_path):
+    """Design's research gate lists no count for a scoped plan; create still refuses one."""
+    from refactory_dsh.create_ops import research_problems
+    from refactory_dsh.design_ops import gate_design_research
+
+    plan = [{"focus": f"q{n}", "slug": f"s{n}", "finding": "f", "ids": []} for n in range(1, 5)]
+    (tmp_path / "research-plan.json").write_text(json.dumps(plan))
+    ctx = RunContext(tmp_path, knobs={}, task={}, facts={"research_scope": "scoped"})
+    assert gate_design_research(ctx) == "proceed"
+    assert "direction(s)" not in ctx.facts["research_advisory"]
+    assert any("one to three are required for a scoped change" in problem
+               for problem in research_problems(ctx, json.dumps(plan), "scoped"))

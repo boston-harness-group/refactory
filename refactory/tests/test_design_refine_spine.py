@@ -286,7 +286,8 @@ def test_widening_on_the_spine(tmp_path):
     assert f"Before research: scoped — {ONE_FUNCTION}\n" in strategy
     assert "Research was widened after a lean pass: changes a shared engine: app.py:1\n" in strategy
     assert "After research: full — changes a shared engine: app.py:1\n" in strategy
-    assert SMALL_CHANGE in strategy
+    # Research overruled the sizer: the strategy keeps today's depth.
+    assert SMALL_CHANGE not in strategy and "short file" not in strategy
     assert not UNRENDERED.findall(strategy) and "{%" not in strategy
 
 
@@ -320,5 +321,5 @@ def test_unknown_sizing_on_the_spine_is_full(tmp_path):
     assert (facts["research_scope"], facts["presize_scope_reason"]) == (
         "full", "the sizer judged it unknown: cause not located")
     research = _research(spine, RESEARCH_ANSWER)
-    assert "between three and five questions for a full design" in research
+    assert "usually three to five questions for a full design" in research
     assert spine.node("widen_research") == "proceed"

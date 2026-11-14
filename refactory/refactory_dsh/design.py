@@ -361,9 +361,16 @@ FOOTPRINT_DEFINITIONS = (
 _SCOPE_FROM_PREPARE = "The research scope is a fact set by the prepare step."
 assert _SCOPE_FROM_PREPARE in RESEARCH_SCHEMA
 #: Create's research plan shape, with the scope's origin as design mode sets it.
+_COUNT_RULE = "Between three and five directions for a full design, or one to three for a scoped change."
+assert _COUNT_RULE in RESEARCH_SCHEMA
 DESIGN_RESEARCH_SCHEMA = RESEARCH_SCHEMA.replace(
     _SCOPE_FROM_PREPARE,
-    "The research scope is the one given above; a sizing step may set it before research.")
+    "The research scope is the one given above; a sizing step may set it before research.",
+).replace(
+    # Create refuses a plan outside these counts; in design mode they are context.
+    _COUNT_RULE,
+    "Usually three to five directions for a full design; a scoped change often needs "
+    "only one. You decide how many.")
 
 #: The change sizer's prompt (`size_change`): it sizes the change by reading the code,
 #: before research, so a small change gets a lean research plan.
@@ -586,9 +593,9 @@ class DesignMode(Mode):
                 "by reading the code: {{presize_scope}} — {{presize_scope_reason}}. This is "
                 "context; you decide how many questions you need.\n\n{% endif %}{% endif %}"
                 "You are the research director. Decide what has to be learned before "
-                "this artifact can be designed: between three and five questions for "
-                "a full design, or one focused question for a scoped change (two or "
-                "three only when it spans unrelated parts of the code). Each must be "
+                "this artifact can be designed: usually three to five questions for a "
+                "full design, while a scoped change often needs only one focused question "
+                "(more when it spans unrelated parts of the code); you decide. Each must be "
                 "answerable by reading {{source}} — including the source code of tools "
                 "and libraries the change depends on, not only the files it changes — "
                 "or by running something there. For a scoped change, the question covers "
@@ -707,13 +714,15 @@ class DesignMode(Mode):
                 "{% if research_widened %}Research was widened after a lean pass: "
                 "{{research_widened}}\n{% endif %}"
                 "After research: {{research_scope}} — {{research_scope_reason}}\n\n"
-                # Only when the sizer found it small: a full change keeps today's depth.
-                "{% if presize_scope == 'scoped' %}A small, contained change usually needs "
+                # Only when the sizer found it small and research did not reach further: a
+                # full sizing, and a research that was widened, keep today's depth.
+                "{% if presize_scope == 'scoped' %}{% if research_widened == '' %}"
+                "A small, contained change usually needs "
                 "few perspectives, and short ones; the simplest-thing and "
                 "what-the-check-misses angles may be one perspective. Tell each subagent the "
                 "scale and its reason, and ask for a short file that states only findings "
                 "that change what gets built. You decide how many perspectives and how "
-                "long.\n\n{% endif %}"
+                "long.\n\n{% endif %}{% endif %}"
                 "You are the strategy director. From the research, choose between two "
                 "and five perspectives on how this artifact could be built — including "
                 "the simplest thing that could pass the check, and one that says what "

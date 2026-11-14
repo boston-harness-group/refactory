@@ -1300,8 +1300,8 @@ def gate_design_research(ctx: Any) -> Any:
     Create mode keeps `create_ops.gate_research`, which refuses a plan it cannot use. Here
     the plan is sent back once only when research-plan.json holds no parseable plan at
     all; then the run proceeds with whatever exists. Everything else that gate checks --
-    three to five directions (one to three for a scoped change), empty fields, slugs, the
-    findings files -- is guidance: it is listed as advisory (``research_advisory``) on
+    three to five directions for a full plan (a scoped plan's size is left to the
+    model), empty fields, slugs, the findings files -- is guidance: it is listed as advisory (``research_advisory``) on
     the approval gate's card. Never raises.
     """
     from refactory_dsh.create_ops import _plan, research_problems
