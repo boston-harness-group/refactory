@@ -128,7 +128,8 @@
     "refactory_dsh.patch_scope",
     "refactory_dsh.targeted_tests",
     "refactory_dsh.test_selection",
-    "refactory_dsh.probe_rerun"
+    "refactory_dsh.probe_rerun",
+    "refactory_dsh.check_probe"
   ],
   "allowed_leaks": {
     "refactory_dsh.run": [
