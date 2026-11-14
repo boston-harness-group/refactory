@@ -785,6 +785,10 @@ class Loop(OuterLoop):
         #: side key: ``e<epoch>`` for a side read from that epoch's rollouts, ``fresh<epoch>``
         #: for a fresh rollout of an unchanged current without the gate): ``{id: record}``.
         self._memory_rollouts: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        #: The proposals each epoch's proposal round refused before they ran, by that
+        #: epoch (journaled with each ``rejection``), for the next memory pass's "What was
+        #: tried this epoch" (`_tried_in_round`).
+        self._round_refusals: dict[int, list[Rejection]] = {}
         #: How the Tasks' declared item metadata is read for the analysts
         #: (`task.item_metadata_reader`), held once as a one-element tuple.
         self._item_metadata: tuple[Any] | None = None
@@ -2818,12 +2822,14 @@ class Loop(OuterLoop):
         proposals = self.propose(run, parents, self.batch_size(run))
         candidates = self.install(run, proposals, parents)
         rejections = self.rejections[before:]
+        self._round_refusals.setdefault(self.epoch, []).extend(rejections)
         for rejection in rejections:
             self._journal(
                 "rejection",
                 attempt=rejection.attempt,
                 edit=rejection.edit,
                 reasons=rejection.reasons,
+                epoch=self.epoch,
             )
         for candidate in candidates:
             self._journal_candidate(candidate)
@@ -5506,6 +5512,11 @@ class Loop(OuterLoop):
             "same": same, "sample": sample, "pairs": len(entries), "missing": missing,
             "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
 
+        tried, refused = self._tried_in_round(epoch - 1)
+        tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1, current=current.id,
+                                         gated=bool(self.selection_mode()))
+        objective = self._objective()
+
         def build(room: int) -> tuple[str, dict[str, int]]:
             return memory.build_prompt(
                 epoch=epoch, mode_name=self.mode_id,
@@ -5513,7 +5524,8 @@ class Loop(OuterLoop):
                 curr={"id": current.id, "pipeline": view[current.id],
                       "rollout": sides[1][3]},
                 changes=memory.changes_lines(self._lineage_edits(prev, current)),
-                previous_note=previous, entries=entries, room=room)
+                previous_note=previous, entries=entries, room=room, tried=tried_lines,
+                objective=objective)
 
         outcome: dict[str, Any] = {}
         if not entries:
@@ -5538,6 +5550,58 @@ class Loop(OuterLoop):
             record["reasoning"] = note.get("reasoning", "")
         self._keep_memory({**record, **({"error": outcome.get("error")}
                                          if not note else {})}, note)
+
+    def _objective(self) -> str:
+        """What the score measures (`optim.base.objective_text`), from this run's
+        settings, as every optimizer request says it."""
+        from refactory_dsh.optim.base import objective_text
+
+        return objective_text(float(self.config.parsimony),
+                              item_mean=bool(self._score_is_item_mean),
+                              gated=bool(self.selection_mode()))
+
+    def _tried_in_round(self, round_: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Every change the optimizer proposed in epoch ``round_``'s proposal round, for
+        the memory pass (`optim.memory.tried_lines`): the candidates it made, oldest
+        first, each with its kind, its own edits in short, its train score and fixed/
+        broken counts against its parent (`optim.feedback.ledger_entry`), the gate's word
+        and the integrity verdict; and the proposals refused before they ran, with why.
+        The facts the proposal request's history, change ledger, integrity and refusal
+        sections show: train records and the gate's word, never a validation score."""
+        from refactory_dsh.optim import memory
+        from refactory_dsh.optim.base import Proposal, _structural_edit
+        from refactory_dsh.optim.feedback import change_kind, ledger_entry
+
+        by_id = {c.id: c for c in self.population}
+        tried = []
+        for candidate in self.population:
+            record = self.proposals.get(candidate.id) or {}
+            if not candidate.parent or record.get("epoch") != round_:
+                continue
+            parent = by_id.get(candidate.parent)
+            if parent is not None and candidate.evaluated:
+                parent_records, child_records, same = self._round_records(parent.id,
+                                                                          candidate.id)
+            else:
+                parent_records, child_records, same = [], [], True
+            entry = ledger_entry(candidate, parent, record=record,
+                                 parent_records=parent_records, child_records=child_records,
+                                 gate=self._gate_decision(candidate.id), same_seed=same,
+                                 integrity=self._integrity_of(candidate.id))
+            tried.append({**entry, "structural": candidate.is_structural(),
+                          "edits": memory.edits_text(candidate.own_edits()),
+                          "score": candidate.score, "exit_ok": candidate.exit_ok,
+                          "evaluated": candidate.evaluated})
+        refused = []
+        for rejection in self._round_refusals.get(round_) or ():
+            steps = Proposal(edit=rejection.edit).steps
+            readable = [s for s in steps if isinstance(s, dict) and s.get("op")]
+            refused.append({
+                "round": round_, "attempt": rejection.attempt,
+                "kind": change_kind(readable) if readable else "",
+                "structural": any(_structural_edit(s) for s in readable) if readable else None,
+                "edits": memory.edits_text(steps), "reasons": list(rejection.reasons)})
+        return tried, refused
 
     def _keep_memory(self, record: dict[str, Any], note: dict[str, Any] | None) -> None:
         """Keep a pass's note (or, when it wrote none, the earlier note marked not
@@ -6281,13 +6345,17 @@ class Loop(OuterLoop):
                     continue
                 apply_score(candidate, record)
             elif event == "rejection":
-                self.rejections.append(
-                    Rejection(
-                        attempt=int(record.get("attempt") or 0),
-                        edit=dict(record.get("edit") or {}),
-                        reasons=list(record.get("reasons") or []),
-                    )
+                rejection = Rejection(
+                    attempt=int(record.get("attempt") or 0),
+                    edit=dict(record.get("edit") or {}),
+                    reasons=list(record.get("reasons") or []),
                 )
+                self.rejections.append(rejection)
+                # A journal written before rejections carried their epoch: the epoch
+                # open when it was written.
+                self._round_refusals.setdefault(
+                    int(record["epoch"]) if record.get("epoch") is not None else self.epoch,
+                    []).append(rejection)
             elif event == "epoch":
                 self.epoch = int(record.get("epoch") or self.epoch)
             elif event == "epoch_open":

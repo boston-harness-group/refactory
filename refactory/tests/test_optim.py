@@ -5,12 +5,29 @@ Phase 5 gate of ``docs/plans/pythonic-modes.md``.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from refactory_dsh import nn, optim, registry
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, ProposalContext
+
+
+def _model_sleeps_into(waits: list[float]):  # type: ignore[no-untyped-def]
+    """A ``time.sleep`` stand-in recording only the model client's own sleeps; any other
+    caller (a background thread left by another test) sleeps for real."""
+    from refactory_dsh import model
+
+    real_sleep = model.time.sleep
+
+    def sleep(seconds: float) -> None:
+        if sys._getframe(1).f_code.co_filename == model.__file__:
+            waits.append(seconds)
+        else:
+            real_sleep(seconds)
+    return sleep
+
 
 MODE = "circle_packing/adaptive"
 
@@ -580,7 +597,7 @@ def test_a_transport_blip_is_ridden_out_over_about_a_minute(monkeypatch):
     answers: list[object] = [Blip(), Blip(), Blip(), Ok()]
     waits: list[float] = []
     monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: answers.pop(0))
-    monkeypatch.setattr(model.time, "sleep", waits.append)
+    monkeypatch.setattr(model.time, "sleep", _model_sleeps_into(waits))
     assert DshModelClient(attempts=4).complete("hello") == "done\n"
     assert answers == [] and len(waits) == 3
     assert waits[1] == 2 * waits[0] and waits[2] == 2 * waits[1]
@@ -841,7 +858,7 @@ def _answers(monkeypatch, *answers):  # type: ignore[no-untyped-def]
     queue = list(answers)
     waits: list[float] = []
     monkeypatch.setattr(DshModelClient, "_run_completion", lambda *a, **k: queue.pop(0))
-    monkeypatch.setattr(model.time, "sleep", waits.append)
+    monkeypatch.setattr(model.time, "sleep", _model_sleeps_into(waits))
     return queue, waits
 
 
