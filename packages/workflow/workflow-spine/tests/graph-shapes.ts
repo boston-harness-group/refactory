@@ -321,7 +321,8 @@ export const designGraph: ShapeEntry = {
   graph: designFixture,
   directors: {}, dataPasses: {},
   // Every gate with a reloop edge reloops once, as before (delivery_gate is left to
-  // proceed): the design phase's gate_research, gate_pitfalls, gate_design_review (a
+  // proceed): the design phase's gate_research, widen_research (a lean research widened
+  // once at full scope, back to research_director), gate_pitfalls, gate_design_review (a
   // design with no Changes; there is no design reviewer since #499) and the person's
   // gate_strategy, then the build's prepare_check, gate_check, gate_qa and gate_overwatch.
   // gate_qa and gate_overwatch route on their judges' JSON verdicts (qa_judge, overwatch):
@@ -329,7 +330,7 @@ export const designGraph: ShapeEntry = {
   // could not be read (bounded in code by the judge_rereads knob; the driver never picks it).
   // gate_overwatch has no `audit` round back to the overwatch; the correction audit
   // (audit_corrections) runs once between gate_qa and the overwatch.
-  gatesWithReloop: ['gate_research', 'gate_pitfalls', 'gate_design_review', 'gate_strategy', 'prepare_check', 'gate_check', 'gate_qa', 'gate_overwatch'],
+  gatesWithReloop: ['gate_research', 'widen_research', 'gate_pitfalls', 'gate_design_review', 'gate_strategy', 'prepare_check', 'gate_check', 'gate_qa', 'gate_overwatch'],
   // A full design: the perspectives step runs. No reviewer sits between the design and
   // the person's gate at either scale.
   fixedVerdicts: { route_strategy: 'proceed', route_refine_design: 'proceed', scope_reloop: 'approach' }, large: true,

@@ -30,6 +30,10 @@
       "id": "classify_scale",
       "_type": "FnNode"
     },
+    "clear_sizing": {
+      "id": "clear_sizing",
+      "_type": "FnNode"
+    },
     "code_reviewer": {
       "id": "code_reviewer",
       "role": "ceo",
@@ -81,6 +85,16 @@
       "optional_targets": [
         "verifier",
         "early_asks_check"
+      ],
+      "_type": "ForkNode"
+    },
+    "fork_size": {
+      "id": "fork_size",
+      "targets": [
+        "size_change"
+      ],
+      "optional_targets": [
+        "size_change"
       ],
       "_type": "ForkNode"
     },
@@ -144,6 +158,13 @@
       ],
       "_type": "JoinNode"
     },
+    "join_size": {
+      "id": "join_size",
+      "sources": [
+        "size_change"
+      ],
+      "_type": "JoinNode"
+    },
     "materialise": {
       "id": "materialise",
       "_type": "FnNode"
@@ -175,6 +196,10 @@
       "evaluator_type": "fn",
       "max_iterations": 45,
       "_type": "GateNode"
+    },
+    "presize_scale": {
+      "id": "presize_scale",
+      "_type": "FnNode"
     },
     "qa_director": {
       "id": "qa_director",
@@ -230,6 +255,12 @@
       "max_iterations": 4,
       "_type": "GateNode"
     },
+    "size_change": {
+      "id": "size_change",
+      "role": "ceo",
+      "max_iterations": 1,
+      "_type": "AgentNode"
+    },
     "strategy_director": {
       "id": "strategy_director",
       "role": "ceo",
@@ -251,6 +282,12 @@
       "role": "code_reviewer",
       "max_iterations": 1,
       "_type": "AgentNode"
+    },
+    "widen_research": {
+      "id": "widen_research",
+      "evaluator_type": "fn",
+      "max_iterations": 1,
+      "_type": "GateNode"
     }
   },
   "edges": [
@@ -276,7 +313,12 @@
     },
     {
       "source": "classify_scale",
-      "target": "pitfalls_researcher",
+      "target": "widen_research",
+      "condition": null
+    },
+    {
+      "source": "clear_sizing",
+      "target": "fork_size",
       "condition": null
     },
     {
@@ -307,6 +349,11 @@
     {
       "source": "fork_qa",
       "target": "join_qa",
+      "condition": null
+    },
+    {
+      "source": "fork_size",
+      "target": "join_size",
       "condition": null
     },
     {
@@ -405,6 +452,11 @@
       "condition": null
     },
     {
+      "source": "join_size",
+      "target": "presize_scale",
+      "condition": null
+    },
+    {
       "source": "materialise",
       "target": "prepare_check",
       "condition": null
@@ -450,6 +502,11 @@
       "condition": "draft"
     },
     {
+      "source": "presize_scale",
+      "target": "research_director",
+      "condition": null
+    },
+    {
       "source": "qa_director_rerun",
       "target": "synthesize_qa",
       "condition": null
@@ -481,13 +538,13 @@
     },
     {
       "source": "route_refine_design",
-      "target": "design_doc",
-      "condition": "light"
+      "target": "clear_sizing",
+      "condition": "proceed"
     },
     {
       "source": "route_refine_design",
-      "target": "research_director",
-      "condition": "proceed"
+      "target": "design_doc",
+      "condition": "light"
     },
     {
       "source": "route_strategy",
@@ -523,6 +580,16 @@
       "source": "synthesize_strategy",
       "target": "design_doc",
       "condition": null
+    },
+    {
+      "source": "widen_research",
+      "target": "pitfalls_researcher",
+      "condition": "proceed"
+    },
+    {
+      "source": "widen_research",
+      "target": "research_director",
+      "condition": "reloop"
     }
   ]
 }

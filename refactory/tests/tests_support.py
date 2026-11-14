@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterator
 
 from refactory_dsh import dsh_profile
+from refactory_dsh.design_ops import SIZER_MARK
 
 
 def _profile(home: Path, name: str, bundles: list[str]) -> Path:
@@ -688,9 +689,15 @@ class FakeModel:
     scripted verdict for each call, and finds everything built once that is empty.
     """
 
-    def __init__(self, answers: list[str], early_asks: list[str] | None = None) -> None:
+    def __init__(self, answers: list[str], early_asks: list[str] | None = None,
+                 sizer: list | None = None) -> None:
         self.answers = list(answers)
         self.early_asks = list(early_asks or [])
+        #: The change sizer's answers, in order (`design.SIZER_PROMPT`): an exception is
+        #: raised, as a session that failed or timed out; with none left it answers
+        #: nothing, which sizes the change full, so a script written before the sizer
+        #: keeps today's prompts.
+        self.sizer = list(sizer or [])
         self.prompts: list[str] = []
         #: The directory each completion was told to run in; see the walker's `_ask_model`.
         self.workdirs: list[object] = []
@@ -720,6 +727,12 @@ class FakeModel:
         if EARLY_ASKS_JUDGE_MARK in prompt:
             queue = getattr(self, "early_asks", None)
             return queue.pop(0) if queue else early_asks_judgment(prompt=prompt)
+        if SIZER_MARK in prompt:
+            queue = getattr(self, "sizer", None)
+            answer = queue.pop(0) if queue else ""
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         beside = (next((text for marker, text in BESIDE_CHECK_REVIEWS if marker in prompt), None)
                   if BESIDE_CHECK in prompt else None)
         if beside is not None and self.answers and _is_emission(self.answers[0]):
