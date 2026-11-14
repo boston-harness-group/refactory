@@ -788,6 +788,8 @@ class ProposalContext:
             + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
              if self.mean_over else f"Mean score so far: {self.mean_score}."),
             "",
+            *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
+                             gated=bool(self.selection)),
             *([self.steering, ""] if self.steering.strip() else []),
             *_strategy_section(self.strategy, self.strategy_name),
             "## Parameters you may move",
@@ -860,7 +862,9 @@ class ProposalContext:
             "",
             "## Evidence from the traces",
             _table(["what", "value"],
-                   [[str(k), json.dumps(v, default=str)] for k, v in _trace_rows(self.traces)]),
+                   [[str(k), json.dumps(v, default=str)] for k, v in _trace_rows(
+                       self.traces, omit=UNSCORED_TRACE_KEYS
+                       if self.parsimony == 0 and self.score_is_item_mean else ())]),
         ]
         if self.edit_pairs:
             sections += ["", *_edit_change_lines(self.edit_pairs)]
@@ -1295,6 +1299,62 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     for title, bundle in examples:
         lines += [f"- {title}", "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
     return lines + [""]
+
+
+#: What a run's score does not count unless the task's own score measures it.
+_UNSCORED = "inference cost, latency, and the number of steps or model calls"
+#: How the validation gate decides (``ValidationGate.judge_round``), said beside the
+#: objective in every request, since the analyst, merge and memory requests do not carry
+#: the proposal request's gate note.
+_GATE_RULE = ("The validation gate decides on the task's score on the validation items: "
+              "it keeps a candidate only when that score beats the current candidate's{none}; "
+              "a train score{train} only breaks a tie between candidates that beat the "
+              "current one by the same validation score; a tie with the current candidate "
+              "is rejected.")
+
+
+def objective_text(parsimony: float | None, *, item_mean: bool = False,
+                   gated: bool = False) -> str:
+    """What the score measures, said from the run's own settings (``LoopConfig.parsimony``,
+    whether the score is the items' mean and whether a validation gate decides), so the
+    optimizer does not trade task score for a cost the run does not count. Empty when
+    ``parsimony`` is not known (``None``). Domain-free: it names no task, and it says
+    that cost is outside the score only as far as the loop knows: a task's own score
+    may measure it.
+
+    With parsimony 0 the score is the task's own score and nothing else. Above 0 the
+    train score carries ``parsimony`` per node of the graph, as `Loop` computes it. Under
+    the validation gate (either way) the gate's own comparison is the task's validation
+    score, which carries no size cost; a train score only breaks a tie between
+    candidates that beat the current one by the same validation score, and a tie with
+    the current one is rejected (``ValidationGate.judge_round``)."""
+    if parsimony is None:
+        return ""
+    task = "the task's own score" + (" (the mean of the items' scores)" if item_mean else "")
+    unless = "unless the task's own score measures them"
+    if not parsimony:
+        text = (f"The score is {task} and nothing else. This run adds no cost term to it "
+                f"(parsimony is 0): {_UNSCORED} are not part of the score {unless}. A "
+                "change is judged only by the task score it reaches.")
+        return text + (" " + _GATE_RULE.format(none="", train="") if gated else "")
+    size = (f"a size cost of {parsimony:g} per node of the pipeline's graph (score = raw "
+            f"score - {parsimony:g} x nodes)")
+    rest = ("Apart from that size cost, inference cost, latency and the number of model "
+            f"calls are not part of the score {unless}.")
+    if gated:
+        return (f"The train scores shown are {task} minus {size}. "
+                + _GATE_RULE.format(none=", and that score carries no size cost",
+                                    train=", size cost included,")
+                + f" {rest}")
+    return f"The score is {task} minus {size}. {rest}"
+
+
+def objective_lines(parsimony: float | None, *, item_mean: bool = False,
+                    gated: bool = False) -> list[str]:
+    """"What the score measures" (`objective_text`) as request lines; none when not
+    known."""
+    text = objective_text(parsimony, item_mean=item_mean, gated=gated)
+    return ["## What the score measures", text, ""] if text else []
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -2516,8 +2576,17 @@ TRACE_OMITTED_KEYS = ("leaderboard", "measurements", "workers", "workdir", "tria
 TRACE_TEXT_CHARS = 160
 
 
-def _trace_rows(traces: Sequence[dict[str, Any]]) -> list[tuple[str, Any]]:
-    """The traces as the request shows them: no receipts, no paths, short texts."""
+#: The trace rows about what running a pipeline cost (seconds, inner model calls). Left
+#: out of the request when the loop adds no cost term (parsimony 0) and the score is the
+#: items' mean (so no cost is in it): the run's gradient.json, journal and report keep
+#: them.
+UNSCORED_TRACE_KEYS = ("cost",)
+
+
+def _trace_rows(traces: Sequence[dict[str, Any]],
+                omit: Sequence[str] = ()) -> list[tuple[str, Any]]:
+    """The traces as the request shows them: no receipts, no paths, short texts, and
+    none of the top-level rows ``omit`` names."""
 
     def short(text: str) -> str:
         return text if len(text) <= TRACE_TEXT_CHARS else (
@@ -2534,7 +2603,7 @@ def _trace_rows(traces: Sequence[dict[str, Any]]) -> list[tuple[str, Any]]:
         return value
 
     return [(key, clean(value)) for key, value in _flatten(traces)
-            if key not in TRACE_OMITTED_KEYS]
+            if key not in TRACE_OMITTED_KEYS and key not in omit]
 
 
 def _flatten(rows: Sequence[dict[str, Any]]) -> list[tuple[str, Any]]:

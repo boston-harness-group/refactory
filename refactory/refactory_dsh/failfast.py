@@ -61,6 +61,8 @@ class PrepassResult:
     #: Chunks whose command pytest could not parse at all (exit 4 with no not-found id):
     #: a broken command is a harness fault, and the self-check stops instead of pretending.
     broken_command: list[str] = field(default_factory=list)
+    #: What pytest printed for each broken command, in the same order: its own error.
+    broken_output: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # why a chunk did not count
     limit_s: float = 0.0
     elapsed_s: float = 0.0
@@ -243,6 +245,7 @@ def _self_check(
     commands: list[str] = []
     ran_nothing: list[str] = []
     broken_command: list[str] = []
+    broken_output: list[str] = []
     notes: list[str] = []
     failed_outputs: list[str] = []
     timings: list[dict[str, Any]] = []
@@ -382,6 +385,7 @@ def _self_check(
                 # removed, are recorded and go on to the whole check).
                 if "exit 4" in why_not and not dropped:
                     broken_command.append(command)
+                    broken_output.append(_output(result))
                 elif not dropped:
                     ran_nothing.append(command)
             continue
@@ -413,10 +417,53 @@ def _self_check(
         digest_text=digest_text, runners=runners, raw_tail=raw_tail,
         selection=list(selection), ran_ids=ran, cut_ids=cut, failing_ids=failing,
         commands=commands, notes=notes, limit_s=limit_s, ran_nothing=ran_nothing,
-        broken_command=broken_command,
+        broken_command=broken_command, broken_output=broken_output,
         elapsed_s=round(time.monotonic() - started, 1),
         outputs=failed_outputs, left_out=sorted(inherited), timings=timings,
     )
+
+
+def dropped_options(check_command: str, targeted: str) -> list[str]:
+    """The options of the check's pytest steps that the targeted command does not carry."""
+    from refactory_dsh.base_check import _steps
+    from refactory_dsh.check_probe import is_pytest
+
+    def pytest_words(command: str) -> list[str]:
+        return [word for step in _steps(command) if is_pytest(step)
+                for word in _split(step)]
+
+    carried = set(pytest_words(targeted))
+    return list(dict.fromkeys(word for word in pytest_words(check_command)
+                              if word.startswith("-") and word not in carried))
+
+
+def _split(step: str) -> list[str]:
+    import shlex
+
+    try:
+        return shlex.split(step)
+    except ValueError:
+        return []
+
+
+def broken_command_message(check_command: str, targeted: str, output: str) -> str:
+    """Why a self-check ran no test: pytest's own error, and dropped options only when some were.
+
+    The targeted command keeps the check's options (`check_digest.build_probe_command`),
+    so a usage error is usually the check's own -- an option no installed plugin provides
+    -- and pytest's output says which.
+    """
+    from refactory_dsh.base_check import strip_ansi
+    from refactory_dsh.check_probe import exit_meaning
+
+    tail = "\n".join(strip_ansi(output).strip().splitlines()[-15:]) or "(it printed nothing)"
+    message = (f"the targeted check ran no tests: `{targeted}` exited 4 ({exit_meaning(4)}), "
+               f"so this self-check could not run at all. pytest said:\n{tail}")
+    dropped = dropped_options(check_command, targeted)
+    if dropped:
+        message += ("\nThe check command's options " + ", ".join(dropped)
+                    + " were not carried into the targeted command.")
+    return message
 
 
 def without_failures(prepass: PrepassResult, test_ids: list[str]) -> PrepassResult:
@@ -505,13 +552,11 @@ def targeted_prepass(
         result = _self_check(selection, prev_record, check_command, run_check_fn, limit, root,
                              alone)
         if result.broken_command:
-            # pytest could not parse the targeted command, so no test could run. The command
-            # is the harness's, and a self-check that cannot run is a fault, not a verdict.
-            raise RuntimeError(
-                "the targeted check ran no tests: "
-                + result.broken_command[0]
-                + " (pytest could not parse it, exit 4). The check command's options were not "
-                  "carried into the targeted one, so this self-check could not run at all.")
+            # pytest could not parse the targeted command, so no test could run. A
+            # self-check that cannot run is a fault, not a verdict.
+            raise RuntimeError(broken_command_message(
+                check_command, result.broken_command[0],
+                result.broken_output[0] if result.broken_output else ""))
         return result
 
     # 1. Skip when previous record is not a failure.

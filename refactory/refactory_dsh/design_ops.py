@@ -319,6 +319,12 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
     located = repo_change.locate(ctx, name, task, in_worktree=in_worktree,
                                  needs_worktree=("refine",) if deliver else (),
                                  output_only=PLANNING_STEPS)
+    # A check that may not run at all on this target is said in the run's first minute,
+    # in its log and on the approval card, not found after the build
+    # (`check_probe.probe_check`). Advisory: the change may add what the base lacks.
+    from refactory_dsh.check_probe import probe_check
+
+    check_probe_warning = probe_check(ctx, check)
 
     # Compute research_scope.  A refine is always scoped; everything else starts
     # as full.  In design's graph the sizer may make it scoped before research
@@ -406,6 +412,7 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
     # apply_corrections updates it with the gate corrections after approval.
     requirements_and_corrections = brief if brief else "(no requirements yet)"
     return {"name": name, "brief": brief, "check": check, "validation": "(no check has run yet)",
+            "check_probe_warning": check_probe_warning,
             "research_review": "(no research review has run yet)",
             "research_scope": research_scope, "research_scope_reason": research_scope_reason,
             "design_review_feedback": "(no design review has run yet)",
@@ -1168,6 +1175,9 @@ def design_review_status(facts: dict) -> str:
     - ``Scale: <scoped|full> — <reason>``, and when a sizer sized the change before
       research, `` (before research: <scope> — <reason>)`` on the same line, naming
       the widening when a lean research was widened;
+    - ``Check may not run at base: … (advisory)`` (``in the artifact's directory`` without
+      a worktree) and the tail of the tool's output, one
+      ``- `` line each, when prepare's probe of the check found a fault (`check_probe`);
     - ``Unverified claims (high, advisory): N``, one ``- unverified claim: …`` line each:
       what the claims check could not confirm;
     - ``Claims check (advisory): N notes``: where a drifted quote was found;
@@ -1196,6 +1206,10 @@ def design_review_status(facts: dict) -> str:
                       f"{facts.get('presize_scope_reason') or ''}"
                       + (f"; widened after lean research: {widened}" if widened else "") + ")")
         lines.append(f"Scale: {facts.get('research_scope') or 'full'} — {reason}{before}")
+    probe_head, *probe_tail = str(facts.get("check_probe_warning") or "").splitlines() or [""]
+    if probe_head:
+        lines.append(f"{probe_head} (advisory)")
+        lines.extend(f"- {line}" for line in probe_tail)
     claims = facts.get("claims_check")
     claims = claims if isinstance(claims, dict) else {}
     unverified = [str(item) for item in claims.get("unverified") or ()]
