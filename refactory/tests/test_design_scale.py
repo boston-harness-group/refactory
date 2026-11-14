@@ -997,17 +997,11 @@ from refactory_dsh.design_ops import (  # noqa: E402
     SIZER_MARK,
     clear_sizing,
     presize_scale,
-    route_sizing,
     scale_from_footprints,
     widen_research,
 )
 from refactory_dsh.model import CompletionTimeout  # noqa: E402
 from refactory_dsh.nn.executor import RunContext  # noqa: E402
-from test_delivery import (  # noqa: E402,F401  (the fake GitHub's fixtures, for a full refine)
-    _opened_golden,
-    _stage,
-    opened_pull,
-)
 from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER, RESEARCH_ANSWER,  # noqa: E402
                            SCOPED_RESEARCH_ANSWER)
 
@@ -1114,9 +1108,6 @@ def _full(reason):
 def test_presize_decision_table(tmp_path):
     """Every row of presize_scale, first match wins; only the last is scoped."""
     rows = [
-        # 0: a refine keeps its scale.
-        (dict(sizing=_sizing(), facts={"research_scope": "scoped",
-                                        "research_scope_reason": REFINE_SCOPE_REASON}), {}),
         (dict(sizing=_sizing(), source=""), _full("no checkout to check the sizer's citations against")),
         (dict(sizing=_sizing(), missing="CompletionTimeout: wall\nmore"),
          _full("the sizer did not finish: CompletionTimeout: wall")),
@@ -1147,15 +1138,6 @@ def test_presize_decision_table(tmp_path):
         result = presize_scale(_presize_ctx(tmp_path, f"row{n}", **given))
         assert result == expected, (n, result)
         assert REFINE_SCOPE_REASON not in result.values()
-
-
-def test_route_sizing_sends_only_a_refine_past_the_sizer(tmp_path):
-    refine = _presize_ctx(tmp_path, "refine", facts={"research_scope": "scoped",
-                                                    "research_scope_reason": REFINE_SCOPE_REASON})
-    assert route_sizing(refine) == "refine"
-    for name, reason in (("fresh", ""), ("other", "a reason prepare never writes")):
-        assert route_sizing(_presize_ctx(tmp_path, name, facts={"research_scope_reason": reason})) \
-            == "proceed"
 
 
 def test_clear_sizing_removes_a_stale_verdict(tmp_path):
@@ -1226,8 +1208,6 @@ def test_widen_research_cases(tmp_path):
         ("scoped", SCOPED_PLAN, {}, "proceed"),
         ("full_presize", ENGINE_PLAN, {"presize_scope": "full"}, "proceed"),
         ("no_presize", ENGINE_PLAN, {"presize_scope": None}, "proceed"),
-        ("refine", ENGINE_PLAN, {"research_scope": "scoped",
-                                 "research_scope_reason": REFINE_SCOPE_REASON}, "proceed"),
         ("attempts_spent", ENGINE_PLAN, {"research_attempts_used": 1}, "reloop"),
     ]
     for name, plan, facts, expected in cases:
@@ -1523,35 +1503,11 @@ def test_card_shows_both_scales(tmp_path):
     assert f"(before research: scoped — {ONE_FUNCTION})" in run.facts["design_card"]
 
 
-def test_full_refine_skips_the_sizer_and_stays_a_refine(opened_pull, tmp_path):
-    """refine_design=full keeps its scale, so route_sizing sends it to research past the
-    sizer: no sizer call is made, and the widening gate never widens it."""
-    from test_delivery import NAME
-
-    mode = DesignMode()
-    state = mode.state_dict()
-    state["knobs"]["refine_design"]["value"] = "full"
-    mode.load_state_dict(state)
-    from tests_support import FakeModel
-
-    model = FakeModel([ENGINE_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER], sizer=[_sizing()])
-    run = mode.run(tmp_path / "refine", model=model,
-                   task={"name": NAME, "brief": "Add more.py that prints two.",
-                         "check": "python tool.py", "refine": opened_pull.url})
-    assert run.gate_stop == "gate_strategy", run.error
-    assert _asked(model, SIZER_MARK) == [] and model.sizer == [_sizing()]
-    assert not (run.workdir / "sizing.json").exists()
-    assert len(_asked(model, RESEARCH_DIRECTOR)) == 1
-    assert (run.facts["research_scope"], run.facts["research_scope_reason"]) == (
-        "scoped", REFINE_SCOPE_REASON)
-    assert "presize_scope" not in run.facts and "research_widenings_used" not in run.facts
-
-
 def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
     from refactory_dsh.nn.validate import validate_state
 
-    sizing_nodes = ("route_sizing", "clear_sizing", "fork_size", "size_change", "join_size",
-                    "presize_scale", "widen_research")
+    sizing_nodes = ("clear_sizing", "fork_size", "size_change", "join_size", "presize_scale",
+                    "widen_research")
 
     def without_sizer(state):
         graph = state["graph"]

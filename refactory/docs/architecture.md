@@ -697,9 +697,8 @@ Non-refine research is guided to 3 to 5 directions. A full design keeps the
 perspectives step.
 
 **Sizing before research.** On `route_refine_design`'s `proceed` edge the change is
-sized before research, so a small fix gets a lean research plan. `route_sizing` sends a
-refine, which keeps its scale, straight to `research_director` with no sizer call
-(`refine`); everything else goes on (`proceed`). `clear_sizing` removes
+sized before research, so a small fix gets a lean research plan (a refine never reaches
+it: `route_refine_design` sends a refine straight to `design_doc`). `clear_sizing` removes
 an earlier visit's verdict; `fork_size` starts `size_change`, its only and optional
 branch: a tool-using agent bounded by `SIZER_TIMEOUT_S` (600 s), told to read only, to
 spawn no subagents and to use no web. It locates where a bug's behaviour lives, or where

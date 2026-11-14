@@ -764,18 +764,6 @@
       "max_iterations": 2,
       "_type": "GateNode"
     },
-    "route_sizing": {
-      "id": "route_sizing",
-      "reads": [],
-      "writes": [],
-      "blocking": true,
-      "evaluator_type": "fn",
-      "evaluator_role": null,
-      "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:route_sizing",
-      "gate_prompt": "a refine keeps its scale, so it goes to research without a sizer; everything else is sized first",
-      "max_iterations": 1,
-      "_type": "GateNode"
-    },
     "route_strategy": {
       "id": "route_strategy",
       "reads": [],
@@ -1190,23 +1178,13 @@
     },
     {
       "source": "route_refine_design",
-      "target": "design_doc",
-      "condition": "light"
-    },
-    {
-      "source": "route_refine_design",
-      "target": "route_sizing",
-      "condition": "proceed"
-    },
-    {
-      "source": "route_sizing",
       "target": "clear_sizing",
       "condition": "proceed"
     },
     {
-      "source": "route_sizing",
-      "target": "research_director",
-      "condition": "refine"
+      "source": "route_refine_design",
+      "target": "design_doc",
+      "condition": "light"
     },
     {
       "source": "route_strategy",

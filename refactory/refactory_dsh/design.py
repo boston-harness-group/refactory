@@ -545,11 +545,6 @@ class DesignMode(Mode):
         # ── sizing before research: a bounded agent reads the code the change touches,
         # and the shared rule turns its verdict into the research scope ──
         graph.add(Node(
-            "route_sizing", "gate", evaluator=f"{OPS}:route_sizing",
-            notes="a refine keeps its scale, so it goes to research without a sizer; "
-                  "everything else is sized first",
-        ))
-        graph.add(Node(
             "clear_sizing", "op", call=f"{OPS}:clear_sizing",
             writes=(SIZING, SIZER_MISSING),
             notes="remove an earlier visit's sizing verdict, so only this visit's is read",
@@ -1336,9 +1331,7 @@ class DesignMode(Mode):
         ))
 
         graph.connect("prepare", "route_refine_design")
-        graph.connect("route_refine_design", "route_sizing", condition="proceed")
-        graph.connect("route_sizing", "clear_sizing", condition="proceed")
-        graph.connect("route_sizing", "research_director", condition="refine")
+        graph.connect("route_refine_design", "clear_sizing", condition="proceed")
         graph.connect("clear_sizing", "fork_size")
         # No edge from size_change to join_size, as fork_qa's branches have none.
         graph.connect("fork_size", "join_size")

@@ -1088,21 +1088,6 @@ SIZING = "sizing.json"
 SIZER_MISSING = "reviews/size_change-missing.txt"
 
 
-def route_sizing(ctx: Any) -> Any:
-    """Send a refine straight to research; size everything else first.
-
-    A refine keeps its scale (`REFINE_SCOPE_REASON`, set by prepare), so a sizer's verdict
-    would be thrown away (`presize_scale` returns nothing for one): the refine goes to
-    `research_director` without the model call. ``proceed`` sizes the change, which is
-    also what a person's skip of this gate sends on the spine, and loses nothing.
-    """
-    from refactory_dsh.nn import Verdict
-
-    if ctx.facts.get("research_scope_reason") == REFINE_SCOPE_REASON:
-        return Verdict("refine", "a refine keeps its scale: research without sizing it")
-    return Verdict("proceed", "size the change before research")
-
-
 def clear_sizing(ctx: Any) -> dict[str, Any]:
     """Op: remove an earlier visit's sizing verdict and missing marker, before the sizer runs.
 
@@ -1125,13 +1110,11 @@ def presize_scale(ctx: Any) -> dict[str, Any]:
     Conservative: anything but a ``scoped`` answer whose footprint resolves in the
     target's checkout and passes the rule (`scale_from_footprints`) is full -- a missing
     or unparseable verdict, a sizer that did not finish, any cross-cutting sign, a
-    footprint that cites no code. A refine keeps its scale (``{}``; design's graph sends
-    it past the sizer, `route_sizing`). Never raises; it
-    reads only ``sizing.json`` and its missing marker, never the brief, and the target's
-    code from the ``source`` fact, never ``ctx.workdir``.
+    footprint that cites no code. A refine never gets here: route_refine_design sends it
+    straight to design_doc. Never raises; it reads only ``sizing.json`` and its missing
+    marker, never the brief, and the target's code from the ``source`` fact, never
+    ``ctx.workdir``.
     """
-    if ctx.facts.get("research_scope_reason") == REFINE_SCOPE_REASON:
-        return {}
     source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")
 
     def _scale(scope: str, reason: str) -> dict[str, Any]:
@@ -1358,13 +1341,12 @@ def widen_research(ctx: Any) -> Any:
     engine), research is sent back once at full scope, with the reason in its review.
     New items alone do not widen it. The one round is counted in
     ``research_widenings_used`` (`_resend_once`), so a second visit proceeds whatever the
-    graph's iteration limit. A refine, and a graph with no sizer, always proceed.
+    graph's iteration limit. A graph with no sizer always proceeds (no ``presize_scope``),
+    and a refine never gets here: route_refine_design sends it straight to design_doc.
     """
     from refactory_dsh.create_ops import _extract_json_array
 
     if ctx.facts.get("presize_scope") != "scoped":
-        return "proceed"
-    if ctx.facts.get("research_scope_reason") == REFINE_SCOPE_REASON:
         return "proceed"
     raw = ctx.read_text("research-plan.json") if ctx.exists("research-plan.json") else ""
     source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")

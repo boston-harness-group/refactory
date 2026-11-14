@@ -221,7 +221,6 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
     """prepare, the route and the sizing chain; the sizer writes ``sizing``, or goes missing."""
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
-    assert spine.node("route_sizing") == "proceed"
     spine.node("clear_sizing")
     if sizing is None:
         (spine.run / "reviews").mkdir(exist_ok=True)
@@ -323,22 +322,3 @@ def test_unknown_sizing_on_the_spine_is_full(tmp_path):
     research = _research(spine, RESEARCH_ANSWER)
     assert "between three and five questions for a full design" in research
     assert spine.node("widen_research") == "proceed"
-
-
-def test_a_full_refine_skips_the_sizer_on_the_spine(opened_pull, tmp_path):
-    """refine_design=full: route_sizing's lowered command sends the refine to research, which
-    the lowered graph routes past the sizer, so no sizer call is made; the widening gate never
-    widens a refine, whatever its research's footprint."""
-    spine = _refine(opened_pull.url, tmp_path, refine_design="full")
-    spine.node("prepare")
-    assert spine.node("route_refine_design") == "proceed"
-    assert spine.node("route_sizing") == "refine"
-    assert {(edge.target, edge.condition) for edge in spine.workflow.edges
-            if edge.source == "route_sizing"} == {("research_director", "refine"),
-                                                  ("clear_sizing", "proceed")}
-    assert not (spine.run / "sizing.json").exists()
-    assert "presize_scope" not in spine.facts()
-    _research(spine, _plan(engine=["app.py:1"]))
-    assert spine.node("widen_research") == "proceed"
-    assert (spine.facts()["research_scope"], spine.facts()["research_scope_reason"]) == (
-        "scoped", REFINE_SCOPE_REASON)
