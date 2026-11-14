@@ -119,7 +119,8 @@ def test_the_cap_is_enforced_and_one_is_todays_behaviour():
     assert isinstance(_attempt(Proposal(edits=four)), Candidate), "the default allows 4"
     assert MAX_EDITS_PER_PROPOSAL == 4
     refused = _attempt(Proposal(edits=(*four, _knob("level", 1))))
-    assert refused[0].startswith("E-too-many-edits") and "the limit is 4 edits per proposal" in refused[0]
+    assert refused[0].startswith("E-too-many-edits") and "the limit is 4 changes per proposal" in refused[0]
+    assert "makes 5 changes (5 edits)" in refused[0], "knob edits each count"
     single_only = _attempt(Proposal(edits=four[:2]), max_edits=1)
     assert single_only[0].startswith("E-too-many-edits")
     assert isinstance(_attempt(Proposal(edit=_knob("level", 1)), max_edits=1), Candidate)
@@ -254,7 +255,9 @@ def test_autoresearch_parses_lists_and_says_it_may_bundle():
     assert [p.steps for p in proposals[1:]] == [pair, [_knob("level", 1)]]
     assert proposal_refusal(proposals[0])[0].startswith("E-proposal-shape: entry 2 of its 2")
     assert proposals[1].rationale == "cascade"
-    assert "up to\n4 edits" in client.prompts[0] or "up to 4 edits" in client.prompts[0].replace("\n", " ")
+    flat = client.prompts[0].replace("\n", " ")
+    assert "up to 4 changes as an ordered list of edits" in flat
+    assert "A structural edit and the edits that only connect it count as one change" in flat
     assert '"edits": [' in client.prompts[0]
     optimizer.propose(ProposalContext(max_edits=1), 1, [parent])
     assert '"edits": [' not in client.prompts[1], "a run of single edits does not mention bundles"

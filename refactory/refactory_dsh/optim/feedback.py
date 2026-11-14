@@ -1,16 +1,13 @@
 """What the optimizer learns across a run, beyond its recent candidates.
 
-Three request sections, each behind a ``LoopConfig`` switch:
+Two request sections, each behind a ``LoopConfig`` switch (the loop's memory note,
+``lessons``, is `optim.memory`'s):
 
 - **Every change so far, by kind** (``run_ledger``): every judged candidate of the run
   with the kind of change it made (``change_kind``), what it touched, its train
   fixed/broken counts against its parent and the gate's outcome word, after a tally by
   kind. Without it the optimizer sees only its last few candidates and cannot tell that
   a kind of change has failed every time it was tried.
-- **Your lessons so far** (``lessons``): the optimizer's own short notes on which
-  changes help here, written in its answer and shown back next round, so what it
-  learned is carried forward rather than re-derived (SkillOpt's slow update does this
-  for its skill text).
 - **Did the added steps contribute?** (``step_review``): for each step a candidate of
   the last round added, the train items it fixed and broke, how often the final answer
   (what the grader read) changed, and a reviewer's verdict on whether the step's output holds anything
@@ -50,9 +47,6 @@ LEDGER_ROWS = 40
 LEDGER_CHARS = 9000
 LEDGER_RATIONALE_CHARS = 140
 LEDGER_TOUCHED = 4
-
-#: The most characters of lessons kept and shown.
-LESSONS_CHARS = 1500
 
 #: Steps reviewed per request and train items each review reads. A review reads each
 #: item's texts (the step's input as sent, its output, the next reader's output) whole;
@@ -270,44 +264,6 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     return [*lines, table]
 
 
-# ── lessons ─────────────────────────────────────────────────────────────────
-
-
-def lessons_text(value: Any) -> str:
-    """An answer's ``lessons`` as text within ``LESSONS_CHARS``: a string as written, a
-    list as one line per entry; empty when it carries none."""
-    if isinstance(value, (list, tuple)):
-        text = "\n".join(f"- {str(entry).strip()}" for entry in value if str(entry).strip())
-    elif isinstance(value, str):
-        text = value.strip()
-    else:
-        text = ""
-    return text if len(text) <= LESSONS_CHARS else text[:LESSONS_CHARS - 1] + "…"
-
-
-def lessons_lines(lessons: Mapping[str, Any] | None) -> list[str]:
-    """"Your lessons so far": the latest lessons the optimizer wrote, with when, and,
-    when a later answer could not be read (``not_updated``), that they were not updated
-    then and why; nothing before it has written any or had an answer unread."""
-    lessons = lessons or {}
-    text = lessons_text(lessons.get("text"))
-    stale = lessons.get("not_updated") or {}
-    if not text and not stale:
-        return []
-    lines = ["## Your lessons so far"]
-    if text:
-        lines.append(f"What you wrote under `lessons` in epoch {lessons.get('epoch', '?')} "
-                     f"(generation {lessons.get('generation', '?')}). Check them against the "
-                     "results since; keep, revise or drop them in your answer.")
-    if stale:
-        lines.append(f"NOT UPDATED in epoch {stale.get('epoch', '?')} (generation "
-                     f"{stale.get('generation', '?')}): your answer then could not be read "
-                     f"({_clip(stale.get('why'), 300)}), so its lessons were lost"
-                     + ("; these are the earlier ones, unchanged." if text
-                        else "; you have none kept yet."))
-    return [*lines, *([text] if text else [])]
-
-
 # ── added steps ─────────────────────────────────────────────────────────────
 
 
@@ -516,13 +472,26 @@ def decision_step(graph: Mapping[str, Any] | None, step: str,
     if readers is None:
         return False
     nodes = ((graph or {}).get("graph") or {}).get("nodes") or {}
-    if not readers and not any(isinstance(node, Mapping) and node.get("kind") == "data"
-                               and node.get("subgraph_exit") == step
-                               for node in nodes.values()):
+    if not readers and not ends_pass(graph, step):
         return False  # what it writes reaches no step and is not the pass's end
     if any(_node_kind(nodes.get(reader)) == "agent" for reader in {*readers, *handed_to(graph, step)}):
         return False
     return all(not sample.get("next_step") for sample in samples)
+
+
+def ends_pass(state: Mapping[str, Any] | None, step: str) -> bool:
+    """Whether ``step`` ends the pass the grader reads: a data node's ``subgraph_exit``;
+    in a graph with no data node declaring one, a step no edge leaves (the graph's own
+    end, whose output the scorer reads)."""
+    graph = (state or {}).get("graph") or {}
+    nodes = graph.get("nodes") or {}
+    exits = {node.get("subgraph_exit") for node in nodes.values()
+             if isinstance(node, Mapping) and node.get("kind") == "data"
+             and node.get("subgraph_exit")}
+    if exits:
+        return step in exits
+    return step in nodes and not any(isinstance(edge, Mapping) and edge.get("source") == step
+                                     for edge in graph.get("edges") or ())
 
 
 def handed_to(state: Mapping[str, Any] | None, step: str) -> set[str]:
@@ -597,15 +566,28 @@ STEP_REVIEW_SYSTEM = ("You review one step of an AI pipeline against what it was
 
 def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
                   room: int = STEP_REVIEW_ROOM) -> str:
-    """The review call for one added step, within ``room`` characters: its input as
-    sent, its output and the next step's output on up to ``STEP_REVIEW_ITEMS`` train
-    items, and domain-free questions. The frame and the step's own instructions are
-    counted first; the items' texts share the rest (`fit_samples`). A decision step
+    """The review call for one added step, within ``room`` characters with the system
+    prompt (``STEP_REVIEW_SYSTEM``) counted: its input as sent, its output and the next
+    step's output on up to ``STEP_REVIEW_ITEMS`` train items, and domain-free
+    questions. The frame and the step's own instructions are counted first; the items'
+    texts share the rest (`fit_samples`). When the instructions leave the items less
+    than ``STEP_REVIEW_FLOOR`` characters each, the instructions are cut too (head and
+    tail, the cut said), so a smaller ``room`` makes a shorter prompt. A decision step
     (``entry["decision"]``) is asked about instead (`decision_prompt`)."""
     build = decision_prompt if entry.get("decision") else _review_text
     samples = list(entry.get("samples") or ())
     blank = [{**sample, "input": "", "output": "", "next_output": ""} for sample in samples]
+    room = max(0, room - len(STEP_REVIEW_SYSTEM))
     frame = len(build(entry, mode_name, blank))
+    texts = sum(1 for s in samples for key in ("input", "output", "next_output") if s.get(key))
+    least = texts * (STEP_REVIEW_FLOOR + len("\n[... 0000000 characters omitted ...]\n"))
+    instructions = str(entry.get("instructions") or "")
+    if instructions and frame + least > room:
+        # The instructions crowd the items out: cut them to what the room leaves.
+        mark = len("\n[... 0000000 characters omitted ...]\n")
+        keep = max(STEP_REVIEW_FLOOR, len(instructions) - (frame + least - room) - mark)
+        entry = {**entry, "instructions": _clip_middle(instructions, keep)}
+        frame = len(build(entry, mode_name, blank))
     return build(entry, mode_name, fit_samples(samples, max(0, room - frame)))
 
 

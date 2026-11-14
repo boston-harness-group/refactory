@@ -45,7 +45,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 import structlog
 
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
-from refactory_dsh.optim.base import proposal_refusal, summarise_reasons
+from refactory_dsh.optim.base import RunStopped, proposal_refusal, summarise_reasons
 
 log = structlog.get_logger()
 
@@ -805,10 +805,19 @@ class OuterLoop:
             # A strategy's evaluation the time or token budget stopped: the search
             # ends on that budget and the strategy's own ending (finish_strategy) runs.
             run.stop(exc.reason)
+        except RunStopped as exc:
+            # A person's stop met inside an optimizer call's retry wait: the search ends
+            # as a stop at an epoch boundary ends it. The open epoch stays open, so a
+            # resume makes its step (the memory pass, the proposal round) again.
+            run.stop(exc.reason)
+            self._stopped_inside(exc)
         self.finish_strategy(run)
         if run.stopped:
             self.bound = str(run.stopped)
         return self.report()
+
+    def _stopped_inside(self, exc: BaseException) -> None:
+        """Record a stop met inside a step (`RunStopped`); a subclass journals it."""
 
     # ── what a subclass writes ─────────────────────────────────────────────
     def strategy(self, run: Run) -> None:

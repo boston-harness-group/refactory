@@ -88,6 +88,17 @@ class Task:
     #: it differs from the run's default; a run's own setting for a category wins.
     #: Default: none.
     integrity_policy: Mapping[str, str] = MappingProxyType({})
+    #: What the optimizer's analysts are shown in each item's header, as SkillOpt's
+    #: analysts see each item's task type: the names `item_meta` returns, a category of
+    #: the item, never its answer. A name also in ``grader_fields`` is never shown.
+    #: Default: none.
+    item_metadata: tuple[str, ...] = ()
+
+    def item_meta(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """The values ``item_metadata`` names for one item, from its metadata: by default
+        the item's own fields of those names (a Task may derive them instead)."""
+        return {name: metadata[name] for name in self.item_metadata
+                if metadata.get(name) not in (None, "", [], {})}
 
     def instances(
         self, *, part: str | None = None, seed: int | None = None,
@@ -242,6 +253,48 @@ def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
                 allowances[str(name)] = (f"{allowances[name]}; {text}" if name in allowances
                                          else str(text))
     return {"policy": policy, "allowances": allowances}
+
+
+def item_metadata_reader(state: dict[str, Any]) -> Any:
+    """How a train record's declared metadata is read (``Task.item_metadata``,
+    ``Task.item_meta``) for the graph's Tasks: a function of a record returning
+    ``{name: value}``, never a name any Task lists in ``grader_fields``; ``None`` when no
+    Task declares any. A Task that cannot be loaded declares nothing."""
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(state.get("graph") or {})
+    except Exception:  # noqa: BLE001 - a graph that cannot be built declares nothing
+        return None
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    tasks: list[Task] = []
+    hidden: set[str] = {"id", "path"}
+    for ref in refs:
+        try:
+            task = load_task(ref)
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        hidden |= {str(name) for name in getattr(task, "grader_fields", ()) or ()}
+        if getattr(task, "item_metadata", ()):
+            tasks.append(task)
+    if not tasks:
+        return None
+
+    def read(record: dict[str, Any]) -> dict[str, Any]:
+        meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        out: dict[str, Any] = {}
+        for task in tasks:
+            try:
+                found = task.item_meta(meta)
+            except Exception:  # noqa: BLE001 - a header is a nicety, never a failure
+                continue
+            for name, value in (found or {}).items():
+                if (str(name) not in hidden and str(name) in task.item_metadata
+                        and value not in (None, "", [], {})):
+                    out.setdefault(str(name), value)
+        return out
+
+    return read
 
 
 def node_item(item: dict[str, Any], task: Task | None) -> dict[str, Any]:

@@ -3,8 +3,7 @@
 - ``run_ledger``: "Every change so far, by kind" lists every evaluated candidate of the
   run (not only the recent ones), with the kind of change it made, train fixed/broken
   against its parent and the gate's word, after a tally per kind; bounded.
-- ``lessons``: the answer's optional ``lessons`` are kept, journaled, shown back as "Your
-  lessons so far" and survive a resume; an answer without them keeps the old ones.
+- ``lessons``: the memory note (`optim.memory`; its tests are test_optimizer_memory.py).
 - ``step_review``: each step the last round added gets its train counts and one review
   call (``step_review``), cached, whose failure is shown and never fatal.
 - Readers' success patterns get their own heading and room.
@@ -175,63 +174,6 @@ def test_without_the_gate_the_ledger_has_no_gate_column():
     assert "| gate |" not in lines[-1] and "kept" not in "\n".join(lines)
 
 
-# ── lessons ─────────────────────────────────────────────────────────────────
-
-
-class Lessons(Recording):
-    """Writes lessons in rounds 1 and 3 (round 2's answer carries none)."""
-
-    WRITES = {1: "LESSON-ONE: prompt moves on level help", 3: "LESSON-THREE: revised"}
-
-    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
-        out = super().propose(ctx, n, parents)
-        self.last_lessons = self.WRITES.get(len(self.contexts), "")
-        return out
-
-
-def _lessons_run(tmp_path: Path, monkeypatch: Any, plan: list, **overrides: Any):
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
-    proposer = Lessons(plan)
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, **{"epochs": len(plan), "val_gate": True, **overrides})
-        loop.optimizer = proposer
-        loop.run()
-    return loop, proposer
-
-
-def test_lessons_are_kept_shown_back_and_kept_when_an_answer_has_none(tmp_path, monkeypatch):
-    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)], []])
-    first, second, third, fourth = (c.render() for c in proposer.contexts[:4])
-    assert '"lessons": "<optional, short: what the results so far teach' in first
-    assert "## Your lessons so far" not in first, "nothing written yet"
-    assert "LESSON-ONE" in _section(second, "## Your lessons so far")
-    assert "in epoch 1 (generation" in second
-    assert "LESSON-ONE" in third, "round 2 wrote none: the old lessons stay"
-    assert "LESSON-THREE" in fourth and "LESSON-ONE" not in fourth
-    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
-    written = [e["text"] for e in events if e.get("event") == "optimizer_lessons"]
-    assert written == [Lessons.WRITES[1], Lessons.WRITES[3]]
-    _no_val(_section(fourth, "## Your lessons so far"), loop)
-
-
-def test_lessons_survive_a_resume(tmp_path, monkeypatch):
-    _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 9)]])
-    again = Recording([[]])
-    with _patch_mode(LevelProbe):
-        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
-        resumed.optimizer = again
-        resumed.run()
-    assert resumed._lessons["text"] == Lessons.WRITES[3]
-    assert "LESSON-THREE" in _section(again.contexts[0].render(), "## Your lessons so far")
-
-
-def test_without_the_lessons_switch_nothing_is_asked_kept_or_shown(tmp_path, monkeypatch):
-    loop, proposer = _lessons_run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], []], lessons=False)
-    text = proposer.contexts[1].render()
-    assert '"lessons"' not in text and "## Your lessons so far" not in text
-    assert "optimizer_lessons" not in (loop.root / "journal.jsonl").read_text()
-
-
 class _Answering:
     """A proposal client answering with ``answer``; step reviews with ``review``."""
 
@@ -250,39 +192,6 @@ class _Answering:
             return self.review if isinstance(self.review, str) else json.dumps(self.review)
         self.proposals.append(prompt)
         return json.dumps(self.answer)
-
-
-def test_the_proposer_reads_lessons_from_its_answer_only_when_asked():
-    long = "L" * 5000
-    optimizer = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": long}))
-    optimizer.propose(ProposalContext(ask_lessons=True), 1, [])
-    assert optimizer.last_lessons == "L" * (feedback.LESSONS_CHARS - 1) + "…"
-    listed = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": ["a", "b"]}))
-    listed.propose(ProposalContext(ask_lessons=True), 1, [])
-    assert listed.last_lessons == "- a\n- b"
-    unasked = AutoresearchOptimizer(_Answering({"proposals": [], "lessons": "x"}))
-    unasked.propose(ProposalContext(ask_lessons=False), 1, [])
-    assert unasked.last_lessons == ""
-
-
-def test_a_parent_picker_hands_its_proposers_lessons_through():
-    from refactory_dsh.optim import compose, policies
-
-    proposer = AutoresearchOptimizer(_Answering({"proposals": []}))
-    paired = compose.PickedParent(policies.HillClimbSelector(), proposer)
-    proposer.last_lessons = "FROM-PROPOSER"
-    assert paired.last_lessons == "FROM-PROPOSER"
-    paired.last_lessons = ""
-    assert proposer.last_lessons == ""
-    proposer.last_reply_problem = "BROKEN"
-    assert paired.last_reply_problem == "BROKEN", "the loop reads why an answer was unread"
-    paired.last_reply_problem = ""
-    assert proposer.last_reply_problem == ""
-
-
-def test_lessons_shown_are_bounded():
-    lines = feedback.lessons_lines({"text": "x" * 9000, "epoch": 2, "generation": 3})
-    assert len(lines[-1]) == feedback.LESSONS_CHARS
 
 
 # ── added steps ─────────────────────────────────────────────────────────────
@@ -438,7 +347,10 @@ def test_a_failed_review_is_recorded_shown_and_never_fatal(tmp_path, review):
     assert "- `think` (agent" in section and "review: not available (" in section
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     failed = [t for t in trace if t["kind"] == "step_review"]
-    assert len(failed) == 1 and failed[0]["error"]
+    # A failed call is attempted three times (SkillOpt's retries); an unreadable reply once.
+    assert len(failed) == (3 if isinstance(review, Exception) else 1)
+    assert all(t["error"] for t in failed)
+    assert [t["attempt"] for t in failed] == list(range(1, len(failed) + 1))
     assert not list((tmp_path / "step_reviews").glob("*.json")), "a failure is not cached"
 
 
@@ -999,7 +911,7 @@ def test_a_rescore_after_full_slots_still_needs_room(tmp_path, monkeypatch, cap,
 FIRST_EDIT = {"op": "set_knob", "name": "k", "value": 2}
 #: The shape of the D-s42 epoch-5 answer: two proposals, the first one's ``edits`` list
 #: never closed, so the outer object is not JSON; the first edit alone parses.
-BROKEN = ('{"diagnosis": "D-TEXT", "considered": "C-TEXT", "lessons": "L-NEW",\n'
+BROKEN = ('{"diagnosis": "D-TEXT", "considered": "C-TEXT",\n'
           ' "proposals": [\n'
           '  {"edits": [' + json.dumps(FIRST_EDIT) + ',\n'
           '    {"op": "set_knob", "name": "k2", "patch": [{"kind": "append", "content": "x"}]\n'
@@ -1035,16 +947,14 @@ def test_a_broken_answer_is_read_as_nothing_and_each_asked_proposal_counted(tmp_
     optimizer = AutoresearchOptimizer(_Raw(text))
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
     optimizer.last_diagnosis = optimizer.last_considered = "AN EARLIER ROUND'S"
-    proposals = optimizer.propose(ProposalContext(ask_lessons=True), 2, [])
+    proposals = optimizer.propose(ProposalContext(), 2, [])
     assert len(proposals) == 2, "one refused stand-in per proposal asked for"
     for proposal in proposals:
         refused = proposal_refusal(proposal)
         assert refused[0].startswith("E-proposal-shape: your whole answer was not valid JSON ("
                                      + why), refused
-        assert "none of its proposals, nor its diagnosis or lessons" in refused[0]
-    assert optimizer.last_reply_problem.startswith(why)
-    assert (optimizer.last_diagnosis, optimizer.last_considered, optimizer.last_lessons) == (
-        "", "", "")
+        assert "none of its proposals, nor its diagnosis;" in refused[0]
+    assert (optimizer.last_diagnosis, optimizer.last_considered) == ("", "")
     record = json.loads(optimizer.trace_path.read_text().splitlines()[-1])
     assert (record["proposals"], record["unreadable"]) == (0, 2)
     assert record["error"].startswith("malformed answer: " + why)
@@ -1059,63 +969,6 @@ def test_an_answer_after_prose_braces_is_still_read():
         {"proposals": [{"edit": {"op": "x"}}]}, "")
     with pytest.raises(ValueError):
         answer_json("no braces at all")
-
-
-def test_lessons_not_updated_are_marked_and_cleared_by_new_ones(tmp_path, monkeypatch):
-    """An answer that could not be read keeps the lessons, says they were not updated
-    then and why; a later answer with lessons clears the mark."""
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
-    proposer = _BreaksAt([[(5, 7)], [(7, 8)], [(8, 9)], []])
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True)
-        loop.optimizer = proposer
-        loop.run()
-    third = _section(proposer.contexts[2].render(), "## Your lessons so far")
-    assert "NOT UPDATED in epoch" in third and "BROKEN-WHY" in third and "LESSON-ONE" in third
-    assert "these are the earlier ones, unchanged" in third
-    assert loop._lessons["text"] == "LESSON-THREE" and "not_updated" not in loop._lessons
-    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
-    marked = [e for e in events if e.get("event") == "optimizer_lessons" and e.get("not_updated")]
-    assert len(marked) == 1 and marked[0]["text"] == "LESSON-ONE"
-    assert marked[0]["not_updated"]["why"] == "BROKEN-WHY"
-
-
-class _BreaksAt(Lessons):
-    """Lessons in rounds 1 and 3; the answer of round ``BREAK`` could not be read."""
-
-    WRITES = {1: "LESSON-ONE", 3: "LESSON-THREE"}
-    BREAK = 2
-
-    def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
-        out = super().propose(ctx, n, parents)
-        self.last_reply_problem = "BROKEN-WHY" if len(self.contexts) == self.BREAK else ""
-        return out
-
-
-def test_a_lessons_mark_survives_a_resume(tmp_path, monkeypatch):
-    class Last(_BreaksAt):
-        BREAK = 3
-        WRITES = {1: "LESSON-ONE"}
-
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=3, val_gate=True)
-        loop.optimizer = Last([[(5, 7)], [(7, 8)], [(8, 9)]])
-        loop.run()
-    assert loop._lessons["not_updated"]["why"] == "BROKEN-WHY"
-    again = Recording([[]])
-    with _patch_mode(LevelProbe):
-        resumed = _loop(tmp_path, epochs=4, val_gate=True, resume=True)
-        resumed.optimizer = again
-        resumed.run()
-    shown = _section(again.contexts[0].render(), "## Your lessons so far")
-    assert "NOT UPDATED in epoch" in shown and "BROKEN-WHY" in shown and "LESSON-ONE" in shown
-
-
-def test_lessons_not_updated_without_earlier_lessons_still_say_so():
-    lines = feedback.lessons_lines({"not_updated": {"epoch": 1, "generation": 0, "why": "W"}})
-    assert lines[0] == "## Your lessons so far" and "NOT UPDATED in epoch 1" in lines[1]
-    assert "you have none kept yet" in lines[1] and len(lines) == 2
 
 
 # ── code steps and gates: measured, not reviewed ────────────────────────────
@@ -1291,7 +1144,7 @@ def test_a_review_reads_each_text_whole_and_any_cut_the_room_forces_is_said():
     assert "characters omitted" in fitted[0]["input"]
 
 
-# ── review follow-ups: fences, repeated lessons, long reviews, handovers ────
+# ── review follow-ups: fences, long reviews, handovers ──────────────────────
 
 
 def test_a_code_fence_inside_a_proposed_prompt_does_not_cut_the_answer():
@@ -1328,29 +1181,6 @@ def test_json_like_braces_in_prose_before_the_answer_are_passed_over(prose):
         {"diagnosis": "d", "proposals": []}, "")
 
 
-@pytest.mark.parametrize("writes", [{1: "LESSON-ONE", 3: "LESSON-ONE"}, {1: "LESSON-ONE"}])
-def test_a_readable_answer_clears_the_lessons_mark_even_with_the_same_lessons(
-        tmp_path, monkeypatch, writes):
-    """Round 2's answer was unread; round 3's was read but repeated (or carried no)
-    lessons: from round 4 on, no request says they were lost."""
-    class Repeats(_BreaksAt):
-        WRITES = writes
-
-    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
-    proposer = Repeats([[(5, 7)], [(7, 8)], [(8, 9)], [(9, 10)], []])
-    with _patch_mode(LevelProbe):
-        loop = _loop(tmp_path, epochs=5, val_gate=True)
-        loop.optimizer = proposer
-        loop.run()
-    texts = [c.render() for c in proposer.contexts]
-    assert "NOT UPDATED" in texts[2]
-    assert all("NOT UPDATED" not in text and "LESSON-ONE" in text for text in texts[3:])
-    assert "not_updated" not in loop._lessons and loop._lessons["text"] == "LESSON-ONE"
-    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()
-              if '"optimizer_lessons"' in line]
-    assert "not_updated" in events[-2] and "not_updated" not in events[-1], "cleared, journaled"
-
-
 class _TooLongOnce(_Answering):
     """Refuses the first review as longer than the model's context, then answers."""
 
@@ -1385,10 +1215,14 @@ def test_a_review_too_long_for_the_context_is_retried_once_at_half_its_length(tm
     assert again.reviews == [], "kept under the first call's key"
 
 
-def test_other_review_errors_are_not_retried():
+def test_other_review_errors_are_retried_as_skillopt_retries_a_call(monkeypatch):
+    from refactory_dsh.optim import random_optimizer
+
+    waits: list[float] = []
+    monkeypatch.setattr(random_optimizer, "_sleep", waits.append)
     client = _Answering({"proposals": []}, RuntimeError("503 overloaded"))
     AutoresearchOptimizer(client).propose(ProposalContext(added_steps=_added()), 1, [])
-    assert len(client.reviews) == 1
+    assert len(client.reviews) == 3 and waits == [1, 2, 4]
 
 
 def test_a_review_keeps_its_frame_and_instructions_inside_the_room():
