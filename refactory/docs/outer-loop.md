@@ -1043,22 +1043,32 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   - **Comparison calls.** The items in the comparison's order (regressions, persistent
     failures, improvements, then stable successes, still without traces) fill a call
     until the next item's pair whole would pass the room; every item is in exactly one
-    call, both traces whole, in SkillOpt's comparison format. Each call also reads what
-    changed between the pipelines, what the score measures and the counts over all
-    items, and writes up to 8 observations for the future optimizer: what regressed,
-    improved or still fails, and why, each citing its items with short quotes. Its
-    prompt is the memory prompt's, adapted: address the future optimizer, use the
-    traces' evidence, no instructions for the pipeline's steps. Domain-free.
+    call, both traces whole, in SkillOpt's comparison format. Each call also reads the
+    pipelines and what changed between them, exactly as the single call shows them (so
+    an observation can say where in the pipeline a problem starts), what the score
+    measures and the counts over all items, and writes up to 8 observations for the
+    future optimizer: what regressed, improved or still fails, and why, each citing its
+    items with short quotes. Its prompt is the memory prompt's, adapted: address the
+    future optimizer, use the traces' evidence, report what the traces show without
+    judging kinds of change in general (the synthesis weighs them against what was
+    tried), no instructions for the pipeline's steps. Domain-free.
   - **One synthesis call.** The single call's request -- both pipelines, what changed,
     what was tried, the objective, the previous note with SkillOpt's reflect wording
-    -- with every comparison call's observations, whole, in place of the traces. It
-    writes the note exactly as the single call does, under the same system prompt
-    with its rules (one line says the comparison was read in parts).
+    -- with every comparison call's observations in place of the traces. It writes
+    the note exactly as the single call does, under the same system prompt with its
+    rules (one line says the comparison was read in parts). The comparison calls are
+    asked for at most 6000 characters each; a part's observations past 12000 are cut
+    to fit, the longest texts first, each cut marked `… [cut: N chars]`. When the
+    pipelines are so large that they and the observations pass the room, the
+    pipelines' texts are clipped head and tail to fit. Both cuts are counted
+    (`synthesis_cuts` in the journal and report.json, a line in report.md).
   A model that reads more makes fewer calls and loses nothing; with a large enough
   context the pass is always the single call. Only an item pair longer than the room
   on its own is cut (head and tail, each cut said, "to fit the memory request's room")
   and counted. A failed comparison call fails the pass (no note from part of the
-  evidence). Any call refused as too long is retried once at half the length (a
+  evidence). A person's stop, a spent budget or a cancelled run starts no further
+  comparison call (likewise for analyst and merge calls). Any call refused as too long
+  is retried once at half the length (a
   comparison call with its traces cut to fit, counted; the synthesis with its pipeline
   texts clipped, the observations whole). The prompt is SkillOpt's `meta_skill.md` for a graph: address
   the future optimizer, what changes help or hurt here, regression risks, revise or drop

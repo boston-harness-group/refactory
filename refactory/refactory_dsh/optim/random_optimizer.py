@@ -662,7 +662,8 @@ class AutoresearchOptimizer(Optimizer):
         the calls it did not finish: the synthesis request holds every observation, so
         it is answered from the cache only when every comparison answered the same. A
         failed comparison fails the pass (no synthesis on part of the evidence), as a
-        failed single call does."""
+        failed single call does. A person's stop, or a call that stops the pass (a spent
+        budget, a cancelled run), starts no further comparison call (`_guarded`)."""
         from concurrent.futures import ThreadPoolExecutor
 
         from . import analysts, memory
@@ -693,7 +694,7 @@ class AutoresearchOptimizer(Optimizer):
                     "clipped_chars": int(clip.get("chars") or 0), "prompt_chars": len(prompt)}
 
         with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY, total))) as pool:
-            results = list(pool.map(compare, enumerate(parts, 1)))
+            results = list(pool.map(self._guarded(compare), enumerate(parts, 1)))
         out: dict[str, Any] = {
             "parts": total,
             "clipped_items": sum(r["clipped_items"] for r in results),
@@ -706,16 +707,57 @@ class AutoresearchOptimizer(Optimizer):
                     "cached": all(r["cached"] for r in results), "prompt_chars": 0,
                     "error": f"comparison part {failed[0]['part']} of {total} failed: "
                              f"{failed[0]['error']}"}
-        prompt = request.synthesis_prompt(results, memory.MEMORY_ROOM)
+        prompt, cuts = request.synthesis_prompt(results, memory.MEMORY_ROOM)
+        cuts = dict(cuts)
+
+        def smaller(room: int) -> str:
+            # The retried request's cuts are the ones the synthesis read.
+            text, used = request.synthesis_prompt(results, room)
+            cuts.update(used)
+            return text
+
         found, error, retried, cached = self._ask(
             ctx, memory.SYNTHESIS_SYSTEM, prompt, {"kind": "memory", "parts": total},
-            memory.parse_note, counts,
-            rebuild=lambda room: request.synthesis_prompt(results, room),
+            memory.parse_note, counts, rebuild=smaller,
             missing='the answer has no "memory" note')
         return {**out, "note": found, "error": error, "calls": counts["calls"],
                 "context_retry": retried or any(r["context_retry"] for r in results),
                 "cached": cached and all(r["cached"] for r in results),
-                "prompt_chars": len(prompt)}
+                "prompt_chars": len(prompt),
+                **({"synthesis_cuts": cuts} if any(cuts.values()) else {})}
+
+    def _guarded(self, work: Callable[[Any], Any]) -> Callable[[Any], Any]:
+        """``work`` for one call of a stage's pool, not started once a person has asked
+        the run to stop (``stop_check``: `RunStopped`) or once an earlier call of the
+        same pool raised (a spent budget, a cancelled run, a stop): that error is
+        raised again, so calls still queued are never made."""
+        import threading
+
+        from .base import RunStopped
+
+        halted: list[BaseException] = []
+        lock = threading.Lock()
+
+        def run(arg: Any) -> Any:
+            with lock:
+                if halted:
+                    raise halted[0]
+            check = getattr(self, "stop_check", None)
+            if callable(check) and check():
+                exc: BaseException = RunStopped(
+                    "a person asked the run to stop; the stage's remaining optimizer calls "
+                    "were not started")
+                with lock:
+                    halted.append(exc)
+                raise exc
+            try:
+                return work(arg)
+            except BaseException as exc:
+                with lock:
+                    halted.append(exc)
+                raise
+
+        return run
 
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
@@ -858,13 +900,13 @@ class AutoresearchOptimizer(Optimizer):
 
                 with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
                                                                len(chunks)))) as pool:
-                    current = list(pool.map(merge, enumerate(chunks, 1)))
+                    current = list(pool.map(self._guarded(merge), enumerate(chunks, 1)))
             return current[0] if current else []
 
         try:
             with ThreadPoolExecutor(max_workers=max(1, min(analysts.CONCURRENCY,
                                                            len(plan)))) as pool:
-                done[:] = list(pool.map(analyse, plan))
+                done[:] = list(pool.map(self._guarded(analyse), plan))
             with ThreadPoolExecutor(max_workers=2) as pool:
                 failure_side, success_side = pool.map(
                     lambda kind: merge_lists(kind, [b["found"] for b in done

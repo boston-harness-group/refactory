@@ -5613,7 +5613,7 @@ class Loop(OuterLoop):
                 outcome = {"note": None, "error": f"{type(exc).__name__}: {exc}"}
         record.update({key: outcome[key] for key in
                        ("calls", "context_retry", "cached", "clipped_items", "clipped_chars",
-                        "prompt_chars", "parts", "compare_chars") if key in outcome})
+                        "prompt_chars", "parts", "compare_chars", "synthesis_cuts") if key in outcome})
         note = outcome.get("note")
         if note:
             record["reasoning"] = note.get("reasoning", "")

@@ -315,13 +315,17 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     one, regressions first; then one synthesis call reads every part's observations,
     the previous note, what was tried and the objective, and writes the note. Nothing
     is cut."""
+    import re
+
     entries = _long_entries()
     request = _request(entries)
     client = Splitting()
     optimizer = AutoresearchOptimizer(client)
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
     made = optimizer.write_memory(epoch=3, generation=2, build=request)
-    compares = client.of(memory.COMPARE_SYSTEM)
+    # The calls run concurrently: in part order.
+    compares = sorted(client.of(memory.COMPARE_SYSTEM),
+                      key=lambda p: int(re.search(r"part (\d+) of", p).group(1)))
     (synthesis,) = client.of(memory.SYNTHESIS_SYSTEM)
     assert len(compares) > 1 and client.calls[-1] == (memory.SYNTHESIS_SYSTEM, synthesis)
     assert client.memory_calls() == [], "no single call"
@@ -330,6 +334,9 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     for prompt in compares:
         assert len(memory.COMPARE_SYSTEM) + len(prompt) <= memory.MEMORY_ROOM
         assert "EDITS" in prompt and "OBJECTIVE-TEXT" in prompt
+        # The pipelines, as the single call shows them, so a finding can say where.
+        assert "## The pipeline at the start of this epoch (candidate `c1`)\nPIPE-START" in prompt
+        assert "## The pipeline now (candidate `c2`)\nPIPE-NOW" in prompt
         for item in _tasks(prompt):
             entry = next(e for e in entries if e["id"] == item)
             if entry["category"] != "stable_success":
@@ -407,6 +414,93 @@ def test_a_half_done_split_pass_pays_only_for_what_it_did_not_finish(tmp_path):
     assert broken.of(memory.SYNTHESIS_SYSTEM) == [], "no note from part of the evidence"
 
 
+def test_an_unchanged_pipeline_is_shown_once_to_each_comparison_call():
+    entries = _long_entries()
+    client = Splitting()
+    AutoresearchOptimizer(client).write_memory(epoch=3, generation=2, build=_request(
+        entries, prev={"id": "c2", "pipeline": "PIPE-NOW", "rollout": "R-PREV"}))
+    for prompt in client.of(memory.COMPARE_SYSTEM):
+        assert "## The pipeline (candidate `c2`)" in prompt and "PIPE-NOW" in prompt
+        assert "two rollouts of this one pipeline (R-PREV, and R-NOW)" in prompt
+
+
+def test_long_observations_are_cut_to_the_parts_room_and_counted():
+    """A comparison call that writes far more than asked: its observations are cut to
+    ``PART_OBSERVATION_CHARS`` in the synthesis request, each cut marked and counted."""
+    def verbose(prompt: str) -> str:
+        return json.dumps({"observations": [
+            {"observation": f"LONG-{n} " + "w" * 20000, "items": [], "evidence": ["q" * 50]}
+            for n in range(3)]})
+
+    client = Splitting(compare=verbose)
+    made = AutoresearchOptimizer(client).write_memory(epoch=3, generation=2,
+                                                      build=_request(_long_entries()))
+    (synthesis,) = client.of(memory.SYNTHESIS_SYSTEM)
+    parts = made["parts"]
+    assert synthesis.count("… [cut: ") == 3 * parts and "q" * 50 in synthesis
+    assert made["synthesis_cuts"]["observation_texts"] == 3 * parts
+    assert made["synthesis_cuts"]["observation_chars"] > 3 * parts * 15000
+    assert made["synthesis_cuts"]["pipeline_chars"] == 0
+    kept, cut = memory.fit_observations([{"observation": "short", "evidence": ["e"]}])
+    assert cut == {"texts": 0, "chars": 0} and kept[0]["observation"] == "short"
+    block = synthesis.split("### Part 1 of")[1].split("### Part 2 of")[0]
+    assert len(block) < memory.PART_OBSERVATION_CHARS + 1000
+
+
+def test_pipelines_too_long_for_the_synthesis_are_clipped_and_counted():
+    entries = _long_entries()
+    big = {"prev": {"id": "c1", "pipeline": "S" * 300000, "rollout": "R-PREV"},
+           "curr": {"id": "c2", "pipeline": "N" * 300000, "rollout": "R-NOW"}}
+    request = _request(entries, **big)
+    results = [{"part": 1, "items": ["r0"], "observations": [{"observation": "OBS"}]}]
+    text, cut = request.synthesis_prompt(results, memory.MEMORY_ROOM)
+    assert len(memory.SYNTHESIS_SYSTEM) + len(text) <= memory.MEMORY_ROOM
+    assert "characters omitted" in text and "OBS" in text
+    assert cut["pipeline_chars"] > 200000 and cut["observation_texts"] == 0
+    whole, none = _request(entries).synthesis_prompt(results, memory.MEMORY_ROOM)
+    assert not any(none.values()) and "characters omitted" not in whole
+
+
+def test_a_stop_during_a_split_pass_starts_no_further_comparison_call(monkeypatch):
+    from refactory_dsh.optim.base import RunStopped
+
+    asked = {"stop": False}
+
+    def first_then_stop(prompt: str) -> str:
+        asked["stop"] = True  # a person asks the run to stop while this call runs
+        return json.dumps({"observations": []})
+
+    client = Splitting(compare=first_then_stop)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.stop_check = lambda: asked["stop"]
+    monkeypatch.setattr(analysts, "CONCURRENCY", 1)  # one at a time: the rest stay queued
+    with pytest.raises(RunStopped):
+        optimizer.write_memory(epoch=3, generation=2, build=_request(_long_entries()))
+    assert len(client.of(memory.COMPARE_SYSTEM)) == 1
+    assert client.of(memory.SYNTHESIS_SYSTEM) == []
+
+
+def test_a_stop_during_the_analyst_stage_starts_no_further_analyst_call(monkeypatch):
+    from refactory_dsh.optim.base import RunStopped
+
+    from test_analysts import ANALYST_SYSTEMS, Client as Analysts, _ctx, _rec as arec
+
+    asked = {"stop": False}
+
+    class Stopping(Analysts):
+        def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
+            asked["stop"] = True
+            return super().complete(prompt, system=system, **kwargs)
+
+    client = Stopping()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.stop_check = lambda: asked["stop"]
+    monkeypatch.setattr(analysts, "CONCURRENCY", 1)
+    with pytest.raises(RunStopped):
+        optimizer.propose(_ctx([arec(f"f{i}", False) for i in range(4)], group_size=1), 1, [])
+    assert len(client.of(ANALYST_SYSTEMS)) == 1
+
+
 def test_only_a_pair_longer_than_the_room_alone_is_cut_and_counted():
     entries = _long_entries(20000)
     huge = memory.pairs([_traced("h0", True, 300000, "BEFORE")],
@@ -442,6 +536,9 @@ def test_the_synthesis_keeps_the_memory_rules_and_the_comparison_prompt_is_domai
     assert ("Any other kind is untested: do not advise for or against it, and do not list "
             "the untested kinds.") in flat
     assert "Address the FUTURE OPTIMIZER directly" in memory.COMPARE_SYSTEM
+    assert ("Report what these traces show; do not judge kinds of change in general "
+            "(another call weighs them against what was tried).") in " ".join(
+        memory.COMPARE_SYSTEM.split())
     assert "Do not output instructions for the pipeline's own steps." in memory.COMPARE_SYSTEM
     assert memory.parse_observations({"findings": []}) is None
     kept = memory.parse_observations({"observations": [
