@@ -975,8 +975,9 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   the future optimizer, what changes help or hurt here, regression risks, revise or drop
   what did not help, no instructions for the pipeline's own steps -- plus one line
   SkillOpt needs no counterpart of, having one kind of edit: judge only kinds of change
-  that were tried, and call a kind not tried yet untested rather than advise for or
-  against it. Domain-free; train items only.
+  with evidence in front of it (this epoch's tries, or what the previous note records
+  of earlier ones); any other kind is untested, with no advice for or against it and
+  no list of them. Domain-free; train items only.
 - **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
   wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
   a longer one cut with the cut said.
