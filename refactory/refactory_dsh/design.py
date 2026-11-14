@@ -19,7 +19,8 @@ from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECO
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
 from refactory_dsh.nn import Graph, Knob, Mode, Node, RunResult
 from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
-                                      EARLY_ASKS_VERDICT, UPDATED_TESTS)
+                                      EARLY_ASKS_VERDICT, SIZER_MARK, SIZER_MISSING, SIZING,
+                                      UPDATED_TESTS)
 
 OPS = "refactory_dsh.design_ops"
 
@@ -38,6 +39,11 @@ TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 #: than any build the shipped modes have needed, so it is only reached by a builder that is
 #: endlessly busy; the run's own wall and budget still apply.
 BUILDER_TIMEOUT_S = 14400
+
+#: The change sizer's wall (`size_change`): it reads the code the change touches, before
+#: research, and must finish in a few minutes. A sizer that does not is missing, and the
+#: change is sized full (`design_ops.presize_scale`).
+SIZER_TIMEOUT_S = 600
 
 #: The builder's timeout retry: one fresh session on the same limits (factor 1). A stuck
 #: session is retried on inactivity, so the retry needs no longer limit, and the hard maximum
@@ -324,6 +330,83 @@ def builder_timeout(values: dict[str, Any]) -> int:
     return int(values.get("builder_timeout_s") or BUILDER_TIMEOUT_S)
 
 
+#: What a footprint records: the research director's, and the change sizer's, definitions.
+FOOTPRINT_DEFINITIONS = (
+    "Record a `footprint` object on every direction, with exactly these "
+    "three keys, each a list. A direction that "
+    "touches no code records an empty footprint: "
+    '`{"existing_functions": [], "new_items": [], "shared_engine": []}`.\n\n'
+    "- `existing_functions`: each entry is a string `\"path:line name\"` "
+    "for an existing function the direction's change modifies: one function "
+    "per entry, the line its definition starts on, and its path as the "
+    "target's checkout shows it. Test "
+    "files, test functions and docs are neither touched functions nor "
+    "added items.\n"
+    "- `new_items`: each entry is a string naming what is added and the "
+    "path it goes in — a module, class, graph node, edge, node field, "
+    "record or data shape, knob, entry point, wiring helper, or any new "
+    "non-test source file. Give the file:line where it would be added "
+    "or wired.\n"
+    "- `shared_engine`: a list of `\"path:line\"` citations of the engine "
+    "code the change modifies — code that every run of the target passes "
+    "through, such as its executor, scheduler, worker dispatch, or "
+    "compilation or lowering step. A function is not an engine because "
+    "several gates or modes call it. Empty when the change does not touch "
+    "one.\n"
+    "- Wording in the brief about the change's size (\"small\", "
+    "\"a one-line fix\", \"a scoped change\", \"a full change\") is a "
+    "claim to check against the code, never a footprint.\n\n"
+)
+
+_SCOPE_FROM_PREPARE = "The research scope is a fact set by the prepare step."
+assert _SCOPE_FROM_PREPARE in RESEARCH_SCHEMA
+#: Create's research plan shape, with the scope's origin as design mode sets it.
+_COUNT_RULE = "Between three and five directions for a full design, or one to three for a scoped change."
+assert _COUNT_RULE in RESEARCH_SCHEMA
+DESIGN_RESEARCH_SCHEMA = RESEARCH_SCHEMA.replace(
+    _SCOPE_FROM_PREPARE,
+    "The research scope is the one given above; a sizing step may set it before research.",
+).replace(
+    # Create refuses a plan outside these counts; in design mode they are context.
+    _COUNT_RULE,
+    "Usually three to five directions for a full design; a scoped change often needs "
+    "only one. You decide how many.")
+
+#: The change sizer's prompt (`size_change`): it sizes the change by reading the code,
+#: before research, so a small change gets a lean research plan.
+SIZER_PROMPT = (
+    SIZER_MARK + "\n\n"
+    "Artifact name: {{name}}\nBrief: {{brief}}\n"
+    "The target's checkout: {{source}}\n\n"
+    "Size this change before it is researched, by investigating {{source}} yourself. "
+    "For a bug, locate where the behaviour lives; for a feature, find where the change "
+    "plugs in. Read that code, trace its callers with grep, and look at the tests that "
+    "pin its current behaviour. Go only as far as sizing needs: do not survey the "
+    "repository.\n\n"
+    "## Rules\n"
+    "- Read only: change nothing in {{source}}.\n"
+    "- Spawn no subagents.\n"
+    "- No web: no search, no fetch.\n"
+    "- Cite every claim as path:line from code you read.\n\n"
+    "## Footprint\n"
+    + FOOTPRINT_DEFINITIONS
+    + "A caller in another module that relies on the changed behaviour, or a caller "
+    "search too broad to finish, is a cross-cutting sign: list it in `cross_cutting`.\n\n"
+    "## Your answer\n"
+    "Write `" + SIZING + "` in the run directory as exactly one JSON array holding one "
+    "object, and nothing else:\n"
+    '`[{"size": "scoped", "why": "<one line>", "footprint": {"existing_functions": '
+    '["path:line name"], "new_items": [], "shared_engine": []}, "cross_cutting": []}]`\n'
+    "- `size` is `scoped`, `full` or `unknown`. When the cause of a bug is not located, "
+    "or a feature's reach is not clear from the code read within the time, answer "
+    "`unknown`.\n"
+    "- `why` is one line saying why, citing path:line.\n"
+    "- `footprint` is the change's footprint, as defined above.\n"
+    "- `cross_cutting` lists every cross-cutting sign you saw, each with its path:line; "
+    "empty when you saw none.\n"
+)
+
+
 class DesignMode(Mode):
     """Design, emit and check a software artifact.
 
@@ -466,6 +549,38 @@ class DesignMode(Mode):
             notes="on a refine, skip research and strategy and go straight to design_doc",
         ))
 
+        # ── sizing before research: a bounded agent reads the code the change touches,
+        # and the shared rule turns its verdict into the research scope ──
+        graph.add(Node(
+            "clear_sizing", "op", call=f"{OPS}:clear_sizing",
+            writes=(SIZING, SIZER_MISSING),
+            notes="remove an earlier visit's sizing verdict, so only this visit's is read",
+        ))
+        graph.add(Node("fork_size", "fork", targets=("size_change",),
+                       optional_targets=("size_change",),
+                       notes="start the change sizer; a sizer that fails or times out is "
+                             "missing, and the change is sized full"))
+        graph.add(Node(
+            "size_change", "agent",
+            prompt_template=SIZER_PROMPT,
+            timeout_s=SIZER_TIMEOUT_S,
+            reads=("brief.json",),
+            writes=(SIZING,),
+            notes="size the change by reading the code it touches, before research; read "
+                  "only, no subagents, no web. The spine's CEO-subagent route does not "
+                  "enforce timeout_s: there the bound is the prompt's",
+        ))
+        graph.add(Node("join_size", "join", sources=("size_change",),
+                       notes="wait for the change sizer"))
+        graph.add(Node(
+            "presize_scale", "op", call=f"{OPS}:presize_scale",
+            reads=(SIZING, SIZER_MISSING),
+            produces=("research_scope", "research_scope_reason", "presize_scope",
+                      "presize_scope_reason"),
+            notes="the research scope before research, from the sizer's verdict and the "
+                  "same rule as classify_scale; full unless the verdict proves it scoped",
+        ))
+
         # ── design-v2's head: research, perspectives, then the design itself ──
         graph.add(Node(
             "research_director", "agent",
@@ -474,43 +589,29 @@ class DesignMode(Mode):
                 "It will be checked by running, from {{check_root}}:\n"
                 "    {{check}}\n\n"
                 "## Research scope\n{{research_scope}}\n\n"
+                "{% if presize_scope %}{% if presize_scope_reason %}Sized before research "
+                "by reading the code: {{presize_scope}} — {{presize_scope_reason}}. This is "
+                "context; you decide how many questions you need.\n\n{% endif %}{% endif %}"
                 "You are the research director. Decide what has to be learned before "
-                "this artifact can be designed: between three and five questions for "
-                "a full design, or one focused question for a scoped change (two or "
-                "three only when it spans unrelated parts of the code). Each must be "
+                "this artifact can be designed: usually three to five questions for a "
+                "full design, while a scoped change often needs only one focused question "
+                "(more when it spans unrelated parts of the code); you decide. Each must be "
                 "answerable by reading {{source}} — including the source code of tools "
                 "and libraries the change depends on, not only the files it changes — "
-                "or by running something there. Spawn "
+                "or by running something there. For a scoped change, the question covers "
+                "the changed function, every caller of it and the tests that pin its "
+                "current behaviour, all read in {{source}}. In its subagent's task, say to "
+                "answer by reading that code (running it if useful), not to survey the "
+                "repository or search the web, to write a short note citing file:line, and "
+                "to report any further reach in the footprint: the run widens the research "
+                "when it finds some. Spawn "
                 "one subagent per question and have each write its findings to "
                 "`research/<slug>.md` under the run directory, then write "
                 "`research-plan.json` yourself.\n\n"
                 "## Footprint\n"
-                "Record a `footprint` object on every direction, with exactly these "
-                "three keys, each a list. A direction that "
-                "touches no code records an empty footprint: "
-                '`{"existing_functions": [], "new_items": [], "shared_engine": []}`.\n\n'
-                "- `existing_functions`: each entry is a string `\"path:line name\"` "
-                "for an existing function the direction's change modifies: one function "
-                "per entry, the line its definition starts on, and its path as the "
-                "target's checkout shows it. Test "
-                "files, test functions and docs are neither touched functions nor "
-                "added items.\n"
-                "- `new_items`: each entry is a string naming what is added and the "
-                "path it goes in — a module, class, graph node, edge, node field, "
-                "record or data shape, knob, entry point, wiring helper, or any new "
-                "non-test source file. Give the file:line where it would be added "
-                "or wired.\n"
-                "- `shared_engine`: a list of `\"path:line\"` citations of the engine "
-                "code the change modifies — code that every run of the target passes "
-                "through, such as its executor, scheduler, worker dispatch, or "
-                "compilation or lowering step. A function is not an engine because "
-                "several gates or modes call it. Empty when the change does not touch "
-                "one.\n"
-                "- Wording in the brief about the change's size (\"small\", "
-                "\"a one-line fix\", \"a scoped change\", \"a full change\") is a "
-                "claim to check against the code, never a footprint.\n\n"
-                "## What was wrong with the last plan\n{{research_review}}\n\n"
-                "## The plan's shape\n" + RESEARCH_SCHEMA
+                + FOOTPRINT_DEFINITIONS
+                + "## What was wrong with the last plan\n{{research_review}}\n\n"
+                "## The plan's shape\n" + DESIGN_RESEARCH_SCHEMA
             ),
             reads=("brief.json", "research-review.txt"),
             writes=("research-plan.json",),
@@ -608,6 +709,20 @@ class DesignMode(Mode):
                 "## Pitfalls\n{{pitfalls}}\n\n"
                 "## What the research found\n{{research}}\n\n"
                 "## Research scope\n{{research_scope}}\n\n"
+                "{% if presize_scope %}{% if presize_scope_reason %}Before research: "
+                "{{presize_scope}} — {{presize_scope_reason}}\n{% endif %}{% endif %}"
+                "{% if research_widened %}Research was widened after a lean pass: "
+                "{{research_widened}}\n{% endif %}"
+                "After research: {{research_scope}} — {{research_scope_reason}}\n\n"
+                # Only when the sizer found it small and research did not reach further: a
+                # full sizing, and a research that was widened, keep today's depth.
+                "{% if presize_scope == 'scoped' %}{% if research_widened == '' %}"
+                "A small, contained change usually needs "
+                "few perspectives, and short ones; the simplest-thing and "
+                "what-the-check-misses angles may be one perspective. Tell each subagent the "
+                "scale and its reason, and ask for a short file that states only findings "
+                "that change what gets built. You decide how many perspectives and how "
+                "long.\n\n{% endif %}{% endif %}"
                 "You are the strategy director. From the research, choose between two "
                 "and five perspectives on how this artifact could be built — including "
                 "the simplest thing that could pass the check, and one that says what "
@@ -1225,7 +1340,12 @@ class DesignMode(Mode):
         ))
 
         graph.connect("prepare", "route_refine_design")
-        graph.connect("route_refine_design", "research_director", condition="proceed")
+        graph.connect("route_refine_design", "clear_sizing", condition="proceed")
+        graph.connect("clear_sizing", "fork_size")
+        # No edge from size_change to join_size, as fork_qa's branches have none.
+        graph.connect("fork_size", "join_size")
+        graph.connect("join_size", "presize_scale")
+        graph.connect("presize_scale", "research_director")
         graph.connect("route_refine_design", "design_doc", condition="light")
         graph.connect("research_director", "record_findings")
         graph.connect("record_findings", "gate_research")
@@ -1237,7 +1357,22 @@ class DesignMode(Mode):
             notes="classify the change's scale from the research footprint",
         ))
         graph.connect("gate_research", "classify_scale", condition="proceed")
-        graph.connect("classify_scale", "pitfalls_researcher")
+        # A lean research whose footprint reaches further goes once more at full scope.
+        graph.add(Node(
+            "widen_research", "gate", evaluator=f"{OPS}:widen_research",
+            reads=("research-plan.json", "research/"),
+            # The lean round's plan and notes move to research-lean/, so the full round
+            # writes them afresh.
+            writes=("research-review.txt", "research-lean/", "research-plan.json", "research/"),
+            produces=("research_scope", "research_scope_reason", "research_review",
+                      "research_widenings_used", "research_widened"),
+            max_iterations=1, on_exhausted="continue",
+            notes="send a lean research back once at full scope when its footprint shows "
+                  "cross-cutting impact; otherwise proceed",
+        ))
+        graph.connect("classify_scale", "widen_research")
+        graph.connect("widen_research", "research_director", condition="reloop")
+        graph.connect("widen_research", "pitfalls_researcher", condition="proceed")
         graph.connect("pitfalls_researcher", "gate_pitfalls")
         graph.connect("gate_pitfalls", "pitfalls_researcher", condition="reloop")
         graph.connect("gate_pitfalls", "route_strategy", condition="proceed")

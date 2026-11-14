@@ -694,7 +694,27 @@ plans "the simplest thing that could pass the check" from the research and pitfa
 with no perspectives step. The routing gate answers `scoped` or `proceed` (also what a
 person's skip of a gate sends on the spine), which both runtimes follow as edge labels.
 Non-refine research is guided to 3 to 5 directions. A full design keeps the
-perspectives step. At either scale the design cites a research finding only where it changes a
+perspectives step.
+
+**Sizing before research.** On `route_refine_design`'s `proceed` edge the change is
+sized before research, so a small fix gets a lean research plan (a refine never reaches
+it: `route_refine_design` sends a refine straight to `design_doc`). `clear_sizing` removes
+an earlier visit's verdict; `fork_size` starts `size_change`, its only and optional
+branch: a tool-using agent bounded by `SIZER_TIMEOUT_S` (600 s), told to read only, to
+spawn no subagents and to use no web. It locates where a bug's behaviour lives, or where
+a feature plugs in, reads that code, greps its callers and looks at the tests that pin
+it, and writes `sizing.json`: `[{size, why, footprint, cross_cutting}]`. `presize_scale`
+turns it into `research_scope` and `presize_scope` with the same rule
+(`scale_from_footprints`, which `classify_scale` applies to the research plan): the scale
+is full unless the sizer answered `scoped`, saw no cross-cutting sign, and cited code that
+resolves in the target's checkout and passes the rule; a sizer that failed or timed out is
+missing, and full. The research and strategy directors are given the scale and its reason
+as context, never as a cap; only a change sized scoped before research tells the strategy
+director that a small change usually needs few, short perspectives. After `classify_scale`, `widen_research` sends a lean research
+back to `research_director` once, at full scope, when its footprint shows a shared engine,
+more functions than a scoped change allows, a citation that does not resolve or no usable
+footprint; new items alone do not widen it. The approval card's scale line adds the scale
+before research, and the widening. A graph with no sizer keeps `prepare`'s full scope. At either scale the design cites a research finding only where it changes a
 decision; the findings stay in `research/` and `strategy/` for the design writer to
 read.
 

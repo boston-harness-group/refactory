@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re as _re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,7 @@ _SENTINEL = object()
 #: Planning steps that must not change the target or the worktree (#347).
 #: They write only into the run directory; a change they make to the target
 #: or the worktree fails the step and names what changed.
-PLANNING_STEPS = ('research_director', 'pitfalls_researcher', 'strategy_director', 'synthesize_strategy', 'design_doc')
+PLANNING_STEPS = ('size_change', 'research_director', 'pitfalls_researcher', 'strategy_director', 'synthesize_strategy', 'design_doc')
 
 #: The op design's materialise node called before it moved to `repo_change` (#330): a run
 #: lowered then, such as one waiting at its approval gate, still names it.
@@ -320,9 +321,11 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
                                  output_only=PLANNING_STEPS)
 
     # Compute research_scope.  A refine is always scoped; everything else starts
-    # as full and is reclassified by classify_scale after research.  The walker
-    # passes `refine` in the task, but a run on DSH carries it as a knob, and there
-    # the task names only the node: read both, as `delivery.refine_task` does.
+    # as full.  In design's graph the sizer may make it scoped before research
+    # (`presize_scale`), and classify_scale reclassifies it after research; a graph
+    # with no sizer researches it at this full scope.  The walker passes `refine` in
+    # the task, but a run on DSH carries it as a knob, and there the task names only
+    # the node: read both, as `delivery.refine_task` does.
     if str(task.get("refine") or ctx.knob("refine", "") or "").strip():
         research_scope = "scoped"
         research_scope_reason = REFINE_SCOPE_REASON
@@ -951,35 +954,48 @@ def resolve_cited(source: str, cited: str, tracked: set[str] | None) -> str | No
     return candidates[0] if len(candidates) == 1 else None
 
 
-def classify_scale(ctx: Any) -> dict[str, Any]:
-    """Deterministic op: classify the change's scale from the research footprint.
+#: The most existing functions a scoped change may touch (dm-200).
+SCOPED_FUNCTIONS = 2
 
-    Reads research-plan.json as raw JSON (not via ``_plan()``, which strips
-    entries to only focus/slug/finding/ids).  Every direction must carry a
-    ``footprint`` object.  The three-part rule decides scoped vs full; the
-    brief is never read.  In a new or empty project (a checkout with no tracked
-    file) everything is new: it is scoped when it adds at most
+#: The rule's breaks that make a lean research too narrow (`widen_research`): no usable
+#: footprint, a citation that does not resolve, too many functions, or a shared engine.
+#: New items alone are not among them: they route the strategy step, not the research.
+CROSS_CUTTING = frozenset({"unusable", "evidence", "functions", "engine"})
+
+
+@dataclass(frozen=True)
+class Scale:
+    """The three-part rule's answer (`scale_from_footprints`).
+
+    ``breaks`` names each part the footprint broke -- ``unusable``, ``evidence``,
+    ``functions``, ``new_items`` or ``engine`` -- with the reason that part gives;
+    ``reason`` is the first of them, or the scoped reason when there are none. ``scope``
+    is ``full`` exactly when ``breaks`` is non-empty.
+    """
+
+    scope: str
+    reason: str
+    breaks: dict[str, str] = field(default_factory=dict)
+
+
+def scale_from_footprints(directions: list, source: str) -> Scale:
+    """The change's scale from its directions' footprints: the one rule (dm-200).
+
+    `classify_scale` applies it to the research plan, `presize_scale` to the sizer's
+    verdict and `widen_research` to a lean research. Every citation must resolve in
+    *source*, the target's checkout. In a new or empty project (a checkout with no
+    tracked file) everything is new: it is scoped when it adds at most
     `NEW_PROJECT_SCOPED_ITEMS` new items, names no existing function and no shared
     engine, and full otherwise.
     """
-    # A refine never gets here: route_refine_design sends it straight to design_doc,
-    # scoped as prepare decided.
-
-    # ── read directions ────────────────────────────────────────────────
-    from refactory_dsh.create_ops import _extract_json_array
-
-    raw = ctx.read_text("research-plan.json") if ctx.exists("research-plan.json") else ""
-    directions = _extract_json_array(raw)
-
-    def _full(reason: str) -> dict[str, Any]:
-        return {"research_scope": "full", "research_scope_reason": reason}
+    def _stop(part: str, reason: str) -> Scale:
+        return Scale("full", reason, {part: reason})
 
     if not directions:
-        return _full("no usable footprint in the research")
+        return _stop("unusable", "no usable footprint in the research")
 
     # ── where cited code must exist ───────────────────────────────────
     # The target's own checkout (the run's worktree), never the run directory.
-    source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")
     tracked = tracked_files(source) if source else None
 
     # ── aggregate footprint ────────────────────────────────────────────
@@ -988,34 +1004,38 @@ def classify_scale(ctx: Any) -> dict[str, Any]:
     engine: list[str] = []
     for direction in directions:
         if not isinstance(direction, dict):
-            return _full(f"no usable footprint: a direction is not an object: {direction!r}"[:300])
+            return _stop("unusable",
+                         f"no usable footprint: a direction is not an object: {direction!r}"[:300])
         footprint = direction.get("footprint")
         if not isinstance(footprint, dict):
-            return _full("no usable footprint in the research")
+            return _stop("unusable", "no usable footprint in the research")
         missing = [key for key in FOOTPRINT_KEYS if key not in footprint]
         unknown = sorted(key for key in footprint if key not in FOOTPRINT_KEYS)
         if missing or unknown:
-            return _full("no usable footprint: "
+            return _stop("unusable", "no usable footprint: "
                          + "; ".join(([f"missing {', '.join(missing)}"] if missing else [])
                                      + ([f"unknown {', '.join(unknown)}"] if unknown else [])))
         for key in FOOTPRINT_KEYS:
             if not isinstance(footprint[key], list):
-                return _full(f"no usable footprint: {key} is not a list: {footprint[key]!r}"[:300])
+                return _stop("unusable",
+                             f"no usable footprint: {key} is not a list: {footprint[key]!r}"[:300])
         for entry in footprint["existing_functions"]:
             match = _FUNCTION_CITATION.fullmatch(entry.strip()) if isinstance(entry, str) else None
             resolved = resolve_cited(source, match["path"], tracked) if match else None
             if resolved is None:
-                return _full(f"footprint without evidence: {entry!r}"[:300])
+                return _stop("evidence", f"footprint without evidence: {entry!r}"[:300])
             # By file, name and line: same-named methods in one file are different
             # functions, and over-counting only ever errs toward full.
             touched[(resolved, match["name"], match["line"])] = f"{resolved}:{match['line']}"
         new_items.extend(str(item) for item in footprint["new_items"])
         engine.extend(str(ref) for ref in footprint["shared_engine"])
 
-    # ── apply the three-part rule ──────────────────────────────────────
-    if len(touched) > 2:
+    # ── apply the three-part rule, each part on its own ────────────────
+    breaks: dict[str, str] = {}
+    if len(touched) > SCOPED_FUNCTIONS:
         names = ", ".join(key[1] for key in sorted(touched)[:3])
-        return _full(f"touches {len(touched)} existing functions (max 2 for scoped): {names}")
+        breaks["functions"] = (f"touches {len(touched)} existing functions "
+                               f"(max {SCOPED_FUNCTIONS} for scoped): {names}")
     # In a new or empty project everything is a new item, so new items alone do not
     # make it full (dm-259): it is scoped when it adds at most NEW_PROJECT_SCOPED_ITEMS
     # and names no existing function (which an empty checkout cannot resolve: full
@@ -1023,23 +1043,119 @@ def classify_scale(ctx: Any) -> dict[str, Any]:
     empty_project = tracked is not None and not tracked
     added = sorted(set(new_items))
     if new_items and not empty_project:
-        return _full(f"adds new items: {', '.join(sorted(new_items)[:3])}")
-    if empty_project and len(added) > NEW_PROJECT_SCOPED_ITEMS:
-        return _full(f"a new or empty project that adds {len(added)} new items "
-                     f"(max {NEW_PROJECT_SCOPED_ITEMS} for scoped): {', '.join(added[:3])}")
+        breaks["new_items"] = f"adds new items: {', '.join(sorted(new_items)[:3])}"
+    elif empty_project and len(added) > NEW_PROJECT_SCOPED_ITEMS:
+        breaks["new_items"] = (f"a new or empty project that adds {len(added)} new items "
+                               f"(max {NEW_PROJECT_SCOPED_ITEMS} for scoped): {', '.join(added[:3])}")
     if engine:
-        return _full(f"changes a shared engine: {', '.join(engine[:3])}")
+        breaks["engine"] = f"changes a shared engine: {', '.join(engine[:3])}"
+    if breaks:
+        return Scale("full", next(iter(breaks.values())), breaks)
     if new_items:
-        return {"research_scope": "scoped",
-                "research_scope_reason": "a new or empty project: adds " + ", ".join(added)
-                + "; touches no existing function, no shared engine"}
+        return Scale("scoped", "a new or empty project: adds " + ", ".join(added)
+                     + "; touches no existing function, no shared engine")
     detail = ", ".join(f"{key[1]} at {touched[key]}" for key in sorted(touched))
-    reason = (
-        f"touches {len(touched)} existing function(s)"
-        + (f" ({detail})" if detail else "")
-        + ", adds nothing new, no shared engine"
-    )
-    return {"research_scope": "scoped", "research_scope_reason": reason}
+    return Scale("scoped",
+                 f"touches {len(touched)} existing function(s)"
+                 + (f" ({detail})" if detail else "")
+                 + ", adds nothing new, no shared engine")
+
+
+def classify_scale(ctx: Any) -> dict[str, Any]:
+    """Deterministic op: classify the change's scale from the research footprint.
+
+    Reads research-plan.json as raw JSON (not via ``_plan()``, which strips
+    entries to only focus/slug/finding/ids).  Every direction must carry a
+    ``footprint`` object.  The three-part rule (`scale_from_footprints`) decides
+    scoped vs full; the brief is never read.
+    """
+    # A refine never gets here: route_refine_design sends it straight to design_doc,
+    # scoped as prepare decided.
+
+    # ── read directions ────────────────────────────────────────────────
+    from refactory_dsh.create_ops import _extract_json_array
+
+    raw = ctx.read_text("research-plan.json") if ctx.exists("research-plan.json") else ""
+    source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")
+    scale = scale_from_footprints(_extract_json_array(raw), source)
+    return {"research_scope": scale.scope, "research_scope_reason": scale.reason}
+
+
+#: The line the sizer's prompt opens with (`size_change`).
+SIZER_MARK = "You are the change sizer."
+#: The sizer's verdict, and the marker a runtime writes when the sizer did not finish.
+SIZING = "sizing.json"
+SIZER_MISSING = "reviews/size_change-missing.txt"
+
+
+def clear_sizing(ctx: Any) -> dict[str, Any]:
+    """Op: remove an earlier visit's sizing verdict and missing marker, before the sizer runs.
+
+    So `presize_scale` reads only what this visit's sizer wrote: a verdict left from an
+    earlier visit can never make a change scoped. It reads nothing, the brief included.
+    """
+    ctx.path(SIZING).unlink(missing_ok=True)
+    ctx.path(SIZER_MISSING).unlink(missing_ok=True)
+    return {}
+
+
+def _first_line(text: str) -> str:
+    lines = str(text).strip().splitlines()
+    return lines[0].strip()[:200] if lines else ""
+
+
+def presize_scale(ctx: Any) -> dict[str, Any]:
+    """Deterministic op: the research scope before research, from the sizer's verdict.
+
+    Conservative: anything but a ``scoped`` answer whose footprint resolves in the
+    target's checkout and passes the rule (`scale_from_footprints`) is full -- a missing
+    or unparseable verdict, a sizer that did not finish, any cross-cutting sign, a
+    footprint that cites no code. A refine never gets here: route_refine_design sends it
+    straight to design_doc. Never raises; it reads only ``sizing.json`` and its missing
+    marker, never the brief, and the target's code from the ``source`` fact, never
+    ``ctx.workdir``.
+    """
+    source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")
+
+    def _scale(scope: str, reason: str) -> dict[str, Any]:
+        return {"research_scope": scope, "research_scope_reason": reason,
+                "presize_scope": scope, "presize_scope_reason": reason}
+
+    try:
+        return _scale(*_presize(ctx, source))
+    except (OSError, UnicodeDecodeError) as error:
+        return _scale("full", f"the sizing verdict could not be read: {type(error).__name__}")
+
+
+def _presize(ctx: Any, source: str) -> tuple[str, str]:
+    """`presize_scale`'s rows, first match wins: (scope, reason)."""
+    from refactory_dsh.create_ops import _extract_json_array
+
+    if not source:
+        return "full", "no checkout to check the sizer's citations against"
+    if ctx.exists(SIZER_MISSING):
+        return "full", f"the sizer did not finish: {_first_line(ctx.read_text(SIZER_MISSING))}"
+    if not ctx.exists(SIZING):
+        return "full", "no sizing verdict"
+    verdict = _extract_json_array(ctx.read_text(SIZING))
+    if not verdict:
+        return "full", "the sizing verdict is not a JSON array"
+    entry = verdict[0] if len(verdict) == 1 else None
+    if not (isinstance(entry, dict) and isinstance(entry.get("size"), str)
+            and isinstance(entry.get("why"), str) and isinstance(entry.get("footprint"), dict)
+            and isinstance(entry.get("cross_cutting"), list)
+            and all(isinstance(sign, str) for sign in entry["cross_cutting"])):
+        return "full", "the sizing verdict is not [{size, why, footprint, cross_cutting}]"
+    if entry["size"] != "scoped":
+        return "full", f"the sizer judged it {entry['size'][:40]}: {_first_line(entry['why'])}"
+    if entry["cross_cutting"]:
+        return "full", "cross-cutting signs: " + "; ".join(entry["cross_cutting"][:3])
+    footprint = entry["footprint"]
+    if not footprint.get("existing_functions") and not footprint.get("new_items"):
+        return "full", "the verdict cites no code"
+    scale = scale_from_footprints([{"footprint": footprint}], source)
+    return scale.scope, scale.reason
+
 
 def design_review_status(facts: dict) -> str:
     """The approval gate's card, from the run's facts.
@@ -1049,7 +1165,9 @@ def design_review_status(facts: dict) -> str:
 
     - ``Design review: PASS``, or ``Design review: FAIL, N unresolved`` and the line
       naming the section the build needs that is still missing;
-    - ``Scale: <scoped|full> — <reason>``;
+    - ``Scale: <scoped|full> — <reason>``, and when a sizer sized the change before
+      research, `` (before research: <scope> — <reason>)`` on the same line, naming
+      the widening when a lean research was widened;
     - ``Unverified claims (high, advisory): N``, one ``- unverified claim: …`` line each:
       what the claims check could not confirm;
     - ``Claims check (advisory): N notes``: where a drifted quote was found;
@@ -1071,7 +1189,13 @@ def design_review_status(facts: dict) -> str:
              *unresolved]
     reason = facts.get("research_scope_reason")
     if reason:
-        lines.append(f"Scale: {facts.get('research_scope') or 'full'} — {reason}")
+        before = ""
+        if facts.get("presize_scope"):
+            widened = facts.get("research_widened")
+            before = (f" (before research: {facts['presize_scope']} — "
+                      f"{facts.get('presize_scope_reason') or ''}"
+                      + (f"; widened after lean research: {widened}" if widened else "") + ")")
+        lines.append(f"Scale: {facts.get('research_scope') or 'full'} — {reason}{before}")
     claims = facts.get("claims_check")
     claims = claims if isinstance(claims, dict) else {}
     unverified = [str(item) for item in claims.get("unverified") or ()]
@@ -1099,8 +1223,9 @@ def design_card(facts: dict, design_text: str = "") -> str:
 
     '' while `design_review_status` is. Then, in order: ``Design: <the first sentences
     of design.md's Summary>``; the review status (`design_review_status`: the headline,
-    ``PASS, nothing blocks the build`` or what is unresolved, the scale, then the
-    advisories, unverified claims first); then ``Pitfalls: N`` with one line each quoting
+    ``PASS, nothing blocks the build`` or what is unresolved, the scale -- and the scale
+    before research, when a sizer sized it -- then the advisories, unverified claims
+    first); then ``Pitfalls: N`` with one line each quoting
     the design lines that cite it (``- PIT-001 (high): § Changes: "…"``) or saying it is
     ``not mentioned``, never a verdict (dm-262); or the one line saying why they were not
     listed. Everything the card listed under its old markdown heading is here, once.
@@ -1175,8 +1300,8 @@ def gate_design_research(ctx: Any) -> Any:
     Create mode keeps `create_ops.gate_research`, which refuses a plan it cannot use. Here
     the plan is sent back once only when research-plan.json holds no parseable plan at
     all; then the run proceeds with whatever exists. Everything else that gate checks --
-    three to five directions (one to three for a scoped change), empty fields, slugs, the
-    findings files -- is guidance: it is listed as advisory (``research_advisory``) on
+    three to five directions for a full plan (a scoped plan's size is left to the
+    model), empty fields, slugs, the findings files -- is guidance: it is listed as advisory (``research_advisory``) on
     the approval gate's card. Never raises.
     """
     from refactory_dsh.create_ops import _plan, research_problems
@@ -1201,6 +1326,56 @@ def gate_design_research(ctx: Any) -> Any:
     ctx.set_fact("research_review", "(the research plan is used as it is)")
     ctx.set_fact("research_advisory", "\n".join(notes))
     return "proceed"
+
+
+#: Where a widened research's lean plan and notes go, so the full round writes them afresh.
+RESEARCH_LEAN = "research-lean"
+
+
+def widen_research(ctx: Any) -> Any:
+    """Design mode's widening gate: a lean research whose footprint reaches further goes again.
+
+    When the sizer sized the change scoped before research (``presize_scope``) and the
+    research's footprint breaks the rule in a cross-cutting way (`CROSS_CUTTING`: no
+    usable footprint, an unresolved citation, more functions than scoped allows, a shared
+    engine), research is sent back once at full scope, with the reason in its review.
+    New items alone do not widen it. The one round is counted in
+    ``research_widenings_used`` (`_resend_once`), so a second visit proceeds whatever the
+    graph's iteration limit. A graph with no sizer always proceeds (no ``presize_scope``),
+    and a refine never gets here: route_refine_design sends it straight to design_doc.
+    """
+    from refactory_dsh.create_ops import _extract_json_array
+
+    if ctx.facts.get("presize_scope") != "scoped":
+        return "proceed"
+    raw = ctx.read_text("research-plan.json") if ctx.exists("research-plan.json") else ""
+    source = str(ctx.facts.get("source") or ctx.facts.get("artifact") or "")
+    breaks = scale_from_footprints(_extract_json_array(raw), source).breaks
+    hits = [reason for part, reason in breaks.items() if part in CROSS_CUTTING]
+    if not hits:
+        return "proceed"
+    joined = "; ".join(hits)
+    why = (f"research ran lean ({ctx.facts.get('presize_scope_reason') or 'scoped'}) but its "
+           f"footprint shows cross-cutting impact: {joined}. Plan again at full scope; the "
+           "earlier plan was lean, so write a fresh note for every direction, including any "
+           "slug you reuse.")
+    resent = _resend_once(ctx, "research_widenings_used", "research-review.txt",
+                          "research_review", why)
+    if resent is None:
+        return "proceed"
+    ctx.set_fact("research_scope", "full")
+    ctx.set_fact("research_scope_reason", f"widened after lean research: {joined}")
+    ctx.set_fact("research_widened", joined)
+    # The full round writes its plan and every note afresh: `record_findings` keeps a note
+    # it finds, and a plan left in place would make a rewrite of the same bytes no delivery.
+    lean = ctx.path(RESEARCH_LEAN)
+    lean.mkdir(parents=True, exist_ok=True)
+    research = ctx.path("research")
+    for note in sorted(research.glob("*.md")) if research.is_dir() else ():
+        note.rename(lean / note.name)
+    if ctx.exists("research-plan.json"):
+        ctx.path("research-plan.json").rename(lean / "research-plan.json")
+    return resent
 
 
 def gate_pitfalls(ctx: Any) -> Any:

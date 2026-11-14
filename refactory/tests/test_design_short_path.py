@@ -30,12 +30,15 @@ def _edges(graph):
 def test_the_design_graph_routes_on_the_scale():
     graph = DesignMode().build()
     edges = _edges(graph)
-    # route_refine_design sits between prepare and research_director.
+    # route_refine_design sits between prepare and research, which the sizer now
+    # precedes (moved on purpose: the sizing chain starts on its proceed edge).
     assert ("prepare", "route_refine_design", None) in edges
-    assert ("route_refine_design", "research_director", "proceed") in edges
+    assert ("route_refine_design", "clear_sizing", "proceed") in edges
     assert ("route_refine_design", "design_doc", "light") in edges
     assert ("gate_research", "classify_scale", "proceed") in edges
-    assert ("classify_scale", "pitfalls_researcher", None) in edges
+    # Moved on purpose: the widening gate sits between classify_scale and the pitfalls.
+    assert ("classify_scale", "widen_research", None) in edges
+    assert ("widen_research", "pitfalls_researcher", "proceed") in edges
     assert ("gate_pitfalls", "route_strategy", "proceed") in edges
     assert ("route_strategy", "strategy_director", "proceed") in edges
     assert ("route_strategy", "synthesize_strategy", "scoped") in edges
@@ -58,7 +61,7 @@ def test_the_spine_gets_the_same_routes():
     assert refine_node.evaluator_command.endswith("refactory_dsh.design_ops:route_refine_design")
     lowered = {(e.source, e.target, e.condition) for e in workflow.edges}
     assert ("prepare", "route_refine_design", None) in lowered
-    assert ("route_refine_design", "research_director", "proceed") in lowered
+    assert ("route_refine_design", "clear_sizing", "proceed") in lowered
     assert ("route_refine_design", "design_doc", "light") in lowered
     assert ("route_strategy", "synthesize_strategy", "scoped") in lowered
     assert ("check_design_claims", "gate_design_review", None) in lowered
@@ -177,3 +180,65 @@ def test_a_full_design_keeps_both_steps(tmp_path):
     assert len([p for p in model.prompts if STRATEGY_DIRECTOR in p]) == 1
     assert run.facts["design_review_status"].startswith(
         "Design review: PASS\nScale: full \u2014 ")
+
+
+# ── the sizing chain before research, and the widening gate before the pitfalls ──
+
+SIZING_CHAIN = {
+    ("route_refine_design", "clear_sizing", "proceed"),
+    ("clear_sizing", "fork_size", None),
+    ("fork_size", "join_size", None),
+    ("join_size", "presize_scale", None),
+    ("presize_scale", "research_director", None),
+    ("classify_scale", "widen_research", None),
+    ("widen_research", "research_director", "reloop"),
+    ("widen_research", "pitfalls_researcher", "proceed"),
+}
+
+
+def test_the_sizing_chain_sits_before_research():
+    graph = DesignMode().build()
+    workflow = lowering.to_workflow(DesignMode().state_dict())
+    lowered = {(e.source, e.target, e.condition) for e in workflow.edges}
+    for edges in (_edges(graph), lowered):
+        assert SIZING_CHAIN <= edges
+        # The light route, the research gate and the strategy route are as they were.
+        assert ("route_refine_design", "design_doc", "light") in edges
+        assert {e for e in edges if e[0] == "route_refine_design"} == {
+            ("route_refine_design", "clear_sizing", "proceed"),
+            ("route_refine_design", "design_doc", "light")}
+        assert {e for e in edges if e[0] == "gate_research"} == {
+            ("gate_research", "research_director", "reloop"),
+            ("gate_research", "classify_scale", "proceed")}
+        assert {e for e in edges if e[0] == "route_strategy"} == {
+            ("route_strategy", "strategy_director", "proceed"),
+            ("route_strategy", "synthesize_strategy", "scoped")}
+        # The sizer is reached through its fork, not an edge.
+        assert not {e for e in edges if "size_change" in e[:2]}
+    assert workflow.nodes["fork_size"].targets == ["size_change"]
+    assert workflow.nodes["fork_size"].optional_targets == ["size_change"]
+    assert workflow.nodes["join_size"].sources == ["size_change"]
+
+
+def test_every_design_path_passes_pitfalls():
+    """Every path from the route's proceed edge to the approval gate passes widen_research and
+    then pitfalls_researcher: no route skips the pitfalls."""
+    graph = DesignMode().build()
+
+    def walk(node, seen, passed):
+        if node == "gate_strategy":
+            assert passed == ["widen_research", "pitfalls_researcher"], seen
+            return 1
+        targets = [e.target for e in graph.out_edges(node)]
+        if graph.nodes[node].kind == "fork":
+            targets = [graph.fork_join(node)]
+        count = 0
+        for target in targets:
+            if target in seen:  # a reloop: the path goes on from the earlier visit
+                continue
+            step = passed + [target] if target in ("widen_research", "pitfalls_researcher") \
+                and target not in passed else passed
+            count += walk(target, seen | {target}, step)
+        return count
+
+    assert walk("clear_sizing", {"route_refine_design", "clear_sizing"}, []) > 0

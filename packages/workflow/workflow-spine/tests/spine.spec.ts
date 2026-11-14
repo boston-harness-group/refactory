@@ -245,6 +245,39 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     }
   })
 
+  it('the sizer runs before research, and a sizer that fails is missing and research still runs', () => {
+    const s = new Spine(graph)
+    expect(spineEdges(graph, 'route_refine_design')).toEqual(
+      [['clear_sizing', 'proceed'], ['design_doc', 'light']])
+    expect(s.view('fork_size').optional_targets).toEqual(['size_change'])
+    const before = advance(s, 'size_change', 'proceed')
+    expect(before).toEqual(['prepare', 'route_refine_design', 'clear_sizing', 'fork_size'])
+    expect(ids(s)).toEqual(['size_change'])
+    // The sizer is the fork's only optional branch: its failure goes on to the join.
+    s.complete('size_change', { failed: true })
+    expect(ids(s)).toEqual(['join_size'])
+    s.complete('join_size')
+    expect(ids(s)).toEqual(['presize_scale'])
+    // presize_scale is not optional: it never fails (it sizes full instead).
+    expect(() => s.complete('presize_scale', { failed: true })).toThrow(/is not optional/)
+    s.complete('presize_scale')
+    expect(ids(s)).toEqual(['research_director'])
+  })
+
+  it('a lean research is widened once: widen_research reloops to research_director, then pitfalls run', () => {
+    const s = new Spine(graph)
+    expect(spineEdges(graph, 'classify_scale')).toEqual([['widen_research', '']])
+    expect(spineEdges(graph, 'widen_research')).toEqual(
+      [['pitfalls_researcher', 'proceed'], ['research_director', 'reloop']])
+    advance(s, 'widen_research', 'proceed')
+    s.verdict('widen_research', 'reloop', 'research ran lean but its footprint shows cross-cutting impact')
+    expect(ids(s)).toEqual(['research_director'])
+    const second = advance(s, 'widen_research', 'proceed')
+    expect(second).toEqual(['research_director', 'record_findings', 'gate_research', 'classify_scale'])
+    s.verdict('widen_research', 'proceed')
+    expect(ids(s)).toEqual(['pitfalls_researcher'])
+  })
+
   it('the check runs beside the reviews: six branches drain before join_qa, then gate_check routes', () => {
     const s = new Spine(graph)
     // Advance through the graph until fork_qa; prepare_check settles the commit first.

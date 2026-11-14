@@ -60,7 +60,7 @@ import pytest
 from refactory_dsh.design import DesignMode
 from refactory_dsh.paths import REPO_ROOT
 from refactory_dsh.run_state import is_alive
-from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER, RESEARCH_ANSWER, REVIEW_ANSWERS,
+from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER, REVIEW_ANSWERS,
                            VERIFICATION_ANSWER, git, git_repo, graph_profile, model_home_with_a_key,
                            stub)
 
@@ -96,6 +96,15 @@ QA_PROCEED = json.dumps({"verdict": "proceed", "must_fix": [], "follow_ups": [],
 OVERWATCH_PASS = json.dumps({"verdict": "pass", "must_fix": [], "follow_ups": [], "corrections": []})
 
 
+#: The lean research of the one-line change: the function the sizer cited, and one new item.
+LEAN_RESEARCH = json.dumps([{
+    "focus": "where VERSION is set and what pins it", "slug": "version",
+    "finding": "tool.py:1 sets VERSION; tests/test_pin.py:5 pins it to 1",
+    "ids": ["FND-version-1"],
+    "footprint": {"existing_functions": ["tool.py:1 VERSION"],
+                  "new_items": ["VERSION_INFO tuple in tool.py:2"], "shared_engine": []}}])
+
+
 def _files(files: dict[str, str]) -> str:
     """The builder's answer: `===FILE:` blocks."""
     return "\n".join(f"===FILE: {name}===\n{body}" for name, body in files.items()) + "\n"
@@ -103,7 +112,14 @@ def _files(files: dict[str, str]) -> str:
 
 #: What each agent node answers, by node id, visit by visit (`parity_dsh.py`).
 SCRIPT: dict[str, list[Any]] = {
-    "research_director": [RESEARCH_ANSWER],
+    # The sizer sizes the one-line change scoped. The lean research agrees on what it touches
+    # and finds one new item, which makes the change full after research without widening
+    # it (new items route the strategy step, not the research), so the perspectives run.
+    "size_change": [json.dumps([{"size": "scoped", "why": "one line: tool.py:1",
+                                 "footprint": {"existing_functions": ["tool.py:1 VERSION"],
+                                               "new_items": [], "shared_engine": []},
+                                 "cross_cutting": []}])],
+    "research_director": [LEAN_RESEARCH],
     "pitfalls_researcher": [{"text": PITFALLS_ANSWER, "files": {"pitfalls.md": "# Pitfalls\n\n(scripted)\n"}}],
     "strategy_director": [{"text": "perspectives", "files": {
         "strategy/simplest.md": "### FND-simplest-1 — the simplest thing\n\n# simplest\n\nDetails.\n",
@@ -716,6 +732,16 @@ def test_each_run_went_through_the_whole_scenario(runs, runtime):
     assert any("prepare_check:" in line and "reloop" in line for line in visits), visits
     assert "delivery_gate: proceed" in visits, visits
     assert any(line.startswith("fork_qa branches:") for line in visits), visits
+    # Sized scoped before research; the lean research is not widened (a new item alone does
+    # not widen it), and the perspectives run on the full scale it finds.
+    assert "fork_size branches: size_change=completed" in visits, visits
+    assert "widen_research: proceed" in visits, visits
+    assert visits.count("research_director: completed") == 1, visits
+    assert "strategy_director: completed" in visits, visits
+    calls = [json.loads(line) for line in (runs["worlds"][runtime].dsh / "calls.jsonl").read_text().splitlines()]
+    [strategy] = [call["prompt"] for call in calls if call["node"] == "strategy_director"]
+    assert "Before research: scoped — touches 1 existing function(s)" in strategy
+    assert "A small, contained change usually needs few perspectives" in strategy
     assert "NAME constant" in observed["artifacts"]["design.md"]
     [patch] = observed["commits"].values()
     assert "+VERSION = 2" in patch and "+NAME = 'tool'" in patch and "assert tool.VERSION == 2" in patch

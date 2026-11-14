@@ -605,3 +605,38 @@ def test_fork_branch_prompt_reading_a_siblings_fact_refused(nested):
     state = {"graph": _sibling_fact_graph(nested=nested).to_state(), "knobs": {}}
     with pytest.raises(LoweringError, match="a branch prompt depends on a sibling's facts"):
         lowering.to_workflow(state)
+
+
+def test_design_lowers_the_sizer_and_widening():
+    """The change sizer, its fork and the widening gate lower for the spine as the walker runs
+    them: an optional sizer with no tool policy or retry, ops with no required reads, and a
+    gate whose one reloop goes back to research_director."""
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.ir import GateNode
+
+    state = DesignMode().state_dict()
+    workflow = lowering.to_workflow(state)
+    widen = workflow.nodes["widen_research"]
+    assert isinstance(widen, GateNode) and widen.evaluator_type == "fn"
+    assert widen.evaluator_command.endswith("refactory_dsh.design_ops:widen_research")
+    assert widen.max_iterations == 1
+    assert state["graph"]["nodes"]["widen_research"]["on_exhausted"] == "continue"
+    assert {(e.target, e.condition) for e in workflow.edges if e.source == "widen_research"} == {
+        ("research_director", "reloop"), ("pitfalls_researcher", "proceed")}
+    sizer = workflow.nodes["size_change"]
+    assert sizer.tool_policy is None and sizer.retry is None and sizer.timeout == 600
+    declared = lowering.node_declarations(state)
+    assert declared["size_change"].get("optional") is True
+    for op in ("clear_sizing", "presize_scale"):
+        assert not declared[op].get("required_reads"), op
+    # Every file the sizing ops and the widening gate touch is declared (a deletion or a
+    # move included), so the lowered contract shows what they do.
+    assert declared["presize_scale"]["reads"] == ["reviews/size_change-missing.txt", "sizing.json"]
+    assert sorted(state["graph"]["nodes"]["clear_sizing"]["writes"]) == [
+        "reviews/size_change-missing.txt", "sizing.json"]
+    assert set(state["graph"]["nodes"]["widen_research"]["writes"]) == {
+        "research-review.txt", "research-lean/", "research-plan.json", "research/"}
+    assert set(state["graph"]["nodes"]["widen_research"]["reads"]) == {
+        "research-plan.json", "research/"}
+    agents = [node for node, entry in declared.items() if entry["kind"] == "agent"]
+    assert [node for node in agents if "sizing.json" in declared[node]["reads"]] == []
