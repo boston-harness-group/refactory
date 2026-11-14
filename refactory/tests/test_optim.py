@@ -302,15 +302,124 @@ def test_the_autoresearch_prompt_lists_the_refusals_on_a_retry():
 def test_a_model_that_returns_nothing_is_a_failed_round_not_a_crash():
     mode = _mode()
     parents = [Candidate.from_state(mode.state_dict())]
-    # Both rounds answer with no JSON: an empty object would be an answer with no
-    # proposals list, which is refused (E-proposal-shape), not a failed round.
-    optimizer = optim.AutoresearchOptimizer(
-        FakeModel(["no json here at all", "no json here either"]), k=2)
+    # Every attempt of both rounds answers with no JSON (each round's proposal call
+    # makes 3 attempts): an empty object would be an answer with no proposals list,
+    # which is refused (E-proposal-shape), not a failed round.
+    model = FakeModel(["no json here at all"] * 6)
+    optimizer = optim.AutoresearchOptimizer(model, k=2)
     candidates, rejections = optimizer.propose_valid(
         _context(mode), 1, parents=parents, invariants=mode.invariants()
     )
     assert candidates == []
     assert rejections == []
+    assert len(model.prompts) == 6 and model.answers == []
+
+
+# ── the proposal call's attempts (SkillOpt-style, as the other optimizer calls) ──
+
+ANSWER = ('{"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob", "name": "order", '
+          '"value": "asc"}, "rationale": "r", "prediction": "p", "confidence": 0.5}]}')
+
+
+class ScriptedModel:
+    """Each call takes the next outcome: an exception is raised, text is answered."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return str(outcome)
+
+
+def _proposer(monkeypatch, tmp_path, outcomes):  # type: ignore[no-untyped-def]
+    from refactory_dsh.optim import random_optimizer
+
+    waits: list[float] = []
+    monkeypatch.setattr(random_optimizer, "_sleep", waits.append)
+    model = ScriptedModel(outcomes)
+    optimizer = optim.AutoresearchOptimizer(model, k=1)
+    optimizer.trace_path = tmp_path / "trace.jsonl"
+    return optimizer, model, waits
+
+
+def _trace(tmp_path):  # type: ignore[no-untyped-def]
+    import json
+
+    return [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
+
+
+def test_a_proposal_call_that_fails_or_answers_no_json_is_tried_again(monkeypatch, tmp_path):
+    """The proposal call is retried as SkillOpt retries its calls: an exception, then a
+    reply with no JSON at all, then an answer. Each attempt is traced (and was paid),
+    with waits of 1 and 2 s between them."""
+    mode = _mode()
+    optimizer, model, waits = _proposer(monkeypatch, tmp_path, [
+        RuntimeError("model completion failed (exit 1): dsh: worker failed"),
+        "I could not decide.", ANSWER])
+    [proposal] = optimizer.propose(_context(mode), 1, [Candidate.from_state(mode.state_dict())])
+    assert proposal.edit["value"] == "asc"
+    assert model.calls == 3 and waits == [1, 2]
+    lines = [line for line in _trace(tmp_path) if line["kind"] == "proposal"]
+    assert [line["attempt"] for line in lines] == [1, 2, 3]
+    assert "RuntimeError" in lines[0]["error"] and lines[0]["reply"] is None
+    assert "no JSON object" in lines[1]["error"] and lines[1]["reply"] == "I could not decide."
+    assert lines[2]["error"] is None and lines[2]["proposals"] == 1
+
+
+def test_a_proposal_call_that_fails_every_attempt_raises_the_last_error(monkeypatch, tmp_path):
+    mode = _mode()
+    optimizer, model, waits = _proposer(monkeypatch, tmp_path, [
+        RuntimeError("one"), RuntimeError("two"), "", ANSWER])
+    with pytest.raises(ValueError, match="the model returned nothing"):
+        optimizer.propose(_context(mode), 1, [Candidate.from_state(mode.state_dict())])
+    assert model.calls == 3 and waits == [1, 2]
+
+
+def test_a_malformed_proposal_answer_is_refused_and_re_asked_not_retried(monkeypatch, tmp_path):
+    """A reply whose JSON object is broken is an answer: one call, refused as unreadable
+    (the loop asks again with why), never an attempt retry."""
+    from refactory_dsh.optim.base import UNREADABLE_PROPOSAL
+
+    mode = _mode()
+    optimizer, model, waits = _proposer(monkeypatch, tmp_path, [
+        '{"diagnosis": "d", "proposals": [{"edit": {"op": "set_knob",, }]}', ANSWER])
+    [proposal] = optimizer.propose(_context(mode), 1, [Candidate.from_state(mode.state_dict())])
+    assert UNREADABLE_PROPOSAL in proposal.edit
+    assert model.calls == 1 and waits == []
+    [line] = _trace(tmp_path)
+    assert line["attempt"] == 1 and line["error"].startswith("malformed answer")
+
+
+@pytest.mark.parametrize("fatal", ["budget", "cancelled", "context"])
+def test_fatal_and_context_failures_of_a_proposal_call_are_not_retried(monkeypatch, tmp_path, fatal):
+    from concurrent.futures import CancelledError
+
+    from refactory_dsh.budgets import BudgetExhausted
+
+    error = {"budget": BudgetExhausted("token budget exhausted"),
+             "cancelled": CancelledError("model completion cancelled"),
+             "context": RuntimeError("prompt is too long: 250000 tokens > 200000 maximum")}[fatal]
+    mode = _mode()
+    optimizer, model, waits = _proposer(monkeypatch, tmp_path, [error, ANSWER])
+    with pytest.raises(type(error)):
+        optimizer.propose(_context(mode), 1, [Candidate.from_state(mode.state_dict())])
+    assert model.calls == 1 and waits == []
+
+
+def test_a_person_stop_during_a_proposal_retry_wait_is_a_stop(monkeypatch, tmp_path):
+    from refactory_dsh.optim.base import RunStopped
+
+    mode = _mode()
+    optimizer, model, waits = _proposer(monkeypatch, tmp_path, [RuntimeError("one"), ANSWER])
+    optimizer.stop_check = lambda: True
+    with pytest.raises(RunStopped):
+        optimizer.propose(_context(mode), 1, [Candidate.from_state(mode.state_dict())])
+    assert model.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -451,16 +560,17 @@ def test_the_output_limit_is_the_smaller_of_model_and_route():
 
 
 def test_a_transport_blip_is_ridden_out_over_about_a_minute(monkeypatch):
-    """A DNS blip outlasted retries one and two seconds apart and failed the run (dm-218).
+    """A blip outlasted retries one and two seconds apart and failed the run (dm-218).
     The waits double and add up to about a minute, whatever the attempt count; a clock
-    that only records the waits keeps the test from waiting."""
+    that only records the waits keeps the test from waiting. (A DNS outage, as dm-218's
+    was, is now waited out without using attempts: test_network_wait.py.)"""
     from refactory_dsh import model
     from refactory_dsh.model import DshModelClient
 
     class Blip:
         returncode = 1
         stdout = ""
-        stderr = "dsh: TRANSPORT: getaddrinfo ENOTFOUND api.example.com"
+        stderr = "dsh: TRANSPORT: 500 Internal Server Error"
 
     class Ok:
         returncode = 0
@@ -815,13 +925,13 @@ def test_each_retry_on_the_wire_is_recorded(monkeypatch, tmp_path):
     from refactory_dsh.model import RETRY_EVENT
 
     run = tmp_path / "run"
-    queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"),
-                            _Failed("dsh: TRANSPORT: ECONNRESET"), _Done())
+    queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: 500 Internal Server Error"),
+                            _Failed("dsh: TRANSPORT: 429 Too Many Requests"), _Done())
     assert _no_tools().complete("hello", workdir=run) == "done\n"
     assert queue == [] and len(waits) == 2
     events = _events(run, RETRY_EVENT)
     assert [(e["attempt"], e["attempts"], e["cause"]) for e in events] == [
-        (1, 3, "dsh: TRANSPORT: socket hang up"), (2, 3, "dsh: TRANSPORT: ECONNRESET")]
+        (1, 3, "dsh: TRANSPORT: 500 Internal Server Error"), (2, 3, "dsh: TRANSPORT: 429 Too Many Requests")]
     assert all(e["state"] == "retrying" for e in events)
 
 
@@ -852,7 +962,7 @@ def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monk
                                      is_retryable_failure, is_transport_failure)
 
     for client in (DshModelClient(), _no_tools()):
-        queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: socket hang up"), _Done())
+        queue, waits = _answers(monkeypatch, _Failed("dsh: TRANSPORT: 500 Internal Server Error"), _Done())
         assert client.complete("hello") == "done\n"
         assert queue == [] and len(waits) == 1
     assert not is_transport_failure(TEARDOWN), "a teardown failure is not called transport"
@@ -872,7 +982,7 @@ def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monk
     assert native.retry_attempts() == 1 and text.retry_attempts() == 3
     rebuilt = DshModelClient(**native.context()).with_tool_policy("none")
     assert rebuilt.retry_attempts() == 3
-    for failure in ("dsh: TRANSPORT: socket hang up",):
+    for failure in ("dsh: TRANSPORT: 500 Internal Server Error",):
         queue, waits = _answers(monkeypatch, _Failed(failure), _Done())
         assert text.complete("hello") == "done\n"
         assert queue == [] and len(waits) == 1

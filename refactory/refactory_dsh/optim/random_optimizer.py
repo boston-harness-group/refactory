@@ -343,6 +343,39 @@ class AutoresearchOptimizer(Optimizer):
             return reply, None, False, attempt
         return None, error, False, CALL_ATTEMPTS
 
+    def _ask_proposal(self, call: dict[str, Any], question: str
+                      ) -> tuple[str, dict[str, Any], str, int]:
+        """The proposal call, retried as SkillOpt retries its calls (``CALL_ATTEMPTS``,
+        waiting ``retry_delay`` after each failed attempt, stop-aware: `_wait`): an
+        attempt fails when the call raises, or when its reply holds no JSON object at
+        all (empty, or prose only), and each failed attempt is traced with its
+        ``attempt`` (each was a paid call). Returns the reply, its answer object, why
+        that object is not valid JSON (``""`` when it is) and the attempt that answered.
+        A reply whose object is broken is an answer, not a failed attempt: the loop
+        refuses it and asks again with why (`propose`). A spent budget, a cancelled run
+        or a missing model choice raise at once (`_fatal`), and a prompt longer than the
+        model's context is not asked again at the same length. When every attempt
+        fails, the last error is raised: the round then counts as a failed one
+        (``Loop.propose``)."""
+        from . import analysts
+
+        for attempt in range(1, CALL_ATTEMPTS + 1):
+            text: str | None = None
+            try:
+                text = self._client.complete(question, system=self._system,
+                                             **self._completion_options)
+                payload, malformed = answer_json(text)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self.record_call(**call, attempt=attempt, reply=text, proposals=0, error=error)
+                if (isinstance(exc, _fatal()) or analysts.context_overflow(error)
+                        or attempt == CALL_ATTEMPTS):
+                    raise
+                self._wait(retry_delay(attempt - 1))
+                continue
+            return str(text), payload, malformed, attempt
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _wait(self, seconds: float) -> None:
         """A retry's wait, cut short by a stop: the client's own cancellation scopes
         (``DshModelClient.with_cancellation``) or the loop's ``stop_check`` (a person's
@@ -810,16 +843,8 @@ class AutoresearchOptimizer(Optimizer):
         )
         call = {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
                 "system": self._system, "prompt": question}
-        try:
-            text = self._client.complete(question, system=self._system, **self._completion_options)
-        except Exception as exc:
-            self.record_call(**call, reply=None, proposals=0, error=f"{type(exc).__name__}: {exc}")
-            raise
-        try:
-            payload, malformed = answer_json(text)
-        except Exception as exc:
-            self.record_call(**call, reply=text, proposals=0, error=f"{type(exc).__name__}: {exc}")
-            raise
+        text, payload, malformed, attempt = self._ask_proposal(call, question)
+        call["attempt"] = attempt
         if malformed:
             # Nothing of a broken answer is read: an object nested in it is a fragment
             # (D-s42 epoch 5 read the first edit of a two-proposal answer as the whole

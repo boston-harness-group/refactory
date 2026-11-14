@@ -61,6 +61,17 @@ def _optimizer_retries_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_outage_given_up_before_or_after() -> Iterator[None]:
+    """A call that gave up on an outage makes later calls in the process fail at once
+    (`model.NETWORK_GIVEN_UP`); no test starts with, or leaves, one given up."""
+    from refactory_dsh.model import NETWORK_GIVEN_UP
+
+    NETWORK_GIVEN_UP.clear()
+    yield
+    NETWORK_GIVEN_UP.clear()
+
+
+@pytest.fixture(autouse=True)
 def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """The checkout guard (dm-164) never watches the checkout under test.
 

@@ -229,7 +229,8 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 A failed item is the candidate's result only when it ran and failed. An item whose
 process died with the run has an unknown outcome (`items.interrupted_item`). That is
 an item whose model calls kept failing on the wire through the client's retries (a
-proxy or provider outage), whose completion process was killed by SIGKILL or SIGTERM
+proxy or provider outage, or a network outage longer than the client waits one out:
+2 hours, or its node's wall; `models.md`), whose completion process was killed by SIGKILL or SIGTERM
 (exit -9 or -15: the host's out-of-memory killer, a stop from outside), whose product
 worker was killed (`signal: SIGKILL`), whose op child exited before it reported, or
 whose model call the run's stop cancelled. Only an item with no verdict qualifies (an
@@ -667,7 +668,15 @@ is never retried. The loop's own analyst, merge, memory and step-review calls ar
 retried the same way (`AutoresearchOptimizer._complete`): up to 3 attempts, waiting 1,
 2 and 4 s after each failed one, any exception from an attempt counting, each attempt
 traced with its `attempt`; a spent budget, a cancellation or a missing model choice
-stop at once. A reply is never retried, however unusable; a call refused as longer than
+stop at once. So is the proposal call (`AutoresearchOptimizer._ask_proposal`), where a
+reply with no JSON object at all (empty, or prose only) also counts as a failed attempt;
+a reply whose JSON object is broken is an answer, refused and asked again with why
+(`E-proposal-shape`), not an attempt retry, and a proposal call whose attempts all fail
+ends the round as a failed one, as a failed proposal call did before (it used to have
+one attempt, so one transient failure lost the round's proposal). Otherwise a reply is
+never retried, however unusable: the analyst, merge, memory and step-review calls parse
+what they get, and the proposal call retries only a reply with no JSON at all; a call
+refused as longer than
 the model's context is not tried again at the same length but once at half of it, and
 not at all when the request cannot be made shorter. A retry's wait ends early on a stop
 (the client's cancellation scope, or a person's `refactory stop` request, checked every
@@ -680,9 +689,16 @@ run with its error, after journaling it as the bound and writing the report; in 
 proposal round they are counted as that round's failure, as any failed proposal is. These attempts stack
 on the model client's own: a `DshModelClient` completion already makes up to 3 attempts
 on a transport failure (`model.DEFAULT_ATTEMPTS`), waiting up to 60 s in all between
-them (`RETRY_WINDOW_S`), so one analyst, merge, memory or step-review call may in the
+them (`RETRY_WINDOW_S`), so one analyst, merge, memory, step-review or proposal call may in the
 worst case start 9 model sessions, each up to the client's own timeout, and wait up to
-3 x 60 + 1 + 2 + 4 = 187 s between them.
+3 x 60 + 1 + 2 + 4 = 187 s between them. A network, DNS or credential-refresh outage
+uses none of these attempts, the SkillOpt port's or the loop's: the model client waits it
+out inside the attempt (up to 2 hours, `models.md`), and the SkillOpt port's trace line
+lists the outages an attempt waited out as `network_waits`. The bound is waited once, not
+once per attempt: after a call has waited the whole 2 hours, an outage met by the next
+call (that call's next attempt included) fails at once until some call gets through. So
+the worst case of one optimizer call in an outage that never ends is about 2 hours plus
+the attempts' own waits (1 + 2 + 4 s), not 3 x 2 hours.
 
 ### Run-wide feedback: changes by kind, the memory note, added-step reviews
 
