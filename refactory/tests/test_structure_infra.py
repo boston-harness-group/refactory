@@ -699,3 +699,42 @@ def test_a_repaired_proposal_is_held_to_the_rounds_edit_level(tmp_path, monkeypa
         loop.rejections.append(Rejection(1, proposal.edit, ["E-patch: no such target"]))
         assert loop._repair(Run(_loop=loop), proposal, parent, ["E-patch: no such target"]) is None
     assert any("E-level" in r for r in loop.rejections[-1].reasons), loop.rejections[-1].reasons
+
+
+def test_a_repaired_fix_is_recorded_at_its_own_edit_level(tmp_path, monkeypatch):
+    """A round asking for both levels: a prompt-level proposal refused, then fixed into a
+    pipeline change, fills the pipeline level, not the prompt level it was written as."""
+    from test_compound_proposals import TwoLevels
+    from test_skillopt import _patch_mode
+    from test_val_gate import _loop
+    from refactory_dsh.outerloop import Run
+
+    class Restructure(Optimizer):
+        def repair(self, ctx, proposal, reasons, parent):  # type: ignore[no-untyped-def]
+            return Proposal(edit={"op": "insert_after", "target": "finish", "node": {
+                "id": "extra", "kind": "op", "call": "loop_ops:write_best",
+                "writes": ["extra.json"], "produces": ["extra_best"]}}, parent=parent.id)
+
+    with _patch_mode(TwoLevels):
+        loop = _loop(tmp_path, epochs=1, batch_size=1, allowed_ops=())
+        loop.optimizer = Restructure()
+        parent = Candidate.from_state(loop.mode.state_dict())
+        loop._levels_wanted, loop._levels_done = ["prompt_knob", "pipeline"], []
+        proposal = Proposal(edit=_patch("Be very careful."), parent=parent.id)
+        accepted = loop.install(Run(_loop=loop), [proposal], [parent])
+    assert len(accepted) == 1 and "extra" in accepted[0].state["graph"]["nodes"], accepted
+    assert loop._levels_done == ["pipeline"], loop._levels_done
+    assert loop.rejections[-1].repaired == accepted[0].id
+
+
+def test_a_rule_is_counted_once_per_proposal_when_a_fixs_refusal_is_kept():
+    """The fix's refusal is kept beside the proposal's in the text, but a rule both name
+    counts once for that proposal in the run's tallies."""
+    from refactory_dsh.loop import _codes
+    from refactory_dsh.optim.base import Rejection
+
+    rejection = Rejection(1, {"op": "x"}, [
+        "V15 [a]: needs {{b}}", "V15 [a]: needs {{c}} [the proposal as a slim repair call fixed it]",
+        "E-noop: same [the proposal as a slim repair call fixed it]"])
+    assert len(rejection.reasons) == 3
+    assert _codes([rejection]) == {"E-noop": 1, "V15": 1}
