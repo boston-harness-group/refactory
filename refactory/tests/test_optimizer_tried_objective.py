@@ -229,7 +229,7 @@ def test_with_no_size_cost_the_request_says_cost_is_not_scored_and_drops_the_cos
     assert "validation gate" in said and "a tie with the current candidate is rejected" in said
     trace = _section(text, "## Evidence from the traces")
     assert "| cost |" not in trace and "294.75" not in text and "| scoring |" in trace
-    assert text.index("## What the score measures") < text.index("## Parameters you may move")
+    assert text.index("## What the score measures") < text.index("## The pipeline you may edit")
     # A score that is not the items' mean may carry cost itself: the row stays.
     other = ProposalContext(parsimony=0.0, traces=[GRADIENT]).render()
     assert "| cost |" in _section(other, "## Evidence from the traces")

@@ -74,7 +74,7 @@ def test_the_next_request_for_a_structural_child_lists_its_new_knobs(tmp_path, e
     for name in new:
         assert name in listed, name
         assert listed[name]["reachable"] is True, name
-    table = ctx.render().split("## Parameters you may move", 1)[1].split("\n## ", 1)[0]
+    table = ctx.render().split("## Each step's settings", 1)[1].split("\n## ", 1)[0]
     for name in new:
         assert name in table, name
 

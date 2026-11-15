@@ -792,14 +792,8 @@ class ProposalContext:
                              gated=bool(self.selection)),
             *([self.steering, ""] if self.steering.strip() else []),
             *_strategy_section(self.strategy, self.strategy_name),
-            "## Parameters you may move",
-            _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
-                    "description"],
-                   [[k["name"], k["value"], k["kind"], k.get("values"), k.get("range"),
-                     k["frozen"], k.get("reachable", True), k.get("description", "")]
-                    for k in self.knobs]),
-            "",
             "## The pipeline you may edit",
+            _levers_line(self.catalogue),
             *([f"Note: {self.graph_note}"] if self.graph_note else []),
             *([f"Protected nodes: {', '.join(f'`{n}`' for n in self.protected)}. An edit may "
                "not remove them, change their declarations or out-edges, move a knob they "
@@ -816,11 +810,19 @@ class ProposalContext:
                 *(f"- {w}" for w in self.wiring_warnings)] if self.wiring_warnings else []),
             *_available_section(self.available, code_nodes=self.code_nodes),
             "",
-            *_node_specs(self.node_states, text_chars=self.node_spec_text_chars,
-                         section_chars=self.node_spec_section_chars,
-                         knob_values={k.get("name"): k.get("value") for k in self.knobs},
-                         person_gates=self.person_gates),
+            *_step_map(self),
+            "## The operations you may use",
+            _table(["op", "kind", "macro", "fields", "description"],
+                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
+                    for c in self.catalogue]),
             "",
+            *composition_section(self.catalogue, self.node_states, self.edges,
+                                 protected=self.protected, code_nodes=self.code_nodes,
+                                 text_knobs=[k.get("name") for k in self.knobs
+                                             if k.get("kind") == "str"],
+                                 structure_guidance=self.structure_guidance),
+            *_settings_lines(self.knobs),
+            *_node_reference(self),
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
             (
@@ -834,23 +836,14 @@ class ProposalContext:
             "score. It is available and it may be worth having, but it is not a way "
             "to improve the number.",
             "",
-            "## The rules a proposal must satisfy",
-            "A proposal that breaks one of these is refused before anything runs, so it "
-            "costs nothing but the answer. They are the same rules the validator "
-            "enforces, generated from it.",
+            "## The rules the validator checks",
+            "Every proposal is checked against these rules before anything runs; they are "
+            "the validator's own, generated from it. One that breaks a rule comes back with "
+            "the rule's code and the reason, so it can be fixed in a later answer, and it "
+            "costs nothing but the answer.",
             _rules_text(),
             "",
-            "## The operations you may use",
-            _table(["op", "kind", "macro", "fields", "description"],
-                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
-                    for c in self.catalogue]),
-            "",
             *_blocks_section(self.insertable, self.catalogue),
-            *composition_section(self.catalogue, self.node_states, self.edges,
-                                 protected=self.protected, code_nodes=self.code_nodes,
-                                 text_knobs=[k.get("name") for k in self.knobs
-                                             if k.get("kind") == "str"],
-                                 structure_guidance=self.structure_guidance),
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
                         selection=self.selection, population=self.population_parents),
@@ -861,10 +854,10 @@ class ProposalContext:
                     for c in self.leaderboard]),
             "",
             "## Evidence from the traces",
-            _table(["what", "value"],
-                   [[str(k), json.dumps(v, default=str)] for k, v in _trace_rows(
-                       self.traces, omit=UNSCORED_TRACE_KEYS
-                       if self.parsimony == 0 and self.score_is_item_mean else ())]),
+            _table(["what", "value"], _evidence_rows(_trace_rows(
+                self.traces, omit=UNSCORED_TRACE_KEYS
+                if self.parsimony == 0 and self.score_is_item_mean else ()),
+                [] if self.history_truncated else self.history)),
         ]
         if self.edit_pairs:
             sections += ["", *_edit_change_lines(self.edit_pairs)]
@@ -941,6 +934,137 @@ class ProposalContext:
         if self.edit_levels:
             sections += ["", *levels_instructions(self.edit_levels, code_nodes=self.code_nodes)]
         return "\n".join(sections)
+
+
+def _levers_line(catalogue: Sequence[dict[str, Any]]) -> str:
+    """What the request lets the optimizer change, said before anything else about the
+    pipeline: its structure and its steps' settings, as equal levers when the run permits
+    structural operations; the settings only when it does not."""
+    if not structural_ops(catalogue):
+        return ("This run permits changes to the steps' settings only (their prompts and "
+                "parameters, listed after the operations); the structure below stays as it is.")
+    return ("You may change the pipeline's structure -- its steps and how they connect, "
+            "with the operations below -- and each step's settings -- its prompts and "
+            "parameters, listed after the operations. Both are levers of the same standing: "
+            "read where the pipeline fails first, then choose by the cause the evidence shows.")
+
+
+def _exact_in_table(value: Any) -> bool:
+    """Whether a table cell shows ``value`` as it is: a cell puts a text on one line and
+    escapes ``|`` (`_cell`), so a text with either is shown whole below the table."""
+    return not (isinstance(value, str) and ("\n" in value or "|" in value))
+
+
+def _fence(text: str) -> str:
+    """A code fence longer than any run of backticks in ``text``."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def _settings_lines(knobs: Sequence[dict[str, Any]]) -> list[str]:
+    """"Each step's settings": every knob in a table; a text the table cannot show as it
+    is (a line break or a ``|``) is shown there by reference and whole below it, fenced,
+    so a patch can quote its target text exactly."""
+    whole = [k for k in knobs if not _exact_in_table(k.get("value"))]
+    lines = ["## Each step's settings",
+             "The prompts and parameters the steps read, which `set_knob` moves (a new step "
+             "brings its own). A patch quotes its target text exactly: a value in the table "
+             "is exact as shown"
+             + ("; a text with line breaks or `|` is shown whole after the table." if whole
+                else "."),
+             _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
+                     "description"],
+                    [[k["name"], k["value"] if _exact_in_table(k.get("value"))
+                      else f"(shown whole below, {len(k['value'])} characters)",
+                      k["kind"], k.get("values"), k.get("range"),
+                      k["frozen"], k.get("reachable", True), k.get("description", "")]
+                     for k in knobs])]
+    for knob in whole:
+        fence = _fence(knob["value"])
+        lines += [f"`{knob['name']}`:", fence, knob["value"], fence]
+    return [*lines, ""]
+
+
+def _step_map(ctx: "ProposalContext") -> list[str]:
+    """"Where the pipeline fails, step by step" (`analysts.step_map_lines`): from the
+    round's analysis, or, without one, from the readers' failure patterns (where each
+    starts); nothing when neither ran."""
+    from .analysts import SHOWN_FINDINGS, reader_failures, step_map_lines
+
+    structural = bool(structural_ops(ctx.catalogue))
+    if ctx.analysis:
+        return step_map_lines(list(ctx.analysis.get("findings") or ()), ctx.nodes, ctx.edges,
+                              source="analysts", shown=SHOWN_FINDINGS,
+                              code_nodes=ctx.code_nodes, structural=structural)
+    if ctx.reader_findings:
+        return step_map_lines(reader_failures(ctx.reader_findings), ctx.nodes, ctx.edges,
+                              source="readers", code_nodes=ctx.code_nodes,
+                              structural=structural)
+    return []
+
+
+def _node_reference(ctx: "ProposalContext") -> list[str]:
+    """Each node of the edited graph in full and the node schemas (`_node_specs`), under
+    their own heading; nothing when the request carries no node states."""
+    specs = _node_specs(ctx.node_states, text_chars=ctx.node_spec_text_chars,
+                        section_chars=ctx.node_spec_section_chars,
+                        knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
+                        person_gates=ctx.person_gates)
+    return ["## Each step in full, and the node schema", *specs, ""] if specs else []
+
+
+def _count(value: Any) -> int:
+    """A count from a trace, 0 when it is not a whole number."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def structural_text(stats: Mapping[str, Any]) -> str:
+    """The run's structural changes so far (``Loop._structural_stats``) in plain words:
+    how many candidates made one, how many did not, how many structural proposals the
+    validator refused, and the operations used -- and, when none was tried, that none
+    has been (a fact about this run, not a judgement of structure)."""
+    structural = _count(stats.get("structural_candidates"))
+    other = _count(stats.get("knob_candidates"))
+    refused = _count(stats.get("structural_refusals"))
+    if structural:
+        text = (f"{structural} candidate(s) so far made a structural change and {other} "
+                "did not")
+    elif refused:
+        text = ("No structural change has been evaluated in this run yet; every candidate "
+                f"so far ({other}) keeps the starting pipeline's structure")
+    else:
+        text = ("No structural change has been tried in this run yet; every candidate so "
+                f"far ({other}) keeps the starting pipeline's structure")
+    if refused:
+        text += (f". {refused} structural proposal(s) were refused by the validator before "
+                 "running")
+    ops = stats.get("accepted_ops")
+    if isinstance(ops, Mapping) and ops:
+        text += ". Operations in the candidates so far: " + ", ".join(
+            f"`{op}` x{_count(n)}" for op, n in ops.items())
+    return text + "."
+
+
+def _evidence_rows(rows: Sequence[tuple[str, Any]],
+                   history: Sequence[Mapping[str, Any]] = ()) -> list[list[str]]:
+    """"Evidence from the traces" rows: what the run has done with structure first, in
+    plain words (`structural_text`), then every other trace row as data. Before the
+    loop's first gradient (a strategy's first request, the traces still empty) the
+    structure row is counted from ``history``, every evaluated candidate, when it is
+    whole (the caller passes none when it is truncated)."""
+    out = [["structural changes", structural_text(value)] for key, value in rows
+           if key == "structural" and isinstance(value, Mapping)]
+    if not out and history:
+        flags = [bool(c.get("structural")) for c in history if isinstance(c, Mapping)]
+        if flags:
+            out = [["structural changes", structural_text(
+                {"structural_candidates": sum(flags),
+                 "knob_candidates": len(flags) - sum(flags)})]]
+    return out + [[str(key), json.dumps(value, default=str)] for key, value in rows
+                  if not (key == "structural" and isinstance(value, Mapping))]
 
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
@@ -1165,7 +1289,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     lines = [
         "## How nodes compose",
         "The pipeline is made of four kinds of step, and any of them may be put anywhere the "
-        "rules above allow:",
+        "validator's rules (listed below) allow:",
         "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
         "produced upstream; its reply is written to its first `writes` file and, when it "
         "declares `produces`, also becomes that fact. A new agent runs without tools, so it "
@@ -1354,7 +1478,26 @@ def objective_lines(parsimony: float | None, *, item_mean: bool = False,
     """"What the score measures" (`objective_text`) as request lines; none when not
     known."""
     text = objective_text(parsimony, item_mean=item_mean, gated=gated)
-    return ["## What the score measures", text, ""] if text else []
+    policy = compute_policy(parsimony, item_mean=item_mean)
+    return ["## What the score measures", text, *([policy] if policy else []), ""] if text else []
+
+
+def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
+    """The run's compute policy, from its scoring settings, for the proposal request: with
+    parsimony 0, extra steps and model calls per item are not penalised, so a change that
+    adds them is weighed like any other. Empty with a size cost (the size cost lines say
+    what a node costs) or when the settings are not known."""
+    if parsimony is None or parsimony:
+        return ""
+    if item_mean:
+        return ("Compute policy: this run does not penalise extra steps or model calls per "
+                "item. Per-item cost is reported separately and is not part of the score, so "
+                "a change that adds steps or model calls is weighed only by the score it "
+                "should reach, as any other change is.")
+    return ("Compute policy: the loop does not penalise extra steps or model calls per item "
+            "(parsimony is 0), so a change that adds them is weighed by the score it should "
+            "reach, as any other change is; cost counts only as far as the task's own score "
+            "measures it.")
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -1416,8 +1559,11 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
             size += "; compare it with the size of the score differences between candidates"
         lines.append(size + ".")
     lines += [
-        "- Few well-argued changes, not many guesses: a concise set of edits, only the ones",
-        "  that are needed. Prefer an edit whose effect you can state, and vary what you touch.",
+        "- Ground each change in the evidence: a setting, a prompt or a structural change, whose",
+        "  effect you can state -- the failure it addresses (the step where it starts), how it",
+        "  changes what a step sees or how the work is done, and a prediction that can be",
+        "  checked. Choose the kind of change by the cause you diagnosed; neither kind is the",
+        "  safer default. Vary what you touch.",
         "- Your prediction is recorded and later checked against the outcome, so say what",
         "  you expect and how you could be wrong.",
         "- If the evidence justifies no change, return an empty proposal list and say why.",
@@ -1912,11 +2058,11 @@ def _edit_fields(fields: Sequence[str]) -> str:
     described = []
     for name in fields:
         if name == "into":
-            described.append("into: a list of two full node objects (see the node schemas above)")
+            described.append("into: a list of two full node objects (see the node schemas below)")
         elif name == "branches":
-            described.append("branches: a list of 2-8 full node objects (see the node schemas above)")
+            described.append("branches: a list of 2-8 full node objects (see the node schemas below)")
         elif name in NODE_OBJECT_FIELDS:
-            described.append(f"{name}: a full node object (see the node schemas above)")
+            described.append(f"{name}: a full node object (see the node schemas below)")
         else:
             described.append(name)
     return ", ".join(described)
@@ -2429,7 +2575,7 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
     patch's ops; a structural edit's fields with every node's wiring whole and its free
     text (prompts, code) sharing ``HISTORY_EDIT_CHARS`` characters (``fit_edit_text``).
     A diff, value or patch is at most ``HISTORY_EDIT_CHARS`` characters plus a "(N more
-    chars)" marker. The "Parameters you may move" table already shows the current
+    chars)" marker. The "Each step's settings" table already shows the current
     values in full."""
     values: dict[str, Any] = dict(before or {})
     parts: list[str] = []

@@ -128,7 +128,7 @@ class Request:
         self.text = text
         self.index = index
         self.pipeline = _section(text, "The pipeline you may edit")
-        self.knobs = _section(text, "Parameters you may move")
+        self.knobs = _section(text, "Each step's settings")
         self.decision = _section(text, "What this round is for")
         wanted = re.search(r"Propose at most (\d+) update", text)
         self.wanted = int(wanted.group(1)) if wanted else 1
@@ -268,9 +268,14 @@ def _fixed(candidate: Candidate) -> set[str]:
 
 
 def _described_prompt(request: Request) -> set[str]:
-    """The fix tokens of the solve prompt the request showed (the knob table)."""
+    """The fix tokens of the solve prompt the request showed (its settings)."""
     row = next((line for line in request.knobs.splitlines()
                 if line.startswith("| solve__system_prompt |")), "")
+    if "(shown whole below" in row:
+        # A multi-line text is shown whole in a fence after the table.
+        block = request.knobs.split("`solve__system_prompt`:\n", 1)[1]
+        fence, rest = block.split("\n", 1)
+        row = rest.split("\n" + fence, 1)[0]
     return set(re.findall(r"fix:(c\d)", row))
 
 

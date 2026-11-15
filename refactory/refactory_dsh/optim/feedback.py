@@ -868,10 +868,12 @@ def stored_review(text: str) -> dict[str, Any] | None:
 
 #: The paragraph ``structure_guidance`` adds under "How nodes compose".
 STRUCTURE_GUIDANCE = (
-    "What makes a new step pay off: a step helps when it adds work or information the "
-    "pipeline does not already have -- an independent attempt that does not see earlier "
-    "steps' conclusions, several attempts combined by a vote or a check, a deterministic "
-    "computation or check in code, or a retry sent back with a specific reason. A step "
-    "that re-reads the same notes with the same model tends to repeat their mistakes. "
-    "Prefer a structural change that changes how the work is done over one that delivers "
-    "an instruction a prompt edit could deliver.")
+    "What makes a new step pay off depends on the failure it addresses. For example, a "
+    "step can add an independent attempt that does not see earlier steps' conclusions, "
+    "several attempts combined by a vote or a check, a deterministic computation or check "
+    "in code, a retry sent back with a specific reason, a critic of an earlier step's "
+    "work, or a step that reformats or summarises for the next one. Design a structural "
+    "change from the evidence as you would a prompt edit: which failure it addresses, how "
+    "it changes what each step sees or how the work is done, and what it should change in "
+    "the results. Choose between a prompt edit and a structural change by which one "
+    "addresses the cause you diagnosed; neither is the safer default.")

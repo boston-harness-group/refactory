@@ -48,19 +48,10 @@ SETTINGS: tuple[tuple[str, str, str, type], ...] = (
 
 
 def validate_settings(section: Any, *, origin: str = "refactory.workers.json") -> dict[str, Any]:
-    """The project file's ``code_graph`` object, checked: only known keys, each of its type."""
-    if not isinstance(section, dict):
-        raise ValueError(f"{origin}: {SETTINGS_KEY} must be an object")
-    known = {key: kind for key, _knob, _env, kind in SETTINGS}
-    unknown = set(section) - set(known)
-    if unknown:
-        raise ValueError(f"{origin}: {SETTINGS_KEY} has unknown keys {sorted(unknown)}; "
-                         f"known: {sorted(known)}")
-    for key, value in section.items():
-        # bool is an int in Python; a count or a timeout given as true/false is a mistake.
-        if not isinstance(value, known[key]) or (known[key] is int and isinstance(value, bool)):
-            raise ValueError(f"{origin}: {SETTINGS_KEY}.{key} must be {known[key].__name__}")
-    return section
+    """The project file's ``code_graph`` object, checked (`worker_config` owns the rule)."""
+    from refactory_dsh.worker_config import validate_code_graph
+
+    return validate_code_graph(section, origin=origin)
 
 
 def setting_knobs(project: Path) -> list[str]:
