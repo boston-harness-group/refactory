@@ -955,7 +955,9 @@ paired with a parent picker), on the train records the request carries:
 - **Where the pipeline fails, step by step.** Right after the pipeline, the request
   aggregates every failure finding per step (`analysts.step_map`): for each step, in the
   pipeline's flow order (`analysts.flow_order`: the edges' topological order with
-  loop-closing edges set aside, not the sorted node list), the failed items and findings
+  loop-closing edges set aside, not the sorted node list; the search for those edges
+  starts from entry steps, then other steps, then gates, so a loop's gate comes after
+  the step it guards whatever its id), the failed items and findings
   that name it (`where`), that say things first went wrong there, that it replaced good
   work from an earlier step with worse, and that it repeated other steps' output without
   adding to it. An item counts once per cell however many findings cite it; a step id
@@ -970,7 +972,9 @@ paired with a parent picker), on the train records the request carries:
   it; independent attempts; a vote or a check; a check that sends a step back; a code
   step when code nodes are allowed), and to choose by the evidence. With the analysts
   off, the map comes from the readers' failure patterns (the step each starts in, its
-  items) when readers ran; with neither, there is no map. Each ranked failure finding
+  items) when readers ran: only its first column (readers give no roles), counting only
+  the patterns that name a step (not `unclear`), its caption pointing at "What the
+  readers found"; with neither, there is no map. Each ranked failure finding
   also shows its attribution (`steps: first went wrong at ...`); success findings show
   none.
 - **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000

@@ -818,9 +818,13 @@ def steps_text(steps: Any) -> str:
 def flow_order(nodes: Sequence[Any], edges: Sequence[Any] = ()) -> list[str]:
     """The pipeline's node ids in the order work flows through them: a topological order
     of the edges once each edge that closes a loop (back to a step on the current path)
-    is set aside, ties kept in the listed order. Nodes no edge orders keep their listed
-    place among the roots; malformed entries are skipped."""
+    is set aside, ties kept in the listed order. The path search starts from the nodes
+    no edge enters, then from other steps, then from gates -- every loop passes through a
+    gate (rule V10), so a gate is never taken for the start of the loop it closes,
+    whatever its id. Malformed entries are skipped."""
     listed = [str(n.get("id")) for n in nodes if isinstance(n, Mapping) and n.get("id")]
+    gates = {str(n.get("id")) for n in nodes
+             if isinstance(n, Mapping) and n.get("kind") == "gate"}
     rank = {node: index for index, node in enumerate(listed)}
     out_edges: dict[str, list[str]] = {node: [] for node in listed}
     for edge in edges or ():
@@ -830,9 +834,13 @@ def flow_order(nodes: Sequence[Any], edges: Sequence[Any] = ()) -> list[str]:
         if source in rank and target in rank and target not in out_edges[source]:
             out_edges[source].append(target)
     # Edges back to a step on the current depth-first path close a loop.
+    entered = {target for targets in out_edges.values() for target in targets}
+    starts = ([n for n in listed if n not in entered]
+              + [n for n in listed if n in entered and n not in gates]
+              + [n for n in listed if n in entered and n in gates])
     back: set[tuple[str, str]] = set()
     state: dict[str, int] = {}
-    for root in listed:
+    for root in starts:
         if root in state:
             continue
         stack = [(root, iter(out_edges[root]))]
@@ -937,7 +945,7 @@ _MAP_SOURCES = {
     "analysts": ("the analysts' failure findings", "failure finding(s)",
                  "\"What the analysts found, ranked\""),
     "readers": ("the readers' failure patterns", "failure pattern(s)",
-                "the readers' findings under the trajectories"),
+                "\"What the readers found\""),
 }
 
 
@@ -954,11 +962,20 @@ def step_map_lines(findings: Sequence[Any], nodes: Sequence[Any] = (),
     failure finding that names a step of the pipeline."""
     found = [f for f in findings or ()
              if isinstance(f, Mapping) and f.get("source", "failure") == "failure"]
+    if source == "readers":
+        # A reader names one step or none ("unclear", dropped): only those that name one
+        # are counted, and readers give no roles, so only the first column is shown.
+        found = [f for f in found if _step_ids((f.get("where") or {}).get("nodes"))]
     rows = step_map(found, nodes, edges)
     if not rows:
         return []
     known = set(flow_order(nodes, edges))
     what, unit, where = _MAP_SOURCES.get(source, _MAP_SOURCES["analysts"])
+    roles = ("named",) if source == "readers" else ("named", *STEP_ROLES)
+    headers = {"named": "named in failure findings",
+               "first_wrong": "where things first went wrong",
+               "overrode": "replaced good work from an earlier step with worse",
+               "repeated": "repeated other steps' output without adding to it"}
 
     def cell(row: Mapping[str, Any], role: str) -> str:
         counts = row.get(role)
@@ -972,13 +989,10 @@ def step_map_lines(findings: Sequence[Any], nodes: Sequence[Any] = (),
         f"From {what} for this candidate (in full under {where}). Each cell is the failed "
         "train items, then in brackets the findings, that give the step that role; an item "
         f"counts once per cell and may be in several cells. {counted}",
-        _table(["step", "named in failure findings", "where things first went wrong",
-                "replaced good work from an earlier step with worse",
-                "repeated other steps' output without adding to it"],
-               [[row["step"], *(cell(row, role) for role in ("named", *STEP_ROLES))]
-                for row in rows])]
+        _table(["step", *(headers[role] for role in roles)],
+               [[row["step"], *(cell(row, role) for role in roles)] for row in rows])]
     attributed = sum(1 for f in found if _known_steps(_steps(f.get("steps")), known))
-    if attributed < len(found):
+    if source != "readers" and attributed < len(found):
         lines.append(f"({len(found) - attributed} of {len(found)} {unit} say only where "
                      "they start, not how the steps took part.)")
     interacts = any(row.get("overrode") or row.get("repeated") for row in rows)

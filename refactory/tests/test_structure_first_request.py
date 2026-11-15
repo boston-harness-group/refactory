@@ -294,6 +294,38 @@ def test_the_step_map_follows_the_flow_not_the_listed_order():
                                [None, {"source": "b", "target": "a"}, {"source": "z"}]) == ["b", "a"]
 
 
+def _kinds(*ids: str, gates: tuple[str, ...] = (), forks: tuple[str, ...] = (),
+           joins: tuple[str, ...] = ()) -> list[dict[str, str]]:
+    kind = {**{g: "gate" for g in gates}, **{f: "fork" for f in forks}, **{j: "join" for j in joins}}
+    return [{"id": i, "kind": kind.get(i, "agent")} for i in sorted(ids)]
+
+
+def _wires(*pairs: str) -> list[dict[str, str]]:
+    return [dict(zip(("source", "target"), pair.split(">"))) for pair in pairs]
+
+
+@pytest.mark.parametrize("nodes,edges,flow", [
+    # A gate whose id sorts before the step it guards, with no entry step.
+    (_kinds("solve", "check", "z_end", gates=("check",)),
+     _wires("solve>check", "check>solve", "check>z_end"), ["solve", "check", "z_end"]),
+    # ... and with an entry step.
+    (_kinds("prep", "solve", "check", "z_end", gates=("check",)),
+     _wires("prep>solve", "solve>check", "check>solve", "check>z_end"),
+     ["prep", "solve", "check", "z_end"]),
+    (_kinds("x_start", "m_work", "b_gate", "z_end", gates=("b_gate",)),
+     _wires("x_start>m_work", "m_work>b_gate", "b_gate>m_work", "b_gate>z_end"),
+     ["x_start", "m_work", "b_gate", "z_end"]),
+    # A fork inside a loop: the gate after the join sends the work back to the fork's step.
+    (_kinds("a_entry", "work", "fork", "left", "right", "join", "a_gate", "out",
+            gates=("a_gate",), forks=("fork",), joins=("join",)),
+     _wires("a_entry>work", "work>fork", "fork>left", "fork>right", "left>join",
+            "right>join", "join>a_gate", "a_gate>work", "a_gate>out"),
+     ["a_entry", "work", "fork", "left", "right", "join", "a_gate", "out"]),
+])
+def test_a_loops_gate_comes_after_the_steps_it_guards_whatever_its_id(nodes, edges, flow):
+    assert analysts.flow_order(nodes, edges) == flow
+
+
 def test_an_item_cited_by_two_findings_for_the_same_step_and_role_counts_once():
     found = [{"source": "failure", "items": ["i1", "i2"], "where": {"nodes": ["review"]},
               "steps": {"first_wrong": "review"}},
@@ -380,9 +412,14 @@ def test_without_analysts_the_map_comes_from_the_readers_patterns():
                                      "junk", {"step": None}]}]
     text = _ctx3(reader_findings=readers).render()
     section = _section(text, "Where the pipeline fails, step by step")
-    assert "From the readers' failure patterns for this candidate" in section
-    assert "| review | 3 (2) | - | - | - |" in section
-    assert "| draft | 1 (1) | - | - | - |" in section
+    assert ("From the readers' failure patterns for this candidate (in full under \"What the "
+            "readers found\")") in section
+    # Readers give no roles: only the first column, no attribution line, and the patterns
+    # that name no step ("unclear", none) are not counted.
+    assert "| step | named in failure findings |\n" in section
+    assert "| review | 3 (2) |\n" in section and "| draft | 1 (1) |\n" in section
+    assert "first went wrong" not in section and "say only where they start" not in section
+    assert "Counted over all 3 failure pattern(s)." in section
     assert "finalize" not in section and "the cause can lie" not in section
     assert (text.index("## The pipeline you may edit")
             < text.index("## Where the pipeline fails, step by step")
