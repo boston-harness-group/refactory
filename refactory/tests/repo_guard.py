@@ -47,8 +47,12 @@ def _working_files(repo: Path) -> dict[str, str]:
         ["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         capture_output=True, timeout=60,
     )
-    if result.returncode != 0:
+    top = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, timeout=30)
+    if result.returncode != 0 or top.returncode != 0:
         return {}
+    # Porcelain paths are relative to the top of the checkout, wherever pytest started.
+    root = Path(top.stdout.strip())
     files: dict[str, str] = {}
     entries = iter(result.stdout.split(b"\0"))
     for entry in entries:
@@ -57,7 +61,7 @@ def _working_files(repo: Path) -> dict[str, str]:
         name = entry[3:].decode(errors="surrogateescape")
         if entry[:1] in (b"R", b"C"):
             next(entries, None)  # the rename's source
-        path = repo / name
+        path = root / name
         try:
             files[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
         except OSError:
@@ -107,13 +111,17 @@ def _compare_snapshots(
         elif before_hooks[name] != after_hooks[name]:
             failures.append(f"hook changed: {name}")
 
-    # Working-tree files: a test writes only under its own temporary directories.
+    # Working-tree files: a test writes only under its own temporary directories. In CI
+    # nobody else edits the checkout, so a change fails; locally it is more often the
+    # person saving a file during a long run, so it is reported, not failed. (A file a
+    # test leaves in refactory/tests fails everywhere: conftest checks that per test.)
     before_files: dict[str, str] = before.get("files") or {}
     after_files: dict[str, str] = after.get("files") or {}
+    changed_files = failures if os.environ.get("CI", "").lower() not in ("", "0", "false") else warnings
     for name in sorted(set(before_files) | set(after_files)):
         if before_files.get(name) != after_files.get(name):
-            failures.append(f"file changed in the checkout under test (a test wrote there, "
-                            f"or it was edited during the run): {name}")
+            changed_files.append(f"file changed in the checkout under test (a test wrote there, "
+                                 f"or it was edited during the run): {name}")
 
     # Worktree changes: attribute to session or report as external.
     before_wts = set(before.get("worktrees") or set())
