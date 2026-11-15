@@ -35,7 +35,34 @@ def _take_snapshot(repo: Path) -> dict[str, Any]:
         "config_lines": shared["config_lines"],
         "hook_files": shared["hook_files"],
         "worktrees": _parse_worktrees(worktree_list),
+        "files": _working_files(repo),
     }
+
+
+def _working_files(repo: Path) -> dict[str, str]:
+    """Each path `git status` lists (changed or untracked, ignored ones not), with a digest
+    of its bytes: a test that writes into the checkout shows here, even over a file the
+    person had already changed."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        capture_output=True, timeout=60,
+    )
+    if result.returncode != 0:
+        return {}
+    files: dict[str, str] = {}
+    entries = iter(result.stdout.split(b"\0"))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        name = entry[3:].decode(errors="surrogateescape")
+        if entry[:1] in (b"R", b"C"):
+            next(entries, None)  # the rename's source
+        path = repo / name
+        try:
+            files[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+        except OSError:
+            files[name] = "unreadable"
+    return files
 
 
 def _parse_worktrees(porcelain: str) -> set[str]:
@@ -79,6 +106,14 @@ def _compare_snapshots(
             failures.append(f"hook removed: {name}")
         elif before_hooks[name] != after_hooks[name]:
             failures.append(f"hook changed: {name}")
+
+    # Working-tree files: a test writes only under its own temporary directories.
+    before_files: dict[str, str] = before.get("files") or {}
+    after_files: dict[str, str] = after.get("files") or {}
+    for name in sorted(set(before_files) | set(after_files)):
+        if before_files.get(name) != after_files.get(name):
+            failures.append(f"file changed in the checkout under test (a test wrote there, "
+                            f"or it was edited during the run): {name}")
 
     # Worktree changes: attribute to session or report as external.
     before_wts = set(before.get("worktrees") or set())

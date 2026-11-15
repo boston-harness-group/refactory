@@ -193,7 +193,7 @@ def test_concurrent_evaluations_overlap_mutation(tmp_path):
 def _item_gate_data_graph(n_items: int, parallelism: int):
     """Build a data graph with *n_items* items that sleep briefly.
 
-    Each item runs ``sleep_op`` from ``test_ops_parallel`` which uses a
+    Each item runs ``sleep_op`` from ``_ops_evaluate_many`` which uses a
     module-level thread-safe counter to track in-flight items and writes
     the peak to ``$PEAK_FILE``.
     """
@@ -212,7 +212,7 @@ def _item_gate_data_graph(n_items: int, parallelism: int):
     ))
     graph.add(Node(
         "body", "op",
-        call="test_ops_parallel:sleep_op",
+        call="_ops_evaluate_many:sleep_op",
         reads=(CURRENT_ITEM,),
         produces=("counted",),
     ))
@@ -226,79 +226,15 @@ def _item_gate_data_graph(n_items: int, parallelism: int):
     return graph
 
 
-_SLEEP_OP_SRC = '''\
-"""Minimal test op for item-gate tests.
-
-Provides a process-safe in-flight counter via fcntl-locked shared files.
-Every ``sleep_op`` call increments the counter on entry, records the peak,
-sleeps, and decrements in ``finally``.  The peak is written to ``$PEAK_FILE``.
-
-The counter file (``$COUNTER_FILE``) stores "current peak" and is protected
-by fcntl.flock so it works across forkserver child processes.
-"""
-import fcntl
-import os
-import time
-from pathlib import Path
-
-
-def _update_counter(counter_file, delta):
-    """Atomically update the shared counter; return (new_current, new_peak)."""
-    with open(counter_file, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            parts = f.read().strip().split()
-            current = int(parts[0]) if len(parts) > 0 else 0
-            peak = int(parts[1]) if len(parts) > 1 else 0
-            current += delta
-            if current > peak:
-                peak = current
-            f.seek(0)
-            f.truncate()
-            f.write(f"{current} {peak}")
-            f.flush()
-            return current, peak
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
-def sleep_op(ctx):
-    """Sleep for `delay` seconds, tracking in-flight count via counter."""
-    item = ctx.read_json("current_item.json")
-    delay = float(item.get("delay", 0))
-    item_id = str(item.get("id", "?"))
-
-    counter_file = os.environ.get("COUNTER_FILE", "")
-    if counter_file:
-        _update_counter(counter_file, +1)
-    try:
-        time.sleep(delay)
-    finally:
-        if counter_file:
-            _, peak = _update_counter(counter_file, -1)
-            peak_file = os.environ.get("PEAK_FILE", "")
-            if peak_file:
-                Path(peak_file).write_text(str(peak))
-
-    return {"counted": item_id}
-'''
 
 
 @pytest.fixture()
 def _install_parallel_ops():
-    """Install test_ops_parallel module with counter-instrumented sleep_op."""
+    """A fresh `_ops_evaluate_many` (its counter-instrumented sleep_op) for each test."""
     import sys
-    HERE = Path(__file__).resolve().parent
-    ops_path = HERE / "test_ops_parallel.py"
-    existed = ops_path.exists()
-    # Always write our version so the counter-instrumented sleep_op is used.
-    ops_path.write_text(_SLEEP_OP_SRC)
-    # Remove cached module so the fresh source is loaded.
-    sys.modules.pop("test_ops_parallel", None)
+    sys.modules.pop("_ops_evaluate_many", None)
     yield
-    if not existed:
-        ops_path.unlink(missing_ok=True)
-    sys.modules.pop("test_ops_parallel", None)
+    sys.modules.pop("_ops_evaluate_many", None)
 
 
 # ── test_item_limit_not_exceeded ─────────────────────────────────────────
@@ -366,7 +302,7 @@ def test_item_limit_not_exceeded(tmp_path, monkeypatch, _install_parallel_ops):
         ))
         eval_graph.add(Node(
             "body", "op",
-            call="test_ops_parallel:sleep_op",
+            call="_ops_evaluate_many:sleep_op",
             reads=(CURRENT_ITEM,),
             produces=("counted",),
         ))

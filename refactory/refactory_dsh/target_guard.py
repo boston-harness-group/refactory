@@ -227,12 +227,15 @@ def record(workdir: Path, root: Path, *, output_only: tuple[str, ...] = (),
     run's own worktree, where a direct edit bypasses materialise.
     ``warn_also`` names directories whose changes produce a run **warning** -- the
     launcher checkout, where another session's edit is not this run's result but
-    should be reported.
+    should be reported. A checkout :data:`UNWATCHED_ENV` names is left out, as
+    `checkouts` leaves it out.
     """
     workdir = Path(workdir).resolve()
+    unwatched = _unwatched()
     baseline = {**state(root, exclude=(workdir,)), "output_only": list(output_only),
                 "also": [str(Path(path).resolve()) for path in also],
-                "warn_also": [str(Path(path).resolve()) for path in warn_also],
+                "warn_also": [str(Path(path).resolve()) for path in warn_also
+                              if Path(path).resolve() not in unwatched],
                 "recorded": datetime.now(timezone.utc).isoformat()}
     path = workdir / RECORD
     path.parent.mkdir(parents=True, exist_ok=True)

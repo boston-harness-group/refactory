@@ -63,103 +63,10 @@ def _data_graph(
     return graph
 
 
-# ── test ops (in test_ops_parallel module) ────────────────────────────────
-
-_TEST_OPS = '''\
-"""Test ops for data_parallel tests. Run inside forkserver child processes."""
-import json
-import os
-import time
-from pathlib import Path
+# ── test ops (in _ops_data_parallel module) ────────────────────────────────
 
 
-def barrier_op(ctx):
-    """Each item signals ready, then waits until K items are ready."""
-    item = ctx.read_json("current_item.json")
-    item_id = str(item.get("id", "?"))
-    barrier_dir = Path(os.environ["BARRIER_DIR"])
-    k = int(os.environ.get("BARRIER_K", "3"))
 
-    # Signal ready.
-    (barrier_dir / f"ready_{item_id}").write_text(str(time.monotonic()))
-
-    # Wait for all K items to be ready.
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        ready = list(barrier_dir.glob("ready_*"))
-        if len(ready) >= k:
-            break
-        time.sleep(0.02)
-    else:
-        raise TimeoutError(f"barrier timeout: only {len(list(barrier_dir.glob('ready_*')))} of {k} ready")
-
-    (barrier_dir / f"done_{item_id}").write_text(str(time.monotonic()))
-    return {"counted": item_id}
-
-
-def sleep_op(ctx):
-    """Sleep for `delay` seconds (from the item)."""
-    item = ctx.read_json("current_item.json")
-    delay = float(item.get("delay", 0))
-    barrier_dir_str = os.environ.get("BARRIER_DIR", "")
-    item_id = str(item.get("id", "?"))
-
-    if barrier_dir_str:
-        barrier_dir = Path(barrier_dir_str)
-        barrier_dir.mkdir(parents=True, exist_ok=True)
-        (barrier_dir / f"start_{item_id}").write_text(str(time.time()))
-
-    time.sleep(delay)
-
-    if barrier_dir_str:
-        (barrier_dir / f"end_{item_id}").write_text(str(time.time()))
-
-    return {"counted": item_id}
-
-
-def noop_op(ctx):
-    """No-op: just record that this item was visited."""
-    item = ctx.read_json("current_item.json")
-    item_id = str(item.get("id", "?"))
-    visited_dir_str = os.environ.get("VISITED_DIR", "")
-    if visited_dir_str:
-        visited_dir = Path(visited_dir_str)
-        visited_dir.mkdir(parents=True, exist_ok=True)
-        (visited_dir / item_id).write_text("1")
-    return {"counted": item_id}
-
-
-def long_sleep_op(ctx):
-    """Sleep for a very long time (for deadline testing)."""
-    item = ctx.read_json("current_item.json")
-    delay = float(item.get("delay", 0))
-    time.sleep(delay)
-    return {"counted": item.get("id")}
-
-
-def maybe_fail_op(ctx):
-    """Fail if the item's 'fail' field is truthy; succeed otherwise."""
-    item = ctx.read_json("current_item.json")
-    item_id = str(item.get("id", "?"))
-    if item.get("fail"):
-        raise RuntimeError(f"item {item_id} forced to fail")
-    visited_dir_str = os.environ.get("VISITED_DIR", "")
-    if visited_dir_str:
-        visited_dir = Path(visited_dir_str)
-        visited_dir.mkdir(parents=True, exist_ok=True)
-        (visited_dir / item_id).write_text("1")
-    return {"counted": item_id}
-'''
-
-
-@pytest.fixture(autouse=True)
-def _install_test_ops(tmp_path):
-    """Install test ops module so forkserver children can import it."""
-    ops_dir = REPO_ROOT / "refactory" / "tests"
-    ops_path = ops_dir / "test_ops_parallel.py"
-    ops_path.write_text(_TEST_OPS)
-    yield
-    ops_path.unlink(missing_ok=True)
 
 
 # ── T1: walker overlap ────────────────────────────────────────────────────
@@ -180,7 +87,7 @@ def test_walker_overlap(tmp_path, monkeypatch):
     monkeypatch.setenv("BARRIER_K", str(K))
 
     graph = _data_graph(
-        "test_ops_parallel", "barrier_op",
+        "_ops_data_parallel", "barrier_op",
         items=items, parallelism=K,
     )
 
@@ -252,7 +159,7 @@ class T(Task):
         parallelism=K,
     ))
     graph.add(nn.Node(
-        "body", "op", call="test_ops_parallel:barrier_op",
+        "body", "op", call="_ops_data_parallel:barrier_op",
         reads=(CURRENT_ITEM,), produces=("counted",),
     ))
     graph.add(nn.Node("report", "op", call="loop_ops:write_best",
@@ -288,7 +195,7 @@ def test_resume_reruns_only_unfinished(tmp_path, monkeypatch):
     monkeypatch.setenv("VISITED_DIR", str(visited_dir))
 
     graph1 = _data_graph(
-        "test_ops_parallel", "noop_op",
+        "_ops_data_parallel", "noop_op",
         items=items, parallelism=1,
     )
     workdir = tmp_path / "run"
@@ -316,7 +223,7 @@ def test_resume_reruns_only_unfinished(tmp_path, monkeypatch):
     monkeypatch.setenv("VISITED_DIR", str(visited_dir2))
 
     graph2 = _data_graph(
-        "test_ops_parallel", "noop_op",
+        "_ops_data_parallel", "noop_op",
         items=items, parallelism=N,
     )
     result2 = execute(graph2, workdir, max_steps=200, start="data")
@@ -343,7 +250,7 @@ def test_step_cap_scaled_like_sequential(tmp_path, monkeypatch, parallelism):
     visited_dir.mkdir()
     monkeypatch.setenv("VISITED_DIR", str(visited_dir))
 
-    graph = _data_graph("test_ops_parallel", "noop_op", items=items, parallelism=parallelism)
+    graph = _data_graph("_ops_data_parallel", "noop_op", items=items, parallelism=parallelism)
     result = execute(graph, tmp_path / "run", max_steps=10)
 
     assert result.exit_ok, result.error
@@ -447,7 +354,7 @@ def test_per_item_deadline_covers_setup_and_verify(tmp_path, monkeypatch, parall
         writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="phase_deadline",
         inline_items=items, parallelism=parallelism,
     ))
-    graph.add(nn.Node("body", "op", call="test_ops_parallel:sleep_op",
+    graph.add(nn.Node("body", "op", call="_ops_data_parallel:sleep_op",
                       reads=(CURRENT_ITEM,), produces=("counted",)))
     graph.add(nn.Node("report", "op", call="loop_ops:write_best",
                       writes=("best.json",), produces=("best",)))
@@ -486,7 +393,7 @@ def test_per_item_deadline_holds_on_a_pool_thread(tmp_path, monkeypatch):
         writes=(CURRENT_ITEM,), produces=("item_scores",), task_ref="phase_deadline",
         inline_items=items, parallelism=4,
     ))
-    graph.add(nn.Node("body", "op", call="test_ops_parallel:sleep_op",
+    graph.add(nn.Node("body", "op", call="_ops_data_parallel:sleep_op",
                       reads=(CURRENT_ITEM,), produces=("counted",)))
     graph.add(nn.Node("report", "op", call="loop_ops:write_best",
                       writes=("best.json",), produces=("best",)))
@@ -512,7 +419,7 @@ def _noop_graph(tmp_path, monkeypatch, parallelism=4):
     visited_dir = tmp_path / "visited"
     visited_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("VISITED_DIR", str(visited_dir))
-    return _data_graph("test_ops_parallel", "noop_op",
+    return _data_graph("_ops_data_parallel", "noop_op",
                        items=tuple({"id": str(i)} for i in range(3)), parallelism=parallelism)
 
 
@@ -570,7 +477,7 @@ def test_shareable_custom_client_runs_items_concurrently(tmp_path, monkeypatch):
     barrier_dir.mkdir()
     monkeypatch.setenv("BARRIER_DIR", str(barrier_dir))
     monkeypatch.setenv("BARRIER_K", "3")
-    graph = _data_graph("test_ops_parallel", "barrier_op",
+    graph = _data_graph("_ops_data_parallel", "barrier_op",
                         items=tuple({"id": str(i)} for i in range(3)), parallelism=3)
     result = execute(graph, tmp_path / "run", model=_Shared(), max_steps=200)
     assert result.exit_ok, result.error
@@ -888,7 +795,7 @@ class T(Task):
         parallelism=3,
     ))
     graph.add(nn.Node(
-        "body", "op", call="test_ops_parallel:maybe_fail_op",
+        "body", "op", call="_ops_data_parallel:maybe_fail_op",
         reads=(CURRENT_ITEM,), produces=("counted",),
     ))
     graph.add(nn.Node(
@@ -1045,7 +952,7 @@ class _BoundMode(nn.Mode):
             inline_items=tuple({"id": str(i)} for i in range(3)),
             parallelism_knob="par", knobs=("par",),
         ))
-        graph.add(nn.Node("body", "op", call="test_ops_parallel:barrier_op",
+        graph.add(nn.Node("body", "op", call="_ops_data_parallel:barrier_op",
                           reads=(CURRENT_ITEM,), produces=("counted",)))
         graph.add(nn.Node("report", "op", call="loop_ops:noop"))
         graph.connect("data", "report")
