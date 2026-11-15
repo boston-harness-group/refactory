@@ -6,7 +6,9 @@ here, saying which edit operations create it, change it on an existing node and 
 it. Where none does, the entry names why, from a fixed list (`REASONS`): left out by
 design (the grader side, a gate nobody answers in a headless run, an infrastructure
 flag, a step's identity, a user's decision), or ``planned``, with the change that will
-cover it. ``tests/test_dsl_coverage.py`` generates the list of constructs from the code
+cover it. The core operators (`nn.core_ops`) cover the forks and joins, rewiring what a step
+reads, replacing a step's callable, and un-routing a gate; what is still planned is
+``configure`` (settings bound to knobs) and the per-sub-item experiment. ``tests/test_dsl_coverage.py`` generates the list of constructs from the code
 and fails when one has no entry, so a new feature cannot land unreachable by accident;
 the table in ``docs/outer-loop.md`` is generated from it (`table_markdown`).
 
@@ -82,12 +84,19 @@ class Entry:
 
 
 #: Operations that add a node object of the given kind.
-_ADD = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel", "duplicate")
-_GATE_ADD = ("add_node", "wrap", "loop")
-_NEW = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel", "loop")
-_PLANNED_REWIRE = Gap("planned", "rewire, which changes what an existing step reads (PR2)")
+_ADD = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel", "duplicate",
+        "insert", "parallelize", "branch", "route", "merge")
+_GATE_ADD = ("add_node", "wrap", "loop", "route")
+_NEW = ("add_node", "insert_after", "insert_before", "wrap", "split", "parallel", "loop",
+        "insert", "parallelize", "branch", "route", "merge")
+_STEP_REMOVE = ("remove_node", "bypass", "remove")
+_GATE_REMOVE = ("remove_node", "add_edge", "remove")
+_FORK_CREATE = ("parallel", "parallelize", "add_node")
+_FORK_CHANGE = ("branch", "remove", "parallelize", "insert")
+_FORK_REMOVE = ("serialize", "remove")
+_REWIRE = ("rewire",)
+_REPLACE = ("split",)
 _PLANNED_CONFIGURE = Gap("planned", "configure, which binds the setting to a knob (PR3)")
-_PLANNED_FORK = Gap("planned", "branch / unbranch and serialize (PR2)")
 _OUTPUTS = Gap("identity", "a step's outputs are what its readers rely on: replace the step "
                            "(split) to change them")
 _GRADER = Gap("grader-side")
@@ -96,11 +105,11 @@ _FLAG = Gap("infrastructure flag")
 
 def _node_kinds() -> list[Entry]:
     return [
-        Entry("node kind", "op", _ADD, ("set_knob",), ("remove_node", "bypass")),
-        Entry("node kind", "agent", _ADD, ("set_knob",), ("remove_node", "bypass")),
-        Entry("node kind", "gate", _GATE_ADD, ("set_knob",), ("remove_node", "add_edge")),
-        Entry("node kind", "fork", ("parallel", "add_node"), _PLANNED_FORK, _PLANNED_FORK),
-        Entry("node kind", "join", ("parallel", "add_node"), _PLANNED_FORK, _PLANNED_FORK),
+        Entry("node kind", "op", _ADD, ("set_knob", "rewire"), _STEP_REMOVE),
+        Entry("node kind", "agent", _ADD, ("set_knob", "rewire"), _STEP_REMOVE),
+        Entry("node kind", "gate", _GATE_ADD, ("set_knob",), _GATE_REMOVE),
+        Entry("node kind", "fork", _FORK_CREATE, _FORK_CHANGE, _FORK_REMOVE),
+        Entry("node kind", "join", _FORK_CREATE, _FORK_CHANGE, _FORK_REMOVE),
         Entry("node kind", "data", _GRADER, ("set_knob",), _GRADER),
     ]
 
@@ -108,9 +117,9 @@ def _node_kinds() -> list[Entry]:
 def _gate_kinds() -> list[Entry]:
     nobody = Gap("no headless answerer", "refused E-gate-kind, and left out of the schema")
     return [
-        Entry("gate kind", "fn", _GATE_ADD, ("set_knob",), ("remove_node", "add_edge")),
-        Entry("gate kind", "user", nobody, nobody, ("remove_node", "add_edge")),
-        Entry("gate kind", "agent", nobody, nobody, ("remove_node", "add_edge")),
+        Entry("gate kind", "fn", _GATE_ADD, ("set_knob",), _GATE_REMOVE),
+        Entry("gate kind", "user", nobody, nobody, _GATE_REMOVE),
+        Entry("gate kind", "agent", nobody, nobody, _GATE_REMOVE),
     ]
 
 
@@ -128,13 +137,13 @@ def _bindable() -> list[Entry]:
 _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "id": (_NEW, Gap("identity")),
     "kind": (_NEW, Gap("identity")),
-    "call": (_NEW, Gap("planned", "split with one new step, which replaces a step (PR2)")),
-    "evaluator": (_NEW, Gap("planned", "split with one new step, which replaces a step (PR2)")),
+    "call": (_NEW, _REPLACE),
+    "evaluator": (_NEW, _REPLACE),
     "gate_kind": (_GATE_ADD, Gap("identity")),
-    "knobs": (_NEW, _PLANNED_REWIRE),
-    "reads": (_NEW, _PLANNED_REWIRE),
-    "required_reads": (_NEW, _PLANNED_REWIRE),
-    "inputs": (_NEW, _PLANNED_REWIRE),
+    "knobs": (_NEW, _PLANNED_CONFIGURE),
+    "reads": (_NEW, _REWIRE),
+    "required_reads": (_NEW, _REWIRE),
+    "inputs": (_NEW, _REWIRE),
     "writes": (_NEW, _OUTPUTS),
     "produces": (_NEW, _OUTPUTS),
     "prompt_template": (_NEW, ("set_knob",)),
@@ -149,9 +158,10 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "timeout_s": (_NEW, _PLANNED_CONFIGURE),
     "retry": (_NEW, _PLANNED_CONFIGURE),
     "workspace": (_NEW, Gap("planned", "configure, the workspace kind (PR3)")),
-    "targets": (("parallel", "add_node"), _PLANNED_FORK),
-    "optional_targets": (("add_node",), Gap("planned", "branch with optional (PR2)")),
-    "sources": (("parallel", "add_node"), _PLANNED_FORK),
+    "targets": (_FORK_CREATE, _FORK_CHANGE),
+    "optional_targets": (("branch", "add_node"),
+                         Gap("planned", "configure a branch's optional (PR3)")),
+    "sources": (_FORK_CREATE, _FORK_CHANGE),
     "field_bindings": (_NEW, _PLANNED_CONFIGURE),
     "feedback_keys": (_NEW, _FLAG),
     "notes": (_NEW, _FLAG),
@@ -181,14 +191,14 @@ EDGE_FORMS = ("plain", "verdict", "reloop", "halt")
 
 def _edges() -> list[Entry]:
     return [
-        Entry("edge form", "plain", ("add_edge", "insert_after", "insert_before"),
-              ("remove_edge", "add_edge"), ("remove_edge",)),
-        Entry("edge form", "verdict", ("add_edge", "loop", "wrap"),
-              ("remove_edge", "add_edge"), ("remove_edge",)),
+        Entry("edge form", "plain", ("add_edge", "insert_after", "insert_before", "insert"),
+              ("remove_edge", "add_edge", "serialize", "remove"), ("remove_edge", "remove")),
+        Entry("edge form", "verdict", ("add_edge", "loop", "wrap", "route"),
+              ("remove_edge", "add_edge"), ("remove_edge", "remove")),
         Entry("edge form", "reloop", ("loop", "add_edge"), ("remove_edge", "add_edge"),
-              ("remove_edge",)),
+              ("remove_edge", "remove")),
         # A verdict that ends the run: a code gate's answer, with no edge of its own.
-        Entry("edge form", "halt", ("add_node", "loop"), ("set_knob",), ("remove_node",)),
+        Entry("edge form", "halt", ("add_node", "loop"), ("set_knob",), ("remove_node", "remove")),
     ]
 
 
@@ -199,15 +209,16 @@ COMPOSITIONS = ("nested fork", "loop inside a fork branch", "loop inside a data 
 
 def _compositions() -> list[Entry]:
     return [
-        Entry("composition", "nested fork", ("parallel",), _PLANNED_FORK, _PLANNED_FORK),
+        Entry("composition", "nested fork", ("parallel", "parallelize", "branch"),
+              _FORK_CHANGE, _FORK_REMOVE),
         Entry("composition", "loop inside a fork branch", ("loop",), ("set_knob",),
-              ("remove_node", "add_edge")),
+              _GATE_REMOVE),
         Entry("composition", "loop inside a data pass", ("loop",), ("set_knob",),
-              ("remove_node", "add_edge")),
-        Entry("composition", "gate routing to several steps", ("add_node", "add_edge"),
-              ("remove_edge", "add_edge"), Gap("planned", "remove with keep, which unroutes (PR2)")),
+              _GATE_REMOVE),
+        Entry("composition", "gate routing to several steps", ("route", "add_node", "add_edge"),
+              ("remove_edge", "add_edge"), ("remove",)),
         Entry("composition", "a step per sub-item",
-              Gap("planned", "a per-sub-item experiment on both runtimes, after PR2"),
+              Gap("planned", "a per-sub-item experiment on both runtimes (PR3)"),
               Gap("planned", "after the per-sub-item experiment"),
               Gap("planned", "after the per-sub-item experiment")),
     ]

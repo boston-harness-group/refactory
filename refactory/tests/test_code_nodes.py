@@ -819,8 +819,9 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
                 "word or put it alone on the last line") in flat
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
-        assert "insert a node after the join" in text
-        assert '"target": "compare"' in text  # an example built from this graph's ids
+        assert "wire what the branches make into the step after the join" in text
+        assert '"step": "compare"' in text  # an example built from this graph's ids
+        assert "## Structural operators" in text and "compose your own" in text
     assert snippet.RUN in on and snippet.RUN not in off and snippet.GATE not in off
     assert composition_section([{"op": "set_knob", "kind": "knob", "fields": []}], nodes, edges) == []
     # Every example in it is a proposal this graph accepts.
@@ -874,20 +875,23 @@ def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(cod
     assert "_task`" not in plain.replace("`<id>__task`", "") and "fills facts" not in plain
 
 
-def test_the_code_op_example_computes_a_fact_from_the_file():
-    """The example code op derives something from the step's file (the lines stating a
-    conclusion), not a clipped copy of it; it passes the code check and runs."""
+def test_the_code_examples_pass_the_code_check_and_run():
+    """The compositions' code (a simulation step, a code judge for iterative fitting) pass
+    the static code check (V18) and run: the step returns its own fact, the judge a
+    verdict."""
     text = _composition(True)
-    example = next(json.loads(line) for line in text.splitlines()
-                   if line.startswith('  {"') and snippet.RUN in line)
-    node = example["node"]
-    assert snippet.static_issues(node["code"]) == []
-    assert "[-2000:]" not in node["code"]
-    [output] = node["reads"]
-    [fact] = node["produces"]
-    namespace: dict = {}
-    exec(node["code"], namespace)  # noqa: S102 - the example's own code, checked above
-    text_in = "We compare the options.\nTherefore the bound is sharp.\nUnrelated line."
-    assert namespace["main"]({"files": {output: text_in}, "facts": {}}) == {
-        "facts": {fact: "Therefore the bound is sharp."}}
-    assert namespace["main"]({"files": {}, "facts": {}}) == {"facts": {fact: "none"}}
+    examples = [json.loads(line) for line in text.splitlines() if line.startswith('  {"')]
+    edits = [edit for example in examples for edit in (example.get("edits") or [example])]
+    coded = [edit for edit in edits if edit.get("judge") == "code" or edit.get("kind") == "code"]
+    assert {edit["op"] for edit in coded} == {"insert", "loop"}
+    for edit in coded:
+        code = edit["text"]
+        assert snippet.static_issues(code) == []
+        namespace: dict = {}
+        exec(code, namespace)  # noqa: S102 - the example's own code, checked above
+        out = namespace["main"]({"files": {"x.txt": "text"}, "facts": {"a": "1"}})
+        if edit["op"] == "loop":
+            assert out["verdict"] in ("proceed", "reloop") and out["reason"]
+        else:
+            assert list(out["facts"]) == [edit["id"]]
+

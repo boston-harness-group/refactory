@@ -405,11 +405,29 @@ def test_every_macro_expands_to_primitives_only():
                      "branches": [{"id": "p7", "kind": "op", "call": "json:dumps"},
                                   {"id": "p8", "kind": "op", "call": "json:dumps"}]},
     }
+    import structure_fuzz_graphs as fg
+
+    # The core operators (`nn.core_ops`), on seeds they fit; `loop` and `split` also in
+    # their one-line forms.
+    review, forks = fg.DraftReview().state_dict(), fg.ForkJoin().state_dict()
+    core = [
+        ("insert", {"after": "draft", "kind": "agent", "text": "x"}, review),
+        ("remove", {"step": "solo"}, fg.NestedFork().state_dict()),
+        ("parallelize", {"steps": ["draft"], "copies": 1}, review),
+        ("serialize", {"fork": "split"}, forks),
+        ("branch", {"fork": "split"}, forks),
+        ("rewire", {"step": "review", "sees": ["task"]}, review),
+        ("loop", {"step": "draft", "judge": "agent"}, review),
+        ("route", {"after": "review"}, review),
+        ("split", {"step": "finalize"}, review),
+        ("merge", {"steps": ["review", "finalize"]}, review),
+    ]
     macros = [name for name in nn.edits.names() if nn.edits.is_macro(name)]
-    assert sorted(macros) == sorted(samples)
-    for name, edit in samples.items():
+    assert sorted(macros) == sorted(set(samples) | {name for name, _e, _s in core})
+    cases = [(name, edit, state) for name, edit in samples.items()] + core
+    for name, edit, at in cases:
         steps = next(
-            spec.expand({"op": name, **edit}, state)
+            spec.expand({"op": name, **edit}, at)
             for spec in [nn.edits._specs()[name]]  # noqa: SLF001 - the catalogue is the subject
         )
         assert steps, name

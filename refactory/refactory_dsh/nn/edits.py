@@ -1391,6 +1391,27 @@ _macro("parallel", "Run 2-8 new steps at once after an existing step: a fork aft
        ("target", "branches"), _pre_parallel, _expand_parallel)
 
 
+# The core structural operators (`nn.core_ops`): one-line macros over the same primitives,
+# with the data wired by the system. `loop` and `split` gain their one-line forms beside
+# the written-out ones.
+from . import core_ops as _core_ops  # noqa: E402 - registers into the catalogue above
+
+_core_ops.register(_macro, _MACROS)
+#: The core operators' names, in the order the request lists them.
+CORE_OPS = _core_ops.CORE_OPS
+
+
+def core_wiring_notes(edit: Any, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    """What a core operator wired beside the steps it names (`core_ops.wiring_notes`)."""
+    return _core_ops.wiring_notes(edit, before, after)
+
+
+def core_ops_calls() -> dict[str, str]:
+    """The plain ops a core operator's step may name by callable."""
+    from .operators import COLLECT_CALL, FILE_TEXT_CALL, SELECT_CALL
+
+    return {"collect": COLLECT_CALL, "file_text": FILE_TEXT_CALL, "select": SELECT_CALL}
+
 PRESETS["broad"] = tuple(sorted(list(_PRIMITIVES) + list(_MACROS)))
 PRESETS["structure"] = PRESETS["broad"]
 
@@ -1720,8 +1741,11 @@ def apply_many(edits: Iterable[dict], state: Mapping[str, Any]) -> State:
 
 
 # ── random sampling, for the random optimizer ──────────────────────────────
-#: Operations `random_edit` never draws.
-_NOT_SAMPLED = ("parallel",)
+#: Operations `random_edit` never draws: `parallel`, and the core operators new in this
+#: catalogue (`core_ops`; `loop` and `split` keep their written-out draws), so a seeded
+#: random search draws what it did before they existed; sampling them with their default
+#: texts is a later change's.
+_NOT_SAMPLED = ("parallel", *(op for op in _core_ops.CORE_OPS if op not in ("loop", "split")))
 
 
 def random_edit(

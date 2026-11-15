@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import pytest
 
+from refactory_dsh import snippet
 from refactory_dsh.nn import coverage
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.graph import Graph
@@ -50,12 +51,20 @@ def test_every_operation_named_exists_and_every_gap_has_a_known_reason():
                 assert aspect and set(aspect) <= ops, (entry, set(aspect) - ops)
 
 
-def test_todays_gaps_are_marked_planned():
-    """What later changes add is listed as planned, so the map says what is missing."""
+def test_todays_gaps_are_marked_planned_and_the_core_operators_close_theirs():
+    """What later changes add is listed as planned, so the map says what is missing; what the
+    core operators cover is no longer planned (forks and joins, what a step reads, a step's
+    callable, un-routing a gate)."""
     planned = {(e.group, e.name) for e in coverage.entries()
                for a in _aspects(e) if isinstance(a, coverage.Gap) and a.reason == "planned"}
-    assert {("node kind", "fork"), ("node field", "reads"), ("node field", "timeout_s"),
+    assert {("node field", "timeout_s"), ("node field", "workspace"),
             ("composition", "a step per sub-item")} <= planned
+    assert not {("node kind", "fork"), ("node kind", "join"), ("node field", "reads"),
+                ("node field", "inputs"), ("node field", "call"), ("node field", "targets"),
+                ("node field", "sources"), ("composition", "nested fork"),
+                ("composition", "gate routing to several steps")} & planned
+    assert not [a for e in coverage.entries() for a in _aspects(e)
+                if isinstance(a, coverage.Gap) and a.reason == "planned" and "PR2" in a.detail]
 
 
 def _apply(seed: str, edit: Any) -> tuple[Graph, Graph]:
@@ -118,6 +127,92 @@ EXAMPLES: dict[tuple[str, str], tuple[str, Any, Callable[[Graph, Graph], bool]]]
         "op": "loop", "target": "solve", "gate": _gate("solve_check")},
         lambda p, c: "solve_check" in c.data_body("items")),
 }
+
+
+# One-line core operators (`nn.core_ops`) making the same constructs.
+EXAMPLES.update({
+    ("node kind", "agent"): ("fuzz_draft_review", {"op": "insert", "after": "draft",
+                                                   "kind": "agent", "text": "Weak points."},
+                             lambda p, c: _kinds(c, "agent") == _kinds(p, "agent") + 1),
+    ("node kind", "fork"): ("fuzz_draft_review", {"op": "parallelize", "steps": ["draft"],
+                                                  "copies": 1},
+                            lambda p, c: _kinds(c, "fork") == _kinds(p, "fork") + 1),
+    ("node kind", "join"): ("fuzz_dataflow", {"op": "parallelize", "after": "clean", "new": [
+        {"kind": "agent", "text": "One."}, {"kind": "agent", "text": "Two."}]},
+        lambda p, c: _kinds(c, "join") == _kinds(p, "join") + 1),
+    ("gate kind", "fn"): ("fuzz_draft_review", {"op": "loop", "step": "draft", "judge": "agent"},
+                          lambda p, c: c.nodes["draft_check"].gate_kind == "fn"),
+    ("edge form", "verdict"): ("fuzz_data_pass", {"op": "route", "after": "solve", "to": {
+        "proceed": "check", "again": {"kind": "agent", "text": "Again."}}},
+        lambda p, c: "again" in _conditions(c) and "again" not in _conditions(p)),
+    ("composition", "nested fork"): ("fuzz_nested_fork", {"op": "branch", "fork": "inner",
+                                                          "kind": "agent", "text": "Deeper."},
+                                     lambda p, c: len(c.nodes["inner"].targets) == 3),
+    ("composition", "gate routing to several steps"): ("fuzz_draft_review", {
+        "op": "route", "after": "review", "to": {"proceed": "finalize",
+                                                 "rewrite": {"kind": "agent", "text": "Redo."}}},
+        lambda p, c: len(c.out_edges("review_route")) == 2),
+    ("node field", "optional_targets"): ("fuzz_fork_join", {"op": "branch", "fork": "split",
+                                                            "optional": True},
+                                         lambda p, c: len(c.nodes["split"].optional_targets) == 1),
+})
+
+
+#: Covered changes and removals of an existing construct: the seed, the edit, which of the
+#: entry's aspects names its operation, and what the child shows.
+CHANGES: dict[tuple[str, str, str], tuple[str, Any, Callable[[Graph, Graph], bool]]] = {
+    ("node kind", "fork", "change"): ("fuzz_fork_join", {"op": "branch", "fork": "split"},
+                                      lambda p, c: len(c.nodes["split"].targets) == 3),
+    ("node kind", "fork", "remove"): ("fuzz_fork_join", {"op": "serialize", "fork": "split"},
+                                      lambda p, c: "split" not in c.nodes),
+    ("node kind", "join", "remove"): ("fuzz_nested_fork", {"op": "serialize", "fork": "inner"},
+                                      lambda p, c: "inner_join" not in c.nodes),
+    ("node kind", "agent", "remove"): ("fuzz_nested_fork", {"op": "remove", "step": "solo"},
+                                       lambda p, c: "solo" not in c.nodes),
+    ("node kind", "gate", "remove"): ("fuzz_gate_loop", {"op": "remove", "step": "review",
+                                                          "keep": "proceed"},
+                                      lambda p, c: _kinds(c, "gate") == 0),
+    ("node field", "reads", "change"): ("fuzz_draft_review", {"op": "rewire", "step": "finalize",
+                                                               "sees": ["task"]},
+                                        lambda p, c: c.nodes["finalize"].prompt_template
+                                        != p.nodes["finalize"].prompt_template),
+    # A step's callable changes when an op step takes its place (any machine), or a code
+    # step (where code steps can run: `test_a_step_split_into_a_code_step_runs_that_code`).
+    ("node field", "call", "change"): ("fuzz_draft_review", {"op": "split", "step": "review",
+                                                              "into": [{"kind": "op", "call": fg.STEP}]},
+                                       lambda p, c: "review" not in c.nodes and any(
+                                           n.call == fg.STEP and n.id not in p.nodes
+                                           for n in c.nodes.values())),
+    ("node field", "targets", "change"): ("fuzz_fork_join", {"op": "insert", "before": "left"},
+                                          lambda p, c: "left" not in c.nodes["split"].targets),
+    ("node field", "sources", "change"): ("fuzz_nested_fork", {"op": "remove", "step": "deep_b"},
+                                          lambda p, c: "inner_join" not in c.nodes),
+    ("composition", "gate routing to several steps", "remove"): (
+        "fuzz_multi_terminal", {"op": "remove", "step": "route", "keep": "proceed"},
+        lambda p, c: "route" not in c.nodes),
+}
+
+
+@pytest.mark.parametrize("key", sorted(CHANGES), ids=lambda key: ":".join(key))
+def test_a_covered_change_or_removal_is_made_by_an_operation_its_entry_names(key):
+    group, name, aspect = key
+    seed, edit, shows = CHANGES[key]
+    entry = next(e for e in coverage.entries() if (e.group, e.name) == (group, name))
+    ops = getattr(entry, aspect)
+    assert isinstance(ops, tuple) and edit["op"] in ops, (entry, edit["op"])
+    parent, child = _apply(seed, edit)
+    assert shows(parent, child), key
+
+
+@pytest.mark.skipif(not snippet.available()[0], reason="this machine cannot sandbox code steps "
+                    "(`snippet.available`); the op-step case above covers the change here")
+def test_a_step_split_into_a_code_step_runs_that_code():
+    """Where code steps can run, ``split`` into a code step changes a step's callable to the
+    code op, as the coverage map's ``call`` entry also says."""
+    parent, child = _apply("fuzz_draft_review", {"op": "split", "step": "review",
+                                                 "into": [{"kind": "code"}]})
+    assert "review" not in child.nodes
+    assert any(n.call == snippet.RUN for n in child.nodes.values() if n.id not in parent.nodes)
 
 
 @pytest.mark.parametrize("key", sorted(EXAMPLES), ids=lambda key: f"{key[0]}:{key[1]}")

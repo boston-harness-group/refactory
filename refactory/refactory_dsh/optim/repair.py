@@ -8,9 +8,10 @@ are the repaired ones, so they replay to its state), in the optimizer trace (kin
 
 **Deterministic fixes**, with no model call, only where what was meant is unambiguous:
 
-- an edit's ``target`` (or ``first``, ``second``, a ``remove_node``'s ``id``, an edge's
-  ends) that names a file instead of a step is read as the step that writes it, when
-  exactly one step does (`fix_edit`);
+- an edit's ``target`` (or ``first``, ``second``, a core operator's ``step``, ``after``,
+  ``before`` or ``fork``, a ``remove_node``'s ``id``, an edge's ends) that names a file
+  instead of a step is read as the step that writes it, when exactly one step does
+  (`fix_edit`);
 - a new node whose id is taken gets a fresh id, when no other edit of the proposal names
   that id (`fix_edit`);
 - a ``set_knob`` in a bundle that sets a knob to the value it already holds is dropped
@@ -81,7 +82,8 @@ def repairable(reasons: Sequence[str]) -> bool:
 # ── deterministic fixes ───────────────────────────────────────────────────
 
 #: Fields of an edit that name an existing step.
-_STEP_FIELDS = {"target": None, "first": None, "second": None}
+_STEP_FIELDS = {"target": None, "first": None, "second": None, "step": None, "after": None,
+                "before": None, "fork": None}
 _NODE_FIELDS = ("node", "gate")
 _NODE_LIST_FIELDS = ("into", "branches")
 

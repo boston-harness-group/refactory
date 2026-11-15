@@ -176,7 +176,8 @@ def count(steps: Sequence[Any], parent_state: Mapping[str, Any] | None) -> dict[
         subject = added | removed
         if not subject:
             edit = steps[index]
-            subject = {str(edit.get(key)) for key in ("target", "first", "second", "id")
+            subject = {str(edit.get(key)) for key in ("target", "first", "second", "id",
+                                                      "step", "fork", "after", "before")
                        if isinstance(edit.get(key), str)}
         # One hop in the graph the structural edit itself left, so an edge another edit
         # of the proposal adds cannot make a far step a neighbour.
