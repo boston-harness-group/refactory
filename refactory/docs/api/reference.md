@@ -979,6 +979,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `begin` | `(workdir: 'Path', route: 'dict[str, Any]', *, node: 'str' = '', role: 'str' = 'worker', tool_policy: 'str' = '') -> 'Path'` |
 | function | `bundled_claude_code` | `(runtime_root: 'Path \| str') -> 'dict[str, str] \| None'` |
 | function | `capabilities` | `(backend: 'str') -> 'dict[str, Any]'` |
+| function | `claude_code_compaction` | `(runtime_root: 'Path \| str') -> 'dict[str, Any] \| None'` |
 | function | `claude_code_minimum` | `(model: 'str') -> 'str'` |
 | function | `claude_code_preflight` | `(model: 'Any', runtime_root: 'Path \| str \| None' = None, *, roles: 'dict[str, str] \| None' = None) -> 'None'` |
 | function | `claude_code_version` | `(executable: 'str') -> 'str'` |
@@ -1004,6 +1005,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 - **`account_usage`** — Keep measured DSH calls while exposing incomplete delegated coverage.
 - **`agent_roles`** — Each agent node of a mode state and the worker role it is dispatched under.
 - **`bundled_claude_code`** — The Claude Code bundled with the Agent SDK the installed adapter resolves:
+- **`claude_code_compaction`** — Whether claude_code workers compact, and what of the person's they override.
 - **`claude_code_minimum`** — The oldest Claude Code version ``model`` runs on, or empty when none is known.
 - **`claude_code_preflight`** — Refuse, before the run directory exists, a claude_code route whose Claude Code
 - **`claude_code_version`** — The X.Y.Z ``executable --version`` starts with, or empty when it says none.

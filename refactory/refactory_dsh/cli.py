@@ -393,6 +393,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         checks.append(("claude_code executable", False, str(exc)))
 
+    # A claude_code worker always compacts its conversation as it fills (flag settings), so a
+    # long step does not end "Prompt is too long"; the person's own Claude Code setting and
+    # shell switches are named because they are what the worker overrides, never changes.
+    try:
+        from refactory_dsh import workers
+        from refactory_dsh.paths import dsh_root
+
+        compaction = workers.claude_code_compaction(dsh_root())
+        if compaction is None:
+            checks.append(("claude_code compaction", None,
+                           f"{workers.PACKAGES['claude_code']} is not installed (only claude_code workers need it)"))
+        elif not compaction["forced"]:
+            checks.append(("claude_code compaction", False,
+                           ("the installed Claude Code adapter does not turn compaction on; its patch is "
+                            "not applied — re-run ./install.sh")))
+        else:
+            notes = []
+            if compaction["person"] is False:
+                notes.append("your own autoCompactEnabled=false in ~/.claude.json applies only to you")
+            if compaction["dropped"]:
+                notes.append(f"{', '.join(compaction['dropped'])} in this environment is not passed to workers")
+            checks.append(("claude_code compaction", True, "on for every claude_code worker"
+                           + (f" ({'; '.join(notes)})" if notes else "")))
+    except Exception as exc:
+        checks.append(("claude_code compaction", False, str(exc)))
+
     # The run model (dm-258): the route a run here would get — a flag, the environment,
     # the project file or the one stored choice, resolved exactly as a run resolves it
     # (`refactory runtime` shows the same). Its provider's key is the one checked, never

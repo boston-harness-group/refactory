@@ -45,7 +45,10 @@ _FAKE_SDK = textwrap.dedent("""\
         pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable ?? null,
         backgroundTasksInChildEnv: options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
         systemPromptInChildEnv: 'REFACTORY_SYSTEM_PROMPT' in process.env,
-        controlsInChildEnv: Object.keys(options.env).filter(key => key in CONTROLS) }
+        controlsInChildEnv: Object.keys(options.env).filter(key => key in CONTROLS),
+        settings: options.settings ?? null,
+        compactSwitchesInChildEnv: Object.keys(options.env).filter(key => /COMPACT/.test(key)),
+        sdkOptionSymbols: Object.getOwnPropertySymbols(options).length }
       const save = () => writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify(record))
       // FAKE_SDK_INIT_TOOLS: the tool list the SDK reports, as when it ignores `tools: []`.
       const tools = process.env.FAKE_SDK_INIT_TOOLS ? JSON.parse(process.env.FAKE_SDK_INIT_TOOLS)
@@ -77,6 +80,24 @@ _FAKE_SDK = textwrap.dedent("""\
             yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] }
             yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
             yield { type: 'result', subtype: 'success', is_error: false, result: 'FINAL PINEAPPLE', modelUsage: usage }
+          } else if (process.env.FAKE_SDK_COMPACT) {
+            // A long step whose conversation outgrows the window. As the real CLI does, it
+            // compacts (FAKE_SDK_COMPACT times) and carries on to its answer only when
+            // compaction is on: autoCompactEnabled set in flag settings, and neither switch
+            // that overrides it in its environment. Otherwise it ends "Prompt is too long".
+            const compacts = options.settings?.autoCompactEnabled === true
+              && !('DISABLE_AUTO_COMPACT' in options.env) && !('DISABLE_COMPACT' in options.env)
+            if (!compacts) {
+              yield { type: 'result', subtype: 'success', is_error: true, result: 'Prompt is too long',
+                      modelUsage: { 'fake-claude': { inputTokens: 200000, outputTokens: 60279,
+                                                     cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
+              return
+            }
+            for (let n = 0; n < Number(process.env.FAKE_SDK_COMPACT); n++) {
+              yield { type: 'system', subtype: 'compact_boundary',
+                      compact_metadata: { trigger: 'auto', pre_tokens: 167000 } }
+            }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'BUILT AFTER COMPACTING', modelUsage: usage }
           } else {
             // FAKE_SDK_RESULT: the result message to end with, as when Claude Code fails.
             yield process.env.FAKE_SDK_RESULT ? JSON.parse(process.env.FAKE_SDK_RESULT)
@@ -391,3 +412,56 @@ def test_a_rate_limited_result_never_replays_a_session_with_tools(tmp_path, fake
     assert "rate_limit_error" in str(caught.value)
     assert getattr(caught.value, "kind", None) == "transport"
     assert failure_kind(caught.value) is None
+
+
+def test_claude_code_workers_compact_whatever_the_person_set(tmp_path, fake_sdk, monkeypatch):
+    """A worker reads the person's ~/.claude.json through its real HOME, and an
+    `autoCompactEnabled: false` there (or a DISABLE_*COMPACT switch inherited from the
+    shell that started the run) left it unable to compact: graph-build's emit ended twice
+    with "Prompt is too long" and lost its edits. The worker gets flag settings, which
+    outrank every source, the switches never reach it, and its record says both."""
+    monkeypatch.setenv("DISABLE_AUTO_COMPACT", "1")
+    monkeypatch.setenv("DISABLE_COMPACT", "1")
+    monkeypatch.setenv("DISABLE_MICROCOMPACT", "1")
+    workdir = tmp_path / "run"
+    _client(tmp_path).complete("Say a fruit", workdir=workdir)
+
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["settings"] == {"autoCompactEnabled": True}
+    assert sent["compactSwitchesInChildEnv"] == []
+    assert sent["sdkOptionSymbols"] == 0  # the adapter's bookkeeping is not an SDK option
+    receipt = _receipt(workdir)
+    assert receipt["auto_compact"] == {
+        "enabled": True, "source": "claude-agent-sdk-flag-settings",
+        "env_dropped": ["DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "DISABLE_MICROCOMPACT"]}
+    assert "compactions" not in receipt
+
+
+def test_a_tool_free_worker_compacts_too(tmp_path, fake_sdk, monkeypatch):
+    """tool_policy none clears the setting sources, never the compaction setting."""
+    for name in ("DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "DISABLE_MICROCOMPACT"):
+        monkeypatch.delenv(name, raising=False)
+    workdir = tmp_path / "run"
+    _client(tmp_path).with_tool_policy("none").complete("Say a fruit", workdir=workdir)
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["settingSources"] == [] and sent["settings"] == {"autoCompactEnabled": True}
+    assert _receipt(workdir)["auto_compact"]["env_dropped"] == []
+
+
+def test_a_step_that_outgrows_the_window_compacts_and_finishes(tmp_path, fake_sdk, monkeypatch):
+    """The overflow, simulated mid-step, launched from a shell that turns compaction off:
+    the fake ends "Prompt is too long" unless compaction is on, as the real CLI does, so
+    the step completing at all proves the flag setting and the dropped switches. Claude
+    Code compacts twice, the same session answers (nothing redone), and the record counts
+    the compactions."""
+    monkeypatch.setenv("FAKE_SDK_COMPACT", "2")
+    monkeypatch.setenv("DISABLE_AUTO_COMPACT", "1")
+    monkeypatch.setenv("DISABLE_COMPACT", "1")
+    workdir = tmp_path / "run"
+    answer = _client(tmp_path).complete("Build the change", workdir=workdir)
+
+    assert answer.strip() == "BUILT AFTER COMPACTING"
+    receipt = _receipt(workdir)
+    assert receipt["state"] == "completed"
+    assert receipt["compactions"] == 2
+    assert receipt["auto_compact"]["enabled"] is True

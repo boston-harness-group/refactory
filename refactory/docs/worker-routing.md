@@ -63,6 +63,19 @@ stays alive and silent after that is stopped within 30 s, and the step still fin
 with its last answer (`background_stream_stopped`). A long
 research step may therefore need `--model-timeout` above the default 1800 s per call.
 
+A claude_code worker always compacts its conversation as it fills, as an interactive
+Claude Code does by default, so a long step (a builder writing a large change) does not
+end with "Prompt is too long" and lose its work. The adapter starts Claude Code with the
+flag setting `autoCompactEnabled: true`, which outranks every other source, and does not
+pass `DISABLE_AUTO_COMPACT`, `DISABLE_COMPACT` or `DISABLE_MICROCOMPACT` from the
+environment that started the run (a Claude Code session sets one). The person's own
+choice is untouched: an `autoCompactEnabled: false` in `~/.claude.json`, which a worker
+would otherwise read through its real HOME, still applies to their own sessions and is
+never written. There is no opt-out, since an unattended worker that cannot compact can
+only fail once it outgrows its window. The worker record's `auto_compact` says it was on
+and which switches were dropped, `compactions` counts the times Claude Code compacted in
+the step, and `refactory doctor` has a `claude_code compaction` row.
+
 Use `refactory help --topic <package/mode>` to inspect actual node
 IDs and roles; custom modes may not call their coder `emit`. `role_routes` uses
 the same objects keyed by declared worker role. Node beats role beats run.
