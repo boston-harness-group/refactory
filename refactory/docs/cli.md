@@ -253,7 +253,7 @@ Design mode can build a code knowledge graph (using `graphifyy`) so that the siz
 | `refactory graph explain NAME --graph <dir>` | Show a node's file:line, callers, callees, importers and contained items. |
 | `refactory graph callers NAME --graph <dir>` | Show only the calls edges into a node, as `path:line caller`. |
 
-The `--graph` argument is the path to the run's `.refactory/code-graph/` directory (or the run directory that contains it); the graph is run state, outside the target checkout and the run's artifacts. When the graph is not ready the command prints one line saying so and exits 1. Every call, answered or not, appends a line to the graph's `queries.jsonl` (time, query kind, name, hits, status, ms), and the run's `design.json` reports a `code_graph` entry: the build's status and the query count, by node and by kind.
+The `--graph` argument is the path to the run's `.refactory/code-graph/` directory (or the run directory that contains it); the graph is run state, outside the target checkout and the run's artifacts. When the graph is not ready the command prints one line saying so and exits 1. Every call, answered or not, appends a line to the graph's `queries.jsonl` (time, query kind, name, hits, status, ms), and the run's `design.json` reports a `code_graph` entry: the build's status and the query count, by node and by kind. A query counts under the node whose worker made it (`REFACTORY_NODE_ID`, which the model client sets on both runtimes); one from a route that sets none counts under the one node running at the time, `ambiguous` when several were, or `unattributed`.
 
 | knob / setting | what it does |
 |---|---|

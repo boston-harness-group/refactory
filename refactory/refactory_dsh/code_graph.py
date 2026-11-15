@@ -300,7 +300,8 @@ def _node_windows(run_dir: Path) -> list[tuple[float, float, str]]:
         if kind == "node_started" or (kind == "worker" and state == "starting"):
             open_at.setdefault(node, at)
         elif kind in ("node_completed", "node_failed") or (
-                kind == "worker" and state in ("completed", "failed", "timeout", "cancelled")):
+                kind == "worker" and state in ("completed", "failed", "timeout", "cancelled",
+                                               "budget_exhausted")):
             if node in open_at:
                 windows.append((open_at.pop(node), at, node))
     now = time.time()
@@ -311,8 +312,11 @@ def _node_windows(run_dir: Path) -> list[tuple[float, float, str]]:
 def usage(run_dir: Path) -> dict[str, Any] | None:
     """The run's graph use for its report, or None when the run built no graph.
 
-    Each query goes to the node that was running when it was made (the latest started
-    one, for a query inside a fork); a query made outside every node counts as unknown.
+    A query counts under the node its worker named (``REFACTORY_NODE_ID``, set by the
+    model client on both runtimes). One without a name (a route that sets none, such as
+    the spine's CEO subagents) counts under the single node that was running when it was
+    made, under ``ambiguous`` when several were, and under ``unattributed`` when none
+    was: never a guess between nodes.
     """
     graph_dir = run_dir / GRAPH_SUBDIR
     if not graph_dir.is_dir():
@@ -335,8 +339,8 @@ def usage(run_dir: Path) -> dict[str, Any] | None:
         node = entry.get("node")
         if not node:
             at = entry.get("at", 0)
-            inside = [w for w in windows if w[0] <= at <= w[1]]
-            node = max(inside)[2] if inside else "unknown"
+            inside = {w[2] for w in windows if w[0] <= at <= w[1]}
+            node = inside.pop() if len(inside) == 1 else ("ambiguous" if inside else "unattributed")
         by_node[node] = by_node.get(node, 0) + 1
         kind = str(entry.get("kind"))
         by_kind[kind] = by_kind.get(kind, 0) + 1
@@ -524,6 +528,12 @@ def _timeout_handler():
     except OSError:
         os._exit(1)
 
+
+# A background build: never compete with the run's own work for the CPU.
+try:
+    os.nice(10)
+except OSError:
+    pass
 
 # The pid lets the query command tell a build that died (e.g. killed for memory)
 # from one still running, instead of waiting out the timeout.

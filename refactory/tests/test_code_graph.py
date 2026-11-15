@@ -901,18 +901,29 @@ def test_usage_counts_queries_per_node_from_the_run_s_events(tmp_path):
         _event(300, "research_director", "worker", "starting"),
         _event(400, "research_director", "worker", "completed"),
         _event(410, "pitfalls_researcher", "node_started"),
-        # A node still open around others (a fork's wait): the latest started one gets it.
-        _event(280, "fork_outer", "node_started"), _event(500, "fork_outer", "node_completed"),
+        _event(500, "pitfalls_researcher", "node_completed"),
+        # Two nodes at once (a fork): a query then names no single node.
+        _event(600, "health_checker", "worker", "starting"),
+        _event(650, "verifier", "worker", "starting"),
+        _event(700, "health_checker", "worker", "budget_exhausted"),
+        _event(800, "verifier", "worker", "completed"),
+        # Still running when the report reads the log.
+        _event(900, "design_doc", "node_started"),
     ]) + "\n")
-    queries = [(150, "callers", "ready"), (160, "explain", "ready"), (350, "callers", "ready"),
-               (405, "callers", "ready"), (420, "callers", "failed: timeout")]
+    queries = [(150, None, "callers", "ready"), (160, None, "explain", "ready"),
+               (350, None, "callers", "ready"), (405, None, "callers", "ready"),
+               (420, None, "callers", "failed: timeout"), (660, None, "callers", "ready"),
+               (750, None, "callers", "ready"),
+               # A worker that named its node is believed, whatever ran at the time.
+               (660, "verifier", "explain", "ready"), (950, None, "callers", "ready")]
     (graph_dir / QUERY_LOG).write_text("".join(
-        json.dumps({"at": at, "node": None, "kind": kind, "query": "f", "hits": 1, "status": st,
-                    "ms": 5}) + "\n" for at, kind, st in queries))
+        json.dumps({"at": at, "node": node, "kind": kind, "query": "f", "hits": 1, "status": st,
+                    "ms": 5}) + "\n" for at, node, kind, st in queries))
     assert usage(run) == {
-        "status": "ready", "queries": 5, "not_available": 1,
-        "by_node": {"fork_outer": 1, "pitfalls_researcher": 1, "research_director": 1, "size_change": 2},
-        "by_kind": {"callers": 4, "explain": 1}}
+        "status": "ready", "queries": 9, "not_available": 1,
+        "by_node": {"ambiguous": 1, "design_doc": 1, "pitfalls_researcher": 1,
+                    "research_director": 1, "size_change": 2, "unattributed": 1, "verifier": 2},
+        "by_kind": {"callers": 7, "explain": 2}}
 
 
 def test_usage_is_none_without_a_graph_and_zero_without_queries(tmp_path):
@@ -937,3 +948,35 @@ def test_the_report_has_no_graph_entry_when_it_is_off(tmp_path, stub_graphify):
                                          extra_knobs={"code_graph": False})
     assert run.exit_ok, run.error
     assert "code_graph" not in json.loads((tmp_path / "run" / "design.json").read_text())
+
+
+def test_a_query_whose_log_cannot_be_written_still_answers(tmp_path, capsys):
+    graph_dir = tmp_path / "code-graph"
+    _write_fixture(graph_dir)
+    _write_status(graph_dir / "status.json", {"status": "ready"})
+    (graph_dir / QUERY_LOG).mkdir()  # opening it to append fails
+    assert cli_graph(_make_args("callers", "classify_scale", graph_dir)) == 0
+    assert "build_code_graph()" in capsys.readouterr().out
+
+
+def test_a_query_names_the_node_its_worker_set(tmp_path, monkeypatch, capsys):
+    graph_dir = tmp_path / "code-graph"
+    _write_fixture(graph_dir)
+    _write_status(graph_dir / "status.json", {"status": "ready"})
+    monkeypatch.setenv("REFACTORY_NODE_ID", "research_director")
+    cli_graph(_make_args("callers", "classify_scale", graph_dir))
+    assert _log(graph_dir)[0]["node"] == "research_director"
+
+
+def test_a_node_s_worker_environment_names_the_node(monkeypatch):
+    from refactory_dsh.model import DshModelClient
+    monkeypatch.setenv("REFACTORY_NODE_ID", "stale_from_the_parent")
+    client = DshModelClient(provider="p", model="m")
+    assert "REFACTORY_NODE_ID" not in client._environment()
+    assert client.for_node("size_change")._environment()["REFACTORY_NODE_ID"] == "size_change"
+
+
+def test_the_background_build_lowers_its_priority():
+    from refactory_dsh.code_graph import _make_build_script
+    script = _make_build_script(graphify_bin="g", source="s", graph_dir="d", timeout_s=1, target_key="t")
+    assert "os.nice(10)" in script
