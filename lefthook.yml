@@ -21,3 +21,15 @@ pre-push:
   jobs:
     - name: typecheck
       run: pnpm run typecheck
+
+    # Stale generated docs were the most common red CI run; this is seconds here.
+    - name: docs:check
+      run: pnpm run docs:check
+
+    # An unclassified module or a stale command list otherwise fails CI after its
+    # whole suite; these take seconds.
+    - name: boundary, registry, command reference
+      run: >-
+        .venv/bin/python -m pytest -q -x -p no:cacheprovider
+        refactory/tests/test_boundary.py refactory/tests/test_registry.py
+        refactory/tests/test_cli.py::test_the_command_reference_matches_the_command_line

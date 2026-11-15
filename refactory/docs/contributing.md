@@ -13,6 +13,7 @@ Run from the repository root.
 uv run python -m pytest refactory/tests/ -q                    # the suite
 uv run python -m pytest refactory/tests/ -q -n 4               # ... on four workers (22.4 min to 5.7 min)
 uv run python -m pytest refactory/tests/ -q --run-integration  # ... plus the real-DSH runs
+uv run python -m pytest refactory/tests/ -q -n 4 --shard 2/4   # ... one of CI's four shards
 
 `-n` is a command-line choice, not a setting: `--toolchain-gate` must stay in one process
 (it refuses `-n` rather than passing a suite it did not check), and the per-site base
@@ -68,6 +69,17 @@ public `uv run refactory ceo <package>/<mode>` route supplies its own graph dire
 `.github/workflows/ci.yml` runs `install.sh` for the default install, then adds the
 reference group so the IR parity tests run on every pull request; the reference stays
 out of the default install.
+
+**CI runs the Python suite in four shards.** Each job runs `--shard I/4`: the test
+files packed by their CI seconds (`refactory/tests/ci_durations.json`), so the four
+together run every test once. A file never leaves its worker, so a file far longer
+than a shard's share holds every push up; split it by theme, as the delivery and
+design-worktree tests are (their helpers live in `_delivery_support.py` and
+`_design_worktree_support.py`). Refresh the seconds now and then from the shards'
+reports with `scripts/ci-durations.py`; a new file counts as the median until then.
+Beside the shards run a fast-checks job (docs, typecheck, ruff for syntax errors and
+undefined names, the boundary and registry tests), the TypeScript job and the macOS
+job; the structure-edit harness's long tier runs nightly (`nightly.yml`).
 
 **Use managed credentials for nested model execution.** Save the provider key through **Settings → Models → Edit → API key → Apply** in the DSH home used by the run. Exported keys and repository `.env` can serve the launching process, but nested smoke deliberately scrubs credential environment variables and changes `HOME`; the product carries the nonsecret DSH-home location so DSH can resolve its managed store. See [Models](models.md#credentials-for-nested-execution) for precedence and setup, and use `refactory doctor --provider deepseek-official --model deepseek-flash` to check downstream configuration before authoring. This check does not authenticate the key; unsupported custom runtimes report an explicit unverified warning. Deterministic modes, searches with `--optimizer random`, and offline tests do not need model credentials.
 

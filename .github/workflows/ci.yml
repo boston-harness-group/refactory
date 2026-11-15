@@ -9,7 +9,8 @@
 # `node_modules`, no DSH profile.
 #
 # Scope: the TypeScript suite (`pnpm test`), the whole-profile acceptance run and
-# the Python suite under `refactory/tests/` all run here. The IR parity tests
+# the Python suite under `refactory/tests/` (in four shards) all run here, with a
+# fast-checks job beside them. The IR parity tests
 # (`test_ir_parity.py`) compare refactory's IR against the reference graph language
 # in the v1 subtree at `v1/`; the code is part of this repo so
 # these tests run on every pull request. The Python suite was red for pre-existing reasons (issue #272)
@@ -37,17 +38,45 @@ permissions:
   contents: read
 
 jobs:
-  install-and-test:
-    name: install.sh + TypeScript + Python suites
+  # Seconds, not the half hour the suites take: the checks that catch most red runs
+  # before they cost a suite. `install.sh` runs `docs:check` and `typecheck` (through
+  # `pnpm run build`); ruff looks for syntax errors and undefined names; the boundary,
+  # registry and command-reference tests catch an unclassified module or a stale
+  # command list. It runs beside the suites rather than in front of them, so it adds
+  # nothing to the wall time.
+  fast-checks:
+    name: Fast checks (docs, typecheck, ruff, boundary)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
-          # `refactory/tests/test_work_complete.py` reads the commit each tracked
-          # item records and asks git to resolve it. A depth-1 clone holds one
-          # commit, so every recorded hash would be unresolvable and the gate would
-          # fail for a reason that is about the checkout rather than the work.
+          fetch-depth: 0
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+      - name: Install (docs:check and typecheck run here)
+        run: ./install.sh
+      - name: Ruff (syntax errors and undefined names)
+        run: uvx ruff@0.15.0 check --isolated --select E9,F63,F7,F82 refactory scripts
+      - name: Boundary, registry and command reference
+        run: >-
+          uv run python -m pytest -q -rfEs -x --timeout=300
+          refactory/tests/test_boundary.py refactory/tests/test_registry.py
+          "refactory/tests/test_cli.py::test_the_command_reference_matches_the_command_line"
+
+  # The TypeScript side and the harness pin, once, beside the Python shards.
+  typescript:
+    name: install.sh + TypeScript suite + web acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
           fetch-depth: 0
 
       # `pnpm/setup` is the action for pnpm 11+ (this repo pins pnpm@11.7.0). It
@@ -74,7 +103,6 @@ jobs:
       - name: Install (fresh-checkout path)
         run: ./install.sh
 
-
       # The TypeScript suite (`pnpm test`). Its 32 stale expectations are why
       # this job exists; a red suite here is the gate working.
       - name: TypeScript suite
@@ -97,6 +125,58 @@ jobs:
       - name: Web profile acceptance
         run: pnpm run test:acceptance
 
+      # The harness this repository pins and the `dsh` that boots the profile
+      # must agree on the version and on the strict TypertCodec contract. CI has
+      # no separate dsh on PATH, so this run proves the plain-clone case stays
+      # green; the mismatch it reports is the one a development machine has when
+      # PATH resolves to a different harness tree. `uv run` is the same venv the
+      # install created.
+      - name: Harness pin vs serving dsh
+        run: uv run python -m refactory_dsh.harness_check
+
+  # The Python suite (issue #272), in four parallel jobs. Every test runs on every
+  # push: `--shard I/4` packs the test files by their CI durations
+  # (`refactory/tests/ci_durations.json`, refreshed by `scripts/ci-durations.py` from
+  # these jobs' reports), each job runs its share on four workers, and the four
+  # shards together are the whole suite. A file always stays on one worker
+  # (`loadscope`), so no file may take much longer than a shard's share: the
+  # delivery and design-worktree tests are split by theme for that reason.
+  #
+  # Tests that need an external tool or a model credential are marked and skipped
+  # with a reason; the toolchain summary at the end of each shard names every one
+  # that did not run, so a green run states what it did not verify. The stricter
+  # `--toolchain-gate` is a separate local check: this runner has no Lean, mathlib or
+  # model credential. A test that hangs fails alone after `--timeout` instead of
+  # holding the job to its limit, and `-rfEs` lists failures and errors at the end.
+  python:
+    name: Python suite (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `refactory/tests/test_work_complete.py` reads the commit each tracked
+          # item records and asks git to resolve it. A depth-1 clone holds one
+          # commit, so every recorded hash would be unresolvable and the gate would
+          # fail for a reason that is about the checkout rather than the work.
+          fetch-depth: 0
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install (fresh-checkout path)
+        run: ./install.sh
+
       # Code nodes run in a user-namespace sandbox (`refactory_dsh.snippet`). Ubuntu
       # 24.04 restricts unprivileged user namespaces through AppArmor, which makes the
       # sandbox unavailable and its tests skip; lifting the restriction here lets the
@@ -109,40 +189,26 @@ jobs:
           fi
           uv run python -c "from refactory_dsh import snippet; print('code-node sandbox:', snippet.available())"
 
-      # The Python suite (issue #272). It runs the tests the install just built and
-      # fails the job on any failure. Tests that need an external tool or a model
-      # credential are marked and skipped with a reason; the toolchain summary at
-      # the end of this step names every skipped unit, so a green run here states
-      # what it did not verify rather than implying it verified everything.
-      #
-      # Four workers on this runner's four vCPUs: the suite is I/O- and
-      # subprocess-heavy and parallelises cleanly (22.4 min serial to 5.7 min at
-      # four on the lab). It is deliberately here and not in pytest.ini, because
-      # some invocations must stay serial: --toolchain-gate reads per-test reports
-      # in the controller, and the per-site base check runs one test under a cap.
-      - name: Python suite
+      # Four workers on this runner's four vCPUs. It is deliberately here and not in
+      # pytest.ini, because some invocations must stay serial: --toolchain-gate reads
+      # per-test reports in the controller, and the per-site base check runs one test
+      # under a cap.
+      - name: Python suite (shard ${{ matrix.shard }}/4)
         env:
           REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
-        run: uv run python -m pytest refactory/tests -q -rs -n 4 --junitxml=python-suite.xml
+        run: >-
+          uv run python -m pytest refactory/tests -q -rfEs -n 4 --timeout=900
+          --shard ${{ matrix.shard }}/4 --junitxml=python-suite-shard${{ matrix.shard }}.xml
 
-      # Each test's time on Linux, to compare with the same test on a Mac
-      # (`refactory_dsh.spawn_count` counts the process launches behind a gap).
-      - name: Keep the Python suite's per-test times
+      # Each test's time, for `scripts/ci-durations.py` and to compare a test on Linux
+      # with the same test on a Mac (`refactory_dsh.spawn_count`).
+      - name: Keep the shard's per-test times
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: python-suite-times
-          path: python-suite.xml
+          name: python-suite-times-shard${{ matrix.shard }}
+          path: python-suite-shard${{ matrix.shard }}.xml
           if-no-files-found: ignore
-
-      # The harness this repository pins and the `dsh` that boots the profile
-      # must agree on the version and on the strict TypertCodec contract. CI has
-      # no separate dsh on PATH, so this run proves the plain-clone case stays
-      # green; the mismatch it reports is the one a development machine has when
-      # PATH resolves to a different harness tree. `uv run` is the same venv the
-      # install created.
-      - name: Harness pin vs serving dsh
-        run: uv run python -m refactory_dsh.harness_check
 
   # macOS is a first-class platform, and the one where a process launch costs most: an
   # endpoint-security agent can make each one 30 ms or more. This job runs the TypeScript
