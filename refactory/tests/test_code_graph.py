@@ -774,7 +774,8 @@ def test_lowered_build_code_graph_is_fn_node():
     workflow = lowering.to_workflow(state)
     node = workflow.nodes["build_code_graph"]
     assert node.command.endswith("refactory_dsh.code_graph:build_code_graph")
-    assert ".refactory/code-graph/" in (getattr(node, "writes", None) or [])
+    # Run state, not an output: a declared output under .refactory/ cannot be reset.
+    assert not any(".refactory" in w for w in (getattr(node, "writes", None) or []))
 
 
 def test_spine_node_runner_runs_build_code_graph(tmp_path):

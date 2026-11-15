@@ -40,9 +40,7 @@
     "build_code_graph": {
       "id": "build_code_graph",
       "reads": [],
-      "writes": [
-        ".refactory/code-graph/"
-      ],
+      "writes": [],
       "blocking": true,
       "command": "python -m refactory_dsh.run refactory_dsh.code_graph:build_code_graph",
       "callable_name": "refactory_dsh.code_graph:build_code_graph",

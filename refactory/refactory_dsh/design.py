@@ -568,8 +568,9 @@ class DesignMode(Mode):
             "build_code_graph", "op",
             call="refactory_dsh.code_graph:build_code_graph",
             knobs=("code_graph", "code_graph_timeout_s", "code_graph_max_files"),
-            writes=(".refactory/code-graph/",),
             produces=("code_graph_paragraph",),
+            # No `writes`: the graph is run state in .refactory/code-graph (`GRAPH_SUBDIR`),
+            # which the runtime owns and never resets as a node's output.
             notes="start the code knowledge graph build as a detached process; returns the prompt paragraph",
         ))
 
