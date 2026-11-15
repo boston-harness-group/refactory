@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868294a26a6 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea875542a8f1 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -147,7 +147,8 @@ function failureDiagnostic(facts) {
@@ -70,7 +70,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +273,150 @@ function successfulResult(message) {
+@@ -231,20 +273,159 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -115,6 +115,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 +	// so the input stays open until a result arrives with none running.
 +	let liveTasks = new Set();
 +	const waitedTasks = new Set();
++	// The times Claude Code compacted the conversation in this step.
++	let compactions = 0;
 +	// A task that never ends (a server or watcher started in the background) must not
 +	// hold the step forever: once waiting, a stream quiet for this long releases the
 +	// input with the last answer, and Claude Code stops what is left, as it did before.
@@ -182,7 +184,14 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 +					model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
 +					...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources },
 +					...sent?.claudeExecutable === void 0 ? {} : { claude_executable: sent.claudeExecutable }, source: "native-sdk-init" },
-+					product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false, ...toolFacts });
++					product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false, ...toolFacts,
++					auto_compact: { enabled: sent?.autoCompact === true, source: "claude-agent-sdk-flag-settings",
++						env_dropped: sent?.compactEnvDropped ?? [] } });
++			}
++			if (message.type === "system" && message.subtype === "compact_boundary") {
++				compactions += 1;
++				onRefactoryMetadata?.({ compactions });
++				continue;
 +			}
 +
 +			if (message.type === "system" && message.subtype === "permission_denied") {
@@ -230,7 +239,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  	});
  	return {
  		output: [{
-@@ -295,14 +467,22 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +476,33 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -246,6 +255,12 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 +	};
 +	// Adapter controls, not Claude Code's environment.
 +	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES", "REFACTORY_CLAUDE_EXECUTABLE", "REFACTORY_BACKGROUND_QUIET_S"]) delete _rfEnv[key];
++	// An unattended worker that cannot compact ends with "Prompt is too long" once its
++	// conversation outgrows the window, losing the step. These switches, inherited from
++	// the shell that started the run (a Claude Code session sets one), turn compaction off
++	// whatever the settings say, so they never reach the worker.
++	const _rfCompactEnvDropped = COMPACTION_SWITCHES.filter((key) => key in _rfEnv);
++	for (const key of _rfCompactEnvDropped) delete _rfEnv[key];
 +	const options = {
  		abortController: controller,
  		cwd: spec.cwd,
@@ -256,9 +271,14 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 -		},
 +		env: _rfEnv,
  		persistSession: false,
++		// Flag settings outrank every other source, so the person's own choice
++		// (autoCompactEnabled in ~/.claude.json, which a worker reads through its real HOME)
++		// stays theirs and is never written; only this worker compacts.
++		settings: { autoCompactEnabled: true },
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
-@@ -327,8 +507,30 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+ 		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
+@@ -327,9 +526,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -286,11 +306,17 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 +	if (_rfClaudeExecutable) {
 +		options.pathToClaudeCodeExecutable = _rfClaudeExecutable;
 +	}
++	options[COMPACT_ENV_DROPPED] = _rfCompactEnvDropped;
 +	return options;
  }
++/** The environment switches that disable Claude Code's compaction. */
++const COMPACTION_SWITCHES = ["DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "DISABLE_MICROCOMPACT"];
++/** Where claudeQueryOptions leaves the switches it dropped; not an SDK option. */
++const COMPACT_ENV_DROPPED = Symbol("compact env dropped");
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +540,24 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+ * @param request - resolved shared subagent request.
+@@ -338,6 +564,24 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -315,7 +341,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +578,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +602,7 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -323,7 +349,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +596,23 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +620,26 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -333,9 +359,12 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
 +			toolsNone: Array.isArray(options.tools) && options.tools.length === 0,
 +			settingSources: options.settingSources,
 +			claudeExecutable: options.pathToClaudeCodeExecutable,
++			autoCompact: options.settings?.autoCompactEnabled === true,
++			compactEnvDropped: options[COMPACT_ENV_DROPPED] ?? [],
 +			// How long consumeClaudeQuery waits on silent background tasks (default 600 s).
 +			backgroundQuietS: Number(spec.env?.REFACTORY_BACKGROUND_QUIET_S) > 0 ? Number(spec.env.REFACTORY_BACKGROUND_QUIET_S) : void 0
 +		};
++		delete options[COMPACT_ENV_DROPPED];
  		query$1 = query({
 -			prompt,
 -			options: claudeQueryOptions(spec, controller, captureChild, capturePermissionDiagnostic)
@@ -349,7 +378,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,6 +665,9 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,6 +692,9 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -359,7 +388,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  				}), publishedProcessFailure]);
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
-@@ -458,7 +692,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +719,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -368,7 +397,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,6 +704,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,6 +731,7 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -376,7 +405,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..39ac88b7700e10aea40271a2d255d868
  			try {
  				await disposeClaudeCodeChild(publishedQuery, publishedChild);
  			} catch (error) {
-@@ -529,6 +764,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +791,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

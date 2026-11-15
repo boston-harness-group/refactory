@@ -923,11 +923,21 @@ def test_the_item_cap_fills_the_room_and_keeps_its_floor():
 
 
 def test_clipped_items_and_characters_are_journaled_and_reported():
+    """Only an item longer than the room on its own is cut: it is a batch of its own,
+    the others stay whole in theirs, and the cut is counted."""
     group = [_long("f0", 600000)] + [_rec(f"f{i}", False) for i in range(1, 8)]
-    optimizer = AutoresearchOptimizer(Client())
+    client = Client()
+    optimizer = AutoresearchOptimizer(client)
     optimizer.propose(_ctx(group), 1, [])
     entry = analysts.journal_entry(optimizer.last_analysis)
-    (batch,) = entry["batches"]
+    (batch,) = [b for b in entry["batches"] if b["clipped"]]
+    assert batch["items"] == ["f0"], "the long item alone"
+    assert sorted(i for b in entry["batches"] for i in b["items"]) == sorted(
+        r["id"] for r in group)
+    for prompt in client.of((analysts.FAILURE_SYSTEM,)):
+        if _items(prompt) != ["f0"]:
+            assert "characters omitted" not in prompt
+            assert all(analysts.item_text(r) in prompt for r in group if r["id"] in _items(prompt))
     assert entry["clipped_items"] == batch["clipped"] == 1
     assert entry["clipped_chars"] == batch["clipped_chars"] > 100000
     from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
@@ -938,6 +948,76 @@ def test_clipped_items_and_characters_are_journaled_and_reported():
     assert (f"1 item trace(s) were clipped to fit an analyst's room "
             f"({entry['clipped_chars']} characters left out)"
             in "\n".join(_analysts_section(report)))
+
+
+# ── long traces: split across calls, never cut ─────────────────────────────
+
+
+def test_long_traces_are_split_across_batches_whole_never_cut(tmp_path):
+    """Eight four-step items of 80000 characters: together past one call's room. They
+    are split across batches, every item whole in exactly one, rather than cut; each
+    request, system prompt included, stays within the room."""
+    group = [_long(f"f{i}", 80000) for i in range(8)]
+    client = Client()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(_ctx(group), 1, [])
+    prompts = client.of((analysts.FAILURE_SYSTEM,))
+    assert len(prompts) > 1, "more than one call"
+    for prompt in prompts:
+        assert "characters omitted" not in prompt and "clipped head and tail" not in prompt
+        assert len(analysts.FAILURE_SYSTEM) + len(prompt) <= analysts.ANALYST_ROOM
+    read = [item for prompt in prompts for item in _items(prompt)]
+    assert sorted(read) == sorted(r["id"] for r in group), "every item exactly once"
+    assert all(analysts.item_text(r) in next(p for p in prompts if r["id"] in _items(p))
+               for r in group), "whole"
+    batches = optimizer.last_analysis["batches"]
+    assert [b["index"] for b in batches] == list(range(1, len(prompts) + 1))
+    assert all(b["clipped"] == 0 for b in batches)
+    assert analysts.journal_entry(optimizer.last_analysis)["clipped_items"] == 0
+    # The batches are the same on a resume, so every call is answered from its cache.
+    for held in (tmp_path / "analyst_findings").glob("round-*.json"):
+        held.unlink()
+    again = Client()
+    resumed = AutoresearchOptimizer(again)
+    resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
+    resumed.propose(_ctx(group), 1, [])
+    assert again.of(ANALYST_SYSTEMS + MERGE_SYSTEMS) == []
+    assert [b["items"] for b in resumed.last_analysis["batches"]] == [b["items"] for b in batches]
+
+
+def test_batches_fill_to_the_room_in_order_and_keep_group_size_and_the_cap():
+    failures = [_rec(f"f{i}", False) for i in range(6)]
+    successes = [_rec(f"s{i}", True) for i in range(3)]
+    sizes = {"f0": 3, "f1": 3, "f2": 5, "f3": 1, "f4": 1, "f5": 1, "s0": 1, "s1": 1, "s2": 1}
+
+    def fits(kind: str, group: list[dict[str, Any]]) -> bool:
+        return sum(sizes[r["id"]] for r in group) <= 6
+
+    plan, left = analysts.batches(failures, successes, group_size=2, fits=fits)
+    assert [(k, i, [r["id"] for r in g]) for k, i, g in plan] == [
+        ("failure", 1, ["f0", "f1"]), ("failure", 2, ["f2", "f3"]), ("failure", 3, ["f4", "f5"]),
+        ("success", 1, ["s0", "s1"]), ("success", 2, ["s2"])]
+    roomy, _ = analysts.batches(failures, successes, group_size=8, fits=fits)
+    assert [[r["id"] for r in g] for _k, _i, g in roomy] == [
+        ["f0", "f1"], ["f2", "f3"], ["f4", "f5"], ["s0", "s1", "s2"]], "closed by size"
+    capped, left = analysts.batches(failures, successes, group_size=8, fits=fits,
+                                    max_batches=2)
+    assert len(capped) == 2 and left == {"failure": 2, "success": 3}
+    lone, _ = analysts.batches([_rec("big", False)], [], group_size=8,
+                               fits=lambda kind, group: False)
+    assert [[r["id"] for r in g] for _k, _i, g in lone] == [["big"]], "too long alone"
+
+
+def test_the_packer_measures_the_request_as_the_builder_makes_it():
+    group = [_long(f"f{i}", 30000) for i in range(3)]
+    ctx = _ctx(group)
+    pipeline = analysts.pipeline_text(ctx)
+    prompt, clip = analysts.analyst_batch(ctx, "failure", 1, 1, group, pipeline)
+    need = len(analysts.FAILURE_SYSTEM) + len(prompt)
+    assert clip == {"items": 0, "chars": 0}
+    assert analysts.packer(ctx, pipeline, group, [], room=need)("failure", group)
+    assert not analysts.packer(ctx, pipeline, group, [], room=need - 1)("failure", group)
 
 
 # ── delta review: step keys and journaling after a resume ──────────────────
