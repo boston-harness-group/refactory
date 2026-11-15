@@ -601,16 +601,19 @@ def test_mixed_conflict_sends_back_only_the_authored_file(github, tmp_path, monk
     assert len(detail[0]["excerpt"].splitlines()) <= 41
 
 
-def test_conflict_send_back_stays_bounded_with_multi_megabyte_files(github, tmp_path, monkeypatch):
-    """Multi-megabyte conflicting files reach the builder as at most a bounded excerpt each
-    and about 20 KB in all, in the file list and in the validation text the prompt renders.
+def test_conflict_send_back_stays_bounded_with_large_files(github, tmp_path, monkeypatch):
+    """Large conflicting files reach the builder as at most a bounded excerpt each and about
+    20 KB in all, in the file list and in the validation text the prompt renders.
 
-    Fails without the change: validation carries the base, ours and theirs files whole.
+    Fails without the change: validation carries the base, ours and theirs files whole. The
+    bounds bind on conflict hunks, not bytes: 150 hunks a file (every 20th row differs)
+    cross each of them several times over without the change, where the 3.5 MB files this
+    once used had 70 and only made the run slower.
     """
-    lines = [f"row {i} " + "x" * 40 for i in range(70_000)]  # about 3.5 MB
+    lines = [f"row {i} " + "x" * 40 for i in range(3_000)]  # about 140 KB
 
     def variant(tag):
-        return "\n".join(f"{row} {tag}" if i % 1000 == 0 else row for i, row in enumerate(lines)) + "\n"
+        return "\n".join(f"{row} {tag}" if i % 20 == 0 else row for i, row in enumerate(lines)) + "\n"
 
     repo = git_repo(tmp_path / "repo")
     for name in ("big_a.txt", "big_b.txt", "big_c.txt"):

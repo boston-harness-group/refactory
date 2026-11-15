@@ -1245,7 +1245,8 @@ def test_csv_items_without_id_get_index_ids(tmp_path):
 
 
 def test_large_benchmark_completes_under_step_cap(tmp_path):
-    """A 600-item data node completes without hitting the step cap (parity fix 4)."""
+    """A data node with three times the step cap's items completes without hitting the
+    cap (parity fix 4): 30 items of 2 steps under a cap of 20."""
     from refactory_dsh import task as task_module
     from refactory_dsh.nn.executor import CURRENT_ITEM, execute
 
@@ -1253,7 +1254,7 @@ def test_large_benchmark_completes_under_step_cap(tmp_path):
         name = "large_task"
 
         def instances(self):
-            return [task_module.TaskInstance(id=str(i)) for i in range(600)]
+            return [task_module.TaskInstance(id=str(i)) for i in range(30)]
 
         def verify(self, instance, workspace):
             return task_module.VerifyResult(passed=True, score=1.0)
@@ -1279,9 +1280,11 @@ def test_large_benchmark_completes_under_step_cap(tmp_path):
     graph.connect("work", "end")
     graph.connect("data", "after")
 
-    result = execute(graph, tmp_path / "run", max_steps=1000)
+    result = execute(graph, tmp_path / "run", max_steps=20)
     assert result.exit_ok, result.error
-    assert len(result.facts["item_scores"]) == 600
+    assert len(result.facts["item_scores"]) == 30
+    # An item that hit the cap is still scored, as a failure: none may have.
+    assert not [s for s in result.facts["item_scores"] if s.get("error_text")], result.facts["item_scores"]
 
 
 def test_verify_timeout_becomes_failed_item(tmp_path):
@@ -1542,8 +1545,9 @@ def test_step_cap_scaling_exceeds_unscaled_cap(tmp_path):
     from refactory_dsh import task as task_module
     from refactory_dsh.nn.executor import CURRENT_ITEM, Executor, RunContext, execute
 
-    # Read the actual default max_steps.
-    default_max = Executor.max_steps  # 2000
+    # A small cap, passed to both runs: the scaling is the same arithmetic at 20 as at the
+    # 2,000 default, which cost 1,001 items run twice (100 s in CI).
+    default_max = 20
 
     # Subgraph has 2 nodes (work + end), so we need items such that:
     # items × 2 > default_max. Use (default_max // 2) + 1 items.
