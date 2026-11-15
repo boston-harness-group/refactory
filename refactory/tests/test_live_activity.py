@@ -914,18 +914,59 @@ def _median_ms(action: object, rounds: int = 9) -> float:
     return statistics.median(timings)
 
 
-def test_page_cost_does_not_grow_with_the_journal(tmp_path):
-    """T-3: a warm page and a warm summary are flat across N — R-1.7a and R-1.7b.
+def _bytes_read(monkeypatch: pytest.MonkeyPatch, action: object) -> int:
+    """How many bytes `action` reads through files (`Path.open`, which every read in
+    `live` goes through): the work a page does, counted exactly, so a loaded machine
+    cannot move it the way it moves a timing."""
+    count = [0]
+    real_open = Path.open
 
-    The assertions are cross-N ratios, because a threshold that compares two
-    numbers measured at the same N accepts an implementation that is linear in N
-    at every N (the code this test replaces did exactly that: 9.05 ms at 5,000
-    records and 35.6 ms at 20,000 records still passed). With three journal sizes
-    40x apart, a page that reads anything proportional to N cannot stay within
-    `max(small * 2, 5 ms)`; a page that seeks does, because its cost is four
-    strides and 200 records whatever the history behind it is.
+    class Counted:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._handle, name)
+
+        def __enter__(self) -> 'Counted':
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc: object) -> object:
+            return self._handle.__exit__(*exc)
+
+        def read(self, *args: object) -> object:
+            data = self._handle.read(*args)
+            count[0] += len(data)
+            return data
+
+        def readline(self, *args: object) -> object:
+            data = self._handle.readline(*args)
+            count[0] += len(data)
+            return data
+
+        def __iter__(self) -> object:
+            for line in self._handle:
+                count[0] += len(line)
+                yield line
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, 'open', lambda self, *a, **k: Counted(real_open(self, *a, **k)))
+        action()
+    return count[0]
+
+
+def test_page_cost_does_not_grow_with_the_journal(tmp_path, monkeypatch):
+    """T-3: a warm page and a warm summary read the same bytes across N — R-1.7a and R-1.7b.
+
+    Bytes read, not milliseconds: timings under a loaded runner flaked (CI, 2026-11:
+    5.85, 8.66 and 2.62 ms at 500, 5,000 and 20,000 records). A page that seeks reads
+    four strides and its 200 records whatever the history behind it is; one that
+    parses the whole index at 20,000 records reads about 300 stride lines more
+    (~180 KB), so 40x the journal against a 4 KB allowance catches any read
+    proportional to N, at a size where a timing could not (0.74 ms then).
     """
-    sizes = (500, 5000, 20000, 270000)
+    sizes = (500, 20000)
     roots = {}
     for size in sizes:
         roots[size] = tmp_path / f'journal-{size}'
@@ -933,40 +974,27 @@ def test_page_cost_does_not_grow_with_the_journal(tmp_path):
         # The cold first call is allowed to scan: it is what builds the index.
         assert len(live.page(roots[size])['events']) == live.PAGE_DEFAULT
 
-    # R-1.7b: `total`/`last_event_at` cost one small file read, not a walk.
-    summary = {size: _median_ms(lambda root=roots[size]: live.summary(root)) for size in sizes}
+    def read(action: object) -> int:
+        return _bytes_read(monkeypatch, action)
 
-    # R-1.7a: the same 200-record page at a fixed `after`, and at N/2.
-    pages = {size: _median_ms(lambda root=roots[size]: live.page(root, after=200, limit=200))
-             for size in sizes}
-    late = {size: _median_ms(lambda root=roots[size], n=size: live.page(root, after=n // 2, limit=200))
+    # R-1.7b: `total`/`last_event_at` cost the small derived files, not a walk.
+    summary = {size: read(lambda root=roots[size]: live.summary(root)) for size in sizes}
+    # R-1.7a: the same 200-record page at a fixed `after`, and at N/2. Records at N/2
+    # carry a few more digits of `i`, which is all the allowance is for.
+    pages = {size: read(lambda root=roots[size]: live.page(root, after=200, limit=200)) for size in sizes}
+    late = {size: read(lambda root=roots[size], n=size: live.page(root, after=n // 2, limit=200))
             for size in sizes}
+    allowance = 4096
+    assert summary[20000] <= summary[500] + allowance, summary
+    assert pages[20000] <= pages[500] + allowance, (pages, late)
+    assert late[20000] <= late[500] + allowance, (pages, late)
+    # A page reads its records: a broken (empty) page cannot pass by reading nothing.
+    assert pages[500] >= 200 * 900 and len(live.page(roots[20000], after=200, limit=200)['events']) == 200
+    # The summary parses no record: the derived files and the anchor are all it reads.
+    assert summary[20000] * 50 < pages[20000], (summary, pages)
 
-    # 40x the journal for the same page: the ceiling is 2x, not the 10x the
-    # previous test used, and it is measured against a page, not against nothing.
-    assert pages[20000] < max(pages[500] * 2, 5.0), (pages, late)
-    assert late[20000] < max(late[500] * 2, 5.0), (pages, late)
-    # The slope with no absolute floor in front of it, at the size the reported
-    # run actually reached. The 5 ms floor above is needed at 500 records, where
-    # a page's own cost is close to timer noise, but it also hides a read
-    # proportional to N while the index is still small: a page that parsed the
-    # whole index was measured passing that floor at 20,000 records (0.74 ms
-    # against 5.0 ms) and passing a 20,000-vs-5,000 ratio at 1.16x, because the
-    # 64:1 striding keeps a full index read cheap at that size. At 270,000
-    # records the same read costs 4.5x a page (2.76 ms against 0.61 ms), so the
-    # ratio is asserted against the largest pair, where it bites.
-    assert pages[270000] < pages[20000] * 2, (pages, late)
-    assert late[270000] < late[20000] * 2, (pages, late)
-    # The summary is flat across the same range, and is cheaper than a page
-    # because it parses no record at all.
-    assert summary[20000] < max(summary[500] * 2, 5.0), summary
-    assert summary[270000] < summary[20000] * 2, summary
-    # A page that returns 200 records has a floor; a real one must not be below
-    # the noise floor either, so a broken (empty) page cannot pass by being fast.
-    assert pages[20000] > 0 and len(live.page(roots[20000], after=200, limit=200)['events']) == 200
-
-    # R-1.7a's other half: an exhaustive pass costs O(N) in total, so N x 4
-    # must be about x 4 and not x 16. 40x the records may take 12x the time.
+    # R-1.7a's other half: an exhaustive pass costs O(N) in total, so 40x the records
+    # reads about 40x the bytes, not 1,600x.
     def full_pass(root: Path) -> int:
         after, pages_read = 0, 0
         while True:
@@ -976,7 +1004,7 @@ def test_page_cost_does_not_grow_with_the_journal(tmp_path):
             if not result['has_more']:
                 return pages_read
 
-    passes = {size: _median_ms(lambda root=roots[size]: full_pass(root), rounds=3) for size in sizes}
+    passes = {size: read(lambda root=roots[size]: full_pass(root)) for size in sizes}
     assert passes[20000] < passes[500] * 40 * 2, passes
 
 
