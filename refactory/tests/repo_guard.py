@@ -39,6 +39,21 @@ def _take_snapshot(repo: Path) -> dict[str, Any]:
     }
 
 
+#: What interpreters and tools write beside the code: never a test's doing.
+_CACHE_PARTS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".vite"})
+
+
+def _is_cache(name: str) -> bool:
+    parts = name.split("/")
+    return name.endswith((".pyc", ".pyo")) or any(part in _CACHE_PARTS for part in parts)
+
+
+def _toplevel(repo: Path) -> Path | None:
+    top = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, timeout=30)
+    return Path(top.stdout.strip()) if top.returncode == 0 else None
+
+
 def _working_files(repo: Path) -> dict[str, str]:
     """Each path `git status` lists (changed or untracked, ignored ones not), with a digest
     of its bytes: a test that writes into the checkout shows here, even over a file the
@@ -47,12 +62,10 @@ def _working_files(repo: Path) -> dict[str, str]:
         ["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         capture_output=True, timeout=60,
     )
-    top = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, timeout=30)
-    if result.returncode != 0 or top.returncode != 0:
-        return {}
     # Porcelain paths are relative to the top of the checkout, wherever pytest started.
-    root = Path(top.stdout.strip())
+    root = _toplevel(repo)
+    if result.returncode != 0 or root is None:
+        return {}
     files: dict[str, str] = {}
     entries = iter(result.stdout.split(b"\0"))
     for entry in entries:
@@ -61,6 +74,8 @@ def _working_files(repo: Path) -> dict[str, str]:
         name = entry[3:].decode(errors="surrogateescape")
         if entry[:1] in (b"R", b"C"):
             next(entries, None)  # the rename's source
+        if _is_cache(name):
+            continue
         path = root / name
         try:
             files[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
@@ -187,7 +202,21 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     except Exception:
         basetemp = ""
 
+    # Files this session is configured to write into the checkout (`--junitxml`) are
+    # its own reports, not a test's writes.
+    top = _toplevel(repo)
+    own: list[str] = []
+    xmlpath = getattr(session.config.option, "xmlpath", None)
+    if xmlpath and top is not None:
+        try:
+            own.append(Path(xmlpath).resolve().relative_to(top.resolve()).as_posix())
+        except ValueError:
+            pass
+    for name in own:
+        snapshot["files"].pop(name, None)
+
     session.config.stash[_GUARD_KEY] = {
+        "own_outputs": own,
         "snapshot": snapshot,
         "repo": str(repo),
         "temp_roots": [basetemp, tempfile.gettempdir()],
@@ -208,6 +237,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     except (ValueError, OSError) as exc:
         session.config.stash[_GUARD_INACTIVE_KEY] = str(exc)
         return
+
+    for name in stored.get("own_outputs") or []:
+        after["files"].pop(name, None)
 
     failures, warnings = _compare_snapshots(
         stored["snapshot"],
