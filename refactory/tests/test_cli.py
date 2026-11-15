@@ -563,6 +563,7 @@ def test_claude_code_compaction_reads_the_adapter_and_the_persons_setting(tmp_pa
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     for name in workers.COMPACTION_SWITCHES:
         monkeypatch.delenv(name, raising=False)
     assert workers.claude_code_compaction(tmp_path) is None
@@ -581,6 +582,21 @@ def test_claude_code_compaction_reads_the_adapter_and_the_persons_setting(tmp_pa
 
     (lib / "index.js").write_text("const options = {};\n")
     assert workers.claude_code_compaction(tmp_path)["forced"] is False
+
+    # CLAUDE_CONFIG_DIR moves the file, as it does for Claude Code; a legacy .config.json
+    # in the config directory wins over .claude.json.
+    config_dir = tmp_path / "claude-config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    assert workers.claude_code_compaction(tmp_path)["person"] is None
+    (config_dir / ".claude.json").write_text(json.dumps({"autoCompactEnabled": True}))
+    assert workers.claude_code_compaction(tmp_path)["person"] is True
+    (config_dir / ".config.json").write_text(json.dumps({"autoCompactEnabled": False}))
+    assert workers.claude_code_compaction(tmp_path)["person"] is False
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    (home / ".claude").mkdir()
+    (home / ".claude" / ".config.json").write_text(json.dumps({"theme": "light"}))
+    assert workers.claude_code_compaction(tmp_path)["person"] is None
 
 
 def test_require_build_passes_when_spine_lib_exists(tmp_path):

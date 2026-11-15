@@ -194,9 +194,9 @@ def claude_code_compaction(runtime_root: Path | str) -> dict[str, Any] | None:
 
     ``forced`` says whether the installed adapter starts Claude Code with the flag setting
     ``autoCompactEnabled: true`` (it is patched to; False means the patch is not applied).
-    ``person`` is the person's own ``autoCompactEnabled`` in ``~/.claude.json`` (None when
-    unset), which a worker would otherwise read through its real HOME and which is never
-    changed; ``dropped`` are the switches in this environment a worker does not get. None
+    ``person`` is the person's own ``autoCompactEnabled`` in the global config Claude Code
+    reads (`_claude_global_config`; None when unset), which a worker would otherwise read
+    through its real HOME and which is never changed; ``dropped`` are the switches in this environment a worker does not get. None
     when the optional adapter is not installed.
     """
     adapter = Path(runtime_root) / 'node_modules' / PACKAGES['claude_code']
@@ -205,12 +205,21 @@ def claude_code_compaction(runtime_root: Path | str) -> dict[str, Any] | None:
     except OSError:
         return None
     try:
-        person = json.loads((Path.home() / '.claude.json').read_text()).get('autoCompactEnabled')
+        person = json.loads(_claude_global_config().read_text()).get('autoCompactEnabled')
     except (OSError, ValueError, AttributeError):
         person = None
     return {'forced': 'settings: { autoCompactEnabled: true }' in source,
             'person': person if isinstance(person, bool) else None,
             'dropped': [name for name in COMPACTION_SWITCHES if name in os.environ]}
+
+
+def _claude_global_config() -> Path:
+    """The global config file Claude Code reads, found as it finds it: a legacy
+    ``.config.json`` in its config directory (``CLAUDE_CONFIG_DIR``, else ``~/.claude``)
+    when there is one, else ``.claude.json`` in ``CLAUDE_CONFIG_DIR``, else in HOME."""
+    configured = os.environ.get('CLAUDE_CONFIG_DIR')
+    legacy = Path(configured or Path.home() / '.claude') / '.config.json'
+    return legacy if legacy.exists() else Path(configured or Path.home()) / '.claude.json'
 
 
 def claude_code_version(executable: str) -> str:

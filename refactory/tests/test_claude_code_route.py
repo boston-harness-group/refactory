@@ -81,8 +81,18 @@ _FAKE_SDK = textwrap.dedent("""\
             yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
             yield { type: 'result', subtype: 'success', is_error: false, result: 'FINAL PINEAPPLE', modelUsage: usage }
           } else if (process.env.FAKE_SDK_COMPACT) {
-            // A long step whose conversation outgrew the window: Claude Code compacts it
-            // (FAKE_SDK_COMPACT times) and the same session carries on to its answer.
+            // A long step whose conversation outgrows the window. As the real CLI does, it
+            // compacts (FAKE_SDK_COMPACT times) and carries on to its answer only when
+            // compaction is on: autoCompactEnabled set in flag settings, and neither switch
+            // that overrides it in its environment. Otherwise it ends "Prompt is too long".
+            const compacts = options.settings?.autoCompactEnabled === true
+              && !('DISABLE_AUTO_COMPACT' in options.env) && !('DISABLE_COMPACT' in options.env)
+            if (!compacts) {
+              yield { type: 'result', subtype: 'success', is_error: true, result: 'Prompt is too long',
+                      modelUsage: { 'fake-claude': { inputTokens: 200000, outputTokens: 60279,
+                                                     cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
+              return
+            }
             for (let n = 0; n < Number(process.env.FAKE_SDK_COMPACT); n++) {
               yield { type: 'system', subtype: 'compact_boundary',
                       compact_metadata: { trigger: 'auto', pre_tokens: 167000 } }
@@ -439,10 +449,14 @@ def test_a_tool_free_worker_compacts_too(tmp_path, fake_sdk, monkeypatch):
 
 
 def test_a_step_that_outgrows_the_window_compacts_and_finishes(tmp_path, fake_sdk, monkeypatch):
-    """The overflow, simulated mid-step: Claude Code compacts twice and the same session
-    answers, so the step completes with that answer (no failure, nothing redone) and its
-    record counts the compactions."""
+    """The overflow, simulated mid-step, launched from a shell that turns compaction off:
+    the fake ends "Prompt is too long" unless compaction is on, as the real CLI does, so
+    the step completing at all proves the flag setting and the dropped switches. Claude
+    Code compacts twice, the same session answers (nothing redone), and the record counts
+    the compactions."""
     monkeypatch.setenv("FAKE_SDK_COMPACT", "2")
+    monkeypatch.setenv("DISABLE_AUTO_COMPACT", "1")
+    monkeypatch.setenv("DISABLE_COMPACT", "1")
     workdir = tmp_path / "run"
     answer = _client(tmp_path).complete("Build the change", workdir=workdir)
 
