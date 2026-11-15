@@ -3270,29 +3270,29 @@ build-loop limit and ended with nothing delivered:
 
 ### Tests
 
-- `refactory/tests/test_delivery.py::test_draft_passing_check_opens_draft_pr`
-- `refactory/tests/test_delivery.py::test_draft_failing_check_opens_draft_pr`
-- `refactory/tests/test_delivery.py::test_draft_no_evidence_refused`
-- `refactory/tests/test_delivery.py::test_no_draft_fact_requires_signoff`
-- `refactory/tests/test_delivery.py::test_draft_conflict_with_base`
-- `refactory/tests/test_delivery.py::test_draft_failing_merged_check`
-- `refactory/tests/test_delivery.py::test_draft_existing_pr_converted_to_draft`
-- `refactory/tests/test_delivery.py::test_draft_closed_pr_opens_no_second_pr`
-- `refactory/tests/test_delivery.py::test_draft_conflict_existing_open_pr`
-- `refactory/tests/test_delivery.py::test_draft_no_pr_mode`
-- `refactory/tests/test_delivery.py::test_spine_draft_delivery_across_processes`
-- `refactory/tests/test_delivery.py::test_draft_pr_body_hides_credentials_and_keeps_each_item_on_one_line`
-- `refactory/tests/test_delivery.py::test_draft_without_any_check_evidence_is_refused`
-- `refactory/tests/test_delivery.py::test_draft_with_stale_identity_is_refused`
-- `refactory/tests/test_delivery.py::test_a_draft_github_refuses_opens_ready_with_its_title_marked`
-- `refactory/tests/test_delivery.py::test_a_pull_request_github_will_not_make_a_draft_keeps_its_delivery`
-- `refactory/tests/test_delivery.py::test_a_draft_whose_description_gh_cannot_edit_still_records_its_push`
-- `refactory/tests/test_delivery.py::test_delivering_a_draft_again_replaces_its_unresolved_section`
-- `refactory/tests/test_delivery.py::test_a_draft_refinement_turns_the_refined_pull_request_into_a_draft`
-- `refactory/tests/test_delivery.py::test_a_draft_whose_pull_request_merged_is_recorded_merged`
-- `refactory/tests/test_delivery.py::test_a_draft_whose_merge_was_abandoned_is_not_succeeded`
-- `refactory/tests/test_delivery.py::test_a_draft_whose_push_is_refused_keeps_the_work_local_as_without_the_fact`
-- b45a, through the real design graph: `test_delivery.py::test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft`,
+- `refactory/tests/test_delivery_drafts.py::test_draft_passing_check_opens_draft_pr`
+- `refactory/tests/test_delivery_drafts.py::test_draft_failing_check_opens_draft_pr`
+- `refactory/tests/test_delivery_drafts.py::test_draft_no_evidence_refused`
+- `refactory/tests/test_delivery_drafts.py::test_no_draft_fact_requires_signoff`
+- `refactory/tests/test_delivery_conflicts.py::test_draft_conflict_with_base`
+- `refactory/tests/test_delivery_conflicts.py::test_draft_failing_merged_check`
+- `refactory/tests/test_delivery_drafts.py::test_draft_existing_pr_converted_to_draft`
+- `refactory/tests/test_delivery_drafts.py::test_draft_closed_pr_opens_no_second_pr`
+- `refactory/tests/test_delivery_conflicts.py::test_draft_conflict_existing_open_pr`
+- `refactory/tests/test_delivery_local.py::test_draft_no_pr_mode`
+- `refactory/tests/test_delivery_drafts.py::test_spine_draft_delivery_across_processes`
+- `refactory/tests/test_delivery_drafts.py::test_draft_pr_body_hides_credentials_and_keeps_each_item_on_one_line`
+- `refactory/tests/test_delivery_drafts.py::test_draft_without_any_check_evidence_is_refused`
+- `refactory/tests/test_delivery_drafts.py::test_draft_with_stale_identity_is_refused`
+- `refactory/tests/test_delivery_drafts.py::test_a_draft_github_refuses_opens_ready_with_its_title_marked`
+- `refactory/tests/test_delivery_drafts.py::test_a_pull_request_github_will_not_make_a_draft_keeps_its_delivery`
+- `refactory/tests/test_delivery_drafts.py::test_a_draft_whose_description_gh_cannot_edit_still_records_its_push`
+- `refactory/tests/test_delivery_drafts.py::test_delivering_a_draft_again_replaces_its_unresolved_section`
+- `refactory/tests/test_delivery_drafts.py::test_a_draft_refinement_turns_the_refined_pull_request_into_a_draft`
+- `refactory/tests/test_delivery_conflicts.py::test_a_draft_whose_pull_request_merged_is_recorded_merged`
+- `refactory/tests/test_delivery_conflicts.py::test_a_draft_whose_merge_was_abandoned_is_not_succeeded`
+- `refactory/tests/test_delivery_local.py::test_a_draft_whose_push_is_refused_keeps_the_work_local_as_without_the_fact`
+- b45a, through the real design graph: `test_delivery_drafts.py::test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft`,
   `::test_a_check_that_still_fails_at_its_limit_delivers_a_draft_marked_check_failing`,
   `::test_a_run_with_no_applied_commit_delivers_nothing`,
   `::test_the_refusal_bound_after_an_applied_commit_delivers_that_commit_as_a_draft`,
@@ -3304,7 +3304,7 @@ build-loop limit and ended with nothing delivered:
   `::test_the_refusal_bound_after_an_applied_commit_goes_to_the_report_on_the_spine`,
   `::test_a_review_limit_at_gate_qa_goes_on_as_a_draft_on_the_spine`,
   `::test_a_review_limit_at_gate_overwatch_goes_to_the_report_as_a_draft_on_the_spine`.
-- `refactory/tests/test_delivery.py::test_a_draft_fact_that_is_not_a_mapping_is_no_draft`
+- `refactory/tests/test_delivery_drafts.py::test_a_draft_fact_that_is_not_a_mapping_is_no_draft`
 - `refactory/tests/test_authoring_evidence.py::test_ceo_skip_is_refused_on_the_draft_path`
 - `refactory/tests/test_authoring_evidence.py::test_person_skip_is_accepted_on_the_draft_path`
 
