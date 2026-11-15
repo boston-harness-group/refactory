@@ -107,6 +107,17 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             # A record from before the epoch's own codes were kept: the run's tally.
             shown = ", ".join(f"{code} {count}" for code, count in sorted(codes.items()))
             line += f" (run so far: {shown})"
+        # Proposals refused, then fixed by a slim repair call and accepted (counted among
+        # the accepted), and accepted ones whose mechanics the attempt path fixed itself.
+        if record.get("repaired") or record.get("repair_calls"):
+            repaired_codes = record.get("repaired_codes")
+            line += (f", repaired {record.get('repaired', 0)}"
+                     + (" (" + ", ".join(f"{code} {count}" for code, count
+                                         in sorted(repaired_codes.items())) + ")"
+                        if isinstance(repaired_codes, dict) and repaired_codes else "")
+                     + f" in {record.get('repair_calls', 0)} repair call(s)")
+        if record.get("fixed"):
+            line += f", {record['fixed']} with mechanical fixes"
         return line
     if step == "scheduler":
         gate = record.get("gate")

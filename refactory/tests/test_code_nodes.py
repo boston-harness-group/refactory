@@ -849,11 +849,13 @@ def _composition(code_nodes: bool, state: dict | None = None) -> str:
 
 @pytest.mark.parametrize("code_nodes", [True, False])
 def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(code_nodes):
-    """An agent cannot read a file: a file's text becomes a fact through an op (a code op
-    when the run allows them) or `produces`. A `{{fact}}` is filled in an agent's prompt
-    and system prompt knobs and, on this graph, in the task knobs its ops fill."""
+    """An agent without tools sees its prompt and its declared reads, pasted in after it;
+    anything else reaches it as a fact: a file's text becomes a fact through an op (a code
+    op when the run allows them) or `produces`. A `{{fact}}` is filled in an agent's
+    prompt and system prompt knobs and, on this graph, in the task knobs its ops fill."""
     text = _composition(code_nodes)
-    assert "cannot read a file" in text
+    assert "cannot read a file" not in text
+    assert "the files it lists in `reads` (pasted in after the prompt)" in text
     assert ("a code op that reads the file and `produces` the fact" in text) is code_nodes
     assert "or when the agent that writes the file declares `produces`" in text
     filled = text[text.index("where `{{fact}}` is filled in"):]

@@ -137,13 +137,22 @@ out = sys.stdout
 out.write("STARTED\\n")
 out.flush()
 sys.stdout = sys.stderr
+data = None
 try:
     data = json.loads(sys.stdin.read())
     space = {"__name__": "snippet"}
     exec(compile(data["code"], "<snippet>", "exec"), space)
     text = json.dumps({"ok": True, "result": space["main"](data["inp"])})
 except BaseException as exc:
-    text = json.dumps({"ok": False, "error": (type(exc).__name__ + ": " + str(exc))[:2000]})
+    where = ""
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == "<snippet>":
+            lines = data["code"].splitlines() if isinstance(data, dict) else []
+            no = tb.tb_lineno
+            where = " (at line %d: %s)" % (no, lines[no - 1].strip()[:200] if 0 < no <= len(lines) else "")
+        tb = tb.tb_next
+    text = json.dumps({"ok": False, "error": (type(exc).__name__ + ": " + str(exc))[:2000] + where})
 out.write(text)
 out.flush()
 """
@@ -564,36 +573,48 @@ def _label(found: dict[str, Any], label: Any, node_id: str) -> str:
                        f"out-edge conditions or halt {known}")
 
 
-def run(ctx: Any) -> dict[str, Any]:
-    """The code op: run the node's code on its declared inputs; write the files it
-    returns (each a declared write) and return the facts it returns (each declared)."""
+def checked_result(node_id: str, result: Any, writes: Any, facts: Any
+                   ) -> tuple[dict[str, Any], dict[str, str]]:
+    """A code op's ``main(inp)`` result as ``(facts, files)``, refused as its runtime
+    refuses it: not ``{'facts': {...}, 'files': {...}}``, a file that is not text or not
+    declared in ``writes``, or a fact not declared in ``facts``. Shared by the code op
+    (`run`) and the attempt path's dry run (`optim.checks`), so the two agree."""
     from refactory_dsh.nn import ExecutionError
 
-    found = _spec(ctx)
-    result = execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx))
     if result is None:
         result = {}
     if not isinstance(result, dict) or set(result) - {"facts", "files"}:
-        raise SnippetError(f"code op {ctx.node_id!r} returned {str(result)[:200]!r}; main(inp) "
+        raise SnippetError(f"code op {node_id!r} returned {str(result)[:200]!r}; main(inp) "
                            "returns {'facts': {...}, 'files': {...}}")
-    facts = result.get("facts") or {}
+    made = result.get("facts") or {}
     files = result.get("files") or {}
-    if not isinstance(facts, dict) or not isinstance(files, dict):
-        raise SnippetError(f"code op {ctx.node_id!r}: 'facts' and 'files' are objects")
-    writes = set(ctx._declared)  # noqa: SLF001 - the node's declared writes
+    if not isinstance(made, dict) or not isinstance(files, dict):
+        raise SnippetError(f"code op {node_id!r}: 'facts' and 'files' are objects")
+    declared_writes = set(writes or ())
     for name, text in files.items():
-        if name not in writes:
-            raise ExecutionError(f"code op {ctx.node_id!r} returned the file {name!r}, which it "
-                                 f"does not declare; declared writes: {sorted(writes)}")
+        if name not in declared_writes:
+            raise ExecutionError(f"code op {node_id!r} returned the file {name!r}, which it "
+                                 f"does not declare; declared writes: {sorted(declared_writes)}")
         if not isinstance(text, str):
-            raise SnippetError(f"code op {ctx.node_id!r}: file {name!r} is not text")
-        ctx.write_text(name, text)
-    declared = set(ctx._declared_facts)  # noqa: SLF001
-    extra = sorted(set(facts) - declared)
+            raise SnippetError(f"code op {node_id!r}: file {name!r} is not text")
+    declared = set(facts or ())
+    extra = sorted(set(made) - declared)
     if extra:
-        raise ExecutionError(f"code op {ctx.node_id!r} returned the fact(s) {extra}, which it "
+        raise ExecutionError(f"code op {node_id!r} returned the fact(s) {extra}, which it "
                              f"does not declare; declared facts: {sorted(declared)}")
-    return dict(facts)
+    return dict(made), dict(files)
+
+
+def run(ctx: Any) -> dict[str, Any]:
+    """The code op: run the node's code on its declared inputs; write the files it
+    returns (each a declared write) and return the facts it returns (each declared)."""
+    found = _spec(ctx)
+    result = execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx))
+    facts, files = checked_result(ctx.node_id, result, ctx._declared,  # noqa: SLF001
+                                  ctx._declared_facts)  # noqa: SLF001
+    for name, text in files.items():
+        ctx.write_text(name, text)
+    return facts
 
 
 def gate(ctx: Any) -> Any:
@@ -603,13 +624,21 @@ def gate(ctx: Any) -> Any:
 
     found = _spec(ctx)
     result = execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx))
+    label, reason = checked_verdict(ctx.node_id, result, found)
+    return Verdict(label, reason=reason)
+
+
+def checked_verdict(node_id: str, result: Any, found: dict[str, Any]) -> tuple[str, str]:
+    """A code gate's ``main(inp)`` result as ``(verdict, reason)``, refused as its runtime
+    refuses it: not a verdict, or a verdict that is not one of its out-edge conditions
+    (``found["labels"]``) or ``halt``. Shared by the code gate (`gate`) and the attempt
+    path's dry run (`optim.checks`)."""
     if isinstance(result, str):
         result = {"verdict": result}
     if not isinstance(result, dict) or "verdict" not in result:
-        raise SnippetError(f"code gate {ctx.node_id!r} returned {str(result)[:200]!r}; main(inp) "
+        raise SnippetError(f"code gate {node_id!r} returned {str(result)[:200]!r}; main(inp) "
                            "returns {'verdict': <label>, 'reason': <text>}")
-    return Verdict(_label(found, result.get("verdict"), ctx.node_id),
-                   reason=str(result.get("reason") or ""))
+    return _label(found, result.get("verdict"), node_id), str(result.get("reason") or "")
 
 
 #: What may come before a verdict's first word: markdown and quoting.

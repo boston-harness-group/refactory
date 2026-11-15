@@ -621,13 +621,15 @@ def test_split_refuses_a_node_whose_routing_two_steps_cannot_carry(seed_name, ta
 
 
 def test_split_refuses_to_leave_a_mode_knob_read_by_nothing():
-    """depth is read by clean alone: a split of clean must hand it to a new step."""
+    """depth is read by clean alone: a split of clean that hands it to no new step leaves
+    it read by nothing, refused on the proposal's end state (V7); handed to a new step,
+    the split is accepted."""
     first = {"id": "a", "kind": "op", "call": sf.fg.STEP, "reads": ["raw.txt"],
              "writes": ["a.txt"]}
     second = {"id": "b", "kind": "op", "call": sf.fg.STEP, "reads": ["a.txt"],
               "writes": ["clean.txt"], "produces": ["cleaned"]}
     _applier, out = _split("fuzz_dataflow", "clean", first, second)
-    assert isinstance(out, list) and "knob(s) ['depth']" in out[0], out
+    assert isinstance(out, list) and out[0].startswith("V7 [depth]"), out
     _applier, out = _split("fuzz_dataflow", "clean", {**first, "knobs": ["depth"]}, second)
     assert isinstance(out, sf.Candidate), out
 

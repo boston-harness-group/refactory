@@ -10,9 +10,12 @@ cannot, and the set of reachable edits is enumerable and reviewable.
 
 **Naive.** No operator repairs, auto-fixes, or maintains an invariant as it
 edits. ``remove_node`` deletes the node and its edges and leaves the hole; the
-validator then reports the hole. Repair is what makes a search dishonest: if a
-proposal is fixed up before it runs, the score belongs to something the optimizer
-never proposed.
+validator then reports the hole. Silent repair is what makes a search dishonest: if a
+proposal is fixed up before it runs and nobody is told, the score belongs to something
+the optimizer never proposed. The few mechanical fixes whose meaning is unambiguous
+(a file named where its step was meant, a taken id) are made on the attempt path
+(`refactory_dsh.optim.repair`), recorded in the candidate's edits and said beside it;
+the operators here never make them.
 
 A macro whose precondition does not hold is refused with a reason, and the state
 is untouched. A macro that applies but produces a broken graph is a validation
@@ -1127,20 +1130,6 @@ def _expand_duplicate(edit: dict, state: State) -> list[dict]:
 SPLIT_KINDS = ("agent", "op")
 
 
-def _split_orphans(graph: Graph, target: Node, into: Sequence[Mapping[str, Any]],
-                   declared: Iterable[str]) -> list[str]:
-    """Declared knobs only ``target`` consumes that are not its own (``<target>__...``, which go
-    with it) and that neither new step reads: removing ``target`` would leave them
-    declared and read by nothing (V7)."""
-    others = {name for node in graph.nodes.values() if node.id != target.id
-              for name in (*node.knobs, *(knob for _f, knob in node.field_bindings))}
-    others |= {str(name) for node in into for name in (node.get("knobs") or ())}
-    consumed = (*target.knobs, *(knob for _f, knob in target.field_bindings))
-    declared = set(declared)
-    return sorted({name for name in consumed if name in declared
-                   and not name.startswith(f"{target.id}__") and name not in others})
-
-
 def _pre_split(edit: dict, state: State) -> str | None:
     graph = _graph(state)
     target = graph.nodes.get(edit.get("target"))
@@ -1183,11 +1172,9 @@ def _pre_split(edit: dict, state: State) -> str | None:
         return (f"{target.id!r} owns the frozen knob(s) {frozen}, which a split would remove "
                 "with it; a frozen knob keeps its value and declaration, so split another step "
                 "or insert one before or after it")
-    orphans = _split_orphans(graph, target, into, knobs)
-    if orphans:
-        return (f"{target.id!r} is the only node reading knob(s) {orphans}, which a split "
-                "would leave read by nothing (rule V7); list them in a new step's `knobs`, or "
-                "insert a step before or after it instead")
+    # A knob only the step read (and that is not its own) is not judged here: the
+    # proposal's later edits may remove it or give it a reader, and its end state is held
+    # to V7 like any other (`Optimizer.attempt`).
     return None
 
 
@@ -1385,7 +1372,8 @@ _macro("duplicate", "Insert a copy of a node directly after it; the copy gets it
 _macro("split", "Replace one step (an agent or op) with two consecutive new steps: the "
        "first takes the step's in-edges, the second its out-edge, and the step and its own "
        "`<id>__...` knobs are removed. The second step must write what the old step's "
-       "readers need.",
+       "readers need. Any other knob only the step read must, by the end of the proposal, "
+       "be read by a new step (its `knobs`) or removed (`remove_knob`) (rule V7).",
        ("target", "into"), _pre_split, _expand_split)
 _macro("reorder", "Swap two adjacent steps. Refused when the first produces what "
        "the second reads.",

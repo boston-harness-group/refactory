@@ -325,9 +325,11 @@ sections at once; this is the default loop's equivalent.
   `set_knob` on `<id>__system_prompt` therefore goes after the edit that adds node
   `<id>`). The combined state is then held to every state rule once: frozen knobs, tool
   policy, protected nodes, the validator, lowering, no-op and duplicate (on the combined
-  state, so the same point reached in another order is a duplicate). An edit the result
-  does not depend on -- one that changes nothing, or that a later edit overwrites or
-  undoes -- is refused `E-noop` with its index. A refusal about one edit names it,
+  state, so the same point reached in another order is a duplicate). A `set_knob` that
+  gives a knob the value it already holds is dropped, and said (see "Wiring blocks,
+  repair and checks before scoring" below). Any other edit the result does not depend
+  on -- one that changes nothing, or that a later edit overwrites or undoes -- is refused
+  `E-noop` with its index. A refusal about one edit names it,
   `[edit k of n: op]`, after the rule's code; one about the combined state names none. A
   list that makes more changes than the cap is refused `E-too-many-edits`, saying how
   many changes and edits it makes and how they are counted.
@@ -1618,6 +1620,192 @@ op that computes a fact for a later step. Code nodes appear in the section only 
 run offers them. The section prescribes nothing: the examples are compositions, not a
 menu.
 
+### Wiring blocks, repair and checks before scoring
+
+Writing and wiring a structural edit is mechanics; what to change stays the proposer's
+call, and nothing below changes what a proposal asks for. All of it sits on the shared
+path every outer loop's proposals take (`Run.attempt` and `Optimizer.attempt`, the
+model proposer's retry), so every strategy gets it.
+
+**Two plain wiring ops** (`refactory_dsh.nn.operators`), ordinary node callables that run
+the same way on both runtimes:
+
+- `collect` (`"call": "refactory_dsh.nn.operators:collect"`): reads the files the node
+  lists in `reads`, each one optional, and sets its one `produces` fact to their text,
+  one `### <file>` header per file. A file that was not written is said to be missing
+  (a failed optional branch, a step with no answer) instead of failing the step; a file
+  over 40,000 characters, or a binary one, is shown as its path and size. This is how
+  files reach a model step as one `{{fact}}`.
+- `select` (`"call": "refactory_dsh.nn.operators:select"`): its first read holds a label
+  (the first word, or the last line alone, as a verdict gate reads one); the label names
+  another of its reads by file name or stem, and that file is copied to the node's first
+  write (and its fact, when it declares one). A label naming no file fails the step.
+
+Neither is prescribed: no combiner, vote or normalisation is built in, and a proposer
+that wants a vote writes it as a code step.
+
+**What each node has.** The request's table of what each node can use names, beside each
+fact and file, the step that makes it, and marks with "(task input)" the ones no model
+step's output reaches (`nn.operators.model_free_inputs`: the task's own inputs and what
+plain ops build from them alone, as nodes declare them). A step given only those sees
+the task and none of the other steps' work, and a step's input is no longer mistaken for
+its output. The composition text says an agent without tools sees its prompt and the
+files it lists in `reads` (pasted in after the prompt), as both runtimes deliver them.
+`nn.operators.place_output` puts a new step's fact into the prompt knob of the next model
+step downstream (or a named one), and says where; the operators of a later change use it.
+
+**Mechanical fixes, said** (`optim.repair`). Made by the attempt path with no model call,
+only where what the proposal meant is unambiguous; the candidate's edits are the fixed
+ones (so they replay to its state), its `repairs` name each fix, and the optimizer trace
+gets a `repair` line:
+
+- an edit's `target` (or `first`, `second`, a `remove_node`'s `id`, an edge's ends) that
+  names a file is read as the step that writes it, when exactly one step does;
+- a new node whose id is taken gets a fresh one, when no other edit of the proposal names
+  that id (otherwise it is refused as before);
+- in a bundle, a `set_knob` to the value the knob already holds is dropped;
+- a `{{name}}` an added or changed step fills, where nothing makes the fact `name` and
+  exactly one file there is called `name` (or `name.<ext>`), gets a `collect` op before
+  the step that hands it that file as `{{name}}` (not for a fork's branch or a join's
+  source).
+
+Anything else is refused with the exact reason. A `set_knob` patch entry whose target is
+not in the knob is now refused `E-patch`, naming the entry and its target, unless the
+patch says what to do then (`config.on_missing`, as SkillOpt's patches do); before, it was
+skipped and the rest applied.
+
+**The slim repair call.** A proposal refused for how it is written -- a validator rule, a
+precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering, too
+many changes, `E-gate-kind` or `E-code-run` -- goes back to the model proposer with the
+reasons and only what fixing it needs: the proposal as written (rationale and prediction
+included), the pipeline's nodes, edges and what each node has, the current text of each
+knob it edits, the node schemas, the rules and the operations. No trajectories, history
+or framing. The answer is the fixed proposal only, and it keeps the original's rationale
+and prediction. A refusal about the idea (`E-integrity`, `E-noop`, `E-duplicate`) or a
+run's policy (`E-protected`, `E-frozen`, `E-policy`, tools, code nodes off) is never
+sent. At most 2 slim calls per refused proposal and 3 per epoch
+(`repair.REPAIR_CALLS_PER_PROPOSAL`, `REPAIR_CALLS_PER_EPOCH`); a fix goes through every
+check a proposal does. When they produce no candidate, the loop asks again with the full
+request, as before, and that request now shows the latest refused proposals as written
+under "Why your last proposals were refused". The trace records each call (kind `repair`)
+and its outcome (`repair_outcome`); the refusal is journaled with `repaired: <candidate>`;
+the epoch line reads `refused N (...), repaired M (...) in K repair call(s)` (a repaired
+proposal counts once, among the accepted) and says how many accepted candidates carry
+mechanical fixes. `Optimizer.repair` makes none by default; the `autoresearch` proposer
+makes the slim call, and any optimizer may override it. `Optimizer.propose_valid` repairs
+the same way.
+
+**Checks before scoring** (`optim.checks`), after the validator and lowering accept a
+state:
+
+- `E-gate-kind`: a gate a person or an agent answers (`gate_kind` `user` or `agent`) that
+  the edit adds, or turns an existing gate into, is refused: an outer loop's candidates
+  run headless, nobody answers it, and every item reaching it would fail, on both
+  runtimes. The node schemas such a request shows leave both kinds out and say why. The
+  parent's own gates are not judged.
+- `E-code-run`: each code node the edit adds or changes is run in the sandbox on up to 3
+  of the parent's recorded items (the files and facts its run left in
+  `runs/<parent>/passes/<data node>/<item>/`, or the run directory for a node outside a
+  pass). Code that raises on them, or returns what its node cannot use, is refused with
+  the error, the line it failed at and the inputs it had. When nothing can be run -- the
+  parent kept no recorded items, an input is made by a step the candidate adds, or there
+  is no sandbox -- it is skipped and the candidate's `notes` say so (journaled, and in the
+  proposal record's `checks`).
+
+A knob only a split step read is no longer judged by `split`'s precondition: the
+proposal's later edits may remove it or give it a reader, and the end state is held to V7
+as every rule is.
+
+**Turning it off.** Nothing here is a setting. A run whose proposals never trip these
+rules behaves as before; the fixes and checks act only on proposals that would otherwise
+be refused or fail every item.
+
+### What the edits can reach: the DSL coverage map
+
+`refactory_dsh.nn.coverage` maps every construct of the graph language (each node kind,
+gate kind, bindable field, `Node` field, edge form and composition both runtimes run) to
+the operations that create it, change it on an existing node and remove it, or to the
+reason none does: the grader side, a gate nobody answers headless, an infrastructure
+flag, a step's identity, a user's decision, or `planned` with the change that will add
+the operation. `tests/test_dsl_coverage.py` generates the list of constructs from the
+code and fails on one without an entry, checks every operation named exists, and applies
+an example of each covered node kind, edge form and composition through the attempt path.
+The table below is generated from the map (`coverage.table_markdown()`), and the test
+checks it matches. It records the user's decisions (`coverage.DECISIONS`): an operator may
+change what an existing step reads; a copy of a step that uses tools keeps its tools only
+with its own fresh workspace; `configure` may change timeouts, retries, loop limits,
+optional branches, the workspace kind and the model role, never tools or `outputs_only`;
+a step per sub-item is tried as an experiment on both runtimes after the core operators.
+
+<!-- dsl-coverage:start -->
+| construct | create | change on an existing node | remove |
+|---|---|---|---|
+| node kind: `op` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `duplicate` | `set_knob` | `remove_node`, `bypass` |
+| node kind: `agent` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `duplicate` | `set_knob` | `remove_node`, `bypass` |
+| node kind: `gate` | `add_node`, `wrap`, `loop` | `set_knob` | `remove_node`, `add_edge` |
+| node kind: `fork` | `parallel`, `add_node` | *planned: branch / unbranch and serialize (PR2)* | *planned: branch / unbranch and serialize (PR2)* |
+| node kind: `join` | `parallel`, `add_node` | *planned: branch / unbranch and serialize (PR2)* | *planned: branch / unbranch and serialize (PR2)* |
+| node kind: `data` | *grader-side* | `set_knob` | *grader-side* |
+| gate kind: `fn` | `add_node`, `wrap`, `loop` | `set_knob` | `remove_node`, `add_edge` |
+| gate kind: `user` | *no headless answerer: refused E-gate-kind, and left out of the schema* | *no headless answerer: refused E-gate-kind, and left out of the schema* | `remove_node`, `add_edge` |
+| gate kind: `agent` | *no headless answerer: refused E-gate-kind, and left out of the schema* | *no headless answerer: refused E-gate-kind, and left out of the schema* | `remove_node`, `add_edge` |
+| bindable field: `prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| bindable field: `system_prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| bindable field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| bindable field: `max_iterations` | `add_node`, `wrap`, `loop` | `set_knob` | - |
+| bindable field: `parallelism` | *grader-side* | `set_knob` | - |
+| node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *identity* | - |
+| node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *identity* | - |
+| node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: split with one new step, which replaces a step (PR2)* | - |
+| node field: `evaluator` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: split with one new step, which replaces a step (PR2)* | - |
+| node field: `gate_kind` | `add_node`, `wrap`, `loop` | *identity* | - |
+| node field: `knobs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: rewire, which changes what an existing step reads (PR2)* | - |
+| node field: `reads` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: rewire, which changes what an existing step reads (PR2)* | - |
+| node field: `required_reads` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: rewire, which changes what an existing step reads (PR2)* | - |
+| node field: `writes` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *identity: a step's outputs are what its readers rely on: replace the step (split) to change them* | - |
+| node field: `produces` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *identity: a step's outputs are what its readers rely on: replace the step (split) to change them* | - |
+| node field: `prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| node field: `system_prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| node field: `role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: configure, among the run's declared routes (PR3)* | - |
+| node field: `tools` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *excluded by decision: tools are not a configure setting* | - |
+| node field: `max_iterations` | `add_node`, `wrap`, `loop` | `set_knob` | - |
+| node field: `on_exhausted` | `add_node`, `wrap`, `loop` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `notes` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *infrastructure flag* | - |
+| node field: `blocking` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *infrastructure flag* | - |
+| node field: `score_effect` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *infrastructure flag* | - |
+| node field: `targets` | `parallel`, `add_node` | *planned: branch / unbranch and serialize (PR2)* | - |
+| node field: `optional_targets` | `add_node` | *planned: branch with optional (PR2)* | - |
+| node field: `sources` | `parallel`, `add_node` | *planned: branch / unbranch and serialize (PR2)* | - |
+| node field: `subgraph_entry` | *grader-side* | *grader-side* | - |
+| node field: `subgraph_exit` | *grader-side* | *grader-side* | - |
+| node field: `task_ref` | *grader-side* | *grader-side* | - |
+| node field: `source_path` | *grader-side* | *grader-side* | - |
+| node field: `source_format` | *grader-side* | *grader-side* | - |
+| node field: `inline_items` | *grader-side* | *grader-side* | - |
+| node field: `limit` | *grader-side* | *grader-side* | - |
+| node field: `parallelism` | *grader-side* | `set_knob` | - |
+| node field: `parallelism_knob` | *grader-side* | *grader-side* | - |
+| node field: `resource_role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *infrastructure flag* | - |
+| node field: `feedback_keys` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *infrastructure flag* | - |
+| node field: `timeout_s` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `retry` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `outputs_only` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *excluded by decision: not a configure setting* | - |
+| node field: `workspace` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: configure, the workspace kind (PR3)* | - |
+| node field: `tool_policy` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *excluded by decision: tools are not a configure setting* | - |
+| node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | `set_knob` | - |
+| node field: `inputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop` | *planned: rewire, which changes what an existing step reads (PR2)* | - |
+| edge form: `plain` | `add_edge`, `insert_after`, `insert_before` | `remove_edge`, `add_edge` | `remove_edge` |
+| edge form: `verdict` | `add_edge`, `loop`, `wrap` | `remove_edge`, `add_edge` | `remove_edge` |
+| edge form: `reloop` | `loop`, `add_edge` | `remove_edge`, `add_edge` | `remove_edge` |
+| edge form: `halt` | `add_node`, `loop` | `set_knob` | `remove_node` |
+| composition: `nested fork` | `parallel` | *planned: branch / unbranch and serialize (PR2)* | *planned: branch / unbranch and serialize (PR2)* |
+| composition: `loop inside a fork branch` | `loop` | `set_knob` | `remove_node`, `add_edge` |
+| composition: `loop inside a data pass` | `loop` | `set_knob` | `remove_node`, `add_edge` |
+| composition: `gate routing to several steps` | `add_node`, `add_edge` | `remove_edge`, `add_edge` | *planned: remove with keep, which unroutes (PR2)* |
+| composition: `a step per sub-item` | *planned: a per-sub-item experiment on both runtimes, after PR2* | *planned: after the per-sub-item experiment* | *planned: after the per-sub-item experiment* |
+<!-- dsl-coverage:end -->
+
 ### The invariant harness
 
 `tests/structure_fuzz.py` checks those promises by generating random structure edits
@@ -1626,7 +1814,9 @@ from a seed, over LiveMath's skill graph and seven small graphs
 a gate loop, a data pass, a pipeline of ops, and several terminals). The edits cover
 every primitive and macro, node copies taken from the node JSON the optimizer is shown
 (new ids, new prompts), and malformed edits. Each walk applies them through the same
-attempt path, and every accepted state is checked two ways.
+attempt path (with its mechanical fixes; the harness answers every gate, so it lets edits
+add gates a person or an agent answers, which an outer loop refuses), and every accepted
+state is checked two ways.
 
 - **Observed**, by running the real code and looking at what it did: lowering; a walker
   run with a scripted model, which must end at a terminal or a halt; the spine beside

@@ -164,10 +164,12 @@ def optimizer(ctx: Any) -> dict[str, Any]:
     loop = _resumed(ctx)
     candidates, rejections = loop.optimizer_step()
     loop.write_pending(candidates)
+    # A proposal a slim repair fixed counts once, among the accepted (`optim.repair`).
+    refused = [r for r in rejections if not r.repaired]
     return {
-        "proposed": len(candidates) + len(rejections),
+        "proposed": len(candidates) + len(refused),
         "accepted": len(candidates),
-        "refused": len(rejections),
+        "refused": len(refused),
     }
 
 

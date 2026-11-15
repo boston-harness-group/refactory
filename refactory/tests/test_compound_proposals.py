@@ -392,7 +392,8 @@ def test_frozen_and_protected_edits_later_in_a_list_are_named():
 
 
 @pytest.mark.parametrize("edits, dead", [
-    ((_knob("extra", 5), _knob("level", 3)), 1),   # extra is already 5
+    # A knob set to the value it already holds is dropped and said, not refused
+    # (`optim.repair`; test_structure_infra).
     ((_knob("level", 1), _knob("level", 3)), 1),   # overwritten by the next edit
     ((_knob("level", 3), _knob("extra", 2), _knob("extra", 5)), 2),  # undone
 ])

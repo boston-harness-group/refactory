@@ -37,11 +37,13 @@ then a malformed one or one too many -- applied as one candidate through the sam
 attempt path. Every accepted combined state is checked against every invariant above,
 and the ``compound`` invariant checks the bundle itself:
 
-- ``compound``  an accepted bundle is exactly its edits applied in order and records
-                all of them (``Candidate.own_edits``); a refused one names the edit
-                that fails on its own (``[edit k of n``: the first not an object or not
-                in the catalogue, else the first whose precheck or apply fails in
-                order), and a refusal of the combined state names none.
+- ``compound``  an accepted bundle is exactly its recorded edits applied in order,
+                and records all of them (``Candidate.own_edits``): its own, with the
+                mechanical fixes the attempt path makes (`optim.repair`), each said in
+                ``Candidate.repairs``; a refused one names the edit that fails on its own
+                (``[edit k of n``: the first not an object or not in the catalogue, else
+                the first whose precheck or apply fails in order), and a refusal of the
+                combined state names none.
 
 A violation is a bug. `Fuzzer` shrinks it to a minimal case (the seed's name and the
 accepted edits that reach it) and `save_case` writes it to the regression corpus
@@ -67,6 +69,7 @@ from refactory_dsh.items import GRADER_FILES, PASS_RECORD
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
+from refactory_dsh.nn.operators import COLLECT_CALL
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
@@ -166,6 +169,10 @@ class Applier:
         self.protected = tuple(mode.edit_protected())
         self.graders = tuple(mode.grader_nodes())
         self.optimizer = Optimizer()
+        # The harness's walker answers every gate (`_verdicts`), so edits may add gates a
+        # person or an agent answers here; the outer loop's candidates run headless and
+        # refuse them (``E-gate-kind``, `optim.checks`), which its own tests check.
+        self.optimizer.answered_gates = True
 
     def attempt(self, parent: Candidate, edit: Any, seen: set[str]) -> Candidate | list[str]:
         """`Run.attempt`'s checks, then `Optimizer.attempt` with this mode's protection.
@@ -1454,52 +1461,91 @@ class Fuzzer:
         self.stats.findings.append(Finding(seed.name, edits, found))
 
 
+def _patch_missed(edit: Any, reports: list[dict[str, Any]]) -> bool:
+    """A ``set_knob`` patch entry whose target is not in the knob, with no
+    ``config.on_missing`` saying what to do then: refused ``E-patch``."""
+    if not isinstance(edit, dict) or edit.get("op") != "set_knob" or "patch" not in edit:
+        return False
+    if "on_missing" in dict(edit.get("config") or {}) or not reports:
+        return False
+    return any(str(o.get("status", "")).endswith("_target_not_found")
+               for o in (reports[0] or {}).get("outcomes") or ())
+
+
 def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
-                   ) -> tuple[int | None, dict[str, Any]]:
-    """The index of the edit that fails on its own, and the state the edits reach when
-    none does. As the attempt path checks them: every edit's shape and op first (not an
-    object, not in the catalogue), then each in order against the state the ones before
-    it left (precheck, apply, and in a bundle an edit that changes nothing). Protected
-    nodes are judged on the state the edits reach, not edit by edit."""
+                   ) -> tuple[int | None, dict[str, Any], list[Any]]:
+    """The index of the edit that fails on its own, the state the edits reach when none
+    does, and the edits as the attempt path applies them. As the attempt path checks them:
+    every edit's shape and op first (not an object, not in the catalogue), then each in
+    order against the state the ones before it left, with the mechanical fixes whose
+    meaning is unambiguous (`optim.repair.fix_edit`; a bundle's ``set_knob`` to the value
+    a knob holds is dropped) and then precheck, apply, a patch target that is not there,
+    and in a bundle an edit that changes nothing. Protected nodes are judged on the state
+    the edits reach, not edit by edit."""
+    from refactory_dsh.optim import repair
+
     state = parent.state
+    fixed: list[Any] = []
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
-            return index, state
+            return index, state, fixed
     for index, edit in enumerate(edits):
+        edit, _said = repair.fix_edit(edit, state, edits, index)
+        if len(edits) > 1 and repair.noop_knob(edit, state):
+            continue
         if nn_edits.precheck(edit, state):
-            return index, state
+            return index, state, fixed
+        reports: list[dict[str, Any]] = []
         try:
-            after = nn_edits.apply(edit, state)
+            after = nn_edits.apply(edit, state, edit_reports=reports)
         except nn_edits.EditError:
-            return index, state
+            return index, state, fixed
+        if _patch_missed(edit, reports):
+            return index, state, fixed
         if len(edits) > 1 and candidate_id(after) == candidate_id(state):
-            return index, state  # an edit of a bundle that changes nothing
+            return index, state, fixed  # an edit of a bundle that changes nothing
         state = after
-    dead = (_dead_edit(edits, parent.state, state)
+        fixed.append(edit)
+    dead = (_dead_edit(fixed, parent.state, state)
             if candidate_id(state) != parent.id else None)
-    return dead, state
+    return dead, state, fixed
 
 
 def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
                    outcome: Candidate | list[str]) -> list[Violation]:
-    """The ``compound`` invariant for one bundle and what the attempt path made of it."""
+    """The ``compound`` invariant for one bundle and what the attempt path made of it.
+
+    An accepted bundle records the edits that made it: its own, fixed where the attempt
+    path fixes mechanics, then any ``collect`` op it put before a step (`optim.repair`);
+    those replay to its state, and any fix is said in its ``repairs``."""
     if len(edits) > MAX_EDITS_PER_PROPOSAL:
         if isinstance(outcome, list) and outcome and outcome[0].startswith("E-too-many-edits"):
             return []
         return [Violation("compound", f"{len(edits)} edits were not refused as too many: "
                                       f"{outcome if isinstance(outcome, list) else outcome.id}")]
-    failing, state = _first_failing(applier, parent, edits)
+    failing, state, fixed = _first_failing(applier, parent, edits)
     if isinstance(outcome, Candidate):
         found = []
         if failing is not None:
             found.append(Violation("compound", f"accepted although edit {failing + 1} of "
                                                f"{len(edits)} fails on its own"))
-        elif outcome.state != state:
-            found.append(Violation("compound", "the accepted state is not the edits applied "
-                                               "in order"))
-        if outcome.own_edits() != list(edits) or outcome.step_edits != len(edits):
+            return found
+        recorded = outcome.own_edits()
+        extra = recorded[len(fixed):]
+        if recorded[:len(fixed)] != fixed or outcome.step_edits != len(recorded) or any(
+                not isinstance(e, dict) or e.get("op") != "insert_before"
+                or (e.get("node") or {}).get("call") != COLLECT_CALL for e in extra):
             found.append(Violation("compound", "the candidate does not record every edit of "
                                                "its proposal"))
+        elif (fixed != list(edits) or extra) and not outcome.repairs:
+            found.append(Violation("compound", "the proposal was fixed without saying so"))
+        try:
+            replayed = nn_edits.apply_many(recorded, parent.state)
+        except nn_edits.EditError as exc:
+            replayed = {"error": str(exc)}
+        if candidate_id(replayed) != outcome.id:
+            found.append(Violation("compound", "the accepted state is not its recorded edits "
+                                               "applied in order"))
         return found
     reason = outcome[0] if outcome else ""
     if failing is None:

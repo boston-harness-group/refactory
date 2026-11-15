@@ -113,9 +113,13 @@ class Run:
     stopped: str | None = None
 
     # ── the cheap primitive ────────────────────────────────────────────────
-    def attempt(self, proposal: Proposal, parent: Candidate) -> Candidate | list[str]:
+    def attempt(self, proposal: Proposal, parent: Candidate, *,
+                record: bool = True) -> Candidate | list[str]:
         """Apply a typed edit -- or a compound proposal's edits, in order, as one
         candidate -- and validate it. Spends no evaluation budget.
+
+        A refusal is recorded among the run's rejections; ``record`` False leaves that to
+        the caller (a slim repair's fix of a proposal already recorded as refused).
 
         With ``integrity_judge`` on, a proposal that became a valid candidate is also
         judged (``Loop._integrity_check``): one call of the optimizer's model, charged
@@ -126,7 +130,9 @@ class Run:
             proposal, permitted=self._loop.permitted_ops(),
             max_edits=getattr(self._loop.optimizer, "max_edits", None))
         if reason:
-            self._loop.rejections.append(Rejection(1, proposal.edit, reason, rationale=proposal.rationale))
+            if record:
+                self._loop.rejections.append(Rejection(1, proposal.edit, reason,
+                                                       rationale=proposal.rationale))
             return reason
         outcome = self._loop.optimizer.attempt(
             proposal,
@@ -143,7 +149,7 @@ class Run:
         check = getattr(self._loop, "_integrity_check", None)
         if not isinstance(outcome, list) and callable(check):
             outcome = check(proposal, parent, outcome)
-        if isinstance(outcome, list):
+        if isinstance(outcome, list) and record:
             self._loop.rejections.append(
                 Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
                           rationale=proposal.rationale)

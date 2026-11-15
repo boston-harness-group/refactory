@@ -1,0 +1,144 @@
+"""The DSL coverage map (`nn.coverage`): every construct of the graph language has an
+entry, every operation it names exists, every gap gives a reason from the fixed list, the
+covered constructs are made by the operations named (applied through the attempt path the
+outer loop uses), and the table in the docs is the map's. A new node kind, gate kind,
+bindable field or ``Node`` field without an entry fails here."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable
+
+import pytest
+
+from refactory_dsh.nn import coverage
+from refactory_dsh.nn import edits as nn_edits
+from refactory_dsh.nn.graph import Graph
+from refactory_dsh.optim import Candidate
+
+import structure_fuzz as sf
+import structure_fuzz_graphs as fg
+
+DOC = Path(__file__).resolve().parent.parent / "docs" / "outer-loop.md"
+START, END = "<!-- dsl-coverage:start -->", "<!-- dsl-coverage:end -->"
+
+
+def _aspects(entry: coverage.Entry) -> list[coverage.Aspect]:
+    return [entry.create, entry.change, entry.remove]
+
+
+def test_every_construct_has_exactly_one_entry():
+    wanted = coverage.constructs()
+    found: dict[str, list[str]] = {}
+    for entry in coverage.entries():
+        found.setdefault(entry.group, []).append(entry.name)
+    for group, names in wanted.items():
+        assert sorted(found.get(group, [])) == sorted(names), (group, set(names) ^ set(found.get(group, [])))
+    assert set(found) == set(wanted)
+
+
+def test_every_operation_named_exists_and_every_gap_has_a_known_reason():
+    ops = set(nn_edits.names())
+    for entry in coverage.entries():
+        assert entry.create is not None and entry.change is not None, entry
+        for aspect in _aspects(entry):
+            if isinstance(aspect, coverage.Gap):
+                assert aspect.reason in coverage.REASONS, (entry, aspect)
+                if aspect.reason == "planned":
+                    assert aspect.detail, f"{entry}: a planned gap names the change"
+            elif aspect is not None:
+                assert aspect and set(aspect) <= ops, (entry, set(aspect) - ops)
+
+
+def test_todays_gaps_are_marked_planned():
+    """What later changes add is listed as planned, so the map says what is missing."""
+    planned = {(e.group, e.name) for e in coverage.entries()
+               for a in _aspects(e) if isinstance(a, coverage.Gap) and a.reason == "planned"}
+    assert {("node kind", "fork"), ("node field", "reads"), ("node field", "timeout_s"),
+            ("composition", "a step per sub-item")} <= planned
+
+
+def _apply(seed: str, edit: Any) -> tuple[Graph, Graph]:
+    applier = sf.Applier(sf.seeds()[seed])
+    parent = Candidate.from_state(applier.seed_state)
+    child = applier.attempt(parent, edit, {parent.id})
+    assert isinstance(child, Candidate), (seed, edit, child)
+    return Graph.from_state(parent.state["graph"]), Graph.from_state(child.state["graph"])
+
+
+def _gate(node_id: str) -> dict[str, Any]:
+    return {"id": node_id, "kind": "gate", "evaluator": fg.PROCEED, "max_iterations": 2}
+
+
+def _kinds(graph: Graph, kind: str) -> int:
+    return sum(1 for n in graph.nodes.values() if n.kind == kind)
+
+
+def _conditions(graph: Graph) -> list[str]:
+    return sorted(str(e.condition) for e in graph.edges if e.condition)
+
+
+#: One example per covered construct: the seed, the edit (with its operations from the
+#: entry's ``create``), and what the child must show that the parent did not.
+EXAMPLES: dict[tuple[str, str], tuple[str, Any, Callable[[Graph, Graph], bool]]] = {
+    ("node kind", "op"): ("fuzz_dataflow", {"op": "insert_after", "target": "clean", "node": fg.op(
+        "tidy", reads=("clean.txt",), produces=("tidied",)).to_state()},
+        lambda p, c: _kinds(c, "op") == _kinds(p, "op") + 1),
+    ("node kind", "agent"): ("fuzz_dataflow", {"op": "insert_after", "target": "clean", "node": fg.agent(
+        "read", "Read {{cleaned}}", writes="read.txt", produces=("read",)).to_state()},
+        lambda p, c: _kinds(c, "agent") == _kinds(p, "agent") + 1),
+    ("node kind", "gate"): ("fuzz_dataflow", {"op": "loop", "target": "summarise",
+                                              "gate": _gate("again")},
+                            lambda p, c: _kinds(c, "gate") == _kinds(p, "gate") + 1),
+    ("node kind", "fork"): ("fuzz_dataflow", {"op": "parallel", "target": "clean", "branches": [
+        fg.op("left", writes=("left.txt",)).to_state(), fg.op("right", writes=("right.txt",)).to_state()]},
+        lambda p, c: _kinds(c, "fork") == _kinds(p, "fork") + 1),
+    ("node kind", "join"): ("fuzz_dataflow", {"op": "parallel", "target": "clean", "branches": [
+        fg.op("left", writes=("left.txt",)).to_state(), fg.op("right", writes=("right.txt",)).to_state()]},
+        lambda p, c: _kinds(c, "join") == _kinds(p, "join") + 1),
+    ("gate kind", "fn"): ("fuzz_dataflow", {"op": "loop", "target": "summarise", "gate": _gate("again")},
+                          lambda p, c: c.nodes["again"].gate_kind == "fn"),
+    ("edge form", "plain"): ("fuzz_dataflow", {"op": "insert_after", "target": "clean", "node": fg.op(
+        "tidy", reads=("clean.txt",), produces=("tidied",)).to_state()},
+        lambda p, c: any(e.source == "clean" and e.target == "tidy" and e.condition is None
+                         for e in c.edges)),
+    ("edge form", "verdict"): ("fuzz_dataflow", {"op": "loop", "target": "summarise",
+                                                 "gate": _gate("again")},
+                               lambda p, c: "proceed" in _conditions(c) and "proceed" not in _conditions(p)),
+    ("edge form", "reloop"): ("fuzz_dataflow", {"op": "loop", "target": "summarise", "gate": _gate("again")},
+                              lambda p, c: "reloop" in _conditions(c)),
+    ("composition", "nested fork"): ("fuzz_fork_join", {"op": "parallel", "target": "right_a", "branches": [
+        fg.op("deep_a", writes=("deep_a.txt",)).to_state(),
+        fg.op("deep_b", writes=("deep_b.txt",)).to_state()]},
+        lambda p, c: _kinds(c, "fork") == 2),
+    ("composition", "loop inside a fork branch"): ("fuzz_fork_join", {
+        "op": "loop", "target": "right_a", "gate": _gate("right_check")},
+        lambda p, c: any(e.source == "right_check" and e.target == "right_a" for e in c.edges)),
+    ("composition", "loop inside a data pass"): ("fuzz_data_pass", {
+        "op": "loop", "target": "solve", "gate": _gate("solve_check")},
+        lambda p, c: "solve_check" in c.data_body("items")),
+}
+
+
+@pytest.mark.parametrize("key", sorted(EXAMPLES), ids=lambda key: f"{key[0]}:{key[1]}")
+def test_a_covered_construct_is_made_by_an_operation_its_entry_names(key):
+    seed, edit, shows = EXAMPLES[key]
+    entry = next(e for e in coverage.entries() if (e.group, e.name) == key)
+    ops = {step.get("op") for step in (edit.get("edits") or [edit])}
+    assert isinstance(entry.create, tuple) and ops <= set(entry.create), (entry, ops)
+    parent, child = _apply(seed, edit)
+    assert shows(parent, child), key
+
+
+def test_every_structural_node_kind_and_edge_form_the_map_covers_has_an_example():
+    covered = {(e.group, e.name) for e in coverage.entries()
+               if e.group in ("node kind", "edge form") and isinstance(e.create, tuple)}
+    assert covered - set(EXAMPLES) <= {("edge form", "halt")}, covered - set(EXAMPLES)
+
+
+def test_the_docs_carry_the_maps_table():
+    text = DOC.read_text()
+    assert START in text and END in text, "docs/outer-loop.md has the coverage markers"
+    shown = text[text.index(START) + len(START):text.index(END)].strip()
+    assert shown == coverage.table_markdown(), (
+        "the table in docs/outer-loop.md is not the map's; paste coverage.table_markdown()")

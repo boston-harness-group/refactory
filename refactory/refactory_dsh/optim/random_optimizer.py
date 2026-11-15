@@ -938,6 +938,12 @@ class AutoresearchOptimizer(Optimizer):
             raise
         return made(ranked)
 
+    def repair(self, ctx: ProposalContext, proposal: Proposal, reasons: Sequence[str],
+               parent: Candidate) -> Proposal | None:
+        """The slim repair call (`optim.repair`): the refused proposal, its reasons and
+        what fixing its mechanics needs, not the whole request; the fixed proposal."""
+        return _repair(self, ctx, proposal, reasons, parent)
+
     def propose(
         self, ctx: ProposalContext, n: int, parents: Sequence[Candidate]
     ) -> list[Proposal]:
@@ -1014,6 +1020,33 @@ class AutoresearchOptimizer(Optimizer):
                          diagnosis=self.last_diagnosis, considered=self.last_considered,
                          error=None)
         return proposals
+
+
+def _repair(optimizer: AutoresearchOptimizer, ctx: ProposalContext, proposal: Proposal,
+            reasons: Sequence[str], parent: Candidate) -> Proposal | None:
+    """`AutoresearchOptimizer.repair`: one slim repair call (`repair.repair_request`),
+    recorded in the trace (kind ``repair``); the fixed proposal, or ``None`` when the
+    call fails or the answer carries no fixed edits."""
+    from . import repair
+
+    text = repair.repair_request(
+        proposal, reasons, parent.state, catalogue=ctx.catalogue, code_nodes=ctx.code_nodes,
+        person_gates=ctx.person_gates, protected=ctx.protected, max_edits=ctx.max_edits)
+    call = {"kind": "repair", "epoch": ctx.epoch, "generation": ctx.generation,
+            "parent": parent.id, "refused": list(reasons), "system": optimizer._system,
+            "prompt": text}
+    reply, error, _overflow, made = optimizer._complete(call, text, optimizer._system)
+    if reply is None:
+        return None
+    try:
+        payload, malformed = answer_json(reply)
+    except Exception as exc:  # an unreadable answer is a failed repair, never fatal
+        payload, malformed = {}, f"{type(exc).__name__}: {exc}"
+    fixed, why = (None, f"malformed answer: {malformed}") if malformed else \
+        repair.repaired_proposal(payload, proposal)
+    optimizer.record_call(**call, attempt=made, reply=reply, error=None if fixed else why,
+                          proposals=1 if fixed else 0)
+    return fixed
 
 
 def _parse_edit(edit: Any) -> dict[str, Any] | None:

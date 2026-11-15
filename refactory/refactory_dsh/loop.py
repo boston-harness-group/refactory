@@ -59,6 +59,7 @@ from refactory_dsh.optim import (
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
+    refused_entries,
     summarise_reasons,
 )
 from refactory_dsh.optim.memory import report as memory_report
@@ -725,6 +726,9 @@ class Loop(OuterLoop):
         # Whether edits may add code nodes, and what their code may never contain.
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
         self.optimizer.grader_secrets = self._grader_secrets
+        # A new or changed code node is dry-run on its parent's recorded item inputs
+        # (`optim.checks.code_dry_run`), found in the parent's run directory.
+        self.optimizer.recorded_inputs = self._recorded_inputs
 
         # How a candidate is run, and therefore how it is scored. Built here from
         # this loop's own settings rather than switched on inside `_evaluate`, so a
@@ -946,6 +950,13 @@ class Loop(OuterLoop):
         from refactory_dsh import snippet
 
         return snippet.available()
+
+    def _recorded_inputs(self, candidate_id: str) -> dict[str, Any]:
+        """``candidate_id``'s recorded run inputs (`optim.checks.recorded_inputs`): its run
+        directory and its data passes' finished item directories."""
+        from refactory_dsh.optim.checks import recorded_inputs
+
+        return recorded_inputs(self.root / "runs" / str(candidate_id))
 
     def _grader_secrets(self) -> frozenset:
         """The train items' grader-only values (`task.grader_secrets`), loaded once, the
@@ -2901,6 +2912,7 @@ class Loop(OuterLoop):
                 edit=rejection.edit,
                 reasons=rejection.reasons,
                 epoch=self.epoch,
+                **({"repaired": rejection.repaired} if rejection.repaired else {}),
             )
         for candidate in candidates:
             self._journal_candidate(candidate)
@@ -2916,6 +2928,11 @@ class Loop(OuterLoop):
                 "origin": "optimizer",
                 # Its edits counted as the per-proposal cap counts them (`optim.edit_count`).
                 "edit_count": self._edit_count(candidate),
+                # The mechanical fixes the attempt path made, and what it could not check.
+                **({"repairs": list(candidate.repairs)} if candidate.repairs else {}),
+                **({"checks": list(candidate.notes)} if candidate.notes else {}),
+                **({"repaired_from": list(notes["repaired_from"])}
+                   if notes.get("repaired_from") else {}),
                 **({"level": notes["level"]} if notes.get("level") else {}),
                 "diagnosis": str(notes.get("diagnosis")
                                  or getattr(self.optimizer, "last_diagnosis", "") or ""),
@@ -2929,15 +2946,24 @@ class Loop(OuterLoop):
             self._journal("proposal", **record)
         self._write_analysis()
         self._append_rejections(rejections)
+        # A proposal a slim repair fixed was refused, then accepted as its fix: counted
+        # once, among the accepted, and said as repaired (`optim.repair`).
+        repaired = [r for r in rejections if r.repaired]
+        still = [r for r in rejections if not r.repaired]
         self._progress(
             "optimizer",
             # This epoch's proposals, every round `install` asked for: each one was either
             # accepted for evaluation or refused, so the three counts add up (dm-265).
-            proposed=len(candidates) + len(rejections),
+            proposed=len(candidates) + len(still),
             accepted=len(candidates),
-            refused=len(rejections),
+            refused=len(still),
+            repaired=len(repaired),
+            repair_calls=self.optimizer.repairs_used(self.epoch)
+            if hasattr(self.optimizer, "repairs_used") else 0,
+            fixed=sum(1 for c in candidates if c.repairs),
             # Why this epoch's were refused, beside the count it explains.
-            epoch_refusal_codes=_codes(rejections),
+            epoch_refusal_codes=_codes(still),
+            **({"repaired_codes": _codes(repaired)} if repaired else {}),
             # The running tally, so a watcher sees which rule is dominating without
             # opening the run directory. Same derivation as the report's.
             refusal_codes=self._rejection_codes(),
@@ -3490,6 +3516,8 @@ class Loop(OuterLoop):
         accepted: list[Candidate] = []
         accepted_ids: set[str] = set()
         wanted = self.batch_size(run)
+        # The request a slim repair describes the pipeline from, built once per round.
+        self._repair_ctx = None
         # `k` adapts: one more round when the last batch was refused more than it was
         # accepted, because that is the signal that the optimizer is close to
         # something legal rather than out of ideas.
@@ -3521,10 +3549,18 @@ class Loop(OuterLoop):
                                + ("already covered" if level in self._levels_done
                                   else "not asked for")
                                + (f"; still missing: {', '.join(missing)}" if missing else "")]
+                # A refused proposal goes to the slim repair call (`_repair`); its fix,
+                # when accepted, is the candidate, and the refusal says so.
+                repaired_from: list[str] = []
                 if refused:
                     self.rejections.append(Rejection(rounds, proposal.edit, refused))
-                    continue
-                outcome = run.attempt(proposal, parent)
+                    repaired_from = list(refused)
+                    outcome = self._repair(run, proposal, parent, refused)
+                else:
+                    outcome = run.attempt(proposal, parent)
+                    if isinstance(outcome, list):
+                        repaired_from = list(outcome)
+                        outcome = self._repair(run, proposal, parent, outcome)
                 if isinstance(outcome, Candidate):
                     if outcome.id in accepted_ids:
                         # Two proposals in one batch that reach the same state. The
@@ -3557,17 +3593,46 @@ class Loop(OuterLoop):
                         "confidence": proposal.confidence,
                         "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or ""),
                         "considered": str(getattr(self.optimizer, "last_considered", "") or ""),
-                        **({"level": level} if self._levels_wanted else {})}
+                        **({"level": level} if self._levels_wanted else {}),
+                        **({"repaired_from": repaired_from} if repaired_from else {})}
             # Another response is useful only if a validation round remains.
             if len(accepted) >= wanted or len(self.rejections) == before or _attempt >= cap:
                 break
             proposals = self.propose(run, parents, wanted - len(accepted))
             if not proposals:
                 break
-        refused = len(self.rejections) - before_all
+        refused = sum(1 for r in self.rejections[before_all:] if not r.repaired)
         self._refusal_pressure = refused / max(1, refused + len(accepted))
         self.attempts_used.append(rounds)
         return accepted
+
+    def _repair(self, run: Run, proposal: Proposal, parent: Candidate,
+                reasons: list[str]) -> Candidate | None:
+        """A refused proposal sent to the optimizer's slim repair call
+        (`Optimizer.repair_refused`), each fix validated as a proposal is (this round's
+        refusals first, then ``Run.attempt``): the candidate, or ``None``. On success the
+        proposal's rejection, just recorded, names the candidate it became."""
+        index = len(self.rejections) - 1
+        if index < 0:
+            return None
+        if getattr(self, "_repair_ctx", None) is None:
+            self._repair_ctx = self._context()
+
+        def attempt(fixed: Proposal) -> Candidate | list[str]:
+            refused = proposal_refusal(fixed, permitted=self.permitted_ops(),
+                                       max_edits=MAX_EDITS_PER_PROPOSAL,
+                                       parent_state=parent.state)
+            level = edit_level(fixed.steps)
+            missing = [l for l in self._levels_wanted if l not in self._levels_done]
+            if not refused and self._levels_wanted and level not in missing:
+                refused = [f"E-level: this round asks for a {', '.join(missing) or 'different'} "
+                           f"change; the repaired proposal is a {level} change"]
+            return refused or run.attempt(fixed, parent, record=False)
+
+        fixed = self.optimizer.repair_refused(self._repair_ctx, proposal, reasons, parent, attempt)
+        if fixed is not None:
+            self.rejections[index] = dataclasses.replace(self.rejections[index], repaired=fixed.id)
+        return fixed
 
     def strategy(self, run: Run) -> None:
         """The default control flow: repeated epochs, each one step of the loop.
@@ -4285,9 +4350,10 @@ class Loop(OuterLoop):
             kept = self.step([c for c in candidates if self.accepts(run, c)], run=run)
             for candidate in kept:
                 self.update(run, candidate)
+        refused = [r for r in rejections if not r.repaired]
         another = self.scheduler(
-            evaluated=evaluated, proposed=len(candidates) + len(rejections),
-            accepted=len(candidates), refused=len(rejections),
+            evaluated=evaluated, proposed=len(candidates) + len(refused),
+            accepted=len(candidates), refused=len(refused),
         )
         if early:
             # A budget a measurement found spent stays the reason (the scheduler kept
@@ -5164,13 +5230,16 @@ class Loop(OuterLoop):
             insertable=[node.to_state() for node in self.mode.insertable()],
             frozen=list(self.config.frozen),
             protected=list(self.protected),
+            # A refusal a slim repair fixed is not fed back: its fix is the candidate.
             rejections=summarise_reasons(
                 [
                     reason
                     for rejection in self.rejections[-8:]
+                    if not rejection.repaired
                     for reason in rejection.reasons
                 ]
             ),
+            refused=refused_entries(self.rejections[-8:]),
             preset=self.config.edit_preset,
             strategy={**dict(self.strategy_decision), **({"search_contract": self.config.resolved_profile["contract"]} if self.config.resolved_profile.get("contract") else {})},
             # Read now, not at construction: the point of steering a search is that a
@@ -6147,7 +6216,10 @@ class Loop(OuterLoop):
             nodes = (whole.get("graph") or {}).get("nodes") or {}
             return {**mode.describe(), "node_states": [dict(state) for state in nodes.values()],
                     "knob_states": dict(whole.get("knobs") or {}),
-                    "available": available_before(whole.get("graph") or {}),
+                    "available": available_before(
+                        whole.get("graph") or {},
+                        {name: (entry or {}).get("value")
+                         for name, entry in (whole.get("knobs") or {}).items()}),
                     "warnings": _wiring_warnings(whole, self._root_state())}
 
         if parent is None:
@@ -6274,6 +6346,8 @@ class Loop(OuterLoop):
                     "edit_reports": candidate.edit_reports,
                     "step_edits": candidate.step_edits,
                     "state": candidate.state,
+                    **({"repairs": candidate.repairs} if candidate.repairs else {}),
+                    **({"notes": candidate.notes} if candidate.notes else {}),
                 }
                 for candidate in candidates
             ],
@@ -6284,14 +6358,17 @@ class Loop(OuterLoop):
         path = self.root / PENDING
         if not path.exists():
             return []
-        return [
-            Candidate.from_state(
+        out = []
+        for record in json.loads(path.read_text()):
+            candidate = Candidate.from_state(
                 record["state"], parent=record.get("parent"), edits=record.get("edits") or (),
                 edit_reports=record.get("edit_reports") or (),
                 step_edits=int(record.get("step_edits", 1)),
             )
-            for record in json.loads(path.read_text())
-        ]
+            candidate.repairs = list(record.get("repairs") or ())
+            candidate.notes = list(record.get("notes") or ())
+            out.append(candidate)
+        return out
 
     def config_from_root(self) -> "LoopConfig":
         """This run's own configuration, as the run directory recorded it."""
@@ -6324,6 +6401,8 @@ class Loop(OuterLoop):
             edit_reports=candidate.edit_reports,
             step_edits=candidate.step_edits,
             state=candidate.state,
+            **({"repairs": candidate.repairs} if candidate.repairs else {}),
+            **({"notes": candidate.notes} if candidate.notes else {}),
         )
 
     def _replay_if_asked(self) -> bool:
@@ -6404,6 +6483,8 @@ class Loop(OuterLoop):
                     # A journal written before compound proposals: one edit each.
                     step_edits=int(record.get("step_edits", 1)),
                 )
+                candidate.repairs = list(record.get("repairs") or ())
+                candidate.notes = list(record.get("notes") or ())
                 if candidate.id not in by_id:
                     by_id[candidate.id] = candidate
                     order.append(candidate.id)
@@ -6420,6 +6501,7 @@ class Loop(OuterLoop):
                     attempt=int(record.get("attempt") or 0),
                     edit=dict(record.get("edit") or {}),
                     reasons=list(record.get("reasons") or []),
+                    repaired=str(record.get("repaired") or ""),
                 )
                 self.rejections.append(rejection)
                 # A journal written before rejections carried their epoch: the epoch
