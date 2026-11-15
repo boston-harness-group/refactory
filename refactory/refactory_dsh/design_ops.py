@@ -3193,6 +3193,11 @@ def _report_artifact(ctx: Any, require: Any) -> dict[str, Any]:
         report_payload["check_note"] = check_note
     if planning_models:
         report_payload["planning_models"] = planning_models
+    # Whether the agents used the code graph, per node: the run's own record of it.
+    from refactory_dsh import code_graph
+    graph_use = code_graph.usage(ctx.workdir)
+    if graph_use is not None:
+        report_payload["code_graph"] = graph_use
     # Surface process notes with their followed/not-followed statement.
     process_notes = (ev or {}).get("process_notes", [])
     if process_notes:
