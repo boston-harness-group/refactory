@@ -639,7 +639,8 @@ _SCOPED_RUN = [SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_A
 
 @pytest.mark.parametrize("mark", [SIZER_MARK, "You are the research director", "pitfalls researcher"])
 def test_graph_on_prompts_carry_the_paragraph(tmp_path, stub_graphify, mark):
-    run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN))
+    run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN),
+                                        extra_knobs={"code_graph": True})
     assert run.exit_ok, run.error
     paragraph = run.facts["code_graph_paragraph"]
     assert paragraph and paragraph in _prompt(model, mark)
@@ -648,6 +649,14 @@ def test_graph_on_prompts_carry_the_paragraph(tmp_path, stub_graphify, mark):
     assert Path(command).is_absolute() and Path(command).is_file()
     for word in ("limit", "maximum", "at most", "no more than"):
         assert word not in paragraph.lower()
+
+
+def test_the_graph_is_off_by_default(tmp_path, stub_graphify):
+    assert DesignMode().state_dict()["knobs"]["code_graph"]["value"] is False
+    run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN))
+    assert run.exit_ok, run.error
+    assert not run.facts.get("code_graph_paragraph")
+    assert not (tmp_path / "run" / GRAPH_SUBDIR / "status.json").exists()
 
 
 def test_no_graph_flag_prompts_have_no_graph_paragraph(tmp_path, stub_graphify):

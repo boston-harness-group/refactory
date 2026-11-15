@@ -498,9 +498,9 @@ _PARAGRAPH_TEMPLATE = (
 def build_code_graph(ctx: Any) -> dict[str, Any]:
     """Deterministic op: start the code graph build as a detached process."""
     knobs = ctx.knobs if hasattr(ctx, "knobs") else {}
-    code_graph_on = knobs.get("code_graph", True)
+    code_graph_on = knobs.get("code_graph", False)
     if isinstance(code_graph_on, dict):
-        code_graph_on = code_graph_on.get("value", True)
+        code_graph_on = code_graph_on.get("value", False)
     if not code_graph_on:
         return {"code_graph_paragraph": ""}
 

@@ -1263,7 +1263,7 @@
     "refusal_attempts": 3.0,
     "judge_rereads": 1.0,
     "self_check_fixups": 2.0,
-    "code_graph": 1.0,
+    "code_graph": 0.0,
     "code_graph_timeout_s": 300.0,
     "code_graph_max_files": 20000.0,
     "self_check_timeout_s": 300.0,
@@ -1420,7 +1420,7 @@
       "required": false
     },
     "code_graph": {
-      "default": true,
+      "default": false,
       "kind": "bool",
       "lo": null,
       "hi": null,

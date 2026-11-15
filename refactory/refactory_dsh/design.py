@@ -471,7 +471,8 @@ class DesignMode(Mode):
                             "spending nothing, before the early stop spends it; a run gets "
                             "this many times check_attempts",
             ),
-            "code_graph": Knob(True, "bool", frozen=True,
+            # Off until a before/after shows it faster at equal or better quality (opt-in).
+            "code_graph": Knob(False, "bool", frozen=True,
                                description="build a code knowledge graph for the research agents"),
             "code_graph_timeout_s": Knob(
                 300, "int", lo=10, hi=3600, frozen=True,
