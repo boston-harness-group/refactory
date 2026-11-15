@@ -14,6 +14,8 @@ import pytest
 
 from refactory_dsh import lowering
 from refactory_dsh.code_graph import (
+    QUERY_LOG,
+    usage,
     GRAPH_SUBDIR,
     _PARAGRAPH_TEMPLATE,
     _count_code_files,
@@ -651,12 +653,12 @@ def test_graph_on_prompts_carry_the_paragraph(tmp_path, stub_graphify, mark):
         assert word not in paragraph.lower()
 
 
-def test_the_graph_is_off_by_default(tmp_path, stub_graphify):
-    assert DesignMode().state_dict()["knobs"]["code_graph"]["value"] is False
+def test_the_graph_is_on_by_default(tmp_path, stub_graphify):
+    assert DesignMode().state_dict()["knobs"]["code_graph"]["value"] is True
     run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN))
     assert run.exit_ok, run.error
-    assert not run.facts.get("code_graph_paragraph")
-    assert not (tmp_path / "run" / GRAPH_SUBDIR / "status.json").exists()
+    assert run.facts["code_graph_paragraph"] in _prompt(model, SIZER_MARK)
+    assert (tmp_path / "run" / GRAPH_SUBDIR / "status.json").exists()
 
 
 def test_no_graph_flag_prompts_have_no_graph_paragraph(tmp_path, stub_graphify):
@@ -840,3 +842,98 @@ def test_spine_run_where_build_fails(tmp_path):
     assert done.returncode == 0, done.stderr[-2000:]
     facts = json.loads((run / "facts.json").read_text())
     assert facts.get("code_graph_paragraph", "") == ""
+
+
+# ── query log and per-node usage ──────────────────────────────────────────────
+
+def _log(graph_dir):
+    return [json.loads(line) for line in (graph_dir / QUERY_LOG).read_text().splitlines()]
+
+
+def test_every_query_is_logged_with_its_hits(tmp_path, capsys):
+    graph_dir = tmp_path / "code-graph"
+    _write_fixture(graph_dir)
+    _write_status(graph_dir / "status.json", {"status": "ready"})
+    assert cli_graph(_make_args("callers", "classify_scale", graph_dir)) == 0
+    assert cli_graph(_make_args("explain", "classify_scale", graph_dir)) == 0
+    assert cli_graph(_make_args("callers", "nonexistent_function", graph_dir)) == 0
+    graph = _fixture_graph()
+    named = {n["id"] for n in graph["nodes"] if n["label"] == "classify_scale()"}
+    callers = sum(1 for link in graph["links"] if link["relation"] == "calls" and link["target"] in named)
+    first, second, third = _log(graph_dir)
+    assert (first["kind"], first["query"], first["hits"], first["status"]) == \
+        ("callers", "classify_scale", callers, "ready")
+    assert (second["kind"], second["hits"]) == ("explain", len(named))
+    assert third["hits"] == 0
+    assert all(isinstance(e["ms"], int) and e["at"] > 0 for e in (first, second, third))
+
+
+def test_a_query_the_graph_cannot_answer_is_logged_too(tmp_path, capsys):
+    graph_dir = tmp_path / "code-graph"
+    graph_dir.mkdir()
+    _write_status(graph_dir / "status.json", {"status": "failed: timeout"})
+    assert cli_graph(_make_args("callers", "foo", graph_dir)) == 1
+    (entry,) = _log(graph_dir)
+    assert (entry["status"], entry["hits"]) == ("failed: timeout", 0)
+
+
+def test_a_query_against_no_graph_writes_nothing(tmp_path, capsys):
+    assert cli_graph(_make_args("callers", "foo", tmp_path / "nowhere")) == 1
+    assert not (tmp_path / "nowhere").exists()
+
+
+def _event(at, node, kind, state=None):
+    from datetime import datetime, timezone
+    entry = {"at": datetime.fromtimestamp(at, timezone.utc).isoformat(), "node_id": node, "kind": kind}
+    if state:
+        entry["state"] = state
+    return json.dumps(entry)
+
+
+def test_usage_counts_queries_per_node_from_the_run_s_events(tmp_path):
+    run = tmp_path / "run"
+    graph_dir = run / GRAPH_SUBDIR
+    graph_dir.mkdir(parents=True)
+    _write_status(graph_dir / "status.json", {"status": "ready", "nodes": 3})
+    (run / ".refactory" / "events.jsonl").write_text("\n".join([
+        _event(100, "size_change", "node_started"), _event(200, "size_change", "node_completed"),
+        # The spine's worker events say the same for a dispatched agent.
+        _event(300, "research_director", "worker", "starting"),
+        _event(400, "research_director", "worker", "completed"),
+        _event(410, "pitfalls_researcher", "node_started"),
+        # A node still open around others (a fork's wait): the latest started one gets it.
+        _event(280, "fork_outer", "node_started"), _event(500, "fork_outer", "node_completed"),
+    ]) + "\n")
+    queries = [(150, "callers", "ready"), (160, "explain", "ready"), (350, "callers", "ready"),
+               (405, "callers", "ready"), (420, "callers", "failed: timeout")]
+    (graph_dir / QUERY_LOG).write_text("".join(
+        json.dumps({"at": at, "node": None, "kind": kind, "query": "f", "hits": 1, "status": st,
+                    "ms": 5}) + "\n" for at, kind, st in queries))
+    assert usage(run) == {
+        "status": "ready", "queries": 5, "not_available": 1,
+        "by_node": {"fork_outer": 1, "pitfalls_researcher": 1, "research_director": 1, "size_change": 2},
+        "by_kind": {"callers": 4, "explain": 1}}
+
+
+def test_usage_is_none_without_a_graph_and_zero_without_queries(tmp_path):
+    assert usage(tmp_path) is None
+    _write_status_dir = tmp_path / GRAPH_SUBDIR
+    _write_status_dir.mkdir(parents=True)
+    _write_status(_write_status_dir / "status.json", {"status": "skipped: graphify not installed"})
+    assert usage(tmp_path) == {"status": "skipped", "queries": 0, "not_available": 0,
+                               "by_node": {}, "by_kind": {}}
+
+
+def test_the_report_carries_the_graph_use(tmp_path, stub_graphify):
+    run, _model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN))
+    assert run.exit_ok, run.error
+    design = json.loads((tmp_path / "run" / "design.json").read_text())
+    assert design["code_graph"]["queries"] == 0
+    assert design["code_graph"]["status"] in ("ready", "failed", "building")
+
+
+def test_the_report_has_no_graph_entry_when_it_is_off(tmp_path, stub_graphify):
+    run, _model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN),
+                                         extra_knobs={"code_graph": False})
+    assert run.exit_ok, run.error
+    assert "code_graph" not in json.loads((tmp_path / "run" / "design.json").read_text())
