@@ -1237,17 +1237,34 @@ def test_the_index_answers_under_concurrent_builders_and_torn_lines(tmp_path):
         assert (output['total'], output['last_event_at']) == (expected['total'], expected['last_event_at'])
         assert output['kinds'] == list(range(50))
 
-    # Three processes appending, as the spine, the worker and the observer do.
+    # Three processes appending, as the spine, the worker and the observer do. Each says
+    # it is ready and waits for one start signal, so their appends overlap rather than
+    # running one after another behind three interpreter start-ups.
+    start = tmp_path / 'start'
+
     def writer(offset: int) -> subprocess.Popen[bytes]:
-        code = ('import sys\nfrom pathlib import Path\nfrom refactory_dsh import live\n'
+        code = ('import sys, time\nfrom pathlib import Path\nfrom refactory_dsh import live\n'
+                f'Path(sys.argv[2] + ".{offset}").touch()\n'
+                'while not Path(sys.argv[2]).exists(): time.sleep(0.001)\n'
                 f'for n in range({offset}, {offset + 20}): live.emit(Path(sys.argv[1]), "w", n=n)\n')
-        return subprocess.Popen([sys.executable, '-c', code, str(tmp_path)])
+        return subprocess.Popen([sys.executable, '-c', code, str(tmp_path), str(start)])
 
     writers = [writer(100), writer(200), writer(300)]
+    deadline = time.monotonic() + 60
+    while not all(Path(f'{start}.{offset}').exists() for offset in (100, 200, 300)):
+        assert time.monotonic() < deadline and all(p.poll() is None for p in writers), 'a writer never got ready'
+        time.sleep(0.005)
+    start.touch()
     assert [process.wait() for process in writers] == [0, 0, 0]
     lines = (tmp_path / live.EVENTS).read_bytes().splitlines(keepends=True)
-    # The count is the newline-terminated lines, and the index agrees with it.
-    assert live.snapshot(tmp_path)['total'] == sum(1 for line in lines if line.endswith(b'\n'))
+    # Every record is counted once, none lost, and the index agrees. Blank lines count
+    # nothing: `emit` repairs a tail that does not end in a newline, and a write still
+    # in flight in another process looks like one, so a race can leave an empty line
+    # (CI, 2026-11-14: 111 lines, 110 records).
+    records = [json.loads(line) for line in lines if line.endswith(b'\n') and line.strip()]
+    assert sorted(record['n'] for record in records if record['kind'] == 'w') == [
+        n for offset in (100, 200, 300) for n in range(offset, offset + 20)]
+    assert live.snapshot(tmp_path)['total'] == len(records) == 110
 
 
 def test_bounded_activity_page(tmp_path):
