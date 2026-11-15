@@ -30,6 +30,8 @@ WALKER = "walker"
 
 #: The authoring modes that work in a worktree of their target (#351).
 DESIGN_MODES = ("default_pack/design", "default_pack/design_fast")
+#: The one mode that builds a code graph for its research agents (`code_graph`).
+GRAPH_MODE = "default_pack/design"
 #: The flags that say how a design run is delivered (#350). design_fast, which has no
 #: approval gate, takes none of them.
 DELIVERY_FLAGS: tuple[str, ...] = ("--no-pr", "--refine", "--review-comments")
@@ -96,6 +98,9 @@ def add_authoring_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-pr", action="store_true",
                         help="design only: keep the work on the run's local branch instead of opening a pull "
                              "request once the reviews pass")
+    parser.add_argument("--no-graph", action="store_true",
+                        help="design only: skip the code knowledge graph build (also REFACTORY_CODE_GRAPH=0, "
+                             "or \"code_graph\": {\"enabled\": false} in refactory.workers.json)")
     parser.add_argument("--refine", default="", metavar="PR",
                         help="design only: follow up an open pull request (its URL or owner/repo#number); the "
                              "run starts from its branch and updates it")
@@ -232,6 +237,9 @@ def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, labe
             return f"refactory: --attempts is --repair-attempts on {label}; give one of them"
     if mode_id is None:
         return None
+    if getattr(args, "no_graph", False) and mode_id != GRAPH_MODE:
+        return (f"refactory: {label} does not take --no-graph: only --mode design builds a code "
+                "graph for its research agents")
     for flag, given in (("--intent", args.intent), ("--source", args.source),
                         ("--source-format", args.source_format)):
         if given:
@@ -266,7 +274,7 @@ def resume_refusal(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 
 def knobs(args: argparse.Namespace, mode_id: str | None, *, brief: str | None = None, name: str = "",
-          revision: str = "") -> list[str]:
+          revision: str = "", named: str = "") -> list[str]:
     """The run's knobs, in one order, as ``NAME=VALUE``: what the flags say, then ``--knob``.
 
     Last, so a person's own ``--knob`` wins over the value derived from a flag.
@@ -290,9 +298,30 @@ def knobs(args: argparse.Namespace, mode_id: str | None, *, brief: str | None = 
         found.append(f"source_project={args.source_project}")
     if mode_id is None or mode_id in DESIGN_MODES:
         found.extend(worktree_knobs(args, deliver=mode_id != "default_pack/design_fast"))
+    # A mode run by its full name (`named`) is resolved later; design's own name still
+    # gets design's graph settings.
+    found.extend(graph_knobs(args, GRAPH_MODE if mode_id is None and named == GRAPH_MODE else mode_id))
     if revision:
         found.append(f"revision_of={revision}")
     found.extend(str(pair) for pair in args.knob)
+    return found
+
+
+def graph_knobs(args: argparse.Namespace, mode_id: str | None) -> list[str]:
+    """The code graph's knobs: the persistent settings, then ``--no-graph``.
+
+    Only design declares them (design_fast pops them), so the settings reach a design run
+    alone: a setting kept in the environment never breaks another mode. ``--no-graph`` is
+    also passed to a mode run by name, which refuses it by name if it has no such knob.
+    """
+    found: list[str] = []
+    if mode_id == GRAPH_MODE:
+        from refactory_dsh.code_graph import setting_knobs
+        from refactory_dsh.paths import project_root
+
+        found.extend(setting_knobs(project_root()))
+    if getattr(args, "no_graph", False) and mode_id in (GRAPH_MODE, None):
+        found.append("code_graph=0")
     return found
 
 

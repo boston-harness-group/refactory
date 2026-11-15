@@ -161,7 +161,8 @@ def cmd_ceo(args: argparse.Namespace) -> int:
         return 2
     if runs_a_mode:
         # A named mode takes them as its knobs; one that does not declare them refuses them by name.
-        args.knob = run_flags.knobs(args, None, name=args.name, revision=args.revise)
+        args.knob = run_flags.knobs(args, None, name=args.name, revision=args.revise,
+                                    named=mode or target)
         return _forward("refactory_dsh.interactive", _run_argv(mode or target, args))
 
     from refactory_dsh.brief_guard import require_brief
@@ -601,6 +602,22 @@ def build_parser() -> argparse.ArgumentParser:
     model_set.add_argument("--model", required=True, help="the model id, e.g. deepseek-v4-pro")
     model_sub.add_parser("show", help="print the stored model choice as JSON")
 
+    # ── code knowledge graph queries ──
+    graph_group = sub.add_parser(
+        "graph", help="query the code knowledge graph built for a design run",
+    )
+    graph_help = "path to the code-graph directory or a run directory"
+    # Accepted before or after the subcommand; the subcommand's copy has no default, so it
+    # never clobbers one given before it.
+    graph_group.add_argument("--graph", default="", help=graph_help)
+    graph_sub = graph_group.add_subparsers(dest="graph_command", required=True)
+    graph_explain = graph_sub.add_parser("explain", help="show a node's callers, callees, importers and contained items")
+    graph_explain.add_argument("name", help="the function or symbol name to look up")
+    graph_explain.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
+    graph_callers = graph_sub.add_parser("callers", help="show calls edges into a node")
+    graph_callers.add_argument("name", help="the function or symbol name to look up")
+    graph_callers.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
+
     ui = sub.add_parser("ui", help="the Web GUI (the tool, the panel, the conversation)")
     ui.add_argument("--port", type=int, default=0, help="default: the launcher's own")
     ui.add_argument("--no-open", action="store_true", help="do not open a browser")
@@ -716,6 +733,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ui(args)
     if args.verb == "doctor":
         return cmd_doctor(args)
+    if args.verb == "graph":
+        from refactory_dsh.code_graph import cli_graph
+        return cli_graph(args)
     if args.verb == "model":
         return _cmd_model(args)
     if args.verb == "pin":

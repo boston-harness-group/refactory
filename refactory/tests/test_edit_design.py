@@ -324,10 +324,11 @@ def _design_answers(emit: list[str]) -> list[str]:
 
 def test_the_design_graph_is_a_different_shape_from_a_package_one():
     graph = DesignMode().graph()
-    # The sizing chain and the widening gate (clear_sizing, fork_size, join_size,
-    # presize_scale, size_change, widen_research) were added on purpose.
+    # The sizing chain and the widening gate (build_code_graph, clear_sizing, fork_size,
+    # join_size, presize_scale, size_change, widen_research) were added on purpose.
     assert sorted(graph.nodes) == [
-        "apply_corrections", "audit_corrections", "check", "check_design_claims",
+        "apply_corrections", "audit_corrections", "build_code_graph",
+        "check", "check_design_claims",
         "classify_reloop", "classify_scale", "clear_sizing", "code_reviewer", "deliver",
         "delivery_gate", "design_doc", "done",
         "early_asks_check", "emit", "fork_qa", "fork_size",

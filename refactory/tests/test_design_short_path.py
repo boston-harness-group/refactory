@@ -33,7 +33,8 @@ def test_the_design_graph_routes_on_the_scale():
     # route_refine_design sits between prepare and research, which the sizer now
     # precedes (moved on purpose: the sizing chain starts on its proceed edge).
     assert ("prepare", "route_refine_design", None) in edges
-    assert ("route_refine_design", "clear_sizing", "proceed") in edges
+    assert ("route_refine_design", "build_code_graph", "proceed") in edges
+    assert ("build_code_graph", "clear_sizing", None) in edges
     assert ("route_refine_design", "design_doc", "light") in edges
     assert ("gate_research", "classify_scale", "proceed") in edges
     # Moved on purpose: the widening gate sits between classify_scale and the pitfalls.
@@ -61,7 +62,8 @@ def test_the_spine_gets_the_same_routes():
     assert refine_node.evaluator_command.endswith("refactory_dsh.design_ops:route_refine_design")
     lowered = {(e.source, e.target, e.condition) for e in workflow.edges}
     assert ("prepare", "route_refine_design", None) in lowered
-    assert ("route_refine_design", "clear_sizing", "proceed") in lowered
+    assert ("route_refine_design", "build_code_graph", "proceed") in lowered
+    assert ("build_code_graph", "clear_sizing", None) in lowered
     assert ("route_refine_design", "design_doc", "light") in lowered
     assert ("route_strategy", "synthesize_strategy", "scoped") in lowered
     assert ("check_design_claims", "gate_design_review", None) in lowered
@@ -185,7 +187,8 @@ def test_a_full_design_keeps_both_steps(tmp_path):
 # ── the sizing chain before research, and the widening gate before the pitfalls ──
 
 SIZING_CHAIN = {
-    ("route_refine_design", "clear_sizing", "proceed"),
+    ("route_refine_design", "build_code_graph", "proceed"),
+    ("build_code_graph", "clear_sizing", None),
     ("clear_sizing", "fork_size", None),
     ("fork_size", "join_size", None),
     ("join_size", "presize_scale", None),
@@ -205,7 +208,7 @@ def test_the_sizing_chain_sits_before_research():
         # The light route, the research gate and the strategy route are as they were.
         assert ("route_refine_design", "design_doc", "light") in edges
         assert {e for e in edges if e[0] == "route_refine_design"} == {
-            ("route_refine_design", "clear_sizing", "proceed"),
+            ("route_refine_design", "build_code_graph", "proceed"),
             ("route_refine_design", "design_doc", "light")}
         assert {e for e in edges if e[0] == "gate_research"} == {
             ("gate_research", "research_director", "reloop"),
@@ -241,4 +244,4 @@ def test_every_design_path_passes_pitfalls():
             count += walk(target, seen | {target}, step)
         return count
 
-    assert walk("clear_sizing", {"route_refine_design", "clear_sizing"}, []) > 0
+    assert walk("build_code_graph", {"route_refine_design", "build_code_graph"}, []) > 0

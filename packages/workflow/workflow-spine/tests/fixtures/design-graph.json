@@ -12,6 +12,10 @@
       "id": "audit_corrections",
       "_type": "FnNode"
     },
+    "build_code_graph": {
+      "id": "build_code_graph",
+      "_type": "FnNode"
+    },
     "check": {
       "id": "check",
       "_type": "FnNode"
@@ -302,6 +306,11 @@
       "condition": null
     },
     {
+      "source": "build_code_graph",
+      "target": "clear_sizing",
+      "condition": null
+    },
+    {
       "source": "check_design_claims",
       "target": "gate_design_review",
       "condition": null
@@ -538,7 +547,7 @@
     },
     {
       "source": "route_refine_design",
-      "target": "clear_sizing",
+      "target": "build_code_graph",
       "condition": "proceed"
     },
     {

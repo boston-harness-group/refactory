@@ -93,6 +93,7 @@
     "refactory_dsh.cli",
     "refactory_dsh.clones",
     "refactory_dsh.console",
+    "refactory_dsh.code_graph",
     "refactory_dsh.coverage_helpers",
     "refactory_dsh.create",
     "refactory_dsh.create_ops",

@@ -37,9 +37,30 @@ def validate_provider_config(config: Any, *, origin: str = FILENAME) -> dict[str
     return config
 
 
+#: The ``code_graph`` object's keys and types (design's code graph, `code_graph`).
+CODE_GRAPH_SETTINGS: dict[str, type] = {"enabled": bool, "timeout_s": int, "max_files": int}
+
+
+def validate_code_graph(section: Any, *, origin: str = FILENAME) -> dict[str, Any]:
+    """The project file's ``code_graph`` object, checked: only known keys, each of its type."""
+    if not isinstance(section, dict):
+        raise ValueError(f"{origin}: code_graph must be an object")
+    unknown = set(section) - set(CODE_GRAPH_SETTINGS)
+    if unknown:
+        raise ValueError(f"{origin}: code_graph has unknown keys {sorted(unknown)}; "
+                         f"known: {sorted(CODE_GRAPH_SETTINGS)}")
+    for key, value in section.items():
+        kind = CODE_GRAPH_SETTINGS[key]
+        # bool is an int in Python; a count or a timeout given as true/false is a mistake.
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            raise ValueError(f"{origin}: code_graph.{key} must be {kind.__name__}")
+    return section
+
+
 def validate(settings: dict[str, Any]) -> None:
     """Validate partial defaults and each override without dispatching a worker."""
-    unknown = set(settings) - set(FIELDS)
+    # The code graph's settings share the project file but are not routing (`code_graph`).
+    unknown = set(settings) - set(FIELDS) - {"code_graph"}
     if unknown:
         raise ValueError(f"{FILENAME}: unknown routing fields {sorted(unknown)}; credentials belong in native stores")
     base = validate_route({key: settings[key] for key in ROUTE_FIELDS if key in settings})
@@ -54,6 +75,8 @@ def validate(settings: dict[str, Any]) -> None:
                 raise ValueError(f"{FILENAME}: {field}.{name}: {error}") from error
     if "provider_config" in settings:
         validate_provider_config(settings["provider_config"])
+    if "code_graph" in settings:
+        validate_code_graph(settings["code_graph"])
 
 
 def resolve(project: Path, overrides: dict[str, Any] | None = None, *,
