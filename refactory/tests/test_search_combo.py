@@ -128,7 +128,7 @@ class Request:
         self.text = text
         self.index = index
         self.pipeline = _section(text, "The pipeline you may edit")
-        self.knobs = _section(text, "Parameters you may move")
+        self.knobs = _section(text, "Each step's settings")
         self.decision = _section(text, "What this round is for")
         wanted = re.search(r"Propose at most (\d+) update", text)
         self.wanted = int(wanted.group(1)) if wanted else 1

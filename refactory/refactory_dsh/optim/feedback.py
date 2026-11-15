@@ -871,7 +871,11 @@ STRUCTURE_GUIDANCE = (
     "What makes a new step pay off: a step helps when it adds work or information the "
     "pipeline does not already have -- an independent attempt that does not see earlier "
     "steps' conclusions, several attempts combined by a vote or a check, a deterministic "
-    "computation or check in code, or a retry sent back with a specific reason. A step "
-    "that re-reads the same notes with the same model tends to repeat their mistakes. "
-    "Prefer a structural change that changes how the work is done over one that delivers "
-    "an instruction a prompt edit could deliver.")
+    "computation or check in code, or a retry sent back with a specific reason. Give a new "
+    "step something of its own to work from -- its own view of the input, its own "
+    "instructions, or a check it can run -- rather than only the earlier steps' output. "
+    "Design a structural change from the evidence as you would a prompt edit: which "
+    "failure it addresses, how it changes what each step sees or how the work is done, "
+    "and what it should change in the results. Choose between a prompt edit and a "
+    "structural change by which one addresses the cause you diagnosed; neither is the "
+    "safer default.")

@@ -473,6 +473,22 @@ digest and whether all of it was empty) and each code-gate visit (its verdict an
 reason); `exchanges` stays one entry per model call. Both runtimes record them (the
 spine through its runner, the walker in memory).
 
+- **Order: the pipeline first.** The request leads with what the optimizer may change:
+  after the score line and what the score measures, "The pipeline you may edit" (one
+  line saying the structure and each step's settings are levers of the same standing, or
+  that the run permits settings only; then the nodes, edges and what each node has
+  before it), "Where the pipeline fails, step by step" (below, when the analysts ran),
+  "The operations you may use" and "How nodes compose". Only then "Each step's settings"
+  (every knob with its exact current value, which a patch quotes), "Each step in full,
+  and the node schema", the author's guidance and "The rules the validator checks",
+  introduced neutrally: a proposal that breaks one comes back with the rule's code and
+  reason, to be fixed in a later answer, at the cost of the answer only. Nothing is
+  dropped by the order; the evidence sections follow as before. All of this is the
+  shared request (`ProposalContext.render`), so every outer loop that asks the model
+  proposer gets it: the default loop (alone, in a portfolio or under a parent picker),
+  `best_of_n`, `reflective`, `reflective_sampler`, `adaptive_meta`, `tree_search`,
+  `staged_curriculum`, `research_then_optimize` and `autoscientists`. The SkillOpt
+  package strategy writes its own text-only requests and is unchanged.
 - **Answer rules.** Built from the run's edit catalogue and the node schema, with
   placeholders only. When the run permits a structural op, the rules show a structural
   example (an op that puts a new node after an existing step, its `node` built from the
@@ -484,8 +500,12 @@ spine through its runner, the walker in memory).
   append, insert, replace and delete patches: the rules say to patch the parts the
   evidence says to change and keep the rest, and the bundling example patches its two
   prompt knobs. A whole new `value` stays available, for a setting that is not text, a
-  new step's own prompt, or a prompt that has to be replaced outright. The rules ask, in
-  SkillOpt's words, for a concise set of edits, only the ones that are needed. A new node is written from
+  new step's own prompt, or a prompt that has to be replaced outright. The rules ask for
+  each change to be grounded in the evidence, kind-neutrally: an edit, a prompt or a
+  structural change, whose effect the optimizer can state -- the failure it addresses
+  (the step where it starts), how it changes what a step sees or how the work is done,
+  and a checkable prediction -- the kind chosen by the diagnosed cause, neither kind the
+  safer default. Nothing asks for structure for its own sake. A new node is written from
   the node schema; the mode's blocks, when it declares any, may be used verbatim, and a
   mode with none says so ("New nodes"). The size cost states the run's parsimony per
   node; only when every train evaluation's score was the mean of its items' scores
@@ -506,8 +526,14 @@ spine through its runner, the walker in memory).
   gate note of their own): on the task's validation score, which carries no size cost,
   keeping a candidate only when it beats the current one; a train score only breaks a
   tie between candidates that beat the current one by the same validation score, and a
-  tie with the current candidate is rejected. Nothing is added to steer toward any kind
-  of change.
+  tie with the current candidate is rejected. The proposal request (not the analyst,
+  merge or memory calls) adds the run's **compute policy** from the same settings: with
+  `parsimony` 0, extra steps and model calls per item are not penalised, so a change
+  that adds them is weighed by the score it should reach like any other (when the score
+  is the items' mean: per-item cost is reported separately and is not part of the
+  score; otherwise cost counts only as far as the task's own score measures it). With
+  `parsimony` above 0 the size-cost lines stand alone. Nothing steers toward any kind of
+  change.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
   (with their error, whether or not any step ran; they are in the cause table too),
@@ -553,7 +579,14 @@ spine through its runner, the walker in memory).
   one proposal call of about 135k characters (about 34k tokens): the trajectory section
   is about 105k and the pipeline with its node specs about 18k. That is 6 calls.
 
-"Evidence from the traces" shows the gradient without the noise. The leaderboard copy
+"Evidence from the traces" shows the gradient without the noise. Its first row,
+"structural changes", says in plain words what the run has done with structure: how many
+candidates made a structural change and how many did not, how many structural proposals
+the validator refused, the operations used, and, when none was tried, "No structural
+change has been tried in this run yet" (a fact about the run, not a judgement of
+structure; `structural_yield` stays in gradient.json and the report). Before the loop's
+first gradient (a strategy's first request) the row is counted from the evaluated
+candidates the request lists, when that list is whole. The leaderboard copy
 is already "Recent results". Per-trial worker receipts and run-directory paths
 (`measurements`, `workers`, `workdir`, `trials`) are left out wherever they appear.
 Long keys and texts, such as a text knob's value in `knob_attribution`, are shown by
@@ -842,8 +875,10 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   "How nodes compose" adds one generic paragraph: a step helps when it adds work or
   information the pipeline lacks (an independent attempt, several attempts combined by
   a vote or a check, a computation or check in code, a retry with a specific reason);
-  one that re-reads the same notes with the same model tends to repeat their mistakes.
-  Off by default, for an experiment.
+  give a new step something of its own to work from, not only the earlier steps' output;
+  design a structural change from the evidence (the failure it addresses, how it changes
+  what each step sees or how the work is done, what it should change); choose between a
+  prompt edit and a structural change by the diagnosed cause, neither the safer default. Off by default, for an experiment.
 
 The readers' success patterns (what the passing items do right) have their own heading
 after the failure patterns, up to 4 per reader whatever its failure patterns, and a
@@ -896,7 +931,16 @@ paired with a parent picker), on the train records the request carries:
   whose calls come from the cache, does not count them again. It
   writes at most 4 findings (SkillOpt's analyst edit budget): what goes wrong, where
   (steps, edges, settings, or the structure), the change that would fix it, the items it
-  covers (an id outside the batch is dropped), its impact and quotes.
+  covers (an id outside the batch is dropped), its impact and quotes. Optionally, how
+  the steps took part (`steps`), as far as the items show it: `first_wrong` (the step
+  where things first went wrong; in a loop or a long multi-turn run, the first step that
+  did), `overrode` (later steps that undid or replaced good work from an earlier step)
+  and `repeated` (steps that only repeated or anchored on another step's output: an
+  earlier step, a parallel branch, or their own earlier attempt in a loop). It assumes
+  no graph shape: any node id (an agent with or without tools, a code op, a gate, a
+  branch) may fill a role, and a part the items cannot show is left out. Only string
+  step ids are kept; a missing or malformed `steps` is `{}` and never fails the batch.
+  Merges carry it through (each part's union).
 - **Success analysts.** The passed items likewise (seed + 1): what made them work, where
   it comes from, and what a change must preserve.
 - **Merge and rank.** Failure findings merge level by level in batches of
@@ -904,6 +948,19 @@ paired with a parent picker), on the train records the request carries:
   failure priority returns one de-duplicated list ranked by items covered and impact.
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
+- **Where the pipeline fails, step by step.** Right after the pipeline, the request
+  aggregates the ranked failure findings per step (`analysts.step_map`): for each step
+  of the pipeline, in its order, the failed items and findings that name it (`where`),
+  that say things first went wrong there, that it undid good work from an earlier step,
+  and that it only repeated or anchored on other steps' output; an item counts once per
+  cell, a step id the
+  pipeline lacks is ignored, success findings do not count. Findings without `steps`
+  still count in the first column, and the section says how many carry no attribution.
+  When a step undid earlier good work or only repeated others and the run permits
+  structural operations, one line says the remedy is usually in how the work is done
+  (independent attempts, a vote or a check across them, a check that sends a step back,
+  a code step when code nodes are allowed), not more instructions to the same step. Each ranked finding also shows its
+  attribution (`steps: first went wrong at ...`).
 - **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
   characters) before the item results. Each finding is shown whole, as SkillOpt shows
   its analysts' edits: its text, what to change and what to keep, where (a structure
@@ -954,7 +1011,7 @@ builds its own optimizer requests: setting it warns, and the stage runs only for
 proposals the strategy asks of the loop's model proposer.
 
 The prompts name no dataset or task, ask for nothing beyond what SkillOpt's analysts
-ask, and see train records only. Off, no call is made and every request is
+ask except the optional step attribution (`steps`, above), and see train records only. Off, no call is made and every request is
 byte-identical to a run without the stage; the four settings are excluded from the
 settings digest, so a run resumes whichever way they are set.
 
@@ -976,7 +1033,9 @@ except one longer than the room on its own, counted); SkillOpt shows
 each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
 with its input and its choices when it has them); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
-with its error.
+with its error. A failure finding here may also say how the steps took part (`steps`),
+which SkillOpt's single-skill analysts have no use for; the SkillOpt strategy's own
+analyst prompts (`refactory_packages/skillopt`) are unchanged.
 
 ### The memory pass: SkillOpt's meta skill (`lessons`, default `1`)
 
