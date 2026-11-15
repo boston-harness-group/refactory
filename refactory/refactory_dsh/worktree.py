@@ -179,8 +179,9 @@ def slot(target: Path) -> Path:
 def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
     """What a git command prints in ``repo``; a failure is refused in git's own words."""
     try:
-        result = subprocess.run([git_exe.program(*args), "-C", str(repo), *args], capture_output=True, text=True,
-                                timeout=300, env={**(env or os.environ), "GIT_LITERAL_PATHSPECS": "1"})
+        run_env = {**(env or os.environ), "GIT_LITERAL_PATHSPECS": "1"}
+        result = subprocess.run([git_exe.program(*args, env=run_env), "-C", str(repo), *args],
+                                capture_output=True, text=True, timeout=300, env=run_env)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"git {' '.join(args)} could not run in {repo}: {error}") from error
     if result.returncode != 0:

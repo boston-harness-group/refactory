@@ -22,6 +22,7 @@ import functools
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 #: The trampoline: what `git` names on PATH on a Mac with no other git installed.
@@ -35,9 +36,8 @@ SELECTED = "/var/db/xcode_select_link"
 DEFAULT_DEVELOPERS = ("/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools")
 
 
-def _developer_dir() -> Path | None:
+def _developer_dir(chosen: str | None) -> Path | None:
     """The developer directory the trampoline would use, or None when it cannot be told."""
-    chosen = os.environ.get("DEVELOPER_DIR")
     if chosen:
         return Path(chosen)
     try:
@@ -50,7 +50,7 @@ def _developer_dir() -> Path | None:
 def _resolve(path_env: str, developer_env: str | None) -> str:
     if sys.platform != "darwin" or shutil.which("git", path=path_env) != TRAMPOLINE:
         return "git"
-    developer = _developer_dir()
+    developer = _developer_dir(developer_env)
     if developer is None:
         return "git"
     # `DEVELOPER_DIR` may name Xcode.app itself; the trampoline looks inside it too.
@@ -85,20 +85,23 @@ def _subcommand(args: tuple[str, ...] | list[str]) -> str | None:
     return None
 
 
-def program(*args: str) -> str:
+def program(*args: str, env: Mapping[str, str] | None = None) -> str:
     """The program to start for `git *args`: :func:`git` for a read, plain ``git`` otherwise.
 
     A `config` that writes (``--add``, ``--unset``, a value after the key, ...) runs no
     hook either, so it is the trampoline's environment, not the write, that rules a
     command out.
     """
-    return git() if _subcommand(args) in READS else "git"
+    return git(env) if _subcommand(args) in READS else "git"
 
 
-def git() -> str:
+def git(env: Mapping[str, str] | None = None) -> str:
     """The program to run for `git`: the trampoline's target on a Mac, else ``git`` itself.
 
-    Asked again whenever PATH or ``DEVELOPER_DIR`` changes, so a git put ahead on PATH
+    Read from ``env`` (this process's environment by default), the environment the git
+    command will run with, since that PATH is the one `subprocess` finds `git` on. Asked
+    again whenever PATH or ``DEVELOPER_DIR`` changes, so a git put ahead on PATH
     (Homebrew's, a test's stub) is always the one run.
     """
-    return _resolve(os.environ.get("PATH", os.defpath), os.environ.get("DEVELOPER_DIR"))
+    env = os.environ if env is None else env
+    return _resolve(env.get("PATH", os.defpath), env.get("DEVELOPER_DIR"))

@@ -8,6 +8,7 @@ trampoline gives the git it starts a compiler environment a hook may rely on.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -144,3 +145,27 @@ def test_on_this_mac_the_git_run_is_the_one_the_trampoline_runs(tmp_path):
     found = git_exe.git()
     assert ask(found, "--version") == ask("git", "--version")
     assert ask(found, "--exec-path") == ask("git", "--exec-path")
+
+
+def test_the_environment_a_command_runs_with_decides_which_git(tmp_path, monkeypatch):
+    """`subprocess` finds `git` on the PATH of the env it is given, so the choice reads that env."""
+    _as_a_mac_with_the_trampoline(monkeypatch)
+    monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path / "process-has-no-git"))
+    developer = _developer(tmp_path)
+
+    assert git_exe.git() == "git"
+    assert git_exe.program("status", env={"PATH": "/usr/bin:/bin", "DEVELOPER_DIR": str(developer)}) \
+        == str(developer / "usr/bin/git")
+
+
+def test_worktree_git_runs_the_git_on_the_path_of_the_env_it_is_given(tmp_path):
+    """A caller's env with its own git ahead on PATH gets that git, as before `git_exe`."""
+    from refactory_dsh import worktree
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "git").write_text("#!/bin/sh\necho stub git \"$@\"\n")
+    (stub / "git").chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    assert worktree.git(tmp_path, "status", env=env).startswith("stub git -C")

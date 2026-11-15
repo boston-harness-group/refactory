@@ -152,14 +152,15 @@ def _tree(top: str, head: str, prefix: str) -> str | None:
     again next time.
     """
     key = (top, head, prefix)
-    if key not in _TREES:
+    found = _TREES.get(key)
+    if found is None:
         found = (_git(Path(top), "rev-parse", "-q", "--verify", f"{head}:{prefix}") or "").strip()
         if not found:
             return None
         if len(_TREES) >= 4096:
             _TREES.clear()
         _TREES[key] = found
-    return _TREES[key]
+    return found
 
 
 def _read(workdir: Path) -> dict[str, Any] | None:
