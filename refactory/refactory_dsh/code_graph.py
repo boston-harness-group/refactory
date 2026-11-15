@@ -127,7 +127,7 @@ def _format_location(source_file: str, source_location: str) -> str:
     return f"{source_file}:{line}" if line else source_file
 
 
-def explain_node(graph_dir: Path, name: str) -> str | None:
+def explain_node(graph_dir: Path, name: str, stats: dict[str, int] | None = None) -> str | None:
     """The matching nodes with their connections, or None if no node has the name.
 
     Nodes with no callers, callees, importers or contents (type nodes such as ``Any``
@@ -136,6 +136,8 @@ def explain_node(graph_dir: Path, name: str) -> str | None:
     nodes, links = _load_graph(graph_dir)
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
     matched = [n for n in nodes if _match_name(n.get("label", ""), name)]
+    if stats is not None:
+        stats["hits"] = len(matched)
     if not matched:
         return None
 
@@ -195,11 +197,16 @@ def explain_node(graph_dir: Path, name: str) -> str | None:
     return "\n".join(parts).rstrip()
 
 
-def callers_of(graph_dir: Path, name: str) -> str | None:
-    """Return callers as text, empty string if none, or None if the node is not found."""
+def callers_of(graph_dir: Path, name: str, stats: dict[str, int] | None = None) -> str | None:
+    """Return callers as text, empty string if none, or None if the node is not found.
+
+    ``stats["hits"]`` is set to the number of callers found.
+    """
     nodes, links = _load_graph(graph_dir)
     node_by_id = {n["id"]: n for n in nodes}
     matched = [n for n in nodes if _match_name(n.get("label", ""), name)]
+    if stats is not None:
+        stats["hits"] = 0
     if not matched:
         return None
 
@@ -212,6 +219,8 @@ def callers_of(graph_dir: Path, name: str) -> str | None:
             if link.get("relation") == "calls" and link["target"] == nid:
                 src_node = node_by_id.get(link["source"], {})
                 parts.append(f"{_format_location(link.get('source_file', ''), link.get('source_location', ''))} {src_node.get('label', link['source'])}")
+                if stats is not None:
+                    stats["hits"] += 1
     return "\n".join(parts).rstrip()
 
 
@@ -245,6 +254,102 @@ def _building_state(status: dict[str, Any]) -> str:
 
 # ── CLI handler ────────────────────────────────────────────────────────────────
 
+QUERY_LOG = "queries.jsonl"
+
+
+def _log_query(graph_dir: Path, kind: str, query: str, *, hits: int, started: float,
+               status: str) -> None:
+    """One line per `refactory graph` call, so a run shows whether its agents used the graph.
+
+    Only into a graph directory the run made: a query against no graph has nowhere to log.
+    Never fails the query.
+    """
+    if not graph_dir.is_dir():
+        return
+    entry = {"at": time.time(), "node": os.environ.get("REFACTORY_NODE_ID") or None,
+             "kind": kind, "query": query, "hits": hits, "status": status,
+             "ms": round((time.monotonic() - started) * 1000)}
+    try:
+        with open(graph_dir / QUERY_LOG, "a", encoding="utf-8") as log:
+            log.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def _node_windows(run_dir: Path) -> list[tuple[float, float, str]]:
+    """When each node ran, from the run's events: node and worker start/end on either runtime."""
+    from datetime import datetime
+
+    events = run_dir / ".refactory" / "events.jsonl"
+    open_at: dict[str, float] = {}
+    windows: list[tuple[float, float, str]] = []
+    try:
+        lines = events.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            event = json.loads(line)
+            node = event.get("node_id")
+            at = datetime.fromisoformat(str(event["at"]).replace("Z", "+00:00")).timestamp()
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not node:
+            continue
+        kind, state = event.get("kind"), event.get("state")
+        if kind == "node_started" or (kind == "worker" and state == "starting"):
+            open_at.setdefault(node, at)
+        elif kind in ("node_completed", "node_failed") or (
+                kind == "worker" and state in ("completed", "failed", "timeout", "cancelled",
+                                               "budget_exhausted")):
+            if node in open_at:
+                windows.append((open_at.pop(node), at, node))
+    now = time.time()
+    windows.extend((start, now, node) for node, start in open_at.items())
+    return windows
+
+
+def usage(run_dir: Path) -> dict[str, Any] | None:
+    """The run's graph use for its report, or None when the run built no graph.
+
+    A query counts under the node its worker named (``REFACTORY_NODE_ID``, set by the
+    model client on both runtimes). One without a name (a route that sets none, such as
+    the spine's CEO subagents) counts under the single node that was running when it was
+    made, under ``ambiguous`` when several were, and under ``unattributed`` when none
+    was: never a guess between nodes.
+    """
+    graph_dir = run_dir / GRAPH_SUBDIR
+    if not graph_dir.is_dir():
+        return None
+    status = str(_read_status(graph_dir).get("status", "absent")).split(":", 1)[0]
+    entries = []
+    try:
+        for line in (graph_dir / QUERY_LOG).read_text(encoding="utf-8").splitlines():
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    windows = _node_windows(run_dir) if entries else []
+    by_node: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    unanswered = 0
+    for entry in entries:
+        node = entry.get("node")
+        if not node:
+            at = entry.get("at", 0)
+            inside = {w[2] for w in windows if w[0] <= at <= w[1]}
+            node = inside.pop() if len(inside) == 1 else ("ambiguous" if inside else "unattributed")
+        by_node[node] = by_node.get(node, 0) + 1
+        kind = str(entry.get("kind"))
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        if entry.get("status") != "ready":
+            unanswered += 1
+    return {"status": status, "queries": len(entries), "by_node": dict(sorted(by_node.items())),
+            "by_kind": dict(sorted(by_kind.items())), "not_available": unanswered}
+
+
 def cli_graph(args: Any) -> int:
     graph_path = getattr(args, "graph", None) or ""
     if not graph_path:
@@ -263,21 +368,25 @@ def cli_graph(args: Any) -> int:
     if st == "building":
         st = _building_state(status)
 
+    name = args.name
+    command = args.graph_command
+    started = time.monotonic()
+
     if st != "ready":
         reason = st if st.startswith(("failed", "skipped")) else st
         print(f"Code graph not available ({reason}). Use grep/find instead.", file=sys.stderr)
+        _log_query(graph_dir, command, name, hits=0, started=started, status=st)
         return 1
 
-    name = args.name
-    command = args.graph_command
-
+    stats: dict[str, int] = {}
     if command == "explain":
-        result = explain_node(graph_dir, name)
+        result = explain_node(graph_dir, name, stats)
     elif command == "callers":
-        result = callers_of(graph_dir, name)
+        result = callers_of(graph_dir, name, stats)
     else:
         print(f"Unknown graph command: {command}", file=sys.stderr)
         return 1
+    _log_query(graph_dir, command, name, hits=stats.get("hits", 0), started=started, status=st)
 
     if result is None:
         print(f"No node named '{name}' found in the graph.")
@@ -420,6 +529,12 @@ def _timeout_handler():
         os._exit(1)
 
 
+# A background build: never compete with the run's own work for the CPU.
+try:
+    os.nice(10)
+except OSError:
+    pass
+
 # The pid lets the query command tell a build that died (e.g. killed for memory)
 # from one still running, instead of waiting out the timeout.
 _write_status({{"status": "building", "started": time.time(), "timeout_s": TIMEOUT_S,
@@ -498,9 +613,9 @@ _PARAGRAPH_TEMPLATE = (
 def build_code_graph(ctx: Any) -> dict[str, Any]:
     """Deterministic op: start the code graph build as a detached process."""
     knobs = ctx.knobs if hasattr(ctx, "knobs") else {}
-    code_graph_on = knobs.get("code_graph", False)
+    code_graph_on = knobs.get("code_graph", True)
     if isinstance(code_graph_on, dict):
-        code_graph_on = code_graph_on.get("value", False)
+        code_graph_on = code_graph_on.get("value", True)
     if not code_graph_on:
         return {"code_graph_paragraph": ""}
 
