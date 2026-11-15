@@ -70,6 +70,21 @@ _FAKE_SDK = textwrap.dedent("""\
                     tasks: [{ task_id: 'server', task_type: 'local_bash', description: 'serve' }] }
             yield { type: 'result', subtype: 'success', is_error: false, result: 'server started', modelUsage: usage }
             await new Promise(() => {})
+          } else if (process.env.FAKE_SDK_BACKGROUND === 'empty-final') {
+            // The run that lost its answer (m46-dm149-before2): real results while a task
+            // runs, then the turn after its report ends with no text. The adapter asks once
+            // in the same session; FAKE_SDK_REASK_EMPTY makes that turn empty too.
+            yield { type: 'system', subtype: 'background_tasks_changed',
+                    tasks: [{ task_id: 'bg-1', task_type: 'local_agent', description: 'research' }] }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'waiting for the researcher', modelUsage: usage }
+            yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] }
+            yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
+            yield { type: 'result', subtype: 'success', is_error: false, result: '', modelUsage: usage }
+            const followUp = await Promise.race([input.next(), new Promise(resolve => setTimeout(() => resolve(null), 5000).unref())])
+            record.reask = followUp && !followUp.done ? followUp.value.message.content : null
+            save()
+            yield { type: 'result', subtype: 'success', is_error: false,
+                    result: process.env.FAKE_SDK_REASK_EMPTY ? '' : 'FINAL PINEAPPLE', modelUsage: usage }
           } else if (process.env.FAKE_SDK_BACKGROUND) {
             // A turn that launches a background subagent and ends before it reports, as
             // Claude Code does: the input must stay open, and Claude Code continues.
@@ -295,6 +310,44 @@ def test_a_step_waits_for_its_background_tasks_before_it_finishes(tmp_path, fake
     assert sent["backgroundTasksInChildEnv"] is None
     assert sent["controlsInChildEnv"] == []
     assert _receipt(workdir)["background_tasks_waited"] == 1
+
+
+def test_an_empty_last_turn_is_asked_once_for_the_answer_on_the_walker_path(tmp_path, fake_sdk, monkeypatch):
+    """A turn after a background report that ends with no text is not the step's answer
+    (m46-dm149-before2 failed "the answer was empty"): the adapter asks once in the same
+    session, and that turn's answer is the node's output."""
+    monkeypatch.setenv("FAKE_SDK_BACKGROUND", "empty-final")
+    workdir = tmp_path / "run"
+    answer = _client(tmp_path).complete("Plan the research", workdir=workdir)
+
+    assert answer.strip() == "FINAL PINEAPPLE"
+    sent = json.loads(fake_sdk.read_text())
+    assert "ended without a reply" in sent["reask"]
+    receipt = _receipt(workdir)
+    assert receipt["state"] == "completed"
+    assert receipt["empty_answer_reasked"] is True
+    assert "answer_from_earlier_turn" not in receipt
+
+
+def test_an_empty_last_turn_keeps_the_earlier_answer_on_the_spine_path(tmp_path, fake_sdk, monkeypatch):
+    """Still no text when asked: the spine worker keeps the last real answer rather than
+    failing the node and losing it."""
+    from refactory_dsh.worker_node import execute
+
+    monkeypatch.setenv("FAKE_SDK_BACKGROUND", "empty-final")
+    monkeypatch.setenv("FAKE_SDK_REASK_EMPTY", "1")
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    execute({"schema_version": 1, "node_id": "solve", "reads": [], "writes": ["answer.txt"],
+             "produces": [], "prompt": "Plan the research", "tool_policy": "none",
+             "model_context": _client(tmp_path).context()},
+            workdir)
+
+    assert (workdir / "answer.txt").read_text().strip() == "waiting for the researcher"
+    receipt = _receipt(workdir)
+    assert receipt["state"] == "completed"
+    assert receipt["empty_answer_reasked"] is True
+    assert receipt["answer_from_earlier_turn"] is True
 
 
 def test_a_silent_background_task_and_cli_end_the_step_with_its_last_answer(tmp_path, fake_sdk, monkeypatch):

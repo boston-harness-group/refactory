@@ -11,11 +11,12 @@ const source = readFileSync(resolve(root, 'node_modules/@deepseek-ai/dsh-subagen
 const start = source.indexOf('const GIVEN_UP')
 const scope = {
   setTimeout, clearTimeout,
-  ClaudeCodeFailure: class extends Error {},
+  ClaudeCodeFailure: class extends Error { constructor(facts) { super(facts?.detail); this.facts = facts } },
   successfulResult: message => {
     if (message.is_error) throw new Error(`error result: ${message.result}`)
     return message.result
   },
+  resultFailureFacts: () => ({ stage: 'query-run', category: 'invalid-result', detail: 'the answer was empty' }),
 }
 vm.createContext(scope)
 vm.runInContext(source.slice(start, source.indexOf('\n/**', source.indexOf('async function consumeClaudeQuery('))), scope)
@@ -25,14 +26,14 @@ const tasks = (...ids) => ({ type: 'system', subtype: 'background_tasks_changed'
 const result = text => ({ type: 'result', subtype: 'success', is_error: false, result: text })
 
 /** Run a script; `released()` inside it says whether the input was released by then. */
-async function run(script, sent = undefined, abortQuery = undefined) {
+async function run(script, sent = undefined, abortQuery = undefined, askAgain = undefined) {
   let released = false
   let release
   const releasedNow = new Promise(resolve => { release = resolve })
   const metadata = []
   const stream = script(() => released, releasedNow)
   const outcome = await scope.consumeClaudeQuery(stream, undefined, undefined, data => metadata.push(data),
-    sent, () => { released = true; release() }, abortQuery).then(value => ({ value }), error => ({ error }))
+    sent, () => { released = true; release() }, abortQuery, askAgain).then(value => ({ value }), error => ({ error }))
   return { ...outcome, released, metadata }
 }
 
@@ -145,4 +146,56 @@ const streaming = await run(async function* (released, releasedNow) {
 assert.equal(streaming.value.output[0].text, 'FINAL')
 assert.equal(abortedWhileStreaming, 0)
 assert.ok(!streaming.metadata.some(data => 'background_stream_stopped' in data))
+
+// (i) The run that lost its answer: real results while tasks run, then the last turn
+// after the final report ends with no text. The step asks once in the same session, and
+// that turn's answer is the step's.
+const asked = []
+const answered = []
+const reasked = await run(async function* (released) {
+  yield tasks('bg-1')
+  yield result('waiting for the researcher')
+  yield { type: 'system', subtype: 'init', model: 'm', session_id: 's' }
+  yield tasks()
+  yield result('')
+  answered.push(released())
+  yield result('FINAL: plan written')
+}, undefined, undefined, text => { asked.push(text); return true })
+assert.equal(asked.length, 1)
+assert.match(asked[0], /ended without a reply/)
+assert.deepEqual(answered, [false])
+assert.equal(reasked.value.output[0].text, 'FINAL: plan written')
+assert.equal(reasked.released, true)
+assert.ok(reasked.metadata.some(data => data.empty_answer_reasked === true))
+assert.ok(!reasked.metadata.some(data => 'answer_from_earlier_turn' in data))
+// (j) Still no text when asked: the last real answer is kept, never lost.
+const kept2 = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('interim answer')
+  yield tasks()
+  yield result('')
+  yield result('  ')
+}, undefined, undefined, () => true)
+assert.equal(kept2.value.output[0].text, 'interim answer')
+assert.ok(kept2.metadata.some(data => data.answer_from_earlier_turn === true))
+// (k) No answer in any turn, even when asked: the empty-answer failure, saying it asked.
+let askedOnce = 0
+const none = await run(async function* () {
+  yield result('')
+  yield result('')
+}, undefined, undefined, () => { askedOnce += 1; return true })
+assert.equal(askedOnce, 1)
+assert.equal(none.error.facts.detail, 'the answer was empty, also when asked once more for it')
+assert.ok(none.error instanceof scope.ClaudeCodeFailure)
+// (l) When the input can no longer take a message, an earlier answer is still kept and
+// none at all still fails.
+const closed = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('interim answer')
+  yield tasks()
+  yield result('')
+}, undefined, undefined, () => false)
+assert.equal(closed.value.output[0].text, 'interim answer')
+const closedNone = await run(async function* () { yield result('') }, undefined, undefined, () => false)
+assert.equal(closedNone.error.facts.detail, 'the answer was empty')
 console.log('claude code background-task waits passed')
