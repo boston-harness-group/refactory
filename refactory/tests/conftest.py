@@ -86,6 +86,51 @@ def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv(target_guard.UNWATCHED_ENV, str(REPO_ROOT))
 
 
+_TESTS_DIR = Path(__file__).resolve().parent
+
+
+def _test_files() -> set[str]:
+    return {name for name in os.listdir(_TESTS_DIR) if name != "__pycache__" and not name.startswith(".")}
+
+
+_TESTS_BEFORE = pytest.StashKey[set]()
+
+
+def _check_test_files(item: pytest.Item, when: str) -> None:
+    before = item.stash.get(_TESTS_BEFORE, None)
+    after = _test_files()
+    if before is not None and after != before:
+        pytest.fail(f"{_TESTS_DIR} changed {when} (this test, or a test on another worker, wrote "
+                    f"into the checkout): added {sorted(after - before)}, removed "
+                    f"{sorted(before - after)}", pytrace=False)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """No test writes into this checkout's tests directory, not even for a moment.
+
+    Two tests once wrote an op module here for their fixture's lifetime, which a design
+    run on another worker reported as a change to its launcher checkout (CI's
+    run-warning flake). The directory is listed before a test's fixtures are set up and
+    compared once they are (a fixture's file is there while the test runs) and after
+    teardown (whatever is left behind); the session's repository guard (`repo_guard`)
+    sees the rest of the checkout. Ops a test needs are committed modules (`_ops_*.py`).
+    """
+    item.stash[_TESTS_BEFORE] = _test_files()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item: pytest.Item) -> None:
+    _check_test_files(item, "while its fixtures were set up")
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Iterator[None]:
+    result = yield
+    _check_test_files(item, "by the time it was torn down")
+    return result
+
+
 # ── the sealed suite: no test reaches the person's DSH home or the real gh ──────
 #
 # A test resolved the person's own DSH home and touched a profile there in the middle of

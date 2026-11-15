@@ -1078,6 +1078,26 @@ def test_an_emit_during_which_the_launcher_checkout_moves_warns_but_succeeds(
     assert "files outside its worktree changed" in warned
 
 
+def test_a_launcher_checkout_the_suite_leaves_unwatched_is_not_warned_about(
+        repo, tmp_path, monkeypatch, capsys):
+    """The test suite's own checkout (`REFACTORY_GUARD_UNWATCHED`) is not a launcher to warn
+    about: a test on another worker writing there once read as this run's warning (CI)."""
+    from refactory_dsh import target_guard
+
+    launcher = git_repo(tmp_path / "launcher")
+    monkeypatch.setenv("REFACTORY_PROJECT", str(launcher))
+    monkeypatch.setenv(target_guard.UNWATCHED_ENV, str(launcher))
+    result = _design(
+        tmp_path / "run",
+        _EditingModel(_answers(render({"tool.py": "print(1)\n"})),
+                      lambda: launcher),
+        target=str(repo))
+    assert result.exit_ok is True, result.error
+    warned = capsys.readouterr().err
+    assert f"in {launcher.resolve()}" not in warned
+    assert "files outside its worktree changed" not in warned
+
+
 def test_a_worktree_run_does_not_warn_that_the_persons_checkout_moved(repo, tmp_path, capsys):
     """A person's edit during a planning step is now refused and the target is restored (dm-159).
 
