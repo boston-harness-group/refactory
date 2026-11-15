@@ -11,11 +11,12 @@ const source = readFileSync(resolve(root, 'node_modules/@deepseek-ai/dsh-subagen
 const start = source.indexOf('const GIVEN_UP')
 const scope = {
   setTimeout, clearTimeout,
-  ClaudeCodeFailure: class extends Error {},
+  ClaudeCodeFailure: class extends Error { constructor(facts) { super(facts?.detail); this.facts = facts } },
   successfulResult: message => {
     if (message.is_error) throw new Error(`error result: ${message.result}`)
     return message.result
   },
+  resultFailureFacts: () => ({ stage: 'query-run', category: 'invalid-result', detail: 'the answer was empty' }),
 }
 vm.createContext(scope)
 vm.runInContext(source.slice(start, source.indexOf('\n/**', source.indexOf('async function consumeClaudeQuery('))), scope)
@@ -25,14 +26,14 @@ const tasks = (...ids) => ({ type: 'system', subtype: 'background_tasks_changed'
 const result = text => ({ type: 'result', subtype: 'success', is_error: false, result: text })
 
 /** Run a script; `released()` inside it says whether the input was released by then. */
-async function run(script, sent = undefined, abortQuery = undefined) {
+async function run(script, sent = undefined, abortQuery = undefined, askAgain = undefined) {
   let released = false
   let release
   const releasedNow = new Promise(resolve => { release = resolve })
   const metadata = []
   const stream = script(() => released, releasedNow)
   const outcome = await scope.consumeClaudeQuery(stream, undefined, undefined, data => metadata.push(data),
-    sent, () => { released = true; release() }, abortQuery).then(value => ({ value }), error => ({ error }))
+    sent, () => { released = true; release() }, abortQuery, askAgain).then(value => ({ value }), error => ({ error }))
   return { ...outcome, released, metadata }
 }
 
@@ -145,4 +146,103 @@ const streaming = await run(async function* (released, releasedNow) {
 assert.equal(streaming.value.output[0].text, 'FINAL')
 assert.equal(abortedWhileStreaming, 0)
 assert.ok(!streaming.metadata.some(data => 'background_stream_stopped' in data))
+
+// (i) The run that lost its answer: real results while tasks run, then the last turn
+// after the final report ends with no text. The step asks once in the same session, and
+// that turn's answer is the step's.
+const asked = []
+const answered = []
+const reasked = await run(async function* (released) {
+  yield tasks('bg-1')
+  yield result('waiting for the researcher')
+  yield { type: 'system', subtype: 'init', model: 'm', session_id: 's' }
+  yield tasks()
+  yield result('')
+  answered.push(released())
+  yield result('FINAL: plan written')
+}, undefined, undefined, text => { asked.push(text); return true })
+assert.equal(asked.length, 1)
+assert.match(asked[0], /ended without a reply/)
+assert.deepEqual(answered, [false])
+assert.equal(reasked.value.output[0].text, 'FINAL: plan written')
+assert.equal(reasked.released, true)
+assert.ok(reasked.metadata.some(data => data.empty_answer_reasked === true))
+assert.ok(!reasked.metadata.some(data => 'answer_from_earlier_turn' in data))
+// (j) Still no text when asked, and the only text was written while a task ran: that is
+// an interim note, not the answer, so the step fails and the failure carries it.
+const interimOnly = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('launching the researchers')
+  yield tasks()
+  yield result('')
+  yield result('  ')
+}, undefined, undefined, () => true)
+assert.equal(interimOnly.error.facts.detail, 'the answer was empty, also when asked once more for it; '
+  + 'its last text, written while background tasks still ran, was: launching the researchers')
+// (k) No text in any turn, even when asked: the empty-answer failure, saying it asked.
+let askedOnce = 0
+const none = await run(async function* () {
+  yield result('')
+  yield result('')
+}, undefined, undefined, () => { askedOnce += 1; return true })
+assert.equal(askedOnce, 1)
+assert.equal(none.error.facts.detail, 'the answer was empty, also when asked once more for it')
+// (l) A settled answer (given with no task running) is kept when a later turn -- Claude
+// Code continuing on its own after the input closed -- ends with no text.
+const settledKept = await run(async function* () {
+  yield result('FULL ANSWER')
+  yield tasks('late')
+  yield tasks()
+  yield result('')
+}, undefined, undefined, () => false)
+assert.equal(settledKept.value.output[0].text, 'FULL ANSWER')
+assert.ok(settledKept.metadata.some(data => data.answer_from_earlier_turn === true))
+const closedInterim = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('interim note')
+  yield tasks()
+  yield result('')
+}, undefined, undefined, () => false)
+assert.match(closedInterim.error.facts.detail, /^the answer was empty; its last text, written while background tasks still ran, was: interim note$/)
+const closedNone = await run(async function* () { yield result('') }, undefined, undefined, () => false)
+assert.equal(closedNone.error.facts.detail, 'the answer was empty')
+// (m) A reply to the re-ask that only points back never replaces a settled answer.
+const pointer = await run(async function* () {
+  yield result('FULL ANSWER')
+  yield result('')
+  yield result('My final answer is above.')
+}, undefined, undefined, () => true)
+assert.equal(pointer.value.output[0].text, 'FULL ANSWER')
+// (n) An empty result while a task still runs is no reason to ask: Claude Code carries on
+// as the task reports back, and the later answer is the step's.
+let askedWhileLive = 0
+const live = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('')
+  yield tasks()
+  yield result('FINAL')
+}, undefined, undefined, () => { askedWhileLive += 1; return true })
+assert.equal(askedWhileLive, 0)
+assert.equal(live.value.output[0].text, 'FINAL')
+// (o) A CLI that never answers the re-ask is bounded like a silent task: the input is
+// released after the quiet bound and the step fails, not held until the node timeout.
+const unanswered = await run(async function* (released, releasedNow) {
+  yield tasks('bg-1')
+  yield result('interim note')
+  yield tasks()
+  yield result('')
+  await releasedNow
+}, { backgroundQuietS: 0.1 }, undefined, () => true)
+assert.equal(unanswered.released, true)
+assert.match(unanswered.error.facts.detail, /also when asked once more for it; its last text.*interim note$/)
+// With no task ever running, only the bound armed by the re-ask can release the input.
+const unansweredAlone = await Promise.race([
+  run(async function* (released, releasedNow) {
+    yield result('')
+    await releasedNow
+  }, { backgroundQuietS: 0.1 }, undefined, () => true),
+  sleep(2000).then(() => 'held'),
+])
+assert.notEqual(unansweredAlone, 'held', 'an unanswered re-ask held the step past its quiet bound')
+assert.equal(unansweredAlone.error.facts.detail, 'the answer was empty, also when asked once more for it')
 console.log('claude code background-task waits passed')

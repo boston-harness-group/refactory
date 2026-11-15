@@ -62,6 +62,14 @@ Code stops what is left, and `background_tasks_abandoned` counts it. A Claude Co
 stays alive and silent after that is stopped within 30 s, and the step still finishes
 with its last answer (`background_stream_stopped`). A long
 research step may therefore need `--model-timeout` above the default 1800 s per call.
+A turn that ends with no text (often the last one, after a background report) is not
+the answer either: the step asks Claude Code once, in the same session, for its complete
+final answer (`empty_answer_reasked`), bounded like a silent task. If that turn is empty
+too, it keeps an earlier answer only when that one was given with no task running
+(`answer_from_earlier_turn`); text written while tasks still ran is an interim note, so
+the step fails "the answer was empty" and the error quotes that note. A reply to the
+re-ask never replaces such an earlier answer. The node is not rerun, since a session
+with tools is not safe to replay.
 
 A claude_code worker always compacts its conversation as it fills, as an interactive
 Claude Code does by default, so a long step (a builder writing a large change) does not
