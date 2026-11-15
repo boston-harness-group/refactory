@@ -3298,11 +3298,11 @@ build-loop limit and ended with nothing delivered:
 - `refactory/tests/test_delivery_local.py::test_a_draft_whose_push_is_refused_keeps_the_work_local_as_without_the_fact`
 - b45a, through the real design graph: `test_delivery_drafts.py::test_a_review_limit_at_gate_qa_with_a_passing_attempt_delivers_a_draft`,
   `::test_a_check_that_still_fails_at_its_limit_delivers_a_draft_marked_check_failing`,
-  `::test_a_run_with_no_applied_commit_delivers_nothing`,
   `::test_the_refusal_bound_after_an_applied_commit_delivers_that_commit_as_a_draft`,
   `::test_a_review_limit_at_gate_overwatch_delivers_a_draft`,
   `::test_a_persons_description_survives_two_draft_deliveries`,
-  `::test_a_full_delivery_after_a_draft_makes_it_ready_with_no_section`,
+  `::test_a_full_delivery_after_a_draft_makes_it_ready_with_no_section`;
+  `test_delivery.py::test_a_run_with_no_applied_commit_delivers_nothing`,
   `::test_a_run_whose_whole_change_is_empty_opens_no_pull_request`; through the node
   runner: `test_build_loop_stop.py::test_a_design_check_limit_goes_to_the_report_as_a_draft_on_the_spine`,
   `::test_the_refusal_bound_after_an_applied_commit_goes_to_the_report_on_the_spine`,

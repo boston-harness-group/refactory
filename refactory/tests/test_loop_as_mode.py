@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -65,14 +66,13 @@ def _direct(root: Path, **overrides: object) -> dict:
 
 
 @pytest.fixture(scope="module")
-def default_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[nn.Mode, nn.RunResult, Path]:
+def default_run(tmp_path_factory: pytest.TempPathFactory,
+                sealed_environment: Any) -> tuple[nn.Mode, nn.RunResult, Path]:
     """One run at the default settings, which every test that only reads such a run reads
-    (each run was ~9 s in CI). Its own home and DSH home, as a test's would be: a module
-    fixture is set up before the per-test sealing."""
+    (each run was ~9 s in CI). A module fixture is set up before the per-test isolation,
+    so it takes the same isolation itself (`sealed_environment`)."""
     root = tmp_path_factory.mktemp("loop-as-mode")
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("REFACTORY_HOME", str(root / "home"))
-        patch.setenv("DSH_HOME", str(root / "dsh-home"))
+    with sealed_environment(root):
         mode, result = _run(root / "graph")
     return mode, result, root / "graph"
 
