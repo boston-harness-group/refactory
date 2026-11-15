@@ -601,16 +601,19 @@ def test_mixed_conflict_sends_back_only_the_authored_file(github, tmp_path, monk
     assert len(detail[0]["excerpt"].splitlines()) <= 41
 
 
-def test_conflict_send_back_stays_bounded_with_multi_megabyte_files(github, tmp_path, monkeypatch):
-    """Multi-megabyte conflicting files reach the builder as at most a bounded excerpt each
-    and about 20 KB in all, in the file list and in the validation text the prompt renders.
+def test_conflict_send_back_stays_bounded_with_large_files(github, tmp_path, monkeypatch):
+    """Large conflicting files reach the builder as at most a bounded excerpt each and about
+    20 KB in all, in the file list and in the validation text the prompt renders.
 
-    Fails without the change: validation carries the base, ours and theirs files whole.
+    Fails without the change: validation carries the base, ours and theirs files whole. The
+    bounds bind on conflict hunks, not bytes: 150 hunks a file (every 20th row differs)
+    cross each of them several times over without the change, where the 3.5 MB files this
+    once used had 70 and only made the run slower.
     """
-    lines = [f"row {i} " + "x" * 40 for i in range(70_000)]  # about 3.5 MB
+    lines = [f"row {i} " + "x" * 40 for i in range(3_000)]  # about 140 KB
 
     def variant(tag):
-        return "\n".join(f"{row} {tag}" if i % 1000 == 0 else row for i, row in enumerate(lines)) + "\n"
+        return "\n".join(f"{row} {tag}" if i % 20 == 0 else row for i, row in enumerate(lines)) + "\n"
 
     repo = git_repo(tmp_path / "repo")
     for name in ("big_a.txt", "big_b.txt", "big_c.txt"):
@@ -1356,71 +1359,79 @@ def test_delivery_advances_worktree_after_merge_push(github, tmp_path, monkeypat
         f"expected base to be second parent {second_parent}, got {found.base}"
 
 
-def test_unresolved_conflict_stops_after_budget(github, tmp_path, monkeypatch):
-    """A builder that never resolves the conflict stops after check_attempts,
-    with a clean worktree.
+def test_an_unresolved_mid_run_conflict_is_delivered_as_a_draft_naming_it(github, tmp_path, monkeypatch):
+    """A builder that never resolves a conflict with main ends in a draft pull request that
+    names the conflict (a passing check always ends in a pull request, b45a), within its
+    conflict budget, with a clean worktree.
 
-    The emission omits the conflicted file every time, so materialise refuses
-    it ("missing: shared.py").  The delivery_gate counts reloops against
-    check_attempts; after the limit it raises without starting a merge.
-
-    Fails without the change: the evaluator never counts reloops, so the run
-    stops with "check exceeded max_iterations of 8" and MERGE_HEAD is left.
+    Main changes shared.py after the run starts, as the run's own build does, so delivery
+    meets the conflict. Every later emission writes only tool.py, omitting shared.py, so
+    materialise refuses it. The delivery gate counts the reloop against check_attempts (1)
+    and the run stops sending the conflict back once that is spent. (This test once moved
+    main before the run, which gave the run a base with no conflict at all, and asserted
+    nothing about its result.)
     """
     repo = git_repo(tmp_path / "repo")
     (repo / "shared.py").write_text("def f():\n    return 1\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "base")
     slug = "acme/unresolved"
-    bare = _published(github, slug, repo)
+    _published(github, slug, repo)
+    _move_main_then_deliver(tmp_path, slug, files={"shared.py": "def f():\n    return 2\n"})
 
-    # First run to advance main.
-    run1 = tmp_path / "run1"
-    result1 = _design(run1, {"tool.py": "print('built')\n",
-                             "shared.py": "def f():\n    return 2\n"},
-                      target=str(repo), check="python tool.py")
-    assert result1.exit_ok, result1.error
-    branch1 = json.loads((run1 / "design.json").read_text())["branch"]
-    # Merge first run into main.
-    main_clone = tmp_path / "main_clone"
-    git(tmp_path, "clone", "-q", f"https://github.com/{slug}.git", str(main_clone))
-    git(main_clone, "-c", "user.name=t", "-c", "user.email=t@example.com",
-        "merge", "-q", "--no-ff", f"origin/{branch1}", "-m", "merge first run")
-    git(main_clone, "push", "-q", "origin", "main")
-
-    # Second run: emits only tool.py, omitting the conflicted shared.py.
-    # Materialise will refuse because the unmerged path is missing from the
-    # emission, and the delivery_gate will count the reloop.
-    bad_emit = "===FILE: tool.py===\nprint('built')\n"
-
-    # Use check_attempts=1 so it stops quickly.
-    run2 = tmp_path / "run2"
-    mode = _mode(check_attempts=1)
+    run = tmp_path / "run"
     model = FakeModel(_answers(render({"tool.py": "print('built')\n",
                                        "shared.py": "def f():\n    return 42\n"}))
-                      + [bad_emit] * 8)
-    result2 = mode.run(
-        run2, model=model, verdicts={"gate_strategy": "proceed"},
+                      + ["===FILE: tool.py===\nprint('built')\n"] * 8)
+    result = _mode(check_attempts=1).run(
+        run, model=model, verdicts={"gate_strategy": "proceed"},
         task={"name": NAME, "brief": "Build a tool\nthat prints built.",
               "check": "python tool.py", "target": str(repo)},
     )
-    # The run should stop (not succeed) because the conflict was never resolved.
-    found = worktree.recorded(run2)
-    if found is not None:
-        path = Path(found.path)
-        # The worktree must be clean — no MERGE_HEAD.
-        with pytest.raises(subprocess.CalledProcessError):
-            git(path, "rev-parse", "--verify", "-q", "MERGE_HEAD")
-        # No unmerged index entries.
-        try:
-            unmerged = worktree.git(path, "diff", "--name-only", "--diff-filter=U")
-        except ValueError:
-            unmerged = ""
-        assert not unmerged.strip(), f"unmerged files remain: {unmerged}"
-    # pending-merge.json should be cleaned up.
-    pm = run2 / ".refactory" / "pending-merge.json"
-    # It may or may not exist depending on the stop path, but MERGE_HEAD
-    # must be gone regardless.
+    assert result.exit_ok, result.error
+    record = _record(run)
+    assert record["status"] == "opened" and record["draft"] is True, record
+    [pull] = json.loads((github / f"{slug}.pulls.json").read_text())
+    assert pull["draft"] and "Merge conflict with base in shared.py" in pull["body"], pull["body"]
+    # Within budget: one conflict send-back (check_attempts=1), and the build stops at the
+    # refusal bound (one build, three refused emissions) rather than spending all eight.
+    assert int(result.facts["delivery_conflict_reloops"]) == 1
+    assert sum(1 for prompt in model.prompts if "Write the artifact `" in prompt) == 4
+    found = worktree.recorded(run)
+    path = Path(found.path)
+    with pytest.raises(subprocess.CalledProcessError):
+        git(path, "rev-parse", "--verify", "-q", "MERGE_HEAD")
+    assert not worktree.git(path, "diff", "--name-only", "--diff-filter=U").strip()
+
+
+def test_a_conflict_that_comes_back_every_delivery_stops_at_its_budget(github, tmp_path, monkeypatch):
+    """Main changes shared.py again before every delivery, so a builder that resolves each
+    conflict meets a fresh one: the delivery gate sends it back check_attempts (1) times and
+    no more, naming the conflicting file. (What the run then delivers is the subject of a
+    follow-up: today it stops and keeps the work local, where a draft would follow b45a.)"""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "shared.py").write_text("def f():\n    return 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    slug = "acme/budget"
+    _published(github, slug, repo)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main_each", {
+        "slug": slug, "clone": str(tmp_path / "other"), "path": "shared.py", "counter": str(tmp_path / "moves")}]])
+    run = tmp_path / "run"
+    builds = [render({"tool.py": "print('built')\n", "shared.py": f"def f():\n    return {42 + i}\n"})
+              for i in range(8)]
+    model = FakeModel(_answers(builds[0]) + builds[1:])
+    result = _mode(check_attempts=1).run(
+        run, model=model, verdicts={"gate_strategy": "proceed"},
+        task={"name": NAME, "brief": "Build a tool\nthat prints built.", "check": "python tool.py",
+              "target": str(repo)})
+    assert int(result.facts["delivery_conflict_reloops"]) == 1
+    assert sum(1 for prompt in model.prompts if "Write the artifact `" in prompt) == 2, "one build, one send-back"
+    assert _record(run)["merge_conflicts"] == ["shared.py"]
+    assert "shared.py" in (result.error or "") + json.dumps(_record(run))
+    path = Path(worktree.recorded(run).path)
+    with pytest.raises(subprocess.CalledProcessError):
+        git(path, "rev-parse", "--verify", "-q", "MERGE_HEAD")
 
 
 def test_cleanly_merged_edit_keeps_mains_change(tmp_path):

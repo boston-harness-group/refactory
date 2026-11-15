@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -64,6 +65,18 @@ def _direct(root: Path, **overrides: object) -> dict:
     return Loop(TARGET, config, project=Path(".")).run()
 
 
+@pytest.fixture(scope="module")
+def default_run(tmp_path_factory: pytest.TempPathFactory,
+                sealed_environment: Any) -> tuple[nn.Mode, nn.RunResult, Path]:
+    """One run at the default settings, which every test that only reads such a run reads
+    (each run was ~9 s in CI). A module fixture is set up before the per-test isolation,
+    so it takes the same isolation itself (`sealed_environment`)."""
+    root = tmp_path_factory.mktemp("loop-as-mode")
+    with sealed_environment(root):
+        mode, result = _run(root / "graph")
+    return mode, result, root / "graph"
+
+
 # ── the graph is the loop ──────────────────────────────────────────────────
 
 
@@ -107,18 +120,18 @@ def _package_knobs() -> dict:
 # ── running it runs the loop ───────────────────────────────────────────────
 
 
-def test_it_produces_the_same_score_as_the_loop_itself(tmp_path):
+def test_it_produces_the_same_score_as_the_loop_itself(tmp_path, default_run):
     """The claim of #18: the graph IS the loop, not a re-implementation of it."""
-    mode, result = _run(tmp_path / "graph")
+    mode, result, _root = default_run
     direct = _direct(tmp_path / "direct")
     assert result.exit_ok, result.error
     assert direct["best_score"] == mode.score(result)
     assert direct["evaluations"] == result.facts["evaluations"]
 
 
-def test_it_writes_the_run_the_loop_would_have_written(tmp_path):
-    _package, result = _run(tmp_path / "graph")
-    root = tmp_path / "graph" / "loop"
+def test_it_writes_the_run_the_loop_would_have_written(default_run):
+    _package, result, run = default_run
+    root = run / "loop"
     for name in ("config.json", "journal.jsonl", "report.json", "report.md", "gradient.json"):
         assert (root / name).exists(), name
     report = json.loads((root / "report.json").read_text())
@@ -150,8 +163,8 @@ def test_the_graph_closes_each_epoch_with_that_epochs_counts(tmp_path, monkeypat
         assert counts["proposed"] == counts["accepted"] + counts["refused"] > 0, counts
 
 
-def test_the_run_reports_what_bounded_it(tmp_path):
-    _package, result = _run(tmp_path / "graph")
+def test_the_run_reports_what_bounded_it(default_run):
+    _package, result, _root = default_run
     assert result.facts["bound"] == "epochs"
 
 
@@ -237,9 +250,9 @@ def test_the_loops_own_knobs_are_a_real_lever(tmp_path):
     )
 
 
-def test_its_score_is_the_best_score_the_inner_run_reached(tmp_path):
-    _package, result = _run(tmp_path / "graph")
-    report = json.loads((tmp_path / "graph" / "loop" / "report.json").read_text())
+def test_its_score_is_the_best_score_the_inner_run_reached(default_run):
+    _package, result, run = default_run
+    report = json.loads((run / "loop" / "report.json").read_text())
     assert result.facts["best"] == report["best_score"]
 
 
@@ -251,14 +264,14 @@ def test_a_run_with_no_score_is_refused_rather_than_read_as_zero(tmp_path):
         mode.score(empty)
 
 
-def test_the_declared_ports_are_the_files_the_run_writes(tmp_path):
+def test_the_declared_ports_are_the_files_the_run_writes(default_run):
     """A port says what a run produced; the validator is what keeps that true."""
-    mode, result = _run(tmp_path / "run")
+    mode, result, run = default_run
     assert result.exit_ok, result.error
     ports = {port.name: port.path for port in mode.ports()}
     assert set(ports) == {"report", "journal"}
     for path in ports.values():
-        assert (tmp_path / "run" / path).exists(), path
+        assert (run / path).exists(), path
 
 
 def test_the_steps_are_ops_the_optimizer_may_not_edit_away(tmp_path):

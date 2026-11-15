@@ -67,8 +67,9 @@ def test_a_run_with_no_target_starts_a_new_project_and_commits_its_work_on_a_bra
         "new", payload["branch"], "succeeded")
 
 
-def test_the_same_idea_again_is_a_new_branch_of_the_same_project_from_main(tmp_path):
+def test_the_same_idea_again_is_a_new_branch_of_the_same_project_from_main(tmp_path, capsys):
     first = _design(tmp_path / "one", FakeModel(_answers(render({"tool.py": "print(1)\n"}))))
+    capsys.readouterr()
     second = _design(tmp_path / "two", FakeModel(_answers(render({"tool.py": "print(2)\n"}))))
     assert first.exit_ok and second.exit_ok, (first.error, second.error)
     one, two = _report(tmp_path / "one"), _report(tmp_path / "two")
@@ -76,6 +77,10 @@ def test_the_same_idea_again_is_a_new_branch_of_the_same_project_from_main(tmp_p
     assert one["base"] == two["base"], "the second run starts from main, not from the first run's branch"
     [entry] = projects.load()["projects"]
     assert [note["status"] for note in entry["runs"]] == ["succeeded", "succeeded"]
+    # A new project's main stays empty until #350 delivers, so the second run names the
+    # branches the work is on.
+    warned = capsys.readouterr().err
+    assert f"has earlier runs, whose work is on their branches, not on main: {one['branch']}" in warned
 
 
 def test_a_run_from_another_base_works_from_that_commit(repo, tmp_path):
@@ -600,17 +605,6 @@ def test_a_base_for_a_project_that_does_not_exist_yet_is_refused_before_it_is_ma
     assert result.exit_ok is False
     assert "this run starts a new project, which has only its empty main" in (result.error or "")
     assert not (projects_dir() / NAME).exists()
-
-
-def test_a_second_run_on_a_project_names_the_earlier_runs_branches(tmp_path, capsys):
-    """A new project's main stays empty until #350 delivers, so the work is on the branches."""
-    first = _design(tmp_path / "one", FakeModel(_answers(render({"tool.py": "print(1)\n"}))))
-    assert first.exit_ok, first.error
-    capsys.readouterr()
-    second = _design(tmp_path / "two", FakeModel(_answers(render({"tool.py": "print(2)\n"}))))
-    assert second.exit_ok, second.error
-    warned = capsys.readouterr().err
-    assert f"has earlier runs, whose work is on their branches, not on main: {_report(tmp_path / 'one')['branch']}" in warned
 
 
 def test_the_agents_are_told_the_worktree_and_the_reviewers_the_diff_and_the_wrapper(repo, tmp_path):

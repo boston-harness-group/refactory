@@ -720,14 +720,21 @@ def test_early_asks_verdict_from_earlier_attempt_does_not_carry_over(tmp_path, m
     ("Updated tests: tests/test_pin.py::test_pin_ (follows ask 1)",
      "tests/test_pin.py::test_pin_ (follows ask 1)"),
     ("Updated tests: tests/test_x.py::test__init__", "tests/test_x.py::test__init__")])
-def test_markdown_around_the_updated_tests_line_is_not_part_of_the_test_id(tmp_path, monkeypatch,
-                                                                            said, named):
+def test_markdown_around_the_updated_tests_line_is_not_part_of_the_test_id(said, named):
+    line = "tests/test_pin.py::test_pin (follows ask 1)"
+    assert design_ops.updated_tests_named(f"Done.\n{said.format(line=line)}\n") == [named.format(line=line)]
+
+
+def test_the_updated_tests_line_becomes_the_fact_through_a_whole_run(tmp_path, monkeypatch):
+    """One markdown form end to end: the builder's completion message is read from its
+    receipt and its named test reaches the ``updated_tests`` fact (the parsing's every form
+    is above, called directly)."""
     T._Chunks(monkeypatch, fails=set())
     line = "tests/test_pin.py::test_pin (follows ask 1)"
-    model = _Builder(T._answers(CLEAN), [f"Done.\n{said.format(line=line)}\n"])
+    model = _Builder(T._answers(CLEAN), [f"Done.\n**Updated tests:** `{line}`\n"])
     result = T._design(tmp_path / "run", model, T._target(tmp_path / "repo", PINNED))
     assert result.exit_ok, result.error
-    assert result.facts["updated_tests"] == f"- {named.format(line=line)}"
+    assert result.facts["updated_tests"] == f"- {line}"
 
 
 def test_past_the_budget_a_build_error_still_stops(

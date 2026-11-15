@@ -3600,8 +3600,7 @@ def note_updated_tests(ctx: Any) -> dict[str, Any]:
             said = (ctx.workdir / str(receipt["final_response"])).read_text()
         except (OSError, UnicodeDecodeError):
             said = ""
-    lines = [_plain(match.group(2)) for match in UPDATED_TESTS_LINE.finditer(said)]
-    lines = [line for line in lines if line.strip(" .`*").lower() not in ("", "none", "no", "n/a")]
+    lines = updated_tests_named(said)
     attempt = int(ctx.facts.get("attempts_used") or 0) + 1
     record = ctx.read_json(UPDATED_TESTS, {}) if ctx.exists(UPDATED_TESTS) else {}
     if not _fixups_used(ctx) or record.get("attempt") != attempt:
@@ -3610,6 +3609,13 @@ def note_updated_tests(ctx: Any) -> dict[str, Any]:
     ctx.write_json(UPDATED_TESTS, record)
     return {"updated_tests": "\n".join(f"- {line}" for line in record["said"])
             or "(the builder named no test it updated)"}
+
+
+def updated_tests_named(said: str) -> list[str]:
+    """The test ids a builder's completion message names on its ``Updated tests:`` lines,
+    without their markdown (`_plain`); a line that names none ("none", "n/a") names none."""
+    lines = [_plain(match.group(2)) for match in UPDATED_TESTS_LINE.finditer(said)]
+    return [line for line in lines if line.strip(" .`*").lower() not in ("", "none", "no", "n/a")]
 
 
 def _not_built_section(ctx: Any) -> str:

@@ -33,9 +33,20 @@ def _current_files() -> dict[str, set[str]]:
     found: dict[str, set[str]] = collections.defaultdict(set)
     for line in listed.splitlines():
         if "::" in line:
-            path, name = line.split("::", 1)
-            found[re.sub(r"\[.*", "", name)].add(path.rsplit("/", 1)[-1])
+            # `file.py::test`, or `file.py::Class::test` for a test in a class.
+            parts = line.split("::")
+            found[re.sub(r"\[.*", "", parts[-1])].add(parts[0].rsplit("/", 1)[-1])
     return found
+
+
+def _module(classname: str) -> str:
+    """The test file a JUnit ``classname`` names: ``refactory.tests.test_x`` for a test
+    function, ``refactory.tests.test_x.TestThing`` for one in a class."""
+    parts = classname.split(".")
+    for part in reversed(parts):
+        if part.startswith("test_") or part.startswith("_"):
+            return part + ".py"
+    return parts[-1] + ".py"
 
 
 def _home(module: str, name: str, where: dict[str, set[str]]) -> str:
@@ -60,7 +71,7 @@ def main(run_dirs: list[str]) -> None:
         for report in sorted(Path(run).rglob("*.xml")):
             for case in ET.parse(report).getroot().iter("testcase"):
                 name = re.sub(r"\[.*", "", case.get("name") or "")
-                module = (case.get("classname") or "").rsplit(".", 1)[-1] + ".py"
+                module = _module(case.get("classname") or "")
                 runs[run][_home(module, name, where)] += float(case.get("time") or 0)
     files = sorted(set().union(*runs.values()))
     durations = {name: round(sum(run[name] for run in runs.values()) / len(runs), 1) for name in files}

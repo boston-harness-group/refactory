@@ -134,7 +134,15 @@ def patch(ctx: Any, *, target: str, name: str, function: str = "", params: dict[
         setattr(module, name, value)
 
 
-STEPS = {"move_main": move_main, "put_back": put_back, "untracked": untracked, "draft": draft,
+def move_main_each(ctx: Any, *, slug: str, clone: str, path: str, counter: str) -> None:
+    """Before every delivery, a new commit to main that changes ``path`` again: a run whose
+    builder resolves each conflict still meets a fresh one at its next delivery."""
+    n = counted(counter)
+    move_main(ctx, slug=slug, clone=f"{clone}-{n}", files={path: f"def f():\n    return {100 + n}\n"},
+              message=f"main moves ({n})")
+
+
+STEPS = {"move_main": move_main, "move_main_each": move_main_each, "put_back": put_back, "untracked": untracked, "draft": draft,
          "seen_head": seen_head, "run_git": run_git, "touch": touch, "seen_record": seen_record,
          "hook": hook, "absent": absent, "patch": patch}
 

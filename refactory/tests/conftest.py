@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -39,17 +40,20 @@ def _isolate_refactory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatc
     A design run with no target creates a project in the projects folder and a
     worktree under refactory's home (#351); a test must never leave either behind.
     """
-    home = tmp_path_factory.mktemp("refactory-home")
-    monkeypatch.setenv("REFACTORY_HOME", str(home / "home"))
-    monkeypatch.setenv("REFACTORY_PROJECTS_DIR", str(home / "projects"))
+    _isolate_home(monkeypatch, tmp_path_factory.mktemp("refactory-home"))
+
+
+def _isolate_home(patch: pytest.MonkeyPatch, home: Path) -> None:
+    patch.setenv("REFACTORY_HOME", str(home / "home"))
+    patch.setenv("REFACTORY_PROJECTS_DIR", str(home / "projects"))
     # A design run that passes delivers a pull request, and may create a repository
     # (#350), so no test may reach the person's own gh login: gh starts logged out.
-    monkeypatch.setenv("GH_CONFIG_DIR", str(home / "gh"))
+    patch.setenv("GH_CONFIG_DIR", str(home / "gh"))
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+        patch.delenv(name, raising=False)
     # A person's own Claude Code choice would change every claude_code worker's route.
-    monkeypatch.delenv("REFACTORY_CLAUDE_EXECUTABLE", raising=False)
-    monkeypatch.delenv("REFACTORY_BACKGROUND_QUIET_S", raising=False)
+    patch.delenv("REFACTORY_CLAUDE_EXECUTABLE", raising=False)
+    patch.delenv("REFACTORY_BACKGROUND_QUIET_S", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -286,44 +290,84 @@ def _sealed(
     real_home = any(request.node.get_closest_marker(name) is not None
                     for name in ("needs_model_credential", "integration"))
     if not real_home:
-        home = tmp_path_factory.mktemp("dsh-home")
-        monkeypatch.setenv("DSH_HOME", str(home))
-        monkeypatch.setenv("REFACTORY_MODEL_DSH_HOME", str(home))
-        # Clear additional env vars that reference the real DSH home so spawned
-        # subprocesses do not inherit paths the seal would catch.  DSH_PROFILE_DIR
-        # and REFACTORY_WORKER_CONTEXT are set when running inside a DSH worker.
-        for name in list(os.environ):
-            if name in ("DSH_HOME", "REFACTORY_MODEL_DSH_HOME"):
-                continue  # already replaced above
-            value = os.environ.get(name, "")
-            if ("DSH" in name or name.startswith("REFACTORY")) and _REAL_DSH_HOMES and any(
-                _REAL_DSH_HOME_IN_TEXT.search(value) for _ in [None] if value
-            ):
-                monkeypatch.delenv(name, raising=False)
-        # Every run needs a model now, and refuses without one (dm-258). The sealed home
-        # holds the choice a person who picked one in Settings → Models has, so a test
-        # that starts a run starts it; a test of the refusal or of the first-run choice
-        # asks for `no_model_choice`.
-        from tests_support import store_model_choice
-
-        store_model_choice(home)
-    bin_dir, log = _real_gh_shim
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    _SEAL.update(home=not real_home, gh=request.node.get_closest_marker("integration") is None, touched=[],
-                 gh_log=log, gh_logged=log.stat().st_size if log.exists() else 0)
+        _seal_dsh_home(monkeypatch, tmp_path_factory.mktemp("dsh-home"))
+    _watch(monkeypatch, _real_gh_shim, home=not real_home,
+           gh=request.node.get_closest_marker("integration") is None)
     try:
         yield
     finally:
         _SEAL.update(home=False, gh=False)
+    touched = _reached_outside(_real_gh_shim[1])
+    if touched:
+        pytest.fail("this test reached outside its sealed environment (dm-267, dm-271):\n  "
+                    + "\n  ".join(touched), pytrace=False)
+
+
+def _seal_dsh_home(patch: pytest.MonkeyPatch, home: Path) -> None:
+    patch.setenv("DSH_HOME", str(home))
+    patch.setenv("REFACTORY_MODEL_DSH_HOME", str(home))
+    # Clear additional env vars that reference the real DSH home so spawned
+    # subprocesses do not inherit paths the seal would catch.  DSH_PROFILE_DIR
+    # and REFACTORY_WORKER_CONTEXT are set when running inside a DSH worker.
+    for name in list(os.environ):
+        if name in ("DSH_HOME", "REFACTORY_MODEL_DSH_HOME"):
+            continue  # already replaced above
+        value = os.environ.get(name, "")
+        if ("DSH" in name or name.startswith("REFACTORY")) and _REAL_DSH_HOMES and any(
+            _REAL_DSH_HOME_IN_TEXT.search(value) for _ in [None] if value
+        ):
+            patch.delenv(name, raising=False)
+    # Every run needs a model now, and refuses without one (dm-258). The sealed home
+    # holds the choice a person who picked one in Settings → Models has, so a test
+    # that starts a run starts it; a test of the refusal or of the first-run choice
+    # asks for `no_model_choice`.
+    from tests_support import store_model_choice
+
+    store_model_choice(home)
+
+
+def _watch(patch: pytest.MonkeyPatch, gh_shim: tuple[Path, Path], *, home: bool, gh: bool) -> None:
+    """Put the gh shim first on PATH and watch the real home and gh from now on."""
+    bin_dir, log = gh_shim
+    patch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    _SEAL.update(home=home, gh=gh, touched=[], gh_log=log,
+                 gh_logged=log.stat().st_size if log.exists() else 0)
+
+
+def _reached_outside(log: Path) -> list[str]:
+    """What the watch saw since `_watch`: real-home paths touched and real gh calls made."""
     touched = list(_SEAL["touched"])
     logged = _SEAL["gh_logged"]
     if log.exists() and log.stat().st_size > logged:
         with log.open() as calls:
             calls.seek(logged)
             touched += [f"the real gh: {line.strip()}" for line in calls if line.strip()]
-    if touched:
-        pytest.fail("this test reached outside its sealed environment (dm-267, dm-271):\n  "
-                    + "\n  ".join(dict.fromkeys(touched)), pytrace=False)
+    return list(dict.fromkeys(touched))
+
+
+@pytest.fixture(scope="session")
+def sealed_environment(_real_gh_shim: tuple[Path, Path]) -> Any:
+    """For a fixture wider than one test (module or session scope), which is set up before
+    the per-test isolation: ``with sealed_environment(root):`` gives what every test gets
+    (`_isolate_refactory_home` and `_sealed`, under ``root``) and fails if the block reached
+    the real home or the real gh."""
+    @contextlib.contextmanager
+    def sealed(root: Path) -> Iterator[None]:
+        with pytest.MonkeyPatch.context() as patch:
+            _isolate_home(patch, root / "refactory-home")
+            (root / "dsh-home").mkdir(parents=True, exist_ok=True)
+            _seal_dsh_home(patch, root / "dsh-home")
+            _watch(patch, _real_gh_shim, home=True, gh=True)
+            try:
+                yield
+            finally:
+                _SEAL.update(home=False, gh=False)
+            touched = _reached_outside(_real_gh_shim[1])
+            if touched:
+                pytest.fail("a shared fixture reached outside its sealed environment:\n  "
+                            + "\n  ".join(touched), pytrace=False)
+
+    return sealed
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
