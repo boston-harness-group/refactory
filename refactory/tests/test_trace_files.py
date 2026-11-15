@@ -187,6 +187,8 @@ def test_the_writer_changes_no_request_journal_or_report(tmp_path, monkeypatch):
 
     def same(text: str, root: Path) -> str:
         text = re.sub(r"\b1[6-9]\d{8}(?:\.\d+)?\b", "<clock>", text.replace(str(root), "<root>"))
+        # A request's "Time per item" is a measured wall time too (said only from 1 s up).
+        text = re.sub(r"## Time per item\n[^\n]*\n\n?", "", text)
         return re.sub(r'"(\w+_s|started|finished|ts|time)": [^,}\]]+',
                       r'"\1": 0', text)
 
