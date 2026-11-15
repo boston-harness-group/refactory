@@ -322,32 +322,34 @@ def test_an_empty_last_turn_is_asked_once_for_the_answer_on_the_walker_path(tmp_
 
     assert answer.strip() == "FINAL PINEAPPLE"
     sent = json.loads(fake_sdk.read_text())
-    assert "ended without a reply" in sent["reask"]
+    assert "ended without a reply" in sent["reask"] and "restated in full" in sent["reask"]
     receipt = _receipt(workdir)
     assert receipt["state"] == "completed"
     assert receipt["empty_answer_reasked"] is True
     assert "answer_from_earlier_turn" not in receipt
 
 
-def test_an_empty_last_turn_keeps_the_earlier_answer_on_the_spine_path(tmp_path, fake_sdk, monkeypatch):
-    """Still no text when asked: the spine worker keeps the last real answer rather than
-    failing the node and losing it."""
+def test_an_empty_last_turn_never_turns_an_interim_note_into_the_answer_on_the_spine_path(
+        tmp_path, fake_sdk, monkeypatch):
+    """Still no text when asked, and the only text was written while a task ran ("waiting
+    for the researcher"): the spine worker fails the node loudly, with that note in the
+    error, rather than completing with it as the answer."""
     from refactory_dsh.worker_node import execute
 
     monkeypatch.setenv("FAKE_SDK_BACKGROUND", "empty-final")
     monkeypatch.setenv("FAKE_SDK_REASK_EMPTY", "1")
     workdir = tmp_path / "run"
     workdir.mkdir()
-    execute({"schema_version": 1, "node_id": "solve", "reads": [], "writes": ["answer.txt"],
-             "produces": [], "prompt": "Plan the research", "tool_policy": "none",
-             "model_context": _client(tmp_path).context()},
-            workdir)
+    with pytest.raises(Exception, match="the answer was empty"):
+        execute({"schema_version": 1, "node_id": "solve", "reads": [], "writes": ["answer.txt"],
+                 "produces": [], "prompt": "Plan the research", "tool_policy": "none",
+                 "model_context": _client(tmp_path).context()}, workdir)
 
-    assert (workdir / "answer.txt").read_text().strip() == "waiting for the researcher"
+    assert not (workdir / "answer.txt").exists()
     receipt = _receipt(workdir)
-    assert receipt["state"] == "completed"
-    assert receipt["empty_answer_reasked"] is True
-    assert receipt["answer_from_earlier_turn"] is True
+    assert receipt["state"] == "failed"
+    assert "also when asked once more for it" in receipt["error"]
+    assert "written while background tasks still ran, was: waiting for the researcher" in receipt["error"]
 
 
 def test_a_silent_background_task_and_cli_end_the_step_with_its_last_answer(tmp_path, fake_sdk, monkeypatch):

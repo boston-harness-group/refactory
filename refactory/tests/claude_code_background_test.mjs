@@ -168,17 +168,18 @@ assert.equal(reasked.value.output[0].text, 'FINAL: plan written')
 assert.equal(reasked.released, true)
 assert.ok(reasked.metadata.some(data => data.empty_answer_reasked === true))
 assert.ok(!reasked.metadata.some(data => 'answer_from_earlier_turn' in data))
-// (j) Still no text when asked: the last real answer is kept, never lost.
-const kept2 = await run(async function* () {
+// (j) Still no text when asked, and the only text was written while a task ran: that is
+// an interim note, not the answer, so the step fails and the failure carries it.
+const interimOnly = await run(async function* () {
   yield tasks('bg-1')
-  yield result('interim answer')
+  yield result('launching the researchers')
   yield tasks()
   yield result('')
   yield result('  ')
 }, undefined, undefined, () => true)
-assert.equal(kept2.value.output[0].text, 'interim answer')
-assert.ok(kept2.metadata.some(data => data.answer_from_earlier_turn === true))
-// (k) No answer in any turn, even when asked: the empty-answer failure, saying it asked.
+assert.equal(interimOnly.error.facts.detail, 'the answer was empty, also when asked once more for it; '
+  + 'its last text, written while background tasks still ran, was: launching the researchers')
+// (k) No text in any turn, even when asked: the empty-answer failure, saying it asked.
 let askedOnce = 0
 const none = await run(async function* () {
   yield result('')
@@ -186,16 +187,62 @@ const none = await run(async function* () {
 }, undefined, undefined, () => { askedOnce += 1; return true })
 assert.equal(askedOnce, 1)
 assert.equal(none.error.facts.detail, 'the answer was empty, also when asked once more for it')
-assert.ok(none.error instanceof scope.ClaudeCodeFailure)
-// (l) When the input can no longer take a message, an earlier answer is still kept and
-// none at all still fails.
-const closed = await run(async function* () {
-  yield tasks('bg-1')
-  yield result('interim answer')
+// (l) A settled answer (given with no task running) is kept when a later turn -- Claude
+// Code continuing on its own after the input closed -- ends with no text.
+const settledKept = await run(async function* () {
+  yield result('FULL ANSWER')
+  yield tasks('late')
   yield tasks()
   yield result('')
 }, undefined, undefined, () => false)
-assert.equal(closed.value.output[0].text, 'interim answer')
+assert.equal(settledKept.value.output[0].text, 'FULL ANSWER')
+assert.ok(settledKept.metadata.some(data => data.answer_from_earlier_turn === true))
+const closedInterim = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('interim note')
+  yield tasks()
+  yield result('')
+}, undefined, undefined, () => false)
+assert.match(closedInterim.error.facts.detail, /^the answer was empty; its last text, written while background tasks still ran, was: interim note$/)
 const closedNone = await run(async function* () { yield result('') }, undefined, undefined, () => false)
 assert.equal(closedNone.error.facts.detail, 'the answer was empty')
+// (m) A reply to the re-ask that only points back never replaces a settled answer.
+const pointer = await run(async function* () {
+  yield result('FULL ANSWER')
+  yield result('')
+  yield result('My final answer is above.')
+}, undefined, undefined, () => true)
+assert.equal(pointer.value.output[0].text, 'FULL ANSWER')
+// (n) An empty result while a task still runs is no reason to ask: Claude Code carries on
+// as the task reports back, and the later answer is the step's.
+let askedWhileLive = 0
+const live = await run(async function* () {
+  yield tasks('bg-1')
+  yield result('')
+  yield tasks()
+  yield result('FINAL')
+}, undefined, undefined, () => { askedWhileLive += 1; return true })
+assert.equal(askedWhileLive, 0)
+assert.equal(live.value.output[0].text, 'FINAL')
+// (o) A CLI that never answers the re-ask is bounded like a silent task: the input is
+// released after the quiet bound and the step fails, not held until the node timeout.
+const unanswered = await run(async function* (released, releasedNow) {
+  yield tasks('bg-1')
+  yield result('interim note')
+  yield tasks()
+  yield result('')
+  await releasedNow
+}, { backgroundQuietS: 0.1 }, undefined, () => true)
+assert.equal(unanswered.released, true)
+assert.match(unanswered.error.facts.detail, /also when asked once more for it; its last text.*interim note$/)
+// With no task ever running, only the bound armed by the re-ask can release the input.
+const unansweredAlone = await Promise.race([
+  run(async function* (released, releasedNow) {
+    yield result('')
+    await releasedNow
+  }, { backgroundQuietS: 0.1 }, undefined, () => true),
+  sleep(2000).then(() => 'held'),
+])
+assert.notEqual(unansweredAlone, 'held', 'an unanswered re-ask held the step past its quiet bound')
+assert.equal(unansweredAlone.error.facts.detail, 'the answer was empty, also when asked once more for it')
 console.log('claude code background-task waits passed')
