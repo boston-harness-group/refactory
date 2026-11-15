@@ -335,7 +335,10 @@ class DesignFastMode(DesignMode):
         knobs.pop("self_check_fixups")
 
         knobs.pop("self_check_timeout_s")
+        # design_fast builds no code graph.
         knobs.pop("code_graph")
+        knobs.pop("code_graph_timeout_s")
+        knobs.pop("code_graph_max_files")
         # design_fast's builder has no timeout retry: its verifier also has none,
         # its runs are shorter and cheaper than design's, and leaving it alone keeps
         # the candidate id stable.

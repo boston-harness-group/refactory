@@ -39,7 +39,8 @@ def validate_provider_config(config: Any, *, origin: str = FILENAME) -> dict[str
 
 def validate(settings: dict[str, Any]) -> None:
     """Validate partial defaults and each override without dispatching a worker."""
-    unknown = set(settings) - set(FIELDS)
+    # The code graph's settings share the project file but are not routing (`code_graph`).
+    unknown = set(settings) - set(FIELDS) - {"code_graph"}
     if unknown:
         raise ValueError(f"{FILENAME}: unknown routing fields {sorted(unknown)}; credentials belong in native stores")
     base = validate_route({key: settings[key] for key in ROUTE_FIELDS if key in settings})
@@ -54,6 +55,10 @@ def validate(settings: dict[str, Any]) -> None:
                 raise ValueError(f"{FILENAME}: {field}.{name}: {error}") from error
     if "provider_config" in settings:
         validate_provider_config(settings["provider_config"])
+    if "code_graph" in settings:
+        from refactory_dsh.code_graph import validate_settings
+
+        validate_settings(settings["code_graph"])
 
 
 def resolve(project: Path, overrides: dict[str, Any] | None = None, *,

@@ -1534,11 +1534,11 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
         graph["edges"] += [
             {"source": "route_refine_design", "target": "research_director", "condition": "proceed"},
             {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
-        # The sizer's own knobs (its system prompt) go with it; the code_graph knob
-        # belongs to build_code_graph which is removed with the sizing chain.
-        for knob in [knob for knob in state["knobs"] if knob.startswith("size_change__")]:
+        # The sizer's own knobs (its system prompt) go with it, and the code_graph knobs
+        # with build_code_graph, which is removed with the sizing chain.
+        for knob in [knob for knob in state["knobs"]
+                     if knob.startswith("size_change__") or knob.startswith("code_graph")]:
             del state["knobs"][knob]
-        del state["knobs"]["code_graph"]
         assert validate_state(state) == []
 
     run, model = _design_run(tmp_path, "Fix main in app.py.",

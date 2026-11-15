@@ -319,6 +319,7 @@ BOOKKEEPING = (
     ".refactory/workers/", ".refactory/agent-delivery/", ".refactory/worker-specs/", ".refactory/prompts/",
     ".refactory/prepare-", ".refactory/check-home/", ".refactory/base-check-home/",
     ".refactory/check-copy-home/", ".refactory/validation-history/", ".refactory/graph-control",
+    ".refactory/code-graph/",
     ".refactory/set-aside/", "graphs/", "console.json", "recovery.log",
 )
 

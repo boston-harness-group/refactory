@@ -20,9 +20,10 @@
 #   * the pinned pnpm workspace and the eight packages' built `lib/`;
 #   * `.venv` from the root `pyproject.toml` — the default (`dev`) dependency
 #     group only;
-#   * the `graph` dependency group (graphifyy): the code knowledge graph for
-#     design mode's research agents. If the install fails it is skipped with a
-#     warning; design mode works without it;
+#   * graphifyy as a uv tool (`uv tool install`, its own environment, so a later
+#     `uv sync` keeps it): the code knowledge graph for design mode's research
+#     agents. If the install fails it is skipped with a warning naming why;
+#     design mode works without it;
 #   * the two DSH profiles this checkout owns — `graph`, which the Python glue
 #     runs modes on, and `refactory`, which the GUI boots over the harness's
 #     own `web` template (the harness's `web` is never written to) — idempotently
@@ -148,10 +149,14 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 (cd "$HERE" && uv sync)
-if ! (cd "$HERE" && uv sync --group graph) 2>/dev/null; then
-  echo "  warning: graphifyy (code knowledge graph) could not be installed." >&2
-  echo "           Design mode works without it. To install it later:" >&2
-  echo "             cd $HERE && uv sync --group graph" >&2
+# graphify is a uv tool, in its own environment, not a dependency of .venv: a later
+# plain `uv sync` (which pin.py runs) would otherwise remove it. Never fatal.
+GRAPHIFY_SPEC='graphifyy>=0.9.109,<0.10'
+if ! graphify_log=$(uv tool install "$GRAPHIFY_SPEC" 2>&1); then
+  echo "  warning: graphifyy (code knowledge graph) could not be installed:" >&2
+  printf '%s\n' "$graphify_log" | tail -n 5 | sed 's/^/           /' >&2
+  echo "           Design mode works without it (agents grep instead). To install it later:" >&2
+  echo "             uv tool install '$GRAPHIFY_SPEC'" >&2
 fi
 
 # 2. Node side: install the pnpm workspace (the pinned harness plus the eight

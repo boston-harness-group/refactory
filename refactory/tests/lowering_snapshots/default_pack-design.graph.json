@@ -41,7 +41,7 @@
       "id": "build_code_graph",
       "reads": [],
       "writes": [
-        "code-graph/"
+        ".refactory/code-graph/"
       ],
       "blocking": true,
       "command": "python -m refactory_dsh.run refactory_dsh.code_graph:build_code_graph",
@@ -1264,6 +1264,8 @@
     "judge_rereads": 1.0,
     "self_check_fixups": 2.0,
     "code_graph": 1.0,
+    "code_graph_timeout_s": 300.0,
+    "code_graph_max_files": 20000.0,
     "self_check_timeout_s": 300.0,
     "builder_timeout_s": 14400.0,
     "target": "",
@@ -1426,6 +1428,28 @@
       "values": [],
       "frozen": true,
       "description": "build a code knowledge graph for the research agents",
+      "required": false
+    },
+    "code_graph_timeout_s": {
+      "default": 300,
+      "kind": "int",
+      "lo": 10,
+      "hi": 3600,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "how long the background code graph build may run before it is stopped; the run never waits for it",
+      "required": false
+    },
+    "code_graph_max_files": {
+      "default": 20000,
+      "kind": "int",
+      "lo": 1,
+      "hi": 10000000,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "the most code files a worktree may have for its code graph to be built; a larger one is skipped",
       "required": false
     },
     "self_check_timeout_s": {

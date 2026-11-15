@@ -473,6 +473,16 @@ class DesignMode(Mode):
             ),
             "code_graph": Knob(True, "bool", frozen=True,
                                description="build a code knowledge graph for the research agents"),
+            "code_graph_timeout_s": Knob(
+                300, "int", lo=10, hi=3600, frozen=True,
+                description="how long the background code graph build may run before it is "
+                            "stopped; the run never waits for it",
+            ),
+            "code_graph_max_files": Knob(
+                20000, "int", lo=1, hi=10_000_000, frozen=True,
+                description="the most code files a worktree may have for its code graph to be "
+                            "built; a larger one is skipped",
+            ),
 
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
@@ -556,8 +566,8 @@ class DesignMode(Mode):
         graph.add(Node(
             "build_code_graph", "op",
             call="refactory_dsh.code_graph:build_code_graph",
-            knobs=("code_graph",),
-            writes=("code-graph/",),
+            knobs=("code_graph", "code_graph_timeout_s", "code_graph_max_files"),
+            writes=(".refactory/code-graph/",),
             produces=("code_graph_paragraph",),
             notes="start the code knowledge graph build as a detached process; returns the prompt paragraph",
         ))

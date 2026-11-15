@@ -29,8 +29,66 @@ CODE_EXTENSIONS = frozenset({
     ".c", ".h", ".cpp", ".cs", ".kt", ".swift", ".php", ".lua", ".scala", ".sh",
 })
 
+#: Where a run keeps its graph: run state beside the workers' homes, not an artifact of
+#: the run. graphify's cache and timestamps would otherwise read as results.
+GRAPH_SUBDIR = Path(".refactory") / "code-graph"
+
 _DEFAULT_TIMEOUT_S = 300
 _DEFAULT_MAX_CODE_FILES = 20000
+
+#: The persistent settings: the project's refactory.workers.json may carry a
+#: ``"code_graph"`` object with these keys; each environment variable sets the same
+#: thing. ``--no-graph`` and ``--knob`` win over both.
+SETTINGS_KEY = "code_graph"
+SETTINGS: tuple[tuple[str, str, str, type], ...] = (
+    ("enabled", "code_graph", "REFACTORY_CODE_GRAPH", bool),
+    ("timeout_s", "code_graph_timeout_s", "REFACTORY_CODE_GRAPH_TIMEOUT_S", int),
+    ("max_files", "code_graph_max_files", "REFACTORY_CODE_GRAPH_MAX_FILES", int),
+)
+
+
+def validate_settings(section: Any, *, origin: str = "refactory.workers.json") -> dict[str, Any]:
+    """The project file's ``code_graph`` object, checked: only known keys, each of its type."""
+    if not isinstance(section, dict):
+        raise ValueError(f"{origin}: {SETTINGS_KEY} must be an object")
+    known = {key: kind for key, _knob, _env, kind in SETTINGS}
+    unknown = set(section) - set(known)
+    if unknown:
+        raise ValueError(f"{origin}: {SETTINGS_KEY} has unknown keys {sorted(unknown)}; "
+                         f"known: {sorted(known)}")
+    for key, value in section.items():
+        # bool is an int in Python; a count or a timeout given as true/false is a mistake.
+        if not isinstance(value, known[key]) or (known[key] is int and isinstance(value, bool)):
+            raise ValueError(f"{origin}: {SETTINGS_KEY}.{key} must be {known[key].__name__}")
+    return section
+
+
+def setting_knobs(project: Path) -> list[str]:
+    """The person's persistent code-graph settings as ``NAME=VALUE`` knobs.
+
+    The project file's ``code_graph`` object wins over the environment, as it does for
+    the worker route (`worker_config`). Only design declares these knobs, so only a
+    design run is given them.
+    """
+    from refactory_dsh.worker_config import FILENAME
+
+    section: dict[str, Any] = {}
+    path = project / FILENAME
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as error:
+            raise ValueError(f"{path}: {error}") from error
+        if isinstance(data, dict) and SETTINGS_KEY in data:
+            section = validate_settings(data[SETTINGS_KEY], origin=str(path))
+    found = []
+    for key, knob, env, kind in SETTINGS:
+        if key in section:
+            value = section[key]
+            found.append(f"{knob}={int(value) if kind is bool else value}")
+        elif os.environ.get(env, "").strip():
+            found.append(f"{knob}={os.environ[env].strip()}")
+    return found
 
 
 # ── atomic status ──────────────────────────────────────────────────────────────
@@ -78,18 +136,23 @@ def _format_location(source_file: str, source_location: str) -> str:
     return f"{source_file}:{line}" if line else source_file
 
 
-def explain_node(graph_dir: Path, name: str) -> str:
+def explain_node(graph_dir: Path, name: str) -> str | None:
+    """The matching nodes with their connections, or None if no node has the name.
+
+    Nodes with no callers, callees, importers or contents (type nodes such as ``Any``
+    repeat once per file) are counted, not printed one empty entry each.
+    """
     nodes, links = _load_graph(graph_dir)
     node_by_id: dict[str, dict] = {n["id"]: n for n in nodes}
     matched = [n for n in nodes if _match_name(n.get("label", ""), name)]
     if not matched:
-        return ""
+        return None
 
     parts: list[str] = []
+    bare: list[str] = []
     for node in matched:
         nid = node["id"]
         loc = _format_location(node.get("source_file", ""), node.get("source_location", ""))
-        parts.append(f"{node.get('label', '')}  {loc}")
 
         callers: list[str] = []
         callees: list[str] = []
@@ -113,6 +176,10 @@ def explain_node(graph_dir: Path, name: str) -> str:
                 tgt_node = node_by_id.get(link["target"], {})
                 contained.append(f"  {_format_location(tgt_node.get('source_file', ''), tgt_node.get('source_location', ''))} {tgt_node.get('label', link['target'])}")
 
+        if not (callers or callees or importers or contained):
+            bare.append(loc)
+            continue
+        parts.append(f"{node.get('label', '')}  {loc}")
         if callers:
             parts.append("  Callers:")
             parts.extend(callers)
@@ -127,6 +194,13 @@ def explain_node(graph_dir: Path, name: str) -> str:
             parts.extend(contained)
         parts.append("")
 
+    shown = len(matched) - len(bare)
+    if len(matched) > 1 or bare:
+        summary = f"{len(matched)} node(s) named '{name}'; {shown} with connections shown"
+        if bare:
+            listed = ", ".join(bare[:5]) + (f" and {len(bare) - 5} more" if len(bare) > 5 else "")
+            summary += f"; {len(bare)} with none ({listed})"
+        parts.insert(0, summary + "\n")
     return "\n".join(parts).rstrip()
 
 
@@ -150,6 +224,34 @@ def callers_of(graph_dir: Path, name: str) -> str | None:
     return "\n".join(parts).rstrip()
 
 
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A dead child of a still-running walker stays a zombie until it is reaped.
+    try:
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return bool(stat) and not stat.startswith("Z")
+
+
+def _building_state(status: dict[str, Any]) -> str:
+    """``building``, or why a build that says so has in fact ended without a status."""
+    pid = status.get("pid")
+    if isinstance(pid, int) and pid > 0 and not _process_alive(pid):
+        return "failed: the build process ended without writing a status (killed, e.g. out of memory)"
+    started = status.get("started", 0)
+    timeout = status.get("timeout_s", _DEFAULT_TIMEOUT_S)
+    if started and (time.time() - started) > timeout + 60:
+        return "failed: stale build (still building after its timeout)"
+    return "building"
+
+
 # ── CLI handler ────────────────────────────────────────────────────────────────
 
 def cli_graph(args: Any) -> int:
@@ -161,17 +263,14 @@ def cli_graph(args: Any) -> int:
     graph_dir = Path(graph_path)
     if graph_dir.name == "graph.json":
         graph_dir = graph_dir.parent.parent
-    elif (graph_dir / "code-graph").is_dir():
-        graph_dir = graph_dir / "code-graph"
+    elif (graph_dir / GRAPH_SUBDIR).is_dir():
+        graph_dir = graph_dir / GRAPH_SUBDIR
 
     status = _read_status(graph_dir)
     st = status.get("status", "absent")
 
     if st == "building":
-        started = status.get("started", 0)
-        timeout = _DEFAULT_TIMEOUT_S
-        if started and (time.time() - started) > timeout + 60:
-            st = "failed: stale build (likely OOM-killed)"
+        st = _building_state(status)
 
     if st != "ready":
         reason = st if st.startswith(("failed", "skipped")) else st
@@ -204,11 +303,28 @@ def _find_graphify() -> str | None:
     override = os.environ.get("_REFACTORY_GRAPHIFY_BIN_OVERRIDE")
     if override is not None:
         return override or None
+    # The driver's own venv first, then PATH, then where `uv tool install` (install.sh)
+    # puts it: the driver runs as `.venv/bin/python` with neither bin dir on PATH.
     candidate = Path(sys.executable).parent / "graphify"
     if candidate.is_file():
         return str(candidate.resolve())
     found = shutil.which("graphify")
-    return found
+    if found:
+        return found
+    for bin_dir in _uv_tool_bin_dirs():
+        candidate = bin_dir / "graphify"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _uv_tool_bin_dirs() -> list[Path]:
+    """Where uv puts tool executables: UV_TOOL_BIN_DIR, XDG_BIN_HOME, else ~/.local/bin."""
+    dirs = [os.environ.get("UV_TOOL_BIN_DIR"), os.environ.get("XDG_BIN_HOME")]
+    if os.environ.get("XDG_DATA_HOME"):
+        dirs.append(str(Path(os.environ["XDG_DATA_HOME"]).parent / "bin"))
+    dirs.append(str(Path.home() / ".local" / "bin"))
+    return [Path(d) for d in dirs if d]
 
 
 def _find_refactory_cmd() -> str | None:
@@ -241,7 +357,7 @@ def _find_reusable_cache(run_dir: Path, target_key: str) -> Path | None:
     for sibling in parent.iterdir():
         if sibling == run_dir or not sibling.is_dir():
             continue
-        cg = sibling / "code-graph"
+        cg = sibling / GRAPH_SUBDIR
         if not cg.is_dir():
             continue
         st = _read_status(cg)
@@ -313,6 +429,11 @@ def _timeout_handler():
         os._exit(1)
 
 
+# The pid lets the query command tell a build that died (e.g. killed for memory)
+# from one still running, instead of waiting out the timeout.
+_write_status({{"status": "building", "started": time.time(), "timeout_s": TIMEOUT_S,
+               "pid": os.getpid()}})
+
 timer = threading.Timer(TIMEOUT_S, _timeout_handler)
 timer.daemon = True
 timer.start()
@@ -327,8 +448,13 @@ try:
         text=True,
     )
     if result.returncode != 0:
-        _write_status({{"status": "failed: graphify exit " + str(result.returncode),
-                       "stderr": result.stderr[-500:]}})
+        if result.returncode < 0:
+            why = "graphify killed by signal " + str(-result.returncode)
+            if -result.returncode == signal.SIGKILL:
+                why += " (likely out of memory)"
+        else:
+            why = "graphify exit " + str(result.returncode)
+        _write_status({{"status": "failed: " + why, "stderr": result.stderr[-500:]}})
         timer.cancel()
         sys.exit(1)
 
@@ -392,7 +518,7 @@ def build_code_graph(ctx: Any) -> dict[str, Any]:
         return {"code_graph_paragraph": ""}
 
     run_dir = ctx.workdir if hasattr(ctx, "workdir") else Path(ctx.path(".")).resolve()
-    graph_dir = run_dir / "code-graph"
+    graph_dir = run_dir / GRAPH_SUBDIR
     graph_dir.mkdir(parents=True, exist_ok=True)
 
     refactory_cmd = _find_refactory_cmd()
@@ -429,8 +555,9 @@ def build_code_graph(ctx: Any) -> dict[str, Any]:
             shutil.rmtree(graphify_out)
         shutil.copytree(reusable, graphify_out)
 
+    started = time.time()
     _write_status(graph_dir / "status.json",
-                  {"status": "building", "started": time.time()})
+                  {"status": "building", "started": started, "timeout_s": int(timeout_s)})
 
     script = _make_build_script(
         graphify_bin=graphify_bin,

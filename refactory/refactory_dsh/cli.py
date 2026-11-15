@@ -605,13 +605,17 @@ def build_parser() -> argparse.ArgumentParser:
     graph_group = sub.add_parser(
         "graph", help="query the code knowledge graph built for a design run",
     )
+    graph_help = "path to the code-graph directory or a run directory"
+    # Accepted before or after the subcommand; the subcommand's copy has no default, so it
+    # never clobbers one given before it.
+    graph_group.add_argument("--graph", default="", help=graph_help)
     graph_sub = graph_group.add_subparsers(dest="graph_command", required=True)
     graph_explain = graph_sub.add_parser("explain", help="show a node's callers, callees, importers and contained items")
     graph_explain.add_argument("name", help="the function or symbol name to look up")
-    graph_explain.add_argument("--graph", default="", help="path to the code-graph directory or a run directory")
+    graph_explain.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
     graph_callers = graph_sub.add_parser("callers", help="show calls edges into a node")
     graph_callers.add_argument("name", help="the function or symbol name to look up")
-    graph_callers.add_argument("--graph", default="", help="path to the code-graph directory or a run directory")
+    graph_callers.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
 
     ui = sub.add_parser("ui", help="the Web GUI (the tool, the panel, the conversation)")
     ui.add_argument("--port", type=int, default=0, help="default: the launcher's own")
