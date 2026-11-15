@@ -477,9 +477,11 @@ spine through its runner, the walker in memory).
   after the score line and what the score measures, "The pipeline you may edit" (one
   line saying the structure and each step's settings are levers of the same standing, or
   that the run permits settings only; then the nodes, edges and what each node has
-  before it), "Where the pipeline fails, step by step" (below, when the analysts ran),
-  "The operations you may use" and "How nodes compose". Only then "Each step's settings"
-  (every knob with its exact current value, which a patch quotes), "Each step in full,
+  before it), "Where the pipeline fails, step by step" (below, when the analysts or the
+  readers ran), "The operations you may use" and "How nodes compose". Only then "Each
+  step's settings" (every knob with its exact current value, which a patch quotes: a
+  text with a line break or a `|`, which a table cell cannot show as it is, is listed
+  there by reference and shown whole in a fence after the table), "Each step in full,
   and the node schema", the author's guidance and "The rules the validator checks",
   introduced neutrally: a proposal that breaks one comes back with the rule's code and
   reason, to be fixed in a later answer, at the cost of the answer only. Nothing is
@@ -501,7 +503,7 @@ spine through its runner, the walker in memory).
   evidence says to change and keep the rest, and the bundling example patches its two
   prompt knobs. A whole new `value` stays available, for a setting that is not text, a
   new step's own prompt, or a prompt that has to be replaced outright. The rules ask for
-  each change to be grounded in the evidence, kind-neutrally: an edit, a prompt or a
+  each change to be grounded in the evidence, kind-neutrally: a setting, a prompt or a
   structural change, whose effect the optimizer can state -- the failure it addresses
   (the step where it starts), how it changes what a step sees or how the work is done,
   and a checkable prediction -- the kind chosen by the diagnosed cause, neither kind the
@@ -872,11 +874,11 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   read by the scorer) counts as ending the pass, so a final agent step added there is
   asked the decision question.
 - **What makes a new step pay off** (`structure_guidance`, default `0`). When on,
-  "How nodes compose" adds one generic paragraph: a step helps when it adds work or
-  information the pipeline lacks (an independent attempt, several attempts combined by
-  a vote or a check, a computation or check in code, a retry with a specific reason);
-  give a new step something of its own to work from, not only the earlier steps' output;
-  design a structural change from the evidence (the failure it addresses, how it changes
+  "How nodes compose" adds one generic paragraph: what a new step adds depends on the
+  failure it addresses, with examples (an independent attempt, several attempts combined
+  by a vote or a check, a computation or check in code, a retry with a specific reason,
+  a critic, a step that reformats or summarises for the next one); design a structural
+  change from the evidence (the failure it addresses, how it changes
   what each step sees or how the work is done, what it should change); choose between a
   prompt edit and a structural change by the diagnosed cause, neither the safer default. Off by default, for an experiment.
 
@@ -934,12 +936,14 @@ paired with a parent picker), on the train records the request carries:
   covers (an id outside the batch is dropped), its impact and quotes. Optionally, how
   the steps took part (`steps`), as far as the items show it: `first_wrong` (the step
   where things first went wrong; in a loop or a long multi-turn run, the first step that
-  did), `overrode` (later steps that undid or replaced good work from an earlier step)
-  and `repeated` (steps that only repeated or anchored on another step's output: an
-  earlier step, a parallel branch, or their own earlier attempt in a loop). It assumes
+  did), `overrode` (later steps whose output replaced good work from an earlier step
+  with worse) and `repeated` (steps whose output repeated another step's output without
+  adding to it: an earlier step, a parallel branch, or their own earlier attempt in a
+  loop). These describe what happened, not why. It assumes
   no graph shape: any node id (an agent with or without tools, a code op, a gate, a
   branch) may fill a role, and a part the items cannot show is left out. Only string
-  step ids are kept; a missing or malformed `steps` is `{}` and never fails the batch.
+  step ids are kept (backticks and spaces stripped); a missing or malformed `steps` is
+  `{}` and never fails the batch.
   Merges carry it through (each part's union).
 - **Success analysts.** The passed items likewise (seed + 1): what made them work, where
   it comes from, and what a change must preserve.
@@ -949,18 +953,26 @@ paired with a parent picker), on the train records the request carries:
   As in SkillOpt, one list is not merged, the final merge runs only when both sides
   found something, and an unreadable merge keeps every input finding (failures first).
 - **Where the pipeline fails, step by step.** Right after the pipeline, the request
-  aggregates the ranked failure findings per step (`analysts.step_map`): for each step
-  of the pipeline, in its order, the failed items and findings that name it (`where`),
-  that say things first went wrong there, that it undid good work from an earlier step,
-  and that it only repeated or anchored on other steps' output; an item counts once per
-  cell, a step id the
-  pipeline lacks is ignored, success findings do not count. Findings without `steps`
-  still count in the first column, and the section says how many carry no attribution.
-  When a step undid earlier good work or only repeated others and the run permits
-  structural operations, one line says the remedy is usually in how the work is done
-  (independent attempts, a vote or a check across them, a check that sends a step back,
-  a code step when code nodes are allowed), not more instructions to the same step. Each ranked finding also shows its
-  attribution (`steps: first went wrong at ...`).
+  aggregates every failure finding per step (`analysts.step_map`): for each step, in the
+  pipeline's flow order (`analysts.flow_order`: the edges' topological order with
+  loop-closing edges set aside, not the sorted node list), the failed items and findings
+  that name it (`where`), that say things first went wrong there, that it replaced good
+  work from an earlier step with worse, and that it repeated other steps' output without
+  adding to it. An item counts once per cell however many findings cite it; a step id
+  the pipeline lacks is ignored and does not count as attribution; success findings do
+  not count. The caption says the map counts all failure findings, and, when there are
+  more findings than the ranked list shows (16), that the list shows only the top ones.
+  Findings without `steps` still count in the first column, and the section says how
+  many carry no attribution. When a step replaced earlier good work or repeated others'
+  output and the run permits structural operations, one line says such a cause can lie
+  in what the step is told or in what it is given and how the work is split between
+  steps, with examples of both (instructions on what to keep and when to depart from
+  it; independent attempts; a vote or a check; a check that sends a step back; a code
+  step when code nodes are allowed), and to choose by the evidence. With the analysts
+  off, the map comes from the readers' failure patterns (the step each starts in, its
+  items) when readers ran; with neither, there is no map. Each ranked failure finding
+  also shows its attribution (`steps: first went wrong at ...`); success findings show
+  none.
 - **The request** shows "What the analysts found, ranked" (up to 16 findings, 30000
   characters) before the item results. Each finding is shown whole, as SkillOpt shows
   its analysts' edits: its text, what to change and what to keep, where (a structure

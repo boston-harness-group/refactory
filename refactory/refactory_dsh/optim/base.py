@@ -821,15 +821,7 @@ class ProposalContext:
                                  text_knobs=[k.get("name") for k in self.knobs
                                              if k.get("kind") == "str"],
                                  structure_guidance=self.structure_guidance),
-            "## Each step's settings",
-            "The prompts and parameters the steps read, which `set_knob` moves (a new step "
-            "brings its own). A patch quotes its target text exactly as it stands here.",
-            _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
-                    "description"],
-                   [[k["name"], k["value"], k["kind"], k.get("values"), k.get("range"),
-                     k["frozen"], k.get("reachable", True), k.get("description", "")]
-                    for k in self.knobs]),
-            "",
+            *_settings_lines(self.knobs),
             *_node_reference(self),
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
@@ -957,15 +949,58 @@ def _levers_line(catalogue: Sequence[dict[str, Any]]) -> str:
             "read where the pipeline fails first, then choose by the cause the evidence shows.")
 
 
-def _step_map(ctx: "ProposalContext") -> list[str]:
-    """"Where the pipeline fails, step by step" (`analysts.step_map_lines`), from the
-    round's analysis; nothing without one."""
-    if not ctx.analysis:
-        return []
-    from .analysts import step_map_lines
+def _exact_in_table(value: Any) -> bool:
+    """Whether a table cell shows ``value`` as it is: a cell puts a text on one line and
+    escapes ``|`` (`_cell`), so a text with either is shown whole below the table."""
+    return not (isinstance(value, str) and ("\n" in value or "|" in value))
 
-    return step_map_lines(ctx.analysis, ctx.nodes, code_nodes=ctx.code_nodes,
-                          structural=bool(structural_ops(ctx.catalogue)))
+
+def _fence(text: str) -> str:
+    """A code fence longer than any run of backticks in ``text``."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def _settings_lines(knobs: Sequence[dict[str, Any]]) -> list[str]:
+    """"Each step's settings": every knob in a table; a text the table cannot show as it
+    is (a line break or a ``|``) is shown there by reference and whole below it, fenced,
+    so a patch can quote its target text exactly."""
+    whole = [k for k in knobs if not _exact_in_table(k.get("value"))]
+    lines = ["## Each step's settings",
+             "The prompts and parameters the steps read, which `set_knob` moves (a new step "
+             "brings its own). A patch quotes its target text exactly: a value in the table "
+             "is exact as shown"
+             + ("; a text with line breaks or `|` is shown whole after the table." if whole
+                else "."),
+             _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
+                     "description"],
+                    [[k["name"], k["value"] if _exact_in_table(k.get("value"))
+                      else f"(shown whole below, {len(k['value'])} characters)",
+                      k["kind"], k.get("values"), k.get("range"),
+                      k["frozen"], k.get("reachable", True), k.get("description", "")]
+                     for k in knobs])]
+    for knob in whole:
+        fence = _fence(knob["value"])
+        lines += [f"`{knob['name']}`:", fence, knob["value"], fence]
+    return [*lines, ""]
+
+
+def _step_map(ctx: "ProposalContext") -> list[str]:
+    """"Where the pipeline fails, step by step" (`analysts.step_map_lines`): from the
+    round's analysis, or, without one, from the readers' failure patterns (where each
+    starts); nothing when neither ran."""
+    from .analysts import SHOWN_FINDINGS, reader_failures, step_map_lines
+
+    structural = bool(structural_ops(ctx.catalogue))
+    if ctx.analysis:
+        return step_map_lines(list(ctx.analysis.get("findings") or ()), ctx.nodes, ctx.edges,
+                              source="analysts", shown=SHOWN_FINDINGS,
+                              code_nodes=ctx.code_nodes, structural=structural)
+    if ctx.reader_findings:
+        return step_map_lines(reader_failures(ctx.reader_findings), ctx.nodes, ctx.edges,
+                              source="readers", code_nodes=ctx.code_nodes,
+                              structural=structural)
+    return []
 
 
 def _node_reference(ctx: "ProposalContext") -> list[str]:
@@ -1524,7 +1559,7 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
             size += "; compare it with the size of the score differences between candidates"
         lines.append(size + ".")
     lines += [
-        "- Ground each change in the evidence: an edit, a prompt or a structural change, whose",
+        "- Ground each change in the evidence: a setting, a prompt or a structural change, whose",
         "  effect you can state -- the failure it addresses (the step where it starts), how it",
         "  changes what a step sees or how the work is done, and a prediction that can be",
         "  checked. Choose the kind of change by the cause you diagnosed; neither kind is the",

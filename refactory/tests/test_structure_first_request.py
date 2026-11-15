@@ -14,8 +14,8 @@ cost -- words our own request supplied. So the request now:
   model calls per item are not penalised);
 - says in plain words what the run has done with structure ("no structural change has
   been tried in this run yet"), not ``structural_yield: n/a``;
-- carries the analysts' optional step attribution (first went wrong / undid good work
-  from an earlier step / only repeated or anchored on other steps' output) into a
+- carries the analysts' optional step attribution (first went wrong / replaced good work
+  from an earlier step with worse / repeated other steps' output without adding to it) into a
   per-step table, for any graph shape (tool-using agents, gates and loops, forks, code
   ops), tolerating findings without it and malformed ones.
 
@@ -63,17 +63,26 @@ FINDINGS = [
     {"source": "success", "finding": "S-KEEP", "items": ["i5"], "where": {"nodes": ["finalize"]},
      "steps": {"first_wrong": "finalize"}}]
 #: Another shape: a step in a loop behind a gate, then a fork of two branches and a join,
-#: then a code op.
-LOOPED = [{"id": "attempt", "kind": "agent"}, {"id": "attempt_check", "kind": "gate"},
-          {"id": "fork_1", "kind": "fork"}, {"id": "branch_a", "kind": "agent"},
-          {"id": "branch_b", "kind": "agent"}, {"id": "join_1", "kind": "join"},
-          {"id": "tally", "kind": "op", "call": "refactory_dsh.snippet:run"}]
+#: then a code op -- listed alphabetically, as a mode lists its nodes, not in flow order.
+LOOPED = sorted([{"id": "attempt", "kind": "agent"}, {"id": "attempt_check", "kind": "gate"},
+                 {"id": "fork_1", "kind": "fork"}, {"id": "branch_a", "kind": "agent"},
+                 {"id": "branch_b", "kind": "agent"}, {"id": "join_1", "kind": "join"},
+                 {"id": "tally", "kind": "op", "call": "refactory_dsh.snippet:run"},
+                 {"id": "begin", "kind": "agent"}], key=lambda n: n["id"])
+LOOPED_EDGES = [{"source": "begin", "target": "attempt"},
+                {"source": "attempt", "target": "attempt_check"},
+                {"source": "attempt_check", "target": "attempt", "condition": "reloop"},
+                {"source": "attempt_check", "target": "fork_1", "condition": "proceed"},
+                {"source": "fork_1", "target": "branch_b"}, {"source": "fork_1", "target": "branch_a"},
+                {"source": "branch_a", "target": "join_1"}, {"source": "branch_b", "target": "join_1"},
+                {"source": "join_1", "target": "tally"}]
 
 
 def _ctx3(**fields: Any) -> ProposalContext:
     fields.setdefault("catalogue", edits.catalogue("broad"))
+    fields.setdefault("knobs", KNOBS)
     return ProposalContext(mode_name="m", nodes=NODES, edges=EDGES, node_states=STATES,
-                           knobs=KNOBS, **fields)
+                           **fields)
 
 
 def _headings(text: str) -> list[str]:
@@ -135,7 +144,7 @@ def test_the_answer_rules_are_kind_neutral(preset):
                           structure_guidance=True).render().split())
     for sentence in OLD_SENTENCES:
         assert sentence not in text
-    assert ("an edit, a prompt or a structural change, whose effect you can state" in text)
+    assert ("a setting, a prompt or a structural change, whose effect you can state" in text)
     assert "neither kind is the safer default" in text
     # Deliberate, evidence-grounded design of either kind: the failure addressed, the
     # change to what a step sees or how the work is done, a checkable prediction.
@@ -148,6 +157,11 @@ def test_the_structure_guidance_paragraph_is_kind_neutral():
         assert sentence not in feedback.STRUCTURE_GUIDANCE
     assert "neither is the safer default" in feedback.STRUCTURE_GUIDANCE
     assert "Design a structural change from the evidence" in feedback.STRUCTURE_GUIDANCE
+    # Example-framed: critics and reformatting steps are legitimate, not argued against.
+    assert "For example, a step can add" in feedback.STRUCTURE_GUIDANCE
+    assert ("a critic of an earlier step's work, or a step that reformats or summarises for "
+            "the next one") in feedback.STRUCTURE_GUIDANCE
+    assert "rather than only the earlier steps" not in feedback.STRUCTURE_GUIDANCE
     composed = _section(_ctx3(structure_guidance=True).render(), "How nodes compose")
     assert feedback.STRUCTURE_GUIDANCE in composed
 
@@ -251,7 +265,7 @@ def test_the_step_map_takes_any_graph_shape():
               "steps": {"first_wrong": "attempt_check", "repeated": ["attempt"]}},
              {"source": "failure", "items": ["i3"], "where": {"nodes": ["branch_b"]},
               "steps": {"repeated": ["branch_a", "branch_b"], "overrode": ["tally"]}}]
-    rows = {r["step"]: r for r in analysts.step_map(found, LOOPED)}
+    rows = {r["step"]: r for r in analysts.step_map(found, LOOPED, LOOPED_EDGES)}
     assert list(rows) == ["attempt", "attempt_check", "branch_a", "branch_b", "tally"]
     assert rows["attempt_check"]["first_wrong"] == {"items": 2, "findings": 1}
     assert rows["attempt"]["repeated"]["items"] == 2
@@ -260,31 +274,140 @@ def test_the_step_map_takes_any_graph_shape():
     assert [r["step"] for r in analysts.step_map(found)] == sorted(rows)
 
 
-def test_the_request_shows_the_step_map_and_the_remedy_only_when_steps_interact():
+def test_the_step_map_follows_the_flow_not_the_listed_order():
+    """A mode lists its nodes sorted by id; the map follows the edges, loops included."""
+    assert analysts.flow_order(LOOPED, LOOPED_EDGES) == [
+        "begin", "attempt", "attempt_check", "fork_1", "branch_a", "branch_b", "join_1", "tally"]
+    found = [{"source": "failure", "items": ["i1"],
+              "where": {"nodes": ["tally", "begin", "attempt_check"]}}]
+    assert [r["step"] for r in analysts.step_map(found, LOOPED, LOOPED_EDGES)] == [
+        "begin", "attempt_check", "tally"]
+    # In the request too: the edges order the rows, not the node list.
+    text = ProposalContext(nodes=list(reversed(NODES)), edges=EDGES, catalogue=edits.catalogue(),
+                           analysis={"findings": FINDINGS, "batches": []}).render()
+    rows = [line.split(" | ")[0][2:] for line in _section(
+        text, "Where the pipeline fails, step by step").splitlines()
+        if line.startswith("| ") and not line.startswith(("| step", "|---"))]
+    assert rows == ["draft", "review", "finalize"]
+    # Malformed edges or nodes are skipped, never raise.
+    assert analysts.flow_order([{"id": "a"}, "x", {"id": "b"}],
+                               [None, {"source": "b", "target": "a"}, {"source": "z"}]) == ["b", "a"]
+
+
+def test_an_item_cited_by_two_findings_for_the_same_step_and_role_counts_once():
+    found = [{"source": "failure", "items": ["i1", "i2"], "where": {"nodes": ["review"]},
+              "steps": {"first_wrong": "review"}},
+             {"source": "failure", "items": ["i2", "i3"], "where": {"nodes": ["review"]},
+              "steps": {"first_wrong": " `review` "}}]
+    row = analysts.step_map(found, NODES)[0]
+    assert row["step"] == "review"
+    assert row["first_wrong"] == {"items": 3, "findings": 2}
+    assert row["named"] == {"items": 3, "findings": 2}
+
+
+CAUSE = ("the cause can lie in what the step is told (its instructions) or in what it is "
+         "given and how the work is split between steps. For example: instructions on what "
+         "to keep from earlier steps and when to depart from it; independent attempts that do "
+         "not see each other's output; a vote or a check across attempts; a check that sends "
+         "a step back with a reason; a deterministic code step. Choose by the evidence.")
+
+
+def test_the_request_shows_the_step_map_and_the_cause_line_only_when_steps_interact():
     text = _ctx3(analysis={"findings": FINDINGS, "batches": []}, code_nodes=True).render()
     section = _section(text, "Where the pipeline fails, step by step")
     assert "| finalize | 2 (1) | - | 2 (1) | - |" in section
     assert "| review | - | 2 (1) | - | 2 (1) |" in section
     assert "(1 of 3 failure finding(s) say only where they start" in section
-    assert ("the remedy is usually in how the work is done -- independent attempts that do "
-            "not see each other's output, a vote or a check across them, a check that sends "
-            "a step back with a reason, a deterministic code step -- not more instructions"
-            ) in section
-    assert ("steps: first went wrong at: `review`; undid good work from an earlier step: "
-            "`finalize`") in text
-    # Old findings (no attribution) still map by where they start, with no remedy line.
+    assert "Counted over all 3 failure finding(s)." in section
+    # Both causes stay equal; structures are examples beside an instruction fix.
+    assert CAUSE in " ".join(section.split())
+    assert "remedy" not in section and "not more instructions" not in section
+    assert ("steps: first went wrong at: `review`; replaced good work from an earlier step "
+            "with worse: `finalize`") in text
+    # Old findings (no attribution) still map by where they start, with no cause line.
     old = [{k: v for k, v in f.items() if k != "steps"} for f in FINDINGS]
     plain = _section(_ctx3(analysis={"findings": old, "batches": []}).render(),
                      "Where the pipeline fails, step by step")
-    assert "| draft | 3 (2) | - | - | - |" in plain and "remedy" not in plain
-    # A settings-only run is not told to restructure.
+    assert "| draft | 3 (2) | - | - | - |" in plain and "the cause can lie" not in plain
+    # A settings-only run is not handed structural examples.
     knob_only = _ctx3(analysis={"findings": FINDINGS, "batches": []},
                       catalogue=edits.catalogue("knob_only")).render()
-    assert "remedy" not in _section(knob_only, "Where the pipeline fails, step by step")
+    assert "the cause can lie" not in _section(knob_only, "Where the pipeline fails, step by step")
     # No analysis, or no failure finding that names a step: no section.
     assert "Where the pipeline fails" not in _ctx3().render()
     assert "Where the pipeline fails" not in _ctx3(
         analysis={"findings": [FINDINGS[3]], "batches": []}).render()
+
+
+def test_only_first_wrong_gives_no_cause_line():
+    found = [{"source": "failure", "items": ["i1"], "where": {"nodes": ["draft"]},
+              "steps": {"first_wrong": "draft"}}]
+    section = _section(_ctx3(analysis={"findings": found, "batches": []}).render(),
+                       "Where the pipeline fails, step by step")
+    assert "| draft | 1 (1) | 1 (1) | - | - |" in section
+    assert "the cause can lie" not in section
+
+
+def test_unknown_ids_do_not_count_as_attributed_and_success_lines_show_no_roles():
+    found = [{"source": "failure", "items": ["i1"], "where": {"nodes": ["draft"]},
+              "steps": {"first_wrong": "ghost", "overrode": ["phantom"]}},
+             {"source": "failure", "items": ["i2"], "where": {"nodes": ["draft"]},
+              "steps": {"first_wrong": "draft"}}]
+    section = _section(_ctx3(analysis={"findings": found, "batches": []}).render(),
+                       "Where the pipeline fails, step by step")
+    assert "(1 of 2 failure finding(s) say only where they start" in section
+    line = analysts.finding_line(1, {"source": "success", "finding": "S", "items": ["i5"],
+                                     "steps": {"first_wrong": "finalize"}})
+    assert "first went wrong" not in line and "steps:" not in line
+
+
+def test_the_caption_says_when_the_map_counts_more_than_the_list_shows():
+    many = [{"source": "failure", "finding": f"F{n}", "items": [f"i{n}"],
+             "where": {"nodes": ["draft"]}} for n in range(analysts.SHOWN_FINDINGS + 2)]
+    section = _section(_ctx3(analysis={"findings": many, "batches": []}).render(),
+                       "Where the pipeline fails, step by step")
+    assert (f"Counted over all {len(many)} failure finding(s); the list below shows the top "
+            f"{analysts.SHOWN_FINDINGS} findings of either kind.") in section
+
+
+def test_without_analysts_the_map_comes_from_the_readers_patterns():
+    readers = [{"failure_patterns": [
+                    {"pattern": "p1", "step": "review", "items": ["i1", "i2"]},
+                    {"pattern": "p2", "step": "unclear", "items": ["i3"]},
+                    {"pattern": "p3", "step": "`draft`", "items": ["i4"]}],
+                "success_patterns": [{"pattern": "s", "step": "finalize", "items": ["i5"]}]},
+               {"failure_patterns": [{"pattern": "p4", "step": "review", "items": ["i2", "i6"]},
+                                     "junk", {"step": None}]}]
+    text = _ctx3(reader_findings=readers).render()
+    section = _section(text, "Where the pipeline fails, step by step")
+    assert "From the readers' failure patterns for this candidate" in section
+    assert "| review | 3 (2) | - | - | - |" in section
+    assert "| draft | 1 (1) | - | - | - |" in section
+    assert "finalize" not in section and "the cause can lie" not in section
+    assert (text.index("## The pipeline you may edit")
+            < text.index("## Where the pipeline fails, step by step")
+            < text.index("## The operations you may use"))
+    # "unclear" names no step, with or without a known graph.
+    assert [f["where"]["nodes"] for f in analysts.reader_failures(readers)] == [
+        ["review"], [], ["draft"], ["review"], []]
+    # With an analysis the analysts' findings are used, not the readers'.
+    both = _section(_ctx3(reader_findings=readers,
+                          analysis={"findings": FINDINGS, "batches": []}).render(),
+                    "Where the pipeline fails, step by step")
+    assert "From the analysts' failure findings" in both
+
+
+def test_a_text_setting_with_line_breaks_or_a_bar_is_shown_exactly():
+    value = "First line | with a bar\n  indented second line\n```inner fence```\nlast"
+    knobs = [*KNOBS, {"name": "draft__system_prompt", "value": value, "kind": "str",
+                      "frozen": False}]
+    settings = _section(_ctx3(knobs=knobs).render(), "Each step's settings")
+    assert value in settings, "the exact text, line breaks and bar included"
+    assert ("| draft__system_prompt | (shown whole below, "
+            f"{len(value)} characters) |") in settings
+    assert "````\n" + value + "\n````" in settings, "a fence longer than any run inside"
+    # One-line texts stay in the table as they are.
+    assert f"| draft__task | {KNOBS[1]['value']} |" in settings
 
 
 def test_the_attribution_survives_the_analyst_stage_into_the_request():
