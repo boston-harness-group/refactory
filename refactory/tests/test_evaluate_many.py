@@ -493,19 +493,25 @@ def test_results_order_mutation(tmp_path):
     # Record completion order
     completion_order: list[str] = []
     lock = threading.Lock()
+    fast_reported = threading.Event()
 
     def on_result(index: int, candidate: Candidate) -> None:
         with lock:
             completion_order.append(candidate.id)
+        if candidate.id == candidates[1].id:
+            fast_reported.set()
 
-    # The delay comes before the evaluation's own work, so the margin must cover that
-    # work's jitter on a loaded runner (a cold start, the trace files): 0.4 s did not
-    # (CI, 2026-11-14), 2 s does.
-    delays = {
-        candidates[0].id: 2.0,  # slow
-        candidates[1].id: 0.01,  # fast
-    }
-    _patch_evaluate_with_delay(loop, delays)
+    # The slow evaluation finishes only once the fast one's result is in, so the
+    # completion order is fixed however loaded the machine is (a sleep was not: CI,
+    # 2026-11-14). Run one at a time, the wait times out and the order check fails.
+    original = loop._evaluate
+
+    def gated(cand, **kw):
+        if cand.id == candidates[0].id:
+            fast_reported.wait(timeout=30)
+        return original(cand, **kw)
+
+    loop._evaluate = gated
 
     requests = [EvalRequest(candidate=c, part="train") for c in candidates]
     results = run.evaluate_many(requests, on_result=on_result)

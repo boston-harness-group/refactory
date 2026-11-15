@@ -1246,8 +1246,14 @@ def test_the_index_answers_under_concurrent_builders_and_torn_lines(tmp_path):
     writers = [writer(100), writer(200), writer(300)]
     assert [process.wait() for process in writers] == [0, 0, 0]
     lines = (tmp_path / live.EVENTS).read_bytes().splitlines(keepends=True)
-    # The count is the newline-terminated lines, and the index agrees with it.
-    assert live.snapshot(tmp_path)['total'] == sum(1 for line in lines if line.endswith(b'\n'))
+    # Every record is counted once, none lost, and the index agrees. Blank lines count
+    # nothing: `emit` repairs a tail that does not end in a newline, and a write still
+    # in flight in another process looks like one, so a race can leave an empty line
+    # (CI, 2026-11-14: 111 lines, 110 records).
+    records = [json.loads(line) for line in lines if line.endswith(b'\n') and line.strip()]
+    assert sorted(record['n'] for record in records if record['kind'] == 'w') == [
+        n for offset in (100, 200, 300) for n in range(offset, offset + 20)]
+    assert live.snapshot(tmp_path)['total'] == len(records) == 110
 
 
 def test_bounded_activity_page(tmp_path):
