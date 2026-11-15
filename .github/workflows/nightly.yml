@@ -1,0 +1,47 @@
+# What is too long for every push but should still run without anyone remembering:
+# the structure-edit harness's long tier (thousands of edits per seed, the spine on
+# every twelfth accepted state, the regression corpus on the spine and the spine's
+# mutation check; `refactory/docs/outer-loop.md`). Push CI (`ci.yml`) still runs every
+# test it ran before, including the harness's short tier and every mutation check;
+# this adds coverage and moves nothing.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structure-fuzz-long:
+    name: Structure-edit harness, long tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          install: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+      - name: Install (fresh-checkout path)
+        run: ./install.sh
+      - name: Long tier
+        env:
+          STRUCTURE_FUZZ_REPORT: structure-fuzz.json
+        run: >-
+          uv run python -m pytest refactory/tests/test_structure_fuzz.py
+          --run-structure-fuzz-long -m structure_fuzz_long -q -rfEs -n 4 --timeout=5400
+      - name: Keep the harness's counts and findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: structure-fuzz-long
+          path: structure-fuzz.json
+          if-no-files-found: ignore

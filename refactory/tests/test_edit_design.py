@@ -82,23 +82,21 @@ def test_the_edit_mode_is_the_create_graph_with_a_different_intent():
 
 # prepare() checks the model credential, here a placeholder in the test's own home (dm-257).
 @pytest.mark.usefixtures("configured_model_home")
-def test_prepare_hands_the_model_the_source_it_is_revising():
-    workdir = Path(__file__).parent / "_edit_prepare"
-    shutil.rmtree(workdir, ignore_errors=True)
-    workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        ctx = nn.RunContext(workdir)
-        ctx.task = {"name": NAME, "brief": "keep it", "mode": "circle_packing/adaptive"}
-        import refactory_dsh.create_ops as ops
+def test_prepare_hands_the_model_the_source_it_is_revising(tmp_path):
+    # The run directory is the test's own: one beside the tests, in the checkout, once
+    # showed up mid-run on other workers (CI's checkout check).
+    workdir = tmp_path / "edit_prepare"
+    workdir.mkdir()
+    ctx = nn.RunContext(workdir)
+    ctx.task = {"name": NAME, "brief": "keep it", "mode": "circle_packing/adaptive"}
+    import refactory_dsh.create_ops as ops
 
-        facts = ops.prepare(ctx)
-        assert facts["revision_of"] == "circle_packing/adaptive"
-        assert "revision of `circle_packing/adaptive`" in facts["reference"]
-        assert "def greedy_pack" in facts["reference"], (
-            "the source being revised must be in the prompt"
-        )
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    facts = ops.prepare(ctx)
+    assert facts["revision_of"] == "circle_packing/adaptive"
+    assert "revision of `circle_packing/adaptive`" in facts["reference"]
+    assert "def greedy_pack" in facts["reference"], (
+        "the source being revised must be in the prompt"
+    )
 
 
 def test_a_revision_needs_a_mode():

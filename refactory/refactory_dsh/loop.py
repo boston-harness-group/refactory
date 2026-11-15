@@ -37,7 +37,10 @@ from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
+
+if TYPE_CHECKING:
+    from refactory_dsh.nn.mode import RunResult
 
 from refactory_dsh import history as run_history
 from refactory_dsh import events

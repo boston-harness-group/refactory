@@ -37,6 +37,7 @@ import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 

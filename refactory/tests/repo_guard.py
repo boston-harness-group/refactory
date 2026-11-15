@@ -35,7 +35,53 @@ def _take_snapshot(repo: Path) -> dict[str, Any]:
         "config_lines": shared["config_lines"],
         "hook_files": shared["hook_files"],
         "worktrees": _parse_worktrees(worktree_list),
+        "files": _working_files(repo),
     }
+
+
+#: What interpreters and tools write beside the code: never a test's doing.
+_CACHE_PARTS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".vite"})
+
+
+def _is_cache(name: str) -> bool:
+    parts = name.split("/")
+    return name.endswith((".pyc", ".pyo")) or any(part in _CACHE_PARTS for part in parts)
+
+
+def _toplevel(repo: Path) -> Path | None:
+    top = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, timeout=30)
+    return Path(top.stdout.strip()) if top.returncode == 0 else None
+
+
+def _working_files(repo: Path) -> dict[str, str]:
+    """Each path `git status` lists (changed or untracked, ignored ones not), with a digest
+    of its bytes: a test that writes into the checkout shows here, even over a file the
+    person had already changed."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        capture_output=True, timeout=60,
+    )
+    # Porcelain paths are relative to the top of the checkout, wherever pytest started.
+    root = _toplevel(repo)
+    if result.returncode != 0 or root is None:
+        return {}
+    files: dict[str, str] = {}
+    entries = iter(result.stdout.split(b"\0"))
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        name = entry[3:].decode(errors="surrogateescape")
+        if entry[:1] in (b"R", b"C"):
+            next(entries, None)  # the rename's source
+        if _is_cache(name):
+            continue
+        path = root / name
+        try:
+            files[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+        except OSError:
+            files[name] = "unreadable"
+    return files
 
 
 def _parse_worktrees(porcelain: str) -> set[str]:
@@ -79,6 +125,18 @@ def _compare_snapshots(
             failures.append(f"hook removed: {name}")
         elif before_hooks[name] != after_hooks[name]:
             failures.append(f"hook changed: {name}")
+
+    # Working-tree files: a test writes only under its own temporary directories. In CI
+    # nobody else edits the checkout, so a change fails; locally it is more often the
+    # person saving a file during a long run, so it is reported, not failed. (A file a
+    # test leaves in refactory/tests fails everywhere: conftest checks that per test.)
+    before_files: dict[str, str] = before.get("files") or {}
+    after_files: dict[str, str] = after.get("files") or {}
+    changed_files = failures if os.environ.get("CI", "").lower() not in ("", "0", "false") else warnings
+    for name in sorted(set(before_files) | set(after_files)):
+        if before_files.get(name) != after_files.get(name):
+            changed_files.append(f"file changed in the checkout under test (a test wrote there, "
+                                 f"or it was edited during the run): {name}")
 
     # Worktree changes: attribute to session or report as external.
     before_wts = set(before.get("worktrees") or set())
@@ -144,7 +202,21 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     except Exception:
         basetemp = ""
 
+    # Files this session is configured to write into the checkout (`--junitxml`) are
+    # its own reports, not a test's writes.
+    top = _toplevel(repo)
+    own: list[str] = []
+    xmlpath = getattr(session.config.option, "xmlpath", None)
+    if xmlpath and top is not None:
+        try:
+            own.append(Path(xmlpath).resolve().relative_to(top.resolve()).as_posix())
+        except ValueError:
+            pass
+    for name in own:
+        snapshot["files"].pop(name, None)
+
     session.config.stash[_GUARD_KEY] = {
+        "own_outputs": own,
         "snapshot": snapshot,
         "repo": str(repo),
         "temp_roots": [basetemp, tempfile.gettempdir()],
@@ -165,6 +237,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     except (ValueError, OSError) as exc:
         session.config.stash[_GUARD_INACTIVE_KEY] = str(exc)
         return
+
+    for name in stored.get("own_outputs") or []:
+        after["files"].pop(name, None)
 
     failures, warnings = _compare_snapshots(
         stored["snapshot"],

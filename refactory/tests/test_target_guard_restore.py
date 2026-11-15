@@ -12,7 +12,7 @@ import pytest
 
 from refactory_dsh import agent_delivery, target_guard, worktree
 from refactory_dsh import agent_delivery as ad
-from test_design_worktree import _answers, _design
+from _design_worktree_support import _answers, _design
 from tests_support import FakeModel, git, git_repo, render
 
 
@@ -245,7 +245,7 @@ def test_incident_scripted_design_run(tmp_path):
     import sys as _sys
 
     from refactory_dsh import agent_delivery as ad
-    from test_design_worktree import _answers, _design
+    from _design_worktree_support import _answers, _design
     from tests_support import FakeModel, render
 
     repo = git_repo(tmp_path / "repo")

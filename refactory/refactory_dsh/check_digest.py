@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from refactory_dsh.base_check import parse_test_failures, strip_ansi

@@ -337,6 +337,8 @@ def _memory_store(directory: Path) -> Any:
     declared = read_memory_declarations(directory)
     if not declared:
         return None
+    from refactory_dsh.paths import project_for_nodes
+
     project = Path(os.environ.get("REFACTORY_PROJECT") or project_for_nodes())
     global_root = os.environ.get("REFACTORY_MEMORY_HOME")
     return MemoryStore(
@@ -457,6 +459,8 @@ def run_node(
     """
     install_workspace_packages()
     manifest = _manifest()
+    from refactory_dsh.paths import project_for_nodes
+
     directory = Path(workdir or os.environ.get(WORKDIR_ENV) or project_for_nodes())
     node_id = str(node_id or manifest.get("id") or "")
     if not node_id:

@@ -86,6 +86,51 @@ def _checkout_guard_leaves_this_checkout_alone(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv(target_guard.UNWATCHED_ENV, str(REPO_ROOT))
 
 
+_TESTS_DIR = Path(__file__).resolve().parent
+
+
+def _test_files() -> set[str]:
+    return {name for name in os.listdir(_TESTS_DIR) if name != "__pycache__" and not name.startswith(".")}
+
+
+_TESTS_BEFORE = pytest.StashKey[set]()
+
+
+def _check_test_files(item: pytest.Item, when: str) -> None:
+    before = item.stash.get(_TESTS_BEFORE, None)
+    after = _test_files()
+    if before is not None and after != before:
+        pytest.fail(f"{_TESTS_DIR} changed {when} (this test, or a test on another worker, wrote "
+                    f"into the checkout): added {sorted(after - before)}, removed "
+                    f"{sorted(before - after)}", pytrace=False)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """No test writes into this checkout's tests directory, not even for a moment.
+
+    Two tests once wrote an op module here for their fixture's lifetime, which a design
+    run on another worker reported as a change to its launcher checkout (CI's
+    run-warning flake). The directory is listed before a test's fixtures are set up and
+    compared once they are (a fixture's file is there while the test runs) and after
+    teardown (whatever is left behind); the session's repository guard (`repo_guard`)
+    sees the rest of the checkout. Ops a test needs are committed modules (`_ops_*.py`).
+    """
+    item.stash[_TESTS_BEFORE] = _test_files()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item: pytest.Item) -> None:
+    _check_test_files(item, "while its fixtures were set up")
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Iterator[None]:
+    result = yield
+    _check_test_files(item, "by the time it was torn down")
+    return result
+
+
 # ── the sealed suite: no test reaches the person's DSH home or the real gh ──────
 #
 # A test resolved the person's own DSH home and touched a profile there in the middle of
@@ -296,6 +341,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
              "edits, with spine runs); see docs/outer-loop.md",
     )
     parser.addoption(
+        "--shard",
+        default=None,
+        metavar="I/N",
+        help="run only shard I of N: test files packed by their CI durations "
+             "(tests/ci_durations.json), so N parallel jobs together run every test once",
+    )
+    parser.addoption(
         "--toolchain-gate",
         action="store_true",
         default=False,
@@ -307,6 +359,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    _parse_shard(config)  # a malformed --shard stops here, before any collection
     # The gate reads each marked test's report in the controller, and xdist reports in
     # its workers, so under -n it would see nothing and pass a suite it never checked.
     if config.getoption("--toolchain-gate", default=False):
@@ -354,7 +407,65 @@ _TOOLCHAIN: dict[str, str] = {}
 _TOOLCHAIN_RESULT: dict[str, tuple[str, str]] = {}
 
 
+#: Seconds each test file took in CI (`scripts/ci-durations.py` refreshes it), for `--shard`.
+CI_DURATIONS = Path(__file__).resolve().parent / "ci_durations.json"
+
+
+def _shard_files(files: list[str], shard: int, shards: int) -> set[str]:
+    """The files shard ``shard`` (1-based) of ``shards`` runs. Longest first, each file
+    goes to the least loaded shard, ties to the lowest; a file CI has no time for yet
+    counts as the median. Every shard (and every xdist worker in it) collects the same
+    files and computes the same packing, so together they run each file exactly once."""
+    import json
+
+    try:
+        known = {str(k): float(v) for k, v in json.loads(CI_DURATIONS.read_text()).items()}
+    except (OSError, ValueError):
+        known = {}
+    timed = sorted(known.values())
+    default = timed[len(timed) // 2] if timed else 1.0
+    weight = {name: known.get(name, default) for name in files}
+    loads = [0.0] * shards
+    owner: dict[str, int] = {}
+    for name in sorted(files, key=lambda name: (-weight[name], name)):
+        index = min(range(shards), key=lambda i: (loads[i], i))
+        owner[name] = index
+        loads[index] += weight[name]
+    return {name for name, index in owner.items() if index == shard - 1}
+
+
+def _parse_shard(config: pytest.Config) -> tuple[int, int] | None:
+    value = config.getoption("--shard", default=None)
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d+)/(\d+)", value)
+    if not match or not 1 <= int(match[1]) <= int(match[2]):
+        raise pytest.UsageError(f"--shard takes I/N with 1 <= I <= N, not {value!r}")
+    return int(match[1]), int(match[2])
+
+
+#: A test another shard runs: deselected here, but not a toolchain test that went unrun.
+_OTHER_SHARD = pytest.StashKey[bool]()
+
+
+def _select_shard(config: pytest.Config, items: list[pytest.Item]) -> None:
+    parsed = _parse_shard(config)
+    if parsed is None:
+        return
+    shard, shards = parsed
+    by_file = {item.nodeid.split("::")[0].rsplit("/", 1)[-1]: None for item in items}
+    mine = _shard_files(list(by_file), shard, shards)
+    keep = [item for item in items if item.nodeid.split("::")[0].rsplit("/", 1)[-1] in mine]
+    dropped = [item for item in items if item.nodeid.split("::")[0].rsplit("/", 1)[-1] not in mine]
+    for item in dropped:
+        item.stash[_OTHER_SHARD] = True
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = keep
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    _select_shard(config, items)
     for item in items:
         marker = item.get_closest_marker("toolchain")
         if marker is not None:
@@ -374,8 +485,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def pytest_deselected(items: list[pytest.Item]) -> None:
-    """A deselected toolchain test did not run; `-k` must not hide it from the gate."""
+    """A deselected toolchain test did not run; `-k` must not hide it from the gate. One
+    `--shard` leaves to another shard is not deselected from the suite."""
     for item in items:
+        if item.stash.get(_OTHER_SHARD, False):
+            continue
         marker = item.get_closest_marker("toolchain")
         if marker is not None:
             _TOOLCHAIN[item.nodeid] = str(marker.args[0]) if marker.args else "unknown"

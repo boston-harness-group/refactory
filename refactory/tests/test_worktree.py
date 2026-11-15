@@ -1247,6 +1247,16 @@ def test_config_lock_does_not_block_isolate_hooks_when_extension_already_set(rep
 # ── session-level repository guard ────────────────────────────────────────
 
 
+@pytest.fixture(params=["", "true"], ids=["local", "ci"])
+def guard_ci(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Each inner session runs as on a person's machine and as in CI (`CI`), so the guard
+    is tested in both modes wherever this suite itself runs. Bytecode writing is on, so
+    the inner session's `__pycache__` is there for the guard to leave aside."""
+    monkeypatch.setenv("CI", request.param)
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    return bool(request.param)
+
+
 def _guard_conftest(tests_dir: Path) -> str:
     """A conftest.py that loads the real repo_guard module."""
     return (
@@ -1255,7 +1265,7 @@ def _guard_conftest(tests_dir: Path) -> str:
     )
 
 
-def test_session_guard_catches_worktree_in_tmp(tmp_path):
+def test_session_guard_catches_worktree_in_tmp(tmp_path, guard_ci):
     """The guard fails a session whose test adds a worktree under tmp_path (scenario a)."""
     tests_dir = Path(__file__).resolve().parent
     test_repo = tmp_path / "guarded-repo-a"
@@ -1282,7 +1292,7 @@ def test_session_guard_catches_worktree_in_tmp(tmp_path):
 
 
 @pytest.mark.parametrize("variant", ["hook", "config"])
-def test_session_guard_catches_hook_or_config_change(tmp_path, variant):
+def test_session_guard_catches_hook_or_config_change(tmp_path, variant, guard_ci):
     """The guard fails when a test rewrites a hook (hook) or a config line (config) (scenario b)."""
     tests_dir = Path(__file__).resolve().parent
     test_repo = tmp_path / "guarded-repo-b"
@@ -1319,7 +1329,7 @@ def test_session_guard_catches_hook_or_config_change(tmp_path, variant):
         assert "FAIL: config line added: user.name=BadActor" in combined
 
 
-def test_session_guard_catches_subprocess_worktree_in_refactory_home(tmp_path):
+def test_session_guard_catches_subprocess_worktree_in_refactory_home(tmp_path, guard_ci):
     """The guard fails when a subprocess creates a worktree under REFACTORY_HOME set by the guard (scenario c)."""
     tests_dir = Path(__file__).resolve().parent
     test_repo = tmp_path / "guarded-repo-c"
@@ -1361,7 +1371,7 @@ def test_session_guard_catches_subprocess_worktree_in_refactory_home(tmp_path):
     assert "sub_bad_01" in combined
 
 
-def test_session_guard_reports_external_worktree_without_failing(tmp_path):
+def test_session_guard_reports_external_worktree_without_failing(tmp_path, guard_ci):
     """The guard reports but does not fail when a worktree is added outside the session's temp space (scenario d)."""
     tests_dir = Path(__file__).resolve().parent
     test_repo = tmp_path / "guarded-repo-d"
@@ -1420,7 +1430,29 @@ def test_shared_state_digest_matches_old_formula(repo, tmp_path):
     assert _shared_state(repo) == expected.hexdigest()
 
 
-def test_session_guard_resolves_symlinked_tmp_root(tmp_path):
+def test_session_guard_fails_a_written_file_in_ci_and_reports_it_locally(tmp_path, guard_ci):
+    """A file a test writes into the checkout fails a CI session; on a person's machine,
+    where it is more often their own edit during the run, it is reported. Caches the inner
+    session writes (its `__pycache__`) are neither."""
+    tests_dir = Path(__file__).resolve().parent
+    test_repo = tmp_path / "guarded-repo-w"
+    git_repo(test_repo)
+    (test_repo / "conftest.py").write_text(_guard_conftest(tests_dir))
+    (test_repo / "test_writes.py").write_text(
+        "from pathlib import Path\n\n"
+        "def test_writes_into_the_checkout():\n"
+        f"    Path({str(test_repo / 'leak.txt')!r}).write_text('x\\n')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-xvs", str(test_repo / "test_writes.py")],
+        capture_output=True, text=True, timeout=60, cwd=str(test_repo))
+    combined = result.stdout + result.stderr
+    assert "file changed in the checkout under test" in combined and "leak.txt" in combined, combined
+    assert "__pycache__" not in combined.split("repository guard")[-1], combined
+    assert (result.returncode == 1) is guard_ci, combined
+
+
+def test_session_guard_resolves_symlinked_tmp_root(tmp_path, guard_ci):
     """The guard catches a worktree under a tmp root reached through a symlink."""
     tests_dir = Path(__file__).resolve().parent
     test_repo = tmp_path / "guarded-repo-sym"
@@ -1454,7 +1486,7 @@ def test_session_guard_resolves_symlinked_tmp_root(tmp_path):
     assert "bad-wt" in combined
 
 
-def test_session_guard_reports_inactive_on_non_git_dir(tmp_path):
+def test_session_guard_reports_inactive_on_non_git_dir(tmp_path, guard_ci):
     """The pytest guard reports inactive when run on a directory that is not a git repo."""
     tests_dir = Path(__file__).resolve().parent
     test_dir = tmp_path / "not-a-repo"
