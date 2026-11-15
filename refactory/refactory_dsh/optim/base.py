@@ -7,9 +7,13 @@ does not survive is regenerated with the machine-readable reason why. That turns
 wasted *budget* into wasted *tokens*, which is the trade worth making, because an
 invalid candidate cannot run and therefore teaches the search nothing.
 
-The loop regenerates; it never repairs. An edit that was fixed up before running
-would be scored as something the optimizer never proposed, and the gradient would
-be a description of the repair rather than of the idea.
+The loop regenerates; it repairs only mechanics. An edit fixed up silently would be
+scored as something the optimizer never proposed, and the gradient would be a
+description of the repair rather than of the idea. So a fix is made only where what
+the proposal meant is unambiguous, and it is said: the candidate's edits are the
+repaired ones and its ``repairs`` name each fix (`optim.repair`). A refusal about how a
+proposal is written may also go back to the model in a slim repair call that shows it
+the refused proposal; one about the idea never does.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
+from . import checks, repair
 from refactory_dsh.nn.knob import Knob
 from refactory_dsh.nn.validate import Invariant
 
@@ -478,6 +483,29 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
     return []
 
 
+def _patch_targets_missing(edit: dict[str, Any], reports: Sequence[dict[str, Any]]) -> str:
+    """``E-patch`` when a ``set_knob`` patch entry's target text is not in the knob, or is
+    empty where its action needs one, and the patch did not say what to do then
+    (``config.on_missing``): skipping it would score a knob the proposal did not write.
+    Empty otherwise."""
+    if edit.get("op") != "set_knob" or "patch" not in edit or not reports:
+        return ""
+    if "on_missing" in dict(edit.get("config") or {}):
+        return ""
+    for outcome in (reports[0] or {}).get("outcomes") or ():
+        if (str(outcome.get("status", "")).startswith("skipped") and not outcome.get("target")
+                and outcome.get("kind") in ("replace", "delete", "insert_after", "insert_before")):
+            return (f"E-patch: knob {edit.get('name')!r}: patch entry {int(outcome.get('index', 0)) + 1} "
+                    f"({outcome.get('kind')}) has no target text; give the exact text it acts on "
+                    "(only append needs none)")
+        if str(outcome.get("status", "")).endswith("_target_not_found"):
+            return (f"E-patch: knob {edit.get('name')!r}: patch entry {int(outcome.get('index', 0)) + 1} "
+                    f"({outcome.get('kind')}) has a target that is not in the knob's text: "
+                    f"{str(outcome.get('target') or '')[:200]!r}; quote the target exactly as the "
+                    "knob holds it now")
+    return ""
+
+
 @dataclass(frozen=True)
 class Rejection:
     """A proposal that did not become a candidate, and why.
@@ -491,12 +519,45 @@ class Rejection:
     edit: dict[str, Any]
     reasons: list[str]
     rationale: str = ""
+    #: The candidate a slim repair call made of this refused proposal (`optim.repair`),
+    #: or empty when it was not repaired.
+    repaired: str = ""
 
     def codes(self) -> list[str]:
         """The rules that were broken, which is how a refusal histogram is built."""
         return sorted(
             {reason.split(" ", 1)[0].rstrip(":") for reason in self.reasons if reason}
         )
+
+
+#: How many refused proposals a request shows as written (``ProposalContext.refused``).
+REFUSED_SHOWN = 2
+#: The characters of free text (prompts, code) one shown refused proposal keeps; its
+#: wiring is always whole (`describe_edits`).
+REFUSED_EDITS_CHARS = 4000
+
+
+def refused_lines(refused: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The latest refused proposals as written, each with its reasons, for a retry."""
+    shown = [entry for entry in refused if entry.get("edit")][-REFUSED_SHOWN:]
+    if not shown:
+        return []
+    lines = ["", "The latest refused proposal(s) as written, so the fix keeps what each "
+                 "meant (wiring whole, long texts shortened):"]
+    for entry in shown:
+        edit = entry.get("edit")
+        steps = edit.get("edits") if isinstance(edit, dict) and "op" not in edit else edit
+        lines += ["", "Refused for: " + " | ".join(str(r) for r in entry.get("reasons") or ()),
+                  describe_edits(steps, text_budget=REFUSED_EDITS_CHARS)]
+    return lines
+
+
+def refused_entries(rejections: Sequence["Rejection"]) -> list[dict[str, Any]]:
+    """The latest rejections a slim repair did not fix, as ``ProposalContext.refused``
+    entries (an unreadable answer has no edit to show and is left out)."""
+    out = [{"edit": r.edit, "reasons": list(r.reasons)} for r in rejections
+           if not r.repaired and isinstance(r.edit, dict) and UNREADABLE_PROPOSAL not in r.edit]
+    return out[-REFUSED_SHOWN:]
 
 
 def _structural_edit(edit: Any) -> bool:
@@ -536,6 +597,11 @@ class Candidate:
     evaluated: bool = False
     measurements: dict[str, Any] = field(default_factory=dict)
     model_calls: int = 0
+    #: The mechanical fixes the attempt path made to the proposal that made this
+    #: candidate (`optim.repair`), each said in a line; its ``edits`` are the fixed ones.
+    repairs: list[str] = field(default_factory=list)
+    #: What the attempt path could not check, and why (a code dry run skipped).
+    notes: list[str] = field(default_factory=list)
 
     @classmethod
     def from_state(
@@ -586,6 +652,8 @@ class Candidate:
             "error": self.error,
             "duration_s": self.duration_s,
             "measurements": self.measurements,
+            **({"repairs": list(self.repairs)} if self.repairs else {}),
+            **({"notes": list(self.notes)} if self.notes else {}),
         }
         if include_reports:
             d["edit_reports"] = self.edit_reports
@@ -730,10 +798,11 @@ class ProposalContext:
     #: rather than from the pool; the gate note says which (``_gate_note``).
     population_parents: bool = False
     #: What is there before each node of the edited graph, on every path that reaches
-    #: it (`available_before`): ``{node: {"facts": [...], "files": [...]}}``. Rendered
-    #: under "The pipeline you may edit", so a prompt's ``{{name}}`` names a fact that
-    #: exists there (rule V15) rather than a file name; empty says nothing.
-    available: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: it (`available_before`): ``{node: {"facts": [...], "files": [...], "made_by":
+    #: {name: [step ids]}, "task_inputs": [...]}}``. Rendered under "The pipeline you may
+    #: edit", so a prompt's ``{{name}}`` names a fact that exists there (rule V15) rather
+    #: than a file name, made by the step meant; empty says nothing.
+    available: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Wiring of the edited graph that runs but is likely not what was meant
     #: (`nn.validate.wiring_warnings`), said beside its edges; never a refusal.
     wiring_warnings: list[str] = field(default_factory=list)
@@ -775,6 +844,10 @@ class ProposalContext:
     #: ``LoopConfig.integrity_judge``), for "Integrity review of your proposals"; empty
     #: (the judge off) says nothing.
     integrity: list[dict[str, Any]] = field(default_factory=list)
+    #: The latest refused proposals as written (``{"edit", "reasons"}``, at most
+    #: ``REFUSED_SHOWN``), shown under "Why your last proposals were refused" so a retry
+    #: fixes the proposal it wrote rather than writing one from scratch.
+    refused: list[dict[str, Any]] = field(default_factory=list)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -923,6 +996,7 @@ class ProposalContext:
                 "A proposal that breaks one of these is not evaluated at all. It costs "
                 "nothing but the answer, so fix the stated reason rather than guessing.",
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
+                *refused_lines(self.refused),
             ]
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
@@ -1293,7 +1367,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
         "produced upstream; its reply is written to its first `writes` file and, when it "
         "declares `produces`, also becomes that fact. A new agent runs without tools, so it "
-        "sees only its prompt and cannot read a file: hand it what it needs as `{{facts}}`. "
+        "sees only its prompt and the files it lists in `reads` (pasted in after the prompt): "
+        "hand it anything else as `{{facts}}`. "
         f"A file's text becomes a fact through {reader}, or when the agent that writes the "
         "file declares `produces`.",
         "- **where `{{fact}}` is filled in**: only in an agent's `prompt_template` (its "
@@ -2101,11 +2176,15 @@ def _node_spec(state: dict[str, Any], limit: int,
     return "\n".join(lines + notes)
 
 
-def available_before(graph_state: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
+def available_before(graph_state: Mapping[str, Any],
+                     knob_values: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """For each node a run can reach, the facts and files there before it starts on every
     path that reaches it (`nn.validate.available_inputs`, the sets rule V15 checks
-    against); empty when the graph does not parse."""
+    against), with who makes each one (``made_by``: name -> step ids, `nn.operators.made_by`)
+    and which carry no model output (``task_inputs``, `nn.operators.model_free_inputs`;
+    ``knob_values`` fills the slots of bound prompts); empty when the graph does not parse."""
     from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.operators import made_by, model_free_inputs
     from refactory_dsh.nn.validate import available_inputs
 
     try:
@@ -2113,9 +2192,21 @@ def available_before(graph_state: Mapping[str, Any]) -> dict[str, dict[str, list
     except Exception:  # a broken graph is the validator's to report
         return {}
     have = available_inputs(graph)
-    return {node_id: {"facts": sorted(n for k, n in have.get(node_id, ()) if k == "fact"),
-                      "files": sorted(n for k, n in have.get(node_id, ()) if k == "file")}
-            for node_id in sorted(graph.reachable())}
+    makers = made_by(graph)
+    try:
+        free = model_free_inputs(graph, knob_values)
+    except Exception:  # a node that cannot be read is the validator's to report
+        free = set()
+    out: dict[str, dict[str, Any]] = {}
+    for node_id in sorted(graph.reachable()):
+        entries = have.get(node_id, ())
+        out[node_id] = {
+            "facts": sorted(n for k, n in entries if k == "fact"),
+            "files": sorted(n for k, n in entries if k == "file"),
+            "made_by": {n: makers.get((k, n), []) for k, n in sorted(entries)},
+            "task_inputs": sorted(n for k, n in entries if (k, n) in free),
+        }
+    return out
 
 
 #: The most characters the "what each node has" table takes: past it, each cell lists
@@ -2123,37 +2214,54 @@ def available_before(graph_state: Mapping[str, Any]) -> dict[str, dict[str, list
 AVAILABLE_SECTION_CHARS = 8000
 
 
-def _available_section(available: Mapping[str, Mapping[str, Sequence[str]]], *,
+def _available_section(available: Mapping[str, Mapping[str, Any]], *,
                        code_nodes: bool = False,
                        limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
     """What each node can use: the facts a `{{name}}` may name there, and the files already
-    written, with how a file's text reaches a prompt. Fits ``limit``. Nothing when not
-    known."""
+    written, each with the step that makes it, the ones that carry no model output marked
+    "(task input)", and how a file's text reaches a prompt. Fits ``limit``. Nothing when
+    not known."""
+    from refactory_dsh.nn.operators import COLLECT_CALL, COLLECT_TEXT_CHARS, FILE_TEXT_CALL
+
     if not available:
         return []
     how = ("a code op (`\"call\": \"refactory_dsh.snippet:run\"`) that reads the file and "
            "`produces` the fact" if code_nodes else "an op that reads the file and `produces` "
            "the fact")
     lead = (
-        "What each node has before it runs (on every path that reaches it). A prompt's "
+        "What each node has before it runs (on every path that reaches it), each with the "
+        "step that makes it in parentheses. \"(task input)\" marks one that no model step's "
+        "output reaches: the task's own inputs, and what plain ops make from them alone, so a "
+        "step given only these sees the task and none of the other steps' work. A step's "
+        "input is not its output: name the fact or file the step makes. A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
-        "not a fact, and `{{notes}}` does not read `notes.txt`. The simplest way to give an "
-        "agent without tools a file's text is to list the file in its `reads`: its declared "
-        "reads are pasted into its prompt. To use the text as a `{{name}}`, insert "
-        f"{how} before the node, or have the agent that writes the file declare `produces`, "
-        "which makes its reply that fact too.")
+        "not a fact, and `{{notes}}` does not read `notes.txt`. An agent without tools sees "
+        "its prompt and the files it lists in `reads`, pasted in after the prompt. To hand "
+        "files to a prompt as one `{{name}}`, insert a collect op before the node "
+        f"(`\"call\": \"{COLLECT_CALL}\"`, the files in `reads`, the fact in `produces`: "
+        "each file under its own header, a missing one said to be missing; one file over "
+        f"{COLLECT_TEXT_CHARS} characters is shown as its path and size), or a file_text op "
+        f"for one file's whole text (`\"call\": \"{FILE_TEXT_CALL}\"`), or "
+        f"{how}, or have the agent that writes the file declare `produces`, which makes its "
+        "reply that fact too.")
 
-    def cell(names: Sequence[str], keep: int | None) -> str:
-        names = list(names or ())
+    def named(entry: Mapping[str, Any], name: str) -> str:
+        if name in (entry.get("task_inputs") or ()):
+            return f"{name} (task input)"
+        makers = (entry.get("made_by") or {}).get(name) or ()
+        return f"{name} ({', '.join(makers)})" if makers else name
+
+    def cell(entry: Mapping[str, Any], key: str, keep: int | None) -> str:
+        names = [named(entry, name) for name in entry.get(key) or ()]
         if not names:
             return "-"
         if keep is None or len(names) <= keep:
             return ", ".join(names)
         return ", ".join(names[:keep]) + f" (+{len(names) - keep} more)"
 
-    def table(rows: Sequence[tuple[str, Mapping[str, Sequence[str]]]], keep: int | None) -> str:
-        return _table(["node", "facts available", "files written before it"],
-                      [[node_id, cell(entry.get("facts"), keep), cell(entry.get("files"), keep)]
+    def table(rows: Sequence[tuple[str, Mapping[str, Any]]], keep: int | None) -> str:
+        return _table(["node", "facts available (made by)", "files written before it (made by)"],
+                      [[node_id, cell(entry, "facts", keep), cell(entry, "files", keep)]
                        for node_id, entry in rows])
 
     rows = sorted(available.items())
@@ -2813,6 +2921,15 @@ class Optimizer:
     #: (``Loop._check_optimizer_route``) and a strategy may hand it the round's sampling.
     uses_model: bool = False
 
+    #: Whether someone answers gates while this run's candidates run. An outer loop's
+    #: candidates run headless, so an edit adding a gate a person or an agent answers is
+    #: refused ``E-gate-kind`` (`optim.checks`).
+    answered_gates: bool = False
+    #: A candidate's recorded run inputs by id (`optim.checks.recorded_inputs`), for the
+    #: code dry run of new or changed code nodes; ``None`` skips the dry run, said in the
+    #: candidate's ``notes``. The loop sets it to its run directory's.
+    recorded_inputs: Any = None
+
     def choose_parent(
         self, ctx: "ProposalContext", parents: Sequence["Candidate"]
     ) -> "Candidate | None":
@@ -2857,6 +2974,8 @@ class Optimizer:
         self.k = max(1, int(k))
         self.rejections: list[Rejection] = []
         self.last_diagnosis: str = ""
+        #: The last refusal of a slim repair's fix (`repair_refused`), when none was taken.
+        self.last_repair_refusal: list[str] = []
         #: The answer's optional ``considered``: the kinds of change it weighed and why it
         #: chose its own, recorded beside the diagnosis so each round's choice can be read.
         self.last_considered: str = ""
@@ -2925,6 +3044,7 @@ class Optimizer:
             round_ctx = replace(
                 ctx,
                 rejections=[*ctx.rejections, *summarise_reasons(feedback)],
+                refused=[*ctx.refused, *refused_entries(self.rejections)][-REFUSED_SHOWN:],
                 preset=preset,
                 attempt=attempt,
             )
@@ -2958,17 +3078,73 @@ class Optimizer:
                     accepted.append(outcome)
                     progressed = True
                 else:
+                    fixed = self.repair_refused(
+                        round_ctx, proposal, outcome, parent,
+                        lambda again, parent=parent: self.attempt(
+                            again, parent, invariants, resolve_calls, ctx.frozen, seen))
+                    after = [] if fixed is not None else list(self.last_repair_refusal)
                     rejection = Rejection(
                         attempt=attempt,
                         edit=proposal.edit,  # {"edits": [...]} for a compound proposal
-                        reasons=outcome,
+                        reasons=[*outcome, *(f"{reason} [the proposal as a slim repair call "
+                                             "fixed it]" for reason in after)],
                         rationale=proposal.rationale,
+                        repaired=fixed.id if fixed is not None else "",
                     )
                     self.rejections.append(rejection)
-                    feedback.extend(outcome)
+                    if fixed is not None:
+                        accepted.append(fixed)
+                        progressed = True
+                    else:
+                        feedback.extend(rejection.reasons)
             if not progressed and not feedback:
                 break
         return accepted, self.rejections
+
+    # ── repairing a refused proposal (`optim.repair`) ─────────────────────
+    def repair(self, ctx: ProposalContext, proposal: Proposal, reasons: Sequence[str],
+               parent: Candidate) -> Proposal | None:
+        """A fixed version of a proposal refused for its mechanics, or ``None``. The
+        default makes none: an optimizer that asks a model overrides it with the slim
+        repair call (`AutoresearchOptimizer.repair`)."""
+        return None
+
+    def repair_refused(self, ctx: ProposalContext, proposal: Proposal, reasons: Sequence[str],
+                       parent: Candidate, attempt: Any) -> Candidate | None:
+        """Ask `repair` to fix a refused proposal and validate each fix with ``attempt``
+        (the caller's attempt path, so a fix passes every check the proposal had to):
+        the candidate, or ``None``. Only a refusal about mechanics (`repair.repairable`)
+        is sent, at most `repair.REPAIR_CALLS_PER_PROPOSAL` times and
+        `repair.REPAIR_CALLS_PER_EPOCH` times in ``ctx.epoch``; each outcome is traced
+        (kind ``repair_outcome``). When no fix is accepted, ``last_repair_refusal`` holds
+        the last fix's refusal (empty when no fix was tried), for the caller to keep."""
+        self.last_repair_refusal = []
+        if type(self).repair is Optimizer.repair:
+            return None
+        used: dict[int, int] = self.__dict__.setdefault("_repair_calls", {})
+        current, why = proposal, list(reasons)
+        for _ in range(repair.REPAIR_CALLS_PER_PROPOSAL):
+            if not repair.repairable(why) or used.get(ctx.epoch, 0) >= repair.REPAIR_CALLS_PER_EPOCH:
+                return None
+            used[ctx.epoch] = used.get(ctx.epoch, 0) + 1
+            fixed = self.repair(ctx, current, why, parent)
+            if fixed is None:
+                return None
+            outcome = attempt(fixed)
+            self.record_call(kind="repair_outcome", epoch=ctx.epoch, parent=parent.id,
+                             accepted=isinstance(outcome, Candidate),
+                             candidate=outcome.id if isinstance(outcome, Candidate) else None,
+                             reasons=[] if isinstance(outcome, Candidate) else list(outcome))
+            if isinstance(outcome, Candidate):
+                return outcome
+            current, why = fixed, list(outcome)
+            # The fix's own refusal, for the caller to keep with the proposal's.
+            self.last_repair_refusal = list(outcome)
+        return None
+
+    def repairs_used(self, epoch: int) -> int:
+        """How many slim repair calls `repair_refused` made in ``epoch``."""
+        return int(self.__dict__.get("_repair_calls", {}).get(epoch, 0))
 
     def _pick_parent(
         self, proposal: Proposal, parents: Sequence[Candidate]
@@ -3022,7 +3198,19 @@ class Optimizer:
         state = parent.state
         edit_reports: list[dict[str, Any] | None] = []
         prefixes: list[dict[str, Any]] = []  # the state after each edit, for E-protected
+        # The edits as applied: each with the fixes whose meaning is unambiguous
+        # (`optim.repair`), each fix said in ``repairs``; the candidate records these.
+        applied: list[dict[str, Any]] = []
+        repairs: list[str] = []
         for index, edit in enumerate(steps):
+            edit, fixed, ambiguous = repair.fix_edit(edit, state, steps, index)
+            if ambiguous:
+                return [_at(f"E-node: {ambiguous}", index, steps)]
+            repairs += fixed
+            if len(steps) > 1 and repair.noop_knob(edit, state):
+                repairs.append(f"edit {index + 1} (set_knob) sets knob {edit.get('name')!r} to "
+                               "the value it already holds, so it was dropped")
+                continue
             if edit.get("op") == "set_knob" and edit.get("name") in frozen:
                 return [_at(f"E-frozen: knob {edit.get('name')!r} is frozen for this run",
                             index, steps)]
@@ -3043,6 +3231,9 @@ class Optimizer:
                 return [_at(f"{exc.code}: {exc}", index, steps)]
             except Exception as exc:  # an operator bug is reported, not swallowed
                 return [_at(f"E-internal: {type(exc).__name__}: {exc}", index, steps)]
+            missed = _patch_targets_missing(edit, reports)
+            if missed:
+                return [_at(missed, index, steps)]
             if len(steps) > 1 and candidate_id(state) == candidate_id(before_step):
                 # An edit of a bundle that changes nothing would be recorded as part of
                 # the idea while doing nothing; said back rather than kept.
@@ -3050,18 +3241,30 @@ class Optimizer:
                             "it left it; drop it or change it", index, steps)]
             edit_reports.append(reports[0] if reports else None)
             prefixes.append(state)
+            applied.append(edit)
 
         violation = nn_edits.protected_violation(parent.state, state, protected)
         if violation:
-            return [f"E-protected: {violation}" + _protected_culprit(steps, parent.state,
+            return [f"E-protected: {violation}" + _protected_culprit(applied, parent.state,
                                                                       prefixes, protected)]
 
         # A bundle that changes nothing at all is refused below as one no-op.
-        dead = (_dead_edit(steps, parent.state, state)
+        dead = (_dead_edit(applied, parent.state, state)
                 if candidate_id(state) != parent.id else None)
         if dead is not None:
-            return [_at(f"E-noop: {steps[dead].get('op')} has no effect on the result: the "
-                        "edits after it undo or overwrite it; drop it", dead, steps)]
+            return [_at(f"E-noop: {applied[dead].get('op')} has no effect on the result: the "
+                        "edits after it undo or overwrite it; drop it", dead, applied)]
+        # A `{{name}}` an added or changed step fills from a file's name, not a fact: a
+        # file_text op hands it the file's whole text (`repair.wire_file_slots`), and says so.
+        # The wired state is held to the protected nodes again: a file_text op put in front
+        # of a step must not rewire a protected one (as the same edit written by hand
+        # would be refused). Then it is not made, and the validator says why (V15).
+        wired_state, wiring, wired = repair.wire_file_slots(parent.state, state)
+        if wiring and not nn_edits.protected_violation(parent.state, wired_state, protected):
+            state = wired_state
+            applied += wiring
+            edit_reports += [None] * len(wiring)
+            repairs += wired
 
         # ── tool-policy escalation check (anchored to the original seed) ──
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
@@ -3116,15 +3319,35 @@ class Optimizer:
         unlowerable = _lowering_refusal(parent.state, state)
         if unlowerable:
             return [unlowerable]
+        # Before scoring (`optim.checks`): a gate nobody will answer fails every item.
+        if not getattr(self, "answered_gates", False):
+            unanswered = checks.answered_gate_refusals(parent.state, state)
+            if unanswered:
+                return unanswered
+        # New or changed code runs on the parent's recorded inputs before any item is
+        # scored with it (`optim.checks.code_dry_run`); skipped, and said, when it cannot.
+        before_code = _code_signatures(parent.state)
+        changed_code = sorted(node_id for node_id, signature in _code_signatures(state).items()
+                              if before_code.get(node_id) != signature)
+        crashed, notes = checks.code_dry_run(parent.id, parent.state, state, changed_code,
+                                             getattr(self, "recorded_inputs", None),
+                                             getattr(self, "sandbox", None))
+        if crashed:
+            return crashed
         # Build the per-edit report list parallel to edits.  Parent reports
         # are carried forward; one report (or None) per applied edit is appended.
         parent_reports = list(parent.edit_reports) if parent.edit_reports else [
             None for _ in parent.edits
         ]
-        return Candidate.from_state(
+        candidate = Candidate.from_state(
             state,
             parent=parent.id,
-            edits=[*parent.edits, *steps],
+            edits=[*parent.edits, *applied],
             edit_reports=[*parent_reports, *edit_reports],
-            step_edits=len(steps),
+            step_edits=len(applied),
         )
+        candidate.repairs, candidate.notes = list(repairs), list(notes)
+        if repairs:
+            self.record_call(kind="repair", how="deterministic", candidate=candidate.id,
+                             parent=parent.id, fixes=repairs)
+        return candidate
