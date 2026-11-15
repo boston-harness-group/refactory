@@ -357,11 +357,17 @@ across the batch.
 3. For each, find where it starts: a step (node), the data passed along an edge, a
    setting, or the pipeline's structure (a missing, redundant or misordered step, a
    check or loop that is absent, work that should run in parallel).
-4. Say what change to the pipeline would fix it: a prompt or setting change, or a
+4. Say how the steps took part, as far as the items show it: the step where things
+   first went wrong for these items (in a loop or a long multi-turn run, the first step
+   that did), any later step whose output replaced good work from an earlier step with
+   worse, and any step whose output repeated another step's output -- an earlier step,
+   a parallel branch, or its own earlier attempt in a loop -- without adding to it.
+   Leave out what the items cannot show.
+5. Say what change to the pipeline would fix it: a prompt or setting change, or a
    structural change (add, remove, rewire, split, loop or parallelise steps).
-5. Address the COMMON patterns, not individual edge cases. A change must hold across
+6. Address the COMMON patterns, not individual edge cases. A change must hold across
    items; do not hardcode item-specific values.
-6. Do not ask for what the pipeline already does.
+7. Do not ask for what the pipeline already does.
 
 You reply with JSON only."""
 
@@ -388,6 +394,14 @@ def system(kind: str) -> str:
     return FAILURE_SYSTEM if kind == "failure" else SUCCESS_SYSTEM
 
 
+#: How a failure finding says the steps took part (optional; `_steps`).
+STEP_ROLES = ("first_wrong", "overrode", "repeated")
+_STEPS = ('"steps": {"first_wrong": "<the step where things first went wrong for these '
+          'items>", "overrode": ["<a later step whose output replaced good work from an '
+          'earlier step with worse>", ...], "repeated": ["<a step whose output repeated '
+          'another step\'s output (an earlier step, a parallel branch, its own earlier '
+          'attempt) without adding to it>", ...]}')
+
 _WHERE = ('"where": {"nodes": ["<step id>", ...], "edges": ["<source> -> <target>", ...], '
           '"knobs": ["<setting name>", ...], "structure": "<what about the pipeline\'s '
           'shape, or empty>"}')
@@ -397,6 +411,7 @@ FAILURE_ANSWER = f"""Write one JSON object and nothing else:
 {{"batch_size": <number of items you read>,
  "findings": [{{"finding": "<what goes wrong, in one or two sentences>",
                {_WHERE},
+               {_STEPS},
                "change": "<the change to the pipeline that would fix it>",
                "items": ["<item id>", ...],
                "impact": "high|medium|low",
@@ -406,6 +421,8 @@ Rules:
 - At most {{limit}} findings, the most important first; fewer if warranted, none if
   nothing is common.
 - Every finding names the items it covers (ids from this batch) and quotes them.
+- "steps" is optional: give the parts the items show, with step ids from the pipeline;
+  leave out any part that does not apply or cannot be told from them.
 - "impact": how much fixing it would raise the score.
 """
 
@@ -530,6 +547,31 @@ def _where(value: Any) -> dict[str, Any]:
     return out
 
 
+def _step_ids(value: Any) -> list[str]:
+    """Step ids from a ``steps`` part: strings only, stripped, each once; anything else
+    (a number, an object) is dropped."""
+    listed = value if isinstance(value, (list, tuple)) else [value]
+    ids = (v.strip().strip("`").strip() for v in listed if isinstance(v, str))
+    return list(dict.fromkeys(v for v in ids if v))
+
+
+def _steps(value: Any) -> dict[str, Any]:
+    """A finding's step attribution normalised (`STEP_ROLES`): ``first_wrong`` one step
+    id, ``overrode`` and ``repeated`` lists of step ids, each only when given. Optional:
+    a finding without it, or with a malformed one, has ``{}`` (or the parts that read)."""
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    first = _step_ids(value.get("first_wrong"))
+    if first:
+        out["first_wrong"] = first[0]
+    for role in ("overrode", "repeated"):
+        ids = _step_ids(value.get(role))
+        if ids:
+            out[role] = ids
+    return out
+
+
 def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
     """One finding normalised: its ``source``, text, ``where``, change (failure) or what
     to keep (success), the cited items checked against ``items`` (an id outside them is
@@ -549,6 +591,7 @@ def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
         merged_from = 1
     kept = [i for i in cited if i in items]
     return {"source": source, "finding": text, "where": _where(raw.get("where")),
+            "steps": _steps(raw.get("steps")),
             "change": str(raw.get("change") or "").strip(),
             "preserve": str(raw.get("preserve") or "").strip(),
             "items": kept, "not_in_batch": [i for i in cited if i not in items],
@@ -633,6 +676,7 @@ MERGE_ANSWER = f"""Write one JSON object and nothing else:
  "findings": [{{"source": "failure|success",
                "finding": "<...>",
                {_WHERE},
+               {_STEPS},
                "change": "<failure: the change that would fix it>",
                "preserve": "<success: what must be kept>",
                "items": ["<item id>", ...],
@@ -640,15 +684,16 @@ MERGE_ANSWER = f"""Write one JSON object and nothing else:
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote>", ...]}}]}}
 
-The list is ranked: the most important finding first.
+The list is ranked: the most important finding first. "steps" is optional: keep it
+from the findings merged (each part's union; the first "first_wrong" when they differ).
 """
 
 
 def _for_merge(found: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Findings as a merge call reads them (without the checker's bookkeeping)."""
-    keys = ("source", "finding", "where", "change", "preserve", "items", "batches",
+    keys = ("source", "finding", "where", "steps", "change", "preserve", "items", "batches",
             "impact", "evidence")
-    return [{key: f[key] for key in keys if f.get(key) not in (None, "", [])} for f in found]
+    return [{key: f[key] for key in keys if f.get(key) not in (None, "", [], {})} for f in found]
 
 
 def merge_prompt(ctx: Any, step: str, lists: Sequence[Sequence[dict[str, Any]]],
@@ -746,10 +791,222 @@ def finding_line(rank: int, entry: Mapping[str, Any], cap: int | None = None) ->
     if int(entry.get("batches") or 1) > 1:
         head.append(f"from {entry['batches']} findings")
     action = "".join(f" -- {label}: {_cut(text, cap)}" for label, text in _actions(entry))
+    roles = steps_text(entry.get("steps")) if entry.get("source", "failure") == "failure" else ""
+    if roles:
+        action = f" -- steps: {roles}{action}"
     quotes = [f'"{_cut(q, cap)}"' for q in entry.get("evidence") or ()]
     return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'), cap)} "
             f"-- where: {_where_text(entry.get('where') or {}, cap)}{action}"
             + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
+
+
+#: How `steps_text` and the step map name each role of `STEP_ROLES`.
+_ROLE_WORDS = {"first_wrong": "first went wrong at",
+               "overrode": "replaced good work from an earlier step with worse",
+               "repeated": "repeated other steps' output without adding to it"}
+
+
+def steps_text(steps: Any) -> str:
+    """A finding's step attribution in words; empty without one."""
+    roles = _steps(steps)
+    parts = [f"{_ROLE_WORDS[role]}: "
+             + ", ".join(f"`{step}`" for step in _step_ids(roles[role]))
+             for role in STEP_ROLES if roles.get(role)]
+    return "; ".join(parts)
+
+
+def flow_order(nodes: Sequence[Any], edges: Sequence[Any] = ()) -> list[str]:
+    """The pipeline's node ids in the order work flows through them: a topological order
+    of the edges once each edge that closes a loop (back to a step on the current path)
+    is set aside, ties kept in the listed order. The path search starts from the nodes
+    no edge enters, then from other steps, then from gates -- every loop passes through a
+    gate (rule V10), so a gate is never taken for the start of the loop it closes,
+    whatever its id. Malformed entries are skipped."""
+    listed = [str(n.get("id")) for n in nodes if isinstance(n, Mapping) and n.get("id")]
+    gates = {str(n.get("id")) for n in nodes
+             if isinstance(n, Mapping) and n.get("kind") == "gate"}
+    rank = {node: index for index, node in enumerate(listed)}
+    out_edges: dict[str, list[str]] = {node: [] for node in listed}
+    for edge in edges or ():
+        if not isinstance(edge, Mapping):
+            continue
+        source, target = str(edge.get("source")), str(edge.get("target"))
+        if source in rank and target in rank and target not in out_edges[source]:
+            out_edges[source].append(target)
+    # Edges back to a step on the current depth-first path close a loop.
+    entered = {target for targets in out_edges.values() for target in targets}
+    starts = ([n for n in listed if n not in entered]
+              + [n for n in listed if n in entered and n not in gates]
+              + [n for n in listed if n in entered and n in gates])
+    back: set[tuple[str, str]] = set()
+    state: dict[str, int] = {}
+    for root in starts:
+        if root in state:
+            continue
+        stack = [(root, iter(out_edges[root]))]
+        state[root] = 1
+        while stack:
+            node, children = stack[-1]
+            child = next(children, None)
+            if child is None:
+                state[node] = 2
+                stack.pop()
+            elif state.get(child) == 1:
+                back.add((node, child))
+            elif child not in state:
+                state[child] = 1
+                stack.append((child, iter(out_edges[child])))
+    indegree = {node: 0 for node in listed}
+    for source, targets in out_edges.items():
+        for target in targets:
+            if (source, target) not in back:
+                indegree[target] += 1
+    ready = sorted((n for n in listed if not indegree[n]), key=rank.__getitem__)
+    order: list[str] = []
+    while ready:
+        node = ready.pop(0)
+        order.append(node)
+        for target in out_edges[node]:
+            if (node, target) in back:
+                continue
+            indegree[target] -= 1
+            if not indegree[target]:
+                ready.append(target)
+                ready.sort(key=rank.__getitem__)
+    return order + [n for n in listed if n not in order]
+
+
+def _known_steps(steps: Mapping[str, Any], known: set[str]) -> dict[str, Any]:
+    """A finding's step attribution with the step ids the pipeline lacks dropped (all
+    kept when ``known`` is empty)."""
+    out: dict[str, Any] = {}
+    for role in STEP_ROLES:
+        ids = [s for s in _step_ids(steps.get(role)) if not known or s in known]
+        if ids:
+            out[role] = ids
+    return out
+
+
+def step_map(findings: Sequence[Any], nodes: Sequence[Any] = (),
+             edges: Sequence[Any] = ()) -> list[dict[str, Any]]:
+    """Per step, from the failure findings: the items and findings that name it
+    (``where.nodes``) and that give it each role of `STEP_ROLES`, an item counted once per
+    step and role however many findings cite it. Rows in the pipeline's flow order
+    (`flow_order` of ``nodes`` and ``edges``), only steps with a count; a step id the
+    pipeline does not have is ignored (when ``nodes`` is known). Robust: a finding of any
+    odd shape counts for what reads in it, never raises."""
+    order = flow_order(nodes, edges)
+    known = set(order)
+    roles = ("named", *STEP_ROLES)
+    cells: dict[str, dict[str, tuple[set[str], set[int]]]] = {}
+    for index, entry in enumerate(findings or ()):
+        if not isinstance(entry, Mapping) or entry.get("source", "failure") != "failure":
+            continue
+        items = {str(i) for i in entry.get("items") or ()
+                 if isinstance(i, (str, int))} if isinstance(entry.get("items"), list) else set()
+        where = entry.get("where") if isinstance(entry.get("where"), Mapping) else {}
+        given = _steps(entry.get("steps"))
+        by_role = {"named": _step_ids(where.get("nodes")),
+                   **{role: _step_ids(given.get(role)) for role in STEP_ROLES}}
+        for role in roles:
+            for step in by_role[role]:
+                if known and step not in known:
+                    continue
+                seen, found = cells.setdefault(step, {}).setdefault(role, (set(), set()))
+                seen.update(items)
+                found.add(index)
+    steps = [s for s in order if s in cells] + sorted(s for s in cells if s not in known)
+    return [{"step": step, **{role: {"items": len(cells[step][role][0]),
+                                     "findings": len(cells[step][role][1])}
+                              for role in roles if role in cells[step]}}
+            for step in steps]
+
+
+def reader_failures(reader_findings: Sequence[Any] | None) -> list[dict[str, Any]]:
+    """The readers' failure patterns (``ProposalContext.reader_findings``) as failure
+    findings `step_map` reads: the step a pattern says it starts in (``"unclear"`` and
+    empty dropped) and its items. Readers give no step attribution."""
+    out: list[dict[str, Any]] = []
+    for found in reader_findings or ():
+        if not isinstance(found, Mapping):
+            continue
+        for pattern in found.get("failure_patterns") or ():
+            if not isinstance(pattern, Mapping):
+                continue
+            steps = [s for s in _step_ids(pattern.get("step")) if s.lower() != "unclear"]
+            items = pattern.get("items")
+            out.append({"source": "failure", "where": {"nodes": steps},
+                        "items": list(items) if isinstance(items, (list, tuple)) else []})
+    return out
+
+
+#: Where the step map's findings come from, as its caption names them.
+_MAP_SOURCES = {
+    "analysts": ("the analysts' failure findings", "failure finding(s)",
+                 "\"What the analysts found, ranked\""),
+    "readers": ("the readers' failure patterns", "failure pattern(s)",
+                "\"What the readers found\""),
+}
+
+
+def step_map_lines(findings: Sequence[Any], nodes: Sequence[Any] = (),
+                   edges: Sequence[Any] = (), *, source: str = "analysts",
+                   shown: int | None = None, code_nodes: bool = False,
+                   structural: bool = True) -> list[str]:
+    """"Where the pipeline fails, step by step", for the proposal request: `step_map` over
+    every failure finding (or reader pattern, ``source``), in the pipeline's flow order.
+    ``shown`` is how many findings of either kind the ranked list below shows, said when
+    the map counts more. With ``structural`` (the run permits structural operations),
+    when a step replaced earlier good work or repeated others' output, one line names
+    the two places such a cause can lie, with examples of each. Nothing without a
+    failure finding that names a step of the pipeline."""
+    found = [f for f in findings or ()
+             if isinstance(f, Mapping) and f.get("source", "failure") == "failure"]
+    if source == "readers":
+        # A reader names one step or none ("unclear", dropped): only those that name one
+        # are counted, and readers give no roles, so only the first column is shown.
+        found = [f for f in found if _step_ids((f.get("where") or {}).get("nodes"))]
+    rows = step_map(found, nodes, edges)
+    if not rows:
+        return []
+    known = set(flow_order(nodes, edges))
+    what, unit, where = _MAP_SOURCES.get(source, _MAP_SOURCES["analysts"])
+    roles = ("named",) if source == "readers" else ("named", *STEP_ROLES)
+    headers = {"named": "named in failure findings",
+               "first_wrong": "where things first went wrong",
+               "overrode": "replaced good work from an earlier step with worse",
+               "repeated": "repeated other steps' output without adding to it"}
+
+    def cell(row: Mapping[str, Any], role: str) -> str:
+        counts = row.get(role)
+        return f"{counts['items']} ({counts['findings']})" if counts else "-"
+
+    counted = (f"Counted over all {len(found)} {unit}"
+               + (f"; the list below shows the top {shown} findings of either kind"
+                  if shown is not None and len(findings or ()) > shown else "") + ".")
+    lines = [
+        "## Where the pipeline fails, step by step",
+        f"From {what} for this candidate (in full under {where}). Each cell is the failed "
+        "train items, then in brackets the findings, that give the step that role; an item "
+        f"counts once per cell and may be in several cells. {counted}",
+        _table(["step", *(headers[role] for role in roles)],
+               [[row["step"], *(cell(row, role) for role in roles)] for row in rows])]
+    attributed = sum(1 for f in found if _known_steps(_steps(f.get("steps")), known))
+    if source != "readers" and attributed < len(found):
+        lines.append(f"({len(found) - attributed} of {len(found)} {unit} say only where "
+                     "they start, not how the steps took part.)")
+    interacts = any(row.get("overrode") or row.get("repeated") for row in rows)
+    if structural and interacts:
+        lines.append(
+            "Where a step replaced earlier good work or repeated other steps' output, the "
+            "cause can lie in what the step is told (its instructions) or in what it is "
+            "given and how the work is split between steps. For example: instructions on "
+            "what to keep from earlier steps and when to depart from it; independent "
+            "attempts that do not see each other's output; a vote or a check across "
+            "attempts; a check that sends a step back with a reason"
+            + ("; a deterministic code step" if code_nodes else "")
+            + ". Choose by the evidence.")
+    return [*lines, ""]
 
 
 def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:

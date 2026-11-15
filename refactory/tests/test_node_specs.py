@@ -278,7 +278,7 @@ def test_catalogue_rows_say_which_fields_take_a_node():
     rows = {line.split("|")[1].strip(): line for line in text.splitlines()
             if line.startswith("| ") and line.split("|")[1].strip() in
             ("insert_after", "split", "loop", "add_node", "bypass")}
-    assert "node: a full node object (see the node schemas above)" in rows["insert_after"]
+    assert "node: a full node object (see the node schemas below)" in rows["insert_after"]
     assert "node: a full node object" in rows["add_node"]
     assert "into: a list of two full node objects" in rows["split"]
     assert "gate: a full node object" in rows["loop"]
@@ -401,7 +401,7 @@ def test_a_new_agents_task_text_is_a_knob_the_next_round_can_move(tmp_path):
     knobs = SkillGraph(state=state).describe()["knobs"]
     assert "verify__task" in knobs and not knobs["verify__task"]["frozen"]
     listed = ProposalContext(knobs=[{"name": n, **k} for n, k in knobs.items()]).render()
-    parameters = listed[listed.index("## Parameters you may move"):listed.index("## The pipeline")]
+    parameters = listed[listed.index("## Each step's settings"):].split("\n## ", 1)[0]
     assert "| verify__task |" in parameters
     moved = nn_edits.apply({"op": "set_knob", "name": "verify__task",
                             "value": "RECHECK {{compare_prompt}}"}, state)

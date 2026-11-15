@@ -291,7 +291,7 @@ def test_the_autoresearch_prompt_carries_the_gradient_and_the_blocks():
         _context(mode), 1, parents=parents, invariants=mode.invariants()
     )
     prompt = model.prompts[0]
-    assert "Parameters you may move" in prompt
+    assert "## Each step's settings" in prompt
     assert "The operations you may use" in prompt
     assert "Blocks you may insert" in prompt
     assert "restart_on_stall" in prompt

@@ -143,7 +143,7 @@ def test_the_optimizer_prompt_states_the_rules():
     assert described is not None
     ctx = ProposalContext(knobs=[], nodes=[], edges=[], catalogue=nn.edits.catalogue())
     prompt = ctx.render()
-    assert "## The rules a proposal must satisfy" in prompt
+    assert "## The rules the validator checks" in prompt
     for code in ("V4", "V5", "V6", "V7", "V10"):
         assert f"`{code}`" in prompt, f"{code} is not stated to the optimizer"
 

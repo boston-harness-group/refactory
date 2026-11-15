@@ -51,7 +51,7 @@ def test_a_prompt_is_patched_by_default_and_a_whole_value_stays_available():
     flat = " ".join(answer.split())
     assert "To change a text parameter such as a prompt, patch it:" in flat
     assert "A whole new `value` is for a setting that is not text, a new step's own prompt" in flat
-    assert "a concise set of edits, only the ones that are needed" in flat
+    assert "neither kind is the safer default" in flat
     bundles = json.loads(next(line for line in answer.splitlines()
                               if line.startswith('{"proposals": [{"edits"')))["proposals"]
     assert all("patch" in e and "value" not in e for e in bundles[0]["edits"])
@@ -275,13 +275,12 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "compare_prompt" in available["compare"]["facts"]
     assert "decide_prompt" not in available["compare"]["facts"]
     text = _render(available=available, code_nodes=True)
-    pipeline = text[text.index("## The pipeline you may edit"):text.index("### Each node")
-                    if "### Each node" in text else text.index("## What the author says")]
+    pipeline = text[text.index("## The pipeline you may edit"):].split("\n## ", 1)[0]
     row = next(line for line in pipeline.splitlines() if line.startswith("| decide |"))
     assert "decide_prompt" in row and "compare_notes.txt" in row
     assert "a file's name is not a fact" in pipeline and "snippet:run" in pipeline
     plain = _render(available=available, code_nodes=False)
-    plain = plain[plain.index("## The pipeline you may edit"):plain.index("## What the author says")]
+    plain = plain[plain.index("## The pipeline you may edit"):].split("\n## ", 1)[0]
     assert "a file's name is not a fact" in plain and "snippet:run" not in plain
     assert "facts available" not in _render()
 
