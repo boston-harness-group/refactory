@@ -135,6 +135,8 @@ The edit algebra: every structural change is typed data.
 | function | `apply_many` | `(edits: 'Iterable[dict]', state: 'Mapping[str, Any]') -> 'State'` |
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |
+| function | `core_ops_calls` | `() -> 'dict[str, str]'` |
+| function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]') -> 'list[str]'` |
 | function | `enabled` | `(preset: 'str' = 'broad') -> 'list[str]'` |
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |
@@ -149,6 +151,8 @@ The edit algebra: every structural change is typed data.
 - **`apply`** — Apply ``edit`` and return a new state, leaving ``state`` untouched.
 - **`catalogue`** — The enabled operations, described for an optimizer's prompt.
 - **`configure`** — Set a knob for the run being made, refusing a bad name or value but not a freeze.
+- **`core_ops_calls`** — The plain ops a core operator's step may name by callable.
+- **`core_wiring_notes`** — What a core operator wired beside the steps it names (`core_ops.wiring_notes`).
 - **`enabled`** — The operations a preset allows. An unknown preset is an error.
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
 - **`protected_violation`** — Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.

@@ -902,18 +902,49 @@ def spine_eligible(state: dict[str, Any]) -> bool:
     return not _verdicts(_graph_of(state))
 
 
+def _judged_labels(graph: Graph) -> dict[str, str]:
+    """For each agent whose reply a verdict gate reads (`snippet.VERDICT`, its first required
+    read), a label of that gate: ``proceed`` when it has one, else its first label."""
+    out: dict[str, str] = {}
+    for gate in graph.nodes.values():
+        if gate.kind != "gate" or gate.evaluator != snippet_calls.VERDICT or not gate.required_reads:
+            continue
+        labels = sorted({str(e.condition) for e in graph.out_edges(gate.id) if e.condition})
+        label = "proceed" if "proceed" in labels else (labels[0] if labels else "proceed")
+        for node in graph.nodes.values():
+            if node.kind == "agent" and gate.required_reads[0] in node.writes[:1]:
+                out[node.id] = label
+    return out
+
+
 def _answers(graph: Graph) -> dict[str, str]:
-    """Every agent node's scripted answer, named, so both runtimes give each the same one."""
-    return {n.id: ANSWERS.get(n.id, "<answer>B</answer>") for n in graph.nodes.values()
-            if n.kind == "agent"}
+    """Every agent node's scripted answer, named, so both runtimes give each the same one;
+    a judge a verdict gate reads answers one of the gate's labels."""
+    judged = _judged_labels(graph)
+    return {n.id: judged.get(n.id) or ANSWERS.get(n.id, "<answer>B</answer>")
+            for n in graph.nodes.values() if n.kind == "agent"}
 
 
 def _compared_facts(graph: Graph, facts: dict[str, Any]) -> dict[str, Any]:
     """The facts both runtimes must agree on: every op's and data node's declared facts.
     An agent's produced fact is set by the spine's worker (`worker_node`), which the
-    test drain stands in for without running, so it is left out."""
+    test drain stands in for without running, so it is left out, and so is every fact an
+    op makes from one."""
     declared = {n for node in graph.nodes.values() if node.kind != "agent" for n in node.produces}
-    out = {k: v for k, v in facts.items() if k in declared and k != "item_scores"}
+    # So is a fact an op computes from an agent's fact (a code step reading `inp['facts']`):
+    # the drain never set what it read.
+    from refactory_dsh.nn.validate import consumed
+
+    unset = {n for node in graph.nodes.values() if node.kind == "agent" for n in node.produces}
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.nodes.values():
+            if node.kind != "agent" and {name for kind, name in consumed(node, {})
+                                         if kind == "fact"} & unset and not set(node.produces) <= unset:
+                unset |= set(node.produces)
+                changed = True
+    out = {k: v for k, v in facts.items() if k in declared - unset and k != "item_scores"}
     out["item_scores"] = sorted((str(r.get("id")), r.get("score")) for r in facts.get("item_scores") or ())
     return out
 
@@ -944,12 +975,18 @@ def check_spine(seed: Seed, state: dict[str, Any], walker: Any, tmp: Path) -> li
 
 def check_tools(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Violation]:
     """Spec check: an agent node the edits added runs without tools (the harness never
-    allows tools for new nodes)."""
-    seed_nodes = set(seed_state["graph"]["nodes"])
+    allows tools for new nodes), except a copy of a seed step that uses tools, with the
+    same tools, in a fresh workspace of its own (scratch, or a clone of the base)."""
+    seed = _graph_of(seed_state)
+    tooled = {(n.tool_policy, tuple(n.tools)) for n in seed.nodes.values()
+              if n.kind == "agent" and (n.tool_policy != "none" or n.tools)}
     return [Violation("tools", f"new agent {node.id} runs with tools")
             for node in _graph_of(state).nodes.values()
-            if node.kind == "agent" and node.id not in seed_nodes
-            and (node.tool_policy != "none" or node.tools)]
+            if node.kind == "agent" and node.id not in seed.nodes
+            and (node.tool_policy != "none" or node.tools)
+            and not ((node.tool_policy, tuple(node.tools)) in tooled and node.workspace
+                     and (node.workspace["kind"] == "scratch"
+                          or node.workspace.get("of") == "base"))]
 
 
 def check_static(seed_state: dict[str, Any], state: dict[str, Any],
@@ -1297,22 +1334,12 @@ class EditGenerator:
         if op == "duplicate":
             return {"op": "duplicate", "target": target,
                     **({"new_id": self.fresh_id(graph, f"{target}_d")} if rng.random() < 0.5 else {})}
-        if op == "split":
-            first = self.new_node(state)
-            second = self.new_node(state)
-            if second["id"] == first["id"]:
-                second["id"] = first["id"] + "b"
-            return {"op": "split", "target": target, "into": [first, second]}
         if op == "reorder":
             plain = [e for e in graph.edges if e.condition is None]
             if plain and rng.random() < 0.85:
                 edge = rng.choice(plain)
                 return {"op": "reorder", "first": edge.source, "second": edge.target}
             return {"op": "reorder", "first": target, "second": rng.choice(ids)}
-        if op == "loop":
-            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if CODE_NODES
-                                                   else ("gate",)))
-            return {"op": "loop", "target": target, "gate": gate}
         if op == "parallel":
             branches = [self.new_node(state, rng.choice(("agent", "op", "code") if CODE_NODES
                                                         else ("agent", "op")))
@@ -1321,7 +1348,107 @@ class EditGenerator:
                 # Two branches writing one file race: refused before anything runs.
                 branches[1]["writes"] = list(branches[0].get("writes") or ["clash.txt"])
             return {"op": "parallel", "target": target, "branches": branches}
+        if op in nn_edits.CORE_OPS:
+            return self.core_op(state, op, target)
         raise AssertionError(f"unhandled op {op}")  # pragma: no cover - catalogue is closed
+
+    # ── the core operators (`nn.core_ops`): one line each, defaults filling the rest ──
+
+    def step_spec(self, state: dict[str, Any], *, kinds: tuple[str, ...] = ("agent", "code"),
+                  sees: bool = True) -> dict[str, Any]:
+        """A new step as an operator takes it: a kind, often a text, now and then ``sees``."""
+        rng, graph = self.rng, _graph_of(state)
+        kind = rng.choice(tuple(k for k in kinds if k != "code" or CODE_NODES) or ("agent",))
+        spec: dict[str, Any] = {"kind": kind}
+        if kind == "agent" and rng.random() < 0.7:
+            self.counter += 1
+            spec["text"] = rng.choice((f"Work on part {self.counter} of the task.",
+                                       f"Check the work so far ({self.counter}).",
+                                       f"Use {{{{{rng.choice(self._facts(graph))}}}}} here."))
+        if kind == "op":
+            spec["call"] = rng.choice((nn_edits.core_ops_calls()["collect"], fg.STEP))
+        if sees and rng.random() < 0.25:
+            pool = ["task", *sorted(graph.nodes)]
+            spec["sees"] = rng.sample(pool, k=min(len(pool), rng.choice((1, 1, 2))))
+        if rng.random() < 0.05:
+            spec["kind"] = rng.choice(("gate", "fork", 7))  # malformed: refused
+        return spec
+
+    def core_op(self, state: dict[str, Any], op: str, target: str) -> dict[str, Any]:
+        rng, graph = self.rng, _graph_of(state)
+        ids = sorted(graph.nodes)
+        forks = sorted(n for n, node in graph.nodes.items() if node.kind == "fork")
+        gates = sorted(n for n, node in graph.nodes.items() if node.kind == "gate")
+        plain = [e for e in graph.edges if e.condition is None
+                 and graph.nodes[e.source].kind in ("agent", "op")
+                 and graph.nodes[e.target].kind in ("agent", "op")]
+        if op == "insert":
+            side = rng.choice(("after", "after", "before"))
+            if rng.random() < 0.2:
+                return {"op": "insert", side: target}  # all defaults: a copy of the neighbour
+            return {"op": "insert", side: target, **self.step_spec(state, kinds=(
+                "agent", "agent", "code", "op"))}
+        if op == "remove":
+            if gates and rng.random() < 0.4:
+                gate = rng.choice(gates)
+                labels = sorted({str(e.condition) for e in graph.out_edges(gate) if e.condition})
+                return {"op": "remove", "step": gate,
+                        **({"keep": rng.choice(labels)} if labels else {})}
+            return {"op": "remove", "step": target}
+        if op == "parallelize":
+            roll = rng.random()
+            if roll < 0.4:
+                return {"op": "parallelize", "steps": [target], "copies": rng.choice((1, 2))}
+            if roll < 0.7 and plain:
+                edge = rng.choice(plain)
+                return {"op": "parallelize", "steps": [edge.source, edge.target]}
+            return {"op": "parallelize", "after": target,
+                    "new": [self.step_spec(state) for _ in range(rng.choice((2, 2, 3)))]}
+        if op == "serialize":
+            return {"op": "serialize", "fork": rng.choice(forks) if forks else target}
+        if op == "branch":
+            return {"op": "branch", "fork": rng.choice(forks) if forks else target,
+                    **({"optional": True} if rng.random() < 0.3 else {}),
+                    **(self.step_spec(state) if rng.random() < 0.8 else {})}
+        if op == "rewire":
+            pool = ["task", *ids]
+            return {"op": "rewire", "step": target,
+                    "sees": rng.sample(pool, k=min(len(pool), rng.choice((1, 1, 2))))}
+        if op == "route":
+            succ = [e.target for e in graph.out_edges(target)]
+            to: dict[str, Any] = {"proceed": succ[0] if succ else target,
+                                  "other": self.step_spec(state, sees=False)}
+            if rng.random() < 0.3 and len(ids) > 2:
+                to["skip"] = rng.choice(ids)
+            judge = rng.choice(("agent", "agent", "code") if CODE_NODES else ("agent",))
+            return {"op": "route", "after": target, "judge": judge,
+                    **({"to": to} if rng.random() < 0.7 else {})}
+        if op == "loop" and rng.random() < 0.6:
+            judge = rng.choice(("agent", "agent", "code", fg.PROCEED) if CODE_NODES
+                               else ("agent", fg.PROCEED))
+            return {"op": "loop", "step": target, "judge": judge,
+                    **({"text": "Is the work complete?"} if judge == "agent" else {})}
+        if op == "loop":
+            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if CODE_NODES
+                                                   else ("gate",)))
+            return {"op": "loop", "target": target, "gate": gate}
+        if op == "split" and rng.random() < 0.6:
+            n = rng.choice((1, 2, 2))
+            return {"op": "split", "step": target,
+                    **({"into": [self.step_spec(state, sees=False) for _ in range(n)]}
+                       if rng.random() < 0.8 else {})}
+        if op == "split":
+            first = self.new_node(state)
+            second = self.new_node(state)
+            if second["id"] == first["id"]:
+                second["id"] = first["id"] + "b"
+            return {"op": "split", "target": target, "into": [first, second]}
+        if op == "merge":
+            if plain and rng.random() < 0.85:
+                edge = rng.choice(plain)
+                return {"op": "merge", "steps": [edge.source, edge.target]}
+            return {"op": "merge", "steps": [target, rng.choice(ids)]}
+        raise AssertionError(f"unhandled core op {op}")  # pragma: no cover
 
 
 # ── the run ───────────────────────────────────────────────────────────────
@@ -1481,7 +1608,7 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
     meaning is unambiguous (`optim.repair.fix_edit`; a bundle's ``set_knob`` to the value
     a knob holds is dropped) and then precheck, apply, a patch target that is not there,
     and in a bundle an edit that changes nothing. Protected nodes are judged on the state
-    the edits reach, not edit by edit."""
+    the edits reach, not edit by edit, and before an edit the later ones undo is."""
     from refactory_dsh.optim import repair
 
     state = parent.state
@@ -1508,6 +1635,10 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
             return index, state, fixed  # an edit of a bundle that changes nothing
         state = after
         fixed.append(edit)
+    if nn_edits.protected_violation(parent.state, state, applier.protected):
+        # Judged on the state the edits reach, before any edit is called dead (as the
+        # attempt path orders them): a refusal of the combined state, naming no edit.
+        return None, state, fixed
     dead = (_dead_edit(fixed, parent.state, state)
             if candidate_id(state) != parent.id else None)
     return dead, state, fixed

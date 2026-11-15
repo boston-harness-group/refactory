@@ -109,6 +109,30 @@ HOLDOUT_FILE = "holdout.json"
 OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
+
+def _timed_out(record: Mapping[str, Any]) -> bool:
+    """Whether an item record says the item ran out of time (its error kind, or its error
+    or failure text)."""
+    if str(record.get("error_kind") or "").lower() == "timeout":
+        return True
+    text = f"{record.get('error_text') or ''} {record.get('fail_reason') or ''}".lower()
+    return "timed out" in text or "timeout" in text
+
+
+def _data_parallelism(state: Mapping[str, Any]) -> int:
+    """How many items the state's data pass runs at once (1 without one)."""
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(dict(state.get("graph") or {}))
+        knobs = {name: (entry or {}).get("value")
+                 for name, entry in (state.get("knobs") or {}).items()}
+        found = [node.effective_parallelism(knobs) for node in graph.nodes.values()
+                 if node.kind == "data"]
+    except Exception:  # noqa: BLE001 - a state that does not read says 1
+        return 1
+    return max(found) if found else 1
+
 class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
 
@@ -2931,6 +2955,13 @@ class Loop(OuterLoop):
                 "rationale": str(notes.get("rationale") or ""),
                 "prediction": str(notes.get("prediction") or ""),
                 "confidence": float(notes.get("confidence") or 0.0),
+                # A structural proposal's reasoning (`REASONING_FIELDS`), and which of it
+                # was left out (marked, never refused).
+                **({"addresses": str(notes["addresses"])} if notes.get("addresses") else {}),
+                **({"flow_change": str(notes["flow_change"])} if notes.get("flow_change")
+                   else {}),
+                **({"reasoning_missing": list(notes["reasoning_missing"])}
+                   if notes.get("reasoning_missing") else {}),
                 "origin": "optimizer",
                 # Its edits counted as the per-proposal cap counts them (`optim.edit_count`).
                 "edit_count": self._edit_count(candidate),
@@ -3599,6 +3630,8 @@ class Loop(OuterLoop):
                     self._proposal_notes[outcome.id] = {
                         "rationale": proposal.rationale, "prediction": proposal.prediction,
                         "confidence": proposal.confidence,
+                        "addresses": proposal.addresses, "flow_change": proposal.flow_change,
+                        "reasoning_missing": proposal.missing_reasoning(),
                         "diagnosis": str(getattr(self.optimizer, "last_diagnosis", "") or ""),
                         "considered": str(getattr(self.optimizer, "last_considered", "") or ""),
                         **({"level": level} if self._levels_wanted else {}),
@@ -4471,6 +4504,12 @@ class Loop(OuterLoop):
             "nodes": nodes,
             "size_cost": round(self.config.parsimony * nodes, 6),
         }
+        # Its measured model cost per train item, when the run measured cost: what a request
+        # whose objective carries a cost term shows beside each candidate.
+        cost = (candidate.measurements or {}).get("cost")
+        items = len(self._train_item_records.get(candidate.id) or ())
+        if isinstance(cost, (int, float)) and items:
+            row["cost_per_item"] = round(float(cost) / items, 6)
         gate = self._gate_decision(candidate.id, detail=detail)
         if gate is not None:
             row["gate"] = gate
@@ -5310,7 +5349,30 @@ class Loop(OuterLoop):
             population_parents=(self.selection_mode() == "pool" and self._population_policy()),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
+            new_node_tools=bool(self.config.allow_new_node_tools),
+            time_facts=self._time_facts(board),
         )
+
+    def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
+        """Time in numbers for the request (`optim.base.time_lines`): how long one model step
+        may run (the inner model's limit), and for the candidate being edited its typical
+        time per item -- its train evaluation's wall time x the items it runs at once /
+        its items -- and how many of its train items timed out."""
+        facts: dict[str, Any] = {}
+        limit = getattr(self.model, "timeout_s", None)
+        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+            facts["step_limit_s"] = int(limit)
+        records = self._parent_train_records(board)
+        if not records:
+            return facts
+        facts["items"] = len(records)
+        facts["timeouts"] = sum(1 for record in records if _timed_out(record))
+        edited = next((c for c in self.population if c.id == self._edited_id(board)), None)
+        if edited is not None and edited.duration_s:
+            parallel = _data_parallelism(edited.state)
+            facts["parallelism"] = parallel
+            facts["per_item_s"] = round(float(edited.duration_s) * parallel / len(records), 1)
+        return facts
 
     def _request_order(self, board: list[Candidate]) -> list[Candidate]:
         """The request's "Recent results" rows in an order no val score decides.
@@ -5381,11 +5443,20 @@ class Loop(OuterLoop):
             parent = by_id.get(child.parent or "")
             parent_records, same = (self._records_like(parent.id, child.id) if parent
                                     else ([], None))
+            record = self.proposals.get(child.id) or {}
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
                 "child_records": list(self._train_item_records.get(child.id, [])),
                 "parent_records": parent_records, "same_seed": same,
+                # What the proposal predicted and said, for the prediction check, and
+                # what the system did beside its edits (the core operators' wiring).
+                **{key: record[key] for key in ("prediction", "addresses", "flow_change")
+                   if record.get(key)},
+                **({"notes": list(child.notes)} if child.notes else {}),
+                "steps": sorted(set(((child.state.get("graph") or {}).get("nodes") or {}))
+                                | set(((parent.state.get("graph") or {}).get("nodes") or {})
+                                      if parent else ())),
             })
         return pairs
 
@@ -5480,6 +5551,8 @@ class Loop(OuterLoop):
                              or w not in _wiring_warnings(parent.state, parent.state)],
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
+                "addresses": record.get("addresses"), "flow_change": record.get("flow_change"),
+                "notes": list(candidate.notes or ()),
                 "considered": record.get("considered"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,
                 "same_seed": same,

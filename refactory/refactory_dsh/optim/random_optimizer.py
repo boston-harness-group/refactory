@@ -1012,6 +1012,8 @@ class AutoresearchOptimizer(Optimizer):
                     prediction=str(raw.get("prediction", "") or ""),
                     confidence=_confidence(raw.get("confidence")),
                     parent=parent if parent in parent_ids else described,
+                    addresses=str(raw.get("addresses", "") or ""),
+                    flow_change=str(raw.get("flow_change", "") or ""),
                 )
             )
         proposals = [*unreadable, *proposals[: max(1, n)]]
@@ -1059,7 +1061,8 @@ def _parse_edit(edit: Any) -> dict[str, Any] | None:
 
 
 #: The keys of an answered proposal that are about the proposal, not its edit.
-PROPOSAL_FIELDS = ("rationale", "prediction", "confidence", "parent")
+PROPOSAL_FIELDS = ("rationale", "prediction", "confidence", "parent", "addresses",
+                   "flow_change")
 #: The keys that hold an answered proposal's edit (``_proposal_edits``).
 EDIT_KEYS = ("edit", "edits", "edit_json")
 

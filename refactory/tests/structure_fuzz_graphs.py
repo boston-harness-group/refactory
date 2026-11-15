@@ -47,7 +47,10 @@ def step(ctx: Any) -> dict[str, Any]:
     seen: list[str] = []
     for name in ctx._declared_reads:  # noqa: SLF001 - the run sets the node's declarations
         if ctx.exists(name):
-            ctx.read_text(name)
+            try:
+                ctx.read_text(name)
+            except UnicodeDecodeError:  # a file that is not text (`render`) is read as bytes
+                ctx.path(name).read_bytes()
             seen.append(name)
         else:
             marker = Path(ctx.workdir) / MISSING_DIR / node
@@ -63,6 +66,30 @@ def step(ctx: Any) -> dict[str, Any]:
 def proceed(ctx: Any) -> str:
     """A fn gate that always answers ``proceed``."""
     return "proceed"
+
+
+#: The bytes `render` writes: a file that is not text.
+BINARY = bytes(range(256)) * 4
+
+
+def render(ctx: Any) -> dict[str, Any]:
+    """Like `step`, but every declared write that is not ``.txt`` gets bytes that are not
+    text (`BINARY`): a step whose output is a file a model cannot read as text."""
+    node = ctx.node_id
+    for name in ctx._declared_reads:  # noqa: SLF001
+        if ctx.exists(name):
+            ctx.path(name).read_bytes()
+    for name in ctx._declared:  # noqa: SLF001
+        if name.endswith(".txt"):
+            ctx.write_text(name, f"{name} written by {node}\n")
+        else:
+            path = ctx.path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(BINARY)
+    return {fact: f"{fact} from {node}" for fact in ctx._declared_facts}  # noqa: SLF001
+
+
+RENDER = f"{MODULE}:render"
 
 
 #: What every item's grader-only answer key starts with, so a leak is found by content.
@@ -285,4 +312,98 @@ class MultiTerminal(nn.Mode):
             ("route", "escalate", "escalate"), ("route", "reject", "reject")])
 
 
-SYNTHETIC = (ForkJoin, NestedFork, Gates, GateLoop, DataPass, Dataflow, MultiTerminal)
+def _tasked(node_id: str, task: str, *, writes: str, reads: tuple[str, ...] = (),
+            produces: tuple[str, ...] = (), **extra: Any) -> nn.Node:
+    """An agent whose task prompt is a knob of its own (``<id>_task``), as a real mode's
+    steps are: what an operator puts a new step's output into."""
+    return nn.Node(node_id, "agent", prompt_template=task,
+                   system_prompt_template=f"You are the {node_id} step.",
+                   writes=(writes,), reads=reads, produces=produces,
+                   tool_policy=extra.pop("tool_policy", "none"), role="solver", timeout_s=60,
+                   knobs=(f"{node_id}_task",), field_bindings=(("prompt_template", f"{node_id}_task"),),
+                   **extra)
+
+
+class DraftReview(nn.Mode):
+    """Draft, review, finalize: three agents whose task prompts are knobs, each reading the
+    one before it as a fact, then an op that ships the answer."""
+
+    name = "fuzz_draft_review"
+
+    TASKS = {
+        "draft": "Write a first answer to: {{brief}}",
+        "review": "Review this draft against the brief.\n\n## Brief\n{{brief}}\n\n## Draft\n{{draft}}",
+        "finalize": "Write the final answer.\n\n## Draft\n{{draft}}\n\n## Review\n{{review}}",
+    }
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {f"{node}_task": nn.Knob(text, "str", description=f"task prompt for {node}")
+                for node, text in cls.TASKS.items()}
+
+    def build(self) -> nn.Graph:
+        return _graph([
+            op("intake", writes=("brief.txt",), produces=("brief",)),
+            _tasked("draft", self.TASKS["draft"], writes="draft.txt", produces=("draft",)),
+            _tasked("review", self.TASKS["review"], writes="review.txt", produces=("review",)),
+            _tasked("finalize", self.TASKS["finalize"], writes="final.txt", produces=("final",)),
+            nn.Node("ship", "op", call=STEP, reads=("final.txt",), required_reads=("final.txt",),
+                    writes=("answer.txt",), produces=("finished",)),
+        ], [("intake", "draft"), ("draft", "review"), ("review", "finalize"), ("finalize", "ship")])
+
+
+class ToolStep(nn.Mode):
+    """A step that uses tools in a workspace of its own, then a step that reasons over what it
+    found: the tool step's work reaches the next step as a file."""
+
+    name = "fuzz_tool_step"
+
+    TASKS = {"gather": "Use your tools to gather what the task needs: {{brief}}",
+             "reason": "Reason about the task.\n\n## Brief\n{{brief}}"}
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {f"{node}_task": nn.Knob(text, "str", description=f"task prompt for {node}")
+                for node, text in cls.TASKS.items()}
+
+    def build(self) -> nn.Graph:
+        return _graph([
+            op("intake", writes=("brief.txt",), produces=("brief",)),
+            _tasked("gather", self.TASKS["gather"], writes="found.txt", tool_policy=None,
+                    workspace="scratch"),
+            _tasked("reason", self.TASKS["reason"], writes="reasoning.txt", reads=("found.txt",),
+                    produces=("reasoning",)),
+            nn.Node("ship", "op", call=STEP, reads=("reasoning.txt",),
+                    required_reads=("reasoning.txt",), writes=("answer.txt",),
+                    produces=("finished",)),
+        ], [("intake", "gather"), ("gather", "reason"), ("reason", "ship")])
+
+
+class FileOutput(nn.Mode):
+    """A step whose output is a file that is not text (a rendered figure), then an agent that
+    is told about it, then an op that ships the answer."""
+
+    name = "fuzz_file_output"
+
+    TASKS = {"describe": "Describe the result.\n\n## Brief\n{{brief}}"}
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {"describe_task": nn.Knob(cls.TASKS["describe"], "str",
+                                         description="task prompt for describe")}
+
+    def build(self) -> nn.Graph:
+        return _graph([
+            op("intake", writes=("brief.txt",), produces=("brief",)),
+            nn.Node("plot", "op", call=RENDER, reads=("brief.txt",),
+                    writes=("figure.png", "plot.txt"), produces=("plotted",)),
+            _tasked("describe", self.TASKS["describe"], writes="description.txt",
+                    produces=("description",)),
+            nn.Node("ship", "op", call=STEP, reads=("description.txt", "figure.png"),
+                    required_reads=("description.txt",), writes=("answer.txt",),
+                    produces=("finished",)),
+        ], [("intake", "plot"), ("plot", "describe"), ("describe", "ship")])
+
+
+SYNTHETIC = (ForkJoin, NestedFork, Gates, GateLoop, DataPass, Dataflow, MultiTerminal,
+             DraftReview, ToolStep, FileOutput)

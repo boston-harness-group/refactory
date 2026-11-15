@@ -175,15 +175,26 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     A node an edit adds gets ``tool_policy: none`` by default (`nn.edits`): with tools
     it could read anything in the run directory or beyond it. Asking for tools
     (``tool_policy: null`` or a ``tools`` list) needs the run to allow it
-    (``LoopConfig.allow_new_node_tools``). A node whose id the seed has is held to the
-    seed's own policy instead (`_tool_policy_escalated`).
+    (``LoopConfig.allow_new_node_tools``), except for the tools a step of the seed already
+    runs with, in a fresh workspace of the new node's own (a copy of a tool step, as the
+    core operators make one). A node whose id the seed has is held to the seed's own policy
+    instead (`_tool_policy_escalated`).
     """
     if allowed:
         return []
     seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
+    # The tools a step of the seed already runs with: a copy of such a step may keep them
+    # when it works in a fresh workspace of its own (the user's decision, recorded in
+    # `nn.coverage.DECISIONS`), so it never works where the step it copies works.
+    seed_tools = {(node.get("tool_policy"), tuple(node.get("tools") or ()))
+                  for node in seed_nodes.values() if node.get("kind") == "agent"
+                  and (node.get("tool_policy") != "none" or node.get("tools"))}
     reasons = []
     for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
         if node_id in seed_nodes or node.get("kind") != "agent":
+            continue
+        if (node.get("tool_policy"), tuple(node.get("tools") or ())) in seed_tools \
+                and _fresh_workspace(node):
             continue
         if node.get("tool_policy") != "none" or node.get("tools"):
             reasons.append(
@@ -191,6 +202,19 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                 "an edit adds runs without tools (omit tool_policy, or set it to 'none') "
                 "unless the run allows tools for new nodes (allow_new_node_tools)")
     return reasons
+
+
+def _fresh_workspace(node: Mapping[str, Any]) -> bool:
+    """Whether a node state works in a workspace of its own, made fresh for each dispatch
+    (``scratch``, or a ``clone`` of the run's base)."""
+    from refactory_dsh.nn.graph import workspace_declaration
+
+    try:
+        workspace = workspace_declaration(node.get("workspace"))
+    except ValueError:
+        return False
+    return workspace is not None and (workspace["kind"] == "scratch"
+                                      or workspace.get("of") == "base")
 
 
 def _code_signatures(state: dict[str, Any]) -> dict[str, tuple[str, str, str]]:
@@ -327,6 +351,11 @@ class Proposal:
     confidence: float = 0.0
     parent: str | None = None
     edits: tuple[Any, ...] = ()
+    #: For a structural proposal (`REASONING_FIELDS`): the failure it targets, citing the
+    #: per-step evidence by step and item id ...
+    addresses: str = ""
+    #: ... and how it changes the information flow or the way the work is done.
+    flow_change: str = ""
 
     def __post_init__(self) -> None:
         steps = tuple(self.edits or ())
@@ -348,10 +377,24 @@ class Proposal:
         """The edits to apply, in order: ``edits`` for a compound proposal, else ``[edit]``."""
         return list(self.edits) if self.edits else [self.edit]
 
+    def missing_reasoning(self) -> list[str]:
+        """For a structural proposal, the reasoning fields it left empty
+        (`REASONING_FIELDS`); none for one that changes settings only. Not a refusal: the
+        trace marks it and a replay counts it."""
+        if not any(_structural_edit(step) for step in self.steps):
+            return []
+        return [name for name in REASONING_FIELDS if not str(getattr(self, name) or "").strip()]
+
     def summary(self) -> str:
         ops = "+".join(str(step.get("op") if isinstance(step, dict) else step)
                        for step in self.steps)
         return f"{ops}: {self.rationale or self.prediction}".strip()
+
+
+#: What a structural proposal says beside its edit lines, so the design gets the thought
+#: and the edit stays one line: the failure it targets (citing per-step evidence by step
+#: and item id), how it changes the information flow, and a prediction that can be checked.
+REASONING_FIELDS = ("addresses", "flow_change", "prediction")
 
 
 def _at(reason: str, index: int, steps: Sequence[Any]) -> str:
@@ -848,6 +891,14 @@ class ProposalContext:
     #: ``REFUSED_SHOWN``), shown under "Why your last proposals were refused" so a retry
     #: fixes the proposal it wrote rather than writing one from scratch.
     refused: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether a new step may use tools in this run (``LoopConfig.allow_new_node_tools``);
+    #: only then do the compositions show a tool step.
+    new_node_tools: bool = False
+    #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
+    #: model step may run), ``per_item_s`` (the edited candidate's typical time per item),
+    #: ``items``, ``timeouts`` (its train items that timed out) and ``parallelism``; empty
+    #: says nothing.
+    time_facts: dict[str, Any] = field(default_factory=dict)
 
     def render(self) -> str:
         """The request, as text, for a model optimizer."""
@@ -863,6 +914,7 @@ class ProposalContext:
             "",
             *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
                              gated=bool(self.selection)),
+            *time_lines(self.time_facts),
             *([self.steering, ""] if self.steering.strip() else []),
             *_strategy_section(self.strategy, self.strategy_name),
             "## The pipeline you may edit",
@@ -893,7 +945,9 @@ class ProposalContext:
                                  protected=self.protected, code_nodes=self.code_nodes,
                                  text_knobs=[k.get("name") for k in self.knobs
                                              if k.get("kind") == "str"],
-                                 structure_guidance=self.structure_guidance),
+                                 structure_guidance=self.structure_guidance,
+                                 tools=self.new_node_tools, rotation=self.generation,
+                                 knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             *_settings_lines(self.knobs),
             *_node_reference(self),
             "## What the author says is worth doing",
@@ -920,10 +974,13 @@ class ProposalContext:
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
                         selection=self.selection, population=self.population_parents),
-            _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard)],
+            *_cost_note(self.parsimony),
+            _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard),
+                    *(["cost per item"] if self.parsimony else [])],
                    [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
                      compact_edits(c.get("edits"), self.seed_knob_values),
-                     *([c.get("gate", "")] if _gate_column(self.leaderboard) else [])]
+                     *([c.get("gate", "")] if _gate_column(self.leaderboard) else []),
+                     *([_cost_cell(c.get("cost_per_item"))] if self.parsimony else [])]
                     for c in self.leaderboard]),
             "",
             "## Evidence from the traces",
@@ -1263,8 +1320,12 @@ def _node_op(catalogue: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def structural_example(catalogue: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    """An example edit for a structural op this run permits, built from its catalogue
-    fields with placeholders; ``None`` when none is permitted."""
+    """An example edit for a structural op this run permits: the one-line ``insert`` when
+    the run permits it, else one built from another op's catalogue fields with
+    placeholders; ``None`` when none is permitted."""
+    if any(op.get("op") == "insert" for op in catalogue):
+        return {"op": "insert", "after": "<existing step id>", "kind": "agent",
+                "text": "<what the new step does>"}
     op = _node_op(catalogue)
     if op is None:
         return None
@@ -1346,12 +1407,16 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
                         edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                         code_nodes: bool = False,
                         text_knobs: Iterable[str] | None = None,
-                        structure_guidance: bool = False) -> list[str]:
-    """The language's primitives and how they compose, with one short example per
-    composition the run permits (a new agent, a code op, a verdict loop, a parallel
-    fork), built from this graph's own ids, so no one shape reads as the way to grow
-    the pipeline. With ``structure_guidance``, what makes a new step pay off
-    (`feedback.STRUCTURE_GUIDANCE`). Nothing when the run permits no structural op."""
+                        structure_guidance: bool = False, tools: bool = False,
+                        rotation: int = 0,
+                        knob_values: Mapping[str, Any] | None = None) -> list[str]:
+    """The language's primitives and how they compose; then the core operators
+    (`nn.core_ops`), one line and one example each, and compositions built only from them
+    (several attempts and a choice, check and send back, an independent attempt, ...),
+    from this graph's own ids, rotated by ``rotation`` so no one shape reads as the way to
+    grow the pipeline (`operator_lines`, `composition_examples`). With
+    ``structure_guidance``, what makes a new step pay off (`feedback.STRUCTURE_GUIDANCE`).
+    Nothing when the run permits no structural op."""
     from refactory_dsh import snippet
 
     if not structural_ops(catalogue):
@@ -1434,70 +1499,287 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "connection to the model are not retried and still fail the item. Retried sessions "
         "count toward the item's time and cost.",
     ]
-    if "parallel" in ops:
+    if {"parallel", "parallelize"} & ops:
         lines.append(
-            "- **fork**: the `parallel` operation runs 2-8 new steps at once between a fork "
-            "and a join after a step; branches write distinct files and facts. Nothing reads "
-            "them until you say so: insert a node after the join that reads the branches' "
-            "files or facts, or use a branch's fact as `{{name}}` where a later step fills "
-            "it in (above).")
+            "- **fork**: steps run at once between a fork and a join; branches write distinct "
+            "files and facts. `parallelize` and `branch` wire what the branches make into the "
+            "step after the join; the written-out `parallel` operation leaves that to you.")
     if structure_guidance:
         from .feedback import STRUCTURE_GUIDANCE
         lines.append(STRUCTURE_GUIDANCE)
-    anchor = _composition_anchor(node_states, edges, protected)
-    if anchor is None or not ({"loop", "insert_before", "insert_after"} & ops):
-        return lines + [""]
-    agent, successor = anchor
-    step = str(agent["id"])
-    output = str((agent.get("writes") or ["output.txt"])[0])
-    examples: list[tuple[str, list[dict[str, Any]]]] = []
-    if "insert_after" in ops:
-        extra = f"{step}_second"
-        examples.append((
-            f"A new agent step after `{step}`, reading its output as a fact:",
-            [{"op": "insert_after", "target": step,
-              "node": {"id": extra, "kind": "agent", "writes": [f"{extra}.txt"],
-                       "prompt_template": "<what this step does; put each fact it needs in double braces>"}}]))
-    if "parallel" in ops:
-        examples.append((
-            f"Two steps at once after `{step}` (a fork and a join):",
-            [{"op": "parallel", "target": step, "branches": [
-                {"id": f"{step}_{side}", "kind": "agent", "writes": [f"{step}_{side}.txt"],
-                 "prompt_template": f"<angle {side}>"} for side in ("a", "b")]}]))
-    if {"loop", "insert_before"} <= ops:
-        review = f"{step}_review"
-        examples.append((
-            f"An agent judges `{step}`'s work and sends it back with a reason (a verdict gate "
-            f"reading the reviewer's file; `{review}`'s prompt needs `{step}`'s output as a "
-            "fact -- a code op can turn the file into one):",
-            [{"op": "loop", "target": step,
-              "gate": {"id": f"{step}_check", "kind": "gate", "evaluator": snippet.VERDICT,
-                       "reads": [f"{review}.txt"], "required_reads": [f"{review}.txt"],
-                       "max_iterations": 2, "on_exhausted": "continue"}},
-             {"op": "insert_before", "target": f"{step}_check",
-              "node": {"id": review, "kind": "agent", "writes": [f"{review}.txt"],
-                       "prompt_template": "<what to check, with the work as fact slots; "
-                                          "answer 'proceed' or 'reloop' first, then why>"}}]))
-    if code_nodes and "insert_after" in ops:
-        fact = f"{step}_conclusions"
-        examples.append((
-            f"A code op computes a fact from `{step}`'s file (here: the lines that state a "
-            f"conclusion), with no model call, for `{successor}` or any later agent to use "
-            f"as `{{{{{fact}}}}}`:",
-            [{"op": "insert_after", "target": step,
-              "node": {"id": fact, "kind": "op", "call": snippet.RUN, "reads": [output],
-                       "produces": [fact],
-                       "code": ("import re\n"
-                                "def main(inp):\n"
-                                f"    text = inp['files'].get({output!r}, '')\n"
-                                "    found = [line.strip() for line in text.splitlines()\n"
-                                "             if re.search(r'(?i)\\b(therefore|so|hence)\\b', line)]\n"
-                                f"    return {{'facts': {{{fact!r}: '\\n'.join(found[-5:]) or 'none'}}}}\n")}}]))
-    lines += ["", "Examples, one per composition (built from this graph; none is the "
-                  "preferred shape -- compose your own the same way):"]
-    for title, bundle in examples:
-        lines += [f"- {title}", "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
+    lines += operator_lines(catalogue, node_states, edges, protected=protected,
+                            knob_values=knob_values)
+    examples = composition_examples(catalogue, node_states, edges, protected=protected,
+                                    code_nodes=code_nodes, tools=tools,
+                                    knob_values=knob_values)
+    if examples:
+        turn = rotation % len(examples)
+        lines += ["", "Compositions built only from these operators -- none is the preferred "
+                      "shape; compose your own:"]
+        for title, bundle in examples[turn:] + examples[:turn]:
+            lines += [f"- {title}:",
+                      "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
     return lines + [""]
+
+
+#: The core operators a request explains, in its order (`nn.core_ops.CORE_OPS`).
+CORE_OPERATORS = nn_edits.CORE_OPS
+
+
+def _example_ids(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                 protected: Sequence[str]) -> dict[str, str]:
+    """Ids of this graph for the operators' examples: a step (an agent with one plain
+    out-edge to a step) and its next step, and a fork, where the graph has them."""
+    ids: dict[str, str] = {}
+    anchor = _composition_anchor(node_states, edges, protected)
+    if anchor is not None:
+        ids["step"], ids["next step"] = str(anchor[0]["id"]), anchor[1]
+    fork = next((str(n.get("id")) for n in sorted(node_states, key=lambda n: str(n.get("id")))
+                 if n.get("kind") == "fork"), None)
+    if fork:
+        ids["fork"] = fork
+    return ids
+
+
+def _example_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                   knob_values: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """The request's graph as a state the operators' preconditions can read (its start is
+    the step nothing leads to), or ``None`` when it does not read back."""
+    from refactory_dsh.nn.graph import Graph
+
+    entered = {str(e.get("target")) for e in edges} | {
+        str(t) for n in node_states for t in (n.get("targets") or ())} | {
+        str(n.get("subgraph_entry")) for n in node_states if n.get("subgraph_entry")}
+    start = next((str(n["id"]) for n in sorted(node_states, key=lambda n: str(n.get("id")))
+                  if str(n["id"]) not in entered), "")
+    try:
+        graph = Graph.from_state({"start": start,
+                                  "nodes": {str(n["id"]): dict(n) for n in node_states},
+                                  "edges": list(edges)})
+    except Exception:  # noqa: BLE001 - a graph that does not read back gets no examples
+        return None
+    return {"graph": graph.to_state(),
+            "knobs": {k: {"value": v, "spec": {"kind": "str"}}
+                      for k, v in (knob_values or {}).items()}}
+
+
+def _removable_step(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                    protected: Sequence[str], state: Mapping[str, Any] | None) -> str | None:
+    """A step ``remove`` can take out of this graph as an example: an agent (else an op) with
+    a next step, not one a gate's verdict leads to, not after a protected or data node, and
+    making nothing a protected node reads; ``None`` when there is none."""
+    if state is None:
+        return None
+    kinds = {str(n.get("id")): n.get("kind") for n in node_states}
+    guarded = {name for other in node_states if str(other.get("id")) in protected
+               for key in ("reads", "required_reads", "inputs") for name in other.get(key) or ()}
+    sources = {str(e.get("source")) for e in edges}
+    ranked = sorted(node_states, key=lambda n: (n.get("kind") != "agent", str(n.get("id"))))
+    for node in ranked:
+        node_id = str(node.get("id"))
+        into = [e for e in edges if e.get("target") == node_id]
+        made = {*(node.get("writes") or ()), *(node.get("produces") or ())}
+        if node.get("kind") not in ("agent", "op") or node_id in protected or made & guarded \
+                or node_id not in sources or any(
+                    e.get("condition") or e.get("source") in protected
+                    or kinds.get(str(e.get("source"))) == "data" for e in into):
+            continue
+        if nn_edits.precheck({"op": "remove", "step": node_id}, dict(state)) is None:
+            return node_id
+    return None
+
+
+def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[str, Any]],
+                 edges: Sequence[dict[str, Any]], protected: Sequence[str],
+                 state: Mapping[str, Any] | None) -> dict[str, str]:
+    """The example ids for operator ``name``: ``ids`` when its example passes its
+    precondition on this graph, else the first other step (agents first, each with its one
+    plain next step) for which it does, else placeholders for the step ids."""
+    from refactory_dsh.nn import core_ops
+
+    placeholders = {**ids, "step": "<step>", "next step": "<next step>"}
+    if state is None:
+        return placeholders
+    out_of = {}
+    for edge in edges:
+        out_of.setdefault(str(edge.get("source")), []).append(edge)
+    options = [dict(ids)] if "step" in ids else []
+    # A data pass's first and last steps are named by its data node, which an edit there
+    # would change: not an example to copy.
+    ends = {str(n.get(key)) for n in node_states if n.get("kind") == "data"
+            for key in ("subgraph_entry", "subgraph_exit")}
+    for node in sorted(node_states, key=lambda n: (n.get("kind") != "agent", str(n.get("id")))):
+        node_id = str(node.get("id"))
+        out = out_of.get(node_id) or []
+        if node.get("kind") in ("agent", "op") and node_id not in protected and len(out) == 1 \
+                and not out[0].get("condition") and node_id not in ends:
+            options.append({**ids, "step": node_id, "next step": str(out[0].get("target"))})
+    for option in options:
+        example = core_ops.example(name, option)
+        named = [example.get(k) for k in ("step", "steps", "after", "before", "fork")]
+        if "<" in json.dumps(named) or "<" in json.dumps(list(example.get("to") or {}.values())):
+            continue
+        if nn_edits.precheck(example, dict(state)) is None:
+            return option
+    return placeholders
+
+
+def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
+                   edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
+                   knob_values: Mapping[str, Any] | None = None) -> list[str]:
+    """"Structural operators": what the system wires for every one, then each core operator
+    the run permits in one line with one example (`nn.core_ops.OPERATORS`), its ids taken
+    from this graph where it has them. Nothing when the run permits none."""
+    from refactory_dsh.nn import core_ops
+
+    ops = {op.get("op") for op in catalogue}
+    chosen = [name for name in CORE_OPERATORS if name in ops]
+    if not chosen:
+        return []
+    ids = _example_ids(node_states, edges, protected)
+    removable = _removable_step(node_states, edges, protected,
+                                _example_state(node_states, edges, knob_values))
+    lines = [
+        "",
+        "## Structural operators",
+        "Each is one line: what kind of step (`agent`, `code` or `op`), where (a step id), and "
+        "its text (a prompt, or code). The system does the wiring: a new step sees what its "
+        "neighbour sees plus the neighbour's outputs (`\"sees\"` names others: `\"task\"` "
+        "for the task's own inputs -- facts and files no model step made -- or step ids for "
+        "their outputs); files reach a model step through a collect step that says a missing "
+        "file instead of failing; its output (a file and a fact named after its id) goes into "
+        "the prompt of the next model step after it (`\"to\"` names another step or prompt "
+        "knob); ids, files and facts are generated; each text goes into a knob of its own "
+        "(`<id>__task`, `<id>__code`) for a later `set_knob`; and the candidate says what was "
+        "wired. Every text has a default (the neighbour's, or a neutral line), and each "
+        "operator counts as one change. Steps after the change keep the names they read. The "
+        "written-out operations in the table above stay for what these do not express.",
+    ]
+    state = _example_state(node_states, edges, knob_values)
+    for name in chosen:
+        spec = core_ops.OPERATORS[name]
+        # Ids this graph's own steps fill where the operator applies to them; a step this
+        # graph can lose for `remove`; placeholders otherwise, never a step it refuses.
+        own = {**ids, "step": removable or "<step>"} if name == "remove" else _fitting_ids(
+            name, ids, node_states, edges, protected, state)
+        lines.append(f"- `{name}`: {spec['line']}. E.g. "
+                     + json.dumps(core_ops.example(name, own)))
+    return lines
+
+
+def composition_examples(catalogue: Sequence[dict[str, Any]],
+                         node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                         *, protected: Sequence[str] = (), code_nodes: bool = False,
+                         tools: bool = False, knob_values: Mapping[str, Any] | None = None
+                         ) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Purpose-level shapes built only from the core operators, with this graph's ids: none
+    is preferred, each is one way to compose them. Each bundle applies as written to the
+    graph it was built from (``tests/test_core_operators.py`` holds it to that). None when
+    the graph has no step to anchor them or the run permits no core operator."""
+    from refactory_dsh.nn import core_ops
+    from refactory_dsh.nn.graph import Graph
+
+    ops = {op.get("op") for op in catalogue}
+    if not set(CORE_OPERATORS) & ops:
+        return []
+    anchor = _composition_anchor(node_states, edges, protected)
+    if anchor is None:
+        return []
+    state = _example_state(node_states, edges, knob_values)
+    if state is None:
+        return []
+    graph = Graph.from_state(state["graph"])
+    step = str(anchor[0]["id"])
+    out: list[tuple[str, list[dict[str, Any]]]] = []
+    if {"parallelize", "insert"} <= ops:
+        join = core_ops.parallel_join_id(graph, step)
+        copies = [f"{step}_copy{n}" for n in (1, 2)]
+        stems = [str(anchor[0]["writes"][0]).rsplit(".", 1)[0], *copies]
+        choose = f"{step}_choose"
+        out.append(("Several attempts and a choice", [
+            {"op": "parallelize", "steps": [step], "copies": 2},
+            {"op": "insert", "after": join, "kind": "agent", "id": choose,
+             "text": "<compare the attempts against the task>; start your answer with the "
+                     f"best one's name: {', '.join(stems)}"},
+            {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call()}]))
+    if "loop" in ops:
+        out.append(("Check and send back", [
+            {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
+    fork = next((str(n.get("id")) for n in node_states if n.get("kind") == "fork"), None)
+    if fork and "branch" in ops:
+        out.append(("An independent attempt that sees only the task", [
+            {"op": "branch", "fork": fork, "kind": "agent", "text": "<solve it your own way>",
+             "sees": ["task"]}]))
+    elif "parallelize" in ops:
+        out.append(("An independent attempt that sees only the task", [
+            {"op": "parallelize", "steps": [step], "copies": 1, "sees": ["task"]}]))
+    if code_nodes and "insert" in ops:
+        sim = f"{step}_sim"
+        out.append(("A simulation step, then an analysis of its results", [
+            {"op": "insert", "after": step, "kind": "code", "id": sim,
+             "text": "def main(inp):\n    result = len(inp['facts'])  # <the simulation>\n"
+                     f"    return {{'facts': {{{sim!r}: str(result)}}}}\n"},
+            {"op": "insert", "after": sim, "kind": "agent",
+             "text": "<analyse the simulation's results>"}]))
+    if "parallelize" in ops:
+        beside = [{"kind": "agent", "text": "<a background pass: what is already known about "
+                                            "this>"},
+                  {"kind": "agent", "text": "<the experiment>"}]
+        out.append(("A background pass beside an experiment", [
+            {"op": "parallelize", "after": step, "new": beside}]))
+    if code_nodes and "loop" in ops:
+        out.append(("Iterative fitting: repeat a step until a code check passes", [
+            {"op": "loop", "step": step, "judge": "code",
+             "text": "def main(inp):\n    residual = 1.0  # <measure it from inp['facts'] and "
+                     "inp['files']>\n    ok = residual < 0.1\n    return {'verdict': 'proceed' "
+                     "if ok else 'reloop', 'reason': 'residual ' + str(residual)}\n"}]))
+    if tools and "insert" in ops:
+        out.append(("A tool step before reasoning", [
+            {"op": "insert", "before": step, "kind": "agent", "tools": True,
+             "text": "<use your tools to gather what the next step needs>"}]))
+    removable = _removable_step(node_states, edges, protected, state) if "remove" in ops else None
+    if removable is not None:
+        out.append(("Dropping a step that does not help", [{"op": "remove", "step": removable}]))
+    return out
+
+
+def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
+    """"Time per item", in numbers, so time is reasoned about from them: how long one model
+    step may run (the run's limit; a step's own ``timeout_s`` overrides it), the edited
+    candidate's typical time per item, and how many of its items timed out. Nothing when
+    none is known."""
+    facts = dict(facts or {})
+    limit, per_item = facts.get("step_limit_s"), facts.get("per_item_s")
+    items, timeouts = int(facts.get("items") or 0), int(facts.get("timeouts") or 0)
+    if not (limit or per_item or items):
+        return []
+    parts = []
+    if limit:
+        parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
+                     "step; a step's own `timeout_s` overrides it); a step past its limit fails "
+                     "that item, as a timeout.")
+    if per_item:
+        parallel = int(facts.get("parallelism") or 1)
+        parts.append(f"The candidate you edit took about {float(per_item):.0f} s per item on "
+                     "its train evaluation (its wall time"
+                     + (f" x {parallel} items at once" if parallel > 1 else "")
+                     + f" / {items} items).")
+    if items:
+        parts.append(f"{timeouts} of its {items} train items timed out.")
+    return ["## Time per item", " ".join(parts), ""]
+
+
+def _cost_note(parsimony: float | None) -> list[str]:
+    """With a cost term in the objective, what the cost column of the results says."""
+    if not parsimony:
+        return []
+    return ["The cost per item column is each candidate's measured model cost (USD) over its "
+            "train items, so a change's cost can be weighed against the size cost the score "
+            "carries; - where it was not measured."]
+
+
+def _cost_cell(value: Any) -> str:
+    return f"{float(value):.4g}" if isinstance(value, (int, float)) else "-"
 
 
 #: What a run's score does not count unless the task's own score measures it.
@@ -1568,11 +1850,12 @@ def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
         return ("Compute policy: this run does not penalise extra steps or model calls per "
                 "item. Per-item cost is reported separately and is not part of the score, so "
                 "a change that adds steps or model calls is weighed only by the score it "
-                "should reach, as any other change is.")
+                "should reach, as any other change is. Cost is not a reason for or against a "
+                "change in this run.")
     return ("Compute policy: the loop does not penalise extra steps or model calls per item "
             "(parsimony is 0), so a change that adds them is weighed by the score it should "
             "reach, as any other change is; cost counts only as far as the task's own score "
-            "measures it.")
+            "measures it. Cost is not a reason for or against a change in this run.")
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -1585,10 +1868,13 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
     structural = structural_example(catalogue)
     ops = {op.get("op") for op in catalogue}
     kinds = ["a prompt or setting"] + ([] if structural is None else [
-        *(["a new agent step"] if ops & {"insert_after", "insert_before", "add_node"} else []),
+        *(["a new agent step"] if ops & {"insert", "insert_after", "insert_before", "add_node"}
+          else []),
         *(["a code step"] if code_nodes else []),
         *(["a gate or loop"] if "loop" in ops else []),
-        *(["parallel steps"] if "parallel" in ops else [])])
+        *(["parallel steps"] if ops & {"parallel", "parallelize"} else []),
+        *(["removing, rewiring or merging steps"] if ops & {"remove", "rewire", "merge"}
+          else [])])
     lines = [
         "Write one JSON object and nothing else:",
         "",
@@ -1597,7 +1883,12 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         f'diagnosis ({", ".join(kinds)}) and why you chose yours>",',
         ' "proposals": [{"edit": {"op": "<operation>", ...},',
         '                "rationale": "<why, citing the evidence>",',
-        '                "prediction": "<expected effect on the score>",',
+        *(['                "addresses": "<structural: the failure it targets, citing the '
+           'steps and items in the evidence by id>",',
+           '                "flow_change": "<structural: which step sees what, or what runs '
+           'beside or after what, once it is made>",'] if structural is not None else []),
+        '                "prediction": "<expected effect: which steps\' outputs or which '
+        'items change, and how>",',
         '                "confidence": 0.0}]}',
         "",
         "Rules:",
@@ -1612,7 +1903,20 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
                   "  Patch the parts the evidence says to change and keep the rest. A whole new",
                   "  `value` is for a setting that is not text, a new step's own prompt, or a",
                   "  prompt that has to be replaced outright."]
-    if structural is not None:
+    if structural is not None and structural.get("op") == "insert":
+        lines += [
+            "- A structural move is one line: a structural operator above (or a written-out "
+            "operation, with the fields it lists). For example:",
+            "  " + json.dumps(structural),
+            "  The new step gets its own `<id>__task` knob holding its text, so a later round "
+            "can patch or rewrite it with `set_knob`.",
+            "- A structural proposal also says what it `addresses` (the failure, citing steps "
+            "and items in the evidence by id), its `flow_change` (which step sees what, or "
+            "what runs beside or after what) and a `prediction` that can be checked (which "
+            "steps' outputs or which items change, and how). Its edit line stays one line; "
+            "the thought goes here. A proposal without them is still judged, and marked.",
+        ]
+    elif structural is not None:
         lines += [
             "- A structural move is one of the structural operations above, with the fields it "
             "lists. A `node` is a node object written from the node schema (or a block, or a "
@@ -1667,6 +1971,11 @@ def bundle_examples(catalogue: Sequence[dict[str, Any]]) -> list[list[dict[str, 
         out.append([{**structural, "node": node},
                     {"op": "set_knob", "name": "<new step id>__system_prompt",
                      "value": "<system prompt text>"}])
+    elif structural is not None and "set_knob" in ops:
+        # A new step, and how a later step is told to use what it makes.
+        out.append([structural, {"op": "set_knob", "name": "<a later step's prompt knob>",
+                                 "patch": [{"kind": "append",
+                                            "content": "<how to use the new step's output>"}]}])
     return out
 
 
@@ -2714,6 +3023,71 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
     return "; ".join(parts) if parts else "(none)"
 
 
+#: How many named items and steps a prediction check lists.
+PREDICTION_NAMED = 8
+
+
+def _named(text: str, names: Iterable[str]) -> list[str]:
+    """The ``names`` a text mentions as whole words, in the order given."""
+    return [name for name in names if name and re.search(
+        r"(?<![\w.-])" + re.escape(str(name)) + r"(?![\w-])", text)]
+
+
+def _step_replies(record: Mapping[str, Any]) -> dict[str, str]:
+    return {str(e.get("node")): str(e.get("response") or "") for e in record.get("exchanges") or ()
+            if isinstance(e, Mapping) and e.get("node")}
+
+
+def prediction_check(prediction: str, parent_records: Sequence[dict[str, Any]] | None,
+                     child_records: Sequence[dict[str, Any]] | None,
+                     steps: Sequence[str] = ()) -> list[str]:
+    """What happened to the items and steps a prediction names, measured on the train items
+    parent and child share: each named item's outcome (fixed, broken, score up or down,
+    unchanged), and for each named step how many items its reply changed on (or ran on, for
+    a step only one of them has). Mechanical: whether the prediction held is the reader's
+    call. Empty when the prediction names neither."""
+    text = str(prediction or "")
+    parent, child = _by_item(parent_records), _by_item(child_records)
+    shared = sorted(set(parent) & set(child))
+    if not text.strip() or not shared:
+        return []
+    lines: list[str] = []
+    items = _named(text, shared)[:PREDICTION_NAMED]
+    if items:
+        said = []
+        for item in items:
+            before, after = parent[item], child[item]
+            if not before.get("passed") and after.get("passed"):
+                said.append(f"{item} fixed")
+            elif before.get("passed") and not after.get("passed"):
+                said.append(f"{item} broken")
+            else:
+                delta = (_score_of(after) or 0.0) - (_score_of(before) or 0.0)
+                said.append(f"{item} {'score up' if delta > 0 else 'score down' if delta < 0 else 'unchanged'}")
+        lines.append("Named items: " + ", ".join(said) + ".")
+    named_steps = _named(text, steps)[:PREDICTION_NAMED]
+    if named_steps:
+        said = []
+        for step in named_steps:
+            ran_before = sum(1 for i in shared if step in _step_replies(parent[i]))
+            ran_after = sum(1 for i in shared if step in _step_replies(child[i]))
+            if not ran_before and not ran_after:
+                said.append(f"{step}: no model reply recorded on either")
+            elif not ran_before:
+                said.append(f"{step}: new, replied on {ran_after} of {len(shared)} item(s)")
+            elif not ran_after:
+                said.append(f"{step}: gone (replied on {ran_before} before)")
+            else:
+                ran = [i for i in shared if step in _step_replies(parent[i])
+                       or step in _step_replies(child[i])]
+                changed = sum(1 for i in ran if _step_replies(parent[i]).get(step)
+                              != _step_replies(child[i]).get(step))
+                said.append(f"{step}: reply changed on {changed} of the {len(ran)} item(s) "
+                            "it ran on")
+        lines.append("Named steps: " + "; ".join(said) + ".")
+    return lines
+
+
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts; the
@@ -2736,6 +3110,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
+        lines += [f"Wired by the system: {note}" for note in pair.get("notes") or ()]
         if pair.get("same_seed") is False:
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
@@ -2753,6 +3128,13 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
                      f"(parent wrong, child right), {len(change['broken'])} broken (parent right, "
                      f"child wrong); largest score rises {change['up'] or 'none'}, largest drops "
                      f"{change['down'] or 'none'}.")
+        if pair.get("prediction"):
+            checked = prediction_check(pair["prediction"], pair.get("parent_records"),
+                                       pair.get("child_records"), pair.get("steps") or ())
+            lines += [f"Its prediction: {_clip(pair['prediction'], REASONING_TEXT_CHARS)}",
+                      *([f"Prediction check -- {line}" for line in checked] or [
+                          "Prediction check: it names no shared item or step, so only the "
+                          "counts above can say whether it held."])]
         parent, child = _by_item(pair.get("parent_records")), _by_item(pair.get("child_records"))
         for kind, items in (("fixed", change["fixed"]), ("broken", change["broken"]),
                             ("score rose", change["up"]), ("score dropped", change["down"])):
@@ -2802,7 +3184,12 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   *_item_error_lines(entry.get("errors") or (), int(entry.get("items") or 0)),
                   *[f"Wiring warning this edit added: {w}" for w in entry.get("warnings") or ()],
                   "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
+                  *[f"Wired by the system: {note}" for note in entry.get("notes") or ()],
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
+                  *([f"Addresses: {_clip(entry['addresses'], REASONING_TEXT_CHARS)}"]
+                    if entry.get("addresses") else []),
+                  *([f"Flow change: {_clip(entry['flow_change'], REASONING_TEXT_CHARS)}"]
+                    if entry.get("flow_change") else []),
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]
@@ -3202,6 +3589,7 @@ class Optimizer:
         # (`optim.repair`), each fix said in ``repairs``; the candidate records these.
         applied: list[dict[str, Any]] = []
         repairs: list[str] = []
+        wired_notes: list[str] = []
         for index, edit in enumerate(steps):
             edit, fixed, ambiguous = repair.fix_edit(edit, state, steps, index)
             if ambiguous:
@@ -3242,6 +3630,8 @@ class Optimizer:
             edit_reports.append(reports[0] if reports else None)
             prefixes.append(state)
             applied.append(edit)
+            # What a core operator wired beside the steps it names, said with the candidate.
+            wired_notes += nn_edits.core_wiring_notes(edit, before_step, state)
 
         violation = nn_edits.protected_violation(parent.state, state, protected)
         if violation:
@@ -3346,7 +3736,7 @@ class Optimizer:
             edit_reports=[*parent_reports, *edit_reports],
             step_edits=len(applied),
         )
-        candidate.repairs, candidate.notes = list(repairs), list(notes)
+        candidate.repairs, candidate.notes = list(repairs), [*wired_notes, *notes]
         if repairs:
             self.record_call(kind="repair", how="deterministic", candidate=candidate.id,
                              parent=parent.id, fixes=repairs)
