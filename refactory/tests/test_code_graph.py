@@ -136,7 +136,7 @@ def test_missing_node(tmp_path):
     graph_dir = tmp_path / "code-graph"
     _write_fixture(graph_dir)
     assert explain_node(graph_dir, "nonexistent_function") == ""
-    assert callers_of(graph_dir, "nonexistent_function") == ""
+    assert callers_of(graph_dir, "nonexistent_function") is None
 
 
 def test_name_matching_strips_parens(tmp_path):
@@ -365,18 +365,42 @@ def test_worktree_stays_clean(tmp_path):
     source = git_repo(tmp_path / "repo")
     before = subprocess.run(["git", "status", "--porcelain"], cwd=source,
                             capture_output=True, text=True).stdout
-    ctx = _FakeCtx(tmp_path / "run", facts={"source": str(source), "target": str(source)},
-                    knobs={"code_graph": True})
-    build_code_graph(ctx)
-    graph_dir = ctx.workdir / "code-graph"
+
+    # Cold build
+    run1 = tmp_path / "runs" / "run1"
+    ctx1 = _FakeCtx(run1, facts={"source": str(source), "target": str(source)},
+                     knobs={"code_graph": True})
+    build_code_graph(ctx1)
+    graph_dir1 = ctx1.workdir / "code-graph"
     for _ in range(60):
-        status = _read_status(graph_dir)
+        status = _read_status(graph_dir1)
         if status.get("status") in ("ready", "failed: timeout"):
             break
         time.sleep(0.5)
-    after = subprocess.run(["git", "status", "--porcelain"], cwd=source,
-                           capture_output=True, text=True).stdout
-    assert before == after, f"Worktree polluted: {after}"
+    after_cold = subprocess.run(["git", "status", "--porcelain"], cwd=source,
+                                capture_output=True, text=True).stdout
+    assert before == after_cold, f"Worktree polluted after cold build: {after_cold}"
+    assert _read_status(graph_dir1).get("status") == "ready"
+
+    # Cache-reuse build: clone the repo to a second worktree, same target
+    source2 = tmp_path / "repo2"
+    subprocess.run(["git", "clone", str(source), str(source2)],
+                   capture_output=True, check=True)
+    before2 = subprocess.run(["git", "status", "--porcelain"], cwd=source2,
+                             capture_output=True, text=True).stdout
+    run2 = tmp_path / "runs" / "run2"
+    ctx2 = _FakeCtx(run2, facts={"source": str(source2), "target": str(source)},
+                     knobs={"code_graph": True})
+    build_code_graph(ctx2)
+    graph_dir2 = ctx2.workdir / "code-graph"
+    for _ in range(60):
+        status = _read_status(graph_dir2)
+        if status.get("status") in ("ready", "failed: timeout"):
+            break
+        time.sleep(0.5)
+    after_reuse = subprocess.run(["git", "status", "--porcelain"], cwd=source2,
+                                 capture_output=True, text=True).stdout
+    assert before2 == after_reuse, f"Worktree polluted after cache-reuse build: {after_reuse}"
 
 
 @pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
@@ -616,7 +640,7 @@ def test_spine_node_runner_runs_build_code_graph(tmp_path):
     assert "code_graph_paragraph" in facts
 
 
-def test_spine_run_where_build_fails(tmp_path, monkeypatch):
+def test_spine_run_where_build_fails(tmp_path):
     from refactory_dsh.run import update_facts
     from refactory_dsh.steering import Ledger
 
@@ -633,11 +657,10 @@ def test_spine_run_where_build_fails(tmp_path, monkeypatch):
            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
            "PYTHONDONTWRITEBYTECODE": "1",
            "REFACTORY_WORKDIR": str(run),
-           "DSH_WORKFLOW_NODE": json.dumps({"id": "build_code_graph", "type": "FnNode"})}
+           "DSH_WORKFLOW_NODE": json.dumps({"id": "build_code_graph", "type": "FnNode"}),
+           "_REFACTORY_GRAPHIFY_BIN_OVERRIDE": ""}
     lowering.write_declarations(state, run)
     update_facts(run, {"source": str(repo), "target": str(repo)})
-
-    monkeypatch.setenv("PATH", "/nonexistent_bin_dir")
 
     done = subprocess.run(
         [sys.executable, "-m", "refactory_dsh.run",

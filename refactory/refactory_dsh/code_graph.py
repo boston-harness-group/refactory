@@ -130,12 +130,13 @@ def explain_node(graph_dir: Path, name: str) -> str:
     return "\n".join(parts).rstrip()
 
 
-def callers_of(graph_dir: Path, name: str) -> str:
+def callers_of(graph_dir: Path, name: str) -> str | None:
+    """Return callers as text, empty string if none, or None if the node is not found."""
     nodes, links = _load_graph(graph_dir)
     node_by_id = {n["id"]: n for n in nodes}
     matched = [n for n in nodes if _match_name(n.get("label", ""), name)]
     if not matched:
-        return ""
+        return None
 
     parts: list[str] = []
     for node in matched:
@@ -188,16 +189,21 @@ def cli_graph(args: Any) -> int:
         print(f"Unknown graph command: {command}", file=sys.stderr)
         return 1
 
-    if result:
+    if result is None:
+        print(f"No node named '{name}' found in the graph.")
+    elif result:
         print(result)
     else:
-        print(f"No node named '{name}' found in the graph.")
+        print(f"No callers found for '{name}'.")
     return 0
 
 
 # ── build op ───────────────────────────────────────────────────────────────────
 
 def _find_graphify() -> str | None:
+    override = os.environ.get("_REFACTORY_GRAPHIFY_BIN_OVERRIDE")
+    if override is not None:
+        return override or None
     candidate = Path(sys.executable).parent / "graphify"
     if candidate.is_file():
         return str(candidate.resolve())
