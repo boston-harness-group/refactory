@@ -957,11 +957,13 @@ Project defaults over the existing worker route schema, resolved once per run.
 | function | `effective` | `(project: 'Path') -> 'dict[str, Any]'` |
 | function | `resolve` | `(project: 'Path', overrides: 'dict[str, Any] \| None' = None, *, inherited: 'dict[str, Any] \| None' = None, profile: 'dict[str, Any] \| None' = None) -> 'dict[str, Any]'` |
 | function | `validate` | `(settings: 'dict[str, Any]') -> 'None'` |
+| function | `validate_code_graph` | `(section: 'Any', *, origin: 'str' = 'refactory.workers.json') -> 'dict[str, Any]'` |
 | function | `validate_provider_config` | `(config: 'Any', *, origin: 'str' = 'refactory.workers.json') -> 'dict[str, Any]'` |
 
 - **`effective`** — Read-only route preview used by terminal, panel and CEO discovery.
 - **`resolve`** — Return nonsecret effective settings and per-field provenance.
 - **`validate`** — Validate partial defaults and each override without dispatching a worker.
+- **`validate_code_graph`** — The project file's ``code_graph`` object, checked: only known keys, each of its type.
 - **`validate_provider_config`** — Validate a nonsecret provider-profile map: provider route name to profile.
 
 
