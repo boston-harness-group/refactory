@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea875542a8f1 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad57a4f98f2 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -147,7 +147,8 @@ function failureDiagnostic(facts) {
@@ -70,7 +70,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +273,159 @@ function successfulResult(message) {
+@@ -231,20 +273,197 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -103,12 +103,26 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
 +		if (!finished) await iterator.return?.();
 +	}
 +}
-+async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata, sent, releaseInput, abortQuery) {
++/** What the step asks, once, when Claude Code's last turn ended without a reply. */
++const EMPTY_ANSWER_PROMPT = "Your last turn ended without a reply. If the task is not finished, finish it. Then reply with your complete final answer, restated in full even if you gave it before.";
++/** Whether a result is a successful turn that ended with no text. */
++function emptySuccess(message) {
++	return message.subtype === "success" && !message.is_error && typeof message.result === "string" && message.result.trim().length === 0;
++}
++async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata, sent, releaseInput, abortQuery, askAgain) {
  	let answer;
 -	for await (const message of query) {
 -		if (message.type === "system" && message.subtype === "permission_denied") {
 -			onPermissionDenied?.();
 -			continue;
++	// A successful result with no text is a turn that ended without a reply -- often the
++	// last one, after a background task reported back -- not the step's answer. The
++	// failure facts of the latest such turn, cleared by a later answer; the step asks once
++	// for the answer. Only text from a result with no task running is a settled answer:
++	// one written while tasks ran ("launching the researchers...") is an interim note.
++	let emptyFacts;
++	let reasked = false;
++	let settled;
 +	// The background tasks (subagents, shells) Claude Code reports still running, by id.
 +	// Each report replaces the last; ambient tasks never hold a step. A result while any
 +	// runs is not the answer: Claude Code continues by itself as each one reports back,
@@ -209,28 +223,52 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
 +						includes_nested_workers: true, excludes: "permission classifier, token-count probes and other helpers outside the SDK query pipeline" } });
 +				}
 +			}
-+			answer = successfulResult(message);
++			if (emptySuccess(message)) emptyFacts = resultFailureFacts(message);
++			else {
++				const text = successfulResult(message);
++				emptyFacts = void 0;
++				// A reply to the re-ask never replaces a settled answer ("my answer is above").
++				if (!(reasked && settled !== void 0)) {
++					answer = text;
++					if (liveTasks.size === 0) settled = text;
++				}
++			}
 +			if (quietReleased) continue;  // the input is closed; the stream's end is awaited
 +			waiting = liveTasks.size > 0;
 +			if (waiting) armQuiet();
-+			else {
++			else if (emptyFacts !== void 0 && !reasked && askAgain?.(EMPTY_ANSWER_PROMPT)) {
++				reasked = true;
++				// A CLI that never answers the re-ask is bounded like a silent task.
++				waiting = true;
++				armQuiet();
++			} else {
 +				stopQuiet();
 +				releaseInput?.();
 +			}
- 		}
--		if (message.type !== "result") continue;
--		onResult?.();
--		answer = successfulResult(message);
++		}
 +	} finally {
 +		// Whatever ended the stream -- a failure, an abort, the CLI exiting -- must not
 +		// leave the prompt input waiting.
 +		stopQuiet();
 +		if (afterReleaseTimer !== void 0) clearTimeout(afterReleaseTimer);
 +		releaseInput?.();
- 	}
++	}
 +	if (waitedTasks.size > 0) onRefactoryMetadata?.({ background_tasks_waited: waitedTasks.size });
 +	if (abandoned > 0) onRefactoryMetadata?.({ background_tasks_abandoned: abandoned });
 +	if (streamStopped) onRefactoryMetadata?.({ background_stream_stopped: true });
++	if (reasked) onRefactoryMetadata?.({ empty_answer_reasked: true });
++	if (emptyFacts !== void 0) {
++		if (settled === void 0) {
++			const asked = reasked ? ", also when asked once more for it" : "";
++			const interim = answer === void 0 ? "" : `; its last text, written while background tasks still ran, was: ${answer.length > 300 ? `${answer.slice(0, 300)}...` : answer}`;
++			throw new ClaudeCodeFailure({ ...emptyFacts, detail: `${emptyFacts.detail}${asked}${interim}` });
+ 		}
+-		if (message.type !== "result") continue;
+-		onResult?.();
+-		answer = successfulResult(message);
++		answer = settled;
++		onRefactoryMetadata?.({ answer_from_earlier_turn: true });
+ 	}
  	if (answer === void 0) throw new ClaudeCodeFailure({
  		stage: "query-run",
 -		category: "invalid-result"
@@ -239,7 +277,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  	});
  	return {
  		output: [{
-@@ -295,15 +476,33 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +514,33 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -278,7 +316,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,9 +526,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,9 +564,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -316,7 +354,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
  * @param request - resolved shared subagent request.
-@@ -338,6 +564,24 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +602,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -326,22 +364,43 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
 +	// Set when consumeClaudeQuery stops a silent CLI after it has its answer: that abort
 +	// ends the CLI, it does not cancel the step.
 +	let stoppedWithAnswer = false;
-+	const inputReleased = new Promise((resolve) => {
-+		releaseInput = resolve;
++	// Messages the step sends after the prompt (`askAgain`), until the input is released.
++	const followUps = [];
++	let inputClosed = false;
++	let wakeInput;
++	releaseInput = () => {
++		inputClosed = true;
++		wakeInput?.();
++	};
++	const askAgain = (text) => {
++		if (inputClosed) return false;
++		followUps.push(text);
++		wakeInput?.();
++		return true;
++	};
++	const userMessage = (content) => ({
++		type: "user",
++		message: { role: "user", content },
++		parent_tool_use_id: null,
++		session_id: ""
 +	});
 +	async function* promptInput() {
-+		yield {
-+			type: "user",
-+			message: { role: "user", content: prompt },
-+			parent_tool_use_id: null,
-+			session_id: ""
-+		};
-+		await inputReleased;
++		yield userMessage(prompt);
++		for (;;) {
++			if (followUps.length > 0) {
++				yield userMessage(followUps.shift());
++				continue;
++			}
++			if (inputClosed) return;
++			await new Promise((resolve) => {
++				wakeInput = resolve;
++			});
++		}
 +	}
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +602,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +661,7 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -349,7 +408,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +620,26 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +679,26 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -378,17 +437,19 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,6 +692,9 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +751,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
+-				}), publishedProcessFailure]);
 +				}, spec.onRefactoryMetadata, sent, releaseInput, () => {
 +					stoppedWithAnswer = true;
 +					requestCancel();
- 				}), publishedProcessFailure]);
++				}, askAgain), publishedProcessFailure]);
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
-@@ -458,7 +719,7 @@ async function startClaudeCodeRun(request, spec) {
+ 				let facts;
+@@ -458,7 +778,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -397,7 +458,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,6 +731,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,6 +790,7 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -405,7 +466,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..8f11a27ab193a35f59c8661c8cf1ea87
  			try {
  				await disposeClaudeCodeChild(publishedQuery, publishedChild);
  			} catch (error) {
-@@ -529,6 +791,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +850,9 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),
