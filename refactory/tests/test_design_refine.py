@@ -27,7 +27,7 @@ from refactory_dsh.design_ops import (
     route_refine_design,
 )
 from refactory_dsh.steering import Ledger
-from test_delivery import (  # noqa: F401  (_stage, _opened_golden and opened_pull are the fake GitHub's fixtures)
+from _delivery_support import (  # noqa: F401  (_stage, _opened_golden and opened_pull are the fake GitHub's fixtures)
     NAME,
     _describe,
     _opened_golden,

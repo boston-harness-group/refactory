@@ -27,7 +27,7 @@ from refactory_dsh.design_ops import (LIGHT_REFINE_STRATEGY_PLAN, REFINE_SCOPE_R
 from refactory_dsh.nn.executor import RunContext, render
 from refactory_dsh.run import declarations, main, update_facts
 from refactory_dsh.steering import Ledger
-from test_delivery import (  # noqa: F401  (_stage, _opened_golden and opened_pull are the fake GitHub's fixtures)
+from _delivery_support import (  # noqa: F401  (_stage, _opened_golden and opened_pull are the fake GitHub's fixtures)
     NAME,
     _describe,
     _opened_golden,

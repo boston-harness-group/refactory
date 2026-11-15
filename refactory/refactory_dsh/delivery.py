@@ -77,7 +77,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from refactory_dsh.nn import Verdict
 
 from refactory_dsh import projects, target_guard, worktree
 from refactory_dsh.nn import Knob

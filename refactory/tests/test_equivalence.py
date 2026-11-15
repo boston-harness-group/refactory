@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import lowering, registry
-from refactory_dsh.paths import REPO_ROOT, dsh_command, venv_bin
+from refactory_dsh.paths import REPO_ROOT, dsh_command, node_bin, venv_bin
 from refactory_dsh.run import FACTS
 
 MODE = "circle_packing/adaptive"
