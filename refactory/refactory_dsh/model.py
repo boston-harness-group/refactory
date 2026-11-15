@@ -1068,6 +1068,12 @@ class DshModelClient:
                   "REFACTORY_RUNTIME_ROOT": str(self._runtime_root)}
         # Clear inherited values because this client owns the current call.
         result.pop("REFACTORY_SYSTEM_PROMPT", None)
+        # Which node's worker this is, so a command the agent runs can say so (the code
+        # graph's query log, `code_graph.usage`); cleared when no node is bound.
+        if getattr(self, "_node_id", ""):
+            result["REFACTORY_NODE_ID"] = self._node_id
+        else:
+            result.pop("REFACTORY_NODE_ID", None)
         # Tool policy: set when this node has one, clear for ordinary nodes so a
         # previous no-tools dispatch's env var does not leak to the next node.
         if getattr(self, '_tool_policy', '') == 'none':
