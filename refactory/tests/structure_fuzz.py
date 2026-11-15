@@ -101,11 +101,14 @@ CONDITIONS = ("proceed", "reloop", "reject")
 SCRIPTED_LABEL = "verdict 'proceed' is not one of"
 #: Whether this machine can sandbox code nodes (`snippet.available`). Without it every
 #: new code node is refused (``E-code-nodes``), so the generator writes none: the walks
-#: are then the ones they were before code nodes existed.
+#: are then the ones they were before code nodes existed. A generator or fuzzer can be
+#: told to write none anywhere (``code_nodes=False``), so a walk that needs no code node
+#: draws the same edits on every machine.
 CODE_NODES = snippet_calls.available()[0]
-#: The node kinds `EditGenerator.new_node` draws a fresh node from.
-NODE_KINDS_TO_GENERATE = (("op", "op", "agent", "agent", "gate", "fork", "join", "data")
-                          + (("code", "code_gate") if CODE_NODES else ()))
+#: The node kinds `EditGenerator.new_node` draws a fresh node from, without code nodes.
+PLAIN_NODE_KINDS = ("op", "op", "agent", "agent", "gate", "fork", "join", "data")
+#: The node kinds `EditGenerator.new_node` draws a fresh node from on this machine.
+NODE_KINDS_TO_GENERATE = PLAIN_NODE_KINDS + (("code", "code_gate") if CODE_NODES else ())
 #: The line every generated code meant to fail at run time carries.
 EXPECTED_FAILURE = "# expected to fail at run time"
 #: Code the generator writes that rule V18 must refuse, each with a marker the ``code``
@@ -1036,9 +1039,11 @@ def _rendered_copy(state: dict[str, Any], node_id: str, limit: int = 100_000) ->
 class EditGenerator:
     """Random structure edits: every primitive and macro, valid-looking and malformed."""
 
-    def __init__(self, rng: random.Random) -> None:
+    def __init__(self, rng: random.Random, *, code_nodes: bool = CODE_NODES) -> None:
         self.rng = rng
         self.counter = 0
+        #: Whether new code nodes are drawn (only where this machine can run them).
+        self.code_nodes = code_nodes and CODE_NODES
 
     def fresh_id(self, graph: Graph, base: str = "n") -> str:
         self.counter += 1
@@ -1094,8 +1099,8 @@ class EditGenerator:
                 node["writes"] = [f"{node['id']}.txt"]
                 node["produces"] = [f"{node['id']}_fact"]
             return node
-        kind = kind or rng.choice(NODE_KINDS_TO_GENERATE)
-        if kind in ("code", "code_gate") and not CODE_NODES:
+        kind = kind or rng.choice(PLAIN_NODE_KINDS + (("code", "code_gate") if self.code_nodes else ()))
+        if kind in ("code", "code_gate") and not self.code_nodes:
             kind = "op" if kind == "code" else "gate"
         new_id = self.fresh_id(graph, kind)
         files, facts, ids = self._files(graph), self._facts(graph), sorted(graph.nodes) or [new_id]
@@ -1341,7 +1346,7 @@ class EditGenerator:
                 return {"op": "reorder", "first": edge.source, "second": edge.target}
             return {"op": "reorder", "first": target, "second": rng.choice(ids)}
         if op == "parallel":
-            branches = [self.new_node(state, rng.choice(("agent", "op", "code") if CODE_NODES
+            branches = [self.new_node(state, rng.choice(("agent", "op", "code") if self.code_nodes
                                                         else ("agent", "op")))
                         for _ in range(rng.choice((2, 2, 3)))]
             if rng.random() < 0.1:
@@ -1358,7 +1363,7 @@ class EditGenerator:
                   sees: bool = True) -> dict[str, Any]:
         """A new step as an operator takes it: a kind, often a text, now and then ``sees``."""
         rng, graph = self.rng, _graph_of(state)
-        kind = rng.choice(tuple(k for k in kinds if k != "code" or CODE_NODES) or ("agent",))
+        kind = rng.choice(tuple(k for k in kinds if k != "code" or self.code_nodes) or ("agent",))
         spec: dict[str, Any] = {"kind": kind}
         if kind == "agent" and rng.random() < 0.7:
             self.counter += 1
@@ -1420,16 +1425,16 @@ class EditGenerator:
                                   "other": self.step_spec(state, sees=False)}
             if rng.random() < 0.3 and len(ids) > 2:
                 to["skip"] = rng.choice(ids)
-            judge = rng.choice(("agent", "agent", "code") if CODE_NODES else ("agent",))
+            judge = rng.choice(("agent", "agent", "code") if self.code_nodes else ("agent",))
             return {"op": "route", "after": target, "judge": judge,
                     **({"to": to} if rng.random() < 0.7 else {})}
         if op == "loop" and rng.random() < 0.6:
-            judge = rng.choice(("agent", "agent", "code", fg.PROCEED) if CODE_NODES
+            judge = rng.choice(("agent", "agent", "code", fg.PROCEED) if self.code_nodes
                                else ("agent", fg.PROCEED))
             return {"op": "loop", "step": target, "judge": judge,
                     **({"text": "Is the work complete?"} if judge == "agent" else {})}
         if op == "loop":
-            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if CODE_NODES
+            gate = self.new_node(state, rng.choice(("gate", "gate", "code_gate") if self.code_nodes
                                                    else ("gate",)))
             return {"op": "loop", "target": target, "gate": gate}
         if op == "split" and rng.random() < 0.6:
@@ -1499,7 +1504,7 @@ class Fuzzer:
     def __init__(self, seed: int, *, seed_names: tuple[str, ...] | None = None,
                  walk_length: int = 12, walker: bool = True, spine_every: int = 0,
                  shrink: bool = True, stop_on: str | None = None,
-                 compound: float = 0.0) -> None:
+                 compound: float = 0.0, code_nodes: bool = CODE_NODES) -> None:
         self.seed = seed
         self.seeds = {name: s for name, s in seeds().items()
                       if seed_names is None or name in seed_names}
@@ -1511,6 +1516,8 @@ class Fuzzer:
         self.stop_on = stop_on
         #: The share of a walk's steps that are compound proposals (0 is none).
         self.compound = compound
+        #: Whether walks draw new code nodes (`EditGenerator.code_nodes`).
+        self.code_nodes = code_nodes
         self.stats = Stats()
 
     def run(self, edits: int) -> Stats:
@@ -1527,7 +1534,7 @@ class Fuzzer:
     def _walk(self, seed: Seed, walk: int, budget: int) -> None:
         rng = random.Random(f"{self.seed}:{seed.name}:{walk}")
         applier = Applier(seed)
-        generator = EditGenerator(rng)
+        generator = EditGenerator(rng, code_nodes=self.code_nodes)
         current = Candidate.from_state(applier.seed_state)
         seen = {current.id}
         accepted: list[Any] = []

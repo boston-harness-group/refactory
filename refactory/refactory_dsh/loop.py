@@ -5362,12 +5362,15 @@ class Loop(OuterLoop):
         limit = getattr(self.model, "timeout_s", None)
         if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
             facts["step_limit_s"] = int(limit)
-        records = self._parent_train_records(board)
+        owner, records = self._train_records_owner(board)
         if not records:
             return facts
-        facts["items"] = len(records)
+        # A repeated item has a record per run: items are counted once, runs each time.
+        facts["items"] = len({record.get("id", index) for index, record in enumerate(records)})
+        facts["runs"] = len(records)
         facts["timeouts"] = sum(1 for record in records if _timed_out(record))
-        edited = next((c for c in self.population if c.id == self._edited_id(board)), None)
+        # The same candidate the records are of, so its time and its timeouts agree.
+        edited = next((c for c in self.population if c.id == owner), None)
         if edited is not None and edited.duration_s:
             parallel = _data_parallelism(edited.state)
             per_item = round(float(edited.duration_s) * parallel / len(records))
@@ -6351,7 +6354,12 @@ class Loop(OuterLoop):
             return described(self.mode), note
 
     def _parent_train_records(self, board: list[Candidate]) -> list[dict[str, Any]]:
-        """Train records for the parent the strategy selected for editing.
+        """Train records for the parent the strategy selected for editing (see
+        :meth:`_train_records_owner`)."""
+        return self._train_records_owner(board)[1]
+
+    def _train_records_owner(self, board: list[Candidate]) -> tuple[str | None, list[dict[str, Any]]]:
+        """The candidate whose train records stand for the parent being edited, and its records.
 
         Priority:
         1. ``strategy_decision["parent"]`` when a strategy named one, else the
@@ -6364,16 +6372,16 @@ class Loop(OuterLoop):
         # Prefer the parent the strategy explicitly selected.
         parent_id = self.strategy_decision.get("parent") or self._editing_parent
         if parent_id and parent_id in self._train_item_records:
-            return list(self._train_item_records[parent_id])
+            return str(parent_id), list(self._train_item_records[parent_id])
         # Fall back to the most recently installed candidate's parent:
         # what the optimizer actually bred from.
         for c in reversed(self.population):
             if c.parent and c.parent in self._train_item_records:
-                return list(self._train_item_records[c.parent])
+                return c.parent, list(self._train_item_records[c.parent])
         # Last resort: leaderboard best.
         if not board:
-            return []
-        return list(self._train_item_records.get(board[0].id, []))
+            return None, []
+        return board[0].id, list(self._train_item_records.get(board[0].id, []))
 
     def _steering_block(self) -> str:
         """The run's intent ledger as the proposer reads it, empty when there is none."""

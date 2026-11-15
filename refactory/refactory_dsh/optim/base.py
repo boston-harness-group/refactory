@@ -896,8 +896,8 @@ class ProposalContext:
     new_node_tools: bool = False
     #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
     #: model step may run), ``per_item_s`` (the edited candidate's typical time per item),
-    #: ``items``, ``timeouts`` (its train items that timed out) and ``parallelism``; empty
-    #: says nothing.
+    #: ``items`` (distinct train items), ``runs`` (their runs, counting repeats),
+    #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def render(self) -> str:
@@ -1751,6 +1751,8 @@ def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
     facts = dict(facts or {})
     limit, per_item = facts.get("step_limit_s"), facts.get("per_item_s")
     items, timeouts = int(facts.get("items") or 0), int(facts.get("timeouts") or 0)
+    runs = int(facts.get("runs") or items)
+    counted = f"{items} items" if runs == items else f"{runs} runs of {items} items"
     if not (limit or per_item or items):
         return []
     parts = []
@@ -1763,9 +1765,9 @@ def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
         parts.append(f"The candidate you edit took about {float(per_item):.0f} s per item on "
                      "its train evaluation (its wall time"
                      + (f" x {parallel} items at once" if parallel > 1 else "")
-                     + f" / {items} items).")
+                     + (f" / {items} items)." if runs == items else f" / {runs} runs)."))
     if items:
-        parts.append(f"{timeouts} of its {items} train items timed out.")
+        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out.")
     return ["## Time per item", " ".join(parts), ""]
 
 

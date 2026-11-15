@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import pytest
 
+from refactory_dsh import snippet
 from refactory_dsh.nn import coverage
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.graph import Graph
@@ -175,9 +176,13 @@ CHANGES: dict[tuple[str, str, str], tuple[str, Any, Callable[[Graph, Graph], boo
                                                                "sees": ["task"]},
                                         lambda p, c: c.nodes["finalize"].prompt_template
                                         != p.nodes["finalize"].prompt_template),
+    # A step's callable changes when an op step takes its place (any machine), or a code
+    # step (where code steps can run: `test_a_step_split_into_a_code_step_runs_that_code`).
     ("node field", "call", "change"): ("fuzz_draft_review", {"op": "split", "step": "review",
-                                                              "into": [{"kind": "code"}]},
-                                       lambda p, c: "review" not in c.nodes),
+                                                              "into": [{"kind": "op", "call": fg.STEP}]},
+                                       lambda p, c: "review" not in c.nodes and any(
+                                           n.call == fg.STEP and n.id not in p.nodes
+                                           for n in c.nodes.values())),
     ("node field", "targets", "change"): ("fuzz_fork_join", {"op": "insert", "before": "left"},
                                           lambda p, c: "left" not in c.nodes["split"].targets),
     ("node field", "sources", "change"): ("fuzz_nested_fork", {"op": "remove", "step": "deep_b"},
@@ -197,6 +202,17 @@ def test_a_covered_change_or_removal_is_made_by_an_operation_its_entry_names(key
     assert isinstance(ops, tuple) and edit["op"] in ops, (entry, edit["op"])
     parent, child = _apply(seed, edit)
     assert shows(parent, child), key
+
+
+@pytest.mark.skipif(not snippet.available()[0], reason="this machine cannot sandbox code steps "
+                    "(`snippet.available`); the op-step case above covers the change here")
+def test_a_step_split_into_a_code_step_runs_that_code():
+    """Where code steps can run, ``split`` into a code step changes a step's callable to the
+    code op, as the coverage map's ``call`` entry also says."""
+    parent, child = _apply("fuzz_draft_review", {"op": "split", "step": "review",
+                                                 "into": [{"kind": "code"}]})
+    assert "review" not in child.nodes
+    assert any(n.call == snippet.RUN for n in child.nodes.values() if n.id not in parent.nodes)
 
 
 @pytest.mark.parametrize("key", sorted(EXAMPLES), ids=lambda key: f"{key[0]}:{key[1]}")

@@ -190,9 +190,11 @@ def test_regression_corpus_case_replays_clean_on_the_spine_too(case):
 
 
 def _finds(invariant: str, *, seeds: tuple[str, ...], edits: int = 2500, walker: bool = False,
-           spine_every: int = 0, seed: int = 3, compound: float = 0.0) -> sf.Stats:
+           spine_every: int = 0, seed: int = 3, compound: float = 0.0,
+           code_nodes: bool = sf.CODE_NODES) -> sf.Stats:
     stats = sf.Fuzzer(seed, seed_names=seeds, walker=walker, spine_every=spine_every,
-                      shrink=False, stop_on=invariant, compound=compound).run(edits)
+                      shrink=False, stop_on=invariant, compound=compound,
+                      code_nodes=code_nodes).run(edits)
     assert stats.violations[invariant] > 0, _report(stats)
     return stats
 
@@ -268,9 +270,12 @@ def test_mutation_code_without_the_static_code_rule_is_caught(monkeypatch):
 def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     """With V17 off, a node reading what grading produced (under whatever name) gets
     the grade, and the leak invariant finds it by content: the grader-only answers and
-    the grader's own verdicts in the finished items' records."""
+    the grader's own verdicts in the finished items' records. The leak needs no code
+    node, so the walks draw none and are the same on every machine, whether or not it
+    can sandbox code nodes (this seed finds it at edit 170)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
-    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1)
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=5,
+           code_nodes=False)
 
 
 def test_the_leak_invariant_reads_what_grading_produced():

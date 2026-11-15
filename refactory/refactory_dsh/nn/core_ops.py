@@ -425,8 +425,9 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         if spec.get("tools") is True:
             node["tool_policy"] = None
             node["workspace"] = {"kind": "scratch"}
-        if knobs:
-            node["knobs"] = list(knobs)
+        carried = _carried_knobs("agent", text, node["system_prompt_template"], knobs)
+        if carried:
+            node["knobs"] = carried
         out.append(node)
         return out
     if kind == "code":
@@ -434,8 +435,6 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         node = {"id": node_id, "kind": "op", "call": snippet.RUN,
                 "code": spec["text"] or _default_code(made, list(writes or ())),
                 "reads": files, "inputs": facts, "produces": made}
-        if knobs:
-            node["knobs"] = list(knobs)
         if writes:
             node["writes"] = list(writes)
         out.append(node)
@@ -467,6 +466,20 @@ def _shared_knobs(*nodes: Node) -> list[str]:
         out += [k for k in node.knobs if not k.startswith(f"{node.id}__") and k not in bound
                 and k not in out]
     return out
+
+
+def _carried_knobs(kind: str, text: str | None, system: str | None,
+                   shared: Sequence[str]) -> list[str]:
+    """The shared knobs (:func:`_shared_knobs`) a step taking others' place reads on: an
+    agent those its prompts name. A code step's code never sees the knobs (`snippet`), and
+    a new op step is given none. The rest go with the steps they belonged to, and the
+    candidate's notes say so (:func:`wiring_notes`)."""
+    if kind != "agent":
+        return []
+    from .validate import template_names
+
+    named = template_names(text or NEUTRAL_STEP) | template_names(system or "")
+    return [k for k in shared if k in named]
 
 
 def _orphaned_knobs(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
@@ -1650,7 +1663,9 @@ def _pre_split_line(edit: dict, state: dict) -> str | None:
     for spec in specs:
         if spec.get("id") is not None and spec["id"] in graph.nodes:
             raise _Refused(f"node {spec['id']!r} already exists")
-    frozen = [k for k in _frozen_settings(graph, state, {node.id}) if k not in _shared_knobs(node)]
+    last = specs[-1]
+    carried = _carried_knobs(last["kind"], last.get("text"), last.get("system"), _shared_knobs(node))
+    frozen = [k for k in _frozen_settings(graph, state, {node.id}) if k not in carried]
     if frozen:
         raise _Refused(f"{node.id!r} alone reads the frozen knob(s) {frozen}, which keep their "
                        "value and declaration; split another step, or insert one beside it")
@@ -1714,6 +1729,24 @@ def _merge_kind(edit: dict, a: Node, b: Node) -> str:
     return edit.get("kind") or ("agent" if "agent" in (a.kind, b.kind) else "code")
 
 
+def _merge_text(edit: dict, a: Node, b: Node, kind: str, state: Mapping[str, Any]) -> str:
+    """The merged step's text: the one given, else for an agent the two agents' prompts,
+    with what ``a`` made named in words (the merged step now makes it itself, so it is no
+    longer an input), after a line saying what a non-agent ``a`` did."""
+    if edit.get("text"):
+        return str(edit["text"])
+    if kind != "agent":
+        return ""
+    made = sorted({name for _k, name in _outputs(a)})
+    parts = [_text_of(n, state) for n in (a, b) if n.kind == "agent"]
+    if a.kind != "agent":
+        parts.insert(0, f"First do what step {a.id!r} did, which made {', '.join(made) or 'nothing named'}.")
+    text = "\n\n".join(part for part in parts if part)
+    for name in made:
+        text = re.sub(r"\{\{\s*" + re.escape(name) + r"\s*\}\}", name, text)
+    return text
+
+
 def _pre_merge(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     ids = edit.get("steps")
@@ -1740,8 +1773,9 @@ def _pre_merge(edit: dict, state: dict) -> str | None:
             and "exit" in _data_ends(graph, b.id):
         raise _Refused("the two steps start and end the same pass or run")
     _spec({**edit, "kind": kind})
-    frozen = [k for k in _frozen_settings(graph, state, {a.id, b.id})
-              if k not in _shared_knobs(a, b)]
+    carried = _carried_knobs(kind, _merge_text(edit, a, b, kind, state), edit.get("system"),
+                             _shared_knobs(a, b))
+    frozen = [k for k in _frozen_settings(graph, state, {a.id, b.id}) if k not in carried]
     if frozen:
         raise _Refused(f"{a.id!r} and {b.id!r} alone read the frozen knob(s) {frozen}")
     if edit.get("id") is not None and edit["id"] in graph.nodes:
@@ -1755,12 +1789,7 @@ def _expand_merge(edit: dict, state: dict) -> list[dict]:
     a, b = (graph.nodes[i] for i in edit["steps"])
     kind = _merge_kind(edit, a, b)
     a_made = {name for _k, name in _outputs(a)}
-    if edit.get("text"):
-        text = edit["text"]
-    elif kind == "agent":
-        text = "\n\n".join(_text_of(n, state) for n in (a, b) if n.kind == "agent")
-    else:
-        text = ""
+    text = _merge_text(edit, a, b, kind, state)
     there = set(_available(graph).get(a.id, set()))
     view = _consumed(a, state) | {key for key in _consumed(b, state) if key[1] not in a_made}
     spec = _spec({**{k: v for k, v in edit.items() if k not in ("op", "steps")},
@@ -1968,6 +1997,10 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
                 unread.append(node_id)
     except Exception:  # noqa: BLE001 - a note, never a refusal
         unread = []
+    taken, toolless = _taken_away(before, after, added, removed)
+    # A removed step's own settings (`<id>__...`) always go with it; the others are news.
+    dropped = sorted(k for k in set(old_knobs) - set(new_knobs)
+                     if not any(k.startswith(f"{node_id}__") for node_id in removed))
     parts = []
     if added:
         parts.append("added " + ", ".join(added))
@@ -1978,7 +2011,43 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
     if unread:
         parts.append(f"no step reads what {', '.join(unread)} make(s) yet (name a reader with "
                      "'to', or insert one)")
+    if taken:
+        parts.append("took " + "; ".join(f"{', '.join(names)} away from {node_id}"
+                                         for node_id, names in taken))
+    if toolless:
+        parts.append(f"the tools of {', '.join(toolless)} went with it: no new step uses tools")
+    if dropped:
+        parts.append(f"dropped knob(s) {', '.join(dropped)}, which no step reads now")
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
+
+
+def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequence[str],
+                removed: Sequence[str]) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """What an edit took from the steps it kept: for each, the files and facts it read or
+    put in its prompt before and no longer gets (itself, or through a step the edit added
+    in front of it, such as a collect step); and the removed steps that used tools when no
+    added step does."""
+    try:
+        old, new = _edits()._graph(before), _edits()._graph(after)
+    except Exception:  # noqa: BLE001 - a note, never a refusal
+        return [], []
+    lost_by: dict[str, set[str]] = {}
+    for node_id in sorted(set(old.nodes) & set(new.nodes)):
+        now = set(_consumed(new.nodes[node_id], after))
+        for other in added:
+            made = _outputs(new.nodes[other])
+            if made & now:
+                now |= set(_consumed(new.nodes[other], after))
+        lost = {name for _kind, name in set(_consumed(old.nodes[node_id], before)) - now}
+        # A step's collect step (`<id>_inputs`) is part of it: its losses are the step's.
+        owner = node_id.removesuffix("_inputs")
+        owner = owner if node_id.endswith("_inputs") and owner in new.nodes else node_id
+        if lost:
+            lost_by.setdefault(owner, set()).update(lost)
+    taken = [(node_id, sorted(names)) for node_id, names in sorted(lost_by.items())]
+    toolless = [] if any(_uses_tools(new.nodes[n]) for n in added) else sorted(
+        n for n in removed if _uses_tools(old.nodes[n]))
+    return taken, toolless
 
 
 def parallel_join_id(graph: Graph, step: str) -> str:

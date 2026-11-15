@@ -419,6 +419,71 @@ def test_merge_makes_two_steps_one_with_the_first_inputs_and_the_second_outputs(
 
 
 @needs_spine
+
+def test_merge_keeps_only_the_knobs_its_step_reads_and_says_which_went():
+    """``depth`` was the op ``clean``'s setting; the merged agent's prompt never names it,
+    so it goes, and the notes say so. The merged text names what ``clean`` made instead of
+    calling it an input the step is not given."""
+    applier, out = _ok("fuzz_dataflow", {"op": "merge", "steps": ["clean", "summarise"]})
+    merged = _graph(out).nodes["clean_summarise"]
+    assert "depth" not in merged.knobs and "depth" not in out.state["knobs"]
+    text = _knob(out, "clean_summarise__task")
+    assert "not given to this step" not in text
+    assert "First do what step 'clean' did" in text and "after cleaned" in text
+    notes = core_ops.wiring_notes({"op": "merge", "steps": ["clean", "summarise"]},
+                                  applier.seed_state, out.state)
+    assert notes and "dropped knob(s) depth, which no step reads now" in notes[0]
+    _sound(applier, out)
+
+
+def test_merge_keeps_a_shared_knob_its_text_names():
+    _applier, out = _ok("fuzz_dataflow", {"op": "merge", "steps": ["clean", "summarise"],
+                                          "text": "Clean {{source}} to depth {{depth}}."})
+    assert "depth" in _graph(out).nodes["clean_summarise"].knobs
+
+
+def test_merge_refuses_when_another_step_reads_what_the_first_makes():
+    """``load`` makes raw.txt, which ``clean`` and also ``emit`` read: merging ``load`` into
+    ``clean`` would leave ``emit`` reading a file nothing makes."""
+    _applier, out = _apply("fuzz_dataflow", {"op": "merge", "steps": ["load", "clean"]})
+    assert isinstance(out, list) and any("emit" in reason and "'load' makes" in reason
+                                          for reason in out), out
+
+
+def test_rewire_replaces_the_collect_step_it_made_before():
+    """A second rewire of a step that already has its collect step replaces that step: one
+    collect step, reading only what the step now sees."""
+    applier, once = _ok("fuzz_dataflow", {"op": "rewire", "step": "summarise", "sees": ["clean"]})
+    assert _graph(once).nodes["summarise_inputs"].reads == ("clean.txt",)
+    _applier, twice = _ok("fuzz_dataflow", {"op": "rewire", "step": "summarise", "sees": ["load"]},
+                          once.state)
+    graph = _graph(twice)
+    assert [n for n in graph.nodes if n.startswith("summarise_inputs")] == ["summarise_inputs"]
+    assert graph.nodes["summarise_inputs"].reads == ("raw.txt",)
+    notes = core_ops.wiring_notes({"op": "rewire", "step": "summarise", "sees": ["load"]},
+                                  once.state, twice.state)
+    assert notes and "took clean.txt, cleaned away from summarise" in notes[0]
+    _sound(applier, twice)
+
+
+def test_remove_says_what_it_took_from_the_steps_it_kept():
+    """``solo`` wrote solo.txt, which ``end`` read: removing it takes that away from ``end``,
+    and the notes name it."""
+    applier, out = _ok("fuzz_nested_fork", {"op": "remove", "step": "solo"})
+    notes = core_ops.wiring_notes({"op": "remove", "step": "solo"}, applier.seed_state, out.state)
+    assert notes and "took solo.txt away from end" in notes[0]
+    assert "solo__system_prompt" not in notes[0]
+
+
+def test_splitting_a_step_that_uses_tools_says_its_tools_went():
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    state = json.loads(json.dumps(applier.seed_state))
+    state["graph"]["nodes"]["review"].pop("tool_policy", None)  # the default: tools
+    edit = {"op": "split", "step": "review", "into": [{"kind": "agent", "text": "Review {{draft}}."}]}
+    _applier, out = _ok("fuzz_draft_review", edit, state)
+    notes = core_ops.wiring_notes(edit, state, out.state)
+    assert notes and "the tools of review went with it" in notes[0], notes
+
 @pytest.mark.parametrize("seed, edit", [
     ("fuzz_draft_review", {"op": "split", "step": "finalize"}),
     ("fuzz_draft_review", {"op": "split", "step": "review", "into": [{"kind": "agent",
@@ -563,8 +628,13 @@ MUTATIONS = [
      {"op": "parallelize", "steps": ["draft"], "copies": 1},
      lambda c: "{{draft_copy1}}" in _knob(c, "review_task")),
     ("_shared_knobs", lambda *nodes: [], "fuzz_dataflow",
-     {"op": "merge", "steps": ["clean", "summarise"]},
+     {"op": "merge", "steps": ["clean", "summarise"],
+      "text": "Clean {{source}} to depth {{depth}}, then summarise it."},
      lambda c: "depth" in _graph(c).nodes["clean_summarise"].knobs),
+    ("_carried_knobs", lambda kind, text, system, shared: list(shared), "fuzz_dataflow",
+     {"op": "merge", "steps": ["clean", "summarise"]},
+     lambda c: "depth" not in _graph(c).nodes["clean_summarise"].knobs
+     and "depth" not in c.state["knobs"]),
 ]
 
 
@@ -608,7 +678,14 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
             sf.seeds()[seed]).protected), code_nodes=CODE, tools=True,
         knob_values={k["name"]: k["value"] for k in ctx.knobs})
     if seed in ("fuzz_draft_review", "fuzz_dataflow"):
-        assert len(examples) >= 6, [title for title, _b in examples]
+        titles = {title for title, _b in examples}
+        assert {"Several attempts and a choice", "Check and send back",
+                "An independent attempt that sees only the task",
+                "A background pass beside an experiment", "A tool step before reasoning"} <= titles
+        # The code-step shapes are offered only where code steps can run (`snippet.available`).
+        code_titles = {"A simulation step, then an analysis of its results",
+                       "Iterative fitting: repeat a step until a code check passes"}
+        assert (code_titles <= titles) if CODE else not code_titles & titles, titles
     for title, bundle in examples:
         assert all(edit["op"] in core_ops.CORE_OPS for edit in bundle), title
         json.loads(json.dumps(bundle))
@@ -735,6 +812,35 @@ def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_o
     priced = _context("fuzz_draft_review", parsimony=0.01, leaderboard=[row]).render()
     assert "cost per item" in priced and "0.0123" in priced
     assert "Cost is not a reason for or against" not in priced
+
+
+def test_repeated_items_are_counted_once_and_their_runs_each_time():
+    lines = " ".join(base_mod.time_lines({"per_item_s": 30, "items": 4, "runs": 8,
+                                          "timeouts": 3}))
+    assert "/ 8 runs)" in lines and "3 of its 8 runs of 4 train items timed out" in lines
+
+
+def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
+    """With no parent selected, the records stand for the latest candidate's parent; its
+    time per item is that candidate's too, not the leaderboard best's."""
+    from types import SimpleNamespace
+
+    from refactory_dsh.loop import Loop
+
+    state = sf.seeds()["fuzz_dataflow"].state()
+    bred_from = SimpleNamespace(id="p", parent=None, duration_s=40.0, state=state)
+    best = SimpleNamespace(id="best", parent=None, duration_s=4000.0, state=state)
+    child = SimpleNamespace(id="c", parent="p", duration_s=None, state=state)
+    loop = SimpleNamespace(model=SimpleNamespace(timeout_s=600), strategy_decision={},
+                           _editing_parent=None, population=[best, bred_from, child],
+                           _train_item_records={"p": [{"id": "a"}, {"id": "b", "repeat": 1},
+                                                      {"id": "b", "repeat": 2,
+                                                       "error_kind": "timeout"}],
+                                                "best": [{"id": "x"}]})
+    loop._train_records_owner = lambda board: Loop._train_records_owner(loop, board)
+    facts = Loop._time_facts(loop, [best])
+    assert facts["items"] == 2 and facts["runs"] == 3 and facts["timeouts"] == 1
+    assert facts["per_item_s"] == round(40.0 / 3)
 
 
 def test_the_loop_counts_timeouts_and_reads_the_items_at_once_from_the_state():
