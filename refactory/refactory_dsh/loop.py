@@ -5370,8 +5370,12 @@ class Loop(OuterLoop):
         edited = next((c for c in self.population if c.id == self._edited_id(board)), None)
         if edited is not None and edited.duration_s:
             parallel = _data_parallelism(edited.state)
-            facts["parallelism"] = parallel
-            facts["per_item_s"] = round(float(edited.duration_s) * parallel / len(records), 1)
+            per_item = round(float(edited.duration_s) * parallel / len(records))
+            # Whole seconds, and none under one: a measured wall time, said only where it
+            # carries information rather than noise.
+            if per_item >= 1:
+                facts["parallelism"] = parallel
+                facts["per_item_s"] = per_item
         return facts
 
     def _request_order(self, board: list[Candidate]) -> list[Candidate]:

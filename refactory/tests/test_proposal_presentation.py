@@ -34,14 +34,21 @@ def _render(preset: str = "broad", **fields) -> str:  # type: ignore[no-untyped-
 @pytest.mark.parametrize("preset", ["broad", "structure", "conservative"])
 def test_structural_examples_appear_when_structure_is_permitted(preset):
     answer = _answer(_render(preset, max_edits=4))
-    assert '"op": "insert_after"' in answer and '"target": "<existing step id>"' in answer
-    assert '"name": "<new step id>__system_prompt"' in answer, "a bundle adds a node and its knob"
     assert "parameter moves only" not in answer
-    # Both bundles, the prompt-knobs one first: neither kind is privileged.
     bundles = json.loads(next(line for line in answer.splitlines()
                               if line.startswith('{"proposals": [{"edits"')))["proposals"]
-    assert [b["edits"][0]["op"] for b in bundles] == ["set_knob", "insert_after"]
     assert bundles[0]["edits"][1]["name"] == "<step B's prompt knob>"
+    if preset == "conservative":
+        # No core operator: the written-out node, and a bundle adding it with its knob.
+        assert '"op": "insert_after"' in answer and '"target": "<existing step id>"' in answer
+        assert '"name": "<new step id>__system_prompt"' in answer
+        assert [b["edits"][0]["op"] for b in bundles] == ["set_knob", "insert_after"]
+        return
+    # The one-line operator, and a bundle adding a step and telling a later one about it;
+    # both bundles, the prompt-knobs one first: neither kind is privileged.
+    assert '{"op": "insert", "after": "<existing step id>", "kind": "agent"' in answer
+    assert [b["edits"][0]["op"] for b in bundles] == ["set_knob", "insert"]
+    assert bundles[1]["edits"][1]["name"] == "<a later step's prompt knob>"
 
 
 def test_a_prompt_is_patched_by_default_and_a_whole_value_stays_available():
@@ -72,7 +79,7 @@ def test_a_parameters_only_run_shows_no_structural_example():
 
 def _examples(answer: str) -> tuple[dict, list[dict]]:
     single = next(json.loads(line.strip()) for line in answer.splitlines()
-                  if line.strip().startswith('{"op": "insert_after"'))
+                  if line.strip().startswith('{"op": "insert'))
     bundle = json.loads(next(line for line in answer.splitlines()
                              if line.startswith('{"proposals": [{"edits"')))
     return single, bundle["proposals"][1]["edits"]
@@ -82,6 +89,8 @@ def _fill(value, target: str):  # type: ignore[no-untyped-def]
     text = json.dumps(value)
     for placeholder, filled in (("<existing step id>", target), ("<new step id>", "fresh_step"),
                                 ("<prompt text>", "Check the work so far."),
+                                ("<what the new step does>", "Check the work so far."),
+                                ("<how to use the new step's output>", "Use the check."),
                                 ("<system prompt text>", "You check the work.")):
         text = text.replace(placeholder, filled)
     assert "<" not in text, text
@@ -101,10 +110,15 @@ def test_the_examples_parse_and_apply_to_a_generic_graph(seed):
     target = next((n for n in outside if n not in graph.terminals()), outside[0])
     child = applier.attempt(parent, _fill(single, target), {parent.id})
     assert isinstance(child, Candidate), child
-    assert "fresh_step__system_prompt" in child.state["knobs"]
-    bundled = applier.attempt(parent, {"edits": _fill(bundle, target)}, {parent.id})
+    added = set(child.state["graph"]["nodes"]) - set(parent.state["graph"]["nodes"])
+    assert any(f"{n}__task" in child.state["knobs"] for n in added), "its text is a knob of its own"
+    # A later step's prompt knob: an agent's system prompt knob downstream of the new step.
+    later = next(k for k in sorted(parent.state["knobs"]) if k.endswith("__system_prompt"))
+    filled = _fill(json.loads(json.dumps(bundle).replace("<a later step's prompt knob>",
+                                                         later)), target)
+    bundled = applier.attempt(parent, {"edits": filled}, {parent.id})
     assert isinstance(bundled, Candidate), bundled
-    assert bundled.state["knobs"]["fresh_step__system_prompt"]["value"] == "You check the work."
+    assert bundled.state["knobs"][later]["value"].rstrip().endswith("Use the check.")
 
 
 def test_new_nodes_come_from_the_schema_without_blocks_and_blocks_are_optional():

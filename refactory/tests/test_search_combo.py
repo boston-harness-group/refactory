@@ -472,8 +472,9 @@ def test_the_request_shows_one_example_per_composition():
                                          code_nodes=True))
     examples = [json.loads(line.strip()) for line in text.splitlines() if line.startswith('  {"')]
     ops = [e.get("op") or e["edits"][0]["op"] for e in examples]
-    assert ops.count("parallel") == 1 and "insert_after" in ops and "loop" in ops
-    assert len(examples) == 4 and "none is the preferred shape" in text
+    # Built only from the core operators (`nn.core_ops`), one per composition.
+    assert {"parallelize", "insert", "loop"} <= set(ops) and "parallel" not in ops
+    assert len(examples) >= 6 and "none is the preferred shape" in text
 
 
 # ── 2. every parent picker x autoresearch ──────────────────────────────────

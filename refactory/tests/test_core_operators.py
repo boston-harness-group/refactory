@@ -735,3 +735,15 @@ def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_o
     priced = _context("fuzz_draft_review", parsimony=0.01, leaderboard=[row]).render()
     assert "cost per item" in priced and "0.0123" in priced
     assert "Cost is not a reason for or against" not in priced
+
+
+def test_the_loop_counts_timeouts_and_reads_the_items_at_once_from_the_state():
+    from refactory_dsh.loop import _data_parallelism, _timed_out
+
+    assert _timed_out({"error_kind": "timeout"})
+    assert _timed_out({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
+    assert not _timed_out({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
+    state = sf.Applier(sf.seeds()["fuzz_data_pass"]).seed_state
+    assert _data_parallelism(state) == 2
+    assert _data_parallelism(_parallel(state, 3)) == 3
+    assert _data_parallelism(sf.seeds()["fuzz_dataflow"].state()) == 1
