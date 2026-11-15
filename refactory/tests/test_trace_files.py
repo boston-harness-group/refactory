@@ -157,6 +157,24 @@ def test_a_walker_run_writes_every_items_full_trace(tmp_path):
     assert all("/" not in n and ":" not in n and n not in (".", "..") for n in names)
 
 
+def _without_timings(markdown: str) -> str:
+    """report.md with its timings set aside, whatever their digits: a number with a
+    seconds unit (``0.95s``, ``12s``) and every cell of a column headed in seconds
+    (``wall-clock s``). A count of decimals is not a format: ``round`` prints 0.95."""
+    markdown = re.sub(r"(?<![\w.])\d+(?:\.\d+)?(?:e-?\d+)?s\b", "<n>s", markdown)
+    lines, seconds = [], set()
+    for line in markdown.splitlines():
+        cells = line.split("|")
+        if not line.startswith("|"):
+            seconds = set()
+        elif not seconds:
+            seconds = {i for i, cell in enumerate(cells) if cell.strip().endswith(" s")}
+        elif not set(line) <= set("|-: "):
+            line = "|".join("<n>" if i in seconds else cell for i, cell in enumerate(cells))
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def test_the_writer_changes_no_request_journal_or_report(tmp_path, monkeypatch):
     """The same run with the writer turned off: the optimizer's requests, the
     journal and the report are the same, byte for byte once the run root and the
@@ -177,8 +195,7 @@ def test_the_writer_changes_no_request_journal_or_report(tmp_path, monkeypatch):
         (off_root / JOURNAL).read_text(), off_root)
     assert same((on_root / "report.json").read_text(), on_root) == same(
         (off_root / "report.json").read_text(), off_root)
-    # report.md's tables show timings as bare numbers: those with many decimals.
-    on_md, off_md = (re.sub(r"\d+\.\d{3,}", "<n>", same((root / "report.md").read_text(), root))
+    on_md, off_md = (_without_timings(same((root / "report.md").read_text(), root))
                      for root in (on_root, off_root))
     assert on_md == off_md
     assert f"/{traces.TRACES_DIR}/" not in (on_root / JOURNAL).read_text()
