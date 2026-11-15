@@ -16,15 +16,17 @@ are the repaired ones, so they replay to its state), in the optimizer trace (kin
 - a ``set_knob`` in a bundle that sets a knob to the value it already holds is dropped
   (`noop_knob`);
 - a ``{{name}}`` slot that names a file rather than a fact -- no step makes the fact
-  ``name``, and exactly one file there is called ``name`` -- is handed to the step by a
-  ``collect`` op inserted before it (`wire_file_slots`). Only steps the proposal added or
-  changed are judged.
+  ``name``, and exactly one file there is called ``name`` -- gets the file's whole text
+  from a ``file_text`` op inserted before the step (`wire_file_slots`). Only steps the
+  proposal added or changed are judged, and not when the op would rewire a protected
+  step.
 
 Anything else is refused with the exact reason, as before.
 
 **The slim repair call.** A proposal refused for its mechanics (`repairable`: an edit's
 shape, a precondition, a validator rule, lowering, a dry run; not the ideas behind it,
-``E-integrity``, ``E-noop``, ``E-duplicate``, nor a run's policy) is sent back to the
+``E-integrity``, ``E-noop``, ``E-duplicate``, nor a run's policy, the grader-side rule
+V17 or the change cap) is sent back to the
 model with the reasons and only what fixing it needs (`repair_request`): the proposal as
 written, the pipeline's tables, the knobs it touches, the operations and the node
 schemas, a fraction of a full request. The answer is the fixed proposal only; its
@@ -46,10 +48,14 @@ REPAIR_CALLS_PER_PROPOSAL = 2
 REPAIR_CALLS_PER_EPOCH = 3
 #: Refusals about the idea, not its mechanics: never sent to a slim repair call.
 IDEA_CODES = ("E-integrity", "E-noop", "E-duplicate")
-#: Refusals about how a proposal is written, which a slim repair call may fix. Every
-#: validator rule (``V…``) is one too.
+#: Validator rules that guard the grader side, as ``E-secret`` and ``E-protected`` do: a
+#: proposal refused by one is not sent to a slim repair call either.
+GUARD_RULES = ("V17",)
+#: Refusals about how a proposal is written, which a slim repair call may fix, with every
+#: validator rule (``V…``) but `GUARD_RULES`. ``E-too-many-edits`` is not one: fitting
+#: the cap means choosing which changes to drop, which is the proposer's call.
 MECHANICS_CODES = ("E-precondition", "E-shape", "E-node-text", "E-binding",
-                   "E-too-many-edits", "E-lowering", "E-node", "E-edge", "E-knob", "E-patch",
+                   "E-lowering", "E-node", "E-edge", "E-knob", "E-patch",
                    "E-op", "E-gate-kind", "E-code-run", "E-wiring")
 #: The most characters the slim request spends on the nodes in full and the schemas.
 REPAIR_NODE_CHARS = 14000
@@ -62,12 +68,14 @@ def _code(reason: str) -> str:
 
 
 def repairable(reasons: Sequence[str]) -> bool:
-    """Whether a refusal is about mechanics only: every reason's code is a validator rule
-    or one of `MECHANICS_CODES`, and none is about the idea (`IDEA_CODES`)."""
+    """Whether a refusal is about mechanics only: every reason's code is one of
+    `MECHANICS_CODES` or a validator rule other than `GUARD_RULES`; anything else -- the
+    idea (`IDEA_CODES`), a run's policy, the change cap -- is not."""
     codes = [_code(reason) for reason in reasons if reason]
     if not codes:
         return False
-    return all(code in MECHANICS_CODES or re.fullmatch(r"V\d+", code) for code in codes)
+    return all(code in MECHANICS_CODES
+               or (re.fullmatch(r"V\d+", code) and code not in GUARD_RULES) for code in codes)
 
 
 # ── deterministic fixes ───────────────────────────────────────────────────
@@ -101,17 +109,22 @@ def _mentions(value: Any, name: str) -> bool:
 
 
 def fix_edit(edit: dict[str, Any], state: Mapping[str, Any], steps: Sequence[Any], index: int
-             ) -> tuple[dict[str, Any], list[str]]:
+             ) -> tuple[dict[str, Any], list[str], str]:
     """``edit`` with the fixes whose meaning is unambiguous, applied against ``state`` (the
-    state the edits before it left), and what was fixed. ``steps`` is the whole proposal,
-    so an id another edit names is never renamed."""
+    state the edits before it left), what was fixed, and -- when a new node's id is taken
+    and what was meant is not clear -- why it is refused instead (empty otherwise).
+
+    A taken id is renamed only when nothing else names it: not the edit's own ``target``,
+    ``first`` or ``second`` (a node re-declared over the step the edit is about may mean
+    "replace this step", which the language does not do by adding one), and no other edit
+    of the proposal."""
     from refactory_dsh.nn.edits import _fresh_id
     from refactory_dsh.nn.graph import Graph
 
     try:
         graph = Graph.from_state(dict(state.get("graph") or {}))
     except Exception:  # noqa: BLE001 - an unreadable state is refused where it is applied
-        return edit, []
+        return edit, [], ""
     where = f"edit {index + 1} ({edit.get('op')})" if len(steps) > 1 else str(edit.get("op"))
     fixes: list[str] = []
     out = dict(edit)
@@ -124,14 +137,29 @@ def fix_edit(edit: dict[str, Any], state: Mapping[str, Any], steps: Sequence[Any
             fixes.append(f"{where}: {key} {value!r} names the file step {step!r} writes, so it "
                          f"was read as step {step!r}")
     others = [step for position, step in enumerate(steps) if position != index]
+    own = {out.get(key) for key in _STEP_FIELDS if isinstance(out.get(key), str)}
     taken = set(graph.nodes)
+    refusals: list[str] = []
 
     def renamed(node: Any) -> Any:
         if not isinstance(node, dict) or not isinstance(node.get("id"), str):
             return node
         old = node["id"]
-        if old not in taken or _mentions(others, old):
+        if old not in taken:
             taken.add(old)
+            return node
+        if old in own:
+            refusals.append(
+                f"the new node's id {old!r} is the step this edit is about, so it is not clear "
+                "whether a second step or a replacement is meant; a step is not replaced by "
+                "adding one with its id: change it through its knobs, or give the new step "
+                "an id of its own")
+            return node
+        if _mentions(others, old):
+            refusals.append(
+                f"the new node's id {old!r} is already a step's, and another edit of the "
+                "proposal names it, so which of the two it means is not clear; give the new "
+                "step an id of its own")
             return node
         new = _fresh_id(graph, old)
         while new in taken:
@@ -147,7 +175,7 @@ def fix_edit(edit: dict[str, Any], state: Mapping[str, Any], steps: Sequence[Any
     for key in _NODE_LIST_FIELDS:
         if isinstance(out.get(key), list):
             out[key] = [renamed(node) for node in out[key]]
-    return out, fixes
+    return out, fixes, refusals[0] if refusals else ""
 
 
 def noop_knob(edit: Any, state: Mapping[str, Any]) -> bool:
@@ -183,8 +211,9 @@ def _touched(parent_state: Mapping[str, Any], state: Mapping[str, Any], graph: A
 
 def wire_file_slots(parent_state: Mapping[str, Any], state: dict[str, Any]
                     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
-    """``state`` with a ``collect`` op before each added or changed step whose ``{{name}}``
-    slot names a file rather than a fact; the edits that did it and what was fixed.
+    """``state`` with a ``file_text`` op before each added or changed step whose ``{{name}}``
+    slot names a file rather than a fact, handing it the file's whole text; the edits that
+    did it and what was fixed.
 
     Fixed only when nothing makes the fact ``name`` anywhere in the graph, and exactly one
     file there before the step (on every path) is called ``name`` (its name, or its name
@@ -193,7 +222,7 @@ def wire_file_slots(parent_state: Mapping[str, Any], state: dict[str, Any]
     refuse (V15)."""
     from refactory_dsh.nn import edits as nn_edits
     from refactory_dsh.nn.graph import Graph
-    from refactory_dsh.nn.operators import collect_node
+    from refactory_dsh.nn.operators import file_text_node
     from refactory_dsh.nn.validate import available_inputs, knob_slot_facts, template_facts
 
     try:
@@ -224,17 +253,17 @@ def wire_file_slots(parent_state: Mapping[str, Any], state: dict[str, Any]
             if len(matches) != 1:
                 continue
             current = Graph.from_state(state["graph"])
-            collector = nn_edits._fresh_id(current, f"{node_id}_{slot}_collect")
+            reader = nn_edits._fresh_id(current, f"{node_id}_{slot}_text")
             edit = {"op": "insert_before", "target": node_id,
-                    "node": collect_node(collector, matches, slot)}
+                    "node": file_text_node(reader, matches[0], slot)}
             try:
                 state = nn_edits.apply(edit, state)
             except nn_edits.EditError:
                 continue
             added.append(edit)
             fixes.append(f"{node_id}: {{{{{slot}}}}} names the file {matches[0]!r}, not a fact, "
-                         f"so a collect op {collector!r} now hands that file to it as "
-                         f"{{{{{slot}}}}}")
+                         f"so a file_text op {reader!r} before it now sets {{{{{slot}}}}} to "
+                         "that file's whole text")
     return state, added, fixes
 
 

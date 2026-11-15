@@ -484,14 +484,20 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
 
 
 def _patch_targets_missing(edit: dict[str, Any], reports: Sequence[dict[str, Any]]) -> str:
-    """``E-patch`` when a ``set_knob`` patch entry's target text is not in the knob and the
-    patch did not say what to do then (``config.on_missing``): skipping it would score a
-    knob the proposal did not write. Empty otherwise."""
+    """``E-patch`` when a ``set_knob`` patch entry's target text is not in the knob, or is
+    empty where its action needs one, and the patch did not say what to do then
+    (``config.on_missing``): skipping it would score a knob the proposal did not write.
+    Empty otherwise."""
     if edit.get("op") != "set_knob" or "patch" not in edit or not reports:
         return ""
     if "on_missing" in dict(edit.get("config") or {}):
         return ""
     for outcome in (reports[0] or {}).get("outcomes") or ():
+        if (str(outcome.get("status", "")).startswith("skipped") and not outcome.get("target")
+                and outcome.get("kind") in ("replace", "delete", "insert_after", "insert_before")):
+            return (f"E-patch: knob {edit.get('name')!r}: patch entry {int(outcome.get('index', 0)) + 1} "
+                    f"({outcome.get('kind')}) has no target text; give the exact text it acts on "
+                    "(only append needs none)")
         if str(outcome.get("status", "")).endswith("_target_not_found"):
             return (f"E-patch: knob {edit.get('name')!r}: patch entry {int(outcome.get('index', 0)) + 1} "
                     f"({outcome.get('kind')}) has a target that is not in the knob's text: "
@@ -2215,7 +2221,7 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
     written, each with the step that makes it, the ones that carry no model output marked
     "(task input)", and how a file's text reaches a prompt. Fits ``limit``. Nothing when
     not known."""
-    from refactory_dsh.nn.operators import COLLECT_CALL
+    from refactory_dsh.nn.operators import COLLECT_CALL, COLLECT_TEXT_CHARS, FILE_TEXT_CALL
 
     if not available:
         return []
@@ -2233,7 +2239,9 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         "its prompt and the files it lists in `reads`, pasted in after the prompt. To hand "
         "files to a prompt as one `{{name}}`, insert a collect op before the node "
         f"(`\"call\": \"{COLLECT_CALL}\"`, the files in `reads`, the fact in `produces`: "
-        "each file under its own header, a missing one said to be missing), or "
+        "each file under its own header, a missing one said to be missing; one file over "
+        f"{COLLECT_TEXT_CHARS} characters is shown as its path and size), or a file_text op "
+        f"for one file's whole text (`\"call\": \"{FILE_TEXT_CALL}\"`), or "
         f"{how}, or have the agent that writes the file declare `produces`, which makes its "
         "reply that fact too.")
 
@@ -2966,6 +2974,8 @@ class Optimizer:
         self.k = max(1, int(k))
         self.rejections: list[Rejection] = []
         self.last_diagnosis: str = ""
+        #: The last refusal of a slim repair's fix (`repair_refused`), when none was taken.
+        self.last_repair_refusal: list[str] = []
         #: The answer's optional ``considered``: the kinds of change it weighed and why it
         #: chose its own, recorded beside the diagnosis so each round's choice can be read.
         self.last_considered: str = ""
@@ -3072,10 +3082,12 @@ class Optimizer:
                         round_ctx, proposal, outcome, parent,
                         lambda again, parent=parent: self.attempt(
                             again, parent, invariants, resolve_calls, ctx.frozen, seen))
+                    after = [] if fixed is not None else list(self.last_repair_refusal)
                     rejection = Rejection(
                         attempt=attempt,
                         edit=proposal.edit,  # {"edits": [...]} for a compound proposal
-                        reasons=outcome,
+                        reasons=[*outcome, *(f"{reason} [the proposal as a slim repair call "
+                                             "fixed it]" for reason in after)],
                         rationale=proposal.rationale,
                         repaired=fixed.id if fixed is not None else "",
                     )
@@ -3084,7 +3096,7 @@ class Optimizer:
                         accepted.append(fixed)
                         progressed = True
                     else:
-                        feedback.extend(outcome)
+                        feedback.extend(rejection.reasons)
             if not progressed and not feedback:
                 break
         return accepted, self.rejections
@@ -3104,7 +3116,9 @@ class Optimizer:
         the candidate, or ``None``. Only a refusal about mechanics (`repair.repairable`)
         is sent, at most `repair.REPAIR_CALLS_PER_PROPOSAL` times and
         `repair.REPAIR_CALLS_PER_EPOCH` times in ``ctx.epoch``; each outcome is traced
-        (kind ``repair_outcome``)."""
+        (kind ``repair_outcome``). When no fix is accepted, ``last_repair_refusal`` holds
+        the last fix's refusal (empty when no fix was tried), for the caller to keep."""
+        self.last_repair_refusal = []
         if type(self).repair is Optimizer.repair:
             return None
         used: dict[int, int] = self.__dict__.setdefault("_repair_calls", {})
@@ -3124,6 +3138,8 @@ class Optimizer:
             if isinstance(outcome, Candidate):
                 return outcome
             current, why = fixed, list(outcome)
+            # The fix's own refusal, for the caller to keep with the proposal's.
+            self.last_repair_refusal = list(outcome)
         return None
 
     def repairs_used(self, epoch: int) -> int:
@@ -3187,7 +3203,9 @@ class Optimizer:
         applied: list[dict[str, Any]] = []
         repairs: list[str] = []
         for index, edit in enumerate(steps):
-            edit, fixed = repair.fix_edit(edit, state, steps, index)
+            edit, fixed, ambiguous = repair.fix_edit(edit, state, steps, index)
+            if ambiguous:
+                return [_at(f"E-node: {ambiguous}", index, steps)]
             repairs += fixed
             if len(steps) > 1 and repair.noop_knob(edit, state):
                 repairs.append(f"edit {index + 1} (set_knob) sets knob {edit.get('name')!r} to "
@@ -3237,11 +3255,16 @@ class Optimizer:
             return [_at(f"E-noop: {applied[dead].get('op')} has no effect on the result: the "
                         "edits after it undo or overwrite it; drop it", dead, applied)]
         # A `{{name}}` an added or changed step fills from a file's name, not a fact: a
-        # collect op hands it the file (`repair.wire_file_slots`), and says so.
-        state, wiring, wired = repair.wire_file_slots(parent.state, state)
-        applied += wiring
-        edit_reports += [None] * len(wiring)
-        repairs += wired
+        # file_text op hands it the file's whole text (`repair.wire_file_slots`), and says so.
+        # The wired state is held to the protected nodes again: a file_text op put in front
+        # of a step must not rewire a protected one (as the same edit written by hand
+        # would be refused). Then it is not made, and the validator says why (V15).
+        wired_state, wiring, wired = repair.wire_file_slots(parent.state, state)
+        if wiring and not nn_edits.protected_violation(parent.state, wired_state, protected):
+            state = wired_state
+            applied += wiring
+            edit_reports += [None] * len(wiring)
+            repairs += wired
 
         # ── tool-policy escalation check (anchored to the original seed) ──
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)

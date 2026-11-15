@@ -69,7 +69,7 @@ from refactory_dsh.items import GRADER_FILES, PASS_RECORD
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
-from refactory_dsh.nn.operators import COLLECT_CALL
+from refactory_dsh.nn.operators import FILE_TEXT_CALL
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
@@ -1490,7 +1490,9 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
         if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
             return index, state, fixed
     for index, edit in enumerate(edits):
-        edit, _said = repair.fix_edit(edit, state, edits, index)
+        edit, _said, ambiguous = repair.fix_edit(edit, state, edits, index)
+        if ambiguous:
+            return index, state, fixed
         if len(edits) > 1 and repair.noop_knob(edit, state):
             continue
         if nn_edits.precheck(edit, state):
@@ -1516,8 +1518,10 @@ def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
     """The ``compound`` invariant for one bundle and what the attempt path made of it.
 
     An accepted bundle records the edits that made it: its own, fixed where the attempt
-    path fixes mechanics, then any ``collect`` op it put before a step (`optim.repair`);
-    those replay to its state, and any fix is said in its ``repairs``."""
+    path fixes mechanics, then any ``file_text`` op it put before a step (`optim.repair`);
+    those replay to its state, and any fix is said in its ``repairs``. (A taken id the
+    attempt path does not rename -- the edit's own step, or one another edit names -- is
+    a refusal of that edit.)"""
     if len(edits) > MAX_EDITS_PER_PROPOSAL:
         if isinstance(outcome, list) and outcome and outcome[0].startswith("E-too-many-edits"):
             return []
@@ -1534,7 +1538,7 @@ def check_compound(applier: Applier, parent: Candidate, edits: list[Any],
         extra = recorded[len(fixed):]
         if recorded[:len(fixed)] != fixed or outcome.step_edits != len(recorded) or any(
                 not isinstance(e, dict) or e.get("op") != "insert_before"
-                or (e.get("node") or {}).get("call") != COLLECT_CALL for e in extra):
+                or (e.get("node") or {}).get("call") != FILE_TEXT_CALL for e in extra):
             found.append(Violation("compound", "the candidate does not record every edit of "
                                                "its proposal"))
         elif (fixed != list(edits) or extra) and not outcome.repairs:

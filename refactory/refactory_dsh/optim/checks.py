@@ -12,8 +12,8 @@ validator and lowering have accepted the state:
   left: ``runs/<parent>/passes/<data node>/<item>/``), before any item is scored with it.
   Code that raises on them, or returns what its node cannot use, is refused with the
   error and the line. When there is nothing to run it on -- no recorded inputs, inputs the
-  candidate's new steps make, no sandbox -- it is skipped, and the candidate carries a
-  note saying so.
+  candidate's new steps make, facts a step in a data pass reads (item directories do not
+  reliably keep them), no sandbox -- it is skipped, and the candidate carries a note saying so.
 """
 
 from __future__ import annotations
@@ -56,20 +56,22 @@ def answered_gate_refusals(parent_state: Mapping[str, Any], state: Mapping[str, 
             and before.get(node_id) != node.gate_kind]
 
 
-def _recorded_dirs(recorded: Mapping[str, Any], graph: Any, node_id: str) -> list[Path]:
-    """Where the parent's run left the inputs ``node_id`` would see: its data pass's item
-    directories when the node is in a pass, else the run directory."""
+def _recorded_dirs(recorded: Mapping[str, Any], graph: Any, node_id: str
+                   ) -> tuple[list[Path], bool]:
+    """Where the parent's run left the inputs ``node_id`` would see, and whether they are a
+    data pass's item directories (the node is in a pass) rather than the run directory."""
     for data_id, data in graph.nodes.items():
         if data.kind == "data" and node_id in graph.data_body(data_id):
-            return [Path(p) for p in (recorded.get("passes") or {}).get(data_id) or ()]
+            return [Path(p) for p in (recorded.get("passes") or {}).get(data_id) or ()], True
     run = recorded.get("run")
-    return [Path(run)] if run else []
+    return ([Path(run)] if run else []), False
 
 
 def _inputs(node: Any, folder: Path) -> tuple[dict[str, Any] | None, str]:
     """The ``inp`` the node's code would get in ``folder``, or ``None`` and why not: a
     declared read or input the recorded run does not have (made by a step the candidate
-    adds, or a file that run never wrote)."""
+    adds, or a file that run never wrote). Facts come from the run directory's
+    ``facts.json``; an item directory's is not the item's (`code_dry_run`)."""
     files: dict[str, str] = {}
     missing = [name for name in node.reads if not (folder / name).is_file()]
     try:
@@ -119,7 +121,17 @@ def code_dry_run(parent_id: str, parent_state: Mapping[str, Any], state: Mapping
         node = graph.nodes.get(node_id)
         if node is None:
             continue
-        dirs = [d for d in _recorded_dirs(found, graph, node_id) if d.is_dir()][:DRY_RUN_ITEMS]
+        folders, in_pass = _recorded_dirs(found, graph, node_id)
+        if in_pass and node.inputs:
+            # An item directory keeps the item's files, not reliably its facts: on the
+            # walker its facts.json is a copy of the run's taken when the pass began
+            # (`items.prepare_pass_dir`), so the first item has none and the next the one
+            # before's.
+            notes.append(f"code dry run of {node_id!r} skipped: it reads the fact(s) "
+                         f"{', '.join(node.inputs)}, and the parent's item directories do not "
+                         "reliably keep each item's facts (a walker run keeps none)")
+            continue
+        dirs = [d for d in folders if d.is_dir()][:DRY_RUN_ITEMS]
         if not dirs:
             notes.append(f"code dry run of {node_id!r} skipped: the parent {parent_id} has no "
                          "recorded inputs" + (f" ({why})" if why else "")

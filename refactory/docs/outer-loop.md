@@ -1636,6 +1636,9 @@ the same way on both runtimes:
   (a failed optional branch, a step with no answer) instead of failing the step; a file
   over 40,000 characters, or a binary one, is shown as its path and size. This is how
   files reach a model step as one `{{fact}}`.
+- `file_text` (`"call": "refactory_dsh.nn.operators:file_text"`): sets its one `produces`
+  fact to the whole text of its one read, which it requires (both runtimes refuse to run
+  it while the file is missing). No header and no length cap.
 - `select` (`"call": "refactory_dsh.nn.operators:select"`): its first read holds a label
   (the first word, or the last line alone, as a verdict gate reads one); the label names
   another of its reads by file name or stem, and that file is copied to the node's first
@@ -1661,39 +1664,50 @@ gets a `repair` line:
 
 - an edit's `target` (or `first`, `second`, a `remove_node`'s `id`, an edge's ends) that
   names a file is read as the step that writes it, when exactly one step does;
-- a new node whose id is taken gets a fresh one, when no other edit of the proposal names
-  that id (otherwise it is refused as before);
+- a new node whose id is taken gets a fresh one, when nothing else names that id. When the
+  id is the edit's own `target`, `first` or `second` (which may mean "replace this step",
+  something the language does not do by adding one), or another edit of the proposal names
+  it, the edit is refused `E-node` with why;
 - in a bundle, a `set_knob` to the value the knob already holds is dropped;
 - a `{{name}}` an added or changed step fills, where nothing makes the fact `name` and
-  exactly one file there is called `name` (or `name.<ext>`), gets a `collect` op before
-  the step that hands it that file as `{{name}}` (not for a fork's branch or a join's
-  source).
+  exactly one file there is called `name` (or `name.<ext>`), gets a `file_text` op before
+  the step that sets `{{name}}` to that file's whole text. Not for a fork's branch or a
+  join's source, and not when the op would rewire a protected step (the same edit written
+  by hand would be refused `E-protected`): then the validator refuses the slot (V15).
 
 Anything else is refused with the exact reason. A `set_knob` patch entry whose target is
-not in the knob is now refused `E-patch`, naming the entry and its target, unless the
-patch says what to do then (`config.on_missing`, as SkillOpt's patches do); before, it was
-skipped and the rest applied.
+not in the knob, or is empty where its action needs one, is now refused `E-patch`, naming
+the entry and its target, unless the patch says what to do then (`config.on_missing`, as
+SkillOpt's patches do); before, it was skipped and the rest applied. None of these fixes
+has a switch; they act only on proposals that would otherwise be refused.
 
 **The slim repair call.** A proposal refused for how it is written -- a validator rule, a
-precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering, too
-many changes, `E-gate-kind` or `E-code-run` -- goes back to the model proposer with the
+precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering,
+`E-gate-kind` or `E-code-run` -- goes back to the model proposer with the
 reasons and only what fixing it needs: the proposal as written (rationale and prediction
 included), the pipeline's nodes, edges and what each node has, the current text of each
 knob it edits, the node schemas, the rules and the operations. No trajectories, history
 or framing. The answer is the fixed proposal only, and it keeps the original's rationale
-and prediction. A refusal about the idea (`E-integrity`, `E-noop`, `E-duplicate`) or a
-run's policy (`E-protected`, `E-frozen`, `E-policy`, tools, code nodes off) is never
-sent. At most 2 slim calls per refused proposal and 3 per epoch
+and prediction. A refusal about the idea (`E-integrity`, `E-noop`, `E-duplicate`), a
+run's policy (`E-protected`, `E-frozen`, `E-policy`, tools, code nodes off), the
+grader-side rule V17, or the change cap (`E-too-many-edits`: which changes to drop is the
+proposer's call) is never sent. At most 2 slim calls per refused proposal and 3 per epoch
 (`repair.REPAIR_CALLS_PER_PROPOSAL`, `REPAIR_CALLS_PER_EPOCH`); a fix goes through every
-check a proposal does. When they produce no candidate, the loop asks again with the full
-request, as before, and that request now shows the latest refused proposals as written
-under "Why your last proposals were refused". The trace records each call (kind `repair`)
+check a proposal does. When they produce no candidate, the last fix's refusal is kept with the
+proposal's reasons (marked "the proposal as a slim repair call fixed it"), so a refusal of
+the fix -- an integrity veto, say -- reaches later requests, and the loop asks again with
+the full request, as before; that request now shows the latest refused proposals as
+written under "Why your last proposals were refused". The trace records each call (kind `repair`)
 and its outcome (`repair_outcome`); the refusal is journaled with `repaired: <candidate>`;
 the epoch line reads `refused N (...), repaired M (...) in K repair call(s)` (a repaired
 proposal counts once, among the accepted) and says how many accepted candidates carry
-mechanical fixes. `Optimizer.repair` makes none by default; the `autoresearch` proposer
+mechanical fixes. A repaired refusal is counted as repaired, not refused, in the run's
+refusal tallies (`refusal_codes`, `refused_total`, the report's `rejection_codes` beside
+`repaired_codes`) and carries `repaired` in `rejections.jsonl`; a portfolio round counts
+the fix's edit level. Each epoch's call count is journaled (`repair_calls`), so a resumed
+run keeps the bound. `Optimizer.repair` makes none by default; the `autoresearch` proposer
 makes the slim call, and any optimizer may override it. `Optimizer.propose_valid` repairs
-the same way.
+the same way (it has no production caller; strategies go through `Loop.install`).
 
 **Checks before scoring** (`optim.checks`), after the validator and lowering accept a
 state:
@@ -1708,8 +1722,10 @@ state:
   `runs/<parent>/passes/<data node>/<item>/`, or the run directory for a node outside a
   pass). Code that raises on them, or returns what its node cannot use, is refused with
   the error, the line it failed at and the inputs it had. When nothing can be run -- the
-  parent kept no recorded items, an input is made by a step the candidate adds, or there
-  is no sandbox -- it is skipped and the candidate's `notes` say so (journaled, and in the
+  parent kept no recorded items, an input is made by a step the candidate adds, the node
+  is in a data pass and reads facts (an item directory does not reliably keep its item's
+  facts: on the walker its `facts.json` is the run's, copied when the pass began), or
+  there is no sandbox -- it is skipped and the candidate's `notes` say so (journaled, and in the
   proposal record's `checks`).
 
 A knob only a split step read is no longer judged by `split`'s precondition: the

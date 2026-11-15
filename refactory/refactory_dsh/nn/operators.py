@@ -9,6 +9,10 @@ same way on both runtimes (the walker in its forkserver child, the spine through
   that is not there is said to be missing rather than failing the step, and a long or
   binary file is shown as its path and size. This is how files reach a model step as one
   ``{{fact}}``.
+- ``file_text`` (`FILE_TEXT_CALL`): sets its one declared fact to the whole text of its one
+  declared read, which it requires (both runtimes refuse to run it while the file is
+  missing). No header and no length cap: this is what a ``{{name}}`` naming a file means,
+  and what the attempt path wires in for one (`optim.repair`).
 - ``select`` (`SELECT_CALL`): reads a label from its first declared read (the first word
   or the last line, as a verdict gate reads one) and copies the declared read whose name
   that label names to its first write (and its fact, when it declares one).
@@ -19,7 +23,8 @@ The helpers describe and wire data without a model:
 - `model_free_inputs`: the facts and files no model step's output reaches -- the task's
   own inputs, and what plain ops make from them alone -- so a step can be made to see
   the task without seeing another step's work.
-- `collect_node`: the node state of a ``collect`` step for a set of files.
+- `collect_node` / `file_text_node`: the node state of a ``collect`` step for a set of
+  files, or of a ``file_text`` step for one.
 - `place_output`: puts a step's fact where the next model step downstream fills facts
   (its prompt knob), and says where.
 
@@ -37,6 +42,8 @@ from .graph import Graph, Node
 
 #: The ``collect`` op: files to one fact.
 COLLECT_CALL = "refactory_dsh.nn.operators:collect"
+#: The ``file_text`` op: one file's whole text as one fact.
+FILE_TEXT_CALL = "refactory_dsh.nn.operators:file_text"
 #: The ``select`` op: copy the file a label names.
 SELECT_CALL = "refactory_dsh.nn.operators:select"
 #: Past this many characters ``collect`` shows a file as its path and size, not its text.
@@ -84,6 +91,22 @@ def collect(ctx: Any) -> dict[str, Any]:
         raise ExecutionError(f"collect step {ctx.node_id!r} declares no fact; it sets one, "
                              "so declare it in `produces`")
     return {fact: "\n\n".join(_section(ctx, name) for name in ctx.declared_reads)}
+
+
+def file_text(ctx: Any) -> dict[str, Any]:
+    """`FILE_TEXT_CALL`: the node's one declared read, whole, as its one declared fact.
+    Refused for any other shape, or a file that is not text."""
+    from .executor import ExecutionError
+
+    fact = _declared_fact(ctx, "file_text")
+    reads = list(ctx.declared_reads)
+    if fact is None or len(reads) != 1:
+        raise ExecutionError(f"file_text step {ctx.node_id!r} reads one file and sets one fact: "
+                             "declare exactly one read and one fact")
+    try:
+        return {fact: ctx.read_text(reads[0])}
+    except UnicodeDecodeError as exc:
+        raise ExecutionError(f"file_text step {ctx.node_id!r}: {reads[0]!r} is not text") from exc
 
 
 def _stem(name: str) -> str:
@@ -190,6 +213,14 @@ def collect_node(node_id: str, files: Sequence[str], fact: str, *, notes: str = 
     return {"id": node_id, "kind": "op", "call": COLLECT_CALL, "reads": list(files),
             "produces": [fact], "score_effect": "none",
             "notes": notes or f"Hands {', '.join(files)} to later steps as {{{{{fact}}}}}."}
+
+
+def file_text_node(node_id: str, file: str, fact: str, *, notes: str = "") -> dict[str, Any]:
+    """The node state of a ``file_text`` step that hands ``file``'s whole text to later
+    steps as the fact ``fact`` (the file required)."""
+    return {"id": node_id, "kind": "op", "call": FILE_TEXT_CALL, "reads": [file],
+            "required_reads": [file], "produces": [fact], "score_effect": "none",
+            "notes": notes or f"Hands the whole text of {file} to later steps as {{{{{fact}}}}}."}
 
 
 def _template_knob(node: Node) -> str | None:

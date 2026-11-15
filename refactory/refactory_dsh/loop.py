@@ -2818,7 +2818,13 @@ class Loop(OuterLoop):
         }
 
     def _rejection_codes(self) -> dict[str, int]:
-        return _codes(self.rejections)
+        """Each rule's refusals that stood: a refusal a slim repair fixed is counted in
+        `_repaired_codes` instead."""
+        return _codes([r for r in self.rejections if not r.repaired])
+
+    def _repaired_codes(self) -> dict[str, int]:
+        """Each rule's refusals a slim repair call fixed (`optim.repair`)."""
+        return _codes([r for r in self.rejections if r.repaired])
 
     def _op_mix(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -2833,7 +2839,7 @@ class Loop(OuterLoop):
         knob_only = [c for c in self.population if not c.is_structural()]
         structural_rejections = [
             r for r in self.rejections
-            if any(isinstance(step, dict) and nn_edits.is_macro(step.get("op", ""))
+            if not r.repaired and any(isinstance(step, dict) and nn_edits.is_macro(step.get("op", ""))
                    for step in Proposal(edit=r.edit).steps)
         ]
         return {
@@ -3142,6 +3148,8 @@ class Loop(OuterLoop):
                             "rationale": rejection.rationale,
                             "reasons": rejection.reasons,
                             "codes": rejection.codes(),
+                            # The candidate a slim repair call made of it, or empty.
+                            "repaired": rejection.repaired,
                         },
                         default=str,
                     )
@@ -3376,7 +3384,7 @@ class Loop(OuterLoop):
             accepted=accepted,
             refused=refused,
             population=len(self.population),
-            refused_total=len(self.rejections),
+            refused_total=sum(1 for r in self.rejections if not r.repaired),
             structural_in_population=sum(1 for c in self.population if c.lineage_is_structural()),
         )
         self.epochs.append(summary)
@@ -3516,8 +3524,6 @@ class Loop(OuterLoop):
         accepted: list[Candidate] = []
         accepted_ids: set[str] = set()
         wanted = self.batch_size(run)
-        # The request a slim repair describes the pipeline from, built once per round.
-        self._repair_ctx = None
         # `k` adapts: one more round when the last batch was refused more than it was
         # accepted, because that is the signal that the optimizer is close to
         # something legal rather than out of ideas.
@@ -3583,6 +3589,8 @@ class Loop(OuterLoop):
                         continue
                     accepted_ids.add(outcome.id)
                     accepted.append(outcome)
+                    if repaired_from and getattr(self, "_repaired_level", ""):
+                        level = self._repaired_level  # the fix's level, as E-level judged it
                     if self._levels_wanted:
                         self._levels_done.append(level)
                     # Its own words, for "Your earlier reasoning" in later requests.
@@ -3610,13 +3618,18 @@ class Loop(OuterLoop):
                 reasons: list[str]) -> Candidate | None:
         """A refused proposal sent to the optimizer's slim repair call
         (`Optimizer.repair_refused`), each fix validated as a proposal is (this round's
-        refusals first, then ``Run.attempt``): the candidate, or ``None``. On success the
-        proposal's rejection, just recorded, names the candidate it became."""
+        refusals first, then ``Run.attempt``): the candidate, or ``None``.
+
+        On success the proposal's rejection, just recorded, names the candidate it became,
+        and ``_repaired_level`` the fix's edit level. When the fixes are refused, the last
+        refusal is added to the rejection's reasons (marked as after a slim repair), so a
+        refusal of the fix (an integrity verdict, say) reaches later requests too. Each
+        epoch's call count is journaled (``repair_calls``), so a resumed run keeps the
+        bound."""
         index = len(self.rejections) - 1
         if index < 0:
             return None
-        if getattr(self, "_repair_ctx", None) is None:
-            self._repair_ctx = self._context()
+        self._repaired_level = ""
 
         def attempt(fixed: Proposal) -> Candidate | list[str]:
             refused = proposal_refusal(fixed, permitted=self.permitted_ops(),
@@ -3627,12 +3640,39 @@ class Loop(OuterLoop):
             if not refused and self._levels_wanted and level not in missing:
                 refused = [f"E-level: this round asks for a {', '.join(missing) or 'different'} "
                            f"change; the repaired proposal is a {level} change"]
-            return refused or run.attempt(fixed, parent, record=False)
+            outcome = refused or run.attempt(fixed, parent, record=False)
+            if isinstance(outcome, Candidate):
+                self._repaired_level = level
+            return outcome
 
-        fixed = self.optimizer.repair_refused(self._repair_ctx, proposal, reasons, parent, attempt)
+        before = self.optimizer.repairs_used(self.epoch) if hasattr(self.optimizer, "repairs_used") else 0
+        fixed = self.optimizer.repair_refused(self._repair_context(), proposal, reasons, parent,
+                                              attempt)
+        used = self.optimizer.repairs_used(self.epoch) if hasattr(self.optimizer, "repairs_used") else 0
+        if used != before:
+            self._journal("repair_calls", epoch=self.epoch, calls=used)
         if fixed is not None:
             self.rejections[index] = dataclasses.replace(self.rejections[index], repaired=fixed.id)
+        else:
+            after = list(getattr(self.optimizer, "last_repair_refusal", None) or ())
+            if after:
+                self.rejections[index] = dataclasses.replace(
+                    self.rejections[index],
+                    reasons=[*self.rejections[index].reasons,
+                             *(f"{reason} [the proposal as a slim repair call fixed it]"
+                               for reason in after)])
         return fixed
+
+    def _repair_context(self) -> ProposalContext:
+        """What a slim repair call is written from: the epoch, the operations, whether code
+        nodes are offered, the protected nodes and the change cap. Not a whole request."""
+        return ProposalContext(
+            epoch=self.epoch, generation=self.generation, mode_name=self.mode_id,
+            catalogue=[op for op in nn_edits.catalogue(self.config.edit_preset)
+                       if not self.config.allowed_ops or op["op"] in self.config.allowed_ops],
+            protected=list(self.protected), preset=self.config.edit_preset,
+            code_nodes=self._code_nodes_offered(self._sandbox_answer()),
+            person_gates=False, max_edits=MAX_EDITS_PER_PROPOSAL)
 
     def strategy(self, run: Run) -> None:
         """The default control flow: repeated epochs, each one step of the loop.
@@ -4600,6 +4640,7 @@ class Loop(OuterLoop):
             "accepted_op_mix": self._op_mix(),
             "structural": self._structural_stats(),
             "rejection_codes": self._rejection_codes(),
+            "repaired_codes": self._repaired_codes(),
             "rejection_reasons": [r for rej in self.rejections for r in rej.reasons][:40],
             "knob_attribution": self.gradient.get("knob_attribution", {}),
             "ports": self.mode.describe()["ports"],
@@ -6509,6 +6550,11 @@ class Loop(OuterLoop):
                 self._round_refusals.setdefault(
                     int(record["epoch"]) if record.get("epoch") is not None else self.epoch,
                     []).append(rejection)
+            elif event == "repair_calls":
+                # The slim repair calls an epoch made, so a resumed run keeps the bound.
+                calls = self.optimizer.__dict__.setdefault("_repair_calls", {})
+                epoch = int(record.get("epoch") or 0)
+                calls[epoch] = max(int(calls.get(epoch, 0)), int(record.get("calls") or 0))
             elif event == "epoch":
                 self.epoch = int(record.get("epoch") or self.epoch)
             elif event == "epoch_open":
