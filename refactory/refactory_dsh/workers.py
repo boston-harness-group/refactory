@@ -184,6 +184,35 @@ def bundled_claude_code(runtime_root: Path | str) -> dict[str, str] | None:
             'sdk_version': str(metadata.get('version') or '')}
 
 
+#: The environment switches that turn Claude Code's compaction off; the adapter drops them
+#: from a claude_code worker's environment (`claude_code_compaction`).
+COMPACTION_SWITCHES = ('DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT', 'DISABLE_MICROCOMPACT')
+
+
+def claude_code_compaction(runtime_root: Path | str) -> dict[str, Any] | None:
+    """Whether claude_code workers compact, and what of the person's they override.
+
+    ``forced`` says whether the installed adapter starts Claude Code with the flag setting
+    ``autoCompactEnabled: true`` (it is patched to; False means the patch is not applied).
+    ``person`` is the person's own ``autoCompactEnabled`` in ``~/.claude.json`` (None when
+    unset), which a worker would otherwise read through its real HOME and which is never
+    changed; ``dropped`` are the switches in this environment a worker does not get. None
+    when the optional adapter is not installed.
+    """
+    adapter = Path(runtime_root) / 'node_modules' / PACKAGES['claude_code']
+    try:
+        source = (adapter / 'lib' / 'index.js').read_text()
+    except OSError:
+        return None
+    try:
+        person = json.loads((Path.home() / '.claude.json').read_text()).get('autoCompactEnabled')
+    except (OSError, ValueError, AttributeError):
+        person = None
+    return {'forced': 'settings: { autoCompactEnabled: true }' in source,
+            'person': person if isinstance(person, bool) else None,
+            'dropped': [name for name in COMPACTION_SWITCHES if name in os.environ]}
+
+
 def claude_code_version(executable: str) -> str:
     """The X.Y.Z ``executable --version`` starts with, or empty when it says none."""
     try:

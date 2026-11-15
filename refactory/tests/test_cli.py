@@ -510,6 +510,79 @@ def test_doctor_names_the_claude_code_the_claude_code_worker_runs(tmp_path, monk
     assert row().split()[0] == "MISS"
 
 
+def test_doctor_says_claude_code_workers_compact(tmp_path, monkeypatch, capsys):
+    """ok when the installed adapter forces compaction on, naming the person's own
+    setting and shell switches it overrides for workers; MISS when the patch is missing;
+    WARN when the optional adapter is absent."""
+    from argparse import Namespace
+
+    from refactory_dsh import workers
+    from refactory_dsh.cli import cmd_doctor
+
+    monkeypatch.setattr(
+        "refactory_dsh.sandbox.model_readiness",
+        lambda *a, **kw: {"provider": "test", "model": "test", "status": "configured"},
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REFACTORY_PROJECT", str(tmp_path))
+
+    def row() -> str:
+        cmd_doctor(Namespace(provider="", model="", run=None))
+        [line] = [line.strip() for line in capsys.readouterr().out.splitlines()
+                  if "claude_code compaction" in line and not line.startswith("refactory doctor")]
+        return line
+
+    monkeypatch.setattr(workers, "claude_code_compaction", lambda root: {
+        "forced": True, "person": False, "dropped": ["DISABLE_MICROCOMPACT"]})
+    on = row()
+    assert on.split()[0] == "ok"
+    assert "on for every claude_code worker" in on
+    assert "autoCompactEnabled=false in ~/.claude.json applies only to you" in on
+    assert "DISABLE_MICROCOMPACT in this environment is not passed to workers" in on
+
+    monkeypatch.setattr(workers, "claude_code_compaction", lambda root: {
+        "forced": True, "person": None, "dropped": []})
+    assert row().endswith("on for every claude_code worker")
+
+    monkeypatch.setattr(workers, "claude_code_compaction", lambda root: {
+        "forced": False, "person": None, "dropped": []})
+    unpatched = row()
+    assert unpatched.split()[0] == "MISS" and "re-run ./install.sh" in unpatched
+
+    monkeypatch.setattr(workers, "claude_code_compaction", lambda root: None)
+    assert row().split()[0] == "WARN"
+
+
+def test_claude_code_compaction_reads_the_adapter_and_the_persons_setting(tmp_path, monkeypatch):
+    """What doctor's row is made of: the installed adapter's flag setting, the person's
+    ~/.claude.json value (read, never written) and the switches in the environment."""
+    import json
+
+    from refactory_dsh import workers
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for name in workers.COMPACTION_SWITCHES:
+        monkeypatch.delenv(name, raising=False)
+    assert workers.claude_code_compaction(tmp_path) is None
+
+    lib = tmp_path / "node_modules" / workers.PACKAGES["claude_code"] / "lib"
+    lib.mkdir(parents=True)
+    (lib / "index.js").write_text("const options = { settings: { autoCompactEnabled: true } };\n")
+    assert workers.claude_code_compaction(tmp_path) == {"forced": True, "person": None, "dropped": []}
+
+    config = home / ".claude.json"
+    config.write_text(json.dumps({"autoCompactEnabled": False, "theme": "dark"}))
+    monkeypatch.setenv("DISABLE_COMPACT", "1")
+    assert workers.claude_code_compaction(tmp_path) == {
+        "forced": True, "person": False, "dropped": ["DISABLE_COMPACT"]}
+    assert json.loads(config.read_text()) == {"autoCompactEnabled": False, "theme": "dark"}
+
+    (lib / "index.js").write_text("const options = {};\n")
+    assert workers.claude_code_compaction(tmp_path)["forced"] is False
+
+
 def test_require_build_passes_when_spine_lib_exists(tmp_path):
     """A checkout with a built spine is not refused."""
     from refactory_dsh.paths import require_build, SPINE_LIB
