@@ -1522,8 +1522,8 @@ def test_card_shows_both_scales(tmp_path):
 def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
     from refactory_dsh.nn.validate import validate_state
 
-    sizing_nodes = ("clear_sizing", "fork_size", "size_change", "join_size", "presize_scale",
-                    "widen_research")
+    sizing_nodes = ("build_code_graph", "clear_sizing", "fork_size", "size_change", "join_size",
+                    "presize_scale", "widen_research")
 
     def without_sizer(state):
         graph = state["graph"]
@@ -1534,9 +1534,11 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
         graph["edges"] += [
             {"source": "route_refine_design", "target": "research_director", "condition": "proceed"},
             {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
-        # The sizer's own knobs (its system prompt) go with it.
+        # The sizer's own knobs (its system prompt) go with it; the code_graph knob
+        # belongs to build_code_graph which is removed with the sizing chain.
         for knob in [knob for knob in state["knobs"] if knob.startswith("size_change__")]:
             del state["knobs"][knob]
+        del state["knobs"]["code_graph"]
         assert validate_state(state) == []
 
     run, model = _design_run(tmp_path, "Fix main in app.py.",

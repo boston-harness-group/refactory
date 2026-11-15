@@ -15,11 +15,14 @@
 #   ./install.sh
 #   uv run refactory ceo "a mode that drafts a haiku and counts its syllables" --mode create
 #
-# It provisions the default install and nothing optional:
+# It provisions the default install and one optional piece:
 #
 #   * the pinned pnpm workspace and the eight packages' built `lib/`;
 #   * `.venv` from the root `pyproject.toml` — the default (`dev`) dependency
 #     group only;
+#   * the `graph` dependency group (graphifyy): the code knowledge graph for
+#     design mode's research agents. If the install fails it is skipped with a
+#     warning; design mode works without it;
 #   * the two DSH profiles this checkout owns — `graph`, which the Python glue
 #     runs modes on, and `refactory`, which the GUI boots over the harness's
 #     own `web` template (the harness's `web` is never written to) — idempotently
@@ -145,6 +148,11 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 (cd "$HERE" && uv sync)
+if ! (cd "$HERE" && uv sync --group graph) 2>/dev/null; then
+  echo "  warning: graphifyy (code knowledge graph) could not be installed." >&2
+  echo "           Design mode works without it. To install it later:" >&2
+  echo "             cd $HERE && uv sync --group graph" >&2
+fi
 
 # 2. Node side: install the pnpm workspace (the pinned harness plus the eight
 #    packages this repo owns), then build those packages' lib/ output. It depends

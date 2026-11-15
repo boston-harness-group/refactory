@@ -41,6 +41,7 @@ variants). The refusal names which argument was empty.
 | `--setup "<command>"` | Design and fast Design: run in the worktree before each check, for example a build. |
 | `--generate "<command>"` | Design and fast Design: run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command. |
 | `--no-worktree` | Design and fast Design: write the artifact under `.factory/artifacts/<name>` instead of a worktree. |
+| `--no-graph` | Design: skip the code knowledge graph build. Also `REFACTORY_CODE_GRAPH=0`. Default is on. |
 | `--no-pr` | Design: keep the work on the run's local branch; the run still writes `pull-request.md` with the title and body, and `delivery.json` records the complete commands to finish opening a pull request by hand. Without it, a run whose reviews pass opens a pull request: into the target's branch its base came from on GitHub (`--base <branch>`, or the checkout's upstream; otherwise the default branch), or, for a new project, in a GitHub repository created for it then, private and under your gh account (`--knob repo_owner=<account>` and `--knob repo_visibility=public` change that). The approval gate shows which, in its question and in `delivery.md`; a run whose gate you answer up front with `--approve` says it when it starts, as `refactory: delivery — …`, and keeps to it. |
 | `--refine <PR>` | Design: follow up an open pull request, given by its URL or `owner/repo#number`, with what you want changed as the brief. A refine skips research and strategy and goes straight to the design, because the pull request already has a design and the refine's request is usually an exact list of fixes. The run starts from the pull request's branch in a worktree of its own, goes through the full review, and pushes onto that branch, after merging the base branch in when it has moved. It pushes nothing if the PR's own branch moved meanwhile, and never changes the pull request's title or description. Without `--target`, the clone to work in is found among `refactory projects`. |
 | `--review-comments` | Design, with `--refine`: add the pull request's reviews and comments to the run's steering. |
@@ -243,6 +244,21 @@ Set these in a profile (`refactory profile-save --name NAME --spec '{"settings":
 
 The read verbs pass through the console's own `--project`, `--runs-root`, `--after`, `--limit`, `--state` and `--contents` options.
 
+## Code knowledge graph
+
+Design mode can build a code knowledge graph (using `graphifyy`) so that the sizer, research director and pitfalls researcher can look up callers and neighbours instead of grepping. The build starts in the background after `prepare` and before the sizer; agents query it through `refactory graph`.
+
+| command | what it does |
+|---|---|
+| `refactory graph explain NAME --graph <dir>` | Show a node's file:line, callers, callees, importers and contained items. |
+| `refactory graph callers NAME --graph <dir>` | Show only the calls edges into a node, as `path:line caller`. |
+
+The `--graph` argument is the path to the `code-graph/` directory (or a run directory that contains it). When the graph is not ready the command prints one line saying so and exits 1.
+
+| knob / setting | what it does |
+|---|---|
+| `code_graph` | Bool knob controlling the code knowledge graph. Default on. Set off with `--no-graph`, `--knob code_graph=0`, or persistently with `REFACTORY_CODE_GRAPH=0`. |
+
 ## Everything else
 
 | command | what it does |
@@ -338,4 +354,3 @@ entry and survives a resume.
 | Command | Description |
 |---|---|
 | `refactory replay-verifier --run-dir <path> [--commit <hash>] [--provider <p> --model <m>] [--effort <e>]` | Replay the verifier on an existing run directory and a commit. Reads `brief.json` from the run directory and invokes the verifier's model session. When `--commit` is given, a temporary worktree of that commit is checked out, used, and removed. The model route resolves as for `refactory ceo`: the flags, then the environment, the project file and the stored choice; half a route is refused. |
-

@@ -96,6 +96,8 @@ def add_authoring_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-pr", action="store_true",
                         help="design only: keep the work on the run's local branch instead of opening a pull "
                              "request once the reviews pass")
+    parser.add_argument("--no-graph", action="store_true",
+                        help="design only: skip the code knowledge graph build")
     parser.add_argument("--refine", default="", metavar="PR",
                         help="design only: follow up an open pull request (its URL or owner/repo#number); the "
                              "run starts from its branch and updates it")
@@ -310,6 +312,10 @@ def worktree_knobs(args: argparse.Namespace, *, deliver: bool = True) -> list[st
         found.append(f"setup={args.setup}")
     if args.generate:
         found.append(f"generate={args.generate}")
+    if os.environ.get("REFACTORY_CODE_GRAPH") == "0":
+        found.append("code_graph=0")
+    if getattr(args, "no_graph", False):
+        found.append("code_graph=0")
     if not deliver:
         return found
     if args.no_pr:

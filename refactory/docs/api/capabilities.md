@@ -5480,6 +5480,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "no_graph": {
+      "default": false,
+      "description": "design only: skip the code knowledge graph build",
+      "flags": [
+        "--no-graph"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
+    },
     "no_pr": {
       "default": false,
       "description": "design only: keep the work on the run's local branch instead of opening a pull request once the reviews pass",
@@ -5788,7 +5799,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "bdeaa4d183befc85fd6839d1946f5638c79bb8245a292ade4bcc9202eeb63059"
+  "reviewed_schema": "5584ba4f01a3c0207e021ac5517d8cd980623368aaf167f7b8ed33a6311a1087"
 }
 ```
 
@@ -5856,6 +5867,56 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
   },
   "purpose": "Inspect prerequisites, the run model and the chosen provider's configured credential (never the headless profile's default) without a model call; with --run, also report a run's driver pin state. Configured does not mean authenticated.",
   "reviewed_schema": "70ed865990a4b3979383d83aa6cae6fa005f787dea18cc94e4f389a5e317e469"
+}
+```
+
+## cli:graph
+
+Query the code knowledge graph built for a design run. explain shows a function's callers, callees, importers and contained items; callers shows only the calls edges into it.
+
+Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
+
+```json
+{
+  "description": "query the code knowledge graph built for a design run",
+  "doc": "refactory/docs/cli.md",
+  "examples": [
+    {
+      "arguments": {
+        "graph_command": "explain"
+      },
+      "explanation": "Show callers, callees, importers and contained items for a function: refactory graph explain classify_scale --graph /path/to/run/code-graph"
+    },
+    {
+      "arguments": {
+        "graph_command": "callers"
+      },
+      "explanation": "Show only the callers of a function as path:line caller_name: refactory graph callers build_code_graph --graph /path/to/run/code-graph"
+    }
+  ],
+  "interfaces": {
+    "chat": "Unavailable as a direct chat mutation; use the documented CLI route.",
+    "cli": "refactory graph {explain,callers} NAME --graph DIR",
+    "panel": "Unavailable as a dedicated panel control; use the documented CLI route."
+  },
+  "parameters": {
+    "graph_command": {
+      "default": null,
+      "description": "",
+      "enum": [
+        "explain",
+        "callers"
+      ],
+      "flags": [],
+      "nargs": "A...",
+      "position": 0,
+      "positional": true,
+      "required": true,
+      "type": "string"
+    }
+  },
+  "purpose": "Query the code knowledge graph built for a design run. explain shows a function's callers, callees, importers and contained items; callers shows only the calls edges into it.",
+  "reviewed_schema": "d4fbf7e27ae1be337a8df6bf5c218def268d09ef8560e2e8bb5d010350ca0305"
 }
 ```
 
@@ -8634,6 +8695,11 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     {
       "condition": null,
+      "source": "build_code_graph",
+      "target": "clear_sizing"
+    },
+    {
+      "condition": null,
       "source": "check_design_claims",
       "target": "gate_design_review"
     },
@@ -8870,7 +8936,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     {
       "condition": "proceed",
       "source": "route_refine_design",
-      "target": "clear_sizing"
+      "target": "build_code_graph"
     },
     {
       "condition": "light",
@@ -9000,6 +9066,16 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "kind": "op",
       "knobs": [],
       "notes": "measure each correction's sites in the diff and their tests, as evidence for the overwatch",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.code_graph:build_code_graph",
+      "id": "build_code_graph",
+      "kind": "op",
+      "knobs": [
+        "code_graph"
+      ],
+      "notes": "start the code knowledge graph build as a detached process; returns the prompt paragraph",
       "role": "ceo"
     },
     {
@@ -9578,6 +9654,18 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "value": "",
       "values": []
     },
+    "code_graph": {
+      "default": true,
+      "description": "build a code knowledge graph for the research agents",
+      "frozen": true,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": true,
+      "values": []
+    },
     "code_reviewer__system_prompt": {
       "default": "",
       "description": "system prompt for code_reviewer",
@@ -10005,7 +10093,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails.",
-    "reviewed_schema": "bf50be700c205f46bf37685e865ea7de2885934a4eb842cb3e8d5c18089d1c18"
+    "reviewed_schema": "271c8fd60d278f7227f1a214ffdcfefb31079483adc321d28ba57161fc7b9e86"
   }
 }
 ```

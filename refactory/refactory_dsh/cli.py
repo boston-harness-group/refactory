@@ -575,6 +575,18 @@ def build_parser() -> argparse.ArgumentParser:
     model_set.add_argument("--model", required=True, help="the model id, e.g. deepseek-v4-pro")
     model_sub.add_parser("show", help="print the stored model choice as JSON")
 
+    # ── code knowledge graph queries ──
+    graph_group = sub.add_parser(
+        "graph", help="query the code knowledge graph built for a design run",
+    )
+    graph_sub = graph_group.add_subparsers(dest="graph_command", required=True)
+    graph_explain = graph_sub.add_parser("explain", help="show a node's callers, callees, importers and contained items")
+    graph_explain.add_argument("name", help="the function or symbol name to look up")
+    graph_explain.add_argument("--graph", default="", help="path to the code-graph directory or a run directory")
+    graph_callers = graph_sub.add_parser("callers", help="show calls edges into a node")
+    graph_callers.add_argument("name", help="the function or symbol name to look up")
+    graph_callers.add_argument("--graph", default="", help="path to the code-graph directory or a run directory")
+
     ui = sub.add_parser("ui", help="the Web GUI (the tool, the panel, the conversation)")
     ui.add_argument("--port", type=int, default=0, help="default: the launcher's own")
     ui.add_argument("--no-open", action="store_true", help="do not open a browser")
@@ -690,6 +702,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ui(args)
     if args.verb == "doctor":
         return cmd_doctor(args)
+    if args.verb == "graph":
+        from refactory_dsh.code_graph import cli_graph
+        return cli_graph(args)
     if args.verb == "model":
         return _cmd_model(args)
     if args.verb == "pin":

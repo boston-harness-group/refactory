@@ -248,10 +248,10 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
   it('the sizer runs before research, and a sizer that fails is missing and research still runs', () => {
     const s = new Spine(graph)
     expect(spineEdges(graph, 'route_refine_design')).toEqual(
-      [['clear_sizing', 'proceed'], ['design_doc', 'light']])
+      [['build_code_graph', 'proceed'], ['design_doc', 'light']])
     expect(s.view('fork_size').optional_targets).toEqual(['size_change'])
     const before = advance(s, 'size_change', 'proceed')
-    expect(before).toEqual(['prepare', 'route_refine_design', 'clear_sizing', 'fork_size'])
+    expect(before).toEqual(['prepare', 'route_refine_design', 'build_code_graph', 'clear_sizing', 'fork_size'])
     expect(ids(s)).toEqual(['size_change'])
     // The sizer is the fork's only optional branch: its failure goes on to the join.
     s.complete('size_change', { failed: true })

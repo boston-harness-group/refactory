@@ -404,6 +404,7 @@ SIZER_PROMPT = (
     "- `footprint` is the change's footprint, as defined above.\n"
     "- `cross_cutting` lists every cross-cutting sign you saw, each with its path:line; "
     "empty when you saw none.\n"
+    "{% if code_graph_paragraph %}{{code_graph_paragraph}}\n\n{% endif %}"
 )
 
 
@@ -470,6 +471,8 @@ class DesignMode(Mode):
                             "spending nothing, before the early stop spends it; a run gets "
                             "this many times check_attempts",
             ),
+            "code_graph": Knob(True, "bool", frozen=True,
+                               description="build a code knowledge graph for the research agents"),
 
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
@@ -550,6 +553,15 @@ class DesignMode(Mode):
             notes="on a refine, skip research and strategy and go straight to design_doc",
         ))
 
+        graph.add(Node(
+            "build_code_graph", "op",
+            call="refactory_dsh.code_graph:build_code_graph",
+            knobs=("code_graph",),
+            writes=("code-graph/",),
+            produces=("code_graph_paragraph",),
+            notes="start the code knowledge graph build as a detached process; returns the prompt paragraph",
+        ))
+
         # ── sizing before research: a bounded agent reads the code the change touches,
         # and the shared rule turns its verdict into the research scope ──
         graph.add(Node(
@@ -611,7 +623,8 @@ class DesignMode(Mode):
                 "`research-plan.json` yourself.\n\n"
                 "## Footprint\n"
                 + FOOTPRINT_DEFINITIONS
-                + "## What was wrong with the last plan\n{{research_review}}\n\n"
+                + "{% if code_graph_paragraph %}{{code_graph_paragraph}}\n\n{% endif %}"
+                "## What was wrong with the last plan\n{{research_review}}\n\n"
                 "## The plan's shape\n" + DESIGN_RESEARCH_SCHEMA
             ),
             reads=("brief.json", "research-review.txt"),
@@ -646,6 +659,7 @@ class DesignMode(Mode):
                 "Repository: {{source}}\n\n"
                 "## Research scope\n{{research_scope}}\n\n"
                 "## What the research found\n{{research}}\n\n"
+                "{% if code_graph_paragraph %}{{code_graph_paragraph}}\n\n{% endif %}"
                 "## What was wrong with the last attempt\n{{pitfalls_review}}\n\n"
                 "You are the pitfalls researcher. Before any strategy or design exists, "
                 "identify the risks a correct design must account for. Read the repository "
@@ -1341,7 +1355,8 @@ class DesignMode(Mode):
         ))
 
         graph.connect("prepare", "route_refine_design")
-        graph.connect("route_refine_design", "clear_sizing", condition="proceed")
+        graph.connect("route_refine_design", "build_code_graph", condition="proceed")
+        graph.connect("build_code_graph", "clear_sizing")
         graph.connect("clear_sizing", "fork_size")
         # No edge from size_change to join_size, as fork_qa's branches have none.
         graph.connect("fork_size", "join_size")

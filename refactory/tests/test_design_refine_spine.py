@@ -221,6 +221,7 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
     """prepare, the route and the sizing chain; the sizer writes ``sizing``, or goes missing."""
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
+    spine.node("build_code_graph")
     spine.node("clear_sizing")
     if sizing is None:
         (spine.run / "reviews").mkdir(exist_ok=True)
