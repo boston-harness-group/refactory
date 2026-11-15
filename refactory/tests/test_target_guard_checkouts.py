@@ -21,7 +21,7 @@ import pytest
 from refactory_dsh import agent_delivery as ad
 from refactory_dsh import target_guard, worktree
 from refactory_dsh.model import DshModelClient
-from test_design_worktree import _answers, _design
+from _design_worktree_support import _answers, _design
 from tests_support import FakeModel, apply_in_workspace, git, git_repo, render
 
 #: A design run plans its delivery by asking gh for its login, so it asks the fake (dm-271).

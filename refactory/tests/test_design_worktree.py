@@ -12,34 +12,8 @@ worktrees, the check and the registry are real.
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-from typing import Callable
+from _design_worktree_support import *  # noqa: F403  (the helpers and fixtures these tests share)
 
-import pytest
-
-from refactory_dsh import (cli, console, design_ops, interactive, lowering, nn, projects, registry, repo_change,
-                           worktree)
-from refactory_dsh import run as node_runner
-from refactory_dsh.create import CreateMode as CreateModeForGraph
-from refactory_dsh.design import DesignMode
-from refactory_dsh.fast import DesignFastMode
-from refactory_dsh.nn import Verdict
-from refactory_dsh.paths import REPO_ROOT
-from refactory_dsh.projects import projects_dir
-from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER,
-                           RESEARCH_ANSWER, VERIFICATION_ANSWER,
-                           REVIEW_ANSWERS, FakeModel,
-                           StaleEmitModel, git, git_repo, render, stub)
-
-NAME = "worktree_tool"
-
-
-# ── graph edges for audit reloop and refused emission ──────────────────────
-
-
-#: A design run plans its delivery by asking gh for its login, so it asks the fake (dm-271).
 pytestmark = pytest.mark.usefixtures("fake_gh")
 
 
@@ -76,57 +50,6 @@ def test_refused_emission_does_not_spend_attempt_design(tmp_path, monkeypatch):
     assert not ctx.facts.get("attempts_used"), "refused emission must not spend an attempt"
 
 
-@pytest.fixture
-def repo(tmp_path) -> Path:
-    return git_repo(tmp_path / "repo")
-
-
-def _answers(*emits: str) -> list[str]:
-    """Every answer a design run needs, in the order its graph asks.
-
-    pick_corrections is a gate (no model answer needed).  When there are no
-    corrections, pick_corrections returns "skip" and apply_corrections does
-    not run.
-    """
-    return [RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan",
-            DESIGN_DOC_ANSWER, *emits,
-            *REVIEW_ANSWERS[:3], VERIFICATION_ANSWER, REVIEW_ANSWERS[3]]
-
-
-def _mode(**knobs) -> DesignMode:
-    """Design mode with some of its knobs set, as a person sets them for one run."""
-    mode = DesignMode()
-    state = mode.state_dict()
-    for name, value in knobs.items():
-        state["knobs"][name]["value"] = value
-    mode.load_state_dict(state)
-    return mode
-
-
-def _design(workdir: Path, model: FakeModel, mode: DesignMode | None = None, **task: str):
-    return (mode or DesignMode()).run(
-        workdir, model=model, verdicts={"gate_strategy": "proceed"},
-        task={"name": NAME, "brief": "a tool", "check": "python tool.py", **task},
-    )
-
-
-def _report(workdir: Path) -> dict:
-    return json.loads((workdir / "design.json").read_text())
-
-
-def _edit(name: str, *pairs: tuple[str, str]) -> str:
-    """An ``===EDIT:`` block: each pair is the lines to find and the lines put in their place."""
-    body = "".join(f"{repo_change.SEARCH}\n{search}{repo_change.DIVIDER}\n{replacement}{repo_change.REPLACE}\n"
-                   for search, replacement in pairs)
-    return f"===EDIT: {name}===\n{body}"
-
-
-def _commit(repo: Path, name: str, text: str) -> None:
-    (repo / name).write_text(text)
-    git(repo, "add", name)
-    git(repo, "commit", "-q", "-m", f"add {name}")
-
-
 # ── the paths a person takes ───────────────────────────────────────────────
 def test_a_run_with_no_target_starts_a_new_project_and_commits_its_work_on_a_branch(tmp_path):
     result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": "print('built')\n"}))))
@@ -153,26 +76,6 @@ def test_the_same_idea_again_is_a_new_branch_of_the_same_project_from_main(tmp_p
     assert one["base"] == two["base"], "the second run starts from main, not from the first run's branch"
     [entry] = projects.load()["projects"]
     assert [note["status"] for note in entry["runs"]] == ["succeeded", "succeeded"]
-
-
-def test_a_run_on_a_repository_leaves_the_persons_checkout_and_uncommitted_work_alone(repo, tmp_path, capsys):
-    """Its work is a branch of their repository; their checkout, edits included, is untouched (#330 I1)."""
-    (repo / "app.py").write_text("print('mine, not committed')\n")
-    (repo / "notes.txt").write_text("untracked\n")
-    head = git(repo, "rev-parse", "HEAD")
-    # This check passes only where app.py is as committed: the worktree, from its pinned base.
-    tool = "import pathlib\nassert pathlib.Path('app.py').read_text() == \"print('app')\\n\"\n"
-    result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": tool}))), target=str(repo))
-    assert result.exit_ok, result.error
-    assert (git(repo, "branch", "--show-current"), git(repo, "rev-parse", "HEAD")) == ("main", head)
-    assert (repo / "app.py").read_text() == "print('mine, not committed')\n"
-    assert (repo / "notes.txt").exists() and not (repo / "tool.py").exists()
-    payload = _report(tmp_path / "run")
-    assert (payload["target"], payload["base"]) == (str(repo.resolve()), head)
-    assert git(repo, "ls-tree", "--name-only", payload["branch"]).splitlines() == ["app.py", "tool.py"]
-    assert "uncommitted change(s) in" in capsys.readouterr().err
-    [entry] = projects.load()["projects"]
-    assert entry["kind"] == "existing"
 
 
 def test_a_run_from_another_base_works_from_that_commit(repo, tmp_path):
@@ -219,62 +122,6 @@ def test_a_target_inside_a_repository_is_refused_before_anything_is_made(repo, t
     assert not worktree.slot(repo).exists() and projects.load()["projects"] == []
 
 
-def test_facts_json_records_final_attempts_used_on_failure(repo, tmp_path, monkeypatch):
-    """run_node's except clause writes facts.json so attempts_used on disk agrees with the error.
-
-    Without it (after removing _persist_facts from create_ops), no writer would persist
-    the facts a raising node set, and the on-disk attempts_used would stay at 0.
-    """
-    run = tmp_path / "run"
-    worktree.create(repo, "HEAD", "abcdef999999", run)
-    lowering.write_declarations(DesignMode().state_dict(), run)
-    (run / "facts.json").write_text(json.dumps({"name": NAME, "brief": "a tool", "check": "exit 1"}))
-    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"check_attempts": 1}))
-    (run / "emit.txt").write_text(render({"tool.py": "print('will fail check')\n"}))
-    node_runner.run_node(f"{repo_change.OPS}:materialise", workdir=run, node_id="materialise")
-    # Before the check, attempts_used is absent from facts.json on disk.
-    assert "attempts_used" not in json.loads((run / "facts.json").read_text())
-    with pytest.raises(ValueError, match=r"check attempts exhausted after 1 check failure\(s\)"):
-        node_runner.run_node(f"{design_ops.__name__}:check_artifact", workdir=run, node_id="check")
-    # run_node's except clause wrote facts.json; the on-disk value agrees with the message.
-    saved = json.loads((run / "facts.json").read_text())
-    assert saved["attempts_used"] == 1
-
-
-def test_an_attempt_that_fails_its_check_is_redone_as_a_second_commit_on_top_of_it(tmp_path):
-    """The retry changes only what it needs to; a file of the first attempt goes when it is deleted."""
-    failing = render({"tool.py": "raise SystemExit(1)\n", "draft.py": "x = 1\n", "keep.py": "y = 2\n"})
-    fixed = render({"tool.py": "print('fixed')\n"}) + "===DELETE: draft.py===\n"
-    result = _design(tmp_path / "run", FakeModel(_answers(failing, fixed)))
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    project = Path(payload["target"])
-    assert git(project, "log", "--format=%s", f"{payload['base']}..{payload['branch']}").splitlines() == [
-        f"{NAME}: attempt 2", f"{NAME}: attempt 1"]
-    assert git(project, "ls-tree", "--name-only", payload["branch"]).split() == ["keep.py", "tool.py"]
-    assert "draft.py" not in (tmp_path / "run" / "changes.diff").read_text()
-    assert payload["files"] == ["keep.py", "tool.py"], "the report names what the branch delivers, not one attempt"
-
-
-def test_a_check_that_rewrites_a_tracked_file_does_not_wedge_the_run(repo, tmp_path, capsys):
-    """What the check changes stays in its check copy: the run's worktree, where the
-    reviewers are, never sees it, and the next attempt's check starts from its commit."""
-    tool = ("import os, pathlib\n"
-            "pathlib.Path('app.py').write_text('rewritten by the check\\n')\n"
-            "marker = pathlib.Path(os.environ['HOME']) / 'second-attempt'\n"
-            "if not marker.exists():\n"
-            "    marker.write_text('')\n"
-            "    raise SystemExit('the first attempt is refused on purpose')\n")
-    emit1 = render({"tool.py": tool})
-    emit2 = render({"tool.py": tool, "note.txt": "retry\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit1, emit2)), target=str(repo))
-    assert result.exit_ok, result.error
-    assert git(repo, "show", f"{_report(tmp_path / 'run')['branch']}:app.py") == "print('app')"
-    warned = capsys.readouterr().err
-    assert "the check changed tracked files in the run's worktree" not in warned
-    assert "are not part of its branch" not in warned, "the run's worktree holds only its commits"
-
-
 # ── edits, and an emission materialise cannot apply (#330 I4, E5) ──────────
 def test_an_edit_changes_only_the_lines_it_names_in_a_long_file(repo, tmp_path):
     """A one-line change to a long file is a one-line diff: nothing else is retyped."""
@@ -294,52 +141,6 @@ def test_a_retry_edits_the_file_its_last_attempt_wrote(tmp_path):
     assert result.exit_ok, result.error
     payload = _report(tmp_path / "run")
     assert git(Path(payload["target"]), "show", f"{payload['branch']}:tool.py") == "x = 1\nprint('fixed', x)"
-
-
-class _WorkspaceBuilder(FakeModel):
-    """A builder at work in its workspace: ``first`` and ``retry`` are what it does there
-    on its first and second dispatch, beside its scripted emission's changes."""
-
-    def __init__(self, answers: list[str], first: Callable[[Path], object],
-                 retry: Callable[[Path], object] = lambda _: None) -> None:
-        super().__init__(answers)
-        self.steps = [first, retry]
-
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None, cwd: object = None,
-                 env: object = None, confine: bool = False) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env, confine=confine)
-        if cwd is not None and "Write the artifact `" in prompt and self.steps:
-            self.steps.pop(0)(Path(str(cwd)))
-        return answer
-
-
-def _binary(clone: Path) -> None:
-    (clone / "logo.png").write_bytes(b"\x89PNG\0\0")
-
-
-def _symlink(clone: Path) -> None:
-    (clone / "link.py").symlink_to("app.py")
-
-
-def _executable(clone: Path) -> None:
-    (clone / "app.py").chmod(0o755)
-
-
-def _bidi(clone: Path) -> None:
-    (clone / "tool\u202e.py").write_text("x = 1\n")
-
-
-def _undo(*names: str) -> Callable[[Path], None]:
-    def undo(clone: Path) -> None:
-        for name in names:
-            path = clone / name
-            if path.is_symlink() or not path.exists():
-                path.unlink(missing_ok=True)
-            elif name == "app.py":
-                path.chmod(0o644)
-            else:
-                path.unlink()
-    return undo
 
 
 # The builder works in a clone of the attempt and its emission is derived from the clone's
@@ -536,19 +337,6 @@ def test_without_a_worktree_a_run_takes_whole_files_only(repo, tmp_path, monkeyp
     assert (Path(result.facts["artifact"]) / "tool.py").read_text() == "print('built')\n"
 
 
-def test_without_a_worktree_the_full_check_writes_no_guardedness_placeholder(repo, tmp_path, monkeypatch):
-    """Only a worktree run can run the new tests on the base, so only it writes
-    test-guardedness.json; the whole check (`design_ops._full_check`) writes no stand-in."""
-    monkeypatch.setenv("REFACTORY_PROJECT", str(repo))
-    model = FakeModel(_answers(render({"tool.py": "print('built')\n"})))
-    result = _design(tmp_path / "run", model, _mode(worktree=False))
-    assert result.exit_ok, result.error
-    # The full check ran (the run succeeded), verify it left no guardedness stand-in.
-    assert (tmp_path / "run" / "check-record.json").exists(), "the whole check ran"
-    assert not (tmp_path / "run" / "test-guardedness.json").exists(), \
-        "test-guardedness.json should not be written on no-worktree runs"
-
-
 @pytest.mark.parametrize("answer, reason", [
     ("print('no blocks')\n", "holds no ===FILE:"),
     ("===EDIT: a path with spaces===\n", "malformed block header"),
@@ -647,19 +435,6 @@ def test_a_mid_line_search_is_not_falsely_skipped_when_replacement_starts_a_line
     assert result == "def f():\n    return compute(b)\ncompute(b)\n" and skipped == 0
 
 
-def _applied(text: str, answer: str, name: str = "models.md") -> tuple[str, int]:
-    """An emission's edits to one file, parsed as materialise parses them, then applied to ``text``."""
-    _files, edits, _deletes = repo_change._emitted(answer, edits=True)
-    return repo_change._edited(Path(name), text, edits[Path(name)], f"git show HEAD:{name}")
-
-
-#: models.md keeps each paragraph on one line; b13b's refused edit searched mid-paragraph.
-PARAGRAPH = ("the refused emission does not count against `check_attempts`; the gate's own iteration "
-             "limit still bounds retries. An emission that changes nothing is refused back to emit.\n")
-SENTENCE = "the gate's own iteration limit still bounds retries."
-ADDED = " A CEO redo keeps the count."
-
-
 def test_an_emitted_edit_that_stops_inside_a_line_applies():
     """The parser ends a search with a newline; a sentence inside a one-line paragraph is still found."""
     answer = _edit("models.md", (SENTENCE + "\n", SENTENCE + ADDED + "\n"))
@@ -721,22 +496,6 @@ def test_a_worktree_a_prune_removed_is_added_back_before_an_edit_applies(repo, t
     assert (Path(found.path) / "app.py").read_text() == "print('edited')\n"
 
 
-def test_on_the_spines_route_a_refusal_reaches_the_check_and_a_later_attempt_clears_it(repo, tmp_path, monkeypatch):
-    """The spine runs each op in its own process; the refusal has to survive in facts.json."""
-    run = tmp_path / "run"
-    worktree.create(repo, "HEAD", "abcdef654321", run)
-    lowering.write_declarations(DesignMode().state_dict(), run)
-    (run / "facts.json").write_text(json.dumps({"name": NAME, "brief": "a tool", "check": "true"}))
-    monkeypatch.setenv("REFACTORY_KNOBS", json.dumps({"check_attempts": 3}))
-    (run / "emit.txt").write_text(_edit("app.py", ("print('not there')\n", "x\n")))
-    node_runner.run_node(f"{repo_change.OPS}:materialise", workdir=run, node_id="materialise")
-    verdict = node_runner.run_node(f"{design_ops.__name__}:check_artifact", workdir=run, node_id="check")
-    assert verdict == "reloop" and "not in the file the edit applies to" in verdict.reason
-    (run / "emit.txt").write_text(render({"tool.py": "print(1)\n"}))
-    node_runner.run_node(f"{repo_change.OPS}:materialise", workdir=run, node_id="materialise")
-    assert json.loads((run / "facts.json").read_text())["emission_refused"] == ""
-
-
 def test_a_run_whose_graph_predates_the_refusal_fact_still_materialises(repo, tmp_path):
     """A spine run started before this fact existed has it in no declaration; succeeding must not need it."""
     run = tmp_path / "run"
@@ -749,21 +508,6 @@ def test_a_run_whose_graph_predates_the_refusal_fact_still_materialises(repo, tm
     (run / "emit.txt").write_text(render({"tool.py": "print(1)\n"}))
     node_runner.run_node(f"{repo_change.OPS}:materialise", workdir=run, node_id="materialise")
     assert json.loads((run / "facts.json").read_text())["files"] == ["tool.py"]
-
-
-# ── the boundaries a run keeps ─────────────────────────────────────────────
-class _EditingModel(FakeModel):
-    """The #319 worker: edits a checkout directly, then answers that it is already done."""
-
-    def __init__(self, answers: list[str], edit: Callable[[], Path]) -> None:
-        super().__init__(answers)
-        self.edit = edit
-
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
-        if "Write the artifact `" in prompt:
-            (self.edit() / "app.py").write_text("print('edited in place')\n")
-        return answer
 
 
 def test_an_emit_that_edits_the_worktree_is_refused(repo, tmp_path):
@@ -820,27 +564,6 @@ def test_a_refused_emit_is_redone_from_a_fresh_emit_txt(repo, tmp_path):
     assert git(repo, "show", f"{_report(run)['branch']}:tool.py") == "print('redone')"
 
 
-class _HookChangingModel(FakeModel):
-    """An agent that rewrites a shared hook while a planning step runs (#347)."""
-
-    def __init__(self, answers: list[str], target_fn) -> None:
-        super().__init__(answers)
-        self._target_fn = target_fn
-
-    def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
-        answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
-        if "You are the research director" in prompt:
-            import subprocess
-            target = self._target_fn()
-            hooks = Path(subprocess.run(
-                ['git', '-C', str(target), 'rev-parse', '--path-format=absolute',
-                 '--git-common-dir'], capture_output=True, text=True,
-                check=True).stdout.strip()) / 'hooks'
-            hooks.mkdir(parents=True, exist_ok=True)
-            (hooks / 'pre-commit').write_text('#!/bin/sh\nexit 0\n')
-        return answer
-
-
 def test_materialise_refusal_clears_emit_txt_before_redispatch(repo, tmp_path):
     """After materialise refuses an emission, the stale emit.txt is gone before the next emit runs."""
     bad_emission = _edit("app.py", ("print('not there')\n", "print('x')\n"))
@@ -848,24 +571,6 @@ def test_materialise_refusal_clears_emit_txt_before_redispatch(repo, tmp_path):
     model = StaleEmitModel(_answers(bad_emission, good_emission))
     result = _design(tmp_path / "run", model, target=str(repo))
     assert result.exit_ok, result.error
-    # StaleEmitModel checks: if emit.txt existed when the second emit ran,
-    # it would have returned "emit.txt already contains the correct content"
-    # instead of the good_emission answer. The run succeeding proves emit.txt
-    # was gone.
-
-
-def test_check_failure_clears_emit_txt_before_redispatch(repo, tmp_path):
-    """After a failed check, the stale emit.txt is gone before the next emit runs."""
-    failing = render({"tool.py": "raise SystemExit(1)\n"})
-    fixed = render({"tool.py": "print('fixed')\n"})
-    model = StaleEmitModel(_answers(failing, fixed))
-    result = _design(tmp_path / "run", model, target=str(repo))
-    assert result.exit_ok, result.error
-    # StaleEmitModel would have intercepted the second emit if emit.txt survived.
-    # The run succeeding with the fixed code proves emit.txt was moved.
-    payload = _report(tmp_path / "run")
-    branch = payload["branch"]
-    assert git(Path(payload["target"]), "show", f"{branch}:tool.py") == "print('fixed')"
 
 
 def test_a_planning_step_that_changes_shared_hooks_fails_the_step(repo, tmp_path):
@@ -878,159 +583,6 @@ def test_a_planning_step_that_changes_shared_hooks_fails_the_step(repo, tmp_path
     assert result.exit_ok is False
     assert "changed shared git state" in (result.error or "")
     assert "research_director" in (result.error or "")
-
-
-def test_a_check_in_the_worktree_sees_none_of_refactorys_environment(repo, tmp_path, monkeypatch):
-    """`REFACTORY_*` and the launcher's PYTHONPATH once failed a target's own tests (#330 E1)."""
-    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "launcher"))
-    monkeypatch.setenv("REFACTORY_PROBE", "1")
-    tool = ("import os, pathlib\n"
-            "leaked = sorted(n for n in os.environ if n == 'PYTHONPATH' or n.startswith(('REFACTORY_', 'DSH_')))\n"
-            "assert not leaked, leaked\n"
-            "assert not pathlib.Path(os.environ['HOME']).resolve().is_relative_to(pathlib.Path.cwd().resolve())\n"
-            "print(os.environ['HOME'])\n")
-    result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": tool}))), target=str(repo))
-    assert result.exit_ok, result.error
-    evidence = json.loads((tmp_path / "run" / "authoring-evidence.json").read_text())
-    # The check runs beside the reviews, in the check copy, with the copy's own HOME.
-    assert evidence["validation"]["stdout"].strip() == str(tmp_path / "run" / ".refactory" / "check-copy-home")
-
-
-def test_a_check_in_the_worktree_is_bounded_by_its_timeout_not_by_memory(repo, tmp_path):
-    """A Node check that starts worker threads, as vitest does, failed under a 2 GB address-space cap (#325)."""
-    import resource
-
-    tool = ("import json, resource\n"
-            "print(json.dumps([resource.getrlimit(resource.RLIMIT_AS)[0], "
-            "resource.getrlimit(resource.RLIMIT_CPU)[0]]))\n")
-    result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": tool}))), _mode(check_timeout_s=30),
-                     target=str(repo))
-    assert result.exit_ok, result.error
-    evidence = json.loads((tmp_path / "run" / "authoring-evidence.json").read_text())
-    assert json.loads(evidence["validation"]["stdout"]) == [resource.getrlimit(resource.RLIMIT_AS)[0],
-                                                            30 * (os.cpu_count() or 1)]
-
-
-def test_a_check_uses_the_environment_its_worktrees_manifests_install(repo, tmp_path, monkeypatch):
-    """The worktree's interpreter, not refactory's, even though refactory's is on the launcher's PATH."""
-    stub(tmp_path / "stubs", "uv", "mkdir -p .venv/bin\n"
-                                   "printf '#!/bin/sh\\necho the-worktree-python\\n' > .venv/bin/python\n"
-                                   "chmod +x .venv/bin/python")
-    monkeypatch.setenv("PATH", f"{tmp_path / 'stubs'}{os.pathsep}{os.environ['PATH']}")
-    (repo / "pyproject.toml").write_text("[project]\nname = 'app'\n")
-    git(repo, "add", "pyproject.toml")
-    git(repo, "commit", "-q", "-m", "manifest")
-    result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": "print('refactory python')\n"}))),
-                     target=str(repo))
-    assert result.exit_ok, result.error
-    evidence = json.loads((tmp_path / "run" / "authoring-evidence.json").read_text())
-    assert evidence["validation"]["stdout"].strip() == "the-worktree-python"
-
-
-def test_the_setup_command_runs_in_the_worktree_before_each_check(repo, tmp_path):
-    tool = "import pathlib\nassert pathlib.Path('built.txt').read_text() == 'built\\n'\n"
-    result = _design(tmp_path / "run", FakeModel(_answers(render({"tool.py": tool}))),
-                     _mode(setup="echo built > built.txt"), target=str(repo))
-    assert result.exit_ok, result.error
-
-
-def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tmp_path, monkeypatch):
-    """No code change can install uv; the run says so instead of asking emit to try again."""
-    only_git = tmp_path / "only-git"
-    only_git.mkdir()
-    (only_git / "git").symlink_to(next(Path(entry) / "git" for entry in os.environ["PATH"].split(os.pathsep)
-                                       if (Path(entry) / "git").is_file()))
-    (repo / "pyproject.toml").write_text("[project]\nname = 'app'\n")
-    git(repo, "add", "pyproject.toml")
-    git(repo, "commit", "-q", "-m", "manifest")
-    monkeypatch.setenv("PATH", str(only_git))
-    emit = render({"tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit, emit)), target=str(repo))
-    assert result.exit_ok is False
-    assert "UNAVAILABLE: uv is not installed" in (result.error or "")
-    found = worktree.recorded(tmp_path / "run")
-    assert git(repo, "rev-list", "--count", f"{found.base}..{found.branch}") == "1", "no repair was attempted"
-
-
-def test_a_setup_command_that_fails_fails_the_check_and_says_why(tmp_path):
-    emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_setup = _design(tmp_path / "setup", FakeModel(_answers(emit1, emit2, emit3)), _mode(setup="exit 3"),
-                           target=str(git_repo(tmp_path / "plain")))
-    assert failed_setup.exit_ok is False
-    assert "the setup command `exit 3` failed" in (failed_setup.error or "")
-
-
-def test_a_generate_command_amends_tracked_file_changes_into_the_attempt(repo, tmp_path):
-    """Whatever a generate command changes in tracked files is committed with the attempt."""
-    _commit(repo, "generated.txt", "old\n")
-    emit = render({"tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit)),
-                     _mode(generate="echo new > generated.txt"), target=str(repo))
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert "generated.txt" in git(repo, "ls-tree", "--name-only", payload["branch"]).splitlines()
-    assert git(repo, "show", f"{payload['branch']}:generated.txt") == "new"
-    assert payload["head"] == git(repo, "rev-parse", payload["branch"]) == result.facts["commit"]
-    assert "generated.txt" in (tmp_path / "run" / "changes.diff").read_text()
-    assert "generated.txt" in result.facts["files"]
-    # The amendment amends the attempt, not a separate commit.
-    assert git(repo, "rev-list", "--count", f"{payload['base']}..{payload['branch']}") == "1"
-
-
-def test_a_generate_command_that_changes_nothing_adds_no_commit(repo, tmp_path):
-    """A generate that touches nothing leaves the attempt as the one commit on the branch."""
-    emit = render({"tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit)),
-                     _mode(generate="true"), target=str(repo))
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert git(repo, "rev-list", "--count", f"{payload['base']}..{payload['branch']}") == "1"
-
-
-def test_a_generate_command_that_fails_fails_the_check_and_says_why(tmp_path):
-    emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_generate = _design(tmp_path / "run", FakeModel(_answers(emit1, emit2, emit3)),
-                              _mode(generate="exit 3"),
-                              target=str(git_repo(tmp_path / "plain")))
-    assert failed_generate.exit_ok is False
-    assert "the generate command `exit 3` failed" in (failed_generate.error or "")
-
-
-def test_generate_runs_before_setup_so_setup_sees_generated_files(repo, tmp_path):
-    """A setup that needs generated files passes because generate runs first.
-
-    With the old order (setup, then generate) this fails: setup sees stale
-    generated.txt before generate can update it.
-    """
-    _commit(repo, "source.txt", "v1\n")
-    _commit(repo, "generated.txt", "v1\n")
-    # The emit changes source.txt; generate copies it to generated.txt; setup diffs them.
-    emit = render({"tool.py": "print('built')\n", "source.txt": "v2\n"})
-    result = _design(
-        tmp_path / "run", FakeModel(_answers(emit)),
-        _mode(generate="cp source.txt generated.txt",
-              setup="diff -q source.txt generated.txt"),
-        target=str(repo),
-    )
-    assert result.exit_ok, result.error
-
-
-def test_a_lockfile_the_install_writes_is_part_of_the_attempt_the_reviewers_see(repo, tmp_path, monkeypatch):
-    """A new Node project has no lockfile: the one its install writes is committed, not refused."""
-    stub(tmp_path / "bin", "npm", "echo '{\"lockfileVersion\": 3}' > package-lock.json")
-    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    emit = render({"package.json": "{}\n", "tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit)), target=str(repo))
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert "package-lock.json" in git(repo, "ls-tree", "--name-only", payload["branch"]).splitlines()
-    assert payload["head"] == git(repo, "rev-parse", payload["branch"]) == result.facts["commit"]
-    assert "package-lock.json" in (tmp_path / "run" / "changes.diff").read_text()
-    assert "package-lock.json" in result.facts["files"], "the files the branch delivers follow the amendment"
 
 
 def test_a_relative_target_names_a_repository_beside_the_project_not_the_run_directory(repo, tmp_path,
@@ -1059,67 +611,6 @@ def test_a_second_run_on_a_project_names_the_earlier_runs_branches(tmp_path, cap
     assert second.exit_ok, second.error
     warned = capsys.readouterr().err
     assert f"has earlier runs, whose work is on their branches, not on main: {_report(tmp_path / 'one')['branch']}" in warned
-
-
-def test_an_emit_during_which_the_launcher_checkout_moves_warns_but_succeeds(
-        repo, tmp_path, monkeypatch, capsys):
-    """Workers start in the run directory inside that checkout; in a worktree
-    run a change there is a warning, not a failure (#319)."""
-    launcher = git_repo(tmp_path / "launcher")
-    monkeypatch.setenv("REFACTORY_PROJECT", str(launcher))
-    result = _design(
-        tmp_path / "run",
-        _EditingModel(_answers(render({"tool.py": "print(1)\n"})),
-                      lambda: launcher),
-        target=str(repo))
-    assert result.exit_ok is True, result.error
-    warned = capsys.readouterr().err
-    assert f"in {launcher.resolve()}" in warned
-    assert "files outside its worktree changed" in warned
-
-
-def test_a_launcher_checkout_the_suite_leaves_unwatched_is_not_warned_about(
-        repo, tmp_path, monkeypatch, capsys):
-    """The test suite's own checkout (`REFACTORY_GUARD_UNWATCHED`) is not a launcher to warn
-    about: a test on another worker writing there once read as this run's warning (CI)."""
-    from refactory_dsh import target_guard
-
-    launcher = git_repo(tmp_path / "launcher")
-    monkeypatch.setenv("REFACTORY_PROJECT", str(launcher))
-    monkeypatch.setenv(target_guard.UNWATCHED_ENV, str(launcher))
-    result = _design(
-        tmp_path / "run",
-        _EditingModel(_answers(render({"tool.py": "print(1)\n"})),
-                      lambda: launcher),
-        target=str(repo))
-    assert result.exit_ok is True, result.error
-    warned = capsys.readouterr().err
-    assert f"in {launcher.resolve()}" not in warned
-    assert "files outside its worktree changed" not in warned
-
-
-def test_a_worktree_run_does_not_warn_that_the_persons_checkout_moved(repo, tmp_path, capsys):
-    """A person's edit during a planning step is now refused and the target is restored (dm-159).
-
-    research_director is output-only (in PLANNING_STEPS), so strayed() moves
-    target_changes from warn to fail.  The refusal restores the target and the
-    set-aside copy of app.py exists.
-    """
-    class Moving(FakeModel):
-        def complete(self, prompt: str, *, system: str = "", workdir: object = None, **workspace: object) -> str:
-            if "You are the research director" in prompt:
-                (repo / "app.py").write_text("print('the person kept working')\n")
-            return super().complete(prompt, system=system, workdir=workdir, **workspace)
-
-    result = _design(tmp_path / "run", Moving(_answers(render({"tool.py": "print(1)\n"}))), target=str(repo))
-    assert result.exit_ok is False
-    assert "changed while agent" in (result.error or "")
-    # The target is restored — app.py has its committed content.
-    assert (repo / "app.py").read_text() == "print('app')\n"
-    # The set-aside copy exists under agent-delivery.
-    from refactory_dsh import agent_delivery
-    found_set_aside = list((tmp_path / "run" / agent_delivery.ROOT).rglob("target-set-aside/app.py"))
-    assert found_set_aside, "the set-aside copy of app.py must exist"
 
 
 def test_the_agents_are_told_the_worktree_and_the_reviewers_the_diff_and_the_wrapper(repo, tmp_path):
@@ -1644,31 +1135,6 @@ def test_a_design_with_left_no_reason_is_advisory(tmp_path):
     assert "[left] without a reason" in ctx.facts["design_review_advisory"]
 
 
-# ── design_fast, on the same steps (`repo_change`) ─────────────────────────────
-#: What design_fast's strategist and focused QA answer; the coder's answers are each test's own.
-FAST_PLAN = "Change only the requested file."
-FAST_QA = json.dumps({"status": "pass", "checks": [{"name": "runs", "command": "python tool.py",
-                                                    "status": "pass", "evidence": "exit 0"}],
-                      "findings": [], "not_run": []})
-
-
-def _fast(workdir: Path, *emits: str, refused: int = 0, knobs: dict | None = None, **task: str):
-    """A design_fast run: the strategist, then each emission and, once one applies, its focused QA.
-
-    The first ``refused`` emissions are ones materialise cannot apply, so no QA follows them.
-    """
-    mode = DesignFastMode()
-    state = mode.state_dict()
-    for name, value in (knobs or {}).items():
-        state["knobs"][name]["value"] = value
-    mode.load_state_dict(state)
-    answers = [FAST_PLAN] + [answer for index, emit in enumerate(emits)
-                             for answer in ((emit,) if index < refused
-                                            else (emit, FAST_QA, VERIFICATION_ANSWER))]
-    return mode.run(workdir, model=FakeModel(answers),
-                    task={"name": NAME, "brief": "a tool", "check": "python tool.py", **task})
-
-
 def test_design_fast_changes_a_repository_in_a_worktree_and_delivers_nothing(repo, tmp_path):
     """It works where design works, and its work stays on the run's branch: it has no gate to approve a PR."""
     (repo / "app.py").write_text("print('mine, not committed')\n")
@@ -1715,30 +1181,6 @@ def test_design_fast_edits_its_last_attempt_and_reviews_the_whole_branch(tmp_pat
     assert git(project, "show", f"{payload['branch']}:tool.py") == "print('fixed')"
     assert json.loads(result.facts["review_files"]) == ["helper.py", "tool.py"]
     assert payload["fast"]["repairs_used"] == 1
-
-
-def test_design_fast_carries_the_lockfile_its_install_writes(repo, tmp_path, monkeypatch):
-    """The check's install amends the attempt, and focused QA is shown that file too."""
-    stub(tmp_path / "bin", "npm", "echo '{\"lockfileVersion\": 3}' > package-lock.json")
-    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    result = _fast(tmp_path / "run", render({"package.json": "{}\n", "tool.py": "print('built')\n"}),
-                   target=str(repo))
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert "package-lock.json" in git(repo, "ls-tree", "--name-only", payload["branch"]).splitlines()
-    assert payload["head"] == git(repo, "rev-parse", payload["branch"]) == result.facts["commit"]
-    assert "package-lock.json" in json.loads(result.facts["review_files"])
-
-def test_design_fast_carries_generate_changes(repo, tmp_path):
-    """The generate command amends the attempt, and focused QA is shown that file too."""
-    _commit(repo, "generated.txt", "old\n")
-    result = _fast(tmp_path / "run", render({"tool.py": "print('built')\n"}),
-                   target=str(repo), generate="echo new > generated.txt")
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert "generated.txt" in git(repo, "ls-tree", "--name-only", payload["branch"]).splitlines()
-    assert payload["head"] == git(repo, "rev-parse", payload["branch"]) == result.facts["commit"]
-    assert "generated.txt" in json.loads(result.facts["review_files"])
 
 
 def test_design_fast_sends_an_emission_it_cannot_apply_back_to_emit(tmp_path):
@@ -1846,294 +1288,6 @@ def test_the_console_design_verb_takes_a_target_too(monkeypatch, tmp_path):
     assert {"--base", "v1", "--setup", "make", "--generate", "make"} <= set(seen[0])
 
 
-# ── base-comparison gate for inherited test failures (dm-80, dm-82) ─────────
-
-
-def test_inherited_failure_passes_check(tmp_path):
-    """A base with one failing test and an attempt that fixes what the brief asks
-    passes the check, with the inherited failure named."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_base_broken.py", "def test_base_broken():\n    assert False\n")
-    result = _design(
-        tmp_path / "run",
-        FakeModel(_answers(render({"tool.py": "print('built')\n"}))),
-        target=str(repo),
-        check="python -m pytest -q",
-    )
-    assert result.exit_ok, result.error
-    check_txt = (tmp_path / "run" / "check.txt").read_text()
-    assert "inherited" in check_txt
-    assert "test_base_broken" in check_txt
-
-
-def test_inherited_failure_does_not_excuse_a_check_that_stopped_at_it(tmp_path):
-    """With -x nothing after the inherited failure ran, so the attempt is not excused."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_base_broken.py", "def test_base_broken():\n    assert False\n")
-    fixed = render({"tool.py": "print('built')\n",
-                    "test_base_broken.py": "def test_base_broken():\n    import tool\n    assert hasattr(tool, '__file__')\n"})
-    result = _design(
-        tmp_path / "run",
-        FakeModel(_answers(render({"tool.py": "print('built')\n"}), fixed)),
-        target=str(repo),
-        check="python -m pytest -q -x",
-    )
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert git(Path(payload["target"]), "rev-list", "--count",
-               f"{payload['base']}..{payload['branch']}") == "2"
-
-
-def _self_checks(run: Path) -> list[dict]:
-    return [json.loads(line) for line in (run / "self-check-record.jsonl").read_text().splitlines()]
-
-
-def test_new_failure_introduced_by_attempt_is_refused(tmp_path):
-    """An attempt that adds a new failure goes back to the builder, and the base's own
-    failure does not. Since b41a the self-check sends it back before the reviews, as a
-    fix-up amended into the attempt, so the branch keeps one commit."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_base_broken.py", "def test_base_broken():\n    assert False\n")
-    failing = render({"tool.py": "print('built')\n",
-                      "test_new.py": "def test_new_broken():\n    assert False\n"})
-    fixed = render({"tool.py": "print('built')\n",
-                    "test_new.py": "def test_new_broken():\n    import tool\n    assert hasattr(tool, '__file__')\n"})
-    result = _design(
-        tmp_path / "run",
-        FakeModel(_answers(failing, fixed)),
-        target=str(repo),
-        check="python -m pytest -q",
-    )
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    project = Path(payload["target"])
-    assert git(project, "rev-list", "--count",
-               f"{payload['base']}..{payload['branch']}") == "1"
-    sent_back = _self_checks(tmp_path / "run")[0]
-    assert sent_back["outcome"] == "fixup"
-    assert sent_back["failing_ids"] == ["test_new.py::test_new_broken"]
-    assert sent_back["inherited_filtered"] == ["test_base_broken.py::test_base_broken"]
-
-
-def test_brief_mentioned_failure_not_excused(tmp_path):
-    """A run whose brief is to fix the failing test is not excused: the base fails it too,
-    but the self-check sends it back (b41a)."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_fix_me.py", "def test_fix_me():\n    assert False\n")
-    not_fixed = render({"tool.py": "print('did not fix it')\n"})
-    fixed = render({"test_fix_me.py": "def test_fix_me():\n    import tool\n    assert hasattr(tool, '__file__')\n"})
-    result = DesignMode().run(
-        tmp_path / "run",
-        model=FakeModel(_answers(not_fixed, fixed)),
-        verdicts={"gate_strategy": "proceed"},
-        task={"name": NAME, "brief": "fix test_fix_me",
-              "check": "python -m pytest -q", "target": str(repo)},
-    )
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    project = Path(payload["target"])
-    assert git(project, "rev-list", "--count",
-               f"{payload['base']}..{payload['branch']}") == "1"
-    sent_back = _self_checks(tmp_path / "run")[0]
-    assert sent_back["failing_ids"] == ["test_fix_me.py::test_fix_me"]
-    assert sent_back["outcome"] == "fixup" and sent_back["inherited_filtered"] == []
-
-
-def test_failure_in_a_test_file_the_attempt_changes_is_not_excused():
-    """A test file the attempt edits is the attempt's, wherever the runner ran from."""
-    from refactory_dsh.base_check import compare_failures
-    failing = {"tests/test_a.py::test_x"}
-    edited = compare_failures(failing, failing, ["pkg/tests/test_a.py"], "", "")
-    assert edited.new_failures == failing and not edited.all_excused
-    untouched = compare_failures(failing, failing, ["pkg/tool.py"], "", "")
-    assert untouched.inherited == failing and untouched.all_excused
-
-
-def test_inherited_failures_excuse_a_check_only_when_nothing_else_failed_or_went_unrun():
-    """Matched names are not enough: the last step must be the runner, run to completion."""
-    from refactory_dsh.base_check import excusal_blocker, parse_test_failures
-    out = "FAILED tests/test_a.py::test_x - assert False\n1 failed, 3 passed in 0.12s\n"
-    failures = parse_test_failures(out)
-    assert excusal_blocker("pnpm test && .venv/bin/python -m pytest -q tests 2>&1", out, failures) is None
-    assert excusal_blocker("python -m pytest -q -rfEx", out, failures) is None
-    # A step after the runner, or one the runner's failure skipped, is not accounted for.
-    assert "last step" in excusal_blocker("python -m pytest -q; ruff check .", out, failures)
-    vitest = " FAIL  tests/a.spec.ts > suite > works\n      Tests  1 failed | 9 passed (10)\n"
-    assert "never ran" in excusal_blocker("npx vitest run && pytest -q", vitest, parse_test_failures(vitest))
-    assert excusal_blocker("npx vitest run", vitest, parse_test_failures(vitest)) is None
-    # Stopping at the first failure hides every test after it.
-    assert "first failure" in excusal_blocker("python -m pytest -xq", out, failures)
-    # An error the summary counts but no name accounts for, or no summary at all.
-    errored = out.replace("1 failed, 3 passed", "1 failed, 3 passed, 1 error")
-    assert "not identified" in excusal_blocker("pytest -q", errored, failures)
-    assert "not identified" in excusal_blocker("pytest -q", "FAILED tests/test_a.py::test_x - x\n", failures)
-
-
-def test_a_test_module_the_attempt_breaks_is_its_failure():
-    """A collection error is a failure with a name; the base does not have it."""
-    from refactory_dsh.base_check import compare_failures, parse_test_failures
-    base = parse_test_failures("FAILED tests/test_a.py::test_x - x\n1 failed in 0.1s\n")
-    attempt = parse_test_failures("FAILED tests/test_a.py::test_x - x\n"
-                                  "ERROR tests/test_b.py - ImportError: cannot import name\n"
-                                  "1 failed, 1 error in 0.1s\n")
-    assert attempt == {"tests/test_a.py::test_x", "tests/test_b.py"}
-    result = compare_failures(base, attempt, [], "", "")
-    assert result.new_failures == {"tests/test_b.py"} and not result.all_excused
-
-
-def test_the_base_is_prepared_with_its_own_home_not_the_attempts(tmp_path):
-    """A setup that writes into HOME and keeps what it finds there (as a tool's profile link
-    does) must not leave the attempt's checks reading the base's.
-
-    The first attempt fails in generate, before its own setup runs, so the base comparison
-    prepares the base first. Sharing a HOME, the base's marker would stay, and the second
-    attempt's check would fail on it however good the emission (b20b, dm-88)."""
-    repo = git_repo(tmp_path / "repo")
-    broken = render({"tool.py": "print('built')\n", "gen.sh": "exit 1\n"})
-    fixed = render({"tool.py": "print('built')\n", "gen.sh": "exit 0\n"})
-    result = _design(
-        tmp_path / "run",
-        FakeModel(_answers(broken, fixed)),
-        _mode(generate="[ ! -f gen.sh ] || sh gen.sh",
-              setup='[ -f "$HOME/built-in" ] || pwd > "$HOME/built-in"'),
-        target=str(repo),
-        check='test "$(cat "$HOME/built-in")" = "$(pwd)"',
-    )
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    assert git(Path(payload["target"]), "rev-list", "--count",
-               f"{payload['base']}..{payload['branch']}") == "2"
-    attempt_home = tmp_path / "run" / ".refactory" / "check-home" / "built-in"
-    base_home = tmp_path / "run" / ".refactory" / "base-check-home" / "built-in"
-    assert attempt_home.read_text().strip() != base_home.read_text().strip()
-
-
-def test_base_check_cannot_run_stops_unavailable(tmp_path):
-    """A deterministic base-preparation failure stops the run as unavailable.
-
-    The setup command ``sh setup.sh`` references a file that only exists in
-    the attempt's emission — on the base commit setup.sh is absent, so the
-    base preparation fails with a deterministic exit code (not a signal crash).
-    Per v5 correction 2, deterministic failures stop as unavailable; only
-    signal crashes continue without excusals (tested in test_robustness.py).
-    """
-    repo = git_repo(tmp_path / "repo")
-    result = DesignMode().run(
-        tmp_path / "run",
-        model=FakeModel(_answers(render({
-            "tool.py": "raise SystemExit(1)\n",
-            "setup.sh": "#!/bin/sh\necho ok\n",
-        }))),
-        verdicts={"gate_strategy": "proceed"},
-        task={"name": NAME, "brief": "a tool",
-              "check": "python tool.py", "target": str(repo),
-              "setup": "sh setup.sh"},
-    )
-    assert result.exit_ok is False
-    error = result.error or ""
-    assert ("unavailable" in error.lower() or "base" in error.lower()
-            or "setup" in error.lower())
-    assert not result.facts.get("attempts_used")
-
-
-def test_design_named_failure_not_excused(tmp_path):
-    """A test named only in design.md, failing on the base too, is the base's: design mode's
-    one rule (b48a) lets the brief and the corrections keep a test, not the design. The
-    self-check calls it inherited and the attempt goes on; a brief that names it keeps it
-    (`test_a_brief_named_failure_is_not_excused`)."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_oblique.py", "def test_oblique():\n    assert False\n")
-    not_fixed = render({"tool.py": "print('did not fix it')\n"})
-    fixed = render({"test_oblique.py": "def test_oblique():\n    import tool\n    assert hasattr(tool, '__file__')\n"})
-
-    naming_appendix = "\n\n## Tests to fix\n- test_oblique.py::test_oblique\n"
-
-    class DesignNamingModel(FakeModel):
-        """Intercepts the design_doc prompt to write a design.md that names the test."""
-        def complete(self, prompt, *, system="", workdir=None, **workspace):
-            answer = super().complete(prompt, system=system, workdir=workdir, **workspace)
-            if "Write the design document" in prompt and workdir is not None:
-                design_path = Path(workdir) / "design.md"
-                if design_path.exists():
-                    existing = design_path.read_text()
-                else:
-                    existing = answer
-                design_path.write_text(existing + naming_appendix)
-            return answer
-
-    result = DesignMode().run(
-        tmp_path / "run",
-        model=DesignNamingModel(_answers(not_fixed, fixed,
-                                         )),
-        verdicts={"gate_strategy": "proceed"},
-        task={"name": NAME, "brief": "the validation test for contract X fails",
-              "check": "python -m pytest -q", "target": str(repo)},
-    )
-    assert result.exit_ok, result.error
-    assert "test_oblique.py::test_oblique" in (tmp_path / "run" / "design.md").read_text()
-    [inherited] = _self_checks(tmp_path / "run")
-    assert inherited["outcome"] == "inherited" and inherited["failing_ids"] == []
-    assert inherited["inherited_filtered"] == ["test_oblique.py::test_oblique"]
-    assert result.facts["inherited_failures"] == ["test_oblique.py::test_oblique"]
-
-
-def test_a_brief_named_failure_is_not_excused(tmp_path):
-    """A test the brief names is not excused even when the base fails it too: the self-check
-    sends it back (b41a, b48a)."""
-    repo = git_repo(tmp_path / "repo")
-    _commit(repo, "test_oblique.py", "def test_oblique():\n    assert False\n")
-    not_fixed = render({"tool.py": "print('did not fix it')\n"})
-    fixed = render({"test_oblique.py": "def test_oblique():\n    import tool\n    assert hasattr(tool, '__file__')\n"})
-    result = DesignMode().run(
-        tmp_path / "run",
-        model=FakeModel(_answers(not_fixed, fixed)),
-        verdicts={"gate_strategy": "proceed"},
-        task={"name": NAME, "brief": "fix test_oblique.py::test_oblique — the validation test for contract X fails",
-              "check": "python -m pytest -q", "target": str(repo)},
-    )
-    assert result.exit_ok, result.error
-    payload = _report(tmp_path / "run")
-    project = Path(payload["target"])
-    assert git(project, "rev-list", "--count",
-               f"{payload['base']}..{payload['branch']}") == "1"
-    sent_back = _self_checks(tmp_path / "run")[0]
-    assert sent_back["failing_ids"] == ["test_oblique.py::test_oblique"]
-    assert sent_back["outcome"] == "fixup" and sent_back["inherited_filtered"] == []
-
-
-def test_guardedness_record_shows_new_test_failing_on_base(tmp_path):
-    """dm-82: the record shows a new test failing on the base, and passing with the attempt."""
-    repo = git_repo(tmp_path / "repo")
-    result = _design(
-        tmp_path / "run",
-        FakeModel(_answers(render({
-            "tool.py": "BUILT = True\n",
-            "test_tool.py": "import tool\ndef test_tool_built():\n    assert tool.BUILT\n",
-        }))),
-        target=str(repo),
-        check="python -m pytest -q",
-    )
-    assert result.exit_ok, result.error
-    guardedness = json.loads((tmp_path / "run" / "test-guardedness.json").read_text())
-    assert "test_tool.py" in guardedness["new_test_files"]
-    found_guarding = False
-    for file_record in guardedness["results"]:
-        if file_record["file"] == "test_tool.py":
-            if file_record.get("tests"):
-                for t in file_record["tests"]:
-                    if t.get("on_base") == "fail":
-                        found_guarding = True
-            elif file_record.get("guarding"):
-                found_guarding = True
-    # The test imports `tool` which does not exist on the base, so it either
-    # fails on import (cannot_run_on_base) or fails on assertion — either way
-    # the record exists and the file is listed.
-    assert found_guarding or any(
-        r["file"] == "test_tool.py" and r.get("file_level") == "cannot_run_on_base"
-        for r in guardedness["results"]
-    ), f"test_tool.py should be guarding or cannot_run_on_base but got: {guardedness}"
-
-
 # ── T1: @-paths accepted in all three emission block kinds ─────────────────
 def test_at_paths_are_accepted_in_emission():
     at_path = "patches/@scope@1.0.0.patch"
@@ -2168,17 +1322,6 @@ def test_absolute_path_is_refused_naming_the_path():
     import re as _re
     with pytest.raises(worktree.AttemptRefused, match=_re.escape("/etc/passwd")):
         repo_change._emitted("===FILE: /etc/passwd===\ncontent\n", edits=True)
-
-
-# ── dm-208: a control or format character in a path is refused by name ─────
-#: One character of each class a path may not hold, and how a refusal names it.
-UNPRINTABLE = [("\x7f", "U+007F (a control character)"), ("\x9b", "U+009B (a control character)"),
-               ("\u202e", "U+202E RIGHT-TO-LEFT OVERRIDE"), ("\u200f", "U+200F RIGHT-TO-LEFT MARK"),
-               ("\u2067", "U+2067 RIGHT-TO-LEFT ISOLATE"), ("\u061c", "U+061C ARABIC LETTER MARK"),
-               ("\u200b", "U+200B ZERO WIDTH SPACE"), ("\u2060", "U+2060 WORD JOINER"),
-               ("\ufeff", "U+FEFF ZERO WIDTH NO-BREAK SPACE")]
-UNPRINTABLE_IDS = ["DEL", "C1-control", "bidi-override", "bidi-mark", "bidi-isolate", "arabic-mark",
-                   "zero-width-space", "word-joiner", "byte-order-mark"]
 
 
 @pytest.mark.parametrize("char, named", UNPRINTABLE, ids=UNPRINTABLE_IDS)
