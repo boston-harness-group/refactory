@@ -12,6 +12,7 @@
     "refactory_dsh.evaluators",
     "refactory_dsh.events",
     "refactory_dsh.finished_control",
+    "refactory_dsh.git_exe",
     "refactory_dsh.git_hooks",
     "refactory_dsh.graph_control",
     "refactory_dsh.harness_check",
@@ -70,6 +71,7 @@
     "refactory_dsh.sandbox",
     "refactory_dsh.seed_cache",
     "refactory_dsh.snippet",
+    "refactory_dsh.spawn_count",
     "refactory_dsh.steer_probe",
     "refactory_dsh.steering",
     "refactory_dsh.strategies",
@@ -191,6 +193,11 @@
     "@deepseek-ai/dsh-tool-refactory"
   ],
   "non_python_files": [
+    {
+      "path": "refactory_dsh/spawn_count.cjs",
+      "classification": "core",
+      "reason": "Node half of the env-gated process-launch counter (spawn_count)"
+    },
     {
       "path": "refactory_dsh/additive.mjs",
       "classification": "core",
