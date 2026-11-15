@@ -274,7 +274,7 @@ def resume_refusal(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 
 def knobs(args: argparse.Namespace, mode_id: str | None, *, brief: str | None = None, name: str = "",
-          revision: str = "") -> list[str]:
+          revision: str = "", named: str = "") -> list[str]:
     """The run's knobs, in one order, as ``NAME=VALUE``: what the flags say, then ``--knob``.
 
     Last, so a person's own ``--knob`` wins over the value derived from a flag.
@@ -298,7 +298,9 @@ def knobs(args: argparse.Namespace, mode_id: str | None, *, brief: str | None = 
         found.append(f"source_project={args.source_project}")
     if mode_id is None or mode_id in DESIGN_MODES:
         found.extend(worktree_knobs(args, deliver=mode_id != "default_pack/design_fast"))
-    found.extend(graph_knobs(args, mode_id))
+    # A mode run by its full name (`named`) is resolved later; design's own name still
+    # gets design's graph settings.
+    found.extend(graph_knobs(args, GRAPH_MODE if mode_id is None and named == GRAPH_MODE else mode_id))
     if revision:
         found.append(f"revision_of={revision}")
     found.extend(str(pair) for pair in args.knob)

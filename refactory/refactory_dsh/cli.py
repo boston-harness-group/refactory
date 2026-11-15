@@ -161,7 +161,8 @@ def cmd_ceo(args: argparse.Namespace) -> int:
         return 2
     if runs_a_mode:
         # A named mode takes them as its knobs; one that does not declare them refuses them by name.
-        args.knob = run_flags.knobs(args, None, name=args.name, revision=args.revise)
+        args.knob = run_flags.knobs(args, None, name=args.name, revision=args.revise,
+                                    named=mode or target)
         return _forward("refactory_dsh.interactive", _run_argv(mode or target, args))
 
     from refactory_dsh.brief_guard import require_brief

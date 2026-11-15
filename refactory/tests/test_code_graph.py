@@ -731,6 +731,16 @@ def test_every_graph_knob_a_run_is_given_is_declared(tmp_path, monkeypatch, mode
         assert not any(k.startswith("code_graph") for k in given)
 
 
+def test_design_run_by_its_full_name_gets_the_settings(tmp_path, monkeypatch):
+    from refactory_dsh import run_flags
+    _project(tmp_path, monkeypatch, {"code_graph": {"timeout_s": 60}})
+    named = run_flags.knobs(_flags(), None, named="default_pack/design")
+    assert "code_graph_timeout_s=60" in named
+    assert not any(k.startswith("code_graph_timeout") for k in
+                   run_flags.knobs(_flags(), None, named="counting_pack/fixed_step"))
+    assert "code_graph=0" in run_flags.knobs(_flags("--no-graph"), None, named="counting_pack/fixed_step")
+
+
 def test_design_fast_refuses_no_graph():
     from refactory_dsh import run_flags
     problem = run_flags.refusal(_flags("--no-graph"), "default_pack/design_fast",
@@ -755,7 +765,7 @@ def test_lowered_build_code_graph_is_fn_node():
     workflow = lowering.to_workflow(state)
     node = workflow.nodes["build_code_graph"]
     assert node.command.endswith("refactory_dsh.code_graph:build_code_graph")
-    assert "code-graph/" in (getattr(node, "writes", None) or [])
+    assert ".refactory/code-graph/" in (getattr(node, "writes", None) or [])
 
 
 def test_spine_node_runner_runs_build_code_graph(tmp_path):
