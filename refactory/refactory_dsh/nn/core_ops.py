@@ -1998,9 +1998,10 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
     except Exception:  # noqa: BLE001 - a note, never a refusal
         unread = []
     taken, toolless = _taken_away(before, after, added, removed)
-    # A removed step's own settings (`<id>__...`) always go with it; the others are news.
+    # A removed step's own settings (`<id>_...`, `<id>__...`) always go with it; the
+    # others are news.
     dropped = sorted(k for k in set(old_knobs) - set(new_knobs)
-                     if not any(k.startswith(f"{node_id}__") for node_id in removed))
+                     if not any(k.startswith(f"{node_id}_") for node_id in removed))
     parts = []
     if added:
         parts.append("added " + ", ".join(added))

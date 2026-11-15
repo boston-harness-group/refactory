@@ -418,8 +418,6 @@ def test_merge_makes_two_steps_one_with_the_first_inputs_and_the_second_outputs(
     _sound(applier, out)
 
 
-@needs_spine
-
 def test_merge_keeps_only_the_knobs_its_step_reads_and_says_which_went():
     """``depth`` was the op ``clean``'s setting; the merged agent's prompt never names it,
     so it goes, and the notes say so. The merged text names what ``clean`` made instead of
@@ -475,6 +473,16 @@ def test_remove_says_what_it_took_from_the_steps_it_kept():
     assert "solo__system_prompt" not in notes[0]
 
 
+def test_a_removed_steps_own_knobs_are_not_news():
+    """``review_task`` and ``finalize_task`` are the merged steps' own prompt knobs: they go
+    with the steps, and the notes do not list them as dropped settings."""
+    edit = {"op": "merge", "steps": ["review", "finalize"]}
+    applier, out = _ok("fuzz_draft_review", edit)
+    assert {"review_task", "finalize_task"} <= set(applier.seed_state["knobs"]) - set(out.state["knobs"])
+    notes = core_ops.wiring_notes(edit, applier.seed_state, out.state)
+    assert notes and "removed finalize, review" in notes[0] and "dropped" not in notes[0], notes
+
+
 def test_splitting_a_step_that_uses_tools_says_its_tools_went():
     applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
     state = json.loads(json.dumps(applier.seed_state))
@@ -484,6 +492,7 @@ def test_splitting_a_step_that_uses_tools_says_its_tools_went():
     notes = core_ops.wiring_notes(edit, state, out.state)
     assert notes and "the tools of review went with it" in notes[0], notes
 
+@needs_spine
 @pytest.mark.parametrize("seed, edit", [
     ("fuzz_draft_review", {"op": "split", "step": "finalize"}),
     ("fuzz_draft_review", {"op": "split", "step": "review", "into": [{"kind": "agent",
