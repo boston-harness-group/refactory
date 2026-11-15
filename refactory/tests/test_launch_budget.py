@@ -23,10 +23,10 @@ from test_qa_judge import _answers, _design, _round, _tool
 from tests_support import FakeModel, git_repo, overwatch_judgment, qa_judgment
 
 #: What one passing design round may launch from refactory's own code, by program, and in
-#: all. Measured on 2026-11-13: 429 git launches with the target guard's seven git commands
-#: a snapshot, 225 with three, and nothing else.
-BUDGET = {"git": 240}
-TOTAL = 250
+#: all. Measured on 2026-11-15: 487 git launches with the target guard's seven git commands
+#: a snapshot, 259 with three, and nothing else.
+BUDGET = {"git": 280}
+TOTAL = 290
 
 #: The launches being counted while a test of this module runs; empty otherwise.
 _COUNTING: list[Counter] = []
