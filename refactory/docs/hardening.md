@@ -1459,9 +1459,13 @@ emission, budget exhaustion, or a person's stop — leaves the worktree clean.
   merge commit, the worktree record advances so a later push fast-forwards.
 - `test_apply_corrections_no_ledger_leaves_design_unchanged`: with no ledger,
   the agent does not run and design.md is unchanged.
-- `test_unresolved_conflict_stops_after_budget`: a builder that never resolves
-  stops after check_attempts, with a clean worktree (no MERGE_HEAD, no
-  unmerged entries).
+- `test_an_unresolved_mid_run_conflict_is_delivered_as_a_draft_naming_it`: a
+  builder that never resolves a conflict with main ends in a draft pull request
+  naming the conflict, after one send-back (check_attempts), with a clean
+  worktree (no MERGE_HEAD, no unmerged entries).
+- `test_a_conflict_that_comes_back_every_delivery_stops_at_its_budget`: with
+  main moving before every delivery, the conflict is sent back check_attempts
+  times and no more, naming the file.
 
 ## 17. Goal completion requires a finished run (#347, C1)
 
