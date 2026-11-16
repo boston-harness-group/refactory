@@ -1205,7 +1205,7 @@ class Executor:
                         # governs it is the data node's — not the last node of the pass
                         # before it.
                         self.ctx.node_id = node.id
-                        # The order the spine's ops see them in (`lowering.op_io`).
+                        # As authored, as the spine hands them to its ops (`graph.op_io`).
                         self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         # The nodes read the item without its grader-only fields.
@@ -1383,7 +1383,7 @@ class Executor:
 
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
-            # The order the spine's ops see them in (`lowering.op_io`).
+            # As authored, as the spine hands them to its ops (`graph.op_io`).
             self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
             self.ctx._produced = set()  # noqa: SLF001
             step_started = time.time()
@@ -1541,7 +1541,7 @@ class Executor:
                 continue
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
-            # The order the spine's ops see them in (`lowering.op_io`).
+            # As authored, as the spine hands them to its ops (`graph.op_io`).
             self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
             self.ctx._produced = set()  # noqa: SLF001
             started = time.time()
@@ -1775,7 +1775,7 @@ class Executor:
             "task": dict(self.ctx.task),
             "callable_target": callable_target,
             "node_id": node.id,
-            # The order the spine's ops see them in (`lowering.op_io`).
+            # As authored, as the spine hands them to its ops (`graph.op_io`).
             "writes": op_io(node)[0],
             "reads": op_io(node)[1],
             "produces": op_io(node)[2],

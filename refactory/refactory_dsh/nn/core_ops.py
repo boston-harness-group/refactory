@@ -375,7 +375,9 @@ def _renamed_code(code: str, source: Node, node_id: str, facts: Sequence[str],
     did, and what it returns under ``source``'s fact and file names is renamed to the
     copy's, in declaration order (one the copy does not declare is dropped). The code
     names its outputs itself, so a bare copy returns the original's and is refused at run
-    time. The names are the copy's own, so a copy of a copy wraps a wrapper soundly."""
+    time. The names are the copy's own, so a copy of a copy wraps a wrapper soundly. Code
+    whose ``main`` calls itself calls the wrapper and is renamed twice, which changes
+    nothing: the copy's names are fresh, never one of ``source``'s."""
     if list(source.produces) == list(facts) and list(source.writes) == list(files):
         return code
     tag = re.sub(r"\W", "_", node_id)

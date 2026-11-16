@@ -318,7 +318,7 @@ def run_data_concurrent(
                         item_deadline_s, node.id, item_id,
                     )
                 child.ctx.node_id = node.id
-                # The order the spine's ops see them in (`lowering.op_io`).
+                # As authored, as the spine hands them to its ops (`graph.op_io`).
                 child.ctx._declared, child.ctx._declared_reads, child.ctx._declared_facts = op_io(node)  # noqa: SLF001
                 child.ctx._produced = set()  # noqa: SLF001
                 from refactory_dsh.task import node_item

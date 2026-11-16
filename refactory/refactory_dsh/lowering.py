@@ -129,7 +129,7 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if node.required_reads:
             # The node runner refuses to run the node while one is missing (`run.run_node`),
             # as the walker does.
-            entry["required_reads"] = sorted(node.required_reads)
+            entry["required_reads"] = list(node.required_reads)
         if node.feedback_keys:
             entry["feedback_keys"] = list(node.feedback_keys)
         rule = graph.retry_rule(node_id)
@@ -580,8 +580,9 @@ def node_manifest(state: dict[str, Any], node_id: str) -> dict[str, Any]:
         "id": node.id,
         "type": {"op": "FnNode", "agent": "AgentNode", "gate": "GateNode"}[node.kind],
         "command": node.call or node.evaluator,
-        "reads": sorted(node.reads),
-        "writes": sorted(node.writes),
+        # As authored, as `node_declarations` carries them (`graph.op_io`).
+        "reads": list(op_io(node)[1]),
+        "writes": list(op_io(node)[0]),
     }
 
 

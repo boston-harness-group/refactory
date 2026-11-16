@@ -122,6 +122,66 @@ def test_collect_and_select_agree_on_both_runtimes(tmp_path, monkeypatch):
     assert spine["gathered"] == walker.facts["gathered"] and "### extra.txt" in spine["gathered"]
 
 
+class OrderedWiring(nn.Mode):
+    """`Wiring` with names whose sorted order is not their declared order: ``select``'s
+    label file (``verdict.txt``) sorts after the files it chooses from, and ``collect``
+    reads its files in reverse alphabetical order. Both ops read meaning into the order
+    their reads were declared in, so a runtime that sorted them would break ``select``
+    and reorder ``collect``'s sections."""
+
+    name = "ordered_wiring"
+
+    def build(self) -> nn.Graph:
+        return fg._graph([
+            fg.op("setup", writes=("brief.txt",), produces=("brief",)),
+            nn.Node("split", "fork", targets=("draft_a", "draft_b")),
+            fg.agent("draft_a", "Draft one from {{brief}}", writes="a.md"),
+            fg.agent("draft_b", "Draft another from {{brief}}", writes="b.md"),
+            nn.Node("merge", "join", sources=("draft_a", "draft_b")),
+            fg.agent("judge", "Name the better draft", writes="verdict.txt",
+                     reads=("a.md", "b.md")),
+            nn.Node("pick", "op", call=operators.SELECT_CALL,
+                    reads=("verdict.txt", "a.md", "b.md"), writes=("chosen.txt",),
+                    produces=("chosen",)),
+            nn.Node("gather", "op", call=operators.COLLECT_CALL,
+                    reads=("verdict.txt", "chosen.txt", "brief.txt"), produces=("gathered",)),
+            fg.agent("finalize", "Finish from:\n{{gathered}}", writes="answer.txt"),
+        ], [("setup", "split"), ("split", "merge"), ("draft_a", "merge"), ("draft_b", "merge"),
+            ("merge", "judge"), ("judge", "pick"), ("pick", "gather"), ("gather", "finalize")])
+
+
+ORDERED_ANSWERS = {"draft_a": "first draft", "draft_b": "second draft",
+                   "judge": "b\nIt is clearer.", "finalize": "done"}
+
+
+def _in_declared_order(gathered: str) -> bool:
+    return gathered.index("### verdict.txt\n") < gathered.index("### chosen.txt\n") < \
+        gathered.index("### brief.txt\n")
+
+
+def test_select_and_collect_read_their_inputs_in_declared_order_on_the_walker(tmp_path):
+    state = OrderedWiring().state_dict()
+    assert nn.validate_state(state) == [], nn.validate_state(state)
+    graph = nn.Graph.from_state(state["graph"])
+    result = execute(graph, tmp_path, model=sf.ScriptedModel(ORDERED_ANSWERS), max_steps=200)
+    assert result.exit_ok, result.error
+    assert "second draft" in result.facts["chosen"]
+    assert _in_declared_order(result.facts["gathered"]), result.facts["gathered"]
+
+
+@needs_spine
+def test_select_and_collect_read_their_inputs_in_declared_order_on_both_runtimes(
+        tmp_path, monkeypatch):
+    for node_id, answer in ORDERED_ANSWERS.items():
+        monkeypatch.setitem(sf.ANSWERS, node_id, answer)
+    seed, state = sf.Seed("ordered_wiring", OrderedWiring), OrderedWiring().state_dict()
+    walked, walker = sf.check_walker(seed, state, tmp_path / "walker")
+    assert walked == [] and walker is not None and "second draft" in walker.facts["chosen"]
+    assert sf.check_spine(seed, state, walker, tmp_path) == []
+    spine = json.loads((tmp_path / "spine" / "facts.json").read_text())
+    assert "second draft" in spine["chosen"] and _in_declared_order(spine["gathered"])
+
+
 def test_collect_shows_a_long_or_binary_file_as_its_path_and_size(tmp_path, monkeypatch):
     monkeypatch.setattr(operators, "COLLECT_TEXT_CHARS", 10)
     ctx = nn.RunContext(tmp_path)

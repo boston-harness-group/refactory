@@ -947,3 +947,26 @@ def test_a_macro_that_breaks_a_readable_graph_still_raises(monkeypatch):
     assert "avoids every gate" in nn_edits.precheck(
         {"op": "route", "after": "decide", "judge": "agent"}, _gateless("fuzz_fork_join"))
 
+
+def test_a_copied_code_step_returns_its_own_outputs_even_when_main_calls_itself():
+    """A copy of a code step renames what the original returns to the copy's names; a
+    ``main`` that calls itself reaches the wrapper and is renamed twice, harmlessly."""
+    from refactory_dsh.nn.graph import Node
+
+    code = ("def main(inp):\n"
+            "    if inp.get('again'):\n"
+            "        return main({})\n"
+            "    return {'facts': {'x_fact': 1}, 'files': {'x.txt': 't'}, 'note': 'kept'}\n")
+    source = Node("x", "op", call=snippet.RUN, writes=("x.txt",), produces=("x_fact",))
+    wrapped = core_ops._renamed_code(code, source, "x_a", ["x_a"], ["x_a.txt"])
+    assert snippet.static_issues(wrapped) == []
+    space: dict[str, Any] = {}
+    exec(wrapped, space)  # noqa: S102 - the test runs the code it built
+    expected = {"facts": {"x_a": 1}, "files": {"x_a.txt": "t"}, "note": "kept"}
+    assert space["main"]({}) == expected
+    assert space["main"]({"again": True}) == expected
+    dropped: dict[str, Any] = {}
+    exec(core_ops._renamed_code(code, source, "x_b", ["x_b"], []), dropped)  # noqa: S102
+    assert dropped["main"]({}) == {"facts": {"x_b": 1}, "files": {}, "note": "kept"}
+    assert core_ops._renamed_code(code, source, "x", ["x_fact"], ["x.txt"]) == code
+

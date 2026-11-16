@@ -167,19 +167,20 @@ def test_long_tier_every_accepted_edit_is_sound(tmp_path):
 # ── what the long tier found once (#674), at the harness's level ──────────
 
 
-def test_an_op_sees_its_declared_inputs_in_the_order_the_spine_hands_them(tmp_path):
-    """The spine hands an op its reads sorted (`lowering.node_declarations`); the walker
-    handed them in declared order, so an op that walks them wrote different text on the
-    two runtimes (fuzz_nested_fork's ``end`` reads ``solo.txt, inner.txt``)."""
+def test_an_op_sees_its_declared_inputs_in_the_order_they_were_declared(tmp_path):
+    """The spine's declarations sorted an op's reads while the walker handed them as
+    declared, so an op that walks them wrote different text on the two runtimes
+    (fuzz_nested_fork's ``end`` reads ``solo.txt, inner.txt``). Both now keep the
+    declared order (`graph.op_io`): ``select`` and ``collect`` read meaning into it."""
     from refactory_dsh.lowering import node_declarations
 
     seed = sf.seeds()["fuzz_nested_fork"]
     state = sf.Applier(seed).seed_state
     assert list(sf._graph_of(state).nodes["end"].reads) == ["solo.txt", "inner.txt"]
-    assert node_declarations(state)["end"]["reads"] == ["inner.txt", "solo.txt"]
+    assert node_declarations(state)["end"]["reads"] == ["solo.txt", "inner.txt"]
     result = sf.run_walker(seed, state, tmp_path / "run")
     assert result.exit_ok, result.error
-    assert "written by end from inner.txt, solo.txt" in (tmp_path / "run" / "answer.txt").read_text()
+    assert "written by end from solo.txt, inner.txt" in (tmp_path / "run" / "answer.txt").read_text()
 
 
 def test_a_compound_refusal_of_a_knob_a_protected_node_reads_names_that_edit():
