@@ -40,6 +40,9 @@ from .validate import consumed
 TOLD_CHARS = 48
 #: How many folded ops deep an input's making is shown.
 FOLD_DEPTH = 3
+#: A loop's line: the step it sends back to, its judge, its cap and how often the step then
+#: runs at most (cap + 1). The legend's form is made from the same template.
+LOOP_LINE = "loop({step}, {judge}, max {cap} -> {runs} runs{knob})"
 #: The key prefix of a line no reader recognised.
 FALLBACK = "(fallback)"
 
@@ -248,9 +251,10 @@ class _View:
                       if (gate_id, e.target) in self.back)
         cap = node.bound("max_iterations", self.values)
         knob = node.bound_knob("max_iterations")
-        return (f"loop({', '.join(self._shown_from(t) for t in back)}, {self.judge(gate_id)}, "
-                f"max {cap}{'*' if knob in self.frozen else ''} -> {cap + 1} runs"
-                f"{f', knob {knob}' if knob else ''})")
+        return LOOP_LINE.format(step=", ".join(self._shown_from(t) for t in back),
+                                judge=self.judge(gate_id),
+                                cap=f"{cap}{'*' if knob in self.frozen else ''}",
+                                runs=cap + 1, knob=f", knob {knob}" if knob else "")
 
     def route(self, gate_id: str) -> str:
         before = sorted(self._shown_before(gate_id))
@@ -470,13 +474,31 @@ READERS: dict[str, Callable[..., str]] = {
 }
 
 
+#: The key of the one line a view that could not be drawn has.
+UNAVAILABLE = "(unavailable)"
+
+#: How each block of the view reads, said once in the request's legend; the test holds
+#: each to what its reader draws (a loop of cap N runs its step N+1 times).
+FORMS = {
+    "parallel": "parallel fork { ... } -> join",
+    "loop": LOOP_LINE.format(step="step", judge="judge ...", cap="N", runs="N+1", knob=""),
+    "route": "route(after step, judge ..., {label: step})",
+    "per item": "per item (data) { ... }",
+}
+
+
 def view_lines(state: Mapping[str, Any], protected: Sequence[str] = (),
                graders: Sequence[str] = ()) -> list[Line]:
-    """The pipeline view of ``state``, line by line; empty when the graph cannot be read."""
+    """The pipeline view of ``state``, line by line. A graph the view cannot draw gives one
+    line saying so, with why (and the error is logged), never nothing: the request and a
+    candidate's record then say the view is missing rather than silently leaving it out."""
     try:
         return _View(state, protected, graders).lines()
-    except Exception:  # noqa: BLE001 - an unreadable graph is the validator's to report
-        return []
+    except Exception as exc:  # noqa: BLE001 - said, never raised: the validator judges graphs
+        import logging
+
+        logging.getLogger(__name__).warning("pipeline view unavailable: %s", exc, exc_info=True)
+        return [Line(UNAVAILABLE, 0, f"pipeline view unavailable: {type(exc).__name__}: {exc}")]
 
 
 def render(state: Mapping[str, Any], protected: Sequence[str] = (),
@@ -486,9 +508,11 @@ def render(state: Mapping[str, Any], protected: Sequence[str] = (),
                      for line in view_lines(state, protected, graders))
 
 
-def fallback_count(state: Mapping[str, Any], protected: Sequence[str] = ()) -> int:
+def fallback_count(state: Mapping[str, Any], protected: Sequence[str] = (),
+                   graders: Sequence[str] = ()) -> int:
     """How many lines no reader recognised (drawn generically)."""
-    return sum(line.key.startswith(FALLBACK) for line in view_lines(state, protected))
+    return sum(line.key.startswith(FALLBACK)
+               for line in view_lines(state, protected, graders))
 
 
 def _structural(key: str) -> bool:
@@ -500,8 +524,12 @@ def changed_lines(before: Mapping[str, Any], after: Mapping[str, Any],
     """What an edit built, as the view's own lines: each new (``+``) or changed (``~``)
     line of ``after``'s view against ``before``'s, keyed by step, gate or fork, with the
     block it sits in, and each one gone (``- removed``)."""
-    old = {line.key: line for line in view_lines(before, protected, graders)}
+    before_lines = view_lines(before, protected, graders)
     new = view_lines(after, protected, graders)
+    missing = [line.text for line in (*before_lines, *new) if line.key == UNAVAILABLE]
+    if missing:  # what an edit built cannot be said without both views: said so
+        return [f"! {missing[0]}"]
+    old = {line.key: line for line in before_lines}
     out = []
     for line in new:
         if _structural(line.key):

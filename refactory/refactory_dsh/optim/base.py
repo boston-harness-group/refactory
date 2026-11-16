@@ -1675,23 +1675,28 @@ def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[d
     from refactory_dsh.nn.pipeline_view import render
 
     state = _fit_state(node_states, edges, knobs)
-    text = render(state, protected) if state is not None else ""
-    if not text:
-        return []
+    text = (render(state, protected) if state is not None
+            else "pipeline view unavailable: the graph does not read back")
     return [PIPELINE_VIEW_LEAD, "```text", text, "```"]
 
 
 #: What the pipeline view's words mean.
-PIPELINE_VIEW_LEAD = (
-    "The pipeline, one line per step, generated from the graph in the operators' own words "
-    "(full node detail is in the reference at the end): `sees` lists a step's inputs as "
-    "`\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain op that only "
-    "assembles a model step's input is folded in as `name (via op: its inputs)`; an agent "
-    "with tools sees the run dir (or its own workspace); `told` is each knob whose text "
-    "reaches the step, its opening words (`*` frozen; `?` read by an op with several "
-    "outputs, for all of them), or a code step's code; `->` what it writes; "
-    "`parallel fork { ... } -> join`, `[optional]`; `loop(step, judge ..., max N -> N+1 "
-    "runs)`; `route(after step, judge ..., {label: step})`; `[protected]`.")
+def _view_lead() -> str:
+    from refactory_dsh.nn.pipeline_view import FORMS
+
+    return (
+        "The pipeline, one line per step, generated from the graph in the operators' own "
+        "words (full node detail is in the reference at the end): `sees` lists a step's "
+        "inputs as `\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain "
+        "op that only assembles a model step's input is folded in as `name (via op: its "
+        "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "
+        "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
+        "an op with several outputs, for all of them), or a code step's code; `->` what it "
+        "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
+        + "; `[optional]`; `[protected]`.")
+
+
+PIPELINE_VIEW_LEAD = _view_lead()
 
 
 def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:

@@ -532,3 +532,44 @@ def test_an_agent_only_a_later_gate_reads_keeps_its_own_line():
     text = pv.render(state)
     assert text.splitlines()[0].startswith("a agent"), text
     assert "loop(b, judge loop_ops:always_proceed, max 2 -> 3 runs)" in text, text
+
+
+def test_a_view_that_cannot_be_drawn_says_so_in_the_request_and_the_record(caplog):
+    broken = {"graph": {"start": "a", "nodes": {"a": {"id": "a", "kind": "no_such_kind"}},
+                        "edges": []}, "knobs": {}}
+    with caplog.at_level("WARNING"):
+        lines = pv.view_lines(broken)
+    assert len(lines) == 1 and lines[0].key == pv.UNAVAILABLE
+    assert lines[0].text.startswith("pipeline view unavailable: ")
+    assert any("pipeline view unavailable" in r.getMessage() for r in caplog.records)
+    good = _seed("fuzz_draft_review")
+    assert pv.changed_lines(good, broken)[0].startswith("! pipeline view unavailable: ")
+    unreadable = base.pipeline_view_lines([{"id": "x", "kind": "nope"}], [], [], ())
+    assert "pipeline view unavailable: the graph does not read back" in unreadable
+
+
+def test_the_legend_s_forms_are_what_the_readers_draw():
+    """Each block form the request's legend gives (`FORMS`) matches its reader's output on
+    a graph that has it: a loop of cap N says N+1 runs."""
+    assert all(form in base.PIPELINE_VIEW_LEAD for form in pv.FORMS.values())
+    s1 = _mode("livemath/solver").state_dict()
+    for cap in (1, 3):
+        looped = nn_edits.apply({"op": "loop", "step": "solve", "judge": "agent",
+                                 "max_iterations": cap}, s1)
+        line = _lines(looped)["solve_check"]
+        found = re.match(r"loop\((\w+), judge .*, max (\d+) -> (\d+) runs", line)
+        assert found and (int(found.group(2)), int(found.group(3))) == (cap, cap + 1), line
+    text = pv.render(_seed("fuzz_fork_join"))
+    assert re.search(r"(?m)^parallel \w+ \{$", text) and re.search(r"(?m)^\} -> \w+$", text)
+    routed = pv.render(nn_edits.apply({"op": "route", "after": "draft", "judge": "agent",
+                                       "to": {"proceed": "review", "revise": {"kind": "agent"}}},
+                                      _seed("fuzz_draft_review")))
+    assert re.search(r"(?m)^route\(after \w+, judge .*, \{\w+: \w+, \w+: \w+\}\)$", routed)
+    assert re.search(r"(?m)^per item \(\w+( -> [^)]*)?\) \{$", pv.render(_seed("fuzz_data_pass")))
+
+
+def test_the_fallback_count_reads_the_graders_as_the_view_does():
+    state = _seed("fuzz_data_pass")
+    for graders in ((), ("check",)):
+        assert pv.fallback_count(state, (), graders) == sum(
+            line.key.startswith(pv.FALLBACK) for line in pv.view_lines(state, (), graders))
