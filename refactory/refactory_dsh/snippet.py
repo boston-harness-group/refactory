@@ -38,6 +38,15 @@ with it). Nothing falls back to running unsandboxed: where the sandbox is not
 available (:func:`available`) a code node fails, and the request does not offer code
 nodes.
 
+On macOS, which has no namespaces, the sandbox is Seatbelt (`sandbox-exec`) with a
+deny-by-default profile (:func:`_seatbelt_profile`): no network, no other process
+started or forked, reads of the system libraries, the interpreter's own install and a
+fresh scratch directory only, writes to that scratch directory only (deleted after the
+step); the same CPU and file-size caps, the memory cap kept by a watchdog on the
+process's footprint (macOS does not enforce ``RLIMIT_AS``), the same wall clock and
+environment. It too fails closed: where `sandbox-exec` or the profile cannot run, a code
+node fails and the request does not offer code nodes.
+
 The static check (rule V18, :func:`static_issues`) is defence in depth: it never
 executes the code, and it refuses what pure computation on ``inp`` never needs.
 """
@@ -315,25 +324,190 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+# ── macOS: Seatbelt ───────────────────────────────────────────────────────
+
+#: The Seatbelt runner: the system's own, never one found on PATH.
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+#: How often the watchdog reads the code's memory footprint, in seconds.
+MEMORY_POLL_S = 0.02
+#: The most the macOS scratch directory may hold, in bytes and in entries: Linux's hidden
+#: directories are 8 MB tmpfs mounts, and the scratch directory is on disk, so the watchdog
+#: holds it to the same size (and to a count, against a flood of empty files).
+SCRATCH_BYTES = 8 << 20
+SCRATCH_ENTRIES = 1024
+#: The scratch directory is measured every this many memory polls.
+SCRATCH_EVERY = 5
+#: Read-only system locations every macOS process needs to start (the dynamic loader,
+#: libSystem, the system frameworks); none holds a person's or a run's files.
+_MAC_SYSTEM_READS = ("/usr/lib", "/System/Library")
+
+
+@functools.lru_cache(maxsize=None)
+def _mac_interpreter() -> tuple[str, str]:
+    """``(interpreter, its install)`` the macOS sandbox runs and may read, both resolved:
+    the base interpreter of the Python running refactory (macOS has no system Python to
+    rely on). Refused when its install is ``/``, the home directory or a directory holding
+    it, since the profile lets the code read the whole install."""
+    python = os.path.realpath(sys.executable)
+    prefix = os.path.realpath(sys.base_prefix)
+    home = os.path.realpath(os.path.expanduser("~"))
+    if prefix == "/" or home == prefix or home.startswith(prefix.rstrip("/") + "/"):
+        raise SnippetError(f"the interpreter's install {prefix} holds the home directory, so "
+                           "the sandbox cannot let code read it")
+    if not python.startswith(prefix.rstrip("/") + "/"):
+        raise SnippetError(f"the interpreter {python} is not inside its install {prefix}")
+    return python, prefix
+
+
+def _sbpl(path: str) -> str:
+    """``path`` as a Seatbelt string literal; a path a literal cannot hold plainly is refused."""
+    if any(ch in path for ch in ('"', "\\")) or not path.isprintable() or not path.startswith("/"):
+        raise SnippetError(f"the sandbox cannot name the path {path!r}")
+    return f'"{path}"'
+
+
+def _seatbelt_profile(python: str, prefix: str, scratch: str) -> str:
+    """The deny-by-default profile a macOS code step runs under. Allowed: starting the one
+    interpreter, reading the root directory itself (the loader opens it), the system
+    libraries, the interpreter's install, ``/dev/null`` and the scratch directory, and
+    writing the scratch directory and ``/dev/null``. Everything else is denied: the
+    network, other processes (exec, fork, signals, their information), Mach and IPC
+    services, and every other file -- homes, keychains, runs, projects, temporary files."""
+    reads = " ".join([f"(subpath {_sbpl(path)})" for path in (*_MAC_SYSTEM_READS, prefix, scratch)])
+    return ("(version 1)\n"
+            "(deny default)\n"
+            f"(allow process-exec (literal {_sbpl(python)}))\n"
+            f'(allow file-read* (literal "/") (literal "/dev/null") {reads})\n'
+            f'(allow file-write* (literal "/dev/null") (subpath {_sbpl(scratch)}))\n')
+
+
+def _mac_command(scratch: str, extra: tuple[str, ...]) -> list[str]:
+    """`sandbox-exec` running the driver under :func:`_seatbelt_profile`: one process, the
+    interpreter exec'd in place. A directory to hide (``extra``) that the profile would let
+    the code read is refused rather than exposed."""
+    python, prefix = _mac_interpreter()
+    for path in extra:
+        resolved = os.path.realpath(path) if path else ""
+        if resolved and any(resolved == allowed or resolved.startswith(allowed.rstrip("/") + "/")
+                            for allowed in (*_MAC_SYSTEM_READS, prefix)):
+            raise SnippetError(f"{resolved} is inside what the sandbox may read, so it cannot "
+                               "be hidden")
+    return [SANDBOX_EXEC, "-p", _seatbelt_profile(python, prefix, scratch),
+            python, "-I", "-S", "-c", _DRIVER]
+
+
+def _confine_mac() -> None:  # pragma: no cover - runs in the forked child
+    """The macOS child's preexec: its own session (a timeout kills the whole group) and the
+    CPU and file-size caps, failing closed. No process cap is set: the profile denies
+    every fork and exec but the interpreter's own. Memory is kept by the watchdog."""
+    import resource
+
+    os.setsid()
+    for which, value in ((resource.RLIMIT_CPU, CPU_S), (resource.RLIMIT_FSIZE, FILE_MB << 20)):
+        resource.setrlimit(which, (value, value))
+
+
+def _footprint(pid: int) -> int | None:
+    """The physical footprint of process ``pid`` in bytes (`proc_pid_rusage`), or None when
+    it cannot be read (the process is gone)."""
+    import ctypes
+
+    class _RusageInfoV0(ctypes.Structure):
+        _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(name, ctypes.c_uint64) for name in (
+            "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups", "pageins",
+            "wired_size", "resident_size", "phys_footprint", "proc_start_abstime",
+            "proc_exit_abstime")]
+
+    libproc = _libproc()
+    info = _RusageInfoV0()
+    if libproc.proc_pid_rusage(pid, 0, ctypes.byref(info)) != 0:
+        return None
+    return int(info.phys_footprint)
+
+
+@functools.lru_cache(maxsize=None)
+def _libproc() -> Any:
+    import ctypes
+    import ctypes.util
+
+    return ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+
+
+def _scratch_use(scratch: str) -> tuple[int, int]:
+    """``(bytes, entries)`` the scratch directory holds, links not followed."""
+    size = entries = 0
+    for directory, names, files in os.walk(scratch):
+        entries += len(names) + len(files)
+        for name in files:
+            try:
+                size += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:
+                pass
+        if entries > SCRATCH_ENTRIES:
+            break
+    return size, entries
+
+
+def _watch(proc: subprocess.Popen, limit: int, scratch: str, stop: Any, over: list[str]) -> None:
+    """Kill ``proc``'s group the moment its footprint passes ``limit`` bytes, or its scratch
+    directory passes :data:`SCRATCH_BYTES` or :data:`SCRATCH_ENTRIES`, saying which in
+    ``over``; polled every :data:`MEMORY_POLL_S` until ``stop`` is set."""
+    polls = 0
+    while not stop.is_set() and proc.poll() is None:
+        used = _footprint(proc.pid)
+        if used is not None and used > limit:
+            over.append(f"went over its {limit >> 20} MB memory limit (reached {used >> 20} MB)")
+        polls += 1
+        if not over and polls % SCRATCH_EVERY == 0:
+            size, entries = _scratch_use(scratch)
+            if size > SCRATCH_BYTES or entries > SCRATCH_ENTRIES:
+                over.append(f"filled its scratch directory past {SCRATCH_BYTES >> 20} MB or "
+                            f"{SCRATCH_ENTRIES} entries")
+        if over:
+            _kill_group(proc)
+            return
+        stop.wait(MEMORY_POLL_S)
+
+
 def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
                startup_s: float | None = None) -> Any:
     """``main(inp)`` of ``code`` in the sandbox. Two clocks: the sandbox has
     ``startup_s`` (default :data:`STARTUP_S`) to start -- its driver says so with its
     first line -- and only then does the code's ``timeout_s`` begin. Missing the first is
     :class:`SandboxUnavailable`; the second, :class:`SnippetTimeout`."""
-    import threading
-    import time
-
     startup_s = STARTUP_S if startup_s is None else startup_s
     try:
         payload = json.dumps({"code": code, "inp": inp})
     except (TypeError, ValueError) as exc:
         raise SnippetError(f"the code node's input is not JSON: {exc}") from exc
+    if sys.platform == "darwin":
+        import tempfile
+
+        scratch = os.path.realpath(tempfile.mkdtemp(prefix="refactory-code-"))
+        try:
+            return _run_sandboxed(_mac_command(scratch, extra),
+                                  {**_environment(), "HOME": scratch, "TMPDIR": scratch},
+                                  scratch, _confine_mac, payload, timeout_s=timeout_s,
+                                  startup_s=startup_s, watch=scratch)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    return _run_sandboxed(_command(extra), _environment(), "/", _confine, payload,
+                          timeout_s=timeout_s, startup_s=startup_s, watch=None)
+
+
+def _run_sandboxed(command: list[str], env: dict[str, str], cwd: str, preexec: Any,
+                   payload: str, *, timeout_s: float, startup_s: float,
+                   watch: str | None) -> Any:
+    """Run the driver as ``command`` and read its reply (see :func:`_sandboxed`). With
+    ``watch`` (the macOS scratch directory), the watchdog (:func:`_watch`) keeps the
+    memory and scratch caps."""
+    import threading
+    import time
+
     try:
         proc = subprocess.Popen(
-            _command(extra), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=_environment(), cwd="/",
-            preexec_fn=_confine,
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env, cwd=cwd, preexec_fn=preexec,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise SnippetError(f"the sandbox could not start: {exc}") from exc
@@ -357,6 +531,10 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
     readers = [threading.Thread(target=feed, daemon=True),
                threading.Thread(target=drain, args=(proc.stdout, "out"), daemon=True),
                threading.Thread(target=drain, args=(proc.stderr, "err"), daemon=True)]
+    stop, over = threading.Event(), []
+    if watch is not None:
+        readers.append(threading.Thread(target=_watch, daemon=True,
+                                        args=(proc, MEMORY_MB << 20, watch, stop, over)))
     for reader in readers:
         reader.start()
     try:
@@ -369,10 +547,13 @@ def _sandboxed(code: str, inp: Any, *, timeout_s: float, extra: tuple[str, ...],
             raise SnippetTimeout(f"the code ran over its {timeout_s:g} s limit") from exc
     finally:
         # Whatever the snippet left running in its group goes with it.
+        stop.set()
         _kill_group(proc)
         proc.wait()
         for reader in readers[1:]:
             reader.join(5)
+    if over:
+        raise SnippetError(f"the code {over[0]}")
     out = b"".join(chunks["out"]).decode(errors="replace")
     first, _, stdout = out.partition("\n")
     stderr = b"".join(chunks["err"]).decode(errors="replace")
@@ -407,7 +588,11 @@ def _probe_cache_path() -> Path:
 
     from refactory_dsh.paths import refactory_home
 
-    key = hashlib.sha256(f"{PYTHON}\0{BASH}\0{shutil.which('unshare')}".encode()).hexdigest()[:16]
+    if sys.platform == "darwin":
+        source = f"{SANDBOX_EXEC}\0{sys.executable}\0{sys.base_prefix}"
+    else:
+        source = f"{PYTHON}\0{BASH}\0{shutil.which('unshare')}"
+    key = hashlib.sha256(source.encode()).hexdigest()[:16]
     return refactory_home() / "cache" / f"sandbox-check-{key}.json"
 
 
@@ -448,13 +633,21 @@ def _probe() -> tuple[bool, str]:
 def _check_sandbox() -> tuple[bool, str]:
     """``(ok, why)``: whether a tiny snippet runs in the real sandbox (its own start-up
     allowance, :data:`STARTUP_S`, then the code's :data:`WALL_S`)."""
-    if not sys.platform.startswith("linux"):
-        return False, f"code nodes need Linux namespaces; this is {sys.platform}"
-    if shutil.which("unshare") is None:
+    if sys.platform == "darwin":
+        if not os.access(SANDBOX_EXEC, os.X_OK):
+            return False, f"{SANDBOX_EXEC} is not there to run the Seatbelt sandbox"
+        try:
+            _mac_interpreter()
+        except SnippetError as exc:
+            return False, str(exc)
+    elif not sys.platform.startswith("linux"):
+        return False, f"code nodes need Linux namespaces or macOS's Seatbelt; this is {sys.platform}"
+    elif shutil.which("unshare") is None:
         return False, "the unshare command is not installed"
-    for needed in (PYTHON, BASH):
-        if not os.path.exists(needed):
-            return False, f"{needed} does not exist"
+    else:
+        for needed in (PYTHON, BASH):
+            if not os.path.exists(needed):
+                return False, f"{needed} does not exist"
     try:
         result = _sandboxed("def main(inp):\n    return inp['facts']['x'] + 1\n",
                             {"files": {}, "facts": {"x": 1}}, timeout_s=WALL_S, extra=())

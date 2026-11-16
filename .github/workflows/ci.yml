@@ -249,3 +249,16 @@ jobs:
           refactory/tests/test_spawn_count.py
           refactory/tests/test_target_guard.py
           refactory/tests/test_qa_judge.py
+
+      # Code steps run on macOS under Seatbelt (`snippet._seatbelt_profile`): the escape
+      # attempts, and every code-step test that needs the sandbox. Required here, so a
+      # sandbox that stopped loading fails the job instead of skipping these tests.
+      - name: Python code steps under Seatbelt
+        env:
+          REFACTORY_REQUIRE_CODE_SANDBOX: "1"
+        run: >-
+          uv run python -m pytest -q -rs -n 3
+          refactory/tests/test_code_nodes_macos.py
+          refactory/tests/test_code_nodes.py
+          refactory/tests/test_core_operators.py
+          refactory/tests/test_bound_settings.py

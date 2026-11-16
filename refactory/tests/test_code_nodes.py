@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,11 @@ from test_livemath_blocks import needs_spine
 
 needs_sandbox = pytest.mark.skipif(not snippet.available()[0],
                                    reason=f"no code-node sandbox here: {snippet.available()[1]}")
+#: macOS runs code under Seatbelt, which refuses what Linux's namespaces hide: a hidden
+#: file or directory reads as missing or empty on Linux, and as not permitted here.
+MAC = sys.platform == "darwin"
+linux_only = pytest.mark.skipif(MAC, reason="a Linux namespace detail (/proc, a process cap); "
+                                            "test_code_nodes_macos.py holds macOS's")
 
 
 @pytest.fixture(autouse=True)
@@ -175,12 +181,15 @@ def test_code_and_inputs_round_trip_and_only_ops_and_fn_gates_take_them():
 @needs_sandbox
 @pytest.mark.parametrize("code, refused", [
     ("import socket\ndef main(inp):\n    socket.create_connection(('1.1.1.1', 80), timeout=3)\n",
-     "OSError"),
-    ("def main(inp):\n    return open(inp['facts']['path']).read()\n", "FileNotFoundError"),
-    ("import os\ndef main(inp):\n    return os.listdir(inp['facts']['dir'])\n", "ok-empty"),
+     "PermissionError" if MAC else "OSError"),
+    ("def main(inp):\n    return open(inp['facts']['path']).read()\n",
+     "PermissionError" if MAC else "FileNotFoundError"),
+    ("import os\ndef main(inp):\n    return os.listdir(inp['facts']['dir'])\n",
+     "PermissionError" if MAC else "ok-empty"),
     ("import os\ndef main(inp):\n    return sorted(k for k in os.environ if 'KEY' in k or 'TOKEN' in k)\n",
      "ok-empty"),
-    ("def main(inp):\n    return len('x' * (2 * 1024 ** 3))\n", "MemoryError"),
+    ("def main(inp):\n    return len('x' * (2 * 1024 ** 3))\n",
+     "512 MB memory limit" if MAC else "MemoryError"),
 ])
 def test_the_sandbox_denies_network_files_secrets_and_memory(code, refused, tmp_path, monkeypatch):
     """No network; nothing of the run directory or the home directory (each hidden behind
@@ -703,6 +712,7 @@ _PROBE = ("import os, json, resource\n"
 
 
 @needs_sandbox
+@linux_only
 def test_the_sandbox_shows_only_its_own_processes_and_no_host_sockets():
     """A fresh /proc in a PID namespace (only the sandbox's own pids; no host cmdline or
     environ to read), /run, /var/lib and /proc/sys empty, no_new_privs, a process cap."""
@@ -729,6 +739,7 @@ def _host_processes(marker: str) -> list[str]:
 
 
 @needs_sandbox
+@linux_only
 def test_the_sandbox_leaves_no_process_behind_after_a_timeout():
     """A snippet that starts a sleeping child and then spins is killed at its wall clock,
     and its child goes with it (PID namespace, process group)."""
@@ -743,6 +754,7 @@ def test_the_sandbox_leaves_no_process_behind_after_a_timeout():
 
 
 @needs_sandbox
+@linux_only
 def test_the_sandbox_caps_its_process_count_and_cleans_up():
     marker = _marker()
     code = ("import subprocess\n"

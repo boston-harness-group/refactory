@@ -1574,8 +1574,29 @@ The snippet never gets the context, the run directory, other facts or the knobs.
 wrapper writes its outputs through the context, so declared writes and facts are still
 enforced. The host's `/etc` and `/usr` stay readable (the interpreter needs them).
 
+**On macOS**, which has no namespaces, the sandbox is Seatbelt: `/usr/bin/sandbox-exec`
+with a deny-by-default profile (`snippet._seatbelt_profile`), running the interpreter
+refactory runs on, `-I -S`, in one process:
+
+- No network of any kind (TCP, DNS, Unix sockets).
+- Reads only of `/` itself, `/dev/null`, `/usr/lib`, `/System/Library`, the interpreter's
+  own install and a fresh scratch directory (stricter than Linux, where `/etc` and `/usr`
+  stay readable). Homes, keychains, `/tmp`, runs and projects are refused, not just hidden.
+  An install that holds the home directory is refused.
+- Writes only to the scratch directory and `/dev/null`. The scratch directory is the
+  code's `HOME` and working directory, is held to 8 MB and 1,024 entries (Linux's tmpfs
+  size), and is deleted after the step.
+- No other process: fork, exec (only the interpreter itself may start), signals and other
+  processes' information are refused, so the process cap is one.
+- The same environment, 10 CPU seconds, 1 MB files and 10 s wall clock (its process
+  group killed).
+- 512 MB of memory kept by a watchdog on the process's footprint, polled every 20 ms
+  (macOS does not enforce `RLIMIT_AS`): the code is killed within about one poll of
+  passing it, so it can briefly hold a little more.
+
 The sandbox fails closed. It is unavailable when `unshare` or the system Python is
-missing, or when the probe snippet does not run (`snippet.available()`). In that case a
+missing (on macOS, `sandbox-exec`, or an interpreter whose install holds the home
+directory), or when the probe snippet does not run (`snippet.available()`). In that case a
 code node fails, the request does not describe code nodes, and an edit that adds one is
 refused `E-code-nodes`. The probe's answer, passing or failing, is kept for 5 minutes
 (`snippet.PROBE_CACHE_S`) in a per-user file every process reads, so a busy machine pays
