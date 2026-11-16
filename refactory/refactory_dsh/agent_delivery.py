@@ -548,7 +548,14 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
             path = _path(workdir, name)
             if not path.is_file():
                 raise ValueError(f"no-tools input is not a readable file: {name}")
-            inputs.append(f"### {name}\n{path.read_text()}")
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError:
+                # A step without tools sees its reads only as the text inlined here, and
+                # a binary file has none (a figure); it is told the file is there.
+                text = (f"(a binary file of {path.stat().st_size} bytes; a step without "
+                        "tools is shown text files only)")
+            inputs.append(f"### {name}\n{text}")
         prompt += "\n\n## Declared inputs\n\n" + "\n\n".join(inputs)
     ws = get_worktree_state()
     if ws is None and (workdir / WORKTREE_RECORD).exists():

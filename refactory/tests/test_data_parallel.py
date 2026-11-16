@@ -1440,17 +1440,29 @@ def test_fork_inside_data_stop(tmp_path, monkeypatch, parallelism):
     """[walker] A halt raised inside item 1's fork stops the run there.
 
     The walker has no graph control; a halt is how it stops (the spine's stop
-    control is test_fork_inside_data_stop_and_pause_spine). Item 0 finished before
-    the stop; sequentially, item 2 never starts.
+    control is test_fork_inside_data_stop_and_pause_spine). Sequentially, item 0
+    finished before the stop and item 2 never starts. Concurrently, the halt
+    cancels the items still running at their next step (`data_parallel`), so
+    which of items 0 and 2 got how far depends on how the threads interleaved;
+    what holds in any order is that the halted item is not finished and every
+    finished item ran both branches.
     """
     log = tmp_path / "walker.log"
     monkeypatch.setenv("PASS_TEST_LOG", str(log))
+    run = tmp_path / "run"
     result = _walker(_fork_graph(parallelism=parallelism, branch_b="loop_ops:fork_branch_b_stop_on_1"),
-                     tmp_path / "run")
+                     run)
     assert result.halted, f"expected halted, got exit_ok={result.exit_ok}, error={result.error}"
-    assert {"0:a", "0:b", "1:b"} <= set(_visits(log))
+    visits = _visits(log)
+    finished = {p.name.split("_")[0] for p in (run / "passes" / "data").iterdir()
+                if (p / ".done").exists()}
     if parallelism == 1:
-        assert not any(v.startswith("2:") for v in _visits(log)), _visits(log)
+        assert sorted(visits) == ["0:a", "0:b", "1:a", "1:b"], visits
+        assert finished == {"0"}, finished
+    else:
+        assert "1:b" in visits, visits
+        assert "1" not in finished, finished
+        assert all({f"{item}:a", f"{item}:b"} <= set(visits) for item in finished), (finished, visits)
 
 
 def test_fork_inside_data_pauses_at_a_user_gate(tmp_path, monkeypatch):

@@ -1236,6 +1236,12 @@ class EditGenerator:
         item = {"kind": kind, "target": target}
         if kind != "delete":
             item["content"] = f" (revised {self.counter}) "
+        if any(n.bound_knob("code") == name for n in _graph_of(state).nodes.values()):
+            # Code cut at a random place may still parse and pass V18, and then do
+            # anything at run time (return a fact it does not declare): the runtime
+            # refusing it is the point, as for `code_node`'s code that fails on purpose.
+            return {"op": "set_knob", "name": name,
+                    "patch": [item, {"kind": "append", "content": f"\n{EXPECTED_FAILURE}\n"}]}
         return {"op": "set_knob", "name": name, "patch": [item]}
 
     def compound(self, state: dict[str, Any]) -> dict[str, Any]:

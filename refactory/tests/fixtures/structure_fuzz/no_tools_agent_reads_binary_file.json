@@ -1,0 +1,49 @@
+{
+  "seed": "fuzz_file_output",
+  "edits": [
+    {
+      "edits": [
+        {
+          "op": "set_knob",
+          "name": "describe_task",
+          "value": "Describe the result.\n\n## Brief\n{{brief}}\nCompound edit 10."
+        },
+        {
+          "op": "wrap",
+          "target": "plot",
+          "node": {
+            "id": "agent11",
+            "kind": "agent",
+            "role": "solver",
+            "tool_policy": "none",
+            "reads": [
+              "figure.png"
+            ],
+            "prompt_template": "Think about {{brief}}",
+            "system_prompt_template": "You are agent11.",
+            "writes": [
+              "agent11.txt"
+            ],
+            "produces": [
+              "agent11_fact"
+            ]
+          }
+        },
+        {
+          "op": "set_knob",
+          "name": "agent11__system_prompt",
+          "patch": [
+            {
+              "kind": "append",
+              "content": "Also check step 12."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "found": [
+    "walker: failed: agent11: UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80 in position 128: invalid start byte"
+  ],
+  "fixed_by": "agent_delivery.begin names a binary read instead of decoding it (#674)"
+}
