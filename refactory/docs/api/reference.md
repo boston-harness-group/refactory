@@ -53,6 +53,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
 | class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = ()) -> None` |
+| function | `op_io` | `(node: 'Node') -> 'tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]'` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
 | function | `retry_safe` | `(node: "'Node'") -> 'bool'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
@@ -61,6 +62,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 - **`Graph`** — A mutable graph. Edits mutate it; serialization canonicalizes it.
 - **`GraphError`** — A graph could not be built or read from its serialized form.
 - **`Node`** — One step of a mode.
+- **`op_io`** — A node's writes, reads and facts in the order both runtimes hand them to its op
 - **`retry_declaration`** — A retry declaration in its one canonical form, or None for no retry.
 - **`retry_safe`** — Whether running ``node`` again in a fresh session cannot start from what a failed
 - **`workspace_declaration`** — A workspace declaration in its one canonical form, or None for ``none``.
