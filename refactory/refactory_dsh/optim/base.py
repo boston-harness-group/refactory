@@ -1802,6 +1802,15 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         full_refusals.append(refused)
     if not rows:
         return []
+    from refactory_dsh.nn.core_ops import TASK, _readable, _task_inputs
+
+    task = sorted(_readable(graph, state, _task_inputs(graph, state)),
+                  key=lambda key: (key[0] != "fact", key[1]))
+    task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step these, each where it is there "
+                 f"before the step: {', '.join(name for _k, name in task)}: what no model "
+                 "step's output reaches, as the steps declare their inputs. A fact a plain op "
+                 "builds from a knob carries that knob's text (another step's instructions, "
+                 "say)." if task else "")
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
             "prompt and reads carry, each with the step that makes it (`(op X, which reads "
@@ -1811,7 +1820,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
             "the task) and which it refuses, in the refusal's own words. A step that "
             "alone reads a frozen knob is not removed, and is split or merged only when the "
             "new step's prompt names each such knob as `{{knob}}` (never one named after the "
-            "step, `<step>__...`); otherwise insert a step beside it.")
+            "step, `<step>__...`); otherwise insert a step beside it." + task_line)
     header = ["step", "its prompt and reads carry", "applies as written", "refused (why)"]
 
     def first_clause(refusal: str) -> str:

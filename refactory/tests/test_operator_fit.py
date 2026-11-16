@@ -296,7 +296,8 @@ def test_the_loop_line_states_the_cap_and_verdict_the_loop_builds():
     line = core_ops.OPERATORS["loop"]["line"]
     assert knob == "review_check__max_iterations" and "<gate>__max_iterations" in line
     assert "<step>_check" in line
-    assert f"default {spec['default']}, {spec['lo']} to {spec['hi']}" in line
+    assert (f"default {spec['default']}: up to {spec['default'] + 1} runs; "
+            f"{spec['lo']} to {spec['hi']}") in line
     judge = after["graph"]["nodes"]["review_check_judge"]
     assert "proceed" in json.dumps(judge) and "reloop" in json.dumps(judge)
     assert "proceed or reloop" in line
@@ -380,3 +381,36 @@ def test_a_code_replacing_hint_is_checked_without_a_code_dry_run_and_says_so(mon
     reason = verdict[0]
     assert '"into": [{"kind": "code"}]} (not dry-run) (its default code' in reason, reason
     assert given and all(recorded is None for recorded in given), given
+
+
+def test_the_lead_names_what_sees_task_gives_on_this_pipeline():
+    """A branch that `sees: ["task"]` also gets compare's prompt fact (built by a plain op
+    from the item and compare's instruction knob): the lead lists it, so a proposal does
+    not describe such a step as seeing the question alone."""
+    from refactory_dsh.nn import core_ops
+    from refactory_dsh.nn.graph import Graph
+
+    state = _start_state()
+    lead = _section(state)[0]
+    names = sorted(name for _kind, name in core_ops._task_inputs(
+        Graph.from_state(state["graph"]), state))
+    assert '`"sees": ["task"]` gives a new step these' in lead
+    for name in ("compare_prompt", "user_prompt", "current_item.json"):
+        assert name in names and name in lead.split('["task"]', 1)[1], name
+    branch = nn_edits.apply({"op": "branch", "fork": "step_fork", "kind": "agent",
+                             "text": "{{user_prompt}}", "sees": ["task"]}, state)
+    # The branch that sees "task" does take compare's prompt fact in, as the lead says.
+    from refactory_dsh.nn.validate import consumed
+
+    graph = Graph.from_state(branch["graph"])
+    agent = next(n for n in set(graph.nodes) - set(state["graph"]["nodes"])
+                 if graph.nodes[n].kind == "agent")
+    values = {k: e["value"] for k, e in branch["knobs"].items()}
+    assert ("fact", "compare_prompt") in consumed(graph.nodes[agent], values)
+
+
+def test_the_loop_line_says_what_the_judge_sees_and_how_often_the_step_runs():
+    line = core_ops.OPERATORS["loop"]["line"]
+    assert "The judge sees what the step read and wrote, unless 'sees' says otherwise" in line
+    default = core_ops.LOOP_ITERATIONS[0]
+    assert f"default {default}: up to {default + 1} runs" in line

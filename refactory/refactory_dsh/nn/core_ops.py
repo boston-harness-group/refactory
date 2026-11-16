@@ -1989,10 +1989,12 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
-                "why}) or a callable. The reason reaches the step sent back; it is sent back "
-                "at most <gate>__max_iterations times (the gate is <step>_check unless "
-                f"'id' names it; a knob, default {LOOP_ITERATIONS[0]}, {LOOP_ITERATIONS[1]} to {LOOP_ITERATIONS[2]}), then "
-                "the run goes on",
+                "why}) or a callable. The judge sees what the step read and wrote, unless "
+                "'sees' says otherwise. The reason reaches the step sent back; it is sent "
+                "back at most <gate>__max_iterations times, so it runs at most that many "
+                "times plus one (the gate is <step>_check unless 'id' names it; a knob, "
+                f"default {LOOP_ITERATIONS[0]}: up to {LOOP_ITERATIONS[0] + 1} runs; "
+                f"{LOOP_ITERATIONS[1]} to {LOOP_ITERATIONS[2]}), then the run goes on",
         "example": {"op": "loop", "step": "<step>", "judge": "agent",
                     "text": "<what to check>"},
     },

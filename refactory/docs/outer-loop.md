@@ -1846,9 +1846,13 @@ points to replacing a step names the exact edit (`{"op": "split", "step": ..., "
 replacing it is refused too. That check skips the code dry run (a sandbox process on every
 request), so an accepted code replacement is marked "(not dry-run)"; proposing it runs
 the dry run as any attempt does. The section fits 7000 characters: refusals are cut to their
-first clause, then rows are left out, last first, and counted among the listed steps. The `loop` line states the verdict format (`proceed` or
-`reloop`, then why, which reaches the step sent back) and the cap (`<gate>__max_iterations`,
-default 2, 1 to 5, after which the run goes on).
+first clause, then rows are left out, last first, and counted among the listed steps.
+The lead also names what `"sees": ["task"]` gives a new step on this pipeline (the
+model-free inputs as the steps declare them), since a fact a plain op builds from a knob
+carries that knob's text. The `loop` line states the verdict format (`proceed` or
+`reloop`, then why, which reaches the step sent back), what the judge sees by default (what
+the step read and wrote) and the cap (`<gate>__max_iterations` send-backs, so at most that
+many runs plus one; default 2, 1 to 5, after which the run goes on).
 
 **Turning it off.** The operators are in the `broad` and `structure` presets; the
 `conservative` and `knob_only` presets are unchanged, and a run that allows only some
