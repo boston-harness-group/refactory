@@ -983,7 +983,33 @@ def deliver_design(ctx: Any) -> dict[str, Any]:
         result["delivery_conflict_files"] = []
         return result
     try:
-        outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
+        try:
+            outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
+        except NotDelivered as conflict:
+            spent = _conflict_budget_spent(ctx, conflict, draft_delivery)
+            if spent is None:
+                raise
+            # The conflict send-backs are spent and the base still conflicts: the work is
+            # delivered as a draft naming the unresolved files (b45a), not kept local.
+            # `_deliver` pushes the reviewed commit without the merge and lists the
+            # conflict first among the draft's unresolved items.
+            draft_delivery = spent
+            _abandon_merge(Path(found.path), found.head)
+            title = _write_pr_text(ctx, found, draft_delivery=draft_delivery)
+            finish = _finish_commands(ctx, found, title, repo_slug, draft=True,
+                                      inputs=inputs, logged_out=bool(now.get("logged_out")))
+            try:
+                outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
+            except NotDelivered as refused:
+                # Not even a draft could be pushed: the run fails, as an exhausted conflict
+                # budget always did, saying both why and how to finish.
+                _kept(ctx, approved, found, str(refused), refused.pull_request, refused.pushed,
+                      title=title, finish=finish, merge=conflict.merge)
+                raise ValueError(
+                    f"delivery conflict resolution exhausted its send-backs; conflicting files: "
+                    f"{', '.join(conflict.merge.conflicts)}; and the draft that would carry them "
+                    f"could not be delivered either: {refused}. To resume: graph-control "
+                    f"redeliver --run <run_dir>") from refused
     except NotDelivered as reason:
         merge = reason.merge
         # Whatever stopped delivery -- a closed pull request, a refused push, an
@@ -1071,7 +1097,9 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
         except ValueError:
             pass
         worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-        merge = MergeResult()  # clear the merge — we push the run's own commit
+        # Clear the merge — we push the run's own commit — but keep which files conflicted,
+        # so the delivery record says so (`merge_conflicts`).
+        merge = MergeResult(conflicts=list(merge.conflicts))
     elif not draft_delivery and merge.conflicts:
         raise NotDelivered(
             f"authored-file conflicts in {', '.join(merge.conflicts)}; "
@@ -2380,6 +2408,25 @@ def _validate_design_after_corrections(workdir: Path) -> None:
         target_guard.warn(
             "design.md lost " + ", ".join(f"## {section}" for section in lost)
             + " in corrections; restored the pre-correction version")
+
+
+def _conflict_budget_spent(ctx: Any, refused: NotDelivered,
+                           draft_delivery: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The draft fact to deliver with when ``refused`` is a merge conflict and the conflict's
+    send-backs to the builder (`delivery_conflict_reloops`, bounded by ``check_attempts`` in
+    `evaluate_delivery_conflicts`) are spent; None when the builder still has one, or when
+    the run is already a draft (which never meets a conflict here) or refused for another
+    reason."""
+    merge = refused.merge
+    if draft_delivery is not None or merge is None or not merge.conflicts:
+        return None
+    used = int(ctx.facts.get("delivery_conflict_reloops", 0))
+    if used < int(ctx.knob("check_attempts", 3)):
+        return None
+    files = ", ".join(merge.conflicts)
+    return {"reason": f"delivered as draft: unresolved conflict with the base in {files}, after "
+                      f"{used} send-back(s) to the builder (check_attempts)",
+            "unresolved": []}
 
 
 def draft_fact(ctx: Any) -> dict[str, Any] | None:
