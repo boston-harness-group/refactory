@@ -100,7 +100,7 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
     state = _start_state()
     refused = _rows(_section(state))["decide"][2]
-    hint = re.search(r"your own text, (\{.*?\]\}), or name", refused)
+    hint = re.search(r"replace it with (\{.*?\}\]\})", refused)
     assert hint, refused
     edit = json.loads(hint.group(1))
     assert edit == {"op": "split", "step": "decide",
@@ -108,8 +108,25 @@ def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
     assert _outcome(edit, state) is None
     # The same exact edit for a data pass's ends, where the replacement is code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state)
-    edit = json.loads(re.search(r"instead: (\{.*\})$", reason).group(1))
+    edit = json.loads(re.search(r"replace it with (\{.*\})$", reason).group(1))
     assert edit["into"][0]["kind"] == "code" and edit["step"] == "prepare"
+    assert _outcome(edit, state) is None
+
+
+def test_a_refusal_never_names_a_replacing_edit_that_would_be_refused():
+    """Where the replacement is refused too (a fork's branch; a step alone reading a frozen
+    knob), the hint says so with that refusal instead of naming the edit."""
+    state = _start_state()
+    refused = _rows(_section(state))["hypotheses"][2]
+    assert "replacing it is refused too ('hypotheses' is a fork's branch" in refused, refused
+    assert '"op": "split"' not in refused
+    _package, mode = registry.resolve(Path("."), "livemath/solver")
+    solver = mode().state_dict()
+    reason = _outcome({"op": "remove", "step": "solve"}, solver)
+    assert "replacing it is refused too ('solve' alone reads the frozen knob(s)" in reason
+    for row in _rows(_section(solver)).values():
+        for found in re.findall(r"replace it with (\{.*?\}\]\})", row[2]):
+            assert _outcome(json.loads(found), solver) is None, found
 
 
 def test_a_step_alone_reading_a_frozen_knob_is_shown_unsplittable():

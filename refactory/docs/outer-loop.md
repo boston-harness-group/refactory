@@ -1807,7 +1807,8 @@ and which core operators apply to the step as written with their default argumen
 which are refused, in the refusal's own words (equal reasons grouped). It is worked out by
 running each operator's precondition check and full expansion on the request's own state,
 frozen marks included, so it says what an attempt would. A refusal that points to
-replacing a step names the exact edit (`{"op": "split", "step": ..., "into": [one step]}`).
+replacing a step names the exact edit (`{"op": "split", "step": ..., "into": [one step]}`)
+when that edit applies, and otherwise says why replacing it is refused too.
 The section fits 7000 characters: refusals are cut to their first clause, then rows are
 left out, last first, and counted. The `loop` line states the verdict format (`proceed` or
 `reloop`, then why, which reaches the step sent back) and the cap (`<gate>__max_iterations`,

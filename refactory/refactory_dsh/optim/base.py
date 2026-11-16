@@ -1755,7 +1755,9 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
             "was built from), and which core operators apply to each step as written with their "
             "default arguments (`split (replace)`: a split into one step of your own text that "
             "sees the task) and which are refused, in the refusal's own words. A step that "
-            "alone reads a frozen knob cannot be split, merged or removed; insert beside it.")
+            "alone reads a frozen knob is neither removed nor merged, and is split only when "
+            "the new last step's prompt names each such knob as `{{knob}}` (never one named "
+            "after the step, `<step>__...`); otherwise insert a step beside it.")
     header = ["step", "its prompt and reads carry", "applies as written", "refused (why)"]
     for shorten in (False, True):
         shown = rows if not shorten else [

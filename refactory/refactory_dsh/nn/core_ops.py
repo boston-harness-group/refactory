@@ -944,14 +944,21 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
 # ── remove ────────────────────────────────────────────────────────────────
 
 
-def _replace_edit(node: Node, sees: Any = None) -> str:
-    """The exact edit that replaces ``node`` by one step of the proposer's own text: an
-    agent for an agent, code for anything else (a new agent writes only its reply)."""
+def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
+    """How to replace ``node`` by one step of the proposer's own text (an agent for an
+    agent, code for anything else: a new agent writes only its reply): the exact edit when
+    it applies here, else why replacing it is refused too, so the hint never names an edit
+    that would be refused."""
     step: dict[str, Any] = ({"kind": "agent", "text": "<what it does>"} if node.kind == "agent"
                             else {"kind": "code", "text": "<def main(inp): ...>"})
     if sees is not None:
         step["sees"] = sees
-    return json.dumps({"op": "split", "step": node.id, "into": [step]})
+    edit = {"op": "split", "step": node.id, "into": [step]}
+    refused = _edits().precheck(edit, state)
+    if refused is not None:
+        return ("replacing it is refused too ("
+                f"{refused.removeprefix('E-precondition: ')})")
+    return f"replace it with {json.dumps(edit)}"
 
 
 def _pre_remove(edit: dict, state: dict) -> str | None:
@@ -963,12 +970,12 @@ def _pre_remove(edit: dict, state: dict) -> str | None:
     if node.kind == "data":
         raise _Refused(f"{node.id!r} is a data node: the data pass is the grader's side")
     if node.id == graph.start:
-        raise _Refused(f"{node.id!r} is the start step; insert a step before it, or replace it "
-                       f"with {_replace_edit(node)}")
+        raise _Refused(f"{node.id!r} is the start step; insert a step before it, or "
+                       f"{_replace_hint(node, state)}")
     ends = _data_ends(graph, node.id)
     if ends:
-        raise _Refused(f"{node.id!r} is the {' and '.join(ends)} of a data pass; replace it "
-                       f"instead: {_replace_edit(node)}")
+        raise _Refused(f"{node.id!r} is the {' and '.join(ends)} of a data pass, so it stays; "
+                       f"{_replace_hint(node, state)}")
     if node.kind == "gate":
         labels = sorted({str(e.condition) for e in graph.out_edges(node.id) if e.condition})
         keep = edit.get("keep")
@@ -1410,9 +1417,9 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
         keep = {name for k, name in seen if k == "fact"} | set(state.get("knobs") or {}) | {gather}
         if text.strip() and not _strip_unseen(text, keep).strip():
             raise _Refused(f"{node.id!r}'s whole prompt is a fact it would no longer see, so "
-                           "rewiring would leave it no instructions; replace it with a step of "
-                           f"your own text, {_replace_edit(node, edit.get('sees', [TASK]))}, "
-                           "or name that fact's step in 'sees'")
+                           "rewiring would leave it no instructions; name that fact's step in "
+                           "'sees', or give it your own text: "
+                           f"{_replace_hint(node, state, edit.get('sees', [TASK]))}")
     return None
 
 
