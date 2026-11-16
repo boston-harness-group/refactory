@@ -168,6 +168,7 @@ class RandomOptimizer(Optimizer):
                     preset=ctx.preset,
                     insertable=ctx.insertable,
                     rng=rng,
+                    operators=True,
                 )
             if edit is None:
                 continue
@@ -187,6 +188,7 @@ class RandomOptimizer(Optimizer):
                 preset="broad",
                 insertable=ctx.insertable,
                 rng=rng,
+                operators=True,
             )
             if edit is not None and edit.get("op") == op:
                 return edit

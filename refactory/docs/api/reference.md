@@ -142,7 +142,8 @@ The edit algebra: every structural change is typed data.
 | function | `names` | `() -> 'list[str]'` |
 | function | `precheck` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'str \| None'` |
 | function | `protected_violation` | `(before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', protected: 'Iterable[str]') -> 'str \| None'` |
-| function | `random_edit` | `(state: 'Mapping[str, Any]', *, preset: 'str' = 'broad', insertable: 'Sequence[Any]' = (), rng: 'random.Random \| None' = None) -> 'dict \| None'` |
+| function | `random_edit` | `(state: 'Mapping[str, Any]', *, preset: 'str' = 'broad', insertable: 'Sequence[Any]' = (), rng: 'random.Random \| None' = None, operators: 'bool' = False) -> 'dict \| None'` |
+| function | `rebase` | `(edits: 'Sequence[dict]', onto: 'Mapping[str, Any]') -> 'State'` |
 | function | `removed` | `(op: 'object') -> 'str \| None'` |
 | function | `unknown` | `(op: 'object') -> 'str \| None'` |
 
@@ -157,6 +158,7 @@ The edit algebra: every structural change is typed data.
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
 - **`protected_violation`** — Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.
 - **`random_edit`** — A random edit from the enabled set, or ``None`` if none can be built.
+- **`rebase`** — ``edits`` replayed onto ``onto``, in order: a seam for a GEPA-style structural merge,
 - **`removed`** — Where a folded-away operation went, or None for any other name.
 - **`unknown`** — The refusal for an op the catalogue does not have, or None when it does.
 

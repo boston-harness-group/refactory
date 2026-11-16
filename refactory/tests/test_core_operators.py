@@ -264,7 +264,9 @@ def test_an_optional_branch_is_marked_optional_and_read_only_when_there():
                                  "kind": "agent", "text": "Try a bolder draft."}, {out.id})
     assert isinstance(more, Candidate), more
     graph = _graph(more)
-    assert graph.nodes["draft_fork"].optional_targets == (_head(graph, "draft_fork_branch"),)
+    knobs = {name: entry["value"] for name, entry in more.state["knobs"].items()}
+    assert graph.optional_targets_of(graph.nodes["draft_fork"], knobs) == (
+        _head(graph, "draft_fork_branch"),)
     assert "{% if draft_fork_branch %}" in _knob(more, "review_task")
     _sound(applier, more)
 

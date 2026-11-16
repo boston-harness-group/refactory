@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from refactory_dsh.ir import (
     AgentNode,
@@ -64,12 +64,12 @@ DECLARATIONS = ".refactory/declarations.json"
 MEMORY_KEY = "memory"
 
 
-def _optional_node_ids(graph: Graph) -> set[str]:
-    """Node ids that appear in some fork's optional_targets."""
+def _optional_node_ids(graph: Graph, knob_values: Mapping[str, Any]) -> set[str]:
+    """Node ids some fork lets fail without failing the item (`Graph.optional_targets_of`)."""
     ids: set[str] = set()
     for node in graph.nodes.values():
-        if node.kind == "fork" and node.optional_targets:
-            ids.update(node.optional_targets)
+        if node.kind == "fork":
+            ids.update(graph.optional_targets_of(node, knob_values))
     return ids
 
 
@@ -87,8 +87,8 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     the DSH path re-deriving it from an environment variable it cannot see.
     """
     graph = Graph.from_state(state.get("graph") or {})
-    optional_ids = _optional_node_ids(graph)
     knob_values = {name: (entry or {}).get("value") for name, entry in (state.get("knobs") or {}).items()}
+    optional_ids = _optional_node_ids(graph, knob_values)
     declarations: dict[str, dict[str, Any]] = {}
     # The reloops whose redone step cannot see what the gate read: the gate's runner
     # hands it those files (`run.with_unseen_reads`), as the walker does.
@@ -290,8 +290,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             # per branch would let the successor run as soon as the first one
             # finished, which is the bug the barrier exists to prevent.
             fork_kwargs: dict[str, Any] = {"targets": list(node.targets)}
-            if node.optional_targets:
-                fork_kwargs["optional_targets"] = list(node.optional_targets)
+            optional = graph.optional_targets_of(node, knob_values)
+            if optional:
+                fork_kwargs["optional_targets"] = list(optional)
             nodes[node_id] = ForkNode(**common, **fork_kwargs)
         elif node.kind == "join":
             nodes[node_id] = JoinNode(**common, sources=list(node.sources))

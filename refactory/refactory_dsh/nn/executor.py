@@ -1631,7 +1631,7 @@ class Executor:
 
         from .fork import _record_missing, _settle_missing
 
-        optional = any(node.id in (fork.optional_targets or ())
+        optional = any(node.id in self.graph.optional_targets_of(fork, self.ctx.knobs)
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
         spent = leaves_no_answer(exc) and self.graph.missing_on_crash(node.id)
         if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(

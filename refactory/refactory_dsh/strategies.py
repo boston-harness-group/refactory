@@ -276,9 +276,20 @@ class BestOfN(Loop):
         ]
         if not movable:
             return None
+        preset = self.config.edit_preset
+        if index % 2 == 1 and set(edits.enabled(preset)) & set(edits.CORE_OPS):
+            # Every other variant is a structural one: a core operator with its default
+            # texts (`core_ops.sample`), where the run's edit preset permits one. Its own
+            # random stream, so the knob variants draw what they always did.
+            shape = random.Random(f"best_of_n:{self.config.seed}:{index}:operator")
+            for _ in range(20):
+                structural = edits.random_edit(seed.state, preset=preset, rng=shape,
+                                               operators=True)
+                if structural is not None and structural.get("op") in edits.CORE_OPS:
+                    return structural
+        rng = random.Random(f"best_of_n:{self.config.seed}:{index}")
         name = movable[index % len(movable)]
         knob = Knob.from_spec(entries[name]["spec"])
-        rng = random.Random(f"best_of_n:{self.config.seed}:{index}")
         value = knob.sample(rng, entries[name]["value"])
         if value is None:
             return None

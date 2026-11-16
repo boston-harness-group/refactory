@@ -118,6 +118,7 @@ class ParentSelector(Optimizer):
                 preset=ctx.preset,
                 insertable=ctx.insertable,
                 rng=rng,
+                operators=True,
             )
             if edit is None:
                 continue

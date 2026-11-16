@@ -1733,6 +1733,22 @@ def configure(state: Mapping[str, Any], name: str, value: Any) -> State:
     return out
 
 
+def rebase(edits: Sequence[dict], onto: Mapping[str, Any]) -> State:
+    """``edits`` replayed onto ``onto``, in order: a seam for a GEPA-style structural merge,
+    which takes one candidate's own edits since the common ancestor (`Candidate.edits`) and
+    replays them onto another candidate's state. A conflict -- an edit that no longer
+    applies there -- refuses the whole rebase, naming the edit, and ``onto`` is left as it
+    was. No strategy calls it yet."""
+    out: State = dict(onto)
+    for index, edit in enumerate(edits, 1):
+        try:
+            out = apply(edit, out)
+        except EditError as exc:
+            raise EditError(f"edit {index} of {len(edits)} ({edit.get('op')}) does not apply "
+                            f"onto this state: {exc}", code=exc.code) from exc
+    return out
+
+
 def apply_many(edits: Iterable[dict], state: Mapping[str, Any]) -> State:
     out = dict(state)
     for edit in edits:
@@ -1741,10 +1757,10 @@ def apply_many(edits: Iterable[dict], state: Mapping[str, Any]) -> State:
 
 
 # ── random sampling, for the random optimizer ──────────────────────────────
-#: Operations `random_edit` never draws: `parallel`, and the core operators new in this
-#: catalogue (`core_ops`; `loop` and `split` keep their written-out draws), so a seeded
-#: random search draws what it did before they existed; sampling them with their default
-#: texts is a later change's.
+#: Operations `random_edit` does not draw by default: `parallel`, and the core operators
+#: (`core_ops`; `loop` and `split` keep their written-out draws), so a caller that does
+#: not ask for operators draws what it did before they existed. ``operators=True``
+#: draws every core operator the preset enables, with its default texts.
 _NOT_SAMPLED = ("parallel", *(op for op in _core_ops.CORE_OPS if op not in ("loop", "split")))
 
 
@@ -1754,13 +1770,18 @@ def random_edit(
     preset: str = "broad",
     insertable: Sequence[Any] = (),
     rng: random.Random | None = None,
+    operators: bool = False,
 ) -> dict | None:
     """A random edit from the enabled set, or ``None`` if none can be built.
 
     Structural edits need something to insert, so a mode that wants them declares
     an insertable catalogue (``Node`` objects or their states). Without one, only
     the parameter edits are reachable, and this says so by returning ``None``
-    rather than by inventing a node.
+    rather than by inventing a node. With ``operators``, the core operators are drawn
+    too (`core_ops.sample`): they need no insertable block, since each makes its own
+    steps with default texts, so a strategy with no model still edits structure. Only in
+    a graph with a model step, though: the steps an operator adds by default are model
+    steps, which a mode that never calls a model cannot run, so its draws stay as they were.
     """
     rng = rng or random
     graph = _graph(state)
@@ -1777,12 +1798,16 @@ def random_edit(
     # `parallel` takes 2-8 branch nodes with distinct writes, which a mode's insertable
     # blocks do not give; it is left out of the draw (not merely skipped), so a seeded
     # random search draws the same operations it did before `parallel` existed.
-    choices = [op for op in enabled(preset) if op not in _NOT_SAMPLED]
+    operators = operators and any(node.kind == "agent" for node in graph.nodes.values())
+    choices = [op for op in enabled(preset)
+               if op not in _NOT_SAMPLED or (operators and op in _core_ops.CORE_OPS)]
 
     for _ in range(40):
         op = rng.choice(choices)
         edit: dict | None
-        if op == "set_knob":
+        if operators and op in _core_ops.CORE_OPS:
+            edit = _core_ops.sample(op, state, rng)
+        elif op == "set_knob":
             if not movable:
                 continue
             name = rng.choice(movable)

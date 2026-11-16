@@ -1752,7 +1752,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `remove` | `{"op": "remove", "step": "<step>"}`; on a gate, `"keep": "<verdict>"` | predecessors to successor; a fork's branch leaves the fork's targets and the join's sources, and a fork left with one branch is folded away; an operator's own helper steps (its collect step, a loop's judge) go too, so do the slots it put in other steps' prompts and the knobs only it read; refused with the exact reader when a step still needs what only it makes. On a gate, the kept verdict's path stays and steps only the others reached go |
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs reach the step after the join |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
-| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets (and `optional_targets`), the join's sources and edges; it sees what the fork's predecessor sees and makes; its output reaches the step after the join, guarded (`{% if %}`) when optional |
+| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output reaches the step after the join, guarded (`{% if %}`) when `optional` is given |
 | `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own inputs (facts and files no model step's output reaches), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
 | `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` is a knob of its own (`<gate>__max_iterations`, 2, 1-5); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
@@ -1810,17 +1810,19 @@ stay as they were.
 gate kind, bindable field, `Node` field, edge form and composition both runtimes run) to
 the operations that create it, change it on an existing node and remove it, or to the
 reason none does: the grader side, a gate nobody answers headless, an infrastructure
-flag, a step's identity, a user's decision, or `planned` with the change that will add
-the operation. `tests/test_dsl_coverage.py` generates the list of constructs from the
-code and fails on one without an entry, checks every operation named exists, and applies
+flag, a step's identity, a user's decision, or `deferred` by the user. Nothing may be
+left planned. `tests/test_dsl_coverage.py` generates the list of constructs from the
+code and fails on one without an entry or left planned, checks every operation named exists, and applies
 an example of each covered node kind, edge form and composition through the attempt path,
 and of each change or removal the core operators cover.
 The table below is generated from the map (`coverage.table_markdown()`), and the test
 checks it matches. It records the user's decisions (`coverage.DECISIONS`): an operator may
 change what an existing step reads; a copy of a step that uses tools keeps its tools only
-with its own fresh workspace; `configure` may change timeouts, retries, loop limits,
-optional branches, the workspace kind and the model role, never tools or `outputs_only`;
-a step per sub-item is tried as an experiment on both runtimes after the core operators.
+with its own fresh workspace; a loop's limit and a branch's optional are settings bound to
+knobs, which `set_knob` moves (`loop` makes the limit's knob, `branch` with `"optional"`
+the branch's), never tools or `outputs_only`. Nothing is left planned: timeouts, retries,
+`on_exhausted`, the workspace kind, the model role and the per-sub-item experiment are
+deferred, with why in `coverage.DECISIONS["deferred"]`.
 
 <!-- dsl-coverage:start -->
 | construct | create | change on an existing node | remove |
@@ -1839,27 +1841,28 @@ a step per sub-item is tried as an experiment on both runtimes after the core op
 | bindable field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | bindable field: `max_iterations` | `add_node`, `wrap`, `loop`, `route` | `set_knob` | - |
 | bindable field: `parallelism` | *grader-side* | `set_knob` | - |
+| bindable field: `optional` | `branch` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |
 | node field: `evaluator` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |
 | node field: `gate_kind` | `add_node`, `wrap`, `loop`, `route` | *identity* | - |
-| node field: `knobs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `knobs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: binding a new setting on an existing step* | - |
 | node field: `reads` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `rewire` | - |
 | node field: `required_reads` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `rewire` | - |
 | node field: `writes` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity: a step's outputs are what its readers rely on: replace the step (split) to change them* | - |
 | node field: `produces` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity: a step's outputs are what its readers rely on: replace the step (split) to change them* | - |
 | node field: `prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `system_prompt_template` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
-| node field: `role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, among the run's declared routes (PR3)* | - |
+| node field: `role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: the model role among the run's routes* | - |
 | node field: `tools` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: tools are not a configure setting* | - |
 | node field: `max_iterations` | `add_node`, `wrap`, `loop`, `route` | `set_knob` | - |
-| node field: `on_exhausted` | `add_node`, `wrap`, `loop`, `route` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `on_exhausted` | `add_node`, `wrap`, `loop`, `route` | *deferred: a timeout or retry setting as a knob* | - |
 | node field: `notes` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
 | node field: `blocking` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
 | node field: `score_effect` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
 | node field: `targets` | `parallel`, `parallelize`, `add_node` | `branch`, `remove`, `parallelize`, `insert` | - |
-| node field: `optional_targets` | `branch`, `add_node` | *planned: configure a branch's optional (PR3)* | - |
+| node field: `optional_targets` | `branch`, `add_node` | `set_knob` | - |
 | node field: `sources` | `parallel`, `parallelize`, `add_node` | `branch`, `remove`, `parallelize`, `insert` | - |
 | node field: `subgraph_entry` | *grader-side* | *grader-side* | - |
 | node field: `subgraph_exit` | *grader-side* | *grader-side* | - |
@@ -1872,12 +1875,12 @@ a step per sub-item is tried as an experiment on both runtimes after the core op
 | node field: `parallelism_knob` | *grader-side* | *grader-side* | - |
 | node field: `resource_role` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
 | node field: `feedback_keys` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *infrastructure flag* | - |
-| node field: `timeout_s` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, which binds the setting to a knob (PR3)* | - |
-| node field: `retry` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `timeout_s` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: a timeout or retry setting as a knob* | - |
+| node field: `retry` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: a timeout or retry setting as a knob* | - |
 | node field: `outputs_only` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: not a configure setting* | - |
-| node field: `workspace` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, the workspace kind (PR3)* | - |
+| node field: `workspace` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: the workspace kind* | - |
 | node field: `tool_policy` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: tools are not a configure setting* | - |
-| node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *planned: configure, which binds the setting to a knob (PR3)* | - |
+| node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: binding a new setting on an existing step* | - |
 | node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `inputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `rewire` | - |
 | edge form: `plain` | `add_edge`, `insert_after`, `insert_before`, `insert` | `remove_edge`, `add_edge`, `serialize`, `remove` | `remove_edge`, `remove` |
@@ -1888,7 +1891,7 @@ a step per sub-item is tried as an experiment on both runtimes after the core op
 | composition: `loop inside a fork branch` | `loop` | `set_knob` | `remove_node`, `add_edge`, `remove` |
 | composition: `loop inside a data pass` | `loop` | `set_knob` | `remove_node`, `add_edge`, `remove` |
 | composition: `gate routing to several steps` | `route`, `add_node`, `add_edge` | `remove_edge`, `add_edge` | `remove` |
-| composition: `a step per sub-item` | *planned: a per-sub-item experiment on both runtimes (PR3)* | *planned: after the per-sub-item experiment* | *planned: after the per-sub-item experiment* |
+| composition: `a step per sub-item` | *deferred: the per-sub-item experiment* | *deferred: the per-sub-item experiment* | *deferred: the per-sub-item experiment* |
 <!-- dsl-coverage:end -->
 
 ### The invariant harness
