@@ -3351,6 +3351,21 @@ def prediction_check(prediction: str, parent_records: Sequence[dict[str, Any]] |
     return lines
 
 
+def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
+    """The proposal's own flow change beside what its edit built, read from the graph
+    (`nn.wiring.as_built`), so a description that says otherwise is seen against what
+    ran."""
+    from refactory_dsh.nn.wiring import clipped
+
+    built = clipped(list(entry.get("wiring") or ()))
+    said = ([f"Flow change, as proposed: {_clip(entry['flow_change'], REASONING_TEXT_CHARS)}"]
+            if entry.get("flow_change") else [])
+    if not built:
+        return said
+    return [*said, "As built (read from the candidate's graph; where the proposal's words "
+            "say otherwise, this is what ran):", *[f"- {line}" for line in built]]
+
+
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts; the
@@ -3374,6 +3389,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
         lines += [f"Wired by the system: {note}" for note in pair.get("notes") or ()]
+        lines += _as_built_lines(pair)
         if pair.get("same_seed") is False:
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
@@ -3451,8 +3467,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Addresses: {_clip(entry['addresses'], REASONING_TEXT_CHARS)}"]
                     if entry.get("addresses") else []),
-                  *([f"Flow change: {_clip(entry['flow_change'], REASONING_TEXT_CHARS)}"]
-                    if entry.get("flow_change") else []),
+                  *_as_built_lines(entry),
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]

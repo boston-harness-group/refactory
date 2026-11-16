@@ -51,6 +51,7 @@ from refactory_dsh import registry
 from refactory_dsh.nn import Knob, PackageError
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
+from refactory_dsh.nn import wiring as nn_wiring
 from refactory_dsh.optim import (
     Candidate,
     Optimizer,
@@ -2947,9 +2948,11 @@ class Loop(OuterLoop):
                 epoch=self.epoch,
                 **({"repaired": rejection.repaired} if rejection.repaired else {}),
             )
+        known = {c.id: c for c in (*self.population, *parents)}
         for candidate in candidates:
             self._journal_candidate(candidate)
             notes = self._proposal_notes.get(candidate.id) or {}
+            parent = known.get(candidate.parent or "")
             record = self.proposals.setdefault(candidate.id, {
                 "id": candidate.id,
                 "parent": candidate.parent,
@@ -2971,6 +2974,10 @@ class Loop(OuterLoop):
                 # The mechanical fixes the attempt path made, and what it could not check.
                 **({"repairs": list(candidate.repairs)} if candidate.repairs else {}),
                 **({"checks": list(candidate.notes)} if candidate.notes else {}),
+                # What the edit built, read from its graph against its parent's
+                # (`nn.wiring`): the record of what runs, whatever the prose says.
+                **({"wiring": built} if parent is not None
+                   and (built := nn_wiring.as_built(parent.state, candidate.state)) else {}),
                 **({"repaired_from": list(notes["repaired_from"])}
                    if notes.get("repaired_from") else {}),
                 **({"level": notes["level"]} if notes.get("level") else {}),
@@ -5465,6 +5472,8 @@ class Loop(OuterLoop):
                 **{key: record[key] for key in ("prediction", "addresses", "flow_change")
                    if record.get(key)},
                 **({"notes": list(child.notes)} if child.notes else {}),
+                **({"wiring": built} if parent is not None
+                   and (built := nn_wiring.as_built(parent.state, child.state)) else {}),
                 "steps": sorted(set(((child.state.get("graph") or {}).get("nodes") or {}))
                                 | set(((parent.state.get("graph") or {}).get("nodes") or {})
                                       if parent else ())),
@@ -5564,6 +5573,8 @@ class Loop(OuterLoop):
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "addresses": record.get("addresses"), "flow_change": record.get("flow_change"),
                 "notes": list(candidate.notes or ()),
+                "wiring": (nn_wiring.as_built(parent.state, candidate.state)
+                           if parent is not None else []),
                 "considered": record.get("considered"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,
                 "same_seed": same,

@@ -1828,6 +1828,19 @@ items -- and how many of its items timed out), and cost: with no cost term (pars
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
+**What an edit built.** A proposal says in prose what its edit does (`flow_change`); the
+expansion can differ (a loop left at its default cap, a branch that sees the task taking in
+more than the question). The candidate's proposal record carries `wiring`, read from its
+graph against its parent's (`nn.wiring.as_built`), never from the edit's text: each new
+step with what it takes in (and which step makes each input, through any collect step the
+edit added), what it writes and which steps read that; each new or changed gate with the
+step it sends back to and its effective cap (the bound knob's value, else its own field)
+and how often that step then runs at most; each existing step whose inputs changed; each
+removed step. The next request shows it under "As built" right after the proposal's own
+"Flow change, as proposed", in "What the last edit changed" and "Your earlier reasoning",
+so a description that says otherwise is seen against what ran (at most 12 lines a
+candidate, the rest counted).
+
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
 step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
