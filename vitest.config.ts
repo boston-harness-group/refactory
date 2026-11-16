@@ -47,7 +47,10 @@ export default defineConfig({
                            include: ['packages/*/*/tests/**/*.spec.{ts,tsx}'],
                            exclude: [SPINE, '**/node_modules/**'] } },
     ],
-    reporters: ['default', './vitest.slow-reporter.ts'],
+    // Naming reporters replaces vitest's defaults, which add `github-actions` (the
+    // ##[error] annotations on a failure) when run in GitHub Actions; it is kept there.
+    reporters: ['default', './vitest.slow-reporter.ts',
+                ...(process.env.GITHUB_ACTIONS ? ['github-actions'] : [])],
     coverage: {
       provider: 'v8',
       include: ['packages/*/*/src/**/*.{ts,tsx}'],
