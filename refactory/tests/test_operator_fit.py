@@ -95,6 +95,11 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
     assert rows["precision"][0].startswith(
         "precision_prompt = op notes_prompts from compare_notes.txt (compare)")
     assert rows["notes_prompts"][0] == "-"  # only model steps' prompts are traced
+    # The text a plain op builds a prompt from is often a knob: named as one.
+    assert "precision_prompt = op notes_prompts from compare_notes.txt (compare), " \
+        "knob precision_task, knob hypotheses_task" in rows["precision"][0], rows["precision"][0]
+    _package, mode = registry.resolve(Path("."), "livemath/solver")
+    assert "knob skill" in _rows(_section(mode().state_dict()))["solve"][0]
 
 
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
@@ -196,3 +201,17 @@ def test_an_edit_whose_preconditions_pass_but_whose_expansion_fails_is_shown_ref
     applies, refused = _rows(_section(state))["compare"][1:]
     assert "insert" not in applies.split(", ")
     assert "insert: E-wiring: the new step would read nothing" in refused
+
+
+def test_a_replacing_hint_whose_edit_fails_to_expand_says_it_is_refused(monkeypatch):
+    state = _start_state()
+    real = nn_edits.apply
+
+    def apply(edit, state, *args, **kwargs):
+        if edit.get("op") == "split" and edit.get("step") == "prepare":
+            raise nn_edits.EditError("E-wiring: the code step would read nothing")
+        return real(edit, state, *args, **kwargs)
+
+    monkeypatch.setattr(nn_edits, "apply", apply)
+    reason = nn_edits.precheck({"op": "remove", "step": "prepare"}, state)
+    assert "replacing it is refused too (E-wiring: the code step would read nothing)" in reason

@@ -955,6 +955,11 @@ def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
         step["sees"] = sees
     edit = {"op": "split", "step": node.id, "into": [step]}
     refused = _edits().precheck(edit, state)
+    if refused is None:
+        try:
+            _edits().apply(edit, state)
+        except _edits().EditError as exc:
+            refused = str(exc)
     if refused is not None:
         return ("replacing it is refused too ("
                 f"{refused.removeprefix('E-precondition: ')})")

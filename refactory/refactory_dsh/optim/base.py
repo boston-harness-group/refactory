@@ -1692,9 +1692,12 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
         if plain:
             sources = []
             for op_id in plain:
-                for source_kind, source in sorted(consumed(graph.nodes[op_id], knob_values)):
+                op = graph.nodes[op_id]
+                for source_kind, source in sorted(consumed(op, knob_values)):
                     by = makers.get((source_kind, source)) or []
                     sources.append(f"{source} ({', '.join(by) or 'task input'})")
+                for knob in dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]):
+                    sources.append(f"knob {knob}")
             parts.append(f"{name} = op {', '.join(plain)} from "
                          f"{', '.join(sources) or 'nothing'}")
         else:

@@ -1802,7 +1802,8 @@ each candidate's measured model cost over its train items.
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
 step's prompt and reads carry, a fact a plain op builds followed one step back to what it
-was built from (`decide_prompt = op decide_prompt from compare_notes.txt (compare), ...`),
+was built from, its files and facts with their makers and the knobs it reads
+(`precision_prompt = op notes_prompts from compare_notes.txt (compare), knob precision_task, ...`),
 and which core operators apply to the step as written with their default arguments and
 which are refused, in the refusal's own words (equal reasons grouped). It is worked out by
 running each operator's precondition check and full expansion on the request's own state,
