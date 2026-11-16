@@ -1783,7 +1783,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
 | `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output reaches the step after the join, guarded (`{% if %}`) when `optional` is given |
 | `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own inputs (facts and files no model step's output reaches), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
-| `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` is a knob of its own (`<gate>__max_iterations`, 2, 1-5); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
+| `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
 | `merge` | `{"op": "merge", "steps": ["A", "B"], "text": "..."}` | one step with A's inputs and B's outputs; refused when another step reads what A makes |
@@ -1827,6 +1827,37 @@ run, the edited candidate's typical time per item -- its train wall time x items
 items -- and how many of its items timed out), and cost: with no cost term (parsimony 0),
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
+
+**What each step carries, and which operators apply to it.** After "Structural operators"
+the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
+step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
+through the plain ops that built it to its sources (model steps, the task's own inputs,
+knobs; at most 4 ops deep, `CARRIES_DEPTH`). No op says which of its outputs a knob feeds,
+so an op with several outputs has its knobs marked as the op's
+(`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))`),
+and which core operators apply to the step as written with their default arguments and
+which are refused, in the refusal's own words (equal reasons grouped). Each verdict is the
+run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then
+`Optimizer.attempt` with the run's protected and grading steps, frozen and guarded knobs,
+wiring and validation; everything `Run.attempt` checks but the model-judged integrity
+check), recording nothing and without the code dry run (a sandbox process for each edit
+on each request): an accepted edit that adds or changes code is marked "(not dry-run)",
+and proposing it runs the dry run as any attempt does. A request built outside a run has
+no section. A refusal that
+points to replacing a step names the exact edit (`{"op": "split", "step": ..., "into":
+[one step]}`) only when an attempt would accept it (`checked_hint`), and otherwise says why
+replacing it is refused too. That check skips the code dry run (a sandbox process on every
+request), so an accepted code replacement is marked "(not dry-run)"; proposing it runs
+the dry run as any attempt does. The section fits 7000 characters: refusals are cut to their
+first clause, then rows are left out, last first, and counted among the listed steps.
+The lead also names what `"sees": ["task"]` gives a new step on this pipeline (the
+model-free inputs as the steps declare them), since a fact a plain op builds from a knob
+carries that knob's text. The `loop` line states the verdict format (`proceed` or
+`reloop`, then why, which reaches the step sent back), what the judge sees by default (what
+the step read and wrote) and the cap (`max_iterations` in the edit, then the knob
+`<gate>__max_iterations`: send-backs, so at most that many runs plus one; default 2, 1 to
+5, after which the run goes on). A fork's row says what a new branch that sees the task
+takes in there.
 
 **Turning it off.** The operators are in the `broad` and `structure` presets; the
 `conservative` and `knob_only` presets are unchanged, and a run that allows only some
