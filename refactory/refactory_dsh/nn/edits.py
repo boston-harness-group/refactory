@@ -1758,9 +1758,13 @@ def apply_many(edits: Iterable[dict], state: Mapping[str, Any]) -> State:
 
 # ── random sampling, for the random optimizer ──────────────────────────────
 #: Operations `random_edit` does not draw by default: `parallel`, and the core operators
-#: (`core_ops`; `loop` and `split` keep their written-out draws), so a caller that does
-#: not ask for operators draws what it did before they existed. ``operators=True``
-#: draws every core operator the preset enables, with its default texts.
+#: other than `loop` and `split`, which without operators keep their written-out draws
+#: (from a mode's insertable gate and block templates), so a caller that does not ask for
+#: operators draws what it did before they existed. ``operators=True`` draws every core
+#: operator the preset enables, `loop` and `split` included, in their one-line form with
+#: default texts (`core_ops.sample`) and never from the templates; drawn uniformly with
+#: the rest, they take most of the draws (on livemath/skill_graph with `broad`, 46%, and
+#: set_knob falls from 16% to 8%).
 _NOT_SAMPLED = ("parallel", *(op for op in _core_ops.CORE_OPS if op not in ("loop", "split")))
 
 

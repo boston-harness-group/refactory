@@ -116,7 +116,11 @@ def test_a_failing_branch_fails_the_item_only_when_its_knob_says_required():
         tmp = Path(tempfile.mkdtemp(prefix="bound-settings-"))
         walker = sf.run_walker(applier.seed, state, tmp / "walker")
         assert walker.exit_ok is optional, (optional, walker.error)
-        assert sf.check_spine(applier.seed, state, walker, tmp) == []
+        found = sf.check_spine(applier.seed, state, walker, tmp)
+        # Required, the spine's drain fails too (`check_spine` says so, comparing with a
+        # walker that finished).
+        assert ([(v.invariant, "rc=" in v.message) for v in found]
+                == ([] if optional else [("spine", True)])), found
 
 
 def test_set_knob_through_the_attempt_path_moves_a_branchs_optional():
@@ -126,3 +130,111 @@ def test_set_knob_through_the_attempt_path_moves_a_branchs_optional():
     assert isinstance(moved, Candidate), moved
     graph = Graph.from_state(moved.state["graph"])
     assert head not in graph.optional_targets_of(graph.nodes["split"], _knobs(moved.state))
+
+
+# ── an optional binding survives every operator that reshapes its fork ──────
+
+
+def _bound(state: dict) -> dict[str, str]:
+    graph = Graph.from_state(state["graph"])
+    return {node.id: node.bound_knob("optional") for node in graph.nodes.values()
+            if node.bound_knob("optional")}
+
+
+@pytest.mark.parametrize("optional", [True, False])
+@pytest.mark.parametrize("edit, survives", [
+    ({"op": "serialize", "fork": "split"}, False),
+    ({"op": "remove", "step": "split_branch"}, False),
+    ({"op": "loop", "step": "split_branch", "judge": "agent"}, True),
+    ({"op": "route", "after": "split_branch", "judge": "agent"}, True),
+    ({"op": "parallelize", "steps": ["split_branch"], "copies": 1}, True),
+], ids=["serialize", "remove the branch", "loop in it", "route in it", "parallelize in it"])
+def test_an_operator_reshaping_the_fork_leaves_no_stranded_optional_binding(edit, survives,
+                                                                             optional):
+    """Where the branch's first step stays, its binding and value stay; where the fork or the
+    branch goes, so do the binding and its knob, and the edit is not refused (V14)."""
+    applier, out, head, knob = _optional_branch(kind="agent", text="Third.")
+    out = applier.attempt(out, {"op": "set_knob", "name": knob, "value": optional}, {out.id}) \
+        if not optional else out
+    child = applier.attempt(out, edit, {out.id})
+    assert isinstance(child, Candidate), child
+    if survives:
+        assert _bound(child.state) == {head: knob}
+        assert child.state["knobs"][knob]["value"] is optional
+    else:
+        assert _bound(child.state) == {} and knob not in child.state["knobs"]
+    assert sf.check_state(applier, child.state, walker=False) == []
+
+
+@pytest.mark.parametrize("optional", [True, False])
+def test_an_insert_before_the_branch_moves_its_optional_to_the_new_first_step(optional):
+    applier, out, head, knob = _optional_branch(kind="agent", text="Third.")
+    out = applier.attempt(out, {"op": "set_knob", "name": knob, "value": optional}, {out.id}) \
+        if not optional else out
+    child = applier.attempt(out, {"op": "insert", "before": head, "kind": "agent"}, {out.id})
+    assert isinstance(child, Candidate), child
+    graph = Graph.from_state(child.state["graph"])
+    first = graph.nodes["split"].targets[-1]
+    assert first != head and _bound(child.state) == {first: f"{first}__optional"}
+    assert child.state["knobs"][f"{first}__optional"]["value"] is optional
+    assert (first in graph.optional_targets_of(graph.nodes["split"], _knobs(child.state))) is optional
+
+
+def test_a_first_step_rebuilt_under_its_id_gets_its_binding_back():
+    """An edit that rebuilds a branch's first step under its own id (rewire's collect step)
+    without its binding: the binding and the knob's value are put back."""
+    from refactory_dsh.nn import core_ops
+
+    _applier, out, head, knob = _optional_branch(kind="agent", text="Third.")
+    bare = Graph.from_state(out.state["graph"]).nodes[head].to_state()
+    bare["knobs"] = [k for k in bare.get("knobs") or [] if k != knob]
+    bare["field_bindings"] = [p for p in bare.get("field_bindings") or [] if p[0] != "optional"]
+    # The step rebuilt with its own knobs declared again at their defaults, as rewire does.
+    steps = [step for step in core_ops._respec(out.state, head, bare)
+             if not (step["op"] == "set_knob" and step["name"] == knob)]
+    settled = nn_edits.apply_many(steps + core_ops._settle_optional(out.state, steps), out.state)
+    assert _bound(settled) == {head: knob} and settled["knobs"][knob]["value"] is True
+
+
+def _failing_op_branch(optional: bool) -> tuple[sf.Applier, dict]:
+    """``fuzz_fork_join`` with a third branch whose op always fails, its optional bound to a
+    knob set to ``optional`` (built directly: an operator adds no new callable)."""
+    import copy
+
+    from refactory_dsh.nn import Knob
+
+    applier = sf.Applier(sf.seeds()["fuzz_fork_join"])
+    state = copy.deepcopy(applier.seed_state)
+    graph = state["graph"]
+    graph["nodes"]["flaky"] = {"id": "flaky", "kind": "op", "call": sf.fg.FAIL,
+                               "writes": ["flaky.txt"], "knobs": ["flaky__optional"],
+                               "field_bindings": [["optional", "flaky__optional"]]}
+    graph["nodes"]["split"]["targets"].append("flaky")
+    graph["nodes"]["merge"]["sources"].append("flaky")
+    graph["edges"].append({"source": "flaky", "target": "merge", "condition": None})
+    state["knobs"]["flaky__optional"] = {"spec": Knob(False, "bool").spec(), "value": optional}
+    return applier, state
+
+
+@pytest.mark.parametrize("optional", [True, False])
+def test_the_walker_fails_an_item_on_a_failing_branch_only_when_its_knob_says_required(
+        optional, tmp_path):
+    """No code step needed, so this holds on every machine: the walker goes on past the
+    failing branch when its knob says optional, and fails the item when it says required."""
+    applier, state = _failing_op_branch(optional)
+    walker = sf.run_walker(applier.seed, state, tmp_path / "walker")
+    assert walker.exit_ok is optional, walker.error
+
+
+@needs_spine
+@pytest.mark.parametrize("optional", [True, False])
+def test_the_spine_agrees_with_the_walker_on_a_failing_branchs_knob(optional, tmp_path):
+    """Optional, the spine's run ends as the walker's does; required, its drain fails too
+    (`check_spine` compares with a walker that finished, so it says the drain failed)."""
+    applier, state = _failing_op_branch(optional)
+    walker = sf.run_walker(applier.seed, state, tmp_path / "walker")
+    found = sf.check_spine(applier.seed, state, walker, tmp_path)
+    if optional:
+        assert found == []
+    else:
+        assert [(v.invariant, "rc=" in v.message) for v in found] == [("spine", True)], found

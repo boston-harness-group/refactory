@@ -61,6 +61,10 @@ def test_nothing_is_left_planned_each_gap_is_covered_or_excluded_on_purpose():
     assert deferred == {("node field", name) for name in (
         "knobs", "field_bindings", "role", "on_exhausted", "timeout_s", "retry", "workspace")} | {
         ("composition", "a step per sub-item")}, deferred
+    # Deferred is deferred: none of these settings can be bound to a knob yet.
+    from refactory_dsh.nn.graph import BINDABLE_FIELDS
+
+    assert not {"timeout_s", "retry", "on_exhausted", "workspace", "role"} & BINDABLE_FIELDS
     decision = coverage.DECISIONS["deferred"]
     for named in ("timeout_s", "retry", "on_exhausted", "workspace kind", "model role",
                   "per-sub-item"):

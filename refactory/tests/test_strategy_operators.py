@@ -151,3 +151,13 @@ def test_rebase_replays_one_candidates_edits_onto_another_or_refuses_whole():
     with pytest.raises(nn_edits.EditError, match=r"edit 2 of 2 \(remove\)"):
         nn_edits.rebase([edits[0], {"op": "remove", "step": "no_such_step"}], onto)
     assert onto == before
+
+
+def test_best_of_n_knob_variants_still_go_through_every_movable_knob(tmp_path):
+    """With every other variant structural, the knob variants are counted on their own: twice
+    as many variants as movable knobs give each knob one."""
+    loop, seed = _best_of_n(MODE, tmp_path)
+    movable = [k for k, e in seed.state["knobs"].items() if not e["spec"].get("frozen")]
+    variants = [loop._variant(index, seed) for index in range(2 * len(movable))]
+    varied = [v["name"] for v in variants if v["op"] == "set_knob"]
+    assert sorted(varied) == sorted(movable), (varied, movable)

@@ -1844,10 +1844,75 @@ def _guarded(check):
 def _guarded_expand(expand):
     def run(edit: dict, state: dict) -> list[dict]:
         try:
-            return expand(edit, state)
+            steps = expand(edit, state)
         except _Refused as exc:
             raise _edits().EditError(str(exc), code="E-precondition") from exc
+        return steps + _settle_optional(state, steps)
     return run
+
+
+def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
+    """Steps that keep each ``optional`` binding (`Graph.optional_targets_of`) on a branch's
+    first step after an edit reshaped a fork: put back on a first step the edit rebuilt
+    under its id (rewire's collect step), moved to the one new first step of that same fork
+    (an insert before it), else dropped with its knob (the fork is gone, or the branch went
+    with ``remove``), so V14 never refuses what the edit left and a setting is not lost."""
+    before = _edits()._graph(start)
+    build = _Steps(start)
+    build.add(list(steps))
+    stranded = []
+    rebuilt = []
+    for fork in (n for n in before.nodes.values() if n.kind == "fork"):
+        for head in fork.targets:
+            knob = before.nodes[head].bound_knob("optional") if head in before.nodes else ""
+            if not knob:
+                continue
+            now = build.graph.nodes.get(fork.id)
+            # The value before the edit: no operator sets it, and a rebuilt step's knob may
+            # have been declared again at its default.
+            value = (start.get("knobs") or {})[knob]["value"]
+            if now is not None and now.kind == "fork" and head in now.targets:
+                if not build.graph.nodes[head].bound_knob("optional"):
+                    rebuilt.append((head, knob, value))
+                continue
+            stranded.append((fork, head, knob, value))
+    for head, knob, value in rebuilt:
+        if knob not in (build.state.get("knobs") or {}):
+            build.add([{"op": "add_knob", "name": knob,
+                        "spec": dict((start.get("knobs") or {})[knob]["spec"])}])
+        again = build.graph.nodes[head].to_state()
+        again["knobs"] = [*(again.get("knobs") or []), knob]
+        again["field_bindings"] = [*(again.get("field_bindings") or []), ["optional", knob]]
+        build.add(_respec(build.state, head, again))
+        build.add([{"op": "set_knob", "name": knob, "value": value}])
+    for fork, head, knob, value in stranded:
+        graph = build.graph
+        now = graph.nodes.get(fork.id)
+        fresh = [t for t in (now.targets if now is not None and now.kind == "fork" else ())
+                 if t not in fork.targets and not graph.nodes[t].bound_knob("optional")]
+        spec = dict((start.get("knobs") or {})[knob]["spec"])
+        if len(fresh) == 1:
+            # The knob is named after the step that binds it (E-binding), so it moves too.
+            new_knob = f"{fresh[0]}__optional"
+            moved = graph.nodes[fresh[0]].to_state()
+            moved["knobs"] = [*(moved.get("knobs") or []), new_knob]
+            moved["field_bindings"] = [*(moved.get("field_bindings") or []),
+                                       ["optional", new_knob]]
+            build.add([{"op": "add_knob", "name": new_knob, "spec": spec}])
+            build.add(_respec(build.state, fresh[0], moved))
+            build.add([{"op": "set_knob", "name": new_knob, "value": value}])
+        if head in build.graph.nodes:
+            if knob in (build.state.get("knobs") or {}) and value != spec.get("default"):
+                # Back to its default while still read, so the respec has nothing to restore.
+                build.add([{"op": "set_knob", "name": knob, "value": spec.get("default")}])
+            kept = build.graph.nodes[head].to_state()
+            kept["knobs"] = [k for k in kept.get("knobs") or [] if k != knob]
+            kept["field_bindings"] = [pair for pair in kept.get("field_bindings") or []
+                                      if pair[0] != "optional"]
+            build.add(_respec(build.state, head, kept))
+        if knob in (build.state.get("knobs") or {}) and knob not in build.graph.knob_consumers():
+            build.add([{"op": "remove_knob", "name": knob}])
+    return build.steps[len(steps):]
 
 
 #: Each operator: its catalogue fields, its one line for the request, and one example
@@ -1952,7 +2017,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     def expand_loop(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_loop(edit):
-            return old_loop.expand(edit, state)
+            steps = old_loop.expand(edit, state)
+            return steps + _settle_optional(state, steps)
         return _guarded_expand(_expand_loop_line)(edit, state)
 
     def pre_split(edit: dict, state: dict) -> str | None:
@@ -1962,7 +2028,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     def expand_split(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_split(edit):
-            return old_split.expand(edit, state)
+            steps = old_split.expand(edit, state)
+            return steps + _settle_optional(state, steps)
         return _guarded_expand(_expand_split_line)(edit, state)
 
     macro("loop", OPERATORS["loop"]["line"] + ". Or, written out: 'target' and a 'gate' node "
