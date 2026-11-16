@@ -69,7 +69,8 @@ def test_the_code_sees_neither_the_persons_home_nor_their_environment(home, monk
     monkeypatch.setenv("SOME_API_KEY", "k")
     seen = _run("import os\ndef main(inp):\n    return {'home': os.environ['HOME'], "
                 "'env': sorted(os.environ), 'cwd': os.getcwd()}\n")
-    assert seen["env"] == ["HOME", "PATH", "TMPDIR"]
+    # The language settings are kept, as on Linux (`snippet._environment`); nothing else.
+    assert set(seen["env"]) - {"LANG", "LC_ALL"} == {"HOME", "PATH", "TMPDIR"}
     assert seen["home"] == seen["cwd"] and str(home) not in seen["home"]
 
 
