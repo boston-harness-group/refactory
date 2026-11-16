@@ -1830,9 +1830,11 @@ each candidate's measured model cost over its train items.
 
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
-step's prompt and reads carry, each with its maker, a fact a plain op builds followed one
-step back to everything that op reads: files and facts with their makers, and knobs
-(`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob precision_task, ...)`),
+step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
+through the plain ops that built it to its sources (model steps, the task's own inputs,
+knobs; at most 4 ops deep, `CARRIES_DEPTH`). No op says which of its outputs a knob feeds,
+so an op with several outputs has its knobs marked as the op's
+(`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))`),
 and which core operators apply to the step as written with their default arguments and
 which are refused, in the refusal's own words (equal reasons grouped). Each verdict is the
 run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then

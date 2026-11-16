@@ -1713,33 +1713,47 @@ def _fit_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, 
     return state
 
 
+#: How many plain ops back a step's input is followed before the table stops ("not
+#: followed further").
+CARRIES_DEPTH = 4
+
+
 def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
     """What a model step's prompt and reads carry, each with what made it: a plain op's
-    output is followed one step back to everything that op reads."""
+    output is followed back through the plain ops that built it to its sources (model
+    steps, the task's own inputs, knobs), at most `CARRIES_DEPTH` ops deep. The knobs an
+    op with several outputs reads are the op's: no op says which output a knob feeds."""
     from refactory_dsh import snippet
     from refactory_dsh.nn.operators import made_by
     from refactory_dsh.nn.validate import consumed
 
     makers = made_by(graph)
-    parts = []
-    for kind, name in sorted(consumed(node, knob_values)):
+
+    def described(kind: str, name: str, depth: int, seen: frozenset[str]) -> str:
         made = makers.get((kind, name)) or []
         plain = [m for m in made if graph.nodes[m].kind == "op"
-                 and not snippet.is_code_node(graph.nodes[m])]
-        if plain:
-            sources = []
-            for op_id in plain:
-                op = graph.nodes[op_id]
-                for source_kind, source in sorted(consumed(op, knob_values)):
-                    by = makers.get((source_kind, source)) or []
-                    sources.append(f"{source} ({', '.join(by) or 'task input'})")
-                for knob in dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]):
-                    sources.append(f"knob {knob}")
-            parts.append(f"{name} (op {', '.join(plain)}, which reads "
-                         f"{', '.join(sources) or 'nothing'})")
-        else:
-            parts.append(f"{name} ({', '.join(made) or 'task input'})")
-    return "; ".join(parts) or "-"
+                 and not snippet.is_code_node(graph.nodes[m]) and m not in seen]
+        if not plain:
+            return f"{name} ({', '.join(made) or 'task input'})"
+        if depth >= CARRIES_DEPTH:
+            return f"{name} (op {', '.join(plain)}, not followed further)"
+        parts = []
+        for op_id in plain:
+            op = graph.nodes[op_id]
+            sources = [described(k, n, depth + 1, seen | {op_id})
+                       for k, n in sorted(consumed(op, knob_values))]
+            knobs = list(dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]))
+            outputs = len(op.produces) + len(op.writes)
+            if knobs and outputs > 1:
+                sources.append(f"knob(s) {', '.join(knobs)} (the op's, for all {outputs} "
+                               "of its outputs)")
+            else:
+                sources += [f"knob {knob}" for knob in knobs]
+            parts.append(f"op {op_id}, which reads {', '.join(sources) or 'nothing'}")
+        return f"{name} ({'; '.join(parts)})"
+
+    return "; ".join(described(k, n, 0, frozenset())
+                     for k, n in sorted(consumed(node, knob_values))) or "-"
 
 
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
@@ -1791,9 +1805,9 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
             "operators an attempt accepts for each step as written with their default "
             "arguments (`split (replace)`: a split into one step of your own text that sees "
             "the task) and which it refuses, in the refusal's own words. A step that "
-            "alone reads a frozen knob is neither removed nor merged, and is split only when "
-            "the new last step's prompt names each such knob as `{{knob}}` (never one named "
-            "after the step, `<step>__...`); otherwise insert a step beside it.")
+            "alone reads a frozen knob is not removed, and is split or merged only when the "
+            "new step's prompt names each such knob as `{{knob}}` (never one named after the "
+            "step, `<step>__...`); otherwise insert a step beside it.")
     header = ["step", "its prompt and reads carry", "applies as written", "refused (why)"]
 
     def first_clause(refusal: str) -> str:

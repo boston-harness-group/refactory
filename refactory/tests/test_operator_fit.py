@@ -109,10 +109,32 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
         "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare)")
     assert rows["notes_prompts"][0] == "-"  # only model steps' prompts are traced
     # The text a plain op builds a prompt from is often a knob: named as one.
+    # One op makes two prompts: its knobs are said to be the op's, not each prompt's.
     assert "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), " \
-        "knob precision_task, knob hypotheses_task)" in rows["precision"][0], rows["precision"][0]
+        "knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))" \
+        in rows["precision"][0], rows["precision"][0]
+    assert "decide_prompt (op decide_prompt, which reads" in rows["decide"][0]
+    assert "knob decide_task)" in rows["decide"][0]  # one output: the knob is its own
+
+
+def test_lineage_follows_plain_ops_back_to_their_sources():
+    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    carries = _rows(_section(state))["summarise"][0]
+    # cleaned <- op clean <- raw.txt <- op load (which reads nothing): two ops back.
+    clean = ("op clean, which reads raw.txt (op load, which reads nothing), knob(s) depth "
+             "(the op's, for all 2 of its outputs)")
+    assert carries == (f"cleaned ({clean}); source (op load, which reads nothing); "
+                       f"clean.txt ({clean})"), carries
+
+
+def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
+    monkeypatch.setattr(base, "CARRIES_DEPTH", 1)
+    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    carries = _rows(_section(state))["summarise"][0]
+    assert "raw.txt (op load, not followed further)" in carries, carries
     _package, mode = registry.resolve(Path("."), "livemath/solver")
-    assert "knob skill" in _rows(_section(mode().state_dict()))["solve"][0]
+    assert "knob(s) skill (the op's, for all 3 of its outputs)" in _rows(
+        _section(mode().state_dict()))["solve"][0]
 
 
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
@@ -172,6 +194,21 @@ def test_a_step_alone_reading_a_frozen_knob_is_shown_unsplittable():
     assert "frozen knob" in _section(state)[0]
 
 
+def test_a_step_alone_reading_a_frozen_knob_merges_only_with_a_prompt_naming_it():
+    """The lead's rule, held to the attempt: merge, like split, is accepted when the new
+    step's prompt names the frozen knob, and refused otherwise."""
+    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    state["knobs"]["depth"]["spec"]["frozen"] = True
+    named = {"op": "merge", "steps": ["clean", "summarise"],
+             "text": "Summarise {{source}} to depth {{depth}}"}
+    unnamed = {**named, "text": "Summarise {{source}}"}
+    assert _outcome(named, state) is None
+    assert "frozen knob(s) ['depth']" in _outcome(unnamed, state)
+    lead = _section(state)[0]
+    assert "is not removed, and is split or merged only when the new step's prompt names" \
+        in lead
+
+
 def test_each_row_on_a_nested_fork_says_what_the_operators_do():
     state = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
     rows = _check_rows_are_true(state)
@@ -187,6 +224,10 @@ def test_a_protected_step_s_row_is_what_an_attempt_says_not_what_the_graph_allow
     rows = _check_rows_are_true(state, protected=("decide",))
     applies, refused = rows["decide"][1].split(", "), rows["decide"][2]
     assert "split" not in applies and "E-protected" in refused, rows["decide"]
+    # A protected neighbour too: merging decide_prompt into decide changes decide.
+    assert "merge" in _rows(_section(state))["decide_prompt"][1]
+    assert "merge" not in rows["decide_prompt"][1].split(", ")
+    assert "merge: E-protected" in rows["decide_prompt"][2], rows["decide_prompt"]
 
 
 def test_the_loop_s_request_takes_its_verdicts_from_the_run_s_own_attempt(tmp_path):
@@ -207,6 +248,14 @@ def test_the_loop_s_request_takes_its_verdicts_from_the_run_s_own_attempt(tmp_pa
     for label, edit in edits.items():
         assert (ctx.edit_check(edit) == run.mechanics(Proposal(edit=edit), seed,
                                                       record=False)), label
+    # The run's own protected steps reach the table: the data pass's entry merges in the
+    # graph's terms but not in the run's.
+    from test_structure_first_request import _section as section_of
+
+    body = section_of(ctx.render(), "What each step carries, and which operators apply to it")
+    rows = _rows([body[body.index("| step |"):]])
+    assert "merge" not in rows["prepare"][1].split(", ")
+    assert "merge: E-protected: node 'data'" in rows["prepare"][2], rows["prepare"]
     stub = base.operator_fit_section(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
                                      lambda edit: ["E-run: refused by this run"])
     assert all(row[1] == "-" and row[2].endswith("E-run: refused by this run")
