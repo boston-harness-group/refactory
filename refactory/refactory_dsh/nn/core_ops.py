@@ -243,6 +243,10 @@ def _readable(graph: Graph, state: Mapping[str, Any], names: set[tuple[str, str]
             if not (kind == "fact" and name in knobs)}
 
 
+#: How many of the names a new step could see a refusal lists.
+SEES_NAMES_SHOWN = 24
+
+
 def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
           default: set[tuple[str, str]], sees: Any) -> list[tuple[str, str]]:
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
@@ -253,7 +257,8 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
         if isinstance(sees, str):
             sees = [sees]
         if not isinstance(sees, list) or not all(isinstance(s, str) for s in sees):
-            raise _Refused("'sees' is a list of \"task\" and step ids")
+            raise _Refused("'sees' is a list of \"task\", step ids, and fact or file names "
+                           "there before the new step")
         chosen = set()
         for name in sees:
             if name == TASK:
@@ -267,8 +272,13 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
             elif ("fact", name) in there or ("file", name) in there:
                 chosen |= {key for key in (("fact", name), ("file", name)) if key in there}
             else:
+                names = sorted({n for _k, n in _readable(graph, state, there)})
+                shown = ", ".join(names[:SEES_NAMES_SHOWN]) + (
+                    f" (+{len(names) - SEES_NAMES_SHOWN} more)"
+                    if len(names) > SEES_NAMES_SHOWN else "")
                 raise _Refused(f"'sees' names {name!r}, which is not \"task\", a step, or a "
-                               "fact or file there before the new step")
+                               "fact or file there before the new step; there: "
+                               f"{shown or 'nothing'}")
     chosen = _readable(graph, state, chosen)
     # An agent's reply is its first file and, when it declares one, its fact: the same
     # text twice. The fact is enough.
@@ -2004,6 +2014,7 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
+        "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "sees", "to", "id", "call", "reads",
                    "tools"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt), code "
@@ -2013,36 +2024,45 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what the new step does>"},
     },
     "remove": {
+        "reads_as": ('step',),
         "fields": ("step", "keep"),
         "line": "take a step out and reconnect around it (a fork branch too); on a gate, "
                 "'keep' names the verdict whose path stays",
         "example": {"op": "remove", "step": "<step>"},
     },
     "parallelize": {
+        "reads_as": ('parallel',),
         "fields": ("steps", "copies", "after", "new", "sees"),
         "line": "run consecutive 'steps' at once, or one step beside 'copies' of itself, or "
                 "'new' steps after 'after', between a fork and a join",
         "example": {"op": "parallelize", "steps": ["<step>"], "copies": 2},
     },
     "serialize": {
+        "reads_as": ('parallel',),
         "fields": ("fork",),
         "line": "run a fork's branches one after another, in their order",
         "example": {"op": "serialize", "fork": "<fork>"},
     },
     "branch": {
+        "reads_as": ('parallel',),
         "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
-                "without failing the item); its output reaches the step after the join",
+                "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
+                "single fact or file names there before the fork); its output reaches the step "
+                "after the join",
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
     },
     "rewire": {
+        "reads_as": ('sees', 'told'),
         "fields": ("step", "sees"),
-        "line": "change what a step sees: \"task\" (the task's own inputs, no model output) "
-                "and step ids (their outputs)",
+        "line": "change what a step sees: \"task\" (the task's own inputs, no model output), "
+                "step ids (their outputs), or single fact or file names there before it (that "
+                "input alone)",
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {
+        "reads_as": ('loop',),
         "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
@@ -2058,6 +2078,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what to check>", "max_iterations": LOOP_ITERATIONS[0]},
     },
     "route": {
+        "reads_as": ('route',),
         "fields": ("after", "judge", "text", "to", "sees", "id"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
                 "or a new step); the branches rejoin",
@@ -2067,6 +2088,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                            "revise": {"kind": "agent", "text": "<what it does>"}}},
     },
     "split": {
+        "reads_as": ('step',),
         "fields": ("step", "into", "target"),
         "line": "replace a step by two new steps run in turn ('into' two), or by one ('into' "
                 "one: replace); the last takes over its outputs",
@@ -2075,6 +2097,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                              {"kind": "agent", "text": "<second part>"}]},
     },
     "merge": {
+        "reads_as": ('step',),
         "fields": ("steps", "kind", "text", "id"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
                 "outputs",
@@ -2098,7 +2121,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     }
     for name, (pre, expand) in simple.items():
         spec = OPERATORS[name]
-        macro(name, spec["line"] + ".", spec["fields"], _guarded(pre), _guarded_expand(expand))
+        macro(name, spec["line"] + ".", spec["fields"], _guarded(pre), _guarded_expand(expand),
+              reads_as=spec["reads_as"])
     old_loop = macros["loop"]
     old_split = macros["split"]
 
@@ -2131,10 +2155,12 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     macro("loop", OPERATORS["loop"]["line"] + ". Or, written out: 'target' and a 'gate' node "
           "object; " + old_loop.description[0].lower() + old_loop.description[1:],
-          OPERATORS["loop"]["fields"], pre_loop, expand_loop)
+          OPERATORS["loop"]["fields"], pre_loop, expand_loop,
+          reads_as=OPERATORS["loop"]["reads_as"])
     macro("split", OPERATORS["split"]["line"] + ". Or, written out: 'target' and 'into' two "
           "node objects (" + old_split.description[0].lower() + old_split.description[1:] + ")",
-          OPERATORS["split"]["fields"], pre_split, expand_split)
+          OPERATORS["split"]["fields"], pre_split, expand_split,
+          reads_as=OPERATORS["split"]["reads_as"])
 
 
 # ── what an operator did, for the candidate ───────────────────────────────

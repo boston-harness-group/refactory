@@ -757,6 +757,9 @@ class ProposalContext:
     #: The mode's protected nodes (``Mode.protected_nodes``): no edit may remove,
     #: rewire or replace them, and one that does is refused with ``E-protected``.
     protected: list[str] = field(default_factory=list)
+    #: The mode's grader nodes (``Mode.grader_nodes``), which the pipeline view reads as
+    #: it does in the loop's records.
+    graders: list[str] = field(default_factory=list)
     #: The loop's verdict on one edit to the edited candidate (`Run.mechanics`: a
     #: candidate, or its refusals), for the request's operator table; ``None`` leaves
     #: the table out.
@@ -929,6 +932,8 @@ class ProposalContext:
                "not remove them, change their declarations or out-edges, move a knob they "
                "read, or let a run finish without them; a new node may go in front of one."]
               if self.protected else []),
+            *pipeline_view_lines(self.node_states, self.edges, self.knobs, self.protected,
+                                 self.graders),
             "Nodes:",
             _table(["id", "kind", "call", "knobs", "notes"],
                    [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
@@ -999,7 +1004,8 @@ class ProposalContext:
         if self.edit_pairs:
             sections += ["", *_edit_change_lines(self.edit_pairs)]
         if self.reasoning:
-            sections += ["", *_reasoning_lines(self.reasoning)]
+            above = [str(p.get("child")) for p in self.edit_pairs or ()]
+            sections += ["", *_reasoning_lines(self.reasoning, above)]
         if self.analysis is not None:
             from .analysts import section_lines
             sections += ["", *section_lines(self.analysis)]
@@ -1667,6 +1673,38 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
 OPERATOR_FIT_CHARS = 7000
 
 
+def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                        knobs: Sequence[Mapping[str, Any]], protected: Sequence[str],
+                        graders: Sequence[str] = ()) -> list[str]:
+    """The pipeline in one line per step (`nn.pipeline_view`), in the operators' own words;
+    nothing when the graph does not read back."""
+    from refactory_dsh.nn.pipeline_view import render
+
+    state = _fit_state(node_states, edges, knobs)
+    text = (render(state, protected, graders) if state is not None
+            else "pipeline view unavailable: the graph does not read back")
+    return [PIPELINE_VIEW_LEAD, "```text", text, "```"]
+
+
+#: What the pipeline view's words mean.
+def _view_lead() -> str:
+    from refactory_dsh.nn.pipeline_view import FORMS
+
+    return (
+        "The pipeline, one line per step, generated from the graph in the operators' own "
+        "words (full node detail is in the reference at the end): `sees` lists a step's "
+        "inputs as `\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain "
+        "op that only assembles a model step's input is folded in as `name (via op: its "
+        "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "
+        "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
+        "an op with several outputs, for all of them), or a code step's code; `->` what it "
+        "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
+        + "; `[optional]`; `[protected]`.")
+
+
+PIPELINE_VIEW_LEAD = _view_lead()
+
+
 def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:
     """Each core operator the run permits, aimed at one step with its default arguments:
     a split into one step that sees only the task stands for "replace it"."""
@@ -1760,39 +1798,39 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
                      for k, n in sorted(consumed(node, knob_values))) or "-"
 
 
-def _task_branch(fork_id: str, state: dict[str, Any]) -> str:
-    """What a new branch of ``fork_id`` that sees the task takes in, read from the graph
-    such a branch makes (its inputs, each with its maker); "-" when none can be made."""
+def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
+    """What a new branch of ``fork_id`` can name in ``sees``: each fact or file there before
+    the fork as the pipeline view writes it (``name@maker``), one built by a plain op that
+    reads a text knob marked with it (it may carry that knob's instructions), and what
+    ``"task"`` gives there. Read from the graph; "-" when it does not read back."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn import core_ops
     from refactory_dsh.nn.graph import Graph
     from refactory_dsh.nn.operators import made_by
-    from refactory_dsh.nn.validate import consumed
 
     try:
-        after = nn_edits.apply({"op": "branch", "fork": fork_id, "kind": "agent",
-                                "sees": ["task"]}, state)
-    except Exception as exc:  # noqa: BLE001 - a fork that takes no such branch gets no line
+        graph = Graph.from_state(state["graph"])
+        there = core_ops._readable(graph, state, set(core_ops._available(graph).get(fork_id, set())))
+        task = core_ops._task_inputs(graph, state) & there
+    except Exception as exc:  # noqa: BLE001 - a fork that does not read back gets no line
         import logging
 
-        logging.getLogger(__name__).debug("no task branch for fork %s: %s", fork_id, exc)
+        logging.getLogger(__name__).debug("no inputs for fork %s: %s", fork_id, exc)
         return "-"
-    graph = Graph.from_state(after["graph"])
-    new = [graph.nodes[n] for n in set(graph.nodes) - set(state["graph"]["nodes"])]
-    values = {k: (e or {}).get("value") for k, e in (after.get("knobs") or {}).items()}
     makers = made_by(graph)
-    agent = next((n for n in new if n.kind == "agent"), None)
-    if agent is None:
-        return "-"
-    taken: list[str] = []  # in order, each once (one collect step may bring several files)
-    for kind, name in sorted(consumed(agent, values)):
-        by = [m for m in makers.get((kind, name)) or [] if m not in {n.id for n in new}]
-        helper = next((n for n in new if n.id in (makers.get((kind, name)) or [])), None)
-        if helper is not None:  # the collect step a new step's files come through
-            taken += [f"{n} ({', '.join(makers.get((k, n)) or []) or 'task input'})"
-                      for k, n in sorted(consumed(helper, values))]
-        else:
-            taken.append(f"{name} ({', '.join(by) or 'task input'})")
-    taken = list(dict.fromkeys(taken))
-    return f"a new branch that sees the task takes in: {', '.join(taken) or 'nothing'}"
+    values = {k: (e or {}).get("value") for k, e in (state.get("knobs") or {}).items()}
+
+    def named(kind: str, name: str) -> str:
+        made = makers.get((kind, name)) or []
+        texts = [k for m in made if graph.nodes[m].kind == "op"
+                 and not snippet.is_code_node(graph.nodes[m])
+                 for k in graph.nodes[m].knobs if isinstance(values.get(k), str)]
+        return (f"{name}@{','.join(made) or 'task'}"
+                + (f" (+knob {', '.join(dict.fromkeys(texts))})" if texts else ""))
+
+    order = sorted(there, key=lambda key: (key[0] != "fact", key[1]))
+    return (f"a new branch here can see: {', '.join(named(*key) for key in order) or 'nothing'}"
+            f"; \"task\" gives {', '.join(n for _k, n in sorted(task)) or 'nothing'}")
 
 
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
@@ -1824,7 +1862,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         if node.kind not in ("agent", "op", "fork"):
             continue
         carries = (_carries(node, graph, knob_values) if node.kind == "agent"
-                   else _task_branch(node_id, state) if node.kind == "fork" else "-")
+                   else _fork_inputs(node_id, state) if node.kind == "fork" else "-")
         applies: list[str] = []
         reasons: dict[str, list[str]] = {}
         for label, edit in _fit_edits(node, graph, ops):
@@ -1851,7 +1889,11 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                  f"before the step: {', '.join(name for _k, name in task)}: what no model "
                  "step's output reaches, as the steps declare their inputs. A fact a plain op "
                  "builds from a knob carries that knob's text (another step's instructions, "
-                 "say)." if task else "")
+                 "say)." if task else "") + (
+        " A fork's row lists every name a new branch there can put in `sees` for that input "
+        "alone (`name@maker`; `(+knob k)`: built by an op that reads text knob k, so it may "
+        "carry that text); a new step after a step can name what that step sees (its line in "
+        "the pipeline view) or what it writes.")
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
             "prompt and reads carry, each with the step that makes it (`(op X, which reads "
@@ -1906,8 +1948,9 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
         "Each is one line: what kind of step (`agent`, `code` or `op`), where (a step id), and "
         "its text (a prompt, or code). The system does the wiring: a new step sees what its "
         "neighbour sees plus the neighbour's outputs (`\"sees\"` names others: `\"task\"` "
-        "for the task's own inputs -- facts and files no model step made -- or step ids for "
-        "their outputs); files reach a model step through a collect step that says a missing "
+        "for the task's own inputs -- facts and files no model step made -- step ids for "
+        "their outputs, or single fact or file names, as the pipeline view writes them "
+        "before `@`, for that input alone); files reach a model step through a collect step that says a missing "
         "file instead of failing; its output (a file and a fact named after its id) goes into "
         "the prompt of the next model step after it (`\"to\"` names another step or prompt "
         "knob); ids, files and facts are generated; each text goes into a knob of its own "
@@ -3351,6 +3394,28 @@ def prediction_check(prediction: str, parent_records: Sequence[dict[str, Any]] |
     return lines
 
 
+#: The most lines of one candidate's "As built" a request shows; the rest are counted.
+AS_BUILT_LINES = 12
+
+
+def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
+    """The proposal's own flow change beside what its edit built: the candidate's
+    pipeline-view lines that are new (``+``) or changed (``~``) against its parent's, and
+    the steps gone (`nn.pipeline_view.changed_lines`), so a description that says
+    otherwise is seen against what ran, in the view's own words."""
+    built = list(entry.get("wiring") or ())
+    if len(built) > AS_BUILT_LINES:
+        built = [*built[:AS_BUILT_LINES],
+                 f"(and {len(built) - AS_BUILT_LINES} more line(s))"]
+    said = ([f"Flow change, as proposed: {_clip(entry['flow_change'], REASONING_TEXT_CHARS)}"]
+            if entry.get("flow_change") else [])
+    if not built:
+        return said
+    return [*said, "As built (its pipeline lines, new + or changed ~, read from the "
+            "candidate's graph; where the proposal's words say otherwise, this is what ran):",
+            "```text", *built, "```"]
+
+
 def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts; the
@@ -3374,6 +3439,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
         lines += [f"Wired by the system: {note}" for note in pair.get("notes") or ()]
+        lines += _as_built_lines(pair)
         if pair.get("same_seed") is False:
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
@@ -3428,9 +3494,11 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     return lines
 
 
-def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
+def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = ()) -> list[str]:
     """'Your earlier reasoning': what the optimizer said about recent candidates,
-    beside what happened to them, with each one's item errors (``item_errors``)."""
+    beside what happened to them, with each one's item errors (``item_errors``). A
+    candidate in ``above`` ("What the last edit changed" shows its edits, its flow change
+    and what they built) points there instead of repeating them."""
     if not entries:
         return []
     lines = ["## Your earlier reasoning and what happened",
@@ -3446,13 +3514,14 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
         lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
                   *_item_error_lines(entry.get("errors") or (), int(entry.get("items") or 0)),
                   *[f"Wiring warning this edit added: {w}" for w in entry.get("warnings") or ()],
-                  "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
-                  *[f"Wired by the system: {note}" for note in entry.get("notes") or ()],
+                  *(["Its edits, flow change and what they built: under \"What the last edit "
+                     "changed\" above."] if str(entry.get("id")) in above else [
+                      "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
+                      *[f"Wired by the system: {note}" for note in entry.get("notes") or ()]]),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Addresses: {_clip(entry['addresses'], REASONING_TEXT_CHARS)}"]
                     if entry.get("addresses") else []),
-                  *([f"Flow change: {_clip(entry['flow_change'], REASONING_TEXT_CHARS)}"]
-                    if entry.get("flow_change") else []),
+                  *([] if str(entry.get("id")) in above else _as_built_lines(entry)),
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]

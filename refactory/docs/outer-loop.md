@@ -1828,6 +1828,49 @@ items -- and how many of its items timed out), and cost: with no cost term (pars
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
+**The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
+step, generated from the graph the edits act on (`nn.pipeline_view`), read in the core
+operators' own words. Reading mirrors writing: every operation in the catalogue names the
+readers that render what it builds (`EditSpec.reads_as`: `step`, `sees`, `told`, `loop`,
+`route`, `parallel`, `edges`), and a test fails on an operation without a reader or a reader
+no operation names. A step's line says what it `sees` (each input as `"sees"` takes it,
+`name@maker`), what it is `told` (each knob whose text reaches it, its opening words; `*`
+frozen, `?` read by an op with several outputs for all of them; a code step's code) and
+what it writes (`->`); forks are `parallel fork { ... } -> join` (`[optional]` branches); a
+judge and its gate are `loop(step, judge ..., max N -> N+1 runs)` or `route(after step,
+judge ..., {label: step})`, each label's steps until the ways meet; data passes are
+`per item (data) { ... }`; `[protected]` steps are marked. A plain op is folded into the
+step it feeds only when it is a pure assembler (no tools, not code, protected, the
+grader's, or a step a gate names) whose outputs only model steps read, directly or through
+an operator's collect step; it shows as `name (via op: its inputs)`. An agent with tools
+sees the run dir (or its own workspace). What no reader recognises is drawn generically
+(kind, sees, writes, `edges ->`) and counted: no hand-written seed graph needs one, nor does
+any graph core operators build from them (`tests/test_pipeline_view.py`, with a round trip:
+an operator changes only the lines it describes, which name its handles, drawn by the
+readers it declares). Read from its lines alone, the view says exactly the graph's edges
+(checked on every seed and its draws): a way that meets a step drawn already says
+`-> step (above)`, a way that ends the run inside a block says `-> end` (so what follows the
+block does not read as following it), and a loop's gate with more than one way forward
+lists each after its loop line. About 1.5k
+characters on the S4 pipeline. Python only: the spine does not render requests. A parser
+from the view back to a graph is not built.
+
+**What an edit built.** A proposal says in prose what its edit does (`flow_change`); the
+expansion can differ (a loop left at its default cap, a branch that sees the task taking in
+more than the question). The candidate's proposal record carries `wiring`: its pipeline
+view's lines that are new (`+`) or changed (`~`) against its parent's, and the steps gone
+(`- removed`), read from the two graphs (`pipeline_view.changed_lines`), never from the
+edit's text. The next request shows them under "As built" right after the proposal's own
+"Flow change, as proposed", in "What the last edit changed" (and in "Your earlier
+reasoning" for a candidate that section does not show; one it shows is pointed to), so a
+description that says otherwise is seen against what ran, in the same words as the
+pipeline view (at most 12 lines a candidate, the rest counted).
+
+**Naming inputs.** `"sees"` takes `"task"`, step ids, or single fact or file names there
+before the new step (that input alone); the catalogue says so, a name that is not there is
+refused with the names that are, and each fork's row in the operator table lists what a new
+branch there can name, `(+knob k)` marking one built by an op that reads text knob `k`.
+
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
 step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
