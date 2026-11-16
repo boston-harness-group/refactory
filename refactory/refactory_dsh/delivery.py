@@ -986,30 +986,36 @@ def deliver_design(ctx: Any) -> dict[str, Any]:
         try:
             outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
         except NotDelivered as conflict:
-            spent = _conflict_budget_spent(ctx, conflict, draft_delivery)
-            if spent is None:
+            if _conflict_budget_spent(ctx, conflict, draft_delivery) is None:
                 raise
-            # The conflict send-backs are spent and the base still conflicts: the work is
-            # delivered as a draft naming the unresolved files (b45a), not kept local.
-            # `_deliver` pushes the reviewed commit without the merge and lists the
-            # conflict first among the draft's unresolved items.
-            draft_delivery = spent
+            # The conflict send-backs are spent. Once more as it is, in case the base no
+            # longer conflicts; if it still does, the work is delivered as a draft naming the
+            # unresolved files (b45a), not kept local. `_deliver` pushes the reviewed commit
+            # without the merge and lists the conflict first among the draft's unresolved items.
             _abandon_merge(Path(found.path), found.head)
-            title = _write_pr_text(ctx, found, draft_delivery=draft_delivery)
-            finish = _finish_commands(ctx, found, title, repo_slug, draft=True,
-                                      inputs=inputs, logged_out=bool(now.get("logged_out")))
             try:
                 outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
-            except NotDelivered as refused:
-                # Not even a draft could be pushed: the run fails, as an exhausted conflict
-                # budget always did, saying both why and how to finish.
-                _kept(ctx, approved, found, str(refused), refused.pull_request, refused.pushed,
-                      title=title, finish=finish, merge=conflict.merge)
-                raise ValueError(
-                    f"delivery conflict resolution exhausted its send-backs; conflicting files: "
-                    f"{', '.join(conflict.merge.conflicts)}; and the draft that would carry them "
-                    f"could not be delivered either: {refused}. To resume: graph-control "
-                    f"redeliver --run <run_dir>") from refused
+            except NotDelivered as again:
+                spent = _conflict_budget_spent(ctx, again, draft_delivery)
+                if spent is None:
+                    raise
+                draft_delivery = spent
+                _abandon_merge(Path(found.path), found.head)
+                title = _write_pr_text(ctx, found, draft_delivery=draft_delivery)
+                finish = _finish_commands(ctx, found, title, repo_slug, draft=True,
+                                          inputs=inputs, logged_out=bool(now.get("logged_out")))
+                try:
+                    outcome = _deliver(ctx, found, now, title=title, draft_delivery=draft_delivery)
+                except NotDelivered as refused:
+                    # Not even a draft could be pushed: the run fails, as an exhausted conflict
+                    # budget always did, saying both why and how to finish.
+                    _kept(ctx, approved, found, str(refused), refused.pull_request, refused.pushed,
+                          title=title, finish=finish, merge=again.merge)
+                    raise ValueError(
+                        f"delivery conflict resolution exhausted its send-backs; conflicting files: "
+                        f"{', '.join(again.merge.conflicts)}; and the draft that would carry them "
+                        f"could not be delivered either: {refused}. To resume: graph-control "
+                        f"redeliver --run <run_dir>") from refused
     except NotDelivered as reason:
         merge = reason.merge
         # Whatever stopped delivery -- a closed pull request, a refused push, an
@@ -2629,7 +2635,10 @@ def _record(ctx: Any, record: dict[str, Any]) -> None:
     ctx.write_json(RECORD, record)
     report = ctx.read_json("design.json", None)
     if isinstance(report, dict):
-        ctx.write_json("design.json", {**report, "delivery": record})
+        # A draft decided at delivery (a spent conflict budget) is a draft in the report too,
+        # which `report` wrote before delivery decided it.
+        drafted = {"draft": True} if record.get("draft") else {}
+        ctx.write_json("design.json", {**report, **drafted, "delivery": record})
 
 
 def _delivered(ctx: Any, approved: dict[str, Any], found: worktree.Worktree,
