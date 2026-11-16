@@ -249,7 +249,6 @@ class _View:
         node = self.graph.nodes[gate_id]
         back = sorted(e.target for e in self.graph.out_edges(gate_id)
                       if (gate_id, e.target) in self.back)
-        self._say(*((gate_id, t) for t in back))
         cap = node.bound("max_iterations", self.values)
         knob = node.bound_knob("max_iterations")
         return LOOP_LINE.format(step=", ".join(self._shown_from(t) for t in back),
@@ -258,7 +257,6 @@ class _View:
                                 runs=cap + 1, knob=f", knob {knob}" if knob else "")
 
     def route(self, gate_id: str) -> str:
-        self._say(*((gate_id, e.target) for e in self.graph.out_edges(gate_id) if e.condition))
         before = sorted(self._shown_before(gate_id))
         labels = ", ".join(f"{e.condition}: {self._shown_from(e.target)}"
                            for e in self.graph.out_edges(gate_id) if e.condition)
@@ -271,16 +269,10 @@ class _View:
     def edges(self, node_id: str) -> str:
         """A step the walk could not place: generically, with its edges."""
         node = self.graph.nodes[node_id]
-        self._say(*((node_id, e.target) for e in self.graph.out_edges(node_id)))
         outs = [f"{e.target}" + (f" [{e.condition}]" if e.condition else "")
                 for e in self.graph.out_edges(node_id)]
         base = self.step(node_id) if node.kind in ("agent", "op") else f"{node_id} {node.kind}"
         return base + (f"  edges -> {', '.join(outs)}" if outs else "")
-
-    def _say(self, *edges: tuple[str, str]) -> None:
-        """Record edges as said, where the text that says them is written: every graph edge
-        must be said by some line (``tests/test_pipeline_view.py``)."""
-        self.said.update(edges)
 
     # ── the walk ─────────────────────────────────────────────────────────
     def _succ(self, node_id: str) -> list[str]:
@@ -404,7 +396,6 @@ class _View:
     def lines(self) -> list[Line]:
         out: list[Line] = []
         self.shown = set()
-        self.said: set[tuple[str, str]] = set()
         self._chain(self.graph.start, None, 0, "", out)
         for node_id in self._in_order([n for n in self.graph.nodes if n not in self.shown]):
             if node_id not in self.shown and not self._hidden(node_id):
@@ -433,14 +424,18 @@ class _View:
 
     def _chain(self, start: str | None, stop: str | None, depth: int, within: str,
                out: list[Line]) -> None:
+        """The steps from ``start`` until ``stop`` (where an enclosing block goes on), one
+        line each. A chain that ends before ``stop`` -- a way out of a route that ends the
+        run -- says ``-> end``, so nothing after the block reads as following it."""
         g = self.graph
-        node_id = start
+        node_id, last = start, start
         while node_id and node_id != stop and node_id in g.nodes:
             node = g.nodes[node_id]
+            last = node_id
             if node_id in self.shown and node.kind != "join":
                 # Drawn already (where routes rejoin, say): said as where it goes.
                 out.append(Line(f"->{node_id}", depth, f"-> {node_id} (above)", within,
-                                "step"))
+                                "edges"))
                 return
             if node.kind == "data":
                 self.shown.add(node_id)
@@ -453,17 +448,14 @@ class _View:
                 self.shown.add(node_id)
                 join = self._join_of(node_id)
                 out.append(Line(node_id, depth, self.parallel(node_id), within, "parallel"))
-                self._say(*((node_id, t) for t in node.targets))
                 for target in node.targets:
                     self._chain(target, join, depth + 1, f"parallel {node_id}", out)
                 out.append(Line(f"{node_id}/", depth, f"}} -> {join or 'end'}", within,
                                 "parallel"))
-                if join:
-                    self._say((node_id, join))
                 if not join:
                     return
                 self.shown.add(join)
-                node_id = self._step(join)
+                node_id = self._next(join)
                 continue
             else:
                 self._one(node_id, depth, within, out)
@@ -474,26 +466,19 @@ class _View:
                     # in turn, to where they rejoin (or to where this chain stops).
                     node_id = self._ways(node_id, forward, stop, depth, within, out)
                     continue
-            node_id = self._step(node_id)
-
-    def _step(self, node_id: str) -> str | None:
-        """The next step along the chain, its edge said."""
-        nxt = self._next(node_id)
-        if nxt is not None:
-            self._say((node_id, nxt))
-        return nxt
+            node_id = self._next(node_id)
+        if node_id is None and stop is not None:
+            out.append(Line(f"{last}:end", depth, "-> end", within, "edges"))
 
     def _ways(self, gate_id: str, edges: list[Any], stop: str | None, depth: int,
               within: str, out: list[Line]) -> str | None:
         """Each labelled way on from a gate, then where they rejoin: the first step every
-        way reaches, else the enclosing chain's stop."""
+        way reaches, else the enclosing chain's stop -- a way that reaches neither ends
+        with ``-> end``."""
         reaches = [self.reach(e.target) for e in edges]
         common = set(reaches[0]).intersection(*map(set, reaches[1:]))
         rejoin = next((n for n in reaches[0] if n in common), None) or stop
-        if not any((gate_id, e.target) in self.back for e in self.graph.out_edges(gate_id)):
-            pass  # a route's line names every way already
-        else:
-            self._say(*((gate_id, e.target) for e in edges))
+        if any((gate_id, e.target) in self.back for e in self.graph.out_edges(gate_id)):
             out.append(Line(f"{gate_id}:ways", depth, "then, by its verdict:", within, "loop"))
         for edge in edges:
             if edge.target != rejoin:
@@ -501,7 +486,7 @@ class _View:
                                 f"on {edge.condition}:", within, "route"))
                 self._chain(edge.target, rejoin, depth + 2,
                             f"route {gate_id} on {edge.condition}", out)
-        return rejoin if rejoin != stop else None
+        return rejoin
 
 
 #: Each reader by the name operations give it in ``EditSpec.reads_as``: what draws that
@@ -523,14 +508,6 @@ FORMS = {
     "route": "route(after step, judge ..., {label: step})",
     "per item": "per item (data) { ... }",
 }
-
-
-def unsaid_edges(state: Mapping[str, Any], protected: Sequence[str] = (),
-                 graders: Sequence[str] = ()) -> list[tuple[str, str]]:
-    """The graph's edges no line of its view says (none, for a complete view)."""
-    view = _View(state, protected, graders)
-    view.lines()
-    return sorted({(e.source, e.target) for e in view.graph.edges} - view.said)
 
 
 def view_lines(state: Mapping[str, Any], protected: Sequence[str] = (),

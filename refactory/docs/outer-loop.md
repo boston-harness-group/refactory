@@ -1847,9 +1847,11 @@ sees the run dir (or its own workspace). What no reader recognises is drawn gene
 (kind, sees, writes, `edges ->`) and counted: no hand-written seed graph needs one, nor does
 any graph core operators build from them (`tests/test_pipeline_view.py`, with a round trip:
 an operator changes only the lines it describes, which name its handles, drawn by the
-readers it declares). Every edge is said by some line (`unsaid_edges`, checked on every
-seed and its draws): a way that meets a step drawn already says `-> step (above)`, and a
-loop's gate with more than one way forward lists each after its loop line. About 1.5k
+readers it declares). Read from its lines alone, the view says exactly the graph's edges
+(checked on every seed and its draws): a way that meets a step drawn already says
+`-> step (above)`, a way that ends the run inside a block says `-> end` (so what follows the
+block does not read as following it), and a loop's gate with more than one way forward
+lists each after its loop line. About 1.5k
 characters on the S4 pipeline. Python only: the spine does not render requests. A parser
 from the view back to a graph is not built.
 

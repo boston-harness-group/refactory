@@ -88,6 +88,51 @@ _BY_HAND = {
             **{k: v for k, v in s["graph"]["nodes"]["review"].items()
                if k not in ("field_bindings",)},
             "id": "review2", "writes": ["review2.txt"], "produces": ["review2"]}}]),
+    "insert_before": ("fuzz_draft_review", lambda s: [
+        {"op": "insert_before", "target": "finalize", "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "review2", "writes": ["review2.txt"], "produces": ["review2"]}}]),
+    "add_node": ("fuzz_draft_review", lambda s: [
+        {"op": "add_node", "position": {"after": "draft"}, "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "review2", "writes": ["review2.txt"], "produces": ["review2"]}}]),
+    "wrap": ("fuzz_draft_review", lambda s: [
+        {"op": "wrap", "target": "review", "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "watch", "writes": ["watch.txt"], "produces": ["watch"]}}]),
+    "parallel": ("fuzz_draft_review", lambda s: [
+        {"op": "parallel", "target": "draft", "branches": [
+            {"id": "side_a", "kind": "agent", "writes": ["side_a.txt"],
+             "prompt_template": "First angle on {{brief}}"},
+            {"id": "side_b", "kind": "agent", "writes": ["side_b.txt"],
+             "prompt_template": "Second angle on {{brief}}"}]}]),
+    # A knob alone is never a valid state (an unread knob is refused): each is checked in
+    # the edit it completes -- a new step told by a new knob, a step's knob removed with it.
+    "add_knob": ("fuzz_draft_review", lambda s: [
+        {"op": "add_knob", "name": "careful", "spec": {"default": "Be careful.", "kind": "str"}},
+        {"op": "insert_after", "target": "draft", "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "review2", "writes": ["review2.txt"], "produces": ["review2"],
+            "knobs": ["careful"], "field_bindings": [["system_prompt_template", "careful"]]}}]),
+}
+
+#: Edits that make the state the by-hand case starts from (``remove_knob`` takes away a
+#: step and then its own knob).
+_BY_HAND_SETUP = {
+    "remove_knob": ("fuzz_draft_review", lambda s: [
+        {"op": "add_knob", "name": "careful", "spec": {"default": "Be careful.", "kind": "str"}},
+        {"op": "insert_after", "target": "finalize", "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "review2", "writes": ["review2.txt"], "produces": ["review2"],
+            "knobs": ["careful"], "field_bindings": [["system_prompt_template", "careful"]]}}],
+        lambda s: [{"op": "remove_node", "id": "review2"},
+                   {"op": "add_edge", "source": "finalize", "target": "ship", "condition": None},
+                   {"op": "remove_knob", "name": "careful"}]),
 }
 
 
@@ -114,12 +159,17 @@ def test_each_operation_s_reader_draws_what_it_changes():
     is drawn by a reader the operation declares (`EditSpec.reads_as`)."""
     specs = nn_edits._specs()
     applied = [draw for seed in sorted(sf.seeds()) for draw in _op_draws(seed)]
-    for name, (seed, edits) in _BY_HAND.items():
+    cases = [(name, seed, lambda s: [], edits) for name, (seed, edits) in _BY_HAND.items()]
+    cases += [(name, seed, setup, edits)
+              for name, (seed, setup, edits) in _BY_HAND_SETUP.items()]
+    for name, seed, setup, edits in cases:
         state = _seed(seed)
+        for edit in setup(state):
+            state = nn_edits.apply(edit, state)
         after = state
         for edit in edits(state):
             after = nn_edits.apply(edit, after)
-        assert validate_state(after) == [], name
+        assert validate_state(after) == [], (name, validate_state(after))
         applied.append((name, state, after))
     checked: set[str] = set()
     for name, before, after in applied:
@@ -133,8 +183,8 @@ def test_each_operation_s_reader_draws_what_it_changes():
         assert any(_drawn_by(reader, o, n) for reader in specs[name].reads_as
                    for o, n in changed), (name, specs[name].reads_as,
                                           sorted({(n or o).reader for o, n in changed}))
-    assert checked >= set(nn_edits.CORE_OPS) | set(_BY_HAND), sorted(
-        set(nn_edits.CORE_OPS) | set(_BY_HAND) - checked)
+    # Every operation in the catalogue is checked by what it drew.
+    assert checked == set(specs), sorted(set(specs) - checked)
 
 
 # ── the view ────────────────────────────────────────────────────────────────
@@ -241,40 +291,263 @@ def _gate_with_ways() -> dict:
                            "condition": "escalate"}, state)
 
 
+def _ways_meet_above() -> dict:
+    """The gate with ways: escalate goes alt -> finish, proceed goes to finish (drawn above
+    by then), and a third way ends: proceed says ``-> finish (above)``."""
+    state = _gate_with_ways()
+    finish = state["graph"]["nodes"]["finish"]
+    state = nn_edits.apply({"op": "add_edge", "source": "alt", "target": "finish",
+                            "condition": None}, state)
+    state = nn_edits.apply({"op": "add_node", "position": {"detached": True},
+                            "node": {"id": "stop_here", "kind": "op", "call": finish["call"],
+                                     "reads": ["work.txt"], "writes": ["stopped.txt"],
+                                     "produces": ["stopped"]}}, state)
+    return nn_edits.apply({"op": "add_edge", "source": "review", "target": "stop_here",
+                           "condition": "drop"}, state)
+
+
 def _shapes() -> dict[str, dict]:
     return {"two passes": _two_passes(_seed("fuzz_data_pass")), "gate ways": _gate_with_ways(),
+            "ways meet above": _ways_meet_above(),
             **{name: _mode(name).state_dict()
                for name in ("livemath/skill_graph", "livemath/solver")}}
 
 
+class _Reading:
+    """What a reader of the view's lines takes as the graph's edges: each line after
+    another at its depth follows it; a block's first line follows its header; a route's or
+    loop's labelled ways follow the gate; what comes after a block follows the tails of its
+    ways (a way ending in ``-> end`` has none); ``-> X (above)`` goes to X; a loop line
+    sends back to its step; a fallback line lists its edges. Steps the view folds into
+    another line (folded ops, judges, joins, no-op steps) may stand between two read
+    steps. Read from the lines (keys, depths, the route/loop/fallback text), never from the
+    drawer's own records."""
+
+    def __init__(self, state: dict) -> None:
+        self.view = view = pv._View(state, ())
+        self.lines = view.lines()
+        self.graph = view.graph
+        self.wrong: set[tuple[str, str]] = set()   # read, but no such path in the graph
+        self.covered: set[tuple[str, str]] = set()  # graph edges some reading uses
+        self.i = 0
+        start = self.graph.start
+        first = self._first(start)
+        if first and first != start:  # the run starts at steps folded into the first line
+            self.covered.update(self._path(start, first) or [])
+        self._end(self._seq(0, set()))
+        for line in self.lines:
+            if line.key.startswith(pv.FALLBACK) and "edges -> " in line.text:
+                source = line.key.removeprefix(pv.FALLBACK)
+                for target in re.findall(r"(\w+)(?: \[[^\]]*\])?",
+                                         line.text.split("edges -> ", 1)[1]):
+                    self._follow({source}, target)
+            if line.reader == "loop" and "loop(" in line.text:
+                gate = line.key
+                for e in self.graph.out_edges(gate):
+                    if (gate, e.target) in view.back and f"loop({view._shown_from(e.target)}" \
+                            in line.text:
+                        self.covered.add((gate, e.target))
+
+    def _path(self, a: str, b: str) -> list[tuple[str, str]] | None:
+        """The edges from ``a`` to ``b`` through folded steps only (forward edges)."""
+        todo, seen = [(a, [])], {a}
+        while todo:
+            node, path = todo.pop(0)
+            for e in self.graph.out_edges(node):
+                if (node, e.target) in self.view.back:
+                    continue
+                step = [*path, (node, e.target)]
+                if e.target == b:
+                    return step
+                if e.target not in seen and self.view._hidden(e.target):
+                    seen.add(e.target)
+                    todo.append((e.target, step))
+            if self.graph.nodes[node].kind == "fork":
+                for t in self.graph.nodes[node].targets:
+                    if t == b:
+                        return [*path, (node, t)]
+                    if t not in seen and self.view._hidden(t):
+                        seen.add(t)
+                        todo.append((t, [*path, (node, t)]))
+        return None
+
+    def _follow(self, tails: set[str], b: str) -> None:
+        for t in tails:
+            path = self._path(t, b)
+            if path is None:
+                self.wrong.add((t, b))
+            else:
+                self.covered.update(path)
+
+    def _node(self, key: str) -> str | None:
+        return key if key in self.graph.nodes else None
+
+    def _seq(self, depth: int, tails: set[str], heads: tuple[str, ...] = ()) -> set[str]:
+        """Read the lines at ``depth`` from here; ``tails`` lead into the first. Returns
+        what leads on after the last (empty when the chain ended)."""
+        g = self.graph
+        while self.i < len(self.lines):
+            line = self.lines[self.i]
+            if line.depth < depth or (line.depth == depth and heads and line.key in heads
+                                       and self._started):
+                return tails
+            if line.depth > depth:  # belongs to an item handled below; never expected here
+                self.i += 1
+                continue
+            key = line.key
+            self.i += 1
+            self._started = True
+            if key.startswith(pv.FALLBACK):
+                tails = set()
+            elif key.startswith("->"):
+                self._follow(tails, key[2:])
+                tails = set()
+            elif key.endswith(":end"):
+                self._end(tails)
+                tails = set()
+            elif key.endswith("/"):
+                self._end(tails)
+                return set()  # a block's closing line: its header's reading continues
+            elif self._node(key) and g.nodes[key].kind == "fork":
+                self._follow(tails, key)
+                join = self.view._join_of(key)
+                out: set[str] = set()
+                firsts = [self._first(t) for t in g.nodes[key].targets]
+                for first in firsts:
+                    if first is None:
+                        continue
+                    self._started = False
+                    out |= self._seq(depth + 1, {key}, tuple(f for f in firsts if f))
+                closing = self.lines[self.i] if self.i < len(self.lines) else None
+                if closing is not None and closing.key == f"{key}/":
+                    self.i += 1
+                if join:
+                    self._follow(out, join) if out else None
+                    self.covered.add((key, join)) if any(
+                        e.target == join for e in g.out_edges(key)) else None
+                    tails = {join}
+                else:
+                    tails = set()
+            elif self._node(key) and g.nodes[key].kind == "data":
+                self._follow(tails, key)
+                entry = g.nodes[key].subgraph_entry
+                self._started = False
+                first = self._first(entry) if entry else None
+                if first and first != entry:
+                    path = self._path(entry, first)
+                    self.covered.update(path or [])
+                self._end(self._seq(depth + 1, set()))
+                if self.i < len(self.lines) and self.lines[self.i].key == f"{key}/":
+                    self.i += 1
+                tails = {key}
+            elif self._node(key):
+                if tails:
+                    self._follow(tails, key)
+                tails = {key}
+                node = g.nodes[key]
+                if node.kind == "gate":
+                    labelled = {e.condition: e.target for e in g.out_edges(key)
+                                if e.condition and (key, e.target) not in self.view.back}
+                    drawn: set[str] = set()
+                    out = set()
+                    if self.i < len(self.lines) and self.lines[self.i].key == f"{key}:ways":
+                        self.i += 1  # "then, by its verdict:", at the gate's own depth
+                    while self.i < len(self.lines) and self.lines[self.i].depth == depth + 1 \
+                            and self.lines[self.i].key.startswith(f"{key}:"):
+                        way = self.lines[self.i].key.split(":", 1)[1]
+                        self.i += 1
+                        if way == "ways":
+                            continue
+                        drawn.add(way)
+                        self._started = False
+                        out |= self._seq(depth + 2, {key})
+                    if self.i < len(self.lines) and self.lines[self.i].key == f"{key}:ways":
+                        self.i += 1
+                    if "route(" in line.text or drawn:
+                        # Undrawn labels go to what follows; drawn ways' tails go on too.
+                        tails = out | ({key} if set(labelled) - drawn else set())
+                        if not (set(labelled) - drawn):
+                            tails = out
+            else:
+                tails = set()
+        return tails
+
+    def _end(self, tails: set[str]) -> None:
+        """A chain that stops with ``tails``: what they lead to through folded steps that
+        end the pass (a no-op step) reads as the chain ending there."""
+        for t in tails:
+            todo = [t]
+            seen = {t}
+            while todo:
+                node = todo.pop()
+                for e in self.graph.out_edges(node):
+                    if (node, e.target) in self.view.back or e.target in seen:
+                        continue
+                    if self.view._hidden(e.target) and not any(
+                            (e.target, x.target) not in self.view.back and not
+                            self.view._hidden(x.target)
+                            for x in self.graph.out_edges(e.target)):
+                        self.covered.add((node, e.target))
+                        seen.add(e.target)
+                        todo.append(e.target)
+
+    def _first(self, node_id: str | None) -> str | None:
+        """The first step a chain from ``node_id`` draws: itself, or past folded steps."""
+        seen = set()
+        while node_id and node_id in self.graph.nodes and self.view._hidden(node_id) \
+                and node_id not in seen:
+            seen.add(node_id)
+            node_id = self.view._next(node_id)
+        return node_id
+
+
+def _reading_problems(state: dict) -> tuple[set, set]:
+    reading = _Reading(state)
+    edges = {(e.source, e.target) for e in reading.graph.edges}
+    fork_targets = {(n.id, t) for n in reading.graph.nodes.values() if n.kind == "fork"
+                    for t in n.targets}
+    return reading.wrong, (edges | fork_targets) - reading.covered
+
+
 @pytest.mark.parametrize("seed", sorted(sf.seeds()))
-def test_every_edge_is_said_by_some_line_on_seeds_and_random_edits(seed):
-    """Completeness: on each seed and its operator draws, every edge of the graph is said
-    by a line of the view -- a step reached along a chain, a route's or loop's way, a fork
-    branch, a ``-> X (above)`` where a chain meets a drawn step, or a fallback line's
-    edges."""
+def test_the_lines_read_as_exactly_the_graph_s_edges_on_seeds_and_random_edits(seed):
+    """Read from the drawn lines alone: every edge they imply is in the graph (soundness:
+    a way that ends says ``-> end``, so nothing after its block reads as following it) and
+    every edge of the graph is read from some line (completeness)."""
     for current in _draws(seed):
-        assert pv.unsaid_edges(current) == [], (seed, pv.render(current))
+        wrong, unread = _reading_problems(current)
+        assert wrong == set(), (seed, sorted(wrong), pv.render(current))
+        assert unread == set(), (seed, sorted(unread), pv.render(current))
 
 
-def test_every_edge_is_said_on_the_shapes():
+def test_the_lines_read_as_exactly_the_graph_s_edges_on_the_shapes():
     for name, state in _shapes().items():
         assert validate_state(state) == [] or name == "two passes", name
-        assert pv.unsaid_edges(state) == [], (name, pv.render(state))
+        wrong, unread = _reading_problems(state)
+        assert wrong == set() and unread == set(), (name, wrong, unread, pv.render(state))
 
 
-def test_routes_rejoining_inside_another_route_keep_every_way():
-    """fuzz_gates: approve's reject way (redo) rejoins at drop, which triage's route also
-    reaches; the view says redo -> drop rather than ending at redo."""
+def test_routes_rejoining_inside_another_route_keep_every_way_and_end_where_they_end():
+    """fuzz_gates: approve's reject way (redo) rejoins at drop, which triage's reject way
+    also reaches; triage's proceed way (archive) ends the run and says so, so drop does not
+    read as following archive."""
     state = _seed("fuzz_gates")
-    assert ("redo", "drop") not in pv.unsaid_edges(state)
     text = pv.render(state)
     assert "on reject:\n    redo agent" in text and text.rstrip().endswith("drop op  -> dropped")
+    assert "archive op  sees answer.txt@ship  -> finished\n        -> end" in text
+    wrong, unread = _reading_problems(state)
+    assert ("archive", "drop") not in wrong and wrong == set() and unread == set()
+
+
+def test_a_way_that_meets_a_step_drawn_above_says_so():
+    text = pv.render(_ways_meet_above())
+    assert "-> finish (above)" in text, text
 
 
 def test_a_loop_gate_s_ways_forward_are_shown_beside_its_loop_line():
     text = pv.render(_gate_with_ways())
-    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)" in text
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)\nthen, by its " \
+        "verdict:" in text
     assert "on escalate:\n    alt op" in text and "on proceed:\n    finish op" in text
 
 
@@ -644,6 +917,51 @@ def test_a_round_records_what_was_built_in_the_proposal_record(tmp_path, monkeyp
                "work_check__max_iterations)" in line for line in built), built
     journaled = [r for r in _events(loop, "proposal") if r["id"] == child.id]
     assert journaled and journaled[0]["wiring"] == built
+
+
+def test_the_mode_s_graders_reach_the_wiring_record_and_the_request(tmp_path, monkeypatch):
+    """The view reads the mode's grader nodes (never folded) in the proposal's wiring
+    record, the history's As built and the request's pipeline view alike."""
+    from refactory_dsh.loop import Loop
+    from refactory_dsh.optim import Optimizer, Proposal
+    from test_compound_proposals import TwoLevels
+    from test_skillopt import _patch_mode
+    from test_val_gate import _loop
+
+    calls: list[tuple] = []
+    for name in ("changed_lines", "render"):
+        real = getattr(pv, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):  # type: ignore[no-untyped-def]
+            import inspect
+
+            bound = inspect.signature(_real).bind(*args, **kwargs)
+            calls.append((_name, tuple(bound.arguments.get("graders") or ())))
+            return _real(*args, **kwargs)
+        monkeypatch.setattr(pv, name, spy)
+    edit = {"op": "loop", "step": "work", "judge": "loop_ops:always_proceed"}
+
+    class Scripted(Optimizer):
+        name = "scripted_graders"
+
+        def __init__(self) -> None:
+            super().__init__(k=1)
+            self.plan = [[Proposal(edit=edit)], []]
+
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            return self.plan.pop(0) if self.plan else []
+
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    monkeypatch.setattr(TwoLevels, "grader_nodes", lambda self: ("GRADER",), raising=False)
+    with _patch_mode(TwoLevels):
+        loop = _loop(tmp_path, epochs=2, batch_size=1, allowed_ops=(), edit_preset="broad")
+        loop.optimizer = Scripted()
+        loop.run()
+        assert loop.graders == ("GRADER",)
+        loop._context().render()
+    kinds = {name for name, _args in calls}
+    assert kinds == {"changed_lines", "render"}, kinds
+    assert all(graders == ("GRADER",) for _name, graders in calls), calls
 
 
 def test_steps_a_gate_names_are_never_folded_and_judges_are_only_judges():
