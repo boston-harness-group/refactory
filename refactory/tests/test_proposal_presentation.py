@@ -251,8 +251,8 @@ def test_the_history_shows_edits_compactly_not_whole_values():
     assert "+SECOND ADDITION" in tried
     assert '"node": {"id": "n2", "kind": "agent", "prompt_template": "PPP' in tried
     assert "set_knob b patch:" in tried
-    row = next(line for line in tried.splitlines() if line.startswith("| c2 |"))
-    assert row.startswith("| c2 | c1 | 0.6 | true | true | ")
+    row = next(line for line in tried.splitlines() if line.startswith("- `c2`"))
+    assert row.startswith("- `c2` from `c1`: ") and row.endswith("| train 0.6 (parent 0.5)")
     assert len(tried) < 4000
     unseeded = ProposalContext(history=rows[:1]).render()
     assert f"set_knob a__system_prompt = ({len(first)} chars)" in unseeded

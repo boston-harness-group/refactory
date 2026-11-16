@@ -219,9 +219,19 @@ class _View:
                 shared.update(texts)
             todo += [m for k, n in self._sorted(self.inputs[op_id])
                      for m in self.makers.get((k, n)) or [] if m in self.folded]
+        from .core_ops import system_appended
+
+        # The system appends its verdict rule to a judge's own prompt (where `core_ops`
+        # builds a judge), so only there is the rule said apart; elsewhere a prompt ending
+        # in the same words is the step's own text.
+        appends = (node.bound_knob("prompt_template")
+                   if node_id in self.judges.values() else None)
         for name in dict.fromkeys(names):
+            text = str(self.values.get(name) or "")
+            own, appended = system_appended(text) if name == appends else (text, "")
             told.append(f"{name}{'*' if name in self.frozen else ''}"
-                        f"{'?' if name in shared else ''} \"{_clip(self.values.get(name))}\"")
+                        f"{'?' if name in shared else ''} \"{_clip(own)}\""
+                        + (f" + appended by the system: \"{appended}\"" if appended else ""))
         return "; ".join(told)
 
     def step(self, node_id: str) -> str:
@@ -508,6 +518,19 @@ FORMS = {
     "route": "route(after step, judge ..., {label: step})",
     "per item": "per item (data) { ... }",
 }
+
+
+def judges(state: Mapping[str, Any]) -> set[str]:
+    """The graph's judges: each agent right before a verdict gate that only that gate
+    reads (where the system appends its verdict rule). Empty when the graph does not
+    read back."""
+    try:
+        return set(_View(state, (), ()).judges.values())
+    except Exception as exc:  # noqa: BLE001 - logged; a graph the view cannot read has none
+        import logging
+
+        logging.getLogger(__name__).warning("judges unavailable: %s", exc)
+        return set()
 
 
 def view_lines(state: Mapping[str, Any], protected: Sequence[str] = (),

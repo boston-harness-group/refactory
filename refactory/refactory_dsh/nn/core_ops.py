@@ -30,8 +30,8 @@ strategy with no model can apply any operator.
   in its own prompt knob; files through a ``collect`` step in front of it
   (`operators.collect`), so a missing file is said, not a crash. A code step gets the
   same files and facts in ``inp``;
-- its output: one file named after its id and one fact of that name, placed in the
-  prompt knob of the next model step downstream (``to`` names another), guarded when
+- its output: one file named after its id and one fact of that name, placed as `REACHES`
+  says (``to`` names another place), guarded when
   the step may not run;
 - names: fresh ids, files and facts, the same for the same edit on the same parent;
 - the fork's targets and the join's sources, edges, the gate's verdict edges, the
@@ -73,6 +73,18 @@ NEUTRAL_REVIEW = "Review the work above against the task and write the final res
 #: What a judge agent is told about its answer's first word.
 VERDICT_RULE = ("Start your answer with one word, {labels}, alone or followed by why; "
                 "nothing before it.")
+def system_appended(text: str) -> tuple[str, str]:
+    """``text`` split into the step's own words and what the system appended to them (the
+    verdict rule a judge's prompt ends with, `VERDICT_RULE`); ``(text, "")`` when nothing
+    was. Our own constant is matched, never the model's words."""
+    head, tail = VERDICT_RULE.split("{labels}")
+    found = re.search(re.escape(head) + r"(?P<labels>.+?)" + re.escape(tail) + r"\s*$",
+                      text or "")
+    if not found:
+        return text, ""
+    return text[:found.start()].rstrip(), text[found.start():].strip()
+
+
 #: The loop's default iteration limit and its knob's bounds.
 LOOP_ITERATIONS = (2, 1, 5)
 #: What ``sees`` calls the task's own inputs.
@@ -2010,6 +2022,11 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
     return build.steps[len(steps):]
 
 
+#: Where a new step's output goes (`_place`): one phrase for every operator that says it.
+REACHES = ("its output goes into the nearest prompt {where} that can take it -- an agent's own "
+           "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
+           "with neither, nothing reads it until you add a reader")
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
@@ -2019,7 +2036,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                    "tools"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt), code "
                 "(text = Python) or op (with 'call'); it sees what that step sees plus its "
-                "outputs, and its output reaches the next model step's prompt",
+                "outputs; " + REACHES.format(where="after it"),
         "example": {"op": "insert", "after": "<step>", "kind": "agent",
                     "text": "<what the new step does>"},
     },
@@ -2048,8 +2065,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
-                "single fact or file names there before the fork); its output reaches the step "
-                "after the join",
+                "single fact or file names there before the fork); "
+                + REACHES.format(where="after the join"),
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
     },
@@ -2107,6 +2124,43 @@ OPERATORS: dict[str, dict[str, Any]] = {
 }
 
 
+def _resolved_texts(edit: dict, state: dict) -> dict:
+    """``edit`` with each step text that is exactly a knob pointer (`nn.edits.KNOB_POINTER`,
+    copied from the request's node reference) replaced by that knob's current text: the
+    edit's own 'text', and the 'text' of each new step under 'into', 'new' and 'to'. A
+    pointer to a knob holding no text is refused (`edits.EditError`)."""
+    edits = _edits()
+
+    def step(raw: Any, where: str) -> Any:
+        if isinstance(raw, dict) and "text" in raw:
+            return {**raw, "text": edits._resolve_pointer(raw["text"], state, where)}
+        return raw
+
+    out = step(edit, f"{edit.get('op')}'s text")
+    for key in ("into", "new"):
+        if isinstance(out.get(key), list):
+            out = {**out, key: [step(raw, f"{edit.get('op')}'s {key}") for raw in out[key]]}
+    if isinstance(out.get("to"), dict):
+        out = {**out, "to": {label: step(raw, f"{edit.get('op')}'s route {label!r}")
+                             for label, raw in out["to"].items()}}
+    return out
+
+
+def _pointed(pre, expand):
+    """A precondition and an expansion that read the edit with its pointer texts resolved
+    (`_resolved_texts`): a pointer is never stored as a step's prompt."""
+    def precondition(edit: dict, state: dict) -> str | None:
+        try:
+            edit = _resolved_texts(edit, state)
+        except _edits().EditError as exc:
+            return str(exc)
+        return pre(edit, state)
+
+    def run(edit: dict, state: dict) -> list[dict]:
+        return expand(_resolved_texts(edit, state), state)
+    return precondition, run
+
+
 def register(macro, macros: Mapping[str, Any]) -> None:
     """Register the operators in the edit catalogue (``nn.edits``)."""
     simple = {
@@ -2121,8 +2175,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     }
     for name, (pre, expand) in simple.items():
         spec = OPERATORS[name]
-        macro(name, spec["line"] + ".", spec["fields"], _guarded(pre), _guarded_expand(expand),
-              reads_as=spec["reads_as"])
+        macro(name, spec["line"] + ".", spec["fields"],
+              *_pointed(_guarded(pre), _guarded_expand(expand)), reads_as=spec["reads_as"])
     old_loop = macros["loop"]
     old_split = macros["split"]
 
@@ -2155,11 +2209,11 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     macro("loop", OPERATORS["loop"]["line"] + ". Or, written out: 'target' and a 'gate' node "
           "object; " + old_loop.description[0].lower() + old_loop.description[1:],
-          OPERATORS["loop"]["fields"], pre_loop, expand_loop,
+          OPERATORS["loop"]["fields"], *_pointed(pre_loop, expand_loop),
           reads_as=OPERATORS["loop"]["reads_as"])
     macro("split", OPERATORS["split"]["line"] + ". Or, written out: 'target' and 'into' two "
           "node objects (" + old_split.description[0].lower() + old_split.description[1:] + ")",
-          OPERATORS["split"]["fields"], pre_split, expand_split,
+          OPERATORS["split"]["fields"], *_pointed(pre_split, expand_split),
           reads_as=OPERATORS["split"]["reads_as"])
 
 

@@ -195,6 +195,33 @@ _CLIP_MARKER = re.compile(r"\[\.\.\. \d+ characters omitted \.\.\.\]")
 _UNCLOSED_SLOT = re.compile(r"\{\{(?![^{}]*\}\})")
 
 
+#: How the request's node reference shows a field bound to a knob: a pointer to the knob,
+#: whose text the request shows once, under "Each step's settings". A new node copied with
+#: the pointer as a field gets the knob's current text there (`_resolve_knob_pointers`).
+KNOB_POINTER = "[the value of knob `{knob}`, under \"Each step's settings\"]"
+_KNOB_POINTER = re.compile(r"^\[the value of knob `([^`]+)`, under \"Each step's settings\"\]$")
+
+
+def _resolve_pointer(value: Any, state: State, where: str) -> Any:
+    """``value`` itself, or, when it is exactly a `KNOB_POINTER`, that knob's current text;
+    a pointer to a knob that holds no text here is refused, never stored as a prompt."""
+    found = _KNOB_POINTER.match(value.strip()) if isinstance(value, str) else None
+    if found is None:
+        return value
+    entry = (state.get("knobs") or {}).get(found.group(1))
+    if not isinstance(entry, Mapping) or not isinstance(entry.get("value"), str):
+        raise EditError(f"{where} points to the knob {found.group(1)!r}, which holds no text "
+                        "here; write the text yourself", code="E-node-text")
+    return entry["value"]
+
+
+def _resolve_knob_pointers(node_state: Mapping[str, Any], state: State) -> dict[str, Any]:
+    """``node_state`` with each field that is exactly a `KNOB_POINTER` set to that knob's
+    current text; a pointer to a knob the state does not have is refused."""
+    return {key: _resolve_pointer(value, state, f"node {node_state.get('id')!r}: {key}")
+            for key, value in node_state.items()}
+
+
 def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
     """A new node's texts carry no clip marker and no unclosed ``{{``."""
     for key, value in node_state.items():
@@ -270,6 +297,7 @@ def _add_node(state: State, edit: dict) -> State:
     node_state = edit.get("node")
     if not isinstance(node_state, dict):
         raise EditError("add_node needs a 'node' object")
+    node_state = _resolve_knob_pointers(node_state, state)
     _check_new_node_texts(node_state)
     if node_state.get("kind") == "agent" and "tool_policy" not in node_state:
         # A new agent runs without tools unless it asks for them (``tool_policy:
@@ -429,6 +457,8 @@ def _set_knob(state: State, edit: dict) -> State:
     # One edit moves a knob, in one of two forms: the whole new value, or a patch
     # (an ordered list of text edits) to a str knob's current text.
     has_value, has_patch = "value" in edit, "patch" in edit
+    if has_value:
+        edit = {**edit, "value": _resolve_pointer(edit["value"], state, f"knob {name!r}")}
     if has_value == has_patch:
         raise EditError(
             f"set_knob on knob {name!r} needs exactly one of 'value' (the whole new "
@@ -480,8 +510,12 @@ def _add_knob(state: State, edit: dict) -> State:
     entries = dict(state.get("knobs") or {})
     if name in entries:
         raise EditError(f"knob {name!r} already exists", code="E-knob")
+    spec = dict(edit.get("spec") or {})
+    # A new step's text (a core operator's 'text') copied as a pointer gets the text.
+    if "default" in spec:
+        spec["default"] = _resolve_pointer(spec["default"], state, f"knob {name!r}")
     try:
-        knob = Knob.from_spec(dict(edit.get("spec") or {}))
+        knob = Knob.from_spec(spec)
     except (KnobError, KeyError, TypeError) as exc:
         raise EditError(f"knob {name!r}: {exc}", code="E-knob") from exc
     out = _finish(state, _graph(state))

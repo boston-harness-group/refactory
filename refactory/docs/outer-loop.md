@@ -676,9 +676,10 @@ optimizer, at no extra compute (train records only):
   batch), or the edited candidate itself when it has none yet, are compared with their
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
-  rises and drops among the rest. Each changed item is shown with both trajectories, as
-  far as 60000 characters hold (`EDIT_CHANGE_BUDGET`); an item that no longer fits goes
-  in a table, and a later, shorter one that still fits is shown in full. It also
+  rises and drops among the rest. Every changed item is shown whole, parent beside
+  child: the parent's trajectory, then the child's verdict and each step's reply, a reply
+  the same as the parent's said so and the input not repeated; size is never a reason to
+  leave one out (only a single text over `ITEM_TEXT_MAX` is cut, and said). It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -1777,11 +1778,11 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 
 | operator | one line | what the system does |
 |---|---|---|
-| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output reaches the next model step's prompt; before a fork's branch, it takes the branch's place |
+| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output is wired as **Wiring** below says; before a fork's branch, it takes the branch's place |
 | `remove` | `{"op": "remove", "step": "<step>"}`; on a gate, `"keep": "<verdict>"` | predecessors to successor; a fork's branch leaves the fork's targets and the join's sources, and a fork left with one branch is folded away; an operator's own helper steps (its collect step, a loop's judge) go too, so do the slots it put in other steps' prompts and the knobs only it read; refused with the exact reader when a step still needs what only it makes. On a gate, the kept verdict's path stays and steps only the others reached go |
-| `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs reach the step after the join |
+| `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
-| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output reaches the step after the join, guarded (`{% if %}`) when `optional` is given |
+| `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output is wired after the join as **Wiring** below says, guarded (`{% if %}`) when `optional` is given |
 | `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own inputs (facts and files no model step's output reaches), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
 | `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
@@ -1793,7 +1794,7 @@ a `collect` step in front of it (so a missing or binary file is said, not a cras
 code step gets both in `inp`. An agent's reply that is also its fact is handed over once,
 as the fact. A new step's output (a file `<id>.txt` and a fact `<id>`) goes into the
 prompt knob of the next model step downstream -- an agent whose task prompt is a knob of
-its own, or an op that fills facts into exactly one text knob -- or where `"to"` says.
+its own, or an op that fills facts into exactly one text knob -- or where `"to"` says; with neither, the candidate says nothing reads it yet.
 Every text an operator creates goes into a knob of its own (`<id>__task`, `<id>__code`);
 every text has a default (the neighbour's, or a neutral line), so a strategy with no model
 can apply any operator; ids, files and facts are generated, and the same operator on the
@@ -1841,11 +1842,11 @@ before it runs, each step in full with the node schema, the validator's rules); 
 answer's form last. Items are chosen rather than cut, and size is never a reason to cut
 one: every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
 characters; it only decides that, and never cuts); otherwise a table lists every item,
-then items chosen by a rule (`_shown_items`) are shown whole -- one failure per failure
-finding that cites a known item, in rank order; then one contrasting success per success
-finding (the cited and same-kind ones first), or, with no success findings, one per kind
-of failure shown, each marked as a success. Without findings, one failure per kind of
-failure (its outcome and declared kind) and a success beside each. Each
+then items chosen by a rule (`_shown_items`), never by size, are shown whole -- one failure per failure finding that
+cites a known item, in rank order; then one contrasting success per success finding (the
+cited and same-kind ones first), or, with no success findings, one per kind of failure
+shown, each marked as a success. Without findings, one failure per kind of failure (its
+outcome and declared kind) and a success beside each kind. Each
 item gives its verdict, what was expected and what it gave, the grader's reason, then its
 input and each step's output, each fenced with its headings demoted, so nothing in an item
 reads as a section of the request. Only a single text too large to send whole
@@ -1853,6 +1854,24 @@ reads as a section of the request. Only a single text too large to send whole
 "[… N chars omitted]", never a path (the proposer has no tools); each cut (item, step,
 chars) is in `ProposalContext.omissions` and in the proposal call's `optimizer_trace.jsonl`
 entry (`omissions`).
+
+**One item's evidence.** Every call that reads train items -- the analysts, memory's
+comparison, the proposer -- renders an item the same way (`optim.evidence.render_item`).
+A step's prompt re-embeds the task's input and the earlier steps' replies, and the same
+instructions recur in every item, so an item shown as each step's prompt plus its reply
+grew with the square of its steps (61% of an S4 analyst batch was repeated text). Now the
+input appears once per item; a step says by name what its prompt took from what is already
+shown (`Sees: the input, compare's reply`) and shows only the rest of its prompt, its own
+instructions, then its full reply, each fenced with headings demoted; and across the items
+of one request an instruction shown for an earlier item is said as "same as item X, step
+Y" (`evidence.dedup`) when that is shorter. Nothing is lost: every reply and every distinct
+instruction text appears once in the request. The proposer's items leave the step prompts
+out (the pipeline view and the settings carry the instructions). Two renderings of the same
+item -- memory's two rollouts -- show the input and the expected answer once (the first),
+and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
+"What the last edit changed" shows the parent's item whole and the child's verdict and
+replies beside it, a reply the child kept said as "same as the parent's". Generic: lines of
+text are compared, with no knowledge of the task or the pipeline.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
 step, generated from the graph the edits act on (`nn.pipeline_view`), read in the core

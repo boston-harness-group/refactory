@@ -6480,9 +6480,21 @@ class Loop(OuterLoop):
         return sorted(candidate.id for candidate in self.population)
 
     def _history(self) -> list[dict[str, Any]]:
-        """The evaluated candidates, newest last, bounded."""
-        evaluated = [self._row(c) for c in self.population if c.evaluated]
-        return evaluated[-self.config.history_limit :]
+        """The evaluated candidates, newest last, bounded; each with how many of its edits
+        are its own, its first As-built lines (cached: a candidate's graph never changes)
+        and the epoch it was proposed in."""
+        by_id = {c.id: c for c in self.population}
+        built = self.__dict__.setdefault("_built_lines", {})
+        rows = []
+        for c in [c for c in self.population if c.evaluated][-self.config.history_limit:]:
+            parent = by_id.get(c.parent or "")
+            if c.id not in built:
+                built[c.id] = (pipeline_view.changed_lines(
+                    parent.state, c.state, self.protected, self.graders)[:3]
+                    if parent is not None else [])
+            rows.append({**self._row(c), "own": c.step_edits, "built": built[c.id],
+                         "epoch": (self.proposals.get(c.id) or {}).get("epoch")})
+        return rows
 
     def _history_truncated(self) -> bool:
         return sum(1 for c in self.population if c.evaluated) > self.config.history_limit

@@ -95,7 +95,7 @@ def test_the_request_lists_regressions_first_with_both_traces_and_stable_ones_wi
     assert order == sorted(order), "SkillOpt's order: regressions first"
     assert "HIGHEST PRIORITY" in text and "- Regressed (right -> wrong): 1" in text
     regressed = _section(text, "### Regressions")
-    assert "B-BEFORE" in text and "B-NOW" in regressed and "Reason now: WHY-b" in regressed
+    assert "B-BEFORE" in text and "B-NOW" in regressed and "Grader: WHY-b" in regressed
     assert "A-BEFORE" in text and "A-NOW" in text
     stable = text[text.index("### Stable successes"):]
     assert "#### Task d: d" in stable and "D-NOW" not in text and "D-BEFORE" not in text
@@ -111,7 +111,8 @@ def test_an_unchanged_candidate_is_compared_with_its_own_earlier_rollout():
     text, _ = _built(entries, same=True)
     assert "two rollouts of this one pipeline (R-PREV, and R-NOW)" in text
     assert "PIPE-START" not in text and "## What changed between them" not in text
-    assert "First rollout: PASS" in text and "Second rollout: FAIL" in text
+    assert "Item a (First rollout) — passed" in text
+    assert "Item a (Second rollout) — answered wrong" in text
 
 
 def test_the_coach_is_told_not_to_rule_on_kinds_of_change_never_tried():
@@ -132,10 +133,10 @@ def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted()
     text, clip = _built(entries, room=200000)
     assert len(text) + len(memory.MEMORY_SYSTEM) <= 200000
     assert clip["items"] == 8 and clip["chars"] > 200000
-    assert "characters omitted" in text and "clipped head and tail" in text
+    assert "chars omitted" in text and "clipped head and tail" in text
     small, _ = memory.pairs([_rec("i0", False, "x" * 9000)], [_rec("i0", True, "y" * 9000)], ["i0"])
     whole, none = _built(small)
-    assert none == {"items": 0, "chars": 0} and "characters omitted" not in whole
+    assert none == {"items": 0, "chars": 0} and "chars omitted" not in whole
     assert "x" * 9000 in whole and "y" * 9000 in whole
 
 
@@ -276,7 +277,7 @@ def _request(entries: list[dict[str, Any]], **overrides: Any) -> memory.MemoryRe
 def _tasks(prompt: str) -> list[str]:
     import re
 
-    return re.findall(r"^#### Task (\S+):", prompt, re.M)
+    return re.findall(r"^#### Task (\S+?)(?::| --|$)", prompt, re.M)
 
 
 class Splitting(Client):
@@ -330,7 +331,7 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     assert len(compares) > 1 and client.calls[-1] == (memory.SYNTHESIS_SYSTEM, synthesis)
     assert client.memory_calls() == [], "no single call"
     for prompt in (*compares, synthesis):
-        assert "characters omitted" not in prompt and "clipped head and tail" not in prompt
+        assert "chars omitted" not in prompt and "clipped head and tail" not in prompt
     for prompt in compares:
         assert len(memory.COMPARE_SYSTEM) + len(prompt) <= memory.MEMORY_ROOM
         assert "EDITS" in prompt and "OBJECTIVE-TEXT" in prompt
@@ -340,8 +341,8 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
         for item in _tasks(prompt):
             entry = next(e for e in entries if e["id"] == item)
             if entry["category"] != "stable_success":
-                assert analysts.item_text(entry["prev"]) in prompt, "both traces whole"
-                assert analysts.item_text(entry["curr"]) in prompt
+                assert memory._trace(entry, "prev", False) in prompt, "both traces whole"
+                assert memory._trace(entry, "curr", False) in prompt
             else:
                 assert "BEFORE-" + item not in prompt, "stable successes without traces"
     read = [item for prompt in compares for item in _tasks(prompt)]
@@ -458,7 +459,7 @@ def test_pipelines_too_long_for_the_synthesis_are_clipped_and_counted():
     assert "characters omitted" in text and "OBS" in text
     assert cut["pipeline_chars"] > 200000 and cut["observation_texts"] == 0
     whole, none = _request(entries).synthesis_prompt(results, memory.MEMORY_ROOM)
-    assert not any(none.values()) and "characters omitted" not in whole
+    assert not any(none.values()) and "chars omitted" not in whole
 
 
 def test_a_stop_during_a_split_pass_starts_no_further_comparison_call(monkeypatch):
@@ -510,8 +511,8 @@ def test_only_a_pair_longer_than_the_room_alone_is_cut_and_counted():
     made = AutoresearchOptimizer(client).write_memory(epoch=3, generation=2, build=request)
     compares = client.of(memory.COMPARE_SYSTEM)
     (alone,) = [p for p in compares if "h0" in _tasks(p)]
-    assert _tasks(alone) == ["h0"] and "characters omitted" in alone
-    assert all("characters omitted" not in p for p in compares if p is not alone)
+    assert _tasks(alone) == ["h0"] and "chars omitted" in alone
+    assert all("chars omitted" not in p for p in compares if p is not alone)
     assert made["clipped_items"] == 2 and made["clipped_chars"] > 100000
 
 
@@ -1278,3 +1279,32 @@ def test_a_loosely_written_answer_after_a_prose_example_is_the_answer(key, value
 def test_a_loosely_written_object_never_stands_in_for_a_broken_answer(text):
     found, problem = answer_json(text)
     assert problem and not found, "the broken answer is reported, not replaced by the example"
+
+
+def test_memory_shows_each_item_s_input_once_and_names_the_rollout_it_refers_to():
+    """Both rollouts of an item are the same task: its input, choices and expected answer
+    appear once (in the first trace); a repeated instruction in the second says which
+    rollout showed it."""
+    task = "## Your task\n" + "Check every option against the hypotheses, one by one. " * 4
+
+    def rec(item, passed, reply):
+        return {"id": item, "passed": passed, "score": float(passed), "label": "B",
+                "prediction": "B" if passed else "A", "fail_reason": "" if passed else "no",
+                "metadata": {"question": f"QUESTION-{item} which holds?",
+                             "choices": ["one", "two"], "answer": "B"},
+                "exchanges": [{"node": "solve", "response": reply,
+                               "prompt": f"QUESTION-{item} which holds?\nA. one\nB. two\n" + task}]}
+
+    entries, _ = memory.pairs([rec("q1", True, "BEFORE")], [rec("q1", False, "NOW")], ["q1"])
+    for same in (False, True):
+        request = memory.MemoryRequest(epoch=3, mode_name="m",
+                                       prev={"id": "c1" if not same else "c2", "pipeline": "P",
+                                             "rollout": "R"},
+                                       curr={"id": "c2", "pipeline": "P", "rollout": "R"},
+                                       changes=[], previous_note="", entries=entries)
+        for text in (request()[0], request.compare_prompt(entries, 1, 1)[0]):
+            assert text.count("QUESTION-q1 which holds?") == 1, same
+            assert text.count("Expected:") == 1, same
+            later = "Second rollout" if same else "Now"
+            first = "First rollout" if same else "Start of epoch"
+            assert f"same as item q1 ({first}), step solve" in text.split(f"({later})", 1)[1]

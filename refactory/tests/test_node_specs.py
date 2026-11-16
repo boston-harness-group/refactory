@@ -38,13 +38,15 @@ def _rendered_node(text: str, node_id: str) -> dict[str, Any]:
 
 
 def _copyable(state: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
-    """A node state as the prompt shows it: bound fields at their knob's value, and
-    no bindings (nor the bound knobs) to copy."""
+    """A node state as the prompt shows it: a bound field as a pointer to its knob (whose
+    text the request shows once, under the settings), and no bindings (nor the bound
+    knobs) to copy."""
     bound = {field: knob for field, knob in state.get("field_bindings") or ()}
     shown = {k: v for k, v in state.items() if k != "field_bindings"}
     shown["knobs"] = [k for k in state["knobs"] if k not in bound.values()]
     for field, knob in bound.items():
-        shown[field] = knobs[knob]["value"]
+        assert knob in knobs
+        shown[field] = nn_edits.KNOB_POINTER.format(knob=knob)
     return shown
 
 
@@ -58,19 +60,37 @@ def test_the_loop_shows_every_node_of_the_graph_in_full(tmp_path):
         assert _rendered_node(text, node_id) == _copyable(node, state["knobs"]), node_id
 
 
-def test_a_bound_field_shows_its_knobs_current_value():
-    """After set_knob on compare's system-prompt knob, the compare node shows the
-    new prompt, not the stored seed text, and says to edit the knob."""
+def test_a_bound_field_points_to_its_knob_whose_current_text_is_shown_once():
+    """After set_knob on compare's system-prompt knob, the request shows the new prompt
+    once (under the settings), the compare node points to that knob, and a copy keeping
+    the pointer gets the knob's current text."""
+    new = "NEW COMPARE PROMPT\n" + "Weigh every option against the question. " * 4
     state = nn_edits.apply({"op": "set_knob", "name": "compare__system_prompt",
-                            "value": "NEW COMPARE PROMPT"}, SkillGraph().state_dict())
+                            "value": new}, SkillGraph().state_dict())
     described = SkillGraph(state=state).describe()
     text = ProposalContext(
         knobs=[{"name": name, **spec} for name, spec in described["knobs"].items()],
         node_states=list(state["graph"]["nodes"].values())).render()
-    assert _rendered_node(text, "compare")["system_prompt_template"] == "NEW COMPARE PROMPT"
-    assert ("`system_prompt_template` is bound to the knob `compare__system_prompt` and shows "
-            "its current value: edit the knob, not this field.") in text
-    assert "field_bindings" not in _rendered_node(text, "compare")
+    node = _rendered_node(text, "compare")
+    assert node["system_prompt_template"] == nn_edits.KNOB_POINTER.format(
+        knob="compare__system_prompt")
+    assert text.count(new.strip()) == 1  # the pipeline view quotes only its opening words
+    assert "field_bindings" not in node
+    node.update(id="compare_check", writes=["compare_check_notes.txt"])
+    built = nn_edits.apply({"op": "insert_after", "target": "compare", "node": node}, state)
+    copied = built["graph"]["nodes"]["compare_check"]
+    bound = dict(copied.get("field_bindings") or ())
+    value = (built["knobs"][bound["system_prompt_template"]]["value"]
+             if "system_prompt_template" in bound else copied["system_prompt_template"])
+    assert value == new
+
+
+def test_a_pointer_to_a_knob_the_graph_lacks_is_refused():
+    node = {"id": "x", "kind": "agent",
+            "system_prompt_template": nn_edits.KNOB_POINTER.format(knob="no_such_knob")}
+    with pytest.raises(nn_edits.EditError, match="no_such_knob"):
+        nn_edits.apply({"op": "insert_after", "target": "compare", "node": node},
+                       SkillGraph().state_dict())
 
 
 def test_a_copied_node_is_accepted_by_insert_after_and_validates(tmp_path):
@@ -182,7 +202,9 @@ def test_a_node_carrying_a_clipped_or_broken_text_is_refused(tmp_path, text, rea
 def test_long_texts_are_clipped_with_the_bound_knob_named_and_the_cap_holds():
     mode = SkillGraph()
     states = list(mode.state_dict()["graph"]["nodes"].values())
-    clipped = ProposalContext(node_states=states, node_spec_text_chars=300).render()
+    # Bound texts point to their knob and are never clipped; an unbound long text is.
+    bare = [{**s, "field_bindings": []} for s in states]
+    clipped = ProposalContext(node_states=bare, node_spec_text_chars=300).render()
     assert "`system_prompt_template` is clipped here (" in clipped and "do not copy it" in clipped
     assert "characters omitted" in clipped
     assert "must not be copied" in clipped
