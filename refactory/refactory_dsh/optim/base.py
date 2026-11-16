@@ -1747,6 +1747,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
         rows.append([node_id, carries, ", ".join(applies) or "-", " | ".join(refused) or "-"])
         full_refusals.append(refused)
+    if not rows:
+        return []
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
             "prompt and reads carry (`= op X from ...`: a fact a plain op builds, from what it "
