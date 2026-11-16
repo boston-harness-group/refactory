@@ -1650,7 +1650,11 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
         return reason
     verdict = check(edit)
     if not isinstance(verdict, list):
-        return reason
+        code = any(isinstance(step, dict) and step.get("kind") == "code"
+                   for step in edit.get("into") or ())
+        # Accepted without running the new code on recorded inputs (`attempt` skips that
+        # for a hint: a process per request), which an attempt of the edit itself does.
+        return (f"{reason[:end]} (not dry-run){reason[end:]}" if code else reason)
     from refactory_dsh.nn.core_ops import CODE_HINT_NOTE
 
     why = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
@@ -3765,6 +3769,7 @@ class Optimizer:
         graders: Sequence[str] = (),
         record: bool = True,
         check_hints: bool = True,
+        dry_run_code: bool = True,
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
@@ -3782,7 +3787,8 @@ class Optimizer:
         ``record`` False records no call (the request's operator table asks this for
         every operator it lists). A precondition refusal that names a replacing edit
         has that edit checked here the same way (``check_hints``): when it would be
-        refused too, the refusal says so instead of naming it.
+        refused too, the refusal says so instead of naming it. That check skips the code
+        dry run (``dry_run_code``), a process per request, and the hint says so.
         """
         steps = proposal.steps
 
@@ -3793,7 +3799,7 @@ class Optimizer:
                 Proposal(edit=edit), parent, invariants, resolve_calls, frozen, seen,
                 seed_state=seed_state, protected=protected,
                 allow_new_node_tools=allow_new_node_tools, graders=graders, record=False,
-                check_hints=False))
+                check_hints=False, dry_run_code=False))
         refusal = proposal_refusal(proposal, max_edits=self.max_edits, parent_state=parent.state)
         if refusal:
             return refusal
@@ -3945,7 +3951,8 @@ class Optimizer:
         changed_code = sorted(node_id for node_id, signature in _code_signatures(state).items()
                               if before_code.get(node_id) != signature)
         crashed, notes = checks.code_dry_run(parent.id, parent.state, state, changed_code,
-                                             getattr(self, "recorded_inputs", None),
+                                             getattr(self, "recorded_inputs", None)
+                                             if dry_run_code else None,
                                              getattr(self, "sandbox", None))
         if crashed:
             return crashed

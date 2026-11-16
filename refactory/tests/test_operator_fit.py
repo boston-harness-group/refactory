@@ -357,3 +357,26 @@ def test_the_request_shows_the_section_after_the_operators_in_domain_free_words(
     lead = body.split("\n|", 1)[0]
     assert not [word for word in DENYLIST if word.lower() in lead.lower()]
     assert fit not in render("knob_only")
+
+
+def test_a_code_replacing_hint_is_checked_without_a_code_dry_run_and_says_so(monkeypatch):
+    """With recorded inputs a code edit is dry-run in a sandbox, a process per run; the
+    hint's own check skips that (it would run on every request) and the hint says so."""
+    from refactory_dsh.optim import checks
+
+    given = []
+    real = checks.code_dry_run
+
+    def spy(parent_id, parent_state, state, nodes, recorded, sandbox=None):
+        given.append(recorded)
+        return real(parent_id, parent_state, state, nodes, None, sandbox)
+
+    monkeypatch.setattr(checks, "code_dry_run", spy)
+    optimizer = Optimizer()
+    optimizer.recorded_inputs = lambda candidate: {"run": "x", "passes": {}}
+    state = _start_state()
+    verdict = optimizer.attempt(Proposal(edit={"op": "remove", "step": "prepare"}),
+                                Candidate.from_state(state), (), False, (), record=False)
+    reason = verdict[0]
+    assert '"into": [{"kind": "code"}]} (not dry-run) (its default code' in reason, reason
+    assert given and all(recorded is None for recorded in given), given

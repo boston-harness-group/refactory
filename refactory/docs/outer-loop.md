@@ -1843,7 +1843,9 @@ wiring and validation; everything `Run.attempt` checks but the model-judged inte
 check), recording nothing; a request built outside a run has no section. A refusal that
 points to replacing a step names the exact edit (`{"op": "split", "step": ..., "into":
 [one step]}`) only when an attempt would accept it (`checked_hint`), and otherwise says why
-replacing it is refused too. The section fits 7000 characters: refusals are cut to their
+replacing it is refused too. That check skips the code dry run (a sandbox process on every
+request), so an accepted code replacement is marked "(not dry-run)"; proposing it runs
+the dry run as any attempt does. The section fits 7000 characters: refusals are cut to their
 first clause, then rows are left out, last first, and counted among the listed steps. The `loop` line states the verdict format (`proceed` or
 `reloop`, then why, which reaches the step sent back) and the cap (`<gate>__max_iterations`,
 default 2, 1 to 5, after which the run goes on).
