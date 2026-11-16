@@ -1404,11 +1404,13 @@ def test_an_unresolved_mid_run_conflict_is_delivered_as_a_draft_naming_it(github
     assert not worktree.git(path, "diff", "--name-only", "--diff-filter=U").strip()
 
 
-def test_a_conflict_that_comes_back_every_delivery_stops_at_its_budget(github, tmp_path, monkeypatch):
+def test_a_conflict_that_comes_back_every_delivery_is_delivered_as_a_draft_at_its_budget(
+        github, tmp_path, monkeypatch):
     """Main changes shared.py again before every delivery, so a builder that resolves each
     conflict meets a fresh one: the delivery gate sends it back check_attempts (1) times and
-    no more, naming the conflicting file. (What the run then delivers is the subject of a
-    follow-up: today it stops and keeps the work local, where a draft would follow b45a.)"""
+    no more, and then the work is delivered as a draft pull request naming the unresolved
+    file (b45a: a passing check always ends in a pull request), not kept local as a failed
+    run."""
     repo = git_repo(tmp_path / "repo")
     (repo / "shared.py").write_text("def f():\n    return 1\n")
     git(repo, "add", ".")
@@ -1425,13 +1427,142 @@ def test_a_conflict_that_comes_back_every_delivery_stops_at_its_budget(github, t
         run, model=model, verdicts={"gate_strategy": "proceed"},
         task={"name": NAME, "brief": "Build a tool\nthat prints built.", "check": "python tool.py",
               "target": str(repo)})
+    assert result.exit_ok, result.error
+    # No send-back past the budget: one build, one send-back, then the draft.
     assert int(result.facts["delivery_conflict_reloops"]) == 1
-    assert sum(1 for prompt in model.prompts if "Write the artifact `" in prompt) == 2, "one build, one send-back"
-    assert _record(run)["merge_conflicts"] == ["shared.py"]
-    assert "shared.py" in (result.error or "") + json.dumps(_record(run))
+    assert sum(1 for prompt in model.prompts if "Write the artifact `" in prompt) == 2
+    record = _record(run)
+    assert record["status"] == "opened" and record["draft"] is True, record
+    assert record["merge_conflicts"] == ["shared.py"]
+    assert record["draft_reason"].startswith("delivered as draft: unresolved conflict"), record
+    assert "delivered as draft: unresolved conflict" in result.facts["delivery_result"]
+    assert json.loads((run / "design.json").read_text())["draft"] is True, "design.json agrees with delivery.json"
+    [pull] = json.loads((github / f"{slug}.pulls.json").read_text())
+    assert pull["draft"] and "Merge conflict with base in shared.py" in pull["body"], pull["body"]
     path = Path(worktree.recorded(run).path)
     with pytest.raises(subprocess.CalledProcessError):
         git(path, "rev-parse", "--verify", "-q", "MERGE_HEAD")
+
+
+def _at_the_second_delivery(github, tmp_path, slug):
+    """A run the walker took to its second delivery and stopped there: main moved again
+    since the builder resolved the first conflict, and the one send-back is spent."""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "shared.py").write_text("def f():\n    return 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    _published(github, slug, repo)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[
+        ["move_main_each", {"slug": slug, "clone": str(tmp_path / "other"), "path": "shared.py",
+                            "counter": str(tmp_path / "moves")}],
+        ["stop_at", {"counter": str(tmp_path / "deliveries"), "call": 1}]])
+    run = tmp_path / "run"
+    builds = [render({"tool.py": "print('built')\n", "shared.py": f"def f():\n    return {42 + i}\n"})
+              for i in range(8)]
+    walked = _mode(check_attempts=1).run(
+        run, model=FakeModel(_answers(builds[0]) + builds[1:]), verdicts={"gate_strategy": "proceed"},
+        task={"name": NAME, "brief": "Build a tool\nthat prints built.", "check": "python tool.py",
+              "target": str(repo)})
+    assert walked.exit_ok is False and "stopped before delivery 1" in (walked.error or ""), walked.error
+    assert int(json.loads((run / "facts.json").read_text())["delivery_conflict_reloops"]) == 1
+    _unfake(delivery, "deliver_design")
+    return run
+
+
+def _deliver_on_the_spine(run, monkeypatch) -> tuple[int, str]:
+    """`deliver` as the spine runs it: its own entry through `refactory_dsh.run`, the knobs
+    as the spine passes them, the facts from facts.json."""
+    import io
+
+    from refactory_dsh import lowering
+    from refactory_dsh.run import main
+
+    state = _mode(check_attempts=1).state_dict()
+    lowering.write_declarations(state, run)
+    for name, value in lowering.knob_environment(state).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("REFACTORY_WORKDIR", str(run))
+    monkeypatch.setenv("DSH_WORKFLOW_NODE", json.dumps({"id": "deliver", "type": "op"}))
+    out, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    code = main(["refactory_dsh.delivery:deliver_design", "--node", "deliver"])
+    return code, err.getvalue()
+
+
+def test_on_the_spine_a_spent_conflict_budget_is_delivered_as_a_draft(github, tmp_path, monkeypatch):
+    """The same decision when the spine runs `deliver`: the walker takes the run to its
+    second delivery and stops; the spine's `deliver` delivers the draft naming the conflict,
+    and the report agrees it is a draft."""
+    slug = "acme/budget-spine"
+    run = _at_the_second_delivery(github, tmp_path, slug)
+    code, err = _deliver_on_the_spine(run, monkeypatch)
+    assert code == 0, err
+    record = _record(run)
+    assert record["draft"] is True and record["merge_conflicts"] == ["shared.py"], record
+    assert record["draft_reason"].startswith("delivered as draft: unresolved conflict"), record
+    assert json.loads((run / "design.json").read_text())["draft"] is True
+    [pull] = json.loads((github / f"{slug}.pulls.json").read_text())
+    assert pull["draft"] and "Merge conflict with base in shared.py" in pull["body"]
+
+
+def test_a_spent_budget_whose_base_no_longer_conflicts_is_delivered_as_it_is(github, tmp_path, monkeypatch):
+    """A spent budget is not a reason to call the work a draft: if the base no longer
+    conflicts when delivery tries again, the pull request is an ordinary one, claiming no
+    unresolved conflict."""
+    slug = "acme/budget-clean"
+    run = _at_the_second_delivery(github, tmp_path, slug)
+    real = delivery._merge_target
+    calls = []
+
+    def merge_target(ctx, path, *args, **kwargs):
+        merged = real(ctx, path, *args, **kwargs)
+        if not calls and merged.conflicts:
+            # Main takes the run's own shared.py: the next merge has nothing to conflict on.
+            delivery_fakes.move_main(None, slug=slug, clone=str(tmp_path / "settle"),
+                                     files={"shared.py": (Path(path) / "shared.py").read_text()},
+                                     message="main settles")
+        calls.append(merged.conflicts)
+        return merged
+
+    monkeypatch.setattr(delivery, "_merge_target", merge_target)
+    code, err = _deliver_on_the_spine(run, monkeypatch)
+    assert code == 0, err
+    assert calls[0] == ["shared.py"] and calls[1] == [], calls
+    record = _record(run)
+    assert record["status"] == "opened" and "draft" not in record and "merge_conflicts" not in record, record
+    [pull] = json.loads((github / f"{slug}.pulls.json").read_text())
+    assert not pull["draft"] and "Merge conflict" not in pull["body"]
+
+
+def test_a_spent_conflict_budget_whose_draft_cannot_be_pushed_fails_saying_so(
+        github, tmp_path, monkeypatch):
+    """When even the draft that would carry the unresolved conflict cannot be delivered (here
+    GitHub refuses the push), the run fails as an exhausted conflict budget always did,
+    naming the conflicting file, why the draft did not land, and how to finish."""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "shared.py").write_text("def f():\n    return 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    slug = "acme/budget-refused"
+    _published(github, slug, repo)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main_each", {
+        "slug": slug, "clone": str(tmp_path / "other"), "path": "shared.py", "counter": str(tmp_path / "moves")}]])
+    _child().setattr(delivery, "_push", delivery_fakes.push_fails, error="push refused by GitHub")
+    run = tmp_path / "run"
+    builds = [render({"tool.py": "print('built')\n", "shared.py": f"def f():\n    return {42 + i}\n"})
+              for i in range(8)]
+    result = _mode(check_attempts=1).run(
+        run, model=FakeModel(_answers(builds[0]) + builds[1:]), verdicts={"gate_strategy": "proceed"},
+        task={"name": NAME, "brief": "Build a tool\nthat prints built.", "check": "python tool.py",
+              "target": str(repo)})
+    assert result.exit_ok is False
+    assert "conflicting files: shared.py" in (result.error or "")
+    assert "push refused by GitHub" in (result.error or "")
+    assert "graph-control redeliver" in (result.error or "")
+    assert not (github / f"{slug}.pulls.json").exists() or json.loads(
+        (github / f"{slug}.pulls.json").read_text()) == []
+    assert _record(run)["status"] == "kept local"
 
 
 def test_cleanly_merged_edit_keeps_mains_change(tmp_path):

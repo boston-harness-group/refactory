@@ -142,7 +142,14 @@ def move_main_each(ctx: Any, *, slug: str, clone: str, path: str, counter: str) 
               message=f"main moves ({n})")
 
 
-STEPS = {"move_main": move_main, "move_main_each": move_main_each, "put_back": put_back, "untracked": untracked, "draft": draft,
+def stop_at(ctx: Any, *, counter: str, call: int) -> None:
+    """Stop the run at its ``call``-th (0-based) delivery, before delivering: what is left
+    is the run as the next delivery would find it."""
+    if counted(counter) >= call:
+        raise RuntimeError(f"stopped before delivery {call} (a test hands it to another runtime)")
+
+
+STEPS = {"move_main": move_main, "move_main_each": move_main_each, "stop_at": stop_at, "put_back": put_back, "untracked": untracked, "draft": draft,
          "seen_head": seen_head, "run_git": run_git, "touch": touch, "seen_record": seen_record,
          "hook": hook, "absent": absent, "patch": patch}
 
