@@ -72,7 +72,8 @@ from refactory_dsh.nn.graph import Graph
 from refactory_dsh.nn.operators import FILE_TEXT_CALL
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim.base import (
-    MAX_EDITS_PER_PROPOSAL, _dead_edit, candidate_id, _node_spec, proposal_refusal, reason_code,
+    MAX_EDITS_PER_PROPOSAL, _dead_edit, _grader_side_knobs, candidate_id, _node_spec,
+    proposal_refusal, reason_code,
 )
 
 import structure_fuzz_graphs as fg
@@ -839,8 +840,7 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     side, side_files = _grader_side_writes(seed, state)
     seen = check_grader(grader_secrets(seed, state), hidden, workdir, model, grader_side=side,
                         grader_files=side_files) + check_slots(state, model)
-    if not result.exit_ok and any(EXPECTED_FAILURE in str(n.bound("code", _knob_values(state)) or "")
-                                  for n in graph.nodes.values()):
+    if not result.exit_ok and failed_only_at_marked_code(graph, state, result):
         # Code that passes V18 and fails at run time on purpose (it raises, or returns an
         # undeclared fact or file): the runtime refused it, which is the point.
         NOTES["code_node_failed_at_run_time"] += 1
@@ -872,6 +872,29 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     if not _terminals_reached(graph, workdir):
         return [*seen, Violation("walker", "finished without completing a terminal")], result
     return seen, result
+
+
+def failed_only_at_marked_code(graph: Graph, state: dict[str, Any], result: Any) -> bool:
+    """Whether a failed walk failed only at code marked ``EXPECTED_FAILURE``: the walk's
+    error names a marked node, or it is a data node's (its items failed) and every failed
+    item's error names one. A failure anywhere else is not excused by a marked node
+    elsewhere in the graph, which a later candidate keeps once a patch marked it."""
+    values = _knob_values(state)
+    marked = [n.id for n in graph.nodes.values()
+              if EXPECTED_FAILURE in str(n.bound("code", values) or "")]
+
+    def names_marked(error: Any) -> bool:
+        return any(str(error or "").startswith(f"{node}:") for node in marked)
+
+    if not marked:
+        return False
+    if names_marked(result.error):
+        return True
+    data = [n.id for n in graph.nodes.values() if n.kind == "data"]
+    items = [r.get("error_text") for r in getattr(result, "item_records", None) or ()
+             if r.get("error_text")]
+    return (any(str(result.error or "").startswith(f"{node}:") for node in data)
+            and bool(items) and all(names_marked(error) for error in items))
 
 
 def _unguaranteed_op_reads(graph: Graph) -> list[str]:
@@ -1626,6 +1649,9 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
 
     state = parent.state
     fixed: list[Any] = []
+    # Knobs a protected or grading node reads hold for every edit (E-frozen), judged on
+    # the parent, as the attempt path judges them.
+    guarded = _grader_side_knobs(parent.state, (*applier.protected, *applier.graders))
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict) or nn_edits.unknown(edit.get("op")) is not None:
             return index, state, fixed
@@ -1635,6 +1661,8 @@ def _first_failing(applier: Applier, parent: Candidate, edits: list[Any]
             return index, state, fixed
         if len(edits) > 1 and repair.noop_knob(edit, state):
             continue
+        if edit.get("op") in ("set_knob", "remove_knob") and edit.get("name") in guarded:
+            return index, state, fixed
         if nn_edits.precheck(edit, state):
             return index, state, fixed
         reports: list[dict[str, Any]] = []

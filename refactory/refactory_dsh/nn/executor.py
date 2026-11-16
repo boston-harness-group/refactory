@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
-from .graph import PROCEED, Edge, Graph, Node
+from .graph import PROCEED, Edge, Graph, Node, op_io
 from .loops import loop_edges
 from .mode import RunResult
 from .record import RunRecord
@@ -1205,9 +1205,8 @@ class Executor:
                         # governs it is the data node's — not the last node of the pass
                         # before it.
                         self.ctx.node_id = node.id
-                        self.ctx._declared = node.writes  # noqa: SLF001
-                        self.ctx._declared_reads = node.reads  # noqa: SLF001
-                        self.ctx._declared_facts = node.produces  # noqa: SLF001
+                        # The order the spine's ops see them in (`lowering.op_io`).
+                        self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
                         self.ctx._produced = set()  # noqa: SLF001
                         # The nodes read the item without its grader-only fields.
                         from refactory_dsh.task import node_item
@@ -1384,9 +1383,8 @@ class Executor:
 
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
-            self.ctx._declared = node.writes  # noqa: SLF001 - the run owns the context
-            self.ctx._declared_reads = node.reads  # noqa: SLF001
-            self.ctx._declared_facts = node.produces  # noqa: SLF001
+            # The order the spine's ops see them in (`lowering.op_io`).
+            self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
             self.ctx._produced = set()  # noqa: SLF001
             step_started = time.time()
             verdict: str | None = None
@@ -1543,9 +1541,8 @@ class Executor:
                 continue
             self.ctx.iteration = len(self.steps)
             self.ctx.node_id = current
-            self.ctx._declared = node.writes  # noqa: SLF001 - the run owns the context
-            self.ctx._declared_reads = node.reads  # noqa: SLF001
-            self.ctx._declared_facts = node.produces  # noqa: SLF001
+            # The order the spine's ops see them in (`lowering.op_io`).
+            self.ctx._declared, self.ctx._declared_reads, self.ctx._declared_facts = op_io(node)  # noqa: SLF001
             self.ctx._produced = set()  # noqa: SLF001
             started = time.time()
             verdict: str | None = None
@@ -1778,9 +1775,10 @@ class Executor:
             "task": dict(self.ctx.task),
             "callable_target": callable_target,
             "node_id": node.id,
-            "writes": tuple(node.writes),
-            "reads": tuple(node.reads),
-            "produces": tuple(node.produces),
+            # The order the spine's ops see them in (`lowering.op_io`).
+            "writes": op_io(node)[0],
+            "reads": op_io(node)[1],
+            "produces": op_io(node)[2],
             "memory": self.ctx.memory,
             "iteration": self.ctx.iteration,
             "verdicts": dict(self.ctx.verdicts),

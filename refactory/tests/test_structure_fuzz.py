@@ -164,6 +164,65 @@ def test_long_tier_every_accepted_edit_is_sound(tmp_path):
         for f in findings[:10])
 
 
+# ── what the long tier found once (#674), at the harness's level ──────────
+
+
+def test_an_op_sees_its_declared_inputs_in_the_order_the_spine_hands_them(tmp_path):
+    """The spine hands an op its reads sorted (`lowering.node_declarations`); the walker
+    handed them in declared order, so an op that walks them wrote different text on the
+    two runtimes (fuzz_nested_fork's ``end`` reads ``solo.txt, inner.txt``)."""
+    from refactory_dsh.lowering import node_declarations
+
+    seed = sf.seeds()["fuzz_nested_fork"]
+    state = sf.Applier(seed).seed_state
+    assert list(sf._graph_of(state).nodes["end"].reads) == ["solo.txt", "inner.txt"]
+    assert node_declarations(state)["end"]["reads"] == ["inner.txt", "solo.txt"]
+    result = sf.run_walker(seed, state, tmp_path / "run")
+    assert result.exit_ok, result.error
+    assert "written by end from inner.txt, solo.txt" in (tmp_path / "run" / "answer.txt").read_text()
+
+
+def test_a_compound_refusal_of_a_knob_a_protected_node_reads_names_that_edit():
+    """The attempt path refuses an edit to a knob a protected or grading node reads
+    (E-frozen) at that edit; the harness's model of it named a later edit instead."""
+    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    parent = sf.Candidate.from_state(applier.seed_state)
+    edits = [{"op": "remove_knob", "name": "data_parallelism"}, {"op": "remove", "step": "check"}]
+    outcome = applier.attempt(parent, {"edits": edits}, {parent.id})
+    assert isinstance(outcome, list) and outcome[0].startswith("E-frozen"), outcome
+    assert "[edit 1 of 2: remove_knob]" in outcome[0], outcome
+    assert sf.check_compound(applier, parent, edits, outcome) == []
+
+
+class _Run:
+    def __init__(self, error: str, items: list[str] = ()) -> None:
+        self.error = error
+        self.item_records = [{"id": str(i), "error_text": text} for i, text in enumerate(items)]
+
+
+def test_a_marked_code_step_excuses_only_failures_at_that_step():
+    """A text patch marks a code step allowed to fail at run time; the mark stays in the
+    knob, so it must not excuse a failure anywhere else in the graph."""
+    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    state = json.loads(json.dumps(applier.seed_state))
+    graph = sf._graph_of(state)
+    ops = [n.id for n in graph.nodes.values() if n.kind == "op"]
+    data = next(n.id for n in graph.nodes.values() if n.kind == "data")
+    marked, other = ops[0], ops[1]
+    state["graph"]["nodes"][marked].update(
+        call=sf.snippet_calls.RUN, code=f"def main(inp):\n    return {{}}\n{sf.EXPECTED_FAILURE}\n")
+    graph = sf._graph_of(state)
+    excused = sf.failed_only_at_marked_code
+    assert excused(graph, state, _Run(f"{marked}: ExecutionError: refused"))
+    assert excused(graph, state, _Run(f"{data}: all 2 items failed",
+                                      [f"{marked}: ExecutionError: x", f"{marked}: ExecutionError: y"]))
+    assert not excused(graph, state, _Run(f"{other}: ValueError: a real bug"))
+    assert not excused(graph, state, _Run(f"{data}: all 2 items failed",
+                                          [f"{marked}: ExecutionError: x", f"{other}: ValueError: bug"]))
+    unmarked = sf._graph_of(applier.seed_state)
+    assert not excused(unmarked, applier.seed_state, _Run(f"{marked}: ExecutionError: refused"))
+
+
 # ── the regression corpus ─────────────────────────────────────────────────
 
 

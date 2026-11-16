@@ -1530,8 +1530,8 @@ def _unreadable_loops(state: Mapping[str, Any], exc: GraphError) -> EditError:
         loop_edges(_graph(state))
     except GraphError as found:
         return EditError(f"the graph this edit starts from has an unreadable cycle ({found}); "
-                         "an earlier edit of the bundle made it: put this edit before that "
-                         "one, or route the cycle through a gate first", code="E-state")
+                         "apply this edit before the one that closed that cycle, or route the "
+                         "cycle through a gate first", code="E-state")
     raise exc
 
 

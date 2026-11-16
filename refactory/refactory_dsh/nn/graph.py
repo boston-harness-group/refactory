@@ -218,6 +218,15 @@ BINDABLE_FIELDS = frozenset({
 })
 
 
+
+def op_io(node: Node) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """A node's writes, reads and facts in the order both runtimes hand them to its op
+    (``ctx._declared``, ``_declared_reads``, ``_declared_facts``): sorted, as the spine's
+    declarations carry them (`lowering.node_declarations`), so an op that walks them sees
+    the same order in the walker."""
+    return tuple(sorted(node.writes)), tuple(sorted(node.reads)), tuple(sorted(node.produces))
+
+
 class GraphError(ValueError):
     """A graph could not be built or read from its serialized form."""
 

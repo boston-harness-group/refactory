@@ -39,6 +39,7 @@ from refactory_dsh.ir import (
     Workflow,
 )
 from refactory_dsh.nn import Graph, Knob
+from refactory_dsh.nn.graph import op_io
 
 #: How a node names the operation it runs. Resolved by the runtime, so no package
 #: is named here and no absolute path is baked in: `--python-bin` supplies the PATH.
@@ -96,11 +97,12 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
     blind = blind_reloops(graph, knob_values)
     for node_id, node in graph.nodes.items():
+        writes, reads, produces = op_io(node)
         entry: dict[str, Any] = {
             "kind": node.kind,
-            "reads": sorted(node.reads),
-            "writes": sorted(node.writes),
-            "produces": sorted(node.produces),
+            "reads": list(reads),
+            "writes": list(writes),
+            "produces": list(produces),
             "resource_role": node.resource_phase,
         }
         if node_id in optional_ids:
