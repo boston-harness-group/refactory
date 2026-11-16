@@ -58,6 +58,10 @@ class EditSpec:
     kind: str
     description: str
     fields: tuple[str, ...]
+    #: The pipeline-view readers (`pipeline_view.READERS`) that render what this
+    #: operation builds or changes, so reading mirrors writing; a coverage test fails on
+    #: an operation without one or a reader no operation names.
+    reads_as: tuple[str, ...] = ()
     macro: bool = False
     precondition: Callable[[dict, State], str | None] | None = None
     expand: Callable[[dict, State], list[dict]] | None = None
@@ -77,14 +81,15 @@ PRESETS: dict[str, tuple[str, ...]] = {
 
 
 def _primitive(name: str, kind: str, description: str, fields: Sequence[str],
-               fn: Callable[[State, dict], State]) -> None:
-    _PRIMITIVES[name] = EditSpec(name, kind, description, tuple(fields), apply=fn)
+               fn: Callable[[State, dict], State], *, reads_as: Sequence[str]) -> None:
+    _PRIMITIVES[name] = EditSpec(name, kind, description, tuple(fields), tuple(reads_as),
+                                 apply=fn)
 
 
 def _macro(name: str, description: str, fields: Sequence[str],
            precondition: Callable[[dict, State], str | None],
-           expand: Callable[[dict, State], list[dict]]) -> None:
-    _MACROS[name] = EditSpec(name, "topology", description, tuple(fields),
+           expand: Callable[[dict, State], list[dict]], *, reads_as: Sequence[str]) -> None:
+    _MACROS[name] = EditSpec(name, "topology", description, tuple(fields), tuple(reads_as),
                              macro=True, precondition=precondition, expand=expand)
 
 
@@ -914,23 +919,23 @@ _primitive(
     "add_node", "node",
     "Add a node. 'position' is {after|before: id}, {start: true}, {terminal: true} "
     "or {detached: true} to add it without edges.",
-    ("node", "position"), _add_node,
+    ("node", "position"), _add_node, reads_as=("step",),
 )
 _primitive(
     "remove_node", "node",
     "Delete a node and every edge touching it, with the knobs that were its own "
     "(`<id>__...`, e.g. its system prompt). Leaves the hole for the validator to report.",
-    ("id",), _remove_node,
+    ("id",), _remove_node, reads_as=("step",),
 )
 _primitive(
     "add_edge", "edge",
     "Add an edge. A 'condition' makes it a gate verdict.",
-    ("source", "target", "condition"), _add_edge,
+    ("source", "target", "condition"), _add_edge, reads_as=("edges",),
 )
 _primitive(
     "remove_edge", "edge",
     "Remove the edge between two nodes, optionally only one condition.",
-    ("source", "target", "condition"), _remove_edge,
+    ("source", "target", "condition"), _remove_edge, reads_as=("edges",),
 )
 #: The key of a ``set_knob`` patch entry that names its action, and the actions.
 PATCH_KIND_KEY = "kind"
@@ -960,17 +965,17 @@ _primitive(
     "ordered list of text edits applied to a str knob as one patch, configured by "
     "'config'); " + PATCH_FORMAT + ". Refused for a frozen knob or a value outside "
     "its bounds.",
-    ("name", "value", "patch", "config"), _set_knob,
+    ("name", "value", "patch", "config"), _set_knob, reads_as=("told",),
 )
 _primitive(
     "add_knob", "knob",
     "Declare a new parameter. A node must consume it or the validator refuses the state.",
-    ("name", "spec"), _add_knob,
+    ("name", "spec"), _add_knob, reads_as=("told",),
 )
 _primitive(
     "remove_knob", "knob",
     "Remove a parameter. Any node still consuming it becomes a validation failure.",
-    ("name",), _remove_knob,
+    ("name",), _remove_knob, reads_as=("told",),
 )
 
 
@@ -1356,39 +1361,39 @@ def _fresh_id(graph: Graph, base: str) -> str:
 
 
 _macro("insert_after", "Splice a new node onto the out-edge of an existing node.",
-       ("target", "node"), _pre_insert_after, _expand_insert_after)
+       ("target", "node"), _pre_insert_after, _expand_insert_after, reads_as=("step",))
 _macro("insert_before", "Splice a new node in front of an existing node.",
-       ("target", "node"), _pre_insert_before, _expand_insert_before)
+       ("target", "node"), _pre_insert_before, _expand_insert_before, reads_as=("step",))
 _macro("wrap", "Put a new node on every out-edge of an existing node, so it sees "
        "the same verdicts (an observer, a verifier, a retry wrapper).",
-       ("target", "node"), _pre_wrap, _expand_wrap)
+       ("target", "node"), _pre_wrap, _expand_wrap, reads_as=("step",))
 _macro("bypass", "Remove a node and reconnect each predecessor to each successor.",
-       ("target",), _pre_bypass, _expand_bypass)
+       ("target",), _pre_bypass, _expand_bypass, reads_as=("step", "edges"))
 _macro("duplicate", "Insert a copy of a node directly after it; the copy gets its own "
        "knobs (same current values) for every field the original binds to a knob. The copy "
        "writes the original's files, so a copy of a step without tools overwrites the "
        "original's output before anything reads it (rule V19).",
-       ("target", "new_id"), _pre_duplicate, _expand_duplicate)
+       ("target", "new_id"), _pre_duplicate, _expand_duplicate, reads_as=("step",))
 _macro("split", "Replace one step (an agent or op) with two consecutive new steps: the "
        "first takes the step's in-edges, the second its out-edge, and the step and its own "
        "`<id>__...` knobs are removed. The second step must write what the old step's "
        "readers need. Any other knob only the step read must, by the end of the proposal, "
        "be read by a new step (its `knobs`) or removed (`remove_knob`) (rule V7).",
-       ("target", "into"), _pre_split, _expand_split)
+       ("target", "into"), _pre_split, _expand_split, reads_as=("step",))
 _macro("reorder", "Swap two adjacent steps. Refused when the first produces what "
        "the second reads.",
-       ("first", "second"), _pre_reorder, _expand_reorder)
+       ("first", "second"), _pre_reorder, _expand_reorder, reads_as=("edges",))
 _macro("loop", "Wrap a step in a gate that can send control back to it, so the step "
        "gains a retry. A step that is the last of its pass gets a no-op step after the "
        "gate to end the pass.",
-       ("target", "gate"), _pre_loop, _expand_loop)
+       ("target", "gate"), _pre_loop, _expand_loop, reads_as=("loop",))
 _macro("parallel", "Run 2-8 new steps at once after an existing step: a fork after "
        "'target', each node of 'branches' (agent or op, distinct writes and facts) on its "
        "own branch, then a join that leads on to target's old successor. The successor's "
        "declarations do not change: to use the branches' outputs, insert a node after the "
        "join that reads their files or facts (or read a branch's fact as {{name}} in a "
        "later node's prompt knob).",
-       ("target", "branches"), _pre_parallel, _expand_parallel)
+       ("target", "branches"), _pre_parallel, _expand_parallel, reads_as=("parallel",))
 
 
 # The core structural operators (`nn.core_ops`): one-line macros over the same primitives,

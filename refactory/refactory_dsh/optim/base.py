@@ -1684,12 +1684,14 @@ def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[d
 #: What the pipeline view's words mean.
 PIPELINE_VIEW_LEAD = (
     "The pipeline, one line per step, generated from the graph in the operators' own words "
-    "(the node and edge tables below have the detail): `sees` lists a step's inputs as "
-    "`\"sees\"` names them, `name@maker` (`@task`: no step makes it), a plain op that builds "
-    "an input folded in as `name@op(its inputs)`; `told` is each knob whose text reaches the "
-    "step, with its opening words (`*` frozen; `?` read by an op with several outputs, for "
-    "all of them); `->` what it writes; `parallel { ... } -> join`; `loop(step, judge ..., "
-    "max N -> N+1 runs)`; `route(after step, judge ..., {label: step})`; `[protected]`.")
+    "(full node detail is in the reference at the end): `sees` lists a step's inputs as "
+    "`\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain op that only "
+    "assembles a model step's input is folded in as `name (via op: its inputs)`; an agent "
+    "with tools sees the run dir (or its own workspace); `told` is each knob whose text "
+    "reaches the step, its opening words (`*` frozen; `?` read by an op with several "
+    "outputs, for all of them), or a code step's code; `->` what it writes; "
+    "`parallel fork { ... } -> join`, `[optional]`; `loop(step, judge ..., max N -> N+1 "
+    "runs)`; `route(after step, judge ..., {label: step})`; `[protected]`.")
 
 
 def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:

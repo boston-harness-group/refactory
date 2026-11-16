@@ -2014,6 +2014,7 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
+        "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "sees", "to", "id", "call", "reads",
                    "tools"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt), code "
@@ -2023,23 +2024,27 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what the new step does>"},
     },
     "remove": {
+        "reads_as": ('step',),
         "fields": ("step", "keep"),
         "line": "take a step out and reconnect around it (a fork branch too); on a gate, "
                 "'keep' names the verdict whose path stays",
         "example": {"op": "remove", "step": "<step>"},
     },
     "parallelize": {
+        "reads_as": ('parallel',),
         "fields": ("steps", "copies", "after", "new", "sees"),
         "line": "run consecutive 'steps' at once, or one step beside 'copies' of itself, or "
                 "'new' steps after 'after', between a fork and a join",
         "example": {"op": "parallelize", "steps": ["<step>"], "copies": 2},
     },
     "serialize": {
+        "reads_as": ('step',),
         "fields": ("fork",),
         "line": "run a fork's branches one after another, in their order",
         "example": {"op": "serialize", "fork": "<fork>"},
     },
     "branch": {
+        "reads_as": ('parallel',),
         "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
@@ -2049,6 +2054,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what this branch does>"},
     },
     "rewire": {
+        "reads_as": ('sees',),
         "fields": ("step", "sees"),
         "line": "change what a step sees: \"task\" (the task's own inputs, no model output), "
                 "step ids (their outputs), or single fact or file names there before it (that "
@@ -2056,6 +2062,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {
+        "reads_as": ('loop',),
         "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
@@ -2071,6 +2078,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what to check>", "max_iterations": LOOP_ITERATIONS[0]},
     },
     "route": {
+        "reads_as": ('route',),
         "fields": ("after", "judge", "text", "to", "sees", "id"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
                 "or a new step); the branches rejoin",
@@ -2080,6 +2088,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                            "revise": {"kind": "agent", "text": "<what it does>"}}},
     },
     "split": {
+        "reads_as": ('step',),
         "fields": ("step", "into", "target"),
         "line": "replace a step by two new steps run in turn ('into' two), or by one ('into' "
                 "one: replace); the last takes over its outputs",
@@ -2088,6 +2097,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                              {"kind": "agent", "text": "<second part>"}]},
     },
     "merge": {
+        "reads_as": ('step',),
         "fields": ("steps", "kind", "text", "id"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
                 "outputs",
@@ -2111,7 +2121,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     }
     for name, (pre, expand) in simple.items():
         spec = OPERATORS[name]
-        macro(name, spec["line"] + ".", spec["fields"], _guarded(pre), _guarded_expand(expand))
+        macro(name, spec["line"] + ".", spec["fields"], _guarded(pre), _guarded_expand(expand),
+              reads_as=spec["reads_as"])
     old_loop = macros["loop"]
     old_split = macros["split"]
 
@@ -2144,10 +2155,12 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     macro("loop", OPERATORS["loop"]["line"] + ". Or, written out: 'target' and a 'gate' node "
           "object; " + old_loop.description[0].lower() + old_loop.description[1:],
-          OPERATORS["loop"]["fields"], pre_loop, expand_loop)
+          OPERATORS["loop"]["fields"], pre_loop, expand_loop,
+          reads_as=OPERATORS["loop"]["reads_as"])
     macro("split", OPERATORS["split"]["line"] + ". Or, written out: 'target' and 'into' two "
           "node objects (" + old_split.description[0].lower() + old_split.description[1:] + ")",
-          OPERATORS["split"]["fields"], pre_split, expand_split)
+          OPERATORS["split"]["fields"], pre_split, expand_split,
+          reads_as=OPERATORS["split"]["reads_as"])
 
 
 # ── what an operator did, for the candidate ───────────────────────────────

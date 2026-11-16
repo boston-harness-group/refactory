@@ -1,22 +1,36 @@
-"""The pipeline as one line per step, in the core operators' own words.
+"""The pipeline as one line per step, read in the core operators' own words.
 
-A read-only view generated from the graph the edits act on: each model or code step on one
-line with what it ``sees`` (each input named as a ``sees`` handle, with the step that makes
-it), what it is ``told`` (the knobs whose text reaches it, their opening words) and what it
-writes; forks as ``parallel { ... } -> join``; a judge and its gate as ``loop(step, judge
-..., max N -> N+1 runs)`` or ``route(after step, judge ..., {label: step})``. Plain ops that
-only assemble a prompt or collect files are folded into the ``sees`` of the step they feed
-(``name@op(its inputs)``). Protected steps and frozen knobs are marked. The same lines,
-compared between a candidate and its parent, say what an edit built (`changed_lines`).
-Any graph shape: nested forks, data passes, gates and code steps are read the same way,
-and a step the walk does not reach is still listed.
+A read-only view generated from the graph the edits act on. Reading mirrors writing:
+every operation in the catalogue names the readers that render what it builds
+(``EditSpec.reads_as``), and `READERS` holds them, so a new operation without a reader,
+or a reader no operation names, fails ``tests/test_pipeline_view.py``:
+
+- ``step``: a model, code or plain step on one line -- what it ``sees``, what it is
+  ``told``, what it writes (``->``);
+- ``sees``: a step's inputs as ``sees`` handles, ``name@maker``; a plain op that only
+  assembles them folded in as ``name (via op: its inputs)``; an agent with tools sees the
+  run directory (or its own workspace);
+- ``told``: each knob whose text reaches the step, its opening words (``*`` frozen, ``?``
+  read by an op with several outputs, for all of them); a code step's code;
+- ``parallel``: a fork's branches, ``parallel fork { ... } -> join``, ``[optional]``;
+- ``loop``: a gate that sends work back, ``loop(step, judge ..., max N -> N+1 runs)``;
+- ``route``: a gate choosing a way on, ``route(after step, judge ..., {label: step})``,
+  each label's steps until the ways meet;
+- ``edges``: the order of the lines; what the walk cannot place is a fallback line.
+
+A plain op is folded into the step it feeds only when it is a pure assembler (an op with
+no tools that is not code, protected or the grader's) whose outputs only model steps read,
+directly or through the collect step an operator put in front of one;
+graders, ops doing real work and code steps keep their own lines. Anything no reader
+recognises is drawn generically (kind, sees, writes, edges as ``->``) and counted
+(`fallback_count`). The same lines, compared between a candidate and its parent, say what
+an edit built (`changed_lines`), with the block each new line sits in.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .graph import Graph
 from .operators import made_by
@@ -26,16 +40,20 @@ from .validate import consumed
 TOLD_CHARS = 48
 #: How many folded ops deep an input's making is shown.
 FOLD_DEPTH = 3
+#: The key prefix of a line no reader recognised.
+FALLBACK = "(fallback)"
 
 
 @dataclass(frozen=True)
 class Line:
-    """One line of the view: the node (or gate, or fork) it is keyed by, its depth, and
-    its text."""
+    """One line of the view: the node (or gate, fork, block end) it is keyed by, its
+    depth, its text, the block it sits in ("" at the top) and the reader that drew it."""
 
     key: str
     depth: int
     text: str
+    within: str = ""
+    reader: str = "step"
 
 
 def _values(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -48,61 +66,101 @@ def _frozen(state: Mapping[str, Any]) -> set[str]:
             if isinstance(entry, Mapping) and ((entry.get("spec") or {}).get("frozen"))}
 
 
+def _clip(text: Any) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= TOLD_CHARS else text[:TOLD_CHARS - 1] + "…"
+
+
 class _View:
-    def __init__(self, state: Mapping[str, Any], protected: Sequence[str]) -> None:
+    def __init__(self, state: Mapping[str, Any], protected: Sequence[str],
+                 graders: Sequence[str] = ()) -> None:
         from refactory_dsh import snippet
 
         self.graph = Graph.from_state(dict(state.get("graph") or {}))
         self.values = _values(state)
         self.frozen = _frozen(state)
         self.protected = set(protected)
+        self.graders = set(graders)
         self.makers = made_by(self.graph)
         g = self.graph
         self.inputs = {n: set(consumed(g.nodes[n], self.values)) for n in g.nodes}
         self.code = {n for n, node in g.nodes.items() if snippet.is_code_node(node)}
+        self.optional = {t for node in g.nodes.values() if node.kind == "fork"
+                         for t in node.optional_targets} | {
+            n for n, node in g.nodes.items() if node.bound_flag("optional", self.values)}
         self.folded = self._folded()
         self.judges = self._judges()
         self.back = self._back_edges()
+        self.shown: set[str] = set()
+        # An optional branch's flag may sit on its collect step: the mark goes to the
+        # step it leads to.
+        self.optional |= {self._shown_from(n) for n in self.optional if n in g.nodes}
 
-    # ── what is folded ───────────────────────────────────────────────────
+    # ── what is folded, what is a judge ──────────────────────────────────
     def _readers(self, node_id: str) -> set[str]:
         node = self.graph.nodes[node_id]
         outs = {("fact", f) for f in node.produces} | {("file", f) for f in node.writes}
         return {n for n, taken in self.inputs.items() if taken & outs}
 
+    def _model(self, node_id: str) -> bool:
+        return self.graph.nodes[node_id].kind == "agent"
+
     def _folded(self) -> set[str]:
-        """Plain ops that only hand their outputs to model or code steps (or to other such
-        ops): they are said inside the ``sees`` of the steps they feed."""
-        g = self.graph
-        folded: set[str] = set()
+        """Pure assemblers: plain ops (no tools, not code, not protected or the grader's)
+        whose outputs only model steps read -- directly, or through the collect or
+        file_text step an operator put in front of one."""
+        from .operators import COLLECT_CALL, FILE_TEXT_CALL
+
+        # A step a gate's verdict leads to (a route's label, a loop's send-back) is named in
+        # that gate's line, so it is never folded away.
+        # (A collect step in front of one is looked through, so it may still fold.)
+        gated = {e.target for e in self.graph.edges if e.condition}
+        candidates = {n for n, node in self.graph.nodes.items()
+                      if node.kind == "op" and n not in self.code and not node.tools
+                      and n not in self.protected and n not in self.graders}
+        helpers = {n for n in candidates
+                   if self.graph.nodes[n].call in (COLLECT_CALL, FILE_TEXT_CALL)}
+        candidates -= gated - helpers
+        out: set[str] = set()
         changed = True
         while changed:
             changed = False
-            for node_id, node in g.nodes.items():
-                if (node_id in folded or node.kind != "op" or node_id in self.code
-                        or node_id in self.protected):
-                    continue
+            for node_id in sorted(candidates - out):
                 readers = self._readers(node_id)
-                if readers and all(g.nodes[r].kind == "agent" or r in self.code or r in folded
+                if readers and all(self._model(r) or (r in out and r in helpers)
                                    for r in readers):
-                    folded.add(node_id)
+                    out.add(node_id)
                     changed = True
-        return folded
+        return out
 
     def _judges(self) -> dict[str, str]:
-        """Each agent whose reply only a gate reads, by gate: said in that gate's line."""
-        g = self.graph
+        """Each agent right before a gate whose reply only that gate reads, by gate: said
+        in that gate's line."""
         out: dict[str, str] = {}
-        for gate_id, gate in g.nodes.items():
+        for gate_id, gate in self.graph.nodes.items():
             if gate.kind != "gate":
                 continue
+            before = {e.source for e in self.graph.in_edges(gate_id)}
             for name in gate.reads:
                 for maker in self.makers.get(("file", name)) or []:
-                    if g.nodes[maker].kind == "agent" and self._readers(maker) <= {gate_id}:
+                    if (maker in before and self._model(maker)
+                            and self._readers(maker) <= {gate_id}):
                         out[gate_id] = maker
         return out
 
-    # ── one input, one step ──────────────────────────────────────────────
+    def _hidden(self, node_id: str) -> bool:
+        """Said inside another line: a folded op, a judge, a no-op step, a join."""
+        node = self.graph.nodes[node_id]
+        return (node_id in self.folded or node_id in self.judges.values()
+                or node.kind == "join"
+                or (node.kind == "op" and not (self.inputs[node_id] or node.writes
+                                               or node.produces)))
+
+    # ── readers ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _sorted(keys: set[tuple[str, str]]) -> list[tuple[str, str]]:
+        return sorted(keys, key=lambda key: (key[0] != "fact", key[1]))
+
     def _input(self, kind: str, name: str, depth: int = 0) -> str:
         made = self.makers.get((kind, name)) or []
         folded = [m for m in made if m in self.folded]
@@ -111,27 +169,41 @@ class _View:
         parts = []
         for op_id in folded:
             inner = [self._input(k, n, depth + 1) for k, n in self._sorted(self.inputs[op_id])]
-            parts.append(f"{name}@{op_id}" + (f"({', '.join(inner)})" if inner else ""))
+            parts.append(f"{name} (via {op_id}" + (f": {', '.join(inner)})" if inner else ")"))
         return ", ".join(parts)
 
-    @staticmethod
-    def _sorted(keys: set[tuple[str, str]]) -> list[tuple[str, str]]:
-        return sorted(keys, key=lambda key: (key[0] != "fact", key[1]))
+    def sees(self, node_id: str) -> str:
+        node = self.graph.nodes[node_id]
+        parts = [self._input(k, n) for k, n in self._sorted(self.inputs[node_id])]
+        if node.kind == "agent" and (node.tool_policy != "none" or node.tools):
+            where = "own workspace" if node.workspace is not None else "run dir"
+            parts.insert(0, f"{where} (tools{': ' + ', '.join(node.tools) if node.tools else ''})")
+        return ", ".join(parts)
 
-    def _told(self, node_id: str) -> list[str]:
-        """The knobs whose text reaches the step: its own bound text fields, and the text
-        knobs of the folded ops that build its inputs."""
+    def told(self, node_id: str) -> str:
+        """The knobs whose text reaches the step: its bound text fields (a code step's
+        code), and the text knobs of the folded ops that build its inputs."""
         g = self.graph
-        names: list[str] = []
         node = g.nodes[node_id]
+        names: list[str] = []
+        code_knob = ""
         for field in ("system_prompt_template", "prompt_template", "code"):
             knob = node.bound_knob(field)
-            if knob:
+            if knob and field == "code":
+                code_knob = knob
+            elif knob:
                 names.append(knob)
+        told: list[str] = []
+        if code_knob:
+            first = str(self.values.get(code_knob) or "").strip().splitlines()
+            told.append(f"{code_knob} (code) \"{_clip(first[0] if first else '')}\"")
+        elif node_id in self.code:
+            first = str(getattr(node, "code", "") or "").strip().splitlines()
+            told.append(f"code \"{_clip(first[0] if first else '')}\"")
+        shared: set[str] = set()
         todo = [m for k, n in self._sorted(self.inputs[node_id])
                 for m in self.makers.get((k, n)) or [] if m in self.folded]
         seen: set[str] = set()
-        shared: set[str] = set()
         while todo:
             op_id = todo.pop(0)
             if op_id in seen:
@@ -140,66 +212,85 @@ class _View:
             op = g.nodes[op_id]
             texts = [k for k in op.knobs if isinstance(self.values.get(k), str)]
             names += texts
-            # An op with several outputs reads its knobs for all of them; which one a
-            # knob feeds is not declared, so the knob is marked "?".
             if len(op.produces) + len(op.writes) > 1:
                 shared.update(texts)
             todo += [m for k, n in self._sorted(self.inputs[op_id])
                      for m in self.makers.get((k, n)) or [] if m in self.folded]
-        out = []
         for name in dict.fromkeys(names):
-            text = " ".join(str(self.values.get(name) or "").split())
-            text = text if len(text) <= TOLD_CHARS else text[:TOLD_CHARS - 1] + "…"
-            out.append(f"{name}{'*' if name in self.frozen else ''}"
-                       f"{'?' if name in shared else ''} \"{text}\"")
-        return out
+            told.append(f"{name}{'*' if name in self.frozen else ''}"
+                        f"{'?' if name in shared else ''} \"{_clip(self.values.get(name))}\"")
+        return "; ".join(told)
 
     def step(self, node_id: str) -> str:
-        g = self.graph
-        node = g.nodes[node_id]
+        node = self.graph.nodes[node_id]
         kind = "code" if node_id in self.code else node.kind
-        sees = [self._input(k, n) for k, n in self._sorted(self.inputs[node_id])]
-        told = self._told(node_id)
+        sees, told = self.sees(node_id), self.told(node_id)
         outs = [*node.writes, *(f for f in node.produces if f not in node.writes)]
-        return ("[protected] " if node_id in self.protected else "") + "  ".join(
-            part for part in (
-                f"{node_id} {kind}",
-                f"sees {', '.join(sees)}" if sees else "",
-                f"told {'; '.join(told)}" if told else "",
-                f"-> {', '.join(outs)}" if outs else "") if part)
+        marks = "".join(f"[{m}] " for m, on in (("protected", node_id in self.protected),
+                                                ("optional", node_id in self.optional)) if on)
+        return marks + "  ".join(part for part in (
+            f"{node_id} {kind}", f"sees {sees}" if sees else "", f"told {told}" if told else "",
+            f"-> {', '.join(outs)}" if outs else "") if part)
 
-    def judge_part(self, gate_id: str) -> str:
+    def judge(self, gate_id: str) -> str:
         gate = self.graph.nodes[gate_id]
         judge = self.judges.get(gate_id)
         if judge:
             body = self.step(judge).split("  ", 1)
             return f"judge {judge}" + (f" ({body[1]})" if len(body) > 1 else "")
         if gate_id in self.code:
-            return "judge code"
+            return f"judge code ({self.told(gate_id) or 'its code'})"
         return f"judge {gate.evaluator or gate.gate_kind}"
 
+    def loop(self, gate_id: str) -> str:
+        node = self.graph.nodes[gate_id]
+        back = sorted(e.target for e in self.graph.out_edges(gate_id)
+                      if (gate_id, e.target) in self.back)
+        cap = node.bound("max_iterations", self.values)
+        knob = node.bound_knob("max_iterations")
+        return (f"loop({', '.join(self._shown_from(t) for t in back)}, {self.judge(gate_id)}, "
+                f"max {cap}{'*' if knob in self.frozen else ''} -> {cap + 1} runs"
+                f"{f', knob {knob}' if knob else ''})")
+
+    def route(self, gate_id: str) -> str:
+        before = sorted(self._shown_before(gate_id))
+        labels = ", ".join(f"{e.condition}: {self._shown_from(e.target)}"
+                           for e in self.graph.out_edges(gate_id) if e.condition)
+        return (f"route(after {', '.join(before) or '-'}, {self.judge(gate_id)}, "
+                f"{{{labels}}})")
+
+    def parallel(self, fork_id: str) -> str:
+        return f"parallel {fork_id} {{"
+
+    def edges(self, node_id: str) -> str:
+        """A step the walk could not place: generically, with its edges."""
+        node = self.graph.nodes[node_id]
+        outs = [f"{e.target}" + (f" [{e.condition}]" if e.condition else "")
+                for e in self.graph.out_edges(node_id)]
+        base = self.step(node_id) if node.kind in ("agent", "op") else f"{node_id} {node.kind}"
+        return base + (f"  edges -> {', '.join(outs)}" if outs else "")
+
     # ── the walk ─────────────────────────────────────────────────────────
-    def _back_edges(self) -> set[tuple[str, str]]:
-        """The edges that go back to a step already on the way to their source (a loop's
-        send-back): found by a depth-first walk from the start, then from any step it did
-        not reach."""
+    def _succ(self, node_id: str) -> list[str]:
         g = self.graph
-        state: dict[str, int] = {}  # 1 on the walk's stack, 2 done
+        node = g.nodes[node_id]
+        out = [e.target for e in g.out_edges(node_id)]
+        if node.kind == "fork":
+            out += list(node.targets)
+        if node.kind == "data" and node.subgraph_entry:
+            out.append(node.subgraph_entry)
+        return [t for t in dict.fromkeys(out) if t in g.nodes]
+
+    def _back_edges(self) -> set[tuple[str, str]]:
+        """Edges back to a step already on the way to their source (a loop's send-back):
+        a depth-first walk from the start, then from any step it did not reach."""
+        g = self.graph
+        state: dict[str, int] = {}
         back: set[tuple[str, str]] = set()
-
-        def successors(node_id: str) -> list[str]:
-            node = g.nodes[node_id]
-            out = [e.target for e in g.out_edges(node_id)]
-            if node.kind == "fork":
-                out += list(node.targets)
-            if node.kind == "data" and node.subgraph_entry:
-                out.append(node.subgraph_entry)
-            return [t for t in dict.fromkeys(out) if t in g.nodes]
-
         for root in [g.start, *sorted(g.nodes)]:
             if root not in g.nodes or root in state:
                 continue
-            stack = [(root, iter(successors(root)))]
+            stack = [(root, iter(self._succ(root)))]
             state[root] = 1
             while stack:
                 node_id, it = stack[-1]
@@ -211,7 +302,7 @@ class _View:
                     back.add((node_id, nxt))
                 elif nxt not in state:
                     state[nxt] = 1
-                    stack.append((nxt, iter(successors(nxt))))
+                    stack.append((nxt, iter(self._succ(nxt))))
         return back
 
     def _forward(self, node_id: str) -> list[str]:
@@ -219,31 +310,27 @@ class _View:
                 if (node_id, e.target) not in self.back]
 
     def _next(self, node_id: str) -> str | None:
-        g = self.graph
-        node = g.nodes[node_id]
+        node = self.graph.nodes[node_id]
         if node.kind == "gate":
             forward = self._forward(node_id)
             return forward[0] if len(forward) == 1 else None
-        outs = [e.target for e in g.out_edges(node_id) if e.condition is None]
+        outs = [e.target for e in self.graph.out_edges(node_id) if e.condition is None]
         return outs[0] if len(outs) == 1 else None
 
-    def _hidden(self, node_id: str) -> bool:
-        """Said inside another line: a folded op, a judge, a no-op step."""
-        node = self.graph.nodes[node_id]
-        return (node_id in self.folded or node_id in self.judges.values()
-                or (node.kind == "op" and not (self.inputs[node_id] or node.writes
-                                               or node.produces)))
-
     def _shown_before(self, node_id: str) -> set[str]:
-        """The shown steps right before ``node_id``, looking through hidden ones."""
         out: set[str] = set()
-        for edge in self.graph.in_edges(node_id):
-            source = edge.source
-            out |= self._shown_before(source) if self._hidden(source) else {source}
+        sources = {e.source for e in self.graph.in_edges(node_id)} | {
+            n for n, node in self.graph.nodes.items()
+            if node.kind == "fork" and node_id in node.targets}
+        for source in sources:
+            # A loop's gate belongs to the step it sends back to: look through it too.
+            looped = self.graph.nodes[source].kind == "gate" and any(
+                (source, e.target) in self.back for e in self.graph.out_edges(source))
+            out |= (self._shown_before(source) if self._hidden(source) or looped
+                    else {source})
         return out
 
     def _shown_from(self, node_id: str) -> str:
-        """The first shown step from ``node_id`` on, looking through hidden ones."""
         seen = set()
         while node_id in self.graph.nodes and self._hidden(node_id) and node_id not in seen:
             seen.add(node_id)
@@ -253,8 +340,7 @@ class _View:
             node_id = nxt
         return node_id
 
-    def _reach(self, node_id: str) -> list[str]:
-        """The nodes from ``node_id`` on along forward edges, in walk order."""
+    def reach(self, node_id: str) -> list[str]:
         order, todo, seen = [], [node_id], set()
         while todo:
             current = todo.pop(0)
@@ -267,13 +353,11 @@ class _View:
         return order
 
     def _join_of(self, fork_id: str) -> str | None:
-        """The join a fork's branches meet at: the first join along its first branch that
-        has no fork of its own still open."""
+        """The join a fork's branches meet at: the first join along its first branch with
+        no inner fork still open."""
         g = self.graph
         targets = list(g.nodes[fork_id].targets)
-        if not targets:
-            return None
-        node_id, depth, seen = targets[0], 0, set()
+        node_id, depth, seen = (targets[0] if targets else None), 0, set()
         while node_id and node_id in g.nodes and node_id not in seen:
             seen.add(node_id)
             kind = g.nodes[node_id].kind
@@ -283,148 +367,150 @@ class _View:
                 if depth == 0:
                     return node_id
                 depth -= 1
-            outs = [e.target for e in g.out_edges(node_id) if e.condition is None]
-            if kind == "gate":
-                outs = self._forward(node_id)
+            outs = (self._forward(node_id) if kind == "gate"
+                    else [e.target for e in g.out_edges(node_id) if e.condition is None])
             node_id = outs[0] if outs else None
         return None
 
-    def lines(self) -> list[Line]:
-        out: list[Line] = []
-        self.shown: set[str] = set()
-        self._chain(self.graph.start, None, 0, out)
-        rest = [n for n in sorted(self.graph.nodes) if n not in self.shown
-                and n not in self.folded and self.graph.nodes[n].kind not in ("join",)
-                and n not in self.judges.values()]
-        if rest:
-            out.append(Line("(other)", 0, "not on the main path:"))
-            for node_id in self._in_order(rest):
-                if node_id not in self.shown:
-                    self._chain(node_id, None, 1, out)
-        return out
-
     def _in_order(self, nodes: list[str]) -> list[str]:
-        """``nodes`` with each after the ones that lead to it (edges among them), ties by id;
-        what a cycle leaves goes last, by id."""
-        g = self.graph
-        left = set(nodes)
-        order: list[str] = []
+        g, left, order = self.graph, set(nodes), []
         while left:
             ready = sorted(n for n in left if not any(
                 e.source in left and e.source != n and (e.source, n) not in self.back
                 for e in g.in_edges(n)))
             if not ready:
-                order += sorted(left)
-                break
+                return order + sorted(left)
             order.append(ready[0])
             left.discard(ready[0])
         return order
 
-    def _one(self, node_id: str, depth: int, out: list[Line]) -> None:
-        g = self.graph
-        node = g.nodes[node_id]
+    def lines(self) -> list[Line]:
+        out: list[Line] = []
+        self.shown = set()
+        self._chain(self.graph.start, None, 0, "", out)
+        for node_id in self._in_order([n for n in self.graph.nodes if n not in self.shown]):
+            if node_id not in self.shown and not self._hidden(node_id):
+                self.shown.add(node_id)
+                out.append(Line(f"{FALLBACK}{node_id}", 0, self.edges(node_id), "", "edges"))
+        return out
+
+    def _one(self, node_id: str, depth: int, within: str, out: list[Line]) -> None:
+        node = self.graph.nodes[node_id]
         self.shown.add(node_id)
-        if node_id in self.folded or node_id in self.judges.values():
+        if self._hidden(node_id):
             return
         if node.kind == "gate":
-            back = sorted(e.target for e in g.out_edges(node_id)
-                          if (node_id, e.target) in self.back)
-            if back:
-                cap = node.bound("max_iterations", self.values)
-                knob = node.bound_knob("max_iterations")
-                out.append(Line(node_id, depth, f"loop({', '.join(back)}, "
-                                f"{self.judge_part(node_id)}, max {cap}"
-                                f"{'*' if knob in self.frozen else ''} -> {cap + 1} runs"
-                                f"{f', knob {knob}' if knob else ''})"))
+            if any((node_id, e.target) in self.back for e in self.graph.out_edges(node_id)):
+                out.append(Line(node_id, depth, self.loop(node_id), within, "loop"))
+            elif len([e for e in self.graph.out_edges(node_id) if e.condition]) > 1:
+                out.append(Line(node_id, depth, self.route(node_id), within, "route"))
             else:
-                before = sorted(self._shown_before(node_id))
-                labels = ", ".join(f"{e.condition}: {self._shown_from(e.target)}"
-                                   for e in g.out_edges(node_id) if e.condition)
-                out.append(Line(node_id, depth, f"route(after {', '.join(before) or '-'}, "
-                                f"{self.judge_part(node_id)}, {{{labels}}})"))
-            return
-        if node.kind in ("agent", "op"):
-            if node.kind == "op" and not (self.inputs[node_id] or node.writes or node.produces):
-                return  # a no-op step (the end of a pass after a gate)
-            out.append(Line(node_id, depth, self.step(node_id)))
+                out.append(Line(f"{FALLBACK}{node_id}", depth, self.edges(node_id), within,
+                                "edges"))
+        elif node.kind in ("agent", "op"):
+            out.append(Line(node_id, depth, self.step(node_id), within, "step"))
+        else:
+            out.append(Line(f"{FALLBACK}{node_id}", depth, self.edges(node_id), within,
+                            "edges"))
 
-    def _chain(self, start: str | None, stop: str | None, depth: int,
-               out: list[Line]) -> str | None:
-        """Walk from ``start`` until ``stop`` (a join) or the end; returns where it ended."""
+    def _chain(self, start: str | None, stop: str | None, depth: int, within: str,
+               out: list[Line]) -> None:
         g = self.graph
         node_id = start
         while node_id and node_id != stop and node_id in g.nodes:
-            if node_id in self.shown and g.nodes[node_id].kind != "join":
-                return node_id
             node = g.nodes[node_id]
+            if node_id in self.shown and node.kind != "join":
+                return
             if node.kind == "data":
                 self.shown.add(node_id)
                 out.append(Line(node_id, depth, f"per item ({node_id}"
-                                f"{' -> ' + ', '.join(node.writes) if node.writes else ''}):"))
-                self._chain(node.subgraph_entry, None, depth + 1, out)
+                                + (f" -> {', '.join(node.writes)}" if node.writes else "")
+                                + ") {", within, "step"))
+                self._chain(node.subgraph_entry, None, depth + 1, f"per item {node_id}", out)
+                out.append(Line(f"{node_id}/", depth, "}", within, "step"))
             elif node.kind == "fork":
                 self.shown.add(node_id)
                 join = self._join_of(node_id)
-                out.append(Line(node_id, depth, "parallel {"))
+                out.append(Line(node_id, depth, self.parallel(node_id), within, "parallel"))
                 for target in node.targets:
-                    self._chain(target, join, depth + 1, out)
-                out.append(Line(f"{node_id}/", depth, f"}} -> {join or 'end'}"))
-                if join:
-                    self.shown.add(join)
-                    node_id = self._next(join)
-                    continue
-                return None
+                    self._chain(target, join, depth + 1, f"parallel {node_id}", out)
+                out.append(Line(f"{node_id}/", depth, f"}} -> {join or 'end'}", within,
+                                "parallel"))
+                if not join:
+                    return
+                self.shown.add(join)
+                node_id = self._next(join)
+                continue
             elif node.kind == "gate" and not any((node_id, e.target) in self.back
                                                  for e in g.out_edges(node_id)) and len(
                     [e for e in g.out_edges(node_id) if e.condition]) > 1:
-                self._one(node_id, depth, out)
-                # Each label's steps until the paths meet again, then on from there.
+                self._one(node_id, depth, within, out)
                 edges = [e for e in g.out_edges(node_id) if e.condition]
-                reaches = [self._reach(e.target) for e in edges]
-                common = set(reaches[0]).intersection(*map(set, reaches[1:])) if reaches else set()
-                rejoin = next((n for n in reaches[0] if n in common), None) if reaches else None
+                reaches = [self.reach(e.target) for e in edges]
+                common = set(reaches[0]).intersection(*map(set, reaches[1:]))
+                rejoin = next((n for n in reaches[0] if n in common), None)
                 for edge in edges:
                     if edge.target != rejoin and edge.target not in self.shown:
                         out.append(Line(f"{node_id}:{edge.condition}", depth + 1,
-                                        f"on {edge.condition}:"))
-                        self._chain(edge.target, rejoin, depth + 2, out)
+                                        f"on {edge.condition}:", within, "route"))
+                        self._chain(edge.target, rejoin, depth + 2,
+                                    f"route {node_id} on {edge.condition}", out)
                 node_id = rejoin
                 continue
             else:
-                self._one(node_id, depth, out)
+                self._one(node_id, depth, within, out)
             node_id = self._next(node_id)
-        return node_id
 
 
-def view_lines(state: Mapping[str, Any], protected: Sequence[str] = ()) -> list[Line]:
+#: Each reader by the name operations give it in ``EditSpec.reads_as``: what draws that
+#: kind of line. ``tests/test_pipeline_view.py`` holds the two sets equal.
+READERS: dict[str, Callable[..., str]] = {
+    "step": _View.step, "sees": _View.sees, "told": _View.told, "loop": _View.loop,
+    "route": _View.route, "parallel": _View.parallel, "edges": _View.edges,
+}
+
+
+def view_lines(state: Mapping[str, Any], protected: Sequence[str] = (),
+               graders: Sequence[str] = ()) -> list[Line]:
     """The pipeline view of ``state``, line by line; empty when the graph cannot be read."""
     try:
-        return _View(state, protected).lines()
+        return _View(state, protected, graders).lines()
     except Exception:  # noqa: BLE001 - an unreadable graph is the validator's to report
         return []
 
 
-def render(state: Mapping[str, Any], protected: Sequence[str] = ()) -> str:
+def render(state: Mapping[str, Any], protected: Sequence[str] = (),
+           graders: Sequence[str] = ()) -> str:
     """The view as text, two spaces of indent per level."""
-    return "\n".join("  " * line.depth + line.text for line in view_lines(state, protected))
+    return "\n".join("  " * line.depth + line.text
+                     for line in view_lines(state, protected, graders))
+
+
+def fallback_count(state: Mapping[str, Any], protected: Sequence[str] = ()) -> int:
+    """How many lines no reader recognised (drawn generically)."""
+    return sum(line.key.startswith(FALLBACK) for line in view_lines(state, protected))
+
+
+def _structural(key: str) -> bool:
+    return key.endswith("/") or (":" in key and not key.startswith(FALLBACK))
 
 
 def changed_lines(before: Mapping[str, Any], after: Mapping[str, Any],
-                  protected: Sequence[str] = ()) -> list[str]:
+                  protected: Sequence[str] = (), graders: Sequence[str] = ()) -> list[str]:
     """What an edit built, as the view's own lines: each new (``+``) or changed (``~``)
-    line of ``after``'s view against ``before``'s, keyed by step, gate or fork, and each
-    one gone (``- removed``)."""
-    old = {line.key: line.text for line in view_lines(before, protected)}
-    new = view_lines(after, protected)
+    line of ``after``'s view against ``before``'s, keyed by step, gate or fork, with the
+    block it sits in, and each one gone (``- removed``)."""
+    old = {line.key: line for line in view_lines(before, protected, graders)}
+    new = view_lines(after, protected, graders)
     out = []
     for line in new:
-        if line.key.endswith("/") or re.fullmatch(r".+:[^:]+", line.key):
-            continue  # a block's closing line or a route's label line
+        if _structural(line.key):
+            continue
+        where = f"[in {line.within}] " if line.within else ""
         if line.key not in old:
-            out.append(f"+ {line.text}")
-        elif old[line.key] != line.text:
-            out.append(f"~ {line.text}")
-    gone = sorted(set(old) - {line.key for line in new} - {"(other)"})
-    out += [f"- removed {key}" for key in gone if not key.endswith("/")
-            and not re.fullmatch(r".+:[^:]+", key)]
+            out.append(f"+ {where}{line.text}")
+        elif old[line.key].text != line.text or old[line.key].within != line.within:
+            out.append(f"~ {where}{line.text}")
+    gone = sorted(set(old) - {line.key for line in new})
+    out += [f"- removed {key.removeprefix(FALLBACK)}" for key in gone if not _structural(key)]
     return out

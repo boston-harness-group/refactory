@@ -1829,15 +1829,26 @@ that cost is not a reason for or against a change; with one, a "cost per item" c
 each candidate's measured model cost over its train items.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
-step, generated from the graph the edits act on (`nn.pipeline_view`), in the core
-operators' own words: each model or code step with what it `sees` (each input named as
-`"sees"` takes it, `name@maker`; a plain op that only builds a prompt or collects files
-folded in as `name@op(its inputs)`), what it is `told` (each knob whose text reaches it,
-its opening words; `*` frozen, `?` read by an op with several outputs for all of them) and
-what it writes (`->`); forks as `parallel { ... } -> join`; a judge and its gate as
-`loop(step, judge ..., max N -> N+1 runs)` or `route(after step, judge ..., {label:
-step})`; `[protected]` steps. About 1.5k characters on the S4 pipeline; the node and edge
-tables follow for detail. Python only: the spine does not render requests.
+step, generated from the graph the edits act on (`nn.pipeline_view`), read in the core
+operators' own words. Reading mirrors writing: every operation in the catalogue names the
+readers that render what it builds (`EditSpec.reads_as`: `step`, `sees`, `told`, `loop`,
+`route`, `parallel`, `edges`), and a test fails on an operation without a reader or a reader
+no operation names. A step's line says what it `sees` (each input as `"sees"` takes it,
+`name@maker`), what it is `told` (each knob whose text reaches it, its opening words; `*`
+frozen, `?` read by an op with several outputs for all of them; a code step's code) and
+what it writes (`->`); forks are `parallel fork { ... } -> join` (`[optional]` branches); a
+judge and its gate are `loop(step, judge ..., max N -> N+1 runs)` or `route(after step,
+judge ..., {label: step})`, each label's steps until the ways meet; data passes are
+`per item (data) { ... }`; `[protected]` steps are marked. A plain op is folded into the
+step it feeds only when it is a pure assembler (no tools, not code, protected, the
+grader's, or a step a gate names) whose outputs only model steps read, directly or through
+an operator's collect step; it shows as `name (via op: its inputs)`. An agent with tools
+sees the run dir (or its own workspace). What no reader recognises is drawn generically
+(kind, sees, writes, `edges ->`) and counted: no hand-written seed graph needs one, nor does
+any graph core operators build from them (`tests/test_pipeline_view.py`, with a round trip:
+an operator changes only the lines it describes, which name its handles). About 1.5k
+characters on the S4 pipeline. Python only: the spine does not render requests. A parser
+from the view back to a graph is not built.
 
 **What an edit built.** A proposal says in prose what its edit does (`flow_change`); the
 expansion can differ (a loop left at its default cap, a branch that sees the task taking in
