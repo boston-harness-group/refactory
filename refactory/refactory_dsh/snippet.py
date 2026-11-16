@@ -141,7 +141,12 @@ _SHELL = (
 #: The driver that runs inside: read code and input, call ``main``, write the result.
 #: What the snippet prints goes to stderr, so it cannot forge the result.
 _DRIVER = """\
-import sys, json
+import os, sys, json
+# What the launch adds on the way in (Linux's shell sets PWD, SHLVL and _) goes, so the
+# code sees exactly the fixed environment (`_environment`) on both platforms.
+kept = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR")
+for name in [name for name in os.environ if name not in kept]:
+    del os.environ[name]
 out = sys.stdout
 out.write("STARTED\\n")
 out.flush()
