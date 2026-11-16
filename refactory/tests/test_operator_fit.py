@@ -18,7 +18,7 @@ import structure_fuzz as sf
 from refactory_dsh import registry
 from refactory_dsh.nn import core_ops
 from refactory_dsh.nn import edits as nn_edits
-from refactory_dsh.optim import base
+from refactory_dsh.optim import Candidate, Optimizer, Proposal, base
 from refactory_dsh.optim.memory import state_view
 
 MODE = "livemath/skill_graph"
@@ -29,10 +29,17 @@ def _start_state() -> dict:
     return mode().state_dict()
 
 
-def _section(state: dict, **kwargs) -> list[str]:
+def _check(state: dict, protected=()):
+    """An attempt's verdict on the real state, as the loop's `edit_check` gives it."""
+    parent = Candidate.from_state(copy.deepcopy(state))
+    return lambda edit: Optimizer().attempt(Proposal(edit=edit), parent, (), False, (),
+                                            protected=tuple(protected), record=False)
+
+
+def _section(state: dict, protected=(), check=None, **kwargs) -> list[str]:
     view = state_view(state)
     return base.operator_fit_section(nn_edits.catalogue("broad"), view.node_states, view.edges,
-                                     view.knobs, **kwargs)
+                                     view.knobs, check or _check(state, protected), **kwargs)
 
 
 def _rows(lines: list[str]) -> dict[str, list[str]]:
@@ -44,14 +51,14 @@ def _rows(lines: list[str]) -> dict[str, list[str]]:
     return rows
 
 
-def _outcome(edit: dict, state: dict) -> str | None:
-    reason = nn_edits.precheck(edit, state)
-    if reason is None:
-        try:
-            nn_edits.apply(edit, copy.deepcopy(state))
-        except nn_edits.EditError as exc:
-            reason = str(exc)
-    return reason
+def _outcome(edit: dict, state: dict, protected: tuple = ()) -> str | None:
+    """An attempt's verdict on one edit (`Optimizer.attempt`), as the section's reason
+    text: None when it is accepted."""
+    verdict = Optimizer().attempt(Proposal(edit=edit), Candidate.from_state(copy.deepcopy(state)),
+                                  (), False, (), protected=protected, record=False)
+    if not isinstance(verdict, list):
+        return None
+    return "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
 
 
 def _edits_by_label(state: dict, step: str) -> dict[str, dict]:
@@ -61,21 +68,21 @@ def _edits_by_label(state: dict, step: str) -> dict[str, dict]:
     return dict(base._fit_edits(graph.nodes[step], graph, set(nn_edits.CORE_OPS)))
 
 
-def _check_rows_are_true(state: dict) -> dict[str, list[str]]:
-    """Every row's verdicts agree with applying the operator: an applying label applies,
-    a refused one is refused with the reason the row gives."""
-    rows = _rows(_section(state))
+def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[str]]:
+    """Every row's verdicts agree with an attempt's: an applying label is accepted, a
+    refused one is refused with the reason the row gives (its replacing hint checked)."""
+    rows = _rows(_section(state, protected=protected))
     assert rows
     for step, (_carries, applies, refused) in rows.items():
         edits = _edits_by_label(state, step)
         for label in filter(None, applies.split(", ")) if applies != "-" else ():
-            assert _outcome(edits[label], state) is None, (step, label)
+            assert _outcome(edits[label], state, protected) is None, (step, label)
         for entry in refused.split(" | ") if refused != "-" else ():
             labels, reason = entry.split(": ", 1)
             for label in labels.split(", "):
-                got = _outcome(edits[label], state)
-                assert got is not None and got.removeprefix("E-precondition: ") == reason, (
-                    step, label, got)
+                got = _outcome(edits[label], state, protected)
+                assert got is not None, (step, label)
+                assert got == reason, (step, label, got)
     return rows
 
 
@@ -113,9 +120,20 @@ def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
     assert _outcome(edit, state) is None
     # The same exact edit for a data pass's ends, where the replacement is code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state)
-    edit = json.loads(re.search(r"replace it with (\{.*\})$", reason).group(1))
-    assert edit["into"][0]["kind"] == "code" and edit["step"] == "prepare"
+    edit = json.loads(re.search(r"replace it with (\{.*?\}\]\})", reason).group(1))
+    assert edit == {"op": "split", "step": "prepare", "into": [{"kind": "code"}]}
     assert _outcome(edit, state) is None
+
+
+def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s():
+    """The operators' precheck knows the graph only: for a protected step it would name a
+    split an attempt refuses (E-protected). The attempt checks the hinted edit itself."""
+    state = _start_state()
+    rewire = {"op": "rewire", "step": "decide", "sees": ["task"]}
+    assert '"op": "split"' in nn_edits.precheck(rewire, state)
+    reason = _outcome(rewire, state, protected=("decide",))
+    assert "replacing it is refused too (E-protected" in reason, reason
+    assert '"op": "split"' not in reason
 
 
 def test_a_refusal_never_names_a_replacing_edit_that_would_be_refused():
@@ -151,10 +169,38 @@ def test_each_row_on_a_nested_fork_says_what_the_operators_do():
     assert len(forks) >= 2 and set(forks) <= set(rows)
 
 
-def test_a_protected_step_is_shown_untouchable():
+def test_a_protected_step_s_row_is_what_an_attempt_says_not_what_the_graph_allows():
+    """Precheck and expansion alone accept a split of a protected step; an attempt refuses
+    it (E-protected), and so does the row."""
     state = _start_state()
-    rows = _rows(_section(state, protected=["decide"]))
-    assert rows["decide"][1:] == ["-", "every operator: protected"]
+    assert nn_edits.precheck({"op": "split", "step": "decide"}, state) is None
+    rows = _check_rows_are_true(state, protected=("decide",))
+    applies, refused = rows["decide"][1].split(", "), rows["decide"][2]
+    assert "split" not in applies and "E-protected" in refused, rows["decide"]
+
+
+def test_the_loop_s_request_takes_its_verdicts_from_the_run_s_own_attempt(tmp_path):
+    """In a run the table is `Run.mechanics` on the edited candidate: an edit the run
+    refuses (here: every edit, for a stub) is shown refused with the run's words."""
+    from refactory_dsh import strategies
+    from refactory_dsh.loop import LoopConfig
+    from refactory_dsh.outerloop import Run
+
+    loop = strategies.create("default", MODE, LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=tmp_path,
+        edit_preset="broad"), project=Path("."))
+    seed = Candidate.from_state(loop.mode.state_dict())
+    loop.population.append(seed)
+    ctx = loop._context()
+    run = Run(_loop=loop)
+    edits = _edits_by_label(seed.state, "compare")
+    for label, edit in edits.items():
+        assert (ctx.edit_check(edit) == run.mechanics(Proposal(edit=edit), seed,
+                                                      record=False)), label
+    stub = base.operator_fit_section(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
+                                     lambda edit: ["E-run: refused by this run"])
+    assert all(row[1] == "-" and row[2].endswith("E-run: refused by this run")
+               for row in _rows(stub).values())
 
 
 def test_the_section_stays_within_its_limit_and_names_what_it_left_out():
@@ -163,13 +209,24 @@ def test_the_section_stays_within_its_limit_and_names_what_it_left_out():
     assert sum(map(len, full)) <= base.OPERATOR_FIT_CHARS
     small = _section(state, limit=2500)
     assert sum(map(len, small)) <= 2500
-    assert small[2].startswith("(") and "not listed" in small[2]
+    steps = len(_rows(full))
+    shown = _rows(small)
+    # The note counts the steps the table lists, not every node of the graph.
+    assert small[2] == (f"({steps - len(shown)} of {steps} steps not listed, to stay within "
+                        "2500 characters)"), small[2]
+    # The rows kept are the shortened ones: each refusal cut to its first clause.
+    for row in shown.values():
+        for entry in row[2].split(" | ") if row[2] != "-" else ():
+            assert ";" not in entry.split(": ", 1)[1], entry
 
 
-def test_no_section_when_the_run_permits_no_core_operator():
-    view = state_view(_start_state())
+def test_no_section_when_the_run_permits_no_core_operator_or_gives_no_check():
+    state = _start_state()
+    view = state_view(state)
     assert base.operator_fit_section(nn_edits.catalogue("knob_only"), view.node_states,
-                                     view.edges, view.knobs) == []
+                                     view.edges, view.knobs, _check(state)) == []
+    assert base.operator_fit_section(nn_edits.catalogue("broad"), view.node_states,
+                                     view.edges, view.knobs, None) == []
 
 
 def test_the_loop_line_states_the_cap_and_verdict_the_loop_builds():
@@ -194,7 +251,7 @@ def test_an_edit_whose_preconditions_pass_but_whose_expansion_fails_is_shown_ref
 
     def apply(edit, state, *args, **kwargs):
         if edit.get("op") == "insert" and edit.get("after") == "compare":
-            raise nn_edits.EditError("E-wiring: the new step would read nothing")
+            raise nn_edits.EditError("the new step would read nothing", code="E-wiring")
         return real(edit, state, *args, **kwargs)
 
     monkeypatch.setattr(nn_edits, "apply", apply)
@@ -228,7 +285,8 @@ def test_the_request_shows_the_section_after_the_operators_in_domain_free_words(
     def render(preset: str) -> str:
         return ProposalContext(mode_name="m", nodes=view.nodes, edges=view.edges,
                                node_states=view.node_states, knobs=view.knobs,
-                               catalogue=nn_edits.catalogue(preset)).render()
+                               catalogue=nn_edits.catalogue(preset),
+                               edit_check=_check(_start_state())).render()
 
     text = render("broad")
     headings = _headings(text)

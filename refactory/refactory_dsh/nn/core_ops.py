@@ -947,10 +947,10 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
 def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
     """How to replace ``node`` by one step of the proposer's own text (an agent for an
     agent, code for anything else: a new agent writes only its reply): the exact edit when
-    it applies here, else why replacing it is refused too, so the hint never names an edit
-    that would be refused."""
+    it applies to the graph, else why replacing it is refused too. An attempt holds the
+    named edit to its own checks as well (`optim.base.checked_hint`)."""
     step: dict[str, Any] = ({"kind": "agent", "text": "<what it does>"} if node.kind == "agent"
-                            else {"kind": "code", "text": "<def main(inp): ...>"})
+                            else {"kind": "code"})
     if sees is not None:
         step["sees"] = sees
     edit = {"op": "split", "step": node.id, "into": [step]}
@@ -963,7 +963,9 @@ def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
     if refused is not None:
         return ("replacing it is refused too ("
                 f"{refused.removeprefix('E-precondition: ')})")
-    return f"replace it with {json.dumps(edit)}"
+    code = "" if node.kind == "agent" else " (its default code joins what it is given; " \
+        "give 'text', your def main(inp), for your own)"
+    return f"replace it with {json.dumps(edit)}{code}"
 
 
 def _pre_remove(edit: dict, state: dict) -> str | None:

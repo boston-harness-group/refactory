@@ -24,7 +24,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
@@ -757,6 +757,11 @@ class ProposalContext:
     #: The mode's protected nodes (``Mode.protected_nodes``): no edit may remove,
     #: rewire or replace them, and one that does is refused with ``E-protected``.
     protected: list[str] = field(default_factory=list)
+    #: The loop's verdict on one edit to the edited candidate (`Run.mechanics`: a
+    #: candidate, or its refusals), for the request's operator table; ``None`` leaves
+    #: the table out.
+    edit_check: Callable[[dict[str, Any]], Any] | None = field(default=None, repr=False,
+                                                                 compare=False)
     preset: str = "broad"
     #: What the outer loop decided for *this* iteration, as data.
     #:
@@ -949,7 +954,7 @@ class ProposalContext:
                                  tools=self.new_node_tools, rotation=self.generation,
                                  knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             *operator_fit_section(self.catalogue, self.node_states, self.edges, self.knobs,
-                                  protected=self.protected),
+                                  self.edit_check),
             *_settings_lines(self.knobs),
             *_node_reference(self),
             "## What the author says is worth doing",
@@ -1626,6 +1631,30 @@ def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[s
     return placeholders
 
 
+#: How a core operator's refusal names the edit that replaces the step (`core_ops`).
+_REPLACE_HINT = "replace it with "
+
+
+def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
+    """``reason`` with the replacing edit it names checked by ``check`` (an attempt's
+    verdict: a candidate, or its refusals): kept when it would be accepted, otherwise
+    turned into "replacing it is refused too (<why>)". The operators' own precheck knows
+    only the graph; an attempt also refuses on protected steps, frozen and guarded knobs,
+    wiring and validation, so the hint is held to that."""
+    start = reason.find(_REPLACE_HINT)
+    if start < 0:
+        return reason
+    try:
+        edit, end = json.JSONDecoder().raw_decode(reason, start + len(_REPLACE_HINT))
+    except ValueError:
+        return reason
+    verdict = check(edit)
+    if not isinstance(verdict, list):
+        return reason
+    why = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
+    return f"{reason[:start]}replacing it is refused too ({why}){reason[end:]}"
+
+
 #: The most characters the "what each step carries" section takes: past it, each refusal
 #: is cut to its first clause, then rows are left out, last first, and named.
 OPERATOR_FIT_CHARS = 7000
@@ -1670,9 +1699,14 @@ def _fit_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, 
     for knob in knobs:
         entry = state["knobs"].get(knob.get("name"))
         if entry is not None:
-            kind = knob.get("kind") if knob.get("kind") in ("int", "float", "bool") else "str"
-            entry["spec"] = {"default": knob.get("value"), "kind": kind,
-                             "frozen": bool(knob.get("frozen"))}
+            from refactory_dsh.nn.knob import _SPEC_FIELDS, KINDS
+
+            spec = {k: knob[k] for k in _SPEC_FIELDS if knob.get(k) is not None}
+            spec.setdefault("default", knob.get("value"))
+            if spec.get("kind") not in KINDS or (spec.get("kind") == "enum"
+                                                 and not spec.get("enum")):
+                spec["kind"] = "str"
+            entry["spec"] = spec
     return state
 
 
@@ -1707,19 +1741,22 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
 
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
-                         knobs: Sequence[Mapping[str, Any]], *, protected: Sequence[str] = (),
+                         knobs: Sequence[Mapping[str, Any]],
+                         check: Callable[[dict[str, Any]], Any] | None, *,
                          limit: int = OPERATOR_FIT_CHARS) -> list[str]:
     """"What each step carries, and which operators apply to it": for each model step,
     what its prompt carries (a plain op's output followed back to what that op reads),
     and for each step which core operators, with their default arguments, apply as written
-    and which are refused, with the refusal's own words. Computed by applying each on the
-    request's state, so it is what an attempt would say. Information only; nothing when the
+    and which are refused, with the refusal's own words. Each verdict is an attempt's:
+    ``check`` is the loop's (`Run.mechanics` on the edited candidate: every check an
+    attempt makes but the model-judged integrity one). Information only; nothing without
+    a check (a request built outside a run, whose verdicts would be guesses) or when the
     run permits no core operator."""
     from refactory_dsh.nn.graph import Graph
 
     ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
-    state = _fit_state(node_states, edges, knobs) if ops else None
-    if state is None:
+    state = _fit_state(node_states, edges, knobs) if ops and check is not None else None
+    if state is None or check is None:
         return []
     graph = Graph.from_state(state["graph"])
     knob_values = {k.get("name"): k.get("value") for k in knobs}
@@ -1730,23 +1767,15 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         if node.kind not in ("agent", "op", "fork"):
             continue
         carries = _carries(node, graph, knob_values) if node.kind == "agent" else "-"
-        if node_id in protected:
-            rows.append([node_id, carries, "-", "every operator: protected"])
-            full_refusals.append(["every operator: protected"])
-            continue
         applies: list[str] = []
         reasons: dict[str, list[str]] = {}
         for label, edit in _fit_edits(node, graph, ops):
-            reason = nn_edits.precheck(edit, state)
-            if reason is None:
-                try:
-                    nn_edits.apply(edit, state)
-                except nn_edits.EditError as exc:
-                    reason = str(exc)
-            if reason is None:
+            verdict = check(edit)
+            if not isinstance(verdict, list):
                 applies.append(label)
-            else:
-                reasons.setdefault(reason.removeprefix("E-precondition: "), []).append(label)
+                continue
+            reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
+            reasons.setdefault(reason, []).append(label)
         refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
         rows.append([node_id, carries, ", ".join(applies) or "-", " | ".join(refused) or "-"])
         full_refusals.append(refused)
@@ -1755,25 +1784,31 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
             "prompt and reads carry, each with the step that makes it (`(op X, which reads "
-            "...)`: a fact a plain op builds, and everything that op reads), and which core operators apply to each step as written with their "
-            "default arguments (`split (replace)`: a split into one step of your own text that "
-            "sees the task) and which are refused, in the refusal's own words. A step that "
+            "...)`: a fact a plain op builds, and everything that op reads), and which core "
+            "operators an attempt accepts for each step as written with their default "
+            "arguments (`split (replace)`: a split into one step of your own text that sees "
+            "the task) and which it refuses, in the refusal's own words. A step that "
             "alone reads a frozen knob is neither removed nor merged, and is split only when "
             "the new last step's prompt names each such knob as `{{knob}}` (never one named "
             "after the step, `<step>__...`); otherwise insert a step beside it.")
     header = ["step", "its prompt and reads carry", "applies as written", "refused (why)"]
-    for shorten in (False, True):
-        shown = rows if not shorten else [
-            row[:3] + [" | ".join(r.split(":", 1)[0] + ": " + r.split(":", 1)[1].split(";")[0]
-                                  .split(". ")[0].strip() for r in refused) or "-"]
-            for row, refused in zip(rows, full_refusals)]
+
+    def first_clause(refusal: str) -> str:
+        labels, why = refusal.split(": ", 1)
+        return f"{labels}: {why.split(';')[0].split('. ')[0].strip()}"
+
+    short = [row[:3] + [" | ".join(map(first_clause, refused)) or "-"]
+             for row, refused in zip(rows, full_refusals)]
+    for shown in (rows, short):
         text = _table(header, shown)
         if len(lead) + len(text) <= limit:
             return [lead, text, ""]
-    while rows:
-        rows, full_refusals = rows[:-1], full_refusals[:-1]
-        text = _table(header, rows)
-        note = f"({len(graph.nodes) - len(rows)} step(s) not listed to stay within {limit} characters)"
+    listed = len(short)
+    while short:
+        short = short[:-1]
+        text = _table(header, short)
+        note = (f"({listed - len(short)} of {listed} steps not listed, to stay within "
+                f"{limit} characters)")
         if len(lead) + len(text) + len(note) <= limit:
             return [lead, text, note, ""]
     return []
@@ -3711,6 +3746,8 @@ class Optimizer:
         protected: Sequence[str] = (),
         allow_new_node_tools: bool = False,
         graders: Sequence[str] = (),
+        record: bool = True,
+        check_hints: bool = True,
     ) -> Candidate | list[str]:
         """Apply and validate one proposal: a candidate, or the reasons it failed.
 
@@ -3724,8 +3761,22 @@ class Optimizer:
         (``E-new-node-tools``). ``graders`` is the mode's ``grader_nodes()``: with the
         protected nodes, the only nodes besides the data nodes that may consume
         grader-derived data (V17).
+
+        ``record`` False records no call (the request's operator table asks this for
+        every operator it lists). A precondition refusal that names a replacing edit
+        has that edit checked here the same way (``check_hints``): when it would be
+        refused too, the refusal says so instead of naming it.
         """
         steps = proposal.steps
+
+        def hinted(reason: str) -> str:
+            if not check_hints:
+                return reason
+            return checked_hint(reason, lambda edit: self.attempt(
+                Proposal(edit=edit), parent, invariants, resolve_calls, frozen, seen,
+                seed_state=seed_state, protected=protected,
+                allow_new_node_tools=allow_new_node_tools, graders=graders, record=False,
+                check_hints=False))
         refusal = proposal_refusal(proposal, max_edits=self.max_edits, parent_state=parent.state)
         if refusal:
             return refusal
@@ -3768,7 +3819,7 @@ class Optimizer:
             before_step = state
             reason = nn_edits.precheck(edit, state)
             if reason:
-                return [_at(f"E-precondition: {reason}", index, steps)]
+                return [_at(f"E-precondition: {hinted(reason)}", index, steps)]
             reports: list[dict[str, Any]] = []
             try:
                 state = nn_edits.apply(edit, state, edit_reports=reports)
@@ -3894,7 +3945,7 @@ class Optimizer:
             step_edits=len(applied),
         )
         candidate.repairs, candidate.notes = list(repairs), [*wired_notes, *notes]
-        if repairs:
+        if repairs and record:
             self.record_call(kind="repair", how="deterministic", candidate=candidate.id,
                              parent=parent.id, fixes=repairs)
         return candidate

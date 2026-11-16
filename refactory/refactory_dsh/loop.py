@@ -5313,6 +5313,7 @@ class Loop(OuterLoop):
             insertable=[node.to_state() for node in self.mode.insertable()],
             frozen=list(self.config.frozen),
             protected=list(self.protected),
+            edit_check=self._edit_check(board),
             # A refusal a slim repair fixed is not fed back: its fix is the candidate.
             rejections=summarise_reasons(
                 [
@@ -6316,6 +6317,22 @@ class Loop(OuterLoop):
                                     child_records=child_records, graph=candidate.state)})
         return entries
 
+    def _edited_candidate(self, board: list[Candidate]) -> Candidate | None:
+        """The candidate this step edits: the strategy's, else the one ``optimizer_step``
+        selected, else the leader; ``None`` when none is known."""
+        by_id = {c.id: c for c in self.population}
+        parent_id = self.strategy_decision.get("parent") or self._editing_parent
+        parent = by_id.get(str(parent_id)) if parent_id else None
+        return parent if parent is not None or not board else board[0]
+
+    def _edit_check(self, board: list[Candidate]) -> Any:
+        """The request's operator table's verdict on one edit: `Run.mechanics` on the
+        edited candidate (the seed when none is known), so the table says what an
+        attempt would, recording nothing."""
+        parent = self._edited_candidate(board) or Candidate.from_state(self.mode.state_dict())
+        run = Run(_loop=self)
+        return lambda edit: run.mechanics(Proposal(edit=edit), parent, record=False)
+
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.
 
@@ -6327,11 +6344,8 @@ class Loop(OuterLoop):
         note says so, in the prompt and in the run's progress, rather than passing
         the seed's graph off as the parent's.
         """
-        by_id = {c.id: c for c in self.population}
-        parent_id = self.strategy_decision.get("parent") or self._editing_parent
-        parent = by_id.get(str(parent_id)) if parent_id else None
-        if parent is None and board:
-            parent = board[0]
+        parent = self._edited_candidate(board)
+
         def described(mode: Any) -> dict[str, Any]:
             # The nodes in full too, in node-state form, for a structure edit to copy.
             # And its knob states (spec + value): a node an earlier edit added brings

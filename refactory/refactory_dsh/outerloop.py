@@ -125,16 +125,31 @@ class Run:
         judged (``Loop._integrity_check``): one call of the optimizer's model, charged
         to the run's token and time budgets; under ``veto`` an ``exploit`` is refused
         here (``E-integrity``), so every strategy's proposals pass the same judge."""
+        outcome = self.mechanics(proposal, parent)
+        check = getattr(self._loop, "_integrity_check", None)
+        if not isinstance(outcome, list) and callable(check):
+            outcome = check(proposal, parent, outcome)
+        if isinstance(outcome, list) and record:
+            self._loop.rejections.append(
+                Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
+                          rationale=proposal.rationale)
+            )
+        return outcome
+
+    def mechanics(self, proposal: Proposal, parent: Candidate, *,
+                  record: bool = True) -> Candidate | list[str]:
+        """Every check `attempt` makes but the model-judged integrity one, and no
+        rejection recorded (``record`` False records no optimizer call either): the catalogue (an unknown or unpermitted operation), then
+        `Optimizer.attempt` with this run's invariants, frozen knobs, tried states,
+        protected and grading steps. The request's operator table asks it for each
+        operator it lists, so the table says what an attempt would."""
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
         reason = proposal_refusal(
             proposal, permitted=self._loop.permitted_ops(),
             max_edits=getattr(self._loop.optimizer, "max_edits", None))
         if reason:
-            if record:
-                self._loop.rejections.append(Rejection(1, proposal.edit, reason,
-                                                       rationale=proposal.rationale))
             return reason
-        outcome = self._loop.optimizer.attempt(
+        return self._loop.optimizer.attempt(
             proposal,
             parent,
             self._loop.invariants,
@@ -145,16 +160,8 @@ class Run:
             protected=getattr(self._loop, "protected", ()),
             graders=getattr(self._loop, "graders", ()),
             allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
+            record=record,
         )
-        check = getattr(self._loop, "_integrity_check", None)
-        if not isinstance(outcome, list) and callable(check):
-            outcome = check(proposal, parent, outcome)
-        if isinstance(outcome, list) and record:
-            self._loop.rejections.append(
-                Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
-                          rationale=proposal.rationale)
-            )
-        return outcome
 
     # ── the expensive primitive ────────────────────────────────────────────
     def evaluate(

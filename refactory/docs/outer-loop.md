@@ -1834,13 +1834,15 @@ step's prompt and reads carry, each with its maker, a fact a plain op builds fol
 step back to everything that op reads: files and facts with their makers, and knobs
 (`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob precision_task, ...)`),
 and which core operators apply to the step as written with their default arguments and
-which are refused, in the refusal's own words (equal reasons grouped). It is worked out by
-running each operator's precondition check and full expansion on the request's own state,
-frozen marks included, so it says what an attempt would. A refusal that points to
-replacing a step names the exact edit (`{"op": "split", "step": ..., "into": [one step]}`)
-when that edit applies, and otherwise says why replacing it is refused too.
-The section fits 7000 characters: refusals are cut to their first clause, then rows are
-left out, last first, and counted. The `loop` line states the verdict format (`proceed` or
+which are refused, in the refusal's own words (equal reasons grouped). Each verdict is the
+run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then
+`Optimizer.attempt` with the run's protected and grading steps, frozen and guarded knobs,
+wiring and validation; everything `Run.attempt` checks but the model-judged integrity
+check), recording nothing; a request built outside a run has no section. A refusal that
+points to replacing a step names the exact edit (`{"op": "split", "step": ..., "into":
+[one step]}`) only when an attempt would accept it (`checked_hint`), and otherwise says why
+replacing it is refused too. The section fits 7000 characters: refusals are cut to their
+first clause, then rows are left out, last first, and counted among the listed steps. The `loop` line states the verdict format (`proceed` or
 `reloop`, then why, which reaches the step sent back) and the cap (`<gate>__max_iterations`,
 default 2, 1 to 5, after which the run goes on).
 
