@@ -5,21 +5,23 @@ Every construct of the graph language -- each node kind, gate kind, bindable fie
 here, saying which edit operations create it, change it on an existing node and remove
 it. Where none does, the entry names why, from a fixed list (`REASONS`): left out by
 design (the grader side, a gate nobody answers in a headless run, an infrastructure
-flag, a step's identity, a user's decision), or ``planned``, with the change that will
-cover it. The core operators (`nn.core_ops`) cover the forks and joins, rewiring what a step
-reads, replacing a step's callable, and un-routing a gate; what is still planned is
-``configure`` (settings bound to knobs) and the per-sub-item experiment. ``tests/test_dsl_coverage.py`` generates the list of constructs from the code
-and fails when one has no entry, so a new feature cannot land unreachable by accident;
-the table in ``docs/outer-loop.md`` is generated from it (`table_markdown`).
+flag, a step's identity, a user's decision), or ``deferred`` by the user, with why in
+`DECISIONS`. Nothing is left planned: the core operators (`nn.core_ops`) cover the forks and
+joins, rewiring what a step reads, replacing a step's callable and un-routing a gate, and a
+loop's limit and a branch's optional are settings bound to knobs (``loop``, ``branch`` with
+``optional``) that ``set_knob`` moves. ``tests/test_dsl_coverage.py`` generates the list of
+constructs from the code and fails when one has no entry or an entry is left planned, so a
+new feature cannot land unreachable by accident; the table in ``docs/outer-loop.md`` is
+generated from it (`table_markdown`).
 
 The standing rule holds: an existing node changes only through knobs (bound fields) and
 topology. A field outside that is reachable only by removing a node and adding another.
 
 The user's decisions the map records (`DECISIONS`): what an existing step reads may be
 rewired; a copy of a step that uses tools may keep its tools when it gets its own fresh
-workspace; ``configure`` may change timeouts, retries, loop limits, optional branches,
-the workspace kind and the model role, never tools or ``outputs_only``; the per-sub-item
-experiment comes after the core operators.
+workspace; settings bound to knobs may be loop limits and optional branches, never tools or
+``outputs_only``; timeouts, retries, the workspace kind, the model role and the per-sub-item
+experiment are deferred.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ REASONS: dict[str, str] = {
     "identity": "what a step is: a different one is a different step (remove it, add one)",
     "excluded by decision": "the user decided the search may not change it",
     "awaiting a user decision": "reachable only once the user decides",
-    "planned": "a later change adds the operation named",
+    "deferred": "the user deferred it; DECISIONS['deferred'] says why",
 }
 
 
@@ -48,11 +50,14 @@ DECISIONS: dict[str, str] = {
     "rewire": "an operator may change what an existing step reads (its reads and inputs)",
     "tool copies": "a copy of a step that uses tools keeps its tools only with its own fresh "
                    "workspace",
-    "configure": "timeout_s, retry, max_iterations, on_exhausted, a branch's optional, the "
-                 "workspace kind and the role among the run's routes; never tools, tool_policy "
-                 "or outputs_only",
-    "per-sub-item": "a step per sub-item is tried as an experiment on both runtimes after the "
-                    "core operators",
+    "configure": "settings bound to knobs, which set_knob moves: a loop gate's max_iterations "
+                 "(`loop` makes its knob) and a branch's optional (`branch` with 'optional'); "
+                 "never tools, tool_policy or outputs_only",
+    "deferred": "left for later on 2026-11-16: timeout_s, retry and on_exhausted as knobs "
+                "(they mostly trade cost and reliability, invite failing fast to game the "
+                "score against 'a time-out counts as a failure', and touch node_retry on both "
+                "runtimes); the workspace kind and the model role; binding a new setting on an "
+                "existing step; and the per-sub-item experiment",
 }
 
 
@@ -96,7 +101,8 @@ _FORK_CHANGE = ("branch", "remove", "parallelize", "insert")
 _FORK_REMOVE = ("serialize", "remove")
 _REWIRE = ("rewire",)
 _REPLACE = ("split",)
-_PLANNED_CONFIGURE = Gap("planned", "configure, which binds the setting to a knob (PR3)")
+_DEFERRED_SETTING = Gap("deferred", "a timeout or retry setting as a knob")
+_DEFERRED_BINDING = Gap("deferred", "binding a new setting on an existing step")
 _OUTPUTS = Gap("identity", "a step's outputs are what its readers rely on: replace the step "
                            "(split) to change them")
 _GRADER = Gap("grader-side")
@@ -130,6 +136,7 @@ def _bindable() -> list[Entry]:
         Entry("bindable field", "code", _NEW, ("set_knob",)),
         Entry("bindable field", "max_iterations", _GATE_ADD, ("set_knob",)),
         Entry("bindable field", "parallelism", _GRADER, ("set_knob",)),
+        Entry("bindable field", "optional", ("branch",), ("set_knob",)),
     ]
 
 
@@ -140,7 +147,7 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "call": (_NEW, _REPLACE),
     "evaluator": (_NEW, _REPLACE),
     "gate_kind": (_GATE_ADD, Gap("identity")),
-    "knobs": (_NEW, _PLANNED_CONFIGURE),
+    "knobs": (_NEW, _DEFERRED_BINDING),
     "reads": (_NEW, _REWIRE),
     "required_reads": (_NEW, _REWIRE),
     "inputs": (_NEW, _REWIRE),
@@ -149,20 +156,20 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "prompt_template": (_NEW, ("set_knob",)),
     "system_prompt_template": (_NEW, ("set_knob",)),
     "code": (_NEW, ("set_knob",)),
-    "role": (_NEW, Gap("planned", "configure, among the run's declared routes (PR3)")),
+    "role": (_NEW, Gap("deferred", "the model role among the run's routes")),
     "tools": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "tool_policy": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),
     "max_iterations": (_GATE_ADD, ("set_knob",)),
-    "on_exhausted": (_GATE_ADD, _PLANNED_CONFIGURE),
-    "timeout_s": (_NEW, _PLANNED_CONFIGURE),
-    "retry": (_NEW, _PLANNED_CONFIGURE),
-    "workspace": (_NEW, Gap("planned", "configure, the workspace kind (PR3)")),
+    "on_exhausted": (_GATE_ADD, _DEFERRED_SETTING),
+    "timeout_s": (_NEW, _DEFERRED_SETTING),
+    "retry": (_NEW, _DEFERRED_SETTING),
+    "workspace": (_NEW, Gap("deferred", "the workspace kind")),
     "targets": (_FORK_CREATE, _FORK_CHANGE),
-    "optional_targets": (("branch", "add_node"),
-                         Gap("planned", "configure a branch's optional (PR3)")),
+    # A branch made with 'optional' binds it to a knob (`Graph.optional_targets_of`).
+    "optional_targets": (("branch", "add_node"), ("set_knob",)),
     "sources": (_FORK_CREATE, _FORK_CHANGE),
-    "field_bindings": (_NEW, _PLANNED_CONFIGURE),
+    "field_bindings": (_NEW, _DEFERRED_BINDING),
     "feedback_keys": (_NEW, _FLAG),
     "notes": (_NEW, _FLAG),
     "blocking": (_NEW, _FLAG),
@@ -217,10 +224,8 @@ def _compositions() -> list[Entry]:
               _GATE_REMOVE),
         Entry("composition", "gate routing to several steps", ("route", "add_node", "add_edge"),
               ("remove_edge", "add_edge"), ("remove",)),
-        Entry("composition", "a step per sub-item",
-              Gap("planned", "a per-sub-item experiment on both runtimes (PR3)"),
-              Gap("planned", "after the per-sub-item experiment"),
-              Gap("planned", "after the per-sub-item experiment")),
+        Entry("composition", "a step per sub-item", *(Gap("deferred", "the per-sub-item "
+                                                                  "experiment"),) * 3),
     ]
 
 

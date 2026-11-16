@@ -211,6 +211,10 @@ BINDABLE_FIELDS = frozenset({
     "max_iterations",
     "parallelism",       # data nodes only; checked in V14
     "code",              # code nodes (`refactory_dsh.snippet`) only; checked in V18
+    # A fork branch's head only (checked in V14): whether it may fail without failing
+    # the item, a bool knob read by `Graph.optional_targets_of` on both runtimes. Not a
+    # `Node` field: the fork's `optional_targets` says it for a branch with no binding.
+    "optional",
 })
 
 
@@ -680,6 +684,18 @@ class Node:
                 f"integer, got {value!r}")
         return value
 
+    def bound_flag(self, field_name: str, knobs: Mapping[str, Any]) -> bool | None:
+        """A bound boolean setting (``optional``) in a run with these knob values; None
+        when no knob is bound to it or the run carries no value for that knob."""
+        knob_name = self.bound_knob(field_name)
+        if not knob_name or knobs.get(knob_name) is None:
+            return None
+        value = knobs[knob_name]
+        if not isinstance(value, bool):
+            raise GraphError(f"node {self.id!r}: {knob_name} is bound to {field_name} and must be "
+                             f"true or false, got {value!r}")
+        return value
+
     def effective_parallelism(self, knobs: Mapping[str, Any]) -> int:
         """How many items this data node runs at once, given the run's knob values.
 
@@ -902,6 +918,19 @@ class Graph:
             if (edge.condition or "").strip().lower() == PROCEED and edge.key() not in retries:
                 return edge.target
         return None
+
+    def optional_targets_of(self, fork: Node, knobs: Mapping[str, Any]) -> tuple[str, ...]:
+        """The branches of ``fork`` that may fail without failing the item, in a run with
+        these knob values: a branch head that binds ``optional`` to a knob, by that knob,
+        and any other by the fork's ``optional_targets``. Both runtimes read it here: the
+        walker's executor, and lowering for the spine."""
+        out = []
+        for target in fork.targets:
+            head = self.nodes.get(target)
+            flag = head.bound_flag("optional", knobs) if head is not None else None
+            if flag if flag is not None else target in fork.optional_targets:
+                out.append(target)
+        return tuple(out)
 
     def on_exhausted(self, gate_id: str) -> str:
         """What ``gate_id`` does when a reloop would pass its ``max_iterations``.

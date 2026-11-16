@@ -45,26 +45,36 @@ def test_every_operation_named_exists_and_every_gap_has_a_known_reason():
         for aspect in _aspects(entry):
             if isinstance(aspect, coverage.Gap):
                 assert aspect.reason in coverage.REASONS, (entry, aspect)
-                if aspect.reason == "planned":
-                    assert aspect.detail, f"{entry}: a planned gap names the change"
+                if aspect.reason in ("deferred", "awaiting a user decision"):
+                    assert aspect.detail, f"{entry}: a deferred gap says what is deferred"
             elif aspect is not None:
                 assert aspect and set(aspect) <= ops, (entry, set(aspect) - ops)
 
 
-def test_todays_gaps_are_marked_planned_and_the_core_operators_close_theirs():
-    """What later changes add is listed as planned, so the map says what is missing; what the
-    core operators cover is no longer planned (forks and joins, what a step reads, a step's
-    callable, un-routing a gate)."""
-    planned = {(e.group, e.name) for e in coverage.entries()
-               for a in _aspects(e) if isinstance(a, coverage.Gap) and a.reason == "planned"}
-    assert {("node field", "timeout_s"), ("node field", "workspace"),
-            ("composition", "a step per sub-item")} <= planned
+def test_nothing_is_left_planned_each_gap_is_covered_or_excluded_on_purpose():
+    """Strict: no construct waits on a later change. What the user deferred is excluded on
+    purpose, and the decision names each deferred thing; the settings bound to knobs (a
+    loop's limit, a branch's optional) are covered."""
+    assert "planned" not in coverage.REASONS
+    deferred = {(e.group, e.name) for e in coverage.entries()
+                for a in _aspects(e) if isinstance(a, coverage.Gap) and a.reason == "deferred"}
+    assert deferred == {("node field", name) for name in (
+        "knobs", "field_bindings", "role", "on_exhausted", "timeout_s", "retry", "workspace")} | {
+        ("composition", "a step per sub-item")}, deferred
+    # Deferred is deferred: none of these settings can be bound to a knob yet.
+    from refactory_dsh.nn.graph import BINDABLE_FIELDS
+
+    assert not {"timeout_s", "retry", "on_exhausted", "workspace", "role"} & BINDABLE_FIELDS
+    decision = coverage.DECISIONS["deferred"]
+    for named in ("timeout_s", "retry", "on_exhausted", "workspace kind", "model role",
+                  "per-sub-item"):
+        assert named in decision, named
     assert not {("node kind", "fork"), ("node kind", "join"), ("node field", "reads"),
                 ("node field", "inputs"), ("node field", "call"), ("node field", "targets"),
-                ("node field", "sources"), ("composition", "nested fork"),
-                ("composition", "gate routing to several steps")} & planned
-    assert not [a for e in coverage.entries() for a in _aspects(e)
-                if isinstance(a, coverage.Gap) and a.reason == "planned" and "PR2" in a.detail]
+                ("node field", "sources"), ("node field", "optional_targets"),
+                ("node field", "max_iterations"), ("bindable field", "optional"),
+                ("composition", "nested fork"),
+                ("composition", "gate routing to several steps")} & deferred
 
 
 def _apply(seed: str, edit: Any) -> tuple[Graph, Graph]:
@@ -154,7 +164,10 @@ EXAMPLES.update({
         lambda p, c: len(c.out_edges("review_route")) == 2),
     ("node field", "optional_targets"): ("fuzz_fork_join", {"op": "branch", "fork": "split",
                                                             "optional": True},
-                                         lambda p, c: len(c.nodes["split"].optional_targets) == 1),
+                                         # The new branch's first step binds its optional.
+                                         lambda p, c: [t for t in c.nodes["split"].targets
+                                                       if c.nodes[t].bound_knob("optional")]
+                                         == [c.nodes["split"].targets[-1]]),
 })
 
 

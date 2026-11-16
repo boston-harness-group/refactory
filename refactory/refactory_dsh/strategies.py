@@ -276,9 +276,23 @@ class BestOfN(Loop):
         ]
         if not movable:
             return None
-        name = movable[index % len(movable)]
-        knob = Knob.from_spec(entries[name]["spec"])
+        preset = self.config.edit_preset
+        # Every other variant is a structural one -- a core operator with its default texts
+        # (`core_ops.sample`) -- where the run's edit preset permits one and the graph has a
+        # model step for its new steps. Its own random stream, so the knob variants draw what
+        # they always did, and the knob variants are counted on their own, so they still go
+        # through every movable knob in turn.
+        structural = bool(set(edits.enabled(preset)) & set(edits.CORE_OPS)) and any(
+            node.get("kind") == "agent" for node in seed.state["graph"]["nodes"].values())
+        if structural and index % 2 == 1:
+            shape = random.Random(f"best_of_n:{self.config.seed}:{index}:operator")
+            for _ in range(20):
+                edit = edits.random_edit(seed.state, preset=preset, rng=shape, operators=True)
+                if edit is not None and edit.get("op") in edits.CORE_OPS:
+                    return edit
         rng = random.Random(f"best_of_n:{self.config.seed}:{index}")
+        name = movable[(index // 2 if structural else index) % len(movable)]
+        knob = Knob.from_spec(entries[name]["spec"])
         value = knob.sample(rng, entries[name]["value"])
         if value is None:
             return None

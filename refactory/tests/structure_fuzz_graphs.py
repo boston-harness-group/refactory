@@ -63,6 +63,14 @@ def step(ctx: Any) -> dict[str, Any]:
     return {fact: f"{fact} from {node}" for fact in ctx._declared_facts}  # noqa: SLF001
 
 
+def fail(ctx: Any) -> dict[str, Any]:
+    """An op that always fails, for a branch whose failure the run must handle."""
+    raise RuntimeError(f"{ctx.node_id} fails on purpose")
+
+
+FAIL = f"{MODULE}:fail"
+
+
 def proceed(ctx: Any) -> str:
     """A fn gate that always answers ``proceed``."""
     return "proceed"

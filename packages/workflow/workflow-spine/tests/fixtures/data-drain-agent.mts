@@ -137,6 +137,7 @@ function liveFor(raw: unknown, id: string): { feedback?: string; iterations?: Re
 }
 
 let status = 'unknown'
+let lastFailure: string | undefined
 for (let step = 0; step < 1000; step += 1) {
   const next = await call('wf_next') as {
     status?: string; error?: string
@@ -152,9 +153,16 @@ for (let step = 0; step < 1000; step += 1) {
   if (status === 'done') break
   if (status === 'failed') {
     // A node failure inside a data-node pass is expected for error items.
-    // The drain continues so the remaining items can be processed.
+    // The drain continues so the remaining items can be processed. The same failure
+    // twice in a row is the run's own ending (a required node failed outside a pass):
+    // the spine answers it at once and would answer it again for every call, so the
+    // drain stops instead of polling it until its step limit.
+    const failure = next.error ?? ''
+    if (failure === lastFailure) break
+    lastFailure = failure
     continue
   }
+  lastFailure = undefined
   if (status !== 'ready') break
 
   for (const node of (next.nodes ?? [])) {

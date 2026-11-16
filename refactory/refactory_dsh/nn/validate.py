@@ -427,7 +427,9 @@ def validate(
         "max_iterations": "int",
         "parallelism": "int",
         "code": "str",
+        "optional": "bool",
     }
+    branch_heads = {t for n in graph.nodes.values() if n.kind == "fork" for t in n.targets}
 
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
@@ -444,6 +446,9 @@ def validate(
                         node=node_id,
                     )
                 )
+            elif field_name == "optional" and node_id not in branch_heads:
+                issues.append(Issue("V14", "optional binding is only for a fork branch's first "
+                                           "step", node=node_id))
             elif field_name == "parallelism" and node.kind != "data":
                 issues.append(
                     Issue(

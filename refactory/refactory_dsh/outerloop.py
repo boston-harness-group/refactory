@@ -733,6 +733,11 @@ class OuterLoop:
     #: works without a profile setting; an explicit ``allowed_ops`` still wins.
     required_ops: tuple[str, ...] = ()
 
+    #: Why the strategy's own proposals never change the graph's structure, when they
+    #: never do; empty when they may. A text-only strategy is held to its word
+    #: (`tests/test_strategy_operators.py`) instead of to taking every core operator.
+    text_only: str = ""
+
     #: Steps a subclass may override. Each has a working default.
     overridable = (
         "configure",

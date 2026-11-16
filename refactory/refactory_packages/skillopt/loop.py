@@ -94,6 +94,9 @@ class SkillOptLoop(OuterLoop):
     #: The patch step is a ``set_knob`` with a ``patch``; the slow update is a
     #: ``set_knob`` with a ``value``.
     required_ops = ("set_knob",)
+    #: SkillOpt edits one skill's text (patches and slow updates), as the paper does: its
+    #: prompts describe no graph, so it is never offered the core operators.
+    text_only = "SkillOpt edits one skill's text with set_knob; it never changes the graph"
     #: The strategy options ``configure`` reads; any other is refused
     #: (``strategies.check_options``), so a misspelled one is not silently ignored.
     accepted_options = (
