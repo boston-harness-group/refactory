@@ -407,8 +407,10 @@ def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
     full = text[text.index("### Full edits of"):].split("\n## ", 1)[0]
     recent = text[text.index("## Recent results"):text.index("## Evidence from the traces")]
     tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
-    for section in (changed, reasoning, full, recent, tried):
+    for section in (changed, full, recent, tried):
         _wiring_whole(section)
+    # The reasoning points to the edit section rather than saying the wiring again.
+    assert 'under "What the last edit changed" above' in reasoning
     assert len(changed) < 6000 and len(tried) < 6000, "the text stays bounded"
 
 

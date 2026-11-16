@@ -2977,7 +2977,8 @@ class Loop(OuterLoop):
                 # What the edit built: its pipeline view's new and changed lines against
                 # its parent's (`nn.pipeline_view`), whatever the prose says.
                 **({"wiring": built} if parent is not None
-                   and (built := pipeline_view.changed_lines(parent.state, candidate.state, self.protected)) else {}),
+                   and (built := pipeline_view.changed_lines(
+                       parent.state, candidate.state, self.protected, self.graders)) else {}),
                 **({"repaired_from": list(notes["repaired_from"])}
                    if notes.get("repaired_from") else {}),
                 **({"level": notes["level"]} if notes.get("level") else {}),
@@ -5320,6 +5321,7 @@ class Loop(OuterLoop):
             insertable=[node.to_state() for node in self.mode.insertable()],
             frozen=list(self.config.frozen),
             protected=list(self.protected),
+            graders=list(self.graders),
             edit_check=self._edit_check(board),
             # A refusal a slim repair fixed is not fed back: its fix is the candidate.
             rejections=summarise_reasons(
@@ -5473,7 +5475,8 @@ class Loop(OuterLoop):
                    if record.get(key)},
                 **({"notes": list(child.notes)} if child.notes else {}),
                 **({"wiring": built} if parent is not None
-                   and (built := pipeline_view.changed_lines(parent.state, child.state, self.protected)) else {}),
+                   and (built := pipeline_view.changed_lines(
+                       parent.state, child.state, self.protected, self.graders)) else {}),
                 "steps": sorted(set(((child.state.get("graph") or {}).get("nodes") or {}))
                                 | set(((parent.state.get("graph") or {}).get("nodes") or {})
                                       if parent else ())),
@@ -5573,7 +5576,8 @@ class Loop(OuterLoop):
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "addresses": record.get("addresses"), "flow_change": record.get("flow_change"),
                 "notes": list(candidate.notes or ()),
-                "wiring": (pipeline_view.changed_lines(parent.state, candidate.state, self.protected)
+                "wiring": (pipeline_view.changed_lines(
+                       parent.state, candidate.state, self.protected, self.graders)
                            if parent is not None else []),
                 "considered": record.get("considered"),
                 "gate": self._gate_decision(candidate.id), "score": candidate.score,

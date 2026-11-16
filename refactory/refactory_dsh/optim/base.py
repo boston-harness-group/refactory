@@ -757,6 +757,9 @@ class ProposalContext:
     #: The mode's protected nodes (``Mode.protected_nodes``): no edit may remove,
     #: rewire or replace them, and one that does is refused with ``E-protected``.
     protected: list[str] = field(default_factory=list)
+    #: The mode's grader nodes (``Mode.grader_nodes``), which the pipeline view reads as
+    #: it does in the loop's records.
+    graders: list[str] = field(default_factory=list)
     #: The loop's verdict on one edit to the edited candidate (`Run.mechanics`: a
     #: candidate, or its refusals), for the request's operator table; ``None`` leaves
     #: the table out.
@@ -929,7 +932,8 @@ class ProposalContext:
                "not remove them, change their declarations or out-edges, move a knob they "
                "read, or let a run finish without them; a new node may go in front of one."]
               if self.protected else []),
-            *pipeline_view_lines(self.node_states, self.edges, self.knobs, self.protected),
+            *pipeline_view_lines(self.node_states, self.edges, self.knobs, self.protected,
+                                 self.graders),
             "Nodes:",
             _table(["id", "kind", "call", "knobs", "notes"],
                    [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
@@ -1000,7 +1004,8 @@ class ProposalContext:
         if self.edit_pairs:
             sections += ["", *_edit_change_lines(self.edit_pairs)]
         if self.reasoning:
-            sections += ["", *_reasoning_lines(self.reasoning)]
+            above = [str(p.get("child")) for p in self.edit_pairs or ()]
+            sections += ["", *_reasoning_lines(self.reasoning, above)]
         if self.analysis is not None:
             from .analysts import section_lines
             sections += ["", *section_lines(self.analysis)]
@@ -1669,13 +1674,14 @@ OPERATOR_FIT_CHARS = 7000
 
 
 def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
-                        knobs: Sequence[Mapping[str, Any]], protected: Sequence[str]) -> list[str]:
+                        knobs: Sequence[Mapping[str, Any]], protected: Sequence[str],
+                        graders: Sequence[str] = ()) -> list[str]:
     """The pipeline in one line per step (`nn.pipeline_view`), in the operators' own words;
     nothing when the graph does not read back."""
     from refactory_dsh.nn.pipeline_view import render
 
     state = _fit_state(node_states, edges, knobs)
-    text = (render(state, protected) if state is not None
+    text = (render(state, protected, graders) if state is not None
             else "pipeline view unavailable: the graph does not read back")
     return [PIPELINE_VIEW_LEAD, "```text", text, "```"]
 
@@ -3488,9 +3494,11 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
     return lines
 
 
-def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
+def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = ()) -> list[str]:
     """'Your earlier reasoning': what the optimizer said about recent candidates,
-    beside what happened to them, with each one's item errors (``item_errors``)."""
+    beside what happened to them, with each one's item errors (``item_errors``). A
+    candidate in ``above`` ("What the last edit changed" shows its edits, its flow change
+    and what they built) points there instead of repeating them."""
     if not entries:
         return []
     lines = ["## Your earlier reasoning and what happened",
@@ -3506,12 +3514,14 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
         lines += ["", f"### {entry.get('id')} (proposed in epoch {entry.get('epoch', '?')}) -- {outcome}",
                   *_item_error_lines(entry.get("errors") or (), int(entry.get("items") or 0)),
                   *[f"Wiring warning this edit added: {w}" for w in entry.get("warnings") or ()],
-                  "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
-                  *[f"Wired by the system: {note}" for note in entry.get("notes") or ()],
+                  *(["Its edits, flow change and what they built: under \"What the last edit "
+                     "changed\" above."] if str(entry.get("id")) in above else [
+                      "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2),
+                      *[f"Wired by the system: {note}" for note in entry.get("notes") or ()]]),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Addresses: {_clip(entry['addresses'], REASONING_TEXT_CHARS)}"]
                     if entry.get("addresses") else []),
-                  *_as_built_lines(entry),
+                  *([] if str(entry.get("id")) in above else _as_built_lines(entry)),
                   f"Prediction: {_clip(entry.get('prediction'), REASONING_TEXT_CHARS) or '(none)'}",
                   f"Diagnosis that round: {_clip(entry.get('diagnosis'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Considered that round: {_clip(entry['considered'], REASONING_TEXT_CHARS)}"]

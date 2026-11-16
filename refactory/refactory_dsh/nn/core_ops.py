@@ -2038,7 +2038,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": {"op": "parallelize", "steps": ["<step>"], "copies": 2},
     },
     "serialize": {
-        "reads_as": ('step',),
+        "reads_as": ('parallel',),
         "fields": ("fork",),
         "line": "run a fork's branches one after another, in their order",
         "example": {"op": "serialize", "fork": "<fork>"},
@@ -2054,7 +2054,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                     "text": "<what this branch does>"},
     },
     "rewire": {
-        "reads_as": ('sees',),
+        "reads_as": ('sees', 'told'),
         "fields": ("step", "sees"),
         "line": "change what a step sees: \"task\" (the task's own inputs, no model output), "
                 "step ids (their outputs), or single fact or file names there before it (that "

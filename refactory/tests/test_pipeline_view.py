@@ -57,6 +57,86 @@ def test_every_operation_names_a_reader_and_every_reader_is_named():
         assert spec["reads_as"] == specs[name].reads_as, name
 
 
+def _part(text: str, word: str) -> str:
+    """A step line's ``sees ...`` or ``told ...`` part."""
+    found = re.search(rf"  {word} (.*?)(?=  (?:sees|told|-> )|$)", text)
+    return found.group(1) if found else ""
+
+
+def _drawn_by(reader: str, old: "pv.Line | None", new: "pv.Line | None") -> bool:
+    """Whether a changed line is what ``reader`` draws: its own lines; for ``sees`` and
+    ``told``, a step line whose part of that name changed; for ``parallel``, a line in a
+    parallel block or the block itself."""
+    line = new or old
+    if reader in ("sees", "told"):
+        return line.reader == "step" and _part(old.text if old else "", reader) != _part(
+            new.text if new else "", reader)
+    if reader == "parallel":
+        return line.reader == "parallel" or line.within.startswith("parallel")
+    return line.reader == reader
+
+
+#: Each operation the random draws do not reach, applied by hand to a seed it fits.
+_BY_HAND = {
+    "add_edge": ("fuzz_gate_loop", lambda s: [
+        {"op": "add_node", "position": {"detached": True},
+         "node": {"id": "alt", "kind": "op", "call": s["graph"]["nodes"]["finish"]["call"],
+                  "reads": ["work.txt"], "writes": ["alt.txt"], "produces": ["alt_done"]}},
+        {"op": "add_edge", "source": "review", "target": "alt", "condition": "escalate"}]),
+    "insert_after": ("fuzz_draft_review", lambda s: [
+        {"op": "insert_after", "target": "draft", "node": {
+            **{k: v for k, v in s["graph"]["nodes"]["review"].items()
+               if k not in ("field_bindings",)},
+            "id": "review2", "writes": ["review2.txt"], "produces": ["review2"]}}]),
+}
+
+
+def _op_draws(seed: str) -> list[tuple[str, dict, dict]]:
+    state = _seed(seed)
+    rng = random.Random(f"readers:{seed}")
+    out = []
+    for _ in range(160):
+        edit = nn_edits.random_edit(state, preset="broad", rng=rng, operators=rng.random() < 0.5)
+        if edit is None or nn_edits.precheck(edit, state) is not None:
+            continue
+        try:
+            after = nn_edits.apply(edit, state)
+        except nn_edits.EditError:
+            continue
+        if not validate_state(after):
+            out.append((edit["op"], state, after))
+    return out
+
+
+def test_each_operation_s_reader_draws_what_it_changes():
+    """Reading mirrors writing in what is drawn, not only in names: after each operation
+    (random draws on every seed, and by hand for those the draws miss), some changed line
+    is drawn by a reader the operation declares (`EditSpec.reads_as`)."""
+    specs = nn_edits._specs()
+    applied = [draw for seed in sorted(sf.seeds()) for draw in _op_draws(seed)]
+    for name, (seed, edits) in _BY_HAND.items():
+        state = _seed(seed)
+        after = state
+        for edit in edits(state):
+            after = nn_edits.apply(edit, after)
+        assert validate_state(after) == [], name
+        applied.append((name, state, after))
+    checked: set[str] = set()
+    for name, before, after in applied:
+        old = {line.key: line for line in pv.view_lines(before)}
+        new = {line.key: line for line in pv.view_lines(after)}
+        changed = [(old.get(k), new.get(k)) for k in set(old) | set(new)
+                   if (old.get(k) and old[k].text) != (new.get(k) and new[k].text)]
+        if not changed:
+            continue  # nothing drawn changed (a knob no step reads, say)
+        checked.add(name)
+        assert any(_drawn_by(reader, o, n) for reader in specs[name].reads_as
+                   for o, n in changed), (name, specs[name].reads_as,
+                                          sorted({(n or o).reader for o, n in changed}))
+    assert checked >= set(nn_edits.CORE_OPS) | set(_BY_HAND), sorted(
+        set(nn_edits.CORE_OPS) | set(_BY_HAND) - checked)
+
+
 # ── the view ────────────────────────────────────────────────────────────────
 
 
@@ -149,6 +229,55 @@ def test_every_input_gate_fork_and_edge_is_shown_on_seeds_and_random_edits(seed)
                 assert order[b] > order[a], (seed, a, b)
 
 
+def _gate_with_ways() -> dict:
+    """fuzz_gate_loop's review gate with a send-back and two ways forward (validates)."""
+    state = _seed("fuzz_gate_loop")
+    finish = state["graph"]["nodes"]["finish"]
+    state = nn_edits.apply({"op": "add_node", "position": {"detached": True},
+                            "node": {"id": "alt", "kind": "op", "call": finish["call"],
+                                     "reads": ["work.txt"], "writes": ["alt.txt"],
+                                     "produces": ["alt_done"]}}, state)
+    return nn_edits.apply({"op": "add_edge", "source": "review", "target": "alt",
+                           "condition": "escalate"}, state)
+
+
+def _shapes() -> dict[str, dict]:
+    return {"two passes": _two_passes(_seed("fuzz_data_pass")), "gate ways": _gate_with_ways(),
+            **{name: _mode(name).state_dict()
+               for name in ("livemath/skill_graph", "livemath/solver")}}
+
+
+@pytest.mark.parametrize("seed", sorted(sf.seeds()))
+def test_every_edge_is_said_by_some_line_on_seeds_and_random_edits(seed):
+    """Completeness: on each seed and its operator draws, every edge of the graph is said
+    by a line of the view -- a step reached along a chain, a route's or loop's way, a fork
+    branch, a ``-> X (above)`` where a chain meets a drawn step, or a fallback line's
+    edges."""
+    for current in _draws(seed):
+        assert pv.unsaid_edges(current) == [], (seed, pv.render(current))
+
+
+def test_every_edge_is_said_on_the_shapes():
+    for name, state in _shapes().items():
+        assert validate_state(state) == [] or name == "two passes", name
+        assert pv.unsaid_edges(state) == [], (name, pv.render(state))
+
+
+def test_routes_rejoining_inside_another_route_keep_every_way():
+    """fuzz_gates: approve's reject way (redo) rejoins at drop, which triage's route also
+    reaches; the view says redo -> drop rather than ending at redo."""
+    state = _seed("fuzz_gates")
+    assert ("redo", "drop") not in pv.unsaid_edges(state)
+    text = pv.render(state)
+    assert "on reject:\n    redo agent" in text and text.rstrip().endswith("drop op  -> dropped")
+
+
+def test_a_loop_gate_s_ways_forward_are_shown_beside_its_loop_line():
+    text = pv.render(_gate_with_ways())
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)" in text
+    assert "on escalate:\n    alt op" in text and "on proceed:\n    finish op" in text
+
+
 # ── round trip: an operation changes the lines it describes, naming its handles ──
 
 
@@ -216,7 +345,9 @@ def test_an_operation_changes_only_the_lines_it_describes_and_names_its_handles(
         reader = nn_edits._specs()[edit["op"]].reads_as[0]
         said = {"loop": "loop(", "route": "route(after ",
                 "parallel": f"[in parallel {edit.get('fork', '')}"}
-        if reader in said and edit["op"] != "parallelize":
+        if edit["op"] == "serialize":
+            assert f"- removed {edit['fork']}" in text, (seed, edit, text)
+        elif reader in said and edit["op"] != "parallelize":
             assert said[reader] in text, (seed, edit, text)
         step = edit.get("step") or edit.get("after")
         if isinstance(step, str) and edit["op"] in ("loop", "route", "rewire", "insert"):
@@ -423,6 +554,34 @@ def test_the_request_shows_the_view_first_and_as_built_beside_the_words():
     assert f"(and {20 - base.AS_BUILT_LINES} more line(s))" in many
 
 
+def _repeated_blocks(text: str, lines: int = 3, chars: int = 120) -> list[str]:
+    """Each run of ``lines`` consecutive non-blank lines (``chars``+ characters together)
+    that appears more than once in ``text``: a block said twice, whatever its line share."""
+    rows = [line for line in text.splitlines() if line.strip()]
+    seen: dict[str, int] = {}
+    for i in range(len(rows) - lines + 1):
+        block = "\n".join(rows[i:i + lines])
+        if len(block) >= chars:
+            seen[block] = seen.get(block, 0) + 1
+    return [block for block, n in seen.items() if n > 1]
+
+
+def test_as_built_is_said_once_when_the_last_edit_s_section_shows_it():
+    """The latest child is in "What the last edit changed" (its edits, flow change and As
+    built) and in "Your earlier reasoning": the second points to the first."""
+    from refactory_dsh.optim import ProposalContext
+
+    pair = {"child": "c1", "parent": "p0", "edit": [{"op": "loop", "step": "solve"}],
+            "flow_change": "the judge sends solve back once when the answer is unsure",
+            "wiring": [f"+ loop(solve, judge j, max 2 -> 3 runs) line {i}" for i in range(4)]}
+    text = ProposalContext(edit_pairs=[pair], reasoning=[{**pair, "id": "c1", "epoch": 1,
+                                                          "rationale": "R"}]).render()
+    assert text.count("Flow change, as proposed: the judge sends") == 1
+    assert text.count("line 0") == 1
+    assert 'under "What the last edit changed" above' in text
+    assert _repeated_blocks(text) == [], _repeated_blocks(text)
+
+
 def test_the_loop_s_request_opens_with_the_view_and_shows_what_was_built(tmp_path):
     from refactory_dsh import strategies
     from refactory_dsh.loop import LoopConfig
@@ -444,10 +603,13 @@ def test_the_loop_s_request_opens_with_the_view_and_shows_what_was_built(tmp_pat
     pipeline = text.split("## The pipeline you may edit", 1)[1].split("Nodes:", 1)[0]
     assert pipeline.index(base.PIPELINE_VIEW_LEAD) < pipeline.index("```text\nper item (data")
     assert "loop(solve, judge solve_check_judge" in pipeline
-    for section in ("## What the last edit changed", "## Your earlier reasoning"):
-        body = text.split(section, 1)[1].split("\n## ", 1)[0]
-        assert "Flow change, as proposed: solve is sent back once at most" in body, section
-        assert "loop(solve, judge solve_check_judge" in body and "max 2 -> 3 runs" in body
+    changed = text.split("## What the last edit changed", 1)[1].split("\n## ", 1)[0]
+    assert "Flow change, as proposed: solve is sent back once at most" in changed
+    assert "loop(solve, judge solve_check_judge" in changed and "max 2 -> 3 runs" in changed
+    # Said once: the reasoning points to it.
+    reasoning = text.split("## Your earlier reasoning", 1)[1].split("\n## ", 1)[0]
+    assert 'under "What the last edit changed" above' in reasoning
+    assert text.count("Flow change, as proposed: solve is sent back once at most") == 1
 
 
 def test_a_round_records_what_was_built_in_the_proposal_record(tmp_path, monkeypatch):

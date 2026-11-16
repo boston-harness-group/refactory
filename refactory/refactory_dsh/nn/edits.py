@@ -930,12 +930,12 @@ _primitive(
 _primitive(
     "add_edge", "edge",
     "Add an edge. A 'condition' makes it a gate verdict.",
-    ("source", "target", "condition"), _add_edge, reads_as=("edges",),
+    ("source", "target", "condition"), _add_edge, reads_as=("route", "edges"),
 )
 _primitive(
     "remove_edge", "edge",
     "Remove the edge between two nodes, optionally only one condition.",
-    ("source", "target", "condition"), _remove_edge, reads_as=("edges",),
+    ("source", "target", "condition"), _remove_edge, reads_as=("route", "edges"),
 )
 #: The key of a ``set_knob`` patch entry that names its action, and the actions.
 PATCH_KIND_KEY = "kind"
@@ -1382,7 +1382,7 @@ _macro("split", "Replace one step (an agent or op) with two consecutive new step
        ("target", "into"), _pre_split, _expand_split, reads_as=("step",))
 _macro("reorder", "Swap two adjacent steps. Refused when the first produces what "
        "the second reads.",
-       ("first", "second"), _pre_reorder, _expand_reorder, reads_as=("edges",))
+       ("first", "second"), _pre_reorder, _expand_reorder, reads_as=("route",))
 _macro("loop", "Wrap a step in a gate that can send control back to it, so the step "
        "gains a retry. A step that is the last of its pass gets a no-op step after the "
        "gate to end the pass.",
