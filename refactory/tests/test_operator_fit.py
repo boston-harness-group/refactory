@@ -215,3 +215,28 @@ def test_a_replacing_hint_whose_edit_fails_to_expand_says_it_is_refused(monkeypa
     monkeypatch.setattr(nn_edits, "apply", apply)
     reason = nn_edits.precheck({"op": "remove", "step": "prepare"}, state)
     assert "replacing it is refused too (E-wiring: the code step would read nothing)" in reason
+
+
+def test_the_request_shows_the_section_after_the_operators_in_domain_free_words():
+    from refactory_dsh.optim import ProposalContext
+    from test_proposal_presentation import DENYLIST
+    from test_structure_first_request import _headings
+    from test_structure_first_request import _section as section_of
+
+    view = state_view(_start_state())
+
+    def render(preset: str) -> str:
+        return ProposalContext(mode_name="m", nodes=view.nodes, edges=view.edges,
+                               node_states=view.node_states, knobs=view.knobs,
+                               catalogue=nn_edits.catalogue(preset)).render()
+
+    text = render("broad")
+    headings = _headings(text)
+    fit = "What each step carries, and which operators apply to it"
+    assert headings.index("Structural operators") < headings.index(fit) < headings.index(
+        "Each step's settings")
+    body = section_of(text, fit)
+    assert "| decide |" in body and "| step_fork |" in body
+    lead = body.split("\n|", 1)[0]
+    assert not [word for word in DENYLIST if word.lower() in lead.lower()]
+    assert fit not in render("knob_only")
