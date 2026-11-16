@@ -631,7 +631,8 @@ def test_design_lowers_the_sizer_and_widening():
         assert not declared[op].get("required_reads"), op
     # Every file the sizing ops and the widening gate touch is declared (a deletion or a
     # move included), so the lowered contract shows what they do.
-    assert declared["presize_scale"]["reads"] == ["reviews/size_change-missing.txt", "sizing.json"]
+    # In the order the node declares them, which is the order its op is handed them.
+    assert declared["presize_scale"]["reads"] == ["sizing.json", "reviews/size_change-missing.txt"]
     assert sorted(state["graph"]["nodes"]["clear_sizing"]["writes"]) == [
         "reviews/size_change-missing.txt", "sizing.json"]
     assert set(state["graph"]["nodes"]["widen_research"]["writes"]) == {

@@ -1,0 +1,31 @@
+{
+  "seed": "fuzz_tool_step",
+  "edits": [
+    {
+      "op": "insert_before",
+      "target": "reason",
+      "node": {
+        "id": "code1",
+        "kind": "op",
+        "call": "refactory_dsh.snippet:run",
+        "reads": [],
+        "inputs": [],
+        "writes": [
+          "code1.txt"
+        ],
+        "produces": [
+          "code1_fact"
+        ],
+        "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code1_fact': len(text)},\n            'files': {'code1.txt': text[:200]}}\n"
+      }
+    },
+    {
+      "op": "split",
+      "step": "code1"
+    }
+  ],
+  "found": [
+    "walker: failed: code1_a: ExecutionError: code op 'code1_a' returned the file 'code1.txt', which it does not declare; declared writes: []"
+  ],
+  "fixed_by": "core_ops._renamed_code renames a copied code step's outputs to the copy's"
+}

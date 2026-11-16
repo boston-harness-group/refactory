@@ -363,10 +363,42 @@ def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
     kind = _kind_of(node)
     if kind not in ("agent", "code"):
         return {"kind": "agent", "text": NEUTRAL_STEP}
-    spec = {"kind": kind, "text": _text_of(node, state)}
-    if kind == "agent":
-        spec["_like"] = node.id
+    spec = {"kind": kind, "text": _text_of(node, state), "_like": node.id}
+    if kind == "code":
+        spec["_copied"] = spec["text"]
     return spec
+
+
+def _renamed_code(code: str, source: Node, node_id: str, facts: Sequence[str],
+                  files: Sequence[str]) -> str:
+    """``code`` copied from ``source`` for a step with outputs of its own: it runs as it
+    did, and what it returns under ``source``'s fact and file names is renamed to the
+    copy's, in declaration order (one the copy does not declare is dropped). The code
+    names its outputs itself, so a bare copy returns the original's and is refused at run
+    time. The names are the copy's own, so a copy of a copy wraps a wrapper soundly. Code
+    whose ``main`` calls itself calls the wrapper and is renamed twice, which changes
+    nothing: the copy's names are fresh, never one of ``source``'s."""
+    if list(source.produces) == list(facts) and list(source.writes) == list(files):
+        return code
+    tag = re.sub(r"\W", "_", node_id)
+    fact_names = {old: (facts[i] if i < len(facts) else None)
+                  for i, old in enumerate(source.produces)}
+    file_names = {old: (files[i] if i < len(files) else None)
+                  for i, old in enumerate(source.writes)}
+    return (f"{code.rstrip()}\n\n\n"
+            f"_main_before_{tag} = main\n"
+            f"_names_for_{tag} = {{'facts': {fact_names!r}, 'files': {file_names!r}}}\n\n\n"
+            "def main(inp):\n"
+            f"    out = _main_before_{tag}(inp)\n"
+            "    if not isinstance(out, dict):\n"
+            "        return out\n"
+            "    renamed = dict(out)\n"
+            f"    for key, names in _names_for_{tag}.items():\n"
+            "        given = out.get(key)\n"
+            "        if isinstance(given, dict):\n"
+            "            renamed[key] = {names.get(k, k): v for k, v in given.items()\n"
+            "                            if names.get(k, k) is not None}\n"
+            "    return renamed\n")
 
 
 def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str,
@@ -432,8 +464,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
         return out
     if kind == "code":
         made = list(produces) if produces is not None else [node_id]
-        node = {"id": node_id, "kind": "op", "call": snippet.RUN,
-                "code": spec["text"] or _default_code(made, list(writes or ())),
+        code = spec["text"] or _default_code(made, list(writes or ()))
+        if like is not None and spec.get("_copied") is not None and code == spec["_copied"]:
+            code = _renamed_code(code, like, node_id, made, list(writes or ()))
+        node = {"id": node_id, "kind": "op", "call": snippet.RUN, "code": code,
                 "reads": files, "inputs": facts, "produces": made}
         if writes:
             node["writes"] = list(writes)
@@ -816,17 +850,28 @@ def _owned(graph: Graph, step: str, state: Mapping[str, Any]) -> list[str]:
 
 
 def _upstream(graph: Graph, node_id: str) -> set[str]:
+    """Every node a walk can pass before ``node_id``: along edges, from a fork to its
+    branch heads, from a join's sources to the join and from a data node to its pass's
+    entry -- the control flow `loops.loop_edges` reads cycles from -- so an edge back to
+    one of them closes a cycle (a fork branch's head included)."""
+    def before(key: str) -> list[str]:
+        node = graph.nodes.get(key)
+        out = [e.source for e in graph.in_edges(key)]
+        out += [n.id for n in graph.nodes.values()
+                if (n.kind == "fork" and key in n.targets)
+                or (n.kind == "data" and n.subgraph_entry == key)]
+        if node is not None and node.kind == "join":
+            out += list(node.sources)
+        return out
+
     seen: set[str] = set()
-    stack = [e.source for e in graph.in_edges(node_id)]
+    stack = before(node_id)
     while stack:
         current = stack.pop()
         if current in seen:
             continue
         seen.add(current)
-        stack.extend(e.source for e in graph.in_edges(current))
-        for fork in graph.nodes.values():
-            if fork.kind == "fork" and current in fork.targets:
-                stack.append(fork.id)
+        stack.extend(before(current))
     return seen
 
 

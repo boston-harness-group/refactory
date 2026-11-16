@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from .concurrent_helpers import clone_child_executor, make_step_budget_reserve, merge_children_into_parent
+from .graph import op_io
 
 if TYPE_CHECKING:
     from .executor import Executor
@@ -317,9 +318,8 @@ def run_data_concurrent(
                         item_deadline_s, node.id, item_id,
                     )
                 child.ctx.node_id = node.id
-                child.ctx._declared = node.writes  # noqa: SLF001
-                child.ctx._declared_reads = node.reads  # noqa: SLF001
-                child.ctx._declared_facts = node.produces  # noqa: SLF001
+                # As authored, as the spine hands them to its ops (`graph.op_io`).
+                child.ctx._declared, child.ctx._declared_reads, child.ctx._declared_facts = op_io(node)  # noqa: SLF001
                 child.ctx._produced = set()  # noqa: SLF001
                 from refactory_dsh.task import node_item
 

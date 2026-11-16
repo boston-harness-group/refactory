@@ -864,3 +864,109 @@ def test_the_loop_counts_timeouts_and_reads_the_items_at_once_from_the_state():
     assert _data_parallelism(state) == 2
     assert _data_parallelism(_parallel(state, 3)) == 3
     assert _data_parallelism(sf.seeds()["fuzz_dataflow"].state()) == 1
+
+
+# ── a macro on a state an earlier edit of a bundle left with an unreadable cycle ──
+
+
+#: An edge that closes a cycle avoiding every gate, per seed: legal mid-bundle (only the
+#: state a bundle reaches is validated), and every macro must refuse it, not crash.
+GATELESS_CYCLE = {"fuzz_fork_join": {"op": "add_edge", "source": "merge", "target": "setup"},
+                  "fuzz_nested_fork": {"op": "add_edge", "source": "inner_join",
+                                       "target": "begin"},
+                  "fuzz_data_pass": None}
+
+
+def _gateless(seed: str) -> dict:
+    state = sf.Applier(sf.seeds()[seed]).seed_state
+    edge = GATELESS_CYCLE[seed]
+    if edge is None:  # close the cycle inside the data pass's body
+        graph = Graph.from_state(state["graph"])
+        body = sorted(graph.data_body("items"))
+        last = next(n for n in body if not graph.out_edges(n) or all(
+            e.target not in body for e in graph.out_edges(n)))
+        edge = {"op": "add_edge", "source": last, "target": graph.nodes["items"].subgraph_entry}
+    return nn_edits.apply(edge, state)
+
+
+def test_route_after_a_bundle_edit_that_closed_a_gateless_cycle_is_refused_by_name():
+    """Nightly long tier, seed 1 (#674): a bundle's ``add_edge`` closed a cycle through a
+    join that avoids every gate, and the ``route`` after it crashed reading the graph's
+    retries (``E-internal: GraphError``). It is refused, naming the edit and the cycle."""
+    bundle = {"edits": [GATELESS_CYCLE["fuzz_fork_join"],
+                        {"op": "route", "after": "decide", "judge": "agent"}]}
+    _applier, out = _apply("fuzz_fork_join", bundle)
+    assert isinstance(out, list) and out, out
+    assert "[edit 2 of 2:" in out[0] and "E-state" in out[0] and "avoids every gate" in out[0], out
+    assert "E-internal" not in out[0]
+
+
+@pytest.mark.parametrize("seed", sorted(GATELESS_CYCLE))
+def test_no_macro_crashes_on_a_state_with_a_gateless_cycle(seed):
+    """Every core operator, drawn many ways, on a graph with a cycle that avoids every gate:
+    precheck answers and apply applies or refuses (`EditError`); none raises anything
+    else. Nested forks, a fork/join and a data pass's body."""
+    import random
+
+    state = _gateless(seed)
+    applied = 0
+    for name in core_ops.CORE_OPS:
+        for draw in range(20):
+            edit = core_ops.sample(name, state, random.Random(draw))
+            if nn_edits.precheck(edit, state):
+                continue
+            try:
+                nn_edits.apply(edit, state)
+            except nn_edits.EditError:
+                continue
+            applied += 1
+    assert applied, "no operator applied anywhere: the draws test nothing"
+
+
+def test_a_macro_that_breaks_a_readable_graph_still_raises(monkeypatch):
+    """Only a cycle the edit started from is a refusal: a GraphError from a macro on a
+    graph whose cycles read is the operator's own bug, left to surface (E-internal)."""
+    import dataclasses
+
+    from refactory_dsh.nn.graph import GraphError
+
+    spec = nn_edits._specs()["route"]
+
+    def broken(edit, state):
+        raise GraphError("the operator's own bug")
+
+    monkeypatch.setitem(nn_edits._MACROS, "route",
+                        dataclasses.replace(spec, expand=broken))
+    state = sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state
+    with pytest.raises(GraphError, match="own bug"):
+        nn_edits.apply({"op": "route", "after": "decide", "judge": "agent"}, state)
+    monkeypatch.setitem(nn_edits._MACROS, "route",
+                        dataclasses.replace(spec, precondition=broken))
+    with pytest.raises(GraphError, match="own bug"):
+        nn_edits.precheck({"op": "route", "after": "decide", "judge": "agent"}, state)
+    assert "avoids every gate" in nn_edits.precheck(
+        {"op": "route", "after": "decide", "judge": "agent"}, _gateless("fuzz_fork_join"))
+
+
+def test_a_copied_code_step_returns_its_own_outputs_even_when_main_calls_itself():
+    """A copy of a code step renames what the original returns to the copy's names; a
+    ``main`` that calls itself reaches the wrapper and is renamed twice, harmlessly."""
+    from refactory_dsh.nn.graph import Node
+
+    code = ("def main(inp):\n"
+            "    if inp.get('again'):\n"
+            "        return main({})\n"
+            "    return {'facts': {'x_fact': 1}, 'files': {'x.txt': 't'}, 'note': 'kept'}\n")
+    source = Node("x", "op", call=snippet.RUN, writes=("x.txt",), produces=("x_fact",))
+    wrapped = core_ops._renamed_code(code, source, "x_a", ["x_a"], ["x_a.txt"])
+    assert snippet.static_issues(wrapped) == []
+    space: dict[str, Any] = {}
+    exec(wrapped, space)  # noqa: S102 - the test runs the code it built
+    expected = {"facts": {"x_a": 1}, "files": {"x_a.txt": "t"}, "note": "kept"}
+    assert space["main"]({}) == expected
+    assert space["main"]({"again": True}) == expected
+    dropped: dict[str, Any] = {}
+    exec(core_ops._renamed_code(code, source, "x_b", ["x_b"], []), dropped)  # noqa: S102
+    assert dropped["main"]({}) == {"facts": {"x_b": 1}, "files": {}, "note": "kept"}
+    assert core_ops._renamed_code(code, source, "x", ["x_fact"], ["x.txt"]) == code
+

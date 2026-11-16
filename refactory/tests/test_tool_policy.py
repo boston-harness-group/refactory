@@ -1204,6 +1204,23 @@ def test_steering_opt_out_works(tmp_path):
     assert "Do not forget this" not in prompt
 
 
+def test_no_tools_binary_read_is_named_not_decoded(tmp_path):
+    """A no-tools node sees its reads inlined as text; a binary read (a figure) is said
+    to be there, not decoded into a crash. Both runtimes deliver through begin()."""
+    from refactory_dsh.agent_delivery import begin
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "out.txt").write_text("")
+    (run_dir / "figure.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(128, 256)))
+    (run_dir / "notes.txt").write_text("plain notes")
+
+    prompt = begin(run_dir, "node", "Task text", ["out.txt"],
+                   reads=["figure.png", "notes.txt"], tool_policy="none")["prompt"]
+    assert "### figure.png\n(a binary file of 136 bytes;" in prompt
+    assert "### notes.txt\nplain notes" in prompt
+
+
 # ── Worker delivery (brief §3) ─────────────────────────────────────────
 
 

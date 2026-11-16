@@ -1512,7 +1512,27 @@ def precheck(edit: dict, state: Mapping[str, Any]) -> str | None:
             return spec.precondition(edit, dict(state))
         except EditError as exc:
             return str(exc)
+        except GraphError as exc:
+            return str(_unreadable_loops(state, exc))
     return None
+
+
+def _unreadable_loops(state: Mapping[str, Any], exc: GraphError) -> EditError:
+    """The refusal of a macro that met a graph whose cycles cannot be read (a cycle that
+    avoids every gate, or one with several), when the state it started from is such a
+    graph: an earlier edit of a bundle may leave one, since only the state a bundle
+    reaches is validated, and a macro reads the retries (`loops.loop_edges`) of the
+    graph it starts from. Re-raises ``exc`` when that graph's cycles read: then the
+    macro's own steps made the bad graph, which is an operator bug, not a refusal."""
+    from .loops import loop_edges
+
+    try:
+        loop_edges(_graph(state))
+    except GraphError as found:
+        return EditError(f"the graph this edit starts from has an unreadable cycle ({found}); "
+                         "apply this edit before the one that closed that cycle, or route the "
+                         "cycle through a gate first", code="E-state")
+    raise exc
 
 
 def _walk_successors(graph: Graph, node: Node) -> list[str]:
@@ -1655,8 +1675,12 @@ def apply(
         if reason:
             raise EditError(reason, code="E-precondition")
         assert spec.expand is not None
+        try:
+            steps = spec.expand(edit, dict(state))
+        except GraphError as exc:
+            raise _unreadable_loops(state, exc) from exc
         out = dict(state)
-        for step in spec.expand(edit, dict(state)):
+        for step in steps:
             out = apply(step, out, edit_reports=edit_reports)
         return out
     assert spec.apply is not None
