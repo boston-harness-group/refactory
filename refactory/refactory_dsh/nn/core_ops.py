@@ -944,6 +944,11 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
 # ── remove ────────────────────────────────────────────────────────────────
 
 
+#: What a replacing hint adds when the step taking the place is code.
+CODE_HINT_NOTE = (" (its default code joins what it is given; give 'text', your def main(inp), "
+                  "for your own)")
+
+
 def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
     """How to replace ``node`` by one step of the proposer's own text (an agent for an
     agent, code for anything else: a new agent writes only its reply): the exact edit when
@@ -963,9 +968,7 @@ def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
     if refused is not None:
         return ("replacing it is refused too ("
                 f"{refused.removeprefix('E-precondition: ')})")
-    code = "" if node.kind == "agent" else " (its default code joins what it is given; " \
-        "give 'text', your def main(inp), for your own)"
-    return f"replace it with {json.dumps(edit)}{code}"
+    return f"replace it with {json.dumps(edit)}" + ("" if node.kind == "agent" else CODE_HINT_NOTE)
 
 
 def _pre_remove(edit: dict, state: dict) -> str | None:

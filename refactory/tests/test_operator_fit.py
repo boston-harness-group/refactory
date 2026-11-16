@@ -86,8 +86,14 @@ def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[s
     return rows
 
 
-def test_each_row_on_the_s4_start_state_says_what_the_operators_do():
+def test_each_row_on_the_s4_start_state_says_what_an_attempt_does():
     rows = _check_rows_are_true(_start_state())
+    # With the mode's own protected steps (the data pass): merging or replacing its entry
+    # passes the graph's checks but changes the protected data node, so an attempt refuses.
+    _package, mode = registry.resolve(Path("."), MODE)
+    guarded = _check_rows_are_true(_start_state(), protected=tuple(mode().edit_protected()))
+    assert "merge" in rows["prepare"][1] and "merge" not in guarded["prepare"][1]
+    assert "E-protected: node 'data'" in guarded["prepare"][2]
     model_steps = {"compare", "decide", "hypotheses", "precision"}
     assert model_steps <= set(rows)
     assert "fact" not in " ".join(rows)  # rows are steps, not facts
@@ -134,6 +140,10 @@ def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s()
     reason = _outcome(rewire, state, protected=("decide",))
     assert "replacing it is refused too (E-protected" in reason, reason
     assert '"op": "split"' not in reason
+    # A code replacement refused the same way leaves no note about its default code.
+    reason = _outcome({"op": "remove", "step": "prepare"}, state, protected=("data",))
+    assert "replacing it is refused too (E-protected: node 'data'" in reason, reason
+    assert "default code" not in reason and '"op": "split"' not in reason
 
 
 def test_a_refusal_never_names_a_replacing_edit_that_would_be_refused():

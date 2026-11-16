@@ -1651,8 +1651,11 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
     verdict = check(edit)
     if not isinstance(verdict, list):
         return reason
+    from refactory_dsh.nn.core_ops import CODE_HINT_NOTE
+
     why = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
-    return f"{reason[:start]}replacing it is refused too ({why}){reason[end:]}"
+    rest = reason[end:].removeprefix(CODE_HINT_NOTE)
+    return f"{reason[:start]}replacing it is refused too ({why}){rest}"
 
 
 #: The most characters the "what each step carries" section takes: past it, each refusal
