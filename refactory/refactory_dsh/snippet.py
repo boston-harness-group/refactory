@@ -353,6 +353,12 @@ def _mac_interpreter() -> tuple[str, str]:
     import os as os_module
 
     python = os.path.realpath(sys.executable)
+    # A framework build's bin/pythonX.Y only starts its Python.app's interpreter, in a
+    # process of its own, which the profile refuses: that interpreter is the one run.
+    app = os.path.join(os.path.realpath(sys.base_prefix), "Resources", "Python.app", "Contents",
+                       "MacOS", "Python")
+    if os.path.isfile(app) and os.access(app, os.X_OK):
+        python = os.path.realpath(app)
     stdlib = os.path.realpath(os.path.dirname(os_module.__file__))
     home = os.path.realpath(os.path.expanduser("~"))
     if stdlib == "/" or home == stdlib or home.startswith(stdlib.rstrip("/") + "/"):
