@@ -108,10 +108,8 @@ def test_a_few_items_are_shown_in_full_failures_the_findings_cite_first_then_suc
     text = _ctx(_many(), findings=FINDINGS).render()
     shown = re.findall(r"^### Item (\S+) — (\S+ ?\S*)", text, re.M)
     ids = [item for item, _ in shown]
-    assert ids[:3] == ["f3", "f2", "f1"], ids  # one per finding in rank order, then more
-    assert len([i for i in ids if i.startswith("f")]) == base.ITEMS_FAILING_SHOWN
+    assert ids == ["f3", "f2", "p4"], ids  # one per finding of each kind, in rank order
     passing = [i for i in ids if i.startswith("p")]
-    assert passing and passing[0] == "p4" and len(passing) <= base.ITEMS_PASSING_SHOWN
     assert text.count("(A success, for contrast.)") == len(passing)
     assert "### Every item" in text  # every item still in the table
 
@@ -138,12 +136,15 @@ def test_a_cut_is_marked_in_place_without_a_path_and_recorded():
     assert len(ctx.omissions) == len(marks)
 
 
-def test_the_request_stays_within_bounds_on_many_long_items():
-    text = _ctx(_many(n_fail=20, n_pass=15, size=9000), findings=FINDINGS).render()
-    assert len(text) < 120_000, len(text)
+def test_many_long_items_are_chosen_not_cut():
+    """Size is no reason to cut: the items the findings choose are each shown whole, and
+    the rest are in the table."""
+    ctx = _ctx(_many(n_fail=20, n_pass=15, size=9000), findings=FINDINGS)
+    text = ctx.render()
     items_part = text.split("## Trajectories of the candidate being edited", 1)[1].split(
         base.REFERENCE_HEADING, 1)[0]
-    assert len(items_part) < base.ITEMS_SHOWN_BUDGET + 12_000, len(items_part)
+    assert re.findall(r"^### Item (\S+)", items_part, re.M) == ["f3", "f2", "p4"]
+    assert "chars omitted" not in items_part and ctx.omissions == []
 
 
 def test_the_optimizer_traces_what_its_request_left_out(tmp_path):
@@ -165,3 +166,14 @@ def test_the_optimizer_traces_what_its_request_left_out(tmp_path):
     assert proposal["omissions"] and all(o["item"] == "f0" for o in proposal["omissions"])
     assert len(re.findall(r"\[… [\d,]+ chars omitted\]", proposal["prompt"])) == len(
         proposal["omissions"])
+
+
+def test_one_contrasting_success_is_shown_per_success_finding():
+    """Two success findings, each citing its own passing item: both are shown beside the
+    failures, one per finding in rank order."""
+    findings = [*FINDINGS, {"source": "success", "finding": "S-TWO", "items": ["p6"],
+                            "impact": "low"}]
+    text = _ctx(_many(), findings=findings).render()
+    ids = re.findall(r"^### Item (\S+) — ", text, re.M)
+    assert ids == ["f3", "f2", "p4", "p6"], ids
+    assert text.count("(A success, for contrast.)") == 2

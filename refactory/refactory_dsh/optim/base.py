@@ -2702,13 +2702,14 @@ def _cited_items(items: Sequence[dict[str, Any]],
     return chosen
 
 
-#: The most characters the items shown in full take in one request: fewer items, each
-#: whole, rather than many cut partway.
-ITEMS_SHOWN_BUDGET = 40000
-#: How many failing items and how many contrasting passing items are shown in full when
-#: not all fit.
-ITEMS_FAILING_SHOWN = 4
-ITEMS_PASSING_SHOWN = 2
+#: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
+#: every item when all of them together are under this many characters. It only decides
+#: that switch; it never cuts an item.
+SHOW_ALL_BELOW = 120000
+#: A single text of an item shown in full (a step's reply, the input) is cut only past
+#: this many characters -- one text too large to send whole; the items themselves are
+#: never cut to fit a size.
+ITEM_TEXT_MAX = 60000
 
 
 def _contrast_items(items: Sequence[dict[str, Any]], shown: Sequence[dict[str, Any]],
@@ -2729,20 +2730,70 @@ def _contrast_items(items: Sequence[dict[str, Any]], shown: Sequence[dict[str, A
     return out
 
 
+def _failure_kind(record: dict[str, Any]) -> str:
+    """What kind of failure an item is, for choosing items without findings: its outcome
+    and its declared kind (`analysts.metadata_text`), when it has one."""
+    from .analysts import metadata_text
+
+    return f"{_outcome(record)} {metadata_text(record)}".strip()
+
+
+def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, Any]] | None
+                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """The items shown whole when not all are, by rule, never by size: one failure per
+    failure finding that cites a known item, in rank order (an item already chosen is not
+    chosen twice); then one contrasting success per success finding -- or, with none, one
+    per kind of failure shown (`_failure_kind`), the same declared kind first. Without
+    findings, one failure per kind of failure. The last value says whether the failures
+    were chosen by findings."""
+    known = {str(r.get("id")) for r in items}
+    by_id = {str(r.get("id")): r for r in items}
+    patterns = [(kind, p) for kind, p in _reader_patterns(findings)
+                if known & {str(i) for i in p.get("items") or ()}]
+    failing: list[dict[str, Any]] = []
+    for kind, pattern in patterns:
+        if kind != "failure_patterns":
+            continue
+        pick = next((by_id[str(i)] for i in pattern.get("items") or ()
+                     if str(i) in by_id and not by_id[str(i)].get("passed")
+                     and all(by_id[str(i)] is not r for r in failing)), None)
+        if pick is not None:
+            failing.append(pick)
+    by_findings = bool(failing)
+    if not failing:
+        kinds: dict[str, dict[str, Any]] = {}
+        for record in items:
+            if not record.get("passed"):
+                kinds.setdefault(_failure_kind(record), record)
+        failing = list(kinds.values())
+    contrast = _contrast_items(items, failing, findings)
+    n_pass = sum(1 for kind, _p in patterns if kind == "success_patterns")
+    if n_pass:
+        passing = contrast[:n_pass]
+    else:
+        from .analysts import metadata_text
+
+        passing = []
+        for kind in dict.fromkeys(metadata_text(r) for r in failing):
+            pick = next((r for r in contrast if metadata_text(r) == kind
+                         and all(r is not p for p in passing)), None) or next(
+                (r for r in contrast if all(r is not p for p in passing)), None)
+            if pick is not None:
+                passing.append(pick)
+    return failing, passing, by_findings
+
+
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = (),
                   analysed: Sequence[dict[str, Any]] | None = None,
-                  omissions: list[dict[str, Any]] | None = None,
-                  shown_budget: int = ITEMS_SHOWN_BUDGET) -> list[str]:
+                  omissions: list[dict[str, Any]] | None = None) -> list[str]:
     """Every train item of the candidate being edited.
 
-    When all of them fit ``budget`` in full, every item is shown in full here. When
-    not, readers went through them in groups (``AutoresearchOptimizer``): their
-    findings come first, then a table of every item, then as many items in full as
-    the rest of the budget holds: the items the readers cited first, one per pattern
-    in turn (``_cited_items``), then failures and passes alternating. Train records
-    only.
+    When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
+    smaller ``budget``), every item is shown in full here. When not, readers went through them in groups of ``budget``
+    (``AutoresearchOptimizer``): their findings come first, then a table of every item,
+    then the items the rule picks (`_shown_items`), each whole. Train records only.
 
     ``analysed``: the analysts' ranked findings (`optim.analysts`), shown before this
     section, which take the readers' place: no reader findings are shown, and the
@@ -2758,12 +2809,12 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
               f"All {len(items)} train item(s): {wrong} answered wrong, {errored} failed with "
               f"an error, {len(items) - wrong - errored} passed."]
     groups = trajectory_groups(records, budget)
-    room = min(budget, shown_budget)
     whole = [_trajectory(r) for r in items]
-    if sum(len(block) + 2 for block in whole) <= room:
+    if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
         return header + ["Every item in full. Read what each step produced and where it "
                          "went wrong before proposing.",
-                         *(line for block in whole for line in ("", block))]
+                         *(line for r in items
+                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions)))]
     if analysed is not None:
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
@@ -2827,28 +2878,21 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
                        _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
-    # A few items in full, chosen rather than cut: the failures the findings cite first,
-    # one per finding in rank order (then other failures), and passing items beside them
-    # as contrast, each marked as a success.
-    failing_all = [r for r in items if not r.get("passed")]
-    cited = [r for r in _cited_items(items, findings) if not r.get("passed")]
-    failing = [*cited, *(r for r in failing_all if all(r is not c for c in cited))]
-    failing = failing[:ITEMS_FAILING_SHOWN]
-    passing = _contrast_items(items, failing, findings)[:ITEMS_PASSING_SHOWN]
+    # Items in full, chosen by rule (`_shown_items`) rather than cut, each whole.
+    failing, passing, cited = _shown_items(items, findings)
     chosen = [*failing, *passing]
     if not chosen:
         return lines
-    each = max(1, room // len(chosen))
     examples = ["", "### Some items in full",
                 f"{len(failing)} failing item(s)"
-                + (f" the {'analysts' if analysed is not None else 'readers'} cited first, "
-                   "one per finding in rank order" if cited else "")
+                + (f" the {'analysts' if analysed is not None else 'readers'} cited, "
+                   "one per finding in rank order" if cited else ", one per kind of failure")
                 + (f", then {len(passing)} passing item(s) for contrast" if passing else "")
                 + f", each whole (of {len(items)}; the table above has every one)."]
     for record in chosen:
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
-        examples += ["", _item_block(record, each, omissions)]
+        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions)]
     return lines + examples
 
 

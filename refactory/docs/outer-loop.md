@@ -1838,13 +1838,18 @@ failure map; the edits it may make (the operations, how nodes compose, one worke
 per structural operator, which apply to each step, the steps' settings, the author's
 guidance); the items; then a reference at the end (every node and edge, what each node has
 before it runs, each step in full with the node schema, the validator's rules); and the
-answer's form last. Items are chosen rather than cut: when they do not all fit
-(`ITEMS_SHOWN_BUDGET`, 40k characters), a table lists every item, then a few are shown in
-full -- the failures the findings cite, one per finding in rank order, then passing items
-beside them, the success findings' and same-kind ones first, each marked as a success. Each
+answer's form last. Items are chosen rather than cut, and size is never a reason to cut
+one: every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
+characters; it only decides that, and never cuts); otherwise a table lists every item,
+then items chosen by a rule (`_shown_items`) are shown whole -- one failure per failure
+finding that cites a known item, in rank order; then one contrasting success per success
+finding (the cited and same-kind ones first), or, with no success findings, one per kind
+of failure shown, each marked as a success. Without findings, one failure per kind of
+failure (its outcome and declared kind) and a success beside each. Each
 item gives its verdict, what was expected and what it gave, the grader's reason, then its
 input and each step's output, each fenced with its headings demoted, so nothing in an item
-reads as a section of the request. A text that still has to be cut says so in place,
+reads as a section of the request. Only a single text too large to send whole
+(`ITEM_TEXT_MAX`, 60k characters) is cut, and it says so in place,
 "[… N chars omitted]", never a path (the proposer has no tools); each cut (item, step,
 chars) is in `ProposalContext.omissions` and in the proposal call's `optimizer_trace.jsonl`
 entry (`omissions`).

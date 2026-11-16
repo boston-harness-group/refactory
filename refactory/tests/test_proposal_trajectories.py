@@ -134,11 +134,16 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
 
 
-def test_an_item_longer_than_the_budget_alone_is_clipped_with_a_note():
+def test_an_item_is_shown_whole_and_only_a_text_too_large_to_send_is_cut():
+    from refactory_dsh.optim.base import ITEM_TEXT_MAX
+
     long = "HEAD " + "x" * 9000 + " TAIL"
     text = _render([_record("w1", outputs={"compare": long, "precision": "p", "decide": "d"})],
                    evidence_budget=4000)
-    section = _section(text)
+    assert long in _section(text), "longer than the budget, still whole"
+    huge = "HEAD " + "x" * ITEM_TEXT_MAX + " TAIL"
+    section = _section(_render([_record("w1", outputs={"compare": huge, "precision": "p",
+                                                       "decide": "d"})], evidence_budget=4000))
     # Cut in place with the count only (no path); nothing else said about it in the request.
     assert "HEAD" in section and "TAIL" in section and re.search(r"\[… [\d,]+ chars omitted\]",
                                                                 section)
@@ -493,7 +498,8 @@ def test_wordy_readers_are_kept_within_the_budget(tmp_path):
     optimizer = AutoresearchOptimizer(client)
     optimizer.propose(ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
     section = _section(client.proposals[0])
-    assert len(section) <= TRAJECTORY_BUDGET
+    findings = section.split("### Every item", 1)[0]
+    assert len(findings) <= TRAJECTORY_BUDGET
     assert section.count("WORDY-") <= READER_PATTERNS * len(client.readers)
     assert "§" * 500 not in section and "¤" * 300 not in section
     assert "more pattern(s) not shown: the findings are kept within" in section
@@ -661,10 +667,8 @@ def _full(text: str) -> list[str]:
 
 def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
     """The items behind the readers' patterns are the ones shown in full, not the
-    first by id: one per pattern in turn (failure patterns first, an item already
-    shown is not shown twice), then the rest by the old rule; within the budget."""
-    from refactory_dsh.optim.base import TRAJECTORY_BUDGET
-
+    first by id: one per pattern (failure patterns first, an item already shown is not
+    shown twice), and as many as there are patterns, each whole."""
     records = _sized_records()
     findings = [
         {"group": 1, "items": [],
@@ -679,21 +683,25 @@ def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
     ]
     text = _render(records, reader_findings=findings)
     full = _full(text)
-    # The cited failures one per pattern in turn, then the other failures, up to the
-    # failing count; then passing items for contrast, the success pattern's first.
-    expected = ["w20", "w23", "w24", "w21", "p09", "p00"]
+    # One failure per failure pattern (an item already shown is not shown twice), then
+    # one passing item per success pattern for contrast; each whole.
+    expected = ["w20", "w23", "w24", "p09"]
     assert full == expected, full
-    assert "the readers cited first, one per finding in rank order" in text
-    assert len(_section(text)) <= TRAJECTORY_BUDGET
+    assert "the readers cited, one per finding in rank order" in text
+    assert "chars omitted" not in _section(text)
 
 
 def test_without_cited_items_failures_by_id_then_passes_for_contrast():
-    """No findings, or findings that cite no known item: the first failures by id, then
-    passing items for contrast."""
+    """No findings, or findings that cite no known item: one failure per kind of failure
+    (its outcome and declared kind), then a passing item of each kind for contrast."""
     records = _sized_records()
     stray = [{"group": 1, "items": [], "success_patterns": [],
               "failure_patterns": [{"pattern": "X", "items": ["nope"], "evidence": []}]}]
     for text in (_render(records), _render(records, reader_findings=stray)):
         full = _full(text)
-        assert full == ["w00", "w01", "w02", "w03", "p00", "p01"], full
-        assert "cited first" not in text
+        assert full == ["w00", "p00"], full  # one kind of failure here: one of it, one pass
+        assert "one per kind of failure" in text
+    # Two declared kinds: one failure of each, and a pass of the same kind beside each.
+    kinds = [{**r, "item_meta": {"type": "algebra" if int(r["id"][1:]) % 2 else "topology"}}
+             for r in records]
+    assert _full(_render(kinds)) == ["w00", "w01", "p00", "p01"]
