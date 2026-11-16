@@ -100,10 +100,10 @@ def test_the_request_leads_with_the_graph_and_shows_the_settings_after_the_opera
     text = _ctx3(analysis={"findings": FINDINGS, "batches": []}, parsimony=0.0).render()
     heads = _headings(text)
     order = ["What the score measures", "The pipeline you may edit",
-             "Where the pipeline fails, step by step", "The operations you may use",
-             "How nodes compose", "Each step's settings",
+             "What the analysts found, ranked", "Where the pipeline fails, step by step",
+             "The operations you may use", "How nodes compose", "Each step's settings",
              "Each step in full, and the node schema", "The rules the validator checks",
-             "What the analysts found, ranked", "Answer"]
+             "Answer"]
     assert [h for h in heads if h in order] == order
     assert "Parameters you may move" not in heads
     # Reorganised, not dropped: every knob's exact text is in the settings table.
@@ -113,7 +113,9 @@ def test_the_request_leads_with_the_graph_and_shows_the_settings_after_the_opera
     # The pipeline section says both levers are open, before any knob is listed.
     pipeline = _section(text, "The pipeline you may edit")
     assert "Both are levers of the same standing" in pipeline
-    assert "| draft | review | null |" in pipeline
+    # The pipeline once at the top (the view); the node and edge tables in the reference.
+    assert "| draft | review | null |" not in pipeline
+    assert "| draft | review | null |" in text.split(base.REFERENCE_HEADING, 1)[1]
     assert text.index("## The pipeline you may edit") < text.index("PROMPT-draft")
 
 
@@ -520,9 +522,9 @@ def test_every_model_proposer_strategy_gets_the_graph_first_request(
                 **overrides)
     assert loop.optimizer.proposal_failures == []
     assert model.requests, name
-    order = ["## The pipeline you may edit", "## The operations you may use",
-             "## Each step's settings", "## The rules the validator checks",
-             "## Evidence from the traces", "## Answer"]
+    order = ["## The pipeline you may edit", "## Evidence from the traces",
+             "## The operations you may use", "## Each step's settings",
+             "## The rules the validator checks", "## Answer"]
     for request in model.requests:
         text = request.text
         assert all(heading in text for heading in order), name

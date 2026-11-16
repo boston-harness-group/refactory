@@ -806,7 +806,7 @@ def test_the_items_the_analysts_cite_are_shown_in_full_first():
     AutoresearchOptimizer(client).propose(ctx, 1, [])
     request = client.proposal()
     shown = request[request.index("### Some items in full"):]
-    assert "The items the analysts cited come first" in shown
+    assert "the analysts cited first, one per finding in rank order" in shown
     assert shown.count("### Item ") >= 2, "setup: room for more than the cited item"
     assert shown.split("### Item ")[1].startswith("f9 ")
 

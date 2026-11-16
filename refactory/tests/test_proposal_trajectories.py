@@ -8,6 +8,8 @@ Each test fails when the behaviour it names is reverted.
 
 from __future__ import annotations
 
+import re
+
 import json
 from pathlib import Path
 from typing import Any
@@ -61,7 +63,7 @@ def test_a_failed_item_is_shown_in_full():
     for expected in ("Input (question):", "Which statement holds in i1?",
                      "C. Every bounded sequence has a convergent subsequence",
                      "Expected: C — Every bounded sequence has a convergent subsequence",
-                     "Predicted: A", "Grader: MCQ=0: predicted 'A' but expected 'C'"):
+                     "Given: A", "Grader: MCQ=0: predicted 'A' but expected 'C'"):
         assert expected in section, expected
     steps = [section.index(f"Step `{node}` output:") for node in ("compare", "precision", "decide")]
     assert steps == sorted(steps)
@@ -96,8 +98,10 @@ def test_steps_keep_the_order_a_forked_graph_ran_them(tmp_path, monkeypatch):
 
 
 def _section(text: str) -> str:
+    from refactory_dsh.optim.base import REFERENCE_HEADING
+
     start = text.index("## Trajectories of the candidate being edited")
-    return text[start:text.index("\n## What this run has already tried", start)]
+    return text[start:text.index("\n" + REFERENCE_HEADING, start)]
 
 
 def _livemath_sized(item: str, *, passed: bool = False) -> dict[str, Any]:
@@ -126,7 +130,7 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
     assert "All 19 train item(s): 12 answered wrong, 2 failed with an error, 5 passed." in text
     assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
-    assert "Every item in full" in text and long in text and "characters omitted" not in text
+    assert "Every item in full" in text and long in text and "chars omitted" not in text
     assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
 
 
@@ -135,8 +139,9 @@ def test_an_item_longer_than_the_budget_alone_is_clipped_with_a_note():
     text = _render([_record("w1", outputs={"compare": long, "precision": "p", "decide": "d"})],
                    evidence_budget=4000)
     section = _section(text)
-    assert "HEAD" in section and "TAIL" in section and "characters omitted" in section
-    assert "longer than one call's evidence budget" in section
+    # Cut in place with the count only (no path); nothing else said about it in the request.
+    assert "HEAD" in section and "TAIL" in section and re.search(r"\[… [\d,]+ chars omitted\]",
+                                                                section)
     from refactory_dsh.optim.base import trajectory_groups
     (group,) = trajectory_groups([_record("w1", outputs={"compare": long, "precision": "p",
                                                           "decide": "d"})], 4000)
@@ -252,7 +257,7 @@ def test_repeats_show_each_item_once_and_a_zero_prediction_shows():
         assert _shown(text) == ["i1"]
         assert "SECOND" not in _section(text) and "repeat" not in _section(text)
     zero = {**_record("i2"), "prediction": 0}
-    assert "Predicted: 0" in _render([zero])
+    assert "Given: 0" in _render([zero])
 
 
 def test_the_loop_hands_the_optimizer_train_records_only(tmp_path, monkeypatch):
@@ -674,20 +679,21 @@ def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
     ]
     text = _render(records, reader_findings=findings)
     full = _full(text)
-    expected = ["w20", "w23", "w24", "p09", "w21", "w00", "p00"]
-    assert len(full) >= 4, full  # setup: the budget holds an item per pattern
-    assert full == expected[:len(full)], full
-    assert "The items the readers cited come first" in text
+    # The cited failures one per pattern in turn, then the other failures, up to the
+    # failing count; then passing items for contrast, the success pattern's first.
+    expected = ["w20", "w23", "w24", "w21", "p09", "p00"]
+    assert full == expected, full
+    assert "the readers cited first, one per finding in rank order" in text
     assert len(_section(text)) <= TRAJECTORY_BUDGET
 
 
-def test_without_cited_items_the_items_in_full_keep_the_old_order():
-    """No findings, or findings that cite no known item: failures and passes
-    alternate by id, as before."""
+def test_without_cited_items_failures_by_id_then_passes_for_contrast():
+    """No findings, or findings that cite no known item: the first failures by id, then
+    passing items for contrast."""
     records = _sized_records()
     stray = [{"group": 1, "items": [], "success_patterns": [],
               "failure_patterns": [{"pattern": "X", "items": ["nope"], "evidence": []}]}]
     for text in (_render(records), _render(records, reader_findings=stray)):
         full = _full(text)
-        assert full and full[:6] == ["w00", "p00", "w01", "p01", "w02", "p02"][:len(full)], full
-        assert "The items the readers cited come first" not in text
+        assert full == ["w00", "w01", "w02", "w03", "p00", "p01"], full
+        assert "cited first" not in text

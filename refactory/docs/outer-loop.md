@@ -1828,6 +1828,27 @@ items -- and how many of its items timed out), and cost: with no cost term (pars
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
+**The request's order.** The proposal request (`ProposalContext.render`) gives the right
+things in the right order, each once: what the score measures; the pipeline, once, as the
+pipeline view; what this run has tried and how each attempt did (recent results, every
+candidate so far, the traces' numbers, the last edit's children and the reasoning behind
+recent candidates with what each edit built, the run's feedback and memory, earlier runs,
+the latest refusals); what the analysts found, failures and successes, with the per-step
+failure map; the edits it may make (the operations, how nodes compose, one worked example
+per structural operator, which apply to each step, the steps' settings, the author's
+guidance); the items; then a reference at the end (every node and edge, what each node has
+before it runs, each step in full with the node schema, the validator's rules); and the
+answer's form last. Items are chosen rather than cut: when they do not all fit
+(`ITEMS_SHOWN_BUDGET`, 40k characters), a table lists every item, then a few are shown in
+full -- the failures the findings cite, one per finding in rank order, then passing items
+beside them, the success findings' and same-kind ones first, each marked as a success. Each
+item gives its verdict, what was expected and what it gave, the grader's reason, then its
+input and each step's output, each fenced with its headings demoted, so nothing in an item
+reads as a section of the request. A text that still has to be cut says so in place,
+"[… N chars omitted]", never a path (the proposer has no tools); each cut (item, step,
+chars) is in `ProposalContext.omissions` and in the proposal call's `optimizer_trace.jsonl`
+entry (`omissions`).
+
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
 step, generated from the graph the edits act on (`nn.pipeline_view`), read in the core
 operators' own words. Reading mirrors writing: every operation in the catalogue names the
