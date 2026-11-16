@@ -1463,9 +1463,13 @@ emission, budget exhaustion, or a person's stop — leaves the worktree clean.
   builder that never resolves a conflict with main ends in a draft pull request
   naming the conflict, after one send-back (check_attempts), with a clean
   worktree (no MERGE_HEAD, no unmerged entries).
-- `test_a_conflict_that_comes_back_every_delivery_stops_at_its_budget`: with
-  main moving before every delivery, the conflict is sent back check_attempts
-  times and no more, naming the file.
+- `test_a_conflict_that_comes_back_every_delivery_is_delivered_as_a_draft_at_its_budget`:
+  with main moving before every delivery, the conflict is sent back check_attempts
+  times and no more, then the work is delivered as a draft naming the file (b45a);
+  `test_on_the_spine_a_spent_conflict_budget_is_delivered_as_a_draft` is the same
+  decision on the spine, and
+  `test_a_spent_conflict_budget_whose_draft_cannot_be_pushed_fails_saying_so` the
+  failure when not even the draft lands.
 
 ## 17. Goal completion requires a finished run (#347, C1)
 
