@@ -469,11 +469,15 @@ def test_a_loop_states_its_cap_in_the_edit():
 
 def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
     rows = _rows(_section(_start_state()))
-    assert rows["step_fork"][0] == ("a new branch that sees the task takes in: compare_prompt "
-                                    "(prepare), current_item.json (data), user_prompt (prepare)")
+    assert rows["step_fork"][0] == (
+        "a new branch here can see: compare_prompt@prepare (+knob compare_task), "
+        "hypotheses_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
+        "precision_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
+        "user_prompt@prepare (+knob compare_task), compare_notes.txt@compare, "
+        "current_item.json@data; \"task\" gives compare_prompt, user_prompt, current_item.json")
     nested = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
     forks = [n for n, x in nested["graph"]["nodes"].items() if x.get("kind") == "fork"]
-    assert all(_rows(_section(nested))[f][0].startswith("a new branch that sees the task")
+    assert all(_rows(_section(nested))[f][0].startswith("a new branch here can see: ")
                for f in forks)
 
 

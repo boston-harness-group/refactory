@@ -243,6 +243,10 @@ def _readable(graph: Graph, state: Mapping[str, Any], names: set[tuple[str, str]
             if not (kind == "fact" and name in knobs)}
 
 
+#: How many of the names a new step could see a refusal lists.
+SEES_NAMES_SHOWN = 24
+
+
 def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
           default: set[tuple[str, str]], sees: Any) -> list[tuple[str, str]]:
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
@@ -253,7 +257,8 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
         if isinstance(sees, str):
             sees = [sees]
         if not isinstance(sees, list) or not all(isinstance(s, str) for s in sees):
-            raise _Refused("'sees' is a list of \"task\" and step ids")
+            raise _Refused("'sees' is a list of \"task\", step ids, and fact or file names "
+                           "there before the new step")
         chosen = set()
         for name in sees:
             if name == TASK:
@@ -267,8 +272,13 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
             elif ("fact", name) in there or ("file", name) in there:
                 chosen |= {key for key in (("fact", name), ("file", name)) if key in there}
             else:
+                names = sorted({n for _k, n in _readable(graph, state, there)})
+                shown = ", ".join(names[:SEES_NAMES_SHOWN]) + (
+                    f" (+{len(names) - SEES_NAMES_SHOWN} more)"
+                    if len(names) > SEES_NAMES_SHOWN else "")
                 raise _Refused(f"'sees' names {name!r}, which is not \"task\", a step, or a "
-                               "fact or file there before the new step")
+                               "fact or file there before the new step; there: "
+                               f"{shown or 'nothing'}")
     chosen = _readable(graph, state, chosen)
     # An agent's reply is its first file and, when it declares one, its fact: the same
     # text twice. The fact is enough.
@@ -2032,14 +2042,17 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "branch": {
         "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
-                "without failing the item); its output reaches the step after the join",
+                "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
+                "single fact or file names there before the fork); its output reaches the step "
+                "after the join",
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
     },
     "rewire": {
         "fields": ("step", "sees"),
-        "line": "change what a step sees: \"task\" (the task's own inputs, no model output) "
-                "and step ids (their outputs)",
+        "line": "change what a step sees: \"task\" (the task's own inputs, no model output), "
+                "step ids (their outputs), or single fact or file names there before it (that "
+                "input alone)",
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {

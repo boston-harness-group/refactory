@@ -1828,18 +1828,31 @@ items -- and how many of its items timed out), and cost: with no cost term (pars
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
+**The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
+step, generated from the graph the edits act on (`nn.pipeline_view`), in the core
+operators' own words: each model or code step with what it `sees` (each input named as
+`"sees"` takes it, `name@maker`; a plain op that only builds a prompt or collects files
+folded in as `name@op(its inputs)`), what it is `told` (each knob whose text reaches it,
+its opening words; `*` frozen, `?` read by an op with several outputs for all of them) and
+what it writes (`->`); forks as `parallel { ... } -> join`; a judge and its gate as
+`loop(step, judge ..., max N -> N+1 runs)` or `route(after step, judge ..., {label:
+step})`; `[protected]` steps. About 1.5k characters on the S4 pipeline; the node and edge
+tables follow for detail. Python only: the spine does not render requests.
+
 **What an edit built.** A proposal says in prose what its edit does (`flow_change`); the
 expansion can differ (a loop left at its default cap, a branch that sees the task taking in
-more than the question). The candidate's proposal record carries `wiring`, read from its
-graph against its parent's (`nn.wiring.as_built`), never from the edit's text: each new
-step with what it takes in (and which step makes each input, through any collect step the
-edit added), what it writes and which steps read that; each new or changed gate with the
-step it sends back to and its effective cap (the bound knob's value, else its own field)
-and how often that step then runs at most; each existing step whose inputs changed; each
-removed step. The next request shows it under "As built" right after the proposal's own
+more than the question). The candidate's proposal record carries `wiring`: its pipeline
+view's lines that are new (`+`) or changed (`~`) against its parent's, and the steps gone
+(`- removed`), read from the two graphs (`pipeline_view.changed_lines`), never from the
+edit's text. The next request shows them under "As built" right after the proposal's own
 "Flow change, as proposed", in "What the last edit changed" and "Your earlier reasoning",
-so a description that says otherwise is seen against what ran (at most 12 lines a
-candidate, the rest counted).
+so a description that says otherwise is seen against what ran, in the same words as the
+pipeline view (at most 12 lines a candidate, the rest counted).
+
+**Naming inputs.** `"sees"` takes `"task"`, step ids, or single fact or file names there
+before the new step (that input alone); the catalogue says so, a name that is not there is
+refused with the names that are, and each fork's row in the operator table lists what a new
+branch there can name, `(+knob k)` marking one built by an op that reads text knob `k`.
 
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
