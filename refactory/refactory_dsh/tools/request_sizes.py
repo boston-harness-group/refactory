@@ -57,6 +57,27 @@ def repeated_share(text: str) -> float:
     return sum(len(line) * (n - 1) for line, n in counts.items() if n > 1) / max(1, len(text))
 
 
+#: A sentence this long said twice in one request is a repeat, whatever its share.
+REPEAT_SENTENCE = 100
+
+
+def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE) -> list[str]:
+    """Each sentence of ``shortest``+ characters that ``text`` says more than once, read
+    outside code fences and with table and list formatting taken off (a table cell and a
+    list item that say the same thing are the same sentence)."""
+    plain = []
+    for line in _outside_fences(text):
+        line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)  # a list item's marker
+        plain += [cell.strip() for cell in re.split(r"(?<!\\)\|", line)]  # table cells
+    counts: dict[str, int] = collections.Counter()
+    for cell in plain:
+        for sentence in re.split(r"(?<=[.!?;])\s+", cell):
+            norm = " ".join(sentence.replace("`", "").replace("**", "").split()).rstrip(".;")
+            if len(norm) >= shortest:
+                counts[norm] += 1
+    return [sentence for sentence, n in counts.items() if n > 1]
+
+
 def sections(text: str) -> list[tuple[str, int]]:
     """Each top-level section (``## ``, outside fences) with its size, largest first."""
     out: list[tuple[str, int]] = []

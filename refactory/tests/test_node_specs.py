@@ -297,9 +297,12 @@ def test_catalogue_rows_say_which_fields_take_a_node():
     catalogue = [op for op in nn_edits.catalogue("broad")
                  if op["op"] in ("insert_after", "split", "loop", "add_node", "bypass")]
     text = ProposalContext(catalogue=catalogue).render()
+    # Written-out operations are table rows; a core operator is its one line.
     rows = {line.split("|")[1].strip(): line for line in text.splitlines()
             if line.startswith("| ") and line.split("|")[1].strip() in
-            ("insert_after", "split", "loop", "add_node", "bypass")}
+            ("insert_after", "add_node", "bypass")}
+    rows |= {name: line for line in text.splitlines() for name in ("split", "loop")
+             if line.startswith(f"- `{name}` (")}
     assert "node: a full node object (see the node schemas below)" in rows["insert_after"]
     assert "node: a full node object" in rows["add_node"]
     assert "into: a list of two full node objects" in rows["split"]

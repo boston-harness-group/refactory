@@ -531,13 +531,12 @@ spine through its runner, the walker in memory).
   keeping a candidate only when it beats the current one; a train score only breaks a
   tie between candidates that beat the current one by the same validation score, and a
   tie with the current candidate is rejected. The proposal request (not the analyst,
-  merge or memory calls) adds the run's **compute policy** from the same settings: with
-  `parsimony` 0, extra steps and model calls per item are not penalised, so a change
-  that adds them is weighed by the score it should reach like any other (when the score
-  is the items' mean: per-item cost is reported separately and is not part of the
-  score; otherwise cost counts only as far as the task's own score measures it). With
+  merge or memory calls) adds the run's **compute policy**, only what the score text
+  does not already say: with `parsimony` 0, cost is not a reason for or against a change
+  (and, when the score is the items' mean, per-item cost is reported separately). With
   `parsimony` above 0 the size-cost lines stand alone. Nothing steers toward any kind of
-  change.
+  change. The validation gate's rule is said here once; the results' gate note points to
+  it.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
   (with their error, whether or not any step ran; they are in the cause table too),
@@ -1681,12 +1680,11 @@ the same way on both runtimes:
 Neither is prescribed: no combiner, vote or normalisation is built in, and a proposer
 that wants a vote writes it as a code step.
 
-**What each node has.** The request's table of what each node can use names, beside each
-fact and file, the step that makes it, and marks with "(task input)" the ones no model
-step's output reaches (`nn.operators.model_free_inputs`: the task's own inputs and what
-plain ops build from them alone, as nodes declare them). A step given only those sees
-the task and none of the other steps' work, and a step's input is no longer mistaken for
-its output. The composition text says an agent without tools sees its prompt and the
+**What each node has.** The request's table of what each node can use writes each fact
+and file as the pipeline view does (`name@maker`, `@task` when no step makes it), so a
+fact has one label everywhere. Nodes with the same row share it, and a row that holds
+all of another's names is said as that row plus the rest ("as at `X`, plus ..."). A
+step's input is no longer mistaken for its output. The composition text says an agent without tools sees its prompt and the
 files it lists in `reads` (pasted in after the prompt), as both runtimes deliver them.
 `nn.operators.place_output` puts a new step's fact into the prompt knob of the next model
 step downstream (or a named one), and says where; the core operators below place their
@@ -1839,10 +1837,12 @@ pipeline view; what this run has tried and how each attempt did (recent results,
 candidate so far, the traces' numbers, the last edit's children and the reasoning behind
 recent candidates with what each edit built, the run's feedback and memory, earlier runs,
 the latest refusals); what the analysts found, failures and successes, with the per-step
-failure map; the edits it may make (the operations, how nodes compose, one worked example
-per structural operator, which apply to each step, the steps' settings, the author's
-guidance); the items; then a reference at the end (every node and edge, what each node has
-before it runs, each step in full with the node schema, the validator's rules); and the
+failure map; the edits it may make (the operations, each said once -- the written-out
+ones in a table, then the core operators one line and one example each, the same rows the
+analysts read -- how nodes compose, which apply to each step, the steps' settings, the
+author's guidance); the items; then a reference at the end (what each node has before it
+runs, each step in full with the node schema, the validator's rules; the nodes and edges
+only when the pipeline view could not be drawn); and the
 answer's form last. Items are chosen rather than cut, and size is never a reason to cut
 one: every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
 characters; it only decides that, and never cuts); otherwise a table lists every item,

@@ -128,7 +128,8 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     records[0] = _record("w00", outputs={"compare": long, "precision": "p", "decide": "d"})
     text = _render(records + [stepped])
     assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
-    assert "All 19 train item(s): 12 answered wrong, 2 failed with an error, 5 passed." in text
+    assert "19 train item(s): 5 passed, 12 answered wrong, 2 failed with an error" in text
+    assert text.count("12 answered wrong") == 1, "the counts are said once"
     assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
     assert "Every item in full" in text and long in text and "chars omitted" not in text
     assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text

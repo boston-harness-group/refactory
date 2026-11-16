@@ -113,8 +113,9 @@ def test_the_request_leads_with_the_graph_and_shows_the_settings_after_the_opera
     # The pipeline section says both levers are open, before any knob is listed.
     pipeline = _section(text, "The pipeline you may edit")
     assert "Both are levers of the same standing" in pipeline
-    # The pipeline once at the top (the view); the node and edge tables in the reference.
-    assert "| draft | review | null |" not in pipeline
+    # The pipeline once, at the top (the view). This fixture's graph does not read back,
+    # so the view says so and the reference lists the nodes and edges instead.
+    assert "pipeline view unavailable" in pipeline and "| draft | review | null |" not in pipeline
     assert "| draft | review | null |" in text.split(base.REFERENCE_HEADING, 1)[1]
     assert text.index("## The pipeline you may edit") < text.index("PROMPT-draft")
 
@@ -177,11 +178,12 @@ def test_the_compute_policy_follows_parsimony():
         return _section(text, "What the score measures") if "## What the score measures" in text else ""
 
     mean = said(parsimony=0.0, score_is_item_mean=True)
-    assert ("Compute policy: this run does not penalise extra steps or model calls per item. "
-            "Per-item cost is reported separately and is not part of the score") in mean
+    assert ("Compute policy: cost is not a reason for or against a change in this run; "
+            "per-item cost is reported separately.") in mean
     other = said(parsimony=0.0)
-    assert "Compute policy: the loop does not penalise extra steps or model calls" in other
-    assert "cost counts only as far as the task's own score measures it" in other
+    assert "Compute policy: cost is not a reason for or against a change in this run." in other
+    # The score text says the parsimony; the policy line does not say it again.
+    assert other.count("parsimony is 0") == 1
     sized = said(parsimony=0.01, score_is_item_mean=True)
     assert "Compute policy" not in sized and "size cost of 0.01 per node" in sized
     assert said() == "", "unknown scoring settings say nothing"

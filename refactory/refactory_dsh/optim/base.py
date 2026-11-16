@@ -921,7 +921,7 @@ class ProposalContext:
         return [_table(
             ["id", "parent", "score", "structural", *(["edits"] if missing else []), *gate,
              *(["cost per item"] if self.parsimony else [])],
-            [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
+            [[c["id"], c.get("parent"), fmt_score(c.get("score")), c.get("structural"),
               *([compact_edits(c.get("edits"), self.seed_knob_values)
                  if c.get("id") not in listed else "(below)"] if missing else []),
               *([c.get("gate", "")] if gate else []),
@@ -943,7 +943,7 @@ class ProposalContext:
             "## What this run has already tried",
             (
                 f"{len(self.history)} candidate(s), best "
-                f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
+                f"{fmt_score(max((c.get('score') or 0.0) for c in self.history))}"
                 if self.history and not _gate_column(self.history)
                 else f"{len(self.history)} candidate(s); {_current_line(self.history)}"
                 if self.history
@@ -981,8 +981,8 @@ class ProposalContext:
                 _table(
                     ["path", "optimizer", "seed", "best", "bound", "best edits"],
                     [
-                        [r.get("path"), r.get("optimizer"), r.get("seed_score"),
-                         r.get("best_score"), r.get("bound"),
+                        [r.get("path"), r.get("optimizer"), fmt_score(r.get("seed_score")),
+                         fmt_score(r.get("best_score")), r.get("bound"),
                          json.dumps(r.get("best_edits"), default=str)]
                         for r in self.prior_runs
                     ],
@@ -1009,11 +1009,12 @@ class ProposalContext:
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
             "",
             f"Mode: `{self.mode_name}`. "
-            + (f"Best score so far: {self.best_score}. " if not self.selection else
+            + (f"Best score so far: {fmt_score(self.best_score)}. " if not self.selection else
                f"Train score of the candidate the validation gate ranks first: "
-               f"{self.best_score}. ")
-            + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
-             if self.mean_over else f"Mean score so far: {self.mean_score}."),
+               f"{fmt_score(self.best_score)}. ")
+            + (f"Mean over the {self.mean_over} candidate(s) scored so far: "
+               f"{fmt_score(self.mean_score)}."
+             if self.mean_over else f"Mean score so far: {fmt_score(self.mean_score)}."),
             "",
             *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
                              gated=bool(self.selection)),
@@ -1045,7 +1046,9 @@ class ProposalContext:
         # 5: the edits it may make, with which apply where, and the steps' settings.
         sections += [
             "## The operations you may use",
-            *operation_lines(self.catalogue),
+            *operation_lines(self.catalogue, self.node_states, self.edges,
+                             protected=self.protected,
+                             knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1066,10 +1069,9 @@ class ProposalContext:
                 else ""
             ),
             "",
-            "`score_effect: none` on a block means inserting it cannot change the "
-            "score. It is available and it may be worth having, but it is not a way "
-            "to improve the number.",
-            "",
+            *(["`score_effect: none` on a block means inserting it cannot change the "
+               "score. It is available and it may be worth having, but it is not a way "
+               "to improve the number.", ""] if self.insertable else []),
             *_blocks_section(self.insertable, self.catalogue),
         ]
         # 6: the items themselves, chosen rather than clipped.
@@ -1085,16 +1087,19 @@ class ProposalContext:
         sections += [
             "",
             REFERENCE_HEADING,
-            "The pipeline's nodes and edges as the graph declares them, what each node has "
-            "before it runs, each step in full with the node schema, and the rules the "
-            "validator checks.",
-            "Nodes:",
-            _table(["id", "kind", "call", "knobs", "notes"],
-                   [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
-                     n.get("notes", "")] for n in self.nodes]),
-            "Edges:",
-            _table(["source", "target", "condition"],
-                   [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
+            "What each node has before it runs, each step in full with the node schema, and "
+            "the rules the validator checks (the pipeline view above is the graph's steps "
+            "and edges).",
+            # Only when the view could not be drawn are the nodes and edges listed here.
+            *([] if _fit_state(self.node_states, self.edges, self.knobs) is not None else [
+                "The pipeline view could not be drawn; the graph as it declares itself:",
+                "Nodes:",
+                _table(["id", "kind", "call", "knobs", "notes"],
+                       [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
+                         n.get("notes", "")] for n in self.nodes]),
+                "Edges:",
+                _table(["source", "target", "condition"],
+                       [[e["source"], e["target"], e.get("condition")] for e in self.edges])]),
             *_available_section(self.available, code_nodes=self.code_nodes),
             "",
             *_node_reference(self),
@@ -1142,15 +1147,23 @@ def _fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def operation_lines(catalogue: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The operations a request offers, one row each with its fields and its description
-    (core operators' own lines, `nn.core_ops.OPERATORS`): the proposer's "The operations
-    you may use" and the analysts' "The changes the optimizer can make" are both this, so
-    an analyst names only what the proposer is shown."""
-    return [_table(["op", "kind", "macro", "fields", "description"],
-                   [[c.get("op"), c.get("kind"), c.get("macro"),
-                     _edit_fields(c.get("fields") or ()), c.get("description")]
-                    for c in catalogue])]
+def operation_lines(catalogue: Sequence[Mapping[str, Any]],
+                    node_states: Sequence[dict[str, Any]] = (),
+                    edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
+                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
+    """The operations a request offers, each said once: the written-out operations in a
+    table (fields and description), then the core operators, one line and one example each
+    (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
+    use" and the analysts' "The changes the optimizer can make" are both this, word for
+    word."""
+    core = set(CORE_OPERATORS)
+    written = [c for c in catalogue if c.get("op") not in core]
+    lines = [_table(["op", "kind", "macro", "fields", "description"],
+                    [[c.get("op"), c.get("kind"), c.get("macro"),
+                      _edit_fields(c.get("fields") or ()), c.get("description")]
+                     for c in written])] if written else []
+    return lines + operator_lines(catalogue, node_states, edges, protected=protected,
+                                  knob_values=knob_values)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -1599,8 +1612,6 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     if structure_guidance:
         from .feedback import STRUCTURE_GUIDANCE
         lines.append(STRUCTURE_GUIDANCE)
-    lines += operator_lines(catalogue, node_states, edges, protected=protected,
-                            knob_values=knob_values)
     examples = composition_examples(catalogue, node_states, edges, protected=protected,
                                     code_nodes=code_nodes, tools=tools,
                                     knob_values=knob_values)
@@ -2020,11 +2031,14 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
     """"Structural operators": what the system wires for every one, then each core operator
-    the run permits in one line with one example (`nn.core_ops.OPERATORS`), its ids taken
-    from this graph where it has them. Nothing when the run permits none."""
+    the run permits in one line -- its fields and its catalogue description (its
+    `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
+    example, its ids taken from this graph where it has them. Nothing when the run
+    permits none."""
     from refactory_dsh.nn import core_ops
 
     ops = {op.get("op") for op in catalogue}
+    by_op = {op.get("op"): op for op in catalogue}
     chosen = [name for name in CORE_OPERATORS if name in ops]
     if not chosen:
         return []
@@ -2043,8 +2057,10 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
         # graph can lose for `remove`; placeholders otherwise, never a step it refuses.
         own = {**ids, "step": removable or "<step>"} if name == "remove" else _fitting_ids(
             name, ids, node_states, edges, protected, state)
-        lines.append(f"- `{name}`: {spec['line']}. E.g. "
-                     + json.dumps(core_ops.example(name, own)))
+        entry = by_op.get(name) or {}
+        description = str(entry.get("description") or f"{spec['line']}.")
+        lines.append(f"- `{name}` ({_edit_fields(entry.get('fields') or spec['fields'])}): "
+                     f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     return lines
 
 
@@ -2161,6 +2177,14 @@ def _cost_note(parsimony: float | None) -> list[str]:
             "carries; - where it was not measured."]
 
 
+def fmt_score(value: Any) -> str:
+    """A score as every request prints it: 4 significant figures (``0.5714``); anything
+    that is not a number as it is (``None`` as "n/a")."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "n/a" if value is None else str(value)
+    return f"{float(value):.4g}"
+
+
 def _cost_cell(value: Any) -> str:
     return f"{float(value):.4g}" if isinstance(value, (int, float)) else "-"
 
@@ -2229,16 +2253,9 @@ def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
     what a node costs) or when the settings are not known."""
     if parsimony is None or parsimony:
         return ""
-    if item_mean:
-        return ("Compute policy: this run does not penalise extra steps or model calls per "
-                "item. Per-item cost is reported separately and is not part of the score, so "
-                "a change that adds steps or model calls is weighed only by the score it "
-                "should reach, as any other change is. Cost is not a reason for or against a "
-                "change in this run.")
-    return ("Compute policy: the loop does not penalise extra steps or model calls per item "
-            "(parsimony is 0), so a change that adds them is weighed by the score it should "
-            "reach, as any other change is; cost counts only as far as the task's own score "
-            "measures it. Cost is not a reason for or against a change in this run.")
+    # What the score text above does not say already (it says what the score is).
+    return ("Compute policy: cost is not a reason for or against a change in this run"
+            + ("; per-item cost is reported separately." if item_mean else "."))
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -2281,8 +2298,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
     if any(op.get("op") == "set_knob" for op in catalogue):
         # SkillOpt's patch mode edits its skill only by local append/insert/replace/delete
         # patches; a whole new value stays available for what a patch cannot express.
-        lines += ["- To change a text parameter such as a prompt, patch it: "
-                  + nn_edits.PATCH_FORMAT + ".",
+        lines += ["- To change a text parameter such as a prompt, patch it, in the form "
+                  "the `set_knob` row above gives.",
                   "  Patch the parts the evidence says to change and keep the rest. A whole new",
                   "  `value` is for a setting that is not text, a new step's own prompt, or a",
                   "  prompt that has to be replaced outright."]
@@ -2458,7 +2475,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     wrong = [r for r in records if not r.get("error_text") and not r.get("passed")
              and not r.get("missing_steps")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
-    mean = f", mean score {sum(scores) / len(scores):.3g}" if scores else ""
+    mean = f", mean score {fmt_score(sum(scores) / len(scores))}" if scores else ""
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
@@ -2501,7 +2518,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
             "",
             "Wrong answers, with the grader's reason:",
             _table(["item", "score", "reason"],
-                   [[r.get("id"), r.get("score"), _clip(r["fail_reason"])]
+                   [[r.get("id"), fmt_score(r.get("score")), _clip(r["fail_reason"])]
                     for r in reasons[:ITEM_EVIDENCE_ROWS]]),
         ]
         if len(reasons) > ITEM_EVIDENCE_ROWS:
@@ -2815,11 +2832,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     items = _ordered_items(records)
     if not items:
         return []
-    wrong = sum(1 for r in items if _outcome(r) == "answered wrong")
-    errored = sum(1 for r in items if _outcome(r) == "failed with an error")
     header = ["## Trajectories of the candidate being edited",
-              f"All {len(items)} train item(s): {wrong} answered wrong, {errored} failed with "
-              f"an error, {len(items) - wrong - errored} passed."]
+              f"The {len(items)} train item(s) counted under \"Item results\"."]
     groups = trajectory_groups(records, budget)
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
@@ -2886,7 +2900,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
     lines += ["", "### Every item",
-              _table(["item", "outcome", "expected", "predicted", "grader", "error"],
+              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error"],
                      [[r.get("id"), _outcome(r), _clip(_expected(r), _TABLE_CELL_CHARS),
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
@@ -3004,9 +3018,9 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
                        code_nodes: bool = False,
                        limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
     """What each node can use: the facts a `{{name}}` may name there, and the files already
-    written, each with the step that makes it, the ones that carry no model output marked
-    "(task input)", and how a file's text reaches a prompt. Fits ``limit``. Nothing when
-    not known."""
+    written, each as the pipeline view writes it (``name@maker``, ``@task`` when no step
+    makes it), nodes with the same row listed together, and how a file's text reaches a
+    prompt. Fits ``limit``. Nothing when not known."""
     from refactory_dsh.nn.operators import COLLECT_CALL, COLLECT_TEXT_CHARS, FILE_TEXT_CALL
 
     if not available:
@@ -3015,11 +3029,10 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
            "`produces` the fact" if code_nodes else "an op that reads the file and `produces` "
            "the fact")
     lead = (
-        "What each node has before it runs (on every path that reaches it), each with the "
-        "step that makes it in parentheses. \"(task input)\" marks one that no model step's "
-        "output reaches: the task's own inputs, and what plain ops make from them alone, so a "
-        "step given only these sees the task and none of the other steps' work. A step's "
-        "input is not its output: name the fact or file the step makes. A prompt's "
+        "What each node has before it runs (on every path that reaches it), each written as "
+        "the pipeline view writes it (`name@maker`; `@task`: no step makes it); nodes with "
+        "the same row share it. A step's input is not its output: name the fact or file the "
+        "step makes. A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
         "not a fact, and `{{notes}}` does not read `notes.txt`. An agent without tools sees "
         "its prompt and the files it lists in `reads`, pasted in after the prompt. To hand "
@@ -3032,10 +3045,8 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         "reply that fact too.")
 
     def named(entry: Mapping[str, Any], name: str) -> str:
-        if name in (entry.get("task_inputs") or ()):
-            return f"{name} (task input)"
         makers = (entry.get("made_by") or {}).get(name) or ()
-        return f"{name} ({', '.join(makers)})" if makers else name
+        return f"{name}@{','.join(makers) or 'task'}"
 
     def cell(entry: Mapping[str, Any], key: str, keep: int | None) -> str:
         names = [named(entry, name) for name in entry.get(key) or ()]
@@ -3046,9 +3057,32 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         return ", ".join(names[:keep]) + f" (+{len(names) - keep} more)"
 
     def table(rows: Sequence[tuple[str, Mapping[str, Any]]], keep: int | None) -> str:
-        return _table(["node", "facts available (made by)", "files written before it (made by)"],
-                      [[node_id, cell(entry, "facts", keep), cell(entry, "files", keep)]
-                       for node_id, entry in rows])
+        # Nodes with the same row share it; a row that holds all of another row's names
+        # is said as that row plus the rest, so no list of names is written twice.
+        groups: dict[tuple[frozenset, frozenset], list[str]] = {}
+        entries: dict[tuple[frozenset, frozenset], Mapping[str, Any]] = {}
+        for node_id, entry in rows:
+            key = (frozenset(entry.get("facts") or ()), frozenset(entry.get("files") or ()))
+            groups.setdefault(key, []).append(node_id)
+            entries.setdefault(key, entry)
+        out = []
+        for key, nodes in groups.items():
+            within = [other for other in groups if other != key
+                      and other[0] <= key[0] and other[1] <= key[1] and (other[0] or other[1])]
+            base = max(within, key=lambda o: (len(o[0]) + len(o[1]), groups[o]), default=None)
+            entry = entries[key]
+            if base is None:
+                facts, files = cell(entry, "facts", keep), cell(entry, "files", keep)
+            else:
+                said = f"as at `{groups[base][0]}`"
+                more = {k: [n for n in entry.get(k) or () if n not in base[i]]
+                        for i, k in enumerate(("facts", "files"))}
+                facts = said + (", plus " + cell({**entry, "facts": more["facts"]}, "facts",
+                                                 keep) if more["facts"] else "")
+                files = said + (", plus " + cell({**entry, "files": more["files"]}, "files",
+                                                 keep) if more["files"] else "")
+            out.append([", ".join(nodes), facts, files])
+        return _table(["node(s)", "facts available", "files written before it"], out)
 
     rows = sorted(available.items())
     room = max(0, limit - len(lead))
@@ -3142,7 +3176,7 @@ def _current_line(history: Sequence[dict[str, Any]]) -> str:
                 else "the validation gate's current candidate is older than this list")
     score = current.get("score")
     return ("train score of the validation gate's current candidate "
-            + (f"{score:.6g}" if isinstance(score, (int, float)) else "n/a (its train run failed)"))
+            + (fmt_score(score) if isinstance(score, (int, float)) else "n/a (its train run failed)"))
 
 
 def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
@@ -3163,10 +3197,8 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
         # ranking, so it is never shown): what changes is that a parent may be any
         # candidate that scored well there (with a population picker, any judged
         # candidate), a rejected one included.
-        return ["This run has a validation gate with a pool of parents: each candidate "
-                "was also run on held-out items, and the gate kept it only if it scored "
-                "strictly higher there than the current candidate (an equal score is "
-                "rejected); the best so far is marked `current`. "
+        return ["This run has a validation gate (its rule is under \"What the score "
+                "measures\") with a pool of parents; the best so far is marked `current`. "
                 + ("A parent may be any candidate judged so far, a `rejected` one included, "
                    "as the parent picker chooses. " if population else
                    "A parent may be any of the candidates that scored well there, a "
@@ -3179,9 +3211,8 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                 "its parent (when shown below) were strongly positive, its direction may still "
                 "be right: you may build on it or combine it with edits to other steps in the "
                 "same failure path."]
-    return ["This run has a validation gate: each candidate was also run on held-out "
-            "items, and the gate kept it only if it scored strictly higher there than the "
-            "current candidate (an equal score is rejected). Scores here are train scores; "
+    return ["This run has a validation gate (its rule is under \"What the score "
+            "measures\"). Scores here are train scores; "
             "held-out scores are never shown. You edit the candidate marked `current`. A "
             "`rejected` candidate was not shown better on validation; that is all a "
             "rejection says. " + resolution + "A rejected candidate is never kept, and its "
@@ -3470,7 +3501,7 @@ def _attempt_lines(history: Sequence[dict[str, Any]],
     scores = {str(c.get("id")): c.get("score") for c in history}
 
     def score(value: Any) -> str:
-        return f"{value:.4g}" if isinstance(value, (int, float)) else "n/a"
+        return fmt_score(value)
 
     lines = []
     for c in history:
@@ -3653,7 +3684,7 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
         node = str(exchange.get("node"))
         runs[node] = runs.get(node, 0) + 1
         replies[(node, runs[node])] = str(exchange.get("response") or "").strip()
-    said = [f"{_outcome(child)} (score {child.get('score')})"]
+    said = [f"{_outcome(child)} (score {fmt_score(child.get('score'))})"]
     if child.get("prediction") is not None:
         said.append(f"Given: {cut(child.get('prediction'), 'prediction')}")
     if child.get("fail_reason") and not child.get("passed"):
@@ -3756,7 +3787,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
     for entry in reasoning_shown(entries):
         outcome = ", ".join(part for part in (
             f"gate {entry['gate']}" if entry.get("gate") else "",
-            f"train score {entry.get('score')}",
+            f"train score {fmt_score(entry.get('score'))}",
             (f"{entry['fixed']} fixed / {entry['broken']} broken vs its parent"
              + (" (scored with different seeds)" if entry.get("same_seed") is False else "")
              if entry.get("fixed") is not None else "")) if part)
@@ -3852,6 +3883,13 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
         "| " + " | ".join(_cell(value) for value in row) + " |" for row in rows
     ]
     return "\n".join([head, rule, *body])
+
+
+def _table_filled(headers: list[str], rows: list[list[Any]]) -> str:
+    """`_table` without the columns that are empty in every row (nothing to read there)."""
+    keep = [i for i in range(len(headers))
+            if any(row[i] not in (None, "", []) for row in rows)]
+    return _table([headers[i] for i in keep], [[row[i] for i in keep] for row in rows])
 
 
 def _cell(value: Any) -> str:

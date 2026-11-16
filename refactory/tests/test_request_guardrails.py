@@ -234,7 +234,7 @@ def test_the_proposal_describes_the_pipeline_once_and_keeps_the_order(requests):
     from test_request_order import ORDER, _sections
 
     for text, _records in requests["proposal"]:
-        assert text.count(base.PIPELINE_VIEW_LEAD) == 1 and text.count("\nNodes:\n") == 1
+        assert text.count(base.PIPELINE_VIEW_LEAD) == 1 and "\nNodes:\n" not in text
         heads = _sections(text)
         at = [next((i for i, h in enumerate(heads) if h.startswith(h0)), None) for h0 in ORDER]
         present = [i for i in at if i is not None]
@@ -402,3 +402,16 @@ def test_an_analyst_names_only_operations_the_proposer_is_shown(kind, requests):
         analyst = _op_rows(text, "## The changes the optimizer can make")
         shown = _op_rows(proposal, "## The operations you may use")
         assert analyst and analyst == shown, (kind, set(analyst) ^ set(shown))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_no_sentence_of_100_characters_is_said_twice(kind, requests):
+    """Any sentence of `request_sizes.REPEAT_SENTENCE`+ characters said twice fails, however
+    small its share of the request: an operation described in a table row and again in a
+    list, a rule given in two sections. The steps' own knob texts (exact edit targets in
+    the settings) and fenced text (items, knob texts) are not the request's sentences."""
+    from refactory_dsh.tools.request_sizes import repeated_sentences
+
+    for text, _records in requests[kind]:
+        repeats = repeated_sentences(_without_knob_texts(text))
+        assert repeats == [], (kind, repeats[:3])

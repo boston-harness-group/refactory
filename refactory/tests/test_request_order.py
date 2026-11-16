@@ -90,8 +90,8 @@ def test_the_sections_come_in_order():
     assert at == sorted(at), [h for h, _ in sorted(zip(ORDER, at), key=lambda p: p[1])]
     # The pipeline once at the top, its detail only in the reference.
     pipeline = text.split("## The pipeline you may edit", 1)[1].split("\n## ", 1)[0]
-    assert "Nodes:" not in pipeline and base.REFERENCE_POINTER in pipeline
-    assert text.index("Nodes:") > text.index(base.REFERENCE_HEADING)
+    assert base.REFERENCE_POINTER in pipeline
+    assert "Nodes:" not in text and "Edges:" not in text, "the view is the graph's one table"
 
 
 def test_no_heading_from_an_item_reads_as_a_section():
@@ -226,3 +226,27 @@ def test_an_attempt_the_last_edit_s_section_shows_points_there_for_what_it_built
     first, second = base._attempt_lines(rows, {}, ["c1"])
     assert 'built: under "What the last edit changed"' in first and "BUILT-LINE" not in first
     assert "OTHER-LINE" in second
+
+
+def test_each_fact_of_the_request_is_said_once():
+    """The validation gate's rule, the item counts and a score: each said once, in one
+    form; an empty column is not printed; the blocks note only when there are blocks."""
+    score = 0.5714285714285714
+    rows = [{"id": "c1", "parent": "seed", "score": score, "structural": False,
+             "exit_ok": True, "edits": [], "own": 0, "epoch": 1, "gate": "current"}]
+    records = _many()  # not all shown whole: the "Every item" table is there
+    ctx = _ctx(records, findings=FINDINGS, parsimony=0.0, selection="single",
+               leaderboard=rows, history=rows, best_score=score, mean_score=score, mean_over=1)
+    text = ctx.render()
+    assert text.count("a tie with the current candidate is rejected") == 1
+    assert "its rule is under \"What the score measures\"" in text
+    counts = re.findall(r"\d+ answered wrong", text)
+    assert len(counts) == 1, counts
+    assert "0.5714285714285714" not in text and "0.571429" not in text
+    assert "0.571 " not in text and "0.5714" in text
+    header = text.split("### Every item\n", 1)[1].split("\n", 1)[0]
+    assert header.startswith("| item | outcome |") and "| error |" not in header, header
+    assert "score_effect: none" not in text and "declares no ready-made blocks" in text
+    ungated = _ctx(records, findings=FINDINGS, parsimony=0.0, leaderboard=rows, history=rows,
+                   best_score=score, mean_score=score).render()
+    assert "0.5714285714285714" not in ungated and "Best score so far: 0.5714." in ungated

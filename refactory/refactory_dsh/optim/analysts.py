@@ -287,7 +287,11 @@ def _changes_text(ctx: Any) -> str:
     source (`base.operation_lines`), so a finding names only what the proposer is shown."""
     from .base import operation_lines
 
-    return "\n".join(operation_lines(ctx.catalogue)) if ctx.catalogue else "(not listed)"
+    if not ctx.catalogue:
+        return "(not listed)"
+    return "\n".join(operation_lines(
+        ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
+        knob_values={k.get("name"): k.get("value") for k in ctx.knobs}))
 
 
 def _memory_text(ctx: Any) -> str:

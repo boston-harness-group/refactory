@@ -38,6 +38,12 @@ TRACE_FORM = ("its input once, then each step in the order the steps ran -- what
 _WHOLE = 10 ** 9
 
 
+def _fmt_score(value: Any) -> str:
+    from .base import fmt_score
+
+    return fmt_score(value)
+
+
 def _norm(line: str) -> str:
     return " ".join(line.split())
 
@@ -131,7 +137,7 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
         return clip(value, limit, item=item, step=step, omissions=omissions)
 
     lines = [f"{heading} Item {item}{f' ({label})' if label else ''} — {outcome} "
-             f"(score {record.get('score')})"
+             f"(score {_fmt_score(record.get('score'))})"
              + (f" — {metadata}" if metadata else "")]
     said = [part for part in (
         f"Expected: {cut(expected, 'expected', reply_chars)}"

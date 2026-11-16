@@ -56,7 +56,8 @@ def test_a_prompt_is_patched_by_default_and_a_whole_value_stays_available():
     # a whole-prompt rewrite passed the gate 5/23, patch-only ones 23/46.
     answer = _answer(_render("knob_only", max_edits=4))
     flat = " ".join(answer.split())
-    assert "To change a text parameter such as a prompt, patch it:" in flat
+    assert "To change a text parameter such as a prompt, patch it, in the form the " \
+        "`set_knob` row above gives." in flat
     assert "A whole new `value` is for a setting that is not text, a new step's own prompt" in flat
     assert "neither kind is the safer default" in flat
     bundles = json.loads(next(line for line in answer.splitlines()
@@ -291,8 +292,20 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     text = _render(available=available, code_nodes=True)
     # In the reference at the end, with the nodes and edges.
     reference = text[text.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
-    row = next(line for line in reference.splitlines() if line.startswith("| decide |"))
-    assert "decide_prompt" in row and "compare_notes.txt" in row
+    rows = {line.split("|")[1].strip(): line for line in reference.splitlines()
+            if line.startswith("| ") and not line.startswith("| node(s)")}
+
+    def row_of(node: str) -> str:
+        return next(line for nodes, line in rows.items()
+                    if node in [n.strip() for n in nodes.split(",")])
+
+    row = row_of("decide")
+    assert "decide_prompt@decide_prompt" in row
+    # A row that holds another's names says "as at" it: followed back, compare's notes.
+    seen = row
+    while "compare_notes.txt@compare" not in seen and "as at `" in seen:
+        seen = row_of(seen.split("as at `", 1)[1].split("`", 1)[0])
+    assert "compare_notes.txt@compare" in seen
     assert "a file's name is not a fact" in reference and "snippet:run" in reference
     plain = _render(available=available, code_nodes=False)
     plain = plain[plain.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
@@ -353,7 +366,7 @@ def test_the_available_table_fits_its_limit_on_a_large_graph():
     assert "more)" in text and "not listed" in text
     assert "the files it lists in `reads`, pasted in after the prompt" in lines[0]
     small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
-    assert "| a | f | x.txt |" in small
+    assert "| a | f@task | x.txt@task |" in small
 
 
 # ── past edits keep their wiring whole wherever a request shows them ─────────

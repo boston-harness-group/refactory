@@ -178,7 +178,7 @@ def test_an_analyst_reads_every_steps_input_and_output_of_a_multi_node_graph():
                  "Rest of its prompt:\n```\nDRAFT-IN t1\n```", "Reply:\n```\nDRAFT-OUT t1\n```",
                  "#### Step `final` (2 of 2)", "FINAL-IN t1", "FINAL-OUT t1",
                  "Expected: GOLD t1; Given: PRED t1", "Grader: GRADER t1",
-                 "### Item t1 — answered wrong (score 0.0)"):
+                 "### Item t1 — answered wrong (score 0)"):
         assert text in failure, text
     assert failure.index("DRAFT-OUT t1") < failure.index("FINAL-IN t1"), "in the order they ran"
     assert "t2" not in _items(failure)
@@ -1346,10 +1346,14 @@ def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
 
 
 def test_the_op_catalogue_reaches_the_analysts_whole_in_the_proposer_s_rows():
-    long = "Split a step into two steps " + "d" * 300 + " END."
-    ctx = replace(_ctx([_rec("f0", False)]), catalogue=[{"op": "split", "description": long}])
-    assert "\n".join(base.operation_lines(ctx.catalogue)) == analysts._changes_text(ctx)
-    assert f"| split | null | null |  | {long} |" in analysts._changes_text(ctx)
+    long = "Splice a node in after another " + "d" * 300 + " END."
+    ctx = replace(_ctx([_rec("f0", False)]),
+                  catalogue=[{"op": "insert_after", "description": long}])
+    assert "\n".join(base.operation_lines(ctx.catalogue, ctx.node_states, ctx.edges,
+                                           knob_values={k["name"]: k["value"]
+                                                        for k in ctx.knobs})) \
+        == analysts._changes_text(ctx)
+    assert f"| insert_after | null | null |  | {long} |" in analysts._changes_text(ctx)
 
 
 def test_an_errored_items_error_is_said_once():

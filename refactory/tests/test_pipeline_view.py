@@ -873,7 +873,7 @@ def test_the_loop_s_request_opens_with_the_view_and_shows_what_was_built(tmp_pat
                                 "origin": "optimizer",
                                 "flow_change": "solve is sent back once at most"}
     text = loop._context().render()
-    pipeline = text.split("## The pipeline you may edit", 1)[1].split("Nodes:", 1)[0]
+    pipeline = text.split("## The pipeline you may edit", 1)[1].split(base.REFERENCE_HEADING, 1)[0]
     assert pipeline.index(base.PIPELINE_VIEW_LEAD) < pipeline.index("```text\nper item (data")
     assert "loop(solve, judge solve_check_judge" in pipeline
     changed = text.split("## What the last edit changed", 1)[1].split("\n## ", 1)[0]
