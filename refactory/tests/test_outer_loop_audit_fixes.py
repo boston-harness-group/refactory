@@ -504,11 +504,15 @@ def _slow_start(monkeypatch: Any, delay: float) -> None:
     two clocks can be told apart on any machine (no namespaces needed)."""
     from refactory_dsh import snippet
 
-    monkeypatch.setattr(snippet, "_command", lambda extra: [
-        "bash", "-c", f'sleep {delay}; exec "$0" -I -S -c "$1"', sys.executable, snippet._DRIVER])
+    command = ["bash", "-c", f'sleep {delay}; exec "$0" -I -S -c "$1"', sys.executable,
+               snippet._DRIVER]
+    # Linux's runner and macOS's alike.
+    monkeypatch.setattr(snippet, "_command", lambda extra: command)
+    monkeypatch.setattr(snippet, "_mac_command", lambda scratch, extra: command)
     # Only the clocks are under test: keep the preexec's own session (a timeout kills the
     # group) and leave out its caps, whose prctl(PR_SET_NO_NEW_PRIVS) is Linux-only.
     monkeypatch.setattr(snippet, "_confine", os.setsid)
+    monkeypatch.setattr(snippet, "_confine_mac", os.setsid)
 
 
 def test_a_slow_sandbox_start_is_not_counted_against_the_code(monkeypatch):
