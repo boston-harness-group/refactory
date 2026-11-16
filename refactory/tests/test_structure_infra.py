@@ -222,8 +222,11 @@ def test_the_node_inputs_table_says_who_makes_each_one_and_marks_task_inputs():
     assert "raw.txt" in available["emit"]["task_inputs"]
     assert "summary.txt" not in available["emit"]["task_inputs"]
     text = "\n".join(base._available_section(available))
-    assert "summary.txt (summarise)" in text and "raw.txt (task input)" in text
-    assert "made by" in text and operators.COLLECT_CALL in text
+    # Each written as the pipeline view writes it: one label per fact or file.
+    raw = ",".join(available["emit"]["made_by"].get("raw.txt") or ()) or "task"
+    assert "summary.txt@summarise" in text and f"raw.txt@{raw}" in text
+    assert "(task input)" not in text
+    assert "`name@maker`" in text and operators.COLLECT_CALL in text
 
 
 def test_place_output_puts_a_fact_in_the_next_model_steps_prompt_knob():
