@@ -90,14 +90,14 @@ def test_each_row_on_the_s4_start_state_says_what_the_operators_do():
 def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_built_it():
     rows = _rows(_section(_start_state()))
     assert rows["decide"][0].startswith(
-        "decide_prompt = op decide_prompt from compare_notes.txt (compare), "
+        "decide_prompt (op decide_prompt, which reads compare_notes.txt (compare), "
         "hypotheses_notes.txt (hypotheses), precision_notes.txt (precision)")
     assert rows["precision"][0].startswith(
-        "precision_prompt = op notes_prompts from compare_notes.txt (compare)")
+        "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare)")
     assert rows["notes_prompts"][0] == "-"  # only model steps' prompts are traced
     # The text a plain op builds a prompt from is often a knob: named as one.
-    assert "precision_prompt = op notes_prompts from compare_notes.txt (compare), " \
-        "knob precision_task, knob hypotheses_task" in rows["precision"][0], rows["precision"][0]
+    assert "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), " \
+        "knob precision_task, knob hypotheses_task)" in rows["precision"][0], rows["precision"][0]
     _package, mode = registry.resolve(Path("."), "livemath/solver")
     assert "knob skill" in _rows(_section(mode().state_dict()))["solve"][0]
 

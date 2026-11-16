@@ -1678,7 +1678,7 @@ def _fit_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, 
 
 def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
     """What a model step's prompt and reads carry, each with what made it: a plain op's
-    output is followed one step back to what the op was built from."""
+    output is followed one step back to everything that op reads."""
     from refactory_dsh import snippet
     from refactory_dsh.nn.operators import made_by
     from refactory_dsh.nn.validate import consumed
@@ -1698,8 +1698,8 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
                     sources.append(f"{source} ({', '.join(by) or 'task input'})")
                 for knob in dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]):
                     sources.append(f"knob {knob}")
-            parts.append(f"{name} = op {', '.join(plain)} from "
-                         f"{', '.join(sources) or 'nothing'}")
+            parts.append(f"{name} (op {', '.join(plain)}, which reads "
+                         f"{', '.join(sources) or 'nothing'})")
         else:
             parts.append(f"{name} ({', '.join(made) or 'task input'})")
     return "; ".join(parts) or "-"
@@ -1710,7 +1710,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          knobs: Sequence[Mapping[str, Any]], *, protected: Sequence[str] = (),
                          limit: int = OPERATOR_FIT_CHARS) -> list[str]:
     """"What each step carries, and which operators apply to it": for each model step,
-    what its prompt carries (a plain op's output followed back to what it was built from),
+    what its prompt carries (a plain op's output followed back to what that op reads),
     and for each step which core operators, with their default arguments, apply as written
     and which are refused, with the refusal's own words. Computed by applying each on the
     request's state, so it is what an attempt would say. Information only; nothing when the
@@ -1754,8 +1754,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         return []
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
-            "prompt and reads carry (`= op X from ...`: a fact a plain op builds, from what it "
-            "was built from), and which core operators apply to each step as written with their "
+            "prompt and reads carry, each with the step that makes it (`(op X, which reads "
+            "...)`: a fact a plain op builds, and everything that op reads), and which core operators apply to each step as written with their "
             "default arguments (`split (replace)`: a split into one step of your own text that "
             "sees the task) and which are refused, in the refusal's own words. A step that "
             "alone reads a frozen knob is neither removed nor merged, and is split only when "
