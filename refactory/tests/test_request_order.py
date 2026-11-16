@@ -177,3 +177,52 @@ def test_one_contrasting_success_is_shown_per_success_finding():
     ids = re.findall(r"^### Item (\S+) — ", text, re.M)
     assert ids == ["f3", "f2", "p4", "p6"], ids
     assert text.count("(A success, for contrast.)") == 2
+
+
+def test_the_leaderboard_does_not_repeat_the_edits_the_attempt_lines_list():
+    """"Recent results" keeps id, parent, score, gate; each candidate's edits are said once,
+    in "What this run has already tried" -- unless that list left the candidate out."""
+    edit = {"op": "set_knob", "name": "level", "value": 7}
+    rows = [{"id": "c1", "parent": "seed", "score": 0.5, "structural": False, "exit_ok": True,
+             "edits": [edit], "own": 1, "epoch": 1}]
+    text = ProposalContext(leaderboard=rows, history=rows).render()
+    recent = text.split("## Recent results", 1)[1].split("\n## ", 1)[0]
+    assert "| edits |" not in recent and "level" not in recent
+    tried = text.split("## What this run has already tried", 1)[1].split("\n## ", 1)[0]
+    assert "level" in tried
+    other = [{**rows[0], "id": "c0"}]
+    text = ProposalContext(leaderboard=rows + other, history=rows).render()
+    recent = text.split("## Recent results", 1)[1].split("\n## ", 1)[0]
+    assert "| edits |" in recent and "(below)" in recent
+
+
+def test_earlier_reasoning_shows_only_the_latest_round_in_full():
+    """Older rounds are one line each in "What this run has already tried" and in memory;
+    only the latest round's reasoning is a block, however few entries there are."""
+    entries = [{"id": f"c{e}", "epoch": e, "score": 0.5, "edit": [], "rationale": f"WHY-{e}"}
+               for e in (1, 2, 2)]
+    text = "\n".join(base._reasoning_lines(entries))
+    assert "### c1 " not in text and "WHY-1" not in text
+    assert text.count("### c2 ") == 2 and text.count("WHY-2") == 2
+
+
+def test_an_attempt_line_shows_only_its_own_edits_not_its_ancestors():
+    """A lineage of three edits, two of them the candidate's own: its line shows those two
+    and not its parent's."""
+    lineage = [{"op": "set_knob", "name": f"knob_{k}", "value": k} for k in ("a", "b", "c")]
+    rows = [{"id": "c1", "parent": "c0", "score": 0.5, "structural": False, "exit_ok": True,
+             "edits": lineage, "own": 2, "epoch": 2}]
+    (line,) = base._attempt_lines(rows, {})
+    assert "knob_b" in line and "knob_c" in line and "knob_a" not in line
+
+
+def test_an_attempt_the_last_edit_s_section_shows_points_there_for_what_it_built():
+    rows = [{"id": "c1", "parent": "c0", "score": 0.5, "structural": True, "exit_ok": True,
+             "edits": [{"op": "loop", "step": "solve"}], "own": 1, "epoch": 1,
+             "built": ["+ loop(solve, judge j, max 2 -> 3 runs) BUILT-LINE"]},
+            {"id": "c2", "parent": "c0", "score": 0.4, "structural": True, "exit_ok": True,
+             "edits": [{"op": "loop", "step": "solve"}], "own": 1, "epoch": 1,
+             "built": ["+ loop(solve, judge k, max 1 -> 2 runs) OTHER-LINE"]}]
+    first, second = base._attempt_lines(rows, {}, ["c1"])
+    assert 'built: under "What the last edit changed"' in first and "BUILT-LINE" not in first
+    assert "OTHER-LINE" in second

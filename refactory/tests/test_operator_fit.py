@@ -499,3 +499,14 @@ def test_max_iterations_is_refused_on_the_written_out_loop():
     assert "'max_iterations'" in text
     assert text.index("'max_iterations'") < text.index("Or, written out"), text
 
+
+
+def test_a_fork_whose_inputs_cannot_be_read_says_why_and_warns(caplog):
+    from refactory_dsh.optim import base
+
+    with caplog.at_level("WARNING"):
+        cell = base._fork_inputs("split", {"graph": {"start": "x", "nodes": {}, "edges": "bad"}})
+    assert cell.startswith("unavailable: ") and "no inputs for fork split" in caplog.text
+    with caplog.at_level("WARNING"):
+        assert base._example_state([{"id": "a", "kind": "no-such-kind"}], []) is None
+    assert "operator examples use placeholders" in caplog.text

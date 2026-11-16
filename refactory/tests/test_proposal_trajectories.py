@@ -65,7 +65,7 @@ def test_a_failed_item_is_shown_in_full():
                      "Expected: C — Every bounded sequence has a convergent subsequence",
                      "Given: A", "Grader: MCQ=0: predicted 'A' but expected 'C'"):
         assert expected in section, expected
-    steps = [section.index(f"Step `{node}` output:") for node in ("compare", "precision", "decide")]
+    steps = [section.index(f"Step `{node}`") for node in ("compare", "precision", "decide")]
     assert steps == sorted(steps)
 
 
@@ -93,7 +93,7 @@ def test_steps_keep_the_order_a_forked_graph_ran_them(tmp_path, monkeypatch):
     assert [n["id"] for n in nodes] == sorted(n["id"] for n in nodes), "setup: describe sorts"
     text = ProposalContext(nodes=nodes, item_records=[record]).render()
     section = text[text.index("## Trajectories"):]
-    order = [section.index(f"Step `{node}` output:") for node in ran]
+    order = [section.index(f"Step `{node}`") for node in ran]
     assert order == sorted(order), "the order the pass ran, not alphabetical"
 
 

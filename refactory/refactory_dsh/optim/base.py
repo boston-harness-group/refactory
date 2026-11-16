@@ -911,6 +911,23 @@ class ProposalContext:
     #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
+    def _leaderboard_lines(self) -> list[str]:
+        """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
+        are in "What this run has already tried", one line each, so they are not repeated
+        here; only a candidate that list leaves out (it was truncated) has its edits here."""
+        listed = {c.get("id") for c in self.history}
+        missing = [c for c in self.leaderboard if c.get("id") not in listed]
+        gate = _gate_column(self.leaderboard)
+        return [_table(
+            ["id", "parent", "score", "structural", *(["edits"] if missing else []), *gate,
+             *(["cost per item"] if self.parsimony else [])],
+            [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
+              *([compact_edits(c.get("edits"), self.seed_knob_values)
+                 if c.get("id") not in listed else "(below)"] if missing else []),
+              *([c.get("gate", "")] if gate else []),
+              *([_cost_cell(c.get("cost_per_item"))] if self.parsimony else [])]
+             for c in self.leaderboard])]
+
     def _tried_lines(self) -> list[str]:
         """What this run has tried and how each attempt did: the recent results, the
         traces' numbers, the last edit's children and the reasoning behind recent
@@ -921,13 +938,7 @@ class ProposalContext:
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
                         selection=self.selection, population=self.population_parents),
             *_cost_note(self.parsimony),
-            _table(["id", "parent", "score", "structural", "edits", *_gate_column(self.leaderboard),
-                    *(["cost per item"] if self.parsimony else [])],
-                   [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
-                     compact_edits(c.get("edits"), self.seed_knob_values),
-                     *([c.get("gate", "")] if _gate_column(self.leaderboard) else []),
-                     *([_cost_cell(c.get("cost_per_item"))] if self.parsimony else [])]
-                    for c in self.leaderboard]),
+            *self._leaderboard_lines(),
             "",
             "## What this run has already tried",
             (
@@ -942,16 +953,12 @@ class ProposalContext:
                 " — older candidates omitted, so do not assume the list is complete"
                 if self.history_truncated
                 else ""
-            ),
-            _table(
-                ["id", "parent", "score", "structural", "ok", "edits", *_gate_column(self.history)],
-                [
-                    [c.get("id"), c.get("parent"), c.get("score"), c.get("structural"),
-                     c.get("exit_ok"), compact_edits(c.get("edits"), self.seed_knob_values),
-                     *([c.get("gate", "")] if _gate_column(self.history) else [])]
-                    for c in self.history[-16:]
-                ],
-            ),
+            )
+            + (". One line each, oldest first: the edits it added to its parent, what they "
+               "built (its first pipeline line, `+` new or `~` changed), its train score "
+               "beside its parent's, and the gate's decision." if self.history else ""),
+            *_attempt_lines(self.history, self.seed_knob_values,
+                            [str(p.get("child")) for p in self.edit_pairs or ()]),
             "",
             "## Evidence from the traces",
             _table(["what", "value"], _evidence_rows(_trace_rows(
@@ -1185,7 +1192,7 @@ def _node_reference(ctx: "ProposalContext") -> list[str]:
     specs = _node_specs(ctx.node_states, text_chars=ctx.node_spec_text_chars,
                         section_chars=ctx.node_spec_section_chars,
                         knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-                        person_gates=ctx.person_gates)
+                        person_gates=ctx.person_gates, refer=True)
     return ["## Each step in full, and the node schema", *specs, ""] if specs else []
 
 
@@ -1251,7 +1258,8 @@ def _feedback_sections(ctx: "ProposalContext") -> list[str]:
     from . import feedback, integrity, memory
 
     out: list[str] = []
-    for lines in (feedback.ledger_lines(ctx.ledger),
+    above = [str(e.get("id")) for e in reasoning_shown(ctx.reasoning or [])]
+    for lines in (feedback.ledger_lines(ctx.ledger, in_full=above),
                   feedback.step_review_lines(ctx.added_steps),
                   memory.request_lines(ctx.memory),
                   integrity.feedback_lines(ctx.integrity)):
@@ -1448,6 +1456,19 @@ def _fact_filled_knobs(node_states: Sequence[dict[str, Any]],
     return sorted(names)
 
 
+#: The lead of "Structural operators". It makes no claim about wiring: what a new step
+#: sees and where its output goes are each operator's own generated line
+#: (`nn.core_ops.OPERATORS`, `core_ops.REACHES`), the single source.
+STRUCTURAL_LEAD = (
+    "Each is one line: what kind of step (`agent`, `code` or `op`), where (a step id), and "
+    "its text (a prompt, or code). The system does the wiring, as each operator's line "
+    "below says. Ids, files and facts are generated; each text goes into a knob of its own "
+    "(`<id>__task`, `<id>__code`) for a later `set_knob`; the candidate says what was "
+    "wired. Every text has a default (the neighbour's, or a neutral line), and each "
+    "operator counts as one change. The written-out operations in the table above stay "
+    "for what these do not express.")
+
+
 def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                         edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                         code_nodes: bool = False,
@@ -1601,7 +1622,11 @@ def _example_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[s
         graph = Graph.from_state({"start": start,
                                   "nodes": {str(n["id"]): dict(n) for n in node_states},
                                   "edges": list(edges)})
-    except Exception:  # noqa: BLE001 - a graph that does not read back gets no examples
+    except Exception as exc:  # noqa: BLE001 - logged; the examples then use placeholders
+        import logging
+
+        logging.getLogger(__name__).warning("the request's graph does not read back, so the "
+                                            "operator examples use placeholders: %s", exc)
         return None
     return {"graph": graph.to_state(),
             "knobs": {k: {"value": v, "spec": {"kind": "str"}}
@@ -1839,7 +1864,8 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
     """What a new branch of ``fork_id`` can name in ``sees``: each fact or file there before
     the fork as the pipeline view writes it (``name@maker``), one built by a plain op that
     reads a text knob marked with it (it may carry that knob's instructions), and what
-    ``"task"`` gives there. Read from the graph; "-" when it does not read back."""
+    ``"task"`` gives there. Read from the graph; "unavailable: <why>" (and a warning) when
+    it does not read back."""
     from refactory_dsh import snippet
     from refactory_dsh.nn import core_ops
     from refactory_dsh.nn.graph import Graph
@@ -1849,11 +1875,11 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
         graph = Graph.from_state(state["graph"])
         there = core_ops._readable(graph, state, set(core_ops._available(graph).get(fork_id, set())))
         task = core_ops._task_inputs(graph, state) & there
-    except Exception as exc:  # noqa: BLE001 - a fork that does not read back gets no line
+    except Exception as exc:  # noqa: BLE001 - said in the row and logged, never raised
         import logging
 
-        logging.getLogger(__name__).debug("no inputs for fork %s: %s", fork_id, exc)
-        return "-"
+        logging.getLogger(__name__).warning("no inputs for fork %s: %s", fork_id, exc)
+        return f"unavailable: {type(exc).__name__}: {exc}"
     makers = made_by(graph)
     values = {k: (e or {}).get("value") for k, e in (state.get("knobs") or {}).items()}
 
@@ -1982,19 +2008,7 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
     lines = [
         "",
         "## Structural operators",
-        "Each is one line: what kind of step (`agent`, `code` or `op`), where (a step id), and "
-        "its text (a prompt, or code). The system does the wiring: a new step sees what its "
-        "neighbour sees plus the neighbour's outputs (`\"sees\"` names others: `\"task\"` "
-        "for the task's own inputs -- facts and files no model step made -- step ids for "
-        "their outputs, or single fact or file names, as the pipeline view writes them "
-        "before `@`, for that input alone); files reach a model step through a collect step that says a missing "
-        "file instead of failing; its output (a file and a fact named after its id) goes into "
-        "the prompt of the next model step after it (`\"to\"` names another step or prompt "
-        "knob); ids, files and facts are generated; each text goes into a knob of its own "
-        "(`<id>__task`, `<id>__code`) for a later `set_knob`; and the candidate says what was "
-        "wired. Every text has a default (the neighbour's, or a neutral line), and each "
-        "operator counts as one change. Steps after the change keep the names they read. The "
-        "written-out operations in the table above stay for what these do not express.",
+        STRUCTURAL_LEAD,
     ]
     state = _example_state(node_states, edges, knob_values)
     for name in chosen:
@@ -2529,53 +2543,24 @@ def _fenced(text: str) -> list[str]:
 
 def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
                 omissions: list[dict[str, Any]] | None = None) -> str:
-    """One train item: its verdict, what was expected and what it gave, then its input and
-    each step's output, each fenced (headings demoted) so nothing in them reads as a
-    section of the request.
+    """One train item (`optim.evidence.render_item`, as every call that reads items shows
+    one): its verdict, what was expected and what it gave, the grader's reason, its input
+    once, then each step's reply, each fenced (headings demoted) so nothing in them reads
+    as a section of the request.
 
     The steps are in the order the record holds them, which is the order the pass ran them
     (a fork merges its branches in branch order), never sorted by name. Texts are whole
     unless ``text_chars`` clips them (head and tail, marked; each cut in ``omissions``).
     """
-    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
+    from . import evidence
     from .analysts import metadata_text
 
-    item = record.get("id")
-
-    def cut(value: Any, step: str) -> str:
-        return _marked(value, text_chars, item=item, step=step, omissions=omissions)
-
-    declared = metadata_text(record)
-    lines = [f"### Item {item} — {_outcome(record)} (score {record.get('score')})"
-             + (f" — {declared}" if declared else "")]
-    expected = _expected(record)
-    said = [part for part in (
-        f"Expected: {cut(expected, 'expected')}" if expected else "",
-        f"Given: {cut(record.get('prediction'), 'prediction')}"
-        if record.get("prediction") is not None else "") if part]
-    if said:
-        lines.append("; ".join(said))
-    if record.get("fail_reason") and not record.get("passed"):
-        lines.append(f"Grader: {cut(record['fail_reason'], 'grader')}")
-    if record.get("error_text"):
-        lines.append(f"Error: {cut(record['error_text'], 'error')}")
-    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
-    choices = _choice_lines(meta.get("choices"))
-    if key is not None:
-        text = cut(meta[key], "input")
-        if choices:
-            text += "\n\nChoices:\n" + "\n".join(cut(line, "choices") for line in choices)
-        lines += [f"Input ({key}):", *_fenced(text)]
-    elif exchanges:
-        lines += ["Input (the first step's prompt):",
-                  *_fenced(cut(exchanges[0].get("prompt"), "input"))]
-    for exchange in exchanges:
-        node = exchange.get("node") or "agent"
-        lines += [f"Step `{node}` output:", *_fenced(cut(exchange.get("response"), str(node)))]
-    if not exchanges:
-        lines.append("(no step output was recorded)")
-    return "\n".join(lines)
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return evidence.render_item(
+        record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
+        expected=_expected(record), metadata=metadata_text(record),
+        choices=_choice_lines(meta.get("choices")), prompts=False,
+        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions)
 
 
 def _outcome(record: dict[str, Any]) -> str:
@@ -2740,7 +2725,7 @@ def _failure_kind(record: dict[str, Any]) -> str:
 
 def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, Any]] | None
                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
-    """The items shown whole when not all are, by rule, never by size: one failure per
+    """The items shown whole when not all fit, by rule, never by size: one failure per
     failure finding that cites a known item, in rank order (an item already chosen is not
     chosen twice); then one contrasting success per success finding -- or, with none, one
     per kind of failure shown (`_failure_kind`), the same declared kind first. Without
@@ -2791,9 +2776,10 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     """Every train item of the candidate being edited.
 
     When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
-    smaller ``budget``), every item is shown in full here. When not, readers went through them in groups of ``budget``
-    (``AutoresearchOptimizer``): their findings come first, then a table of every item,
-    then the items the rule picks (`_shown_items`), each whole. Train records only.
+    smaller ``budget``), every item is shown in full here. When not, readers went through
+    them in groups of ``budget`` (``AutoresearchOptimizer``): their findings come first,
+    then a table of every item, then the items the rule picks (`_shown_items`), each
+    whole. Train records only.
 
     ``analysed``: the analysts' ranked findings (`optim.analysts`), shown before this
     section, which take the readers' place: no reader findings are shown, and the
@@ -2819,15 +2805,16 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
         lines = header + [
-            "They do not fit one request in full. The analysts' ranked findings above "
-            "cover them; here is a table of every item, then as many items in full as fit."]
+            "Not every item is shown in full here. The analysts' ranked findings above "
+            "cover them all; here is a table of every item, then the items the rule below "
+            "picks, each whole."]
         findings = [{"failure_patterns": [f for f in analysed if f.get("source") != "success"],
                      "success_patterns": [f for f in analysed if f.get("source") == "success"]}]
     else:
         lines = header + [
-            f"They do not fit one request in full, so readers went through them in "
+            f"Not every item is shown in full here, so readers went through them in "
             f"{len(groups)} groups of whole items. Their findings come first, then a table "
-            "of every item, then as many items in full as fit."]
+            "of every item, then the items the rule below picks, each whole."]
     if analysed is None and findings is None:
         lines.append("(No reader went through these items for this request: read the "
                      "table and the items in full below.)")
@@ -2878,7 +2865,6 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
                        _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
-    # Items in full, chosen by rule (`_shown_items`) rather than cut, each whole.
     failing, passing, cited = _shown_items(items, findings)
     chosen = [*failing, *passing]
     if not chosen:
@@ -2912,12 +2898,14 @@ def _edit_fields(fields: Sequence[str]) -> str:
 
 
 def _node_spec(state: dict[str, Any], limit: int,
-               knob_values: Mapping[str, Any] | None = None) -> str:
+               knob_values: Mapping[str, Any] | None = None, *, refer: bool = False) -> str:
     """One node in full, as a node object to copy; long texts clipped, and said.
 
     A field bound to a knob shows the knob's current value (the stored field is not
-    what runs), and says to edit the knob. The bindings themselves, and the bound
-    knobs in ``knobs``, are left out: a copy must not bind the original's knob.
+    what runs), and says to edit the knob; with ``refer``, a pointer to the knob
+    (`nn.edits.KNOB_POINTER`), whose text the request shows once elsewhere. The bindings
+    themselves, and the bound knobs in ``knobs``, are left out: a copy must not bind the
+    original's knob.
     """
     knob_values = knob_values or {}
     bound = {str(pair[0]): str(pair[1]) for pair in state.get("field_bindings") or ()
@@ -2929,7 +2917,11 @@ def _node_spec(state: dict[str, Any], limit: int,
             continue
         if key == "knobs":
             value = [name for name in value or () if name not in bound.values()]
-        if key in bound:
+        if key in bound and refer:
+            # Its text is shown once, under "Each step's settings"; a node copied with
+            # the pointer gets that text (`nn.edits.KNOB_POINTER`).
+            value = nn_edits.KNOB_POINTER.format(knob=bound[key])
+        elif key in bound:
             value = knob_values.get(bound[key], value)
             notes.append(f"`{key}` is bound to the knob `{bound[key]}` and shows its current "
                          "value: edit the knob, not this field.")
@@ -3051,7 +3043,7 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
 def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC_TEXT_CHARS,
                 section_chars: int = NODE_SPEC_SECTION_CHARS,
                 knob_values: Mapping[str, Any] | None = None,
-                person_gates: bool = True) -> list[str]:
+                person_gates: bool = True, refer: bool = False) -> list[str]:
     """Each node of the edited graph in full, then the generated node schemas.
 
     A structure edit (``add_node``, ``insert_after``, ``split``, ...) needs a whole
@@ -3075,10 +3067,13 @@ def _node_specs(states: Sequence[dict[str, Any]], *, text_chars: int = NODE_SPEC
                  "are left out of these copies: a new agent node gets its own "
                  "`<id>__system_prompt` knob holding its `system_prompt_template` and its own "
                  "`<id>__task` knob holding its `prompt_template`, and a "
-                 "new node may not bind another node's knob. A clipped text (marked "
+                 "new node may not bind another node's knob. A field bound to a knob shows "
+                 "where its text is (`[the value of knob ...]`); a copy keeping that pointer, "
+                 "or an operation's 'text' that is that pointer, gets the knob's current "
+                 "text. A clipped text (marked "
                  "`[... N characters omitted ...]`) must not be copied: write your own, or "
                  "edit the knob; an edit carrying the marker is refused."]
-        lines += [_node_spec(state, limit, knob_values) for state in chosen]
+        lines += [_node_spec(state, limit, knob_values, refer=refer) for state in chosen]
         left = [str(s.get("id")) for s in ordered[len(chosen):]]
         if left:
             lines.append(f"({len(left)} node(s) not shown in full to stay within "
@@ -3171,9 +3166,6 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
             "same failure path."]
 
 
-#: The section comparing the last edit's child with its parent fits this many
-#: characters: changed items in full while they fit, the rest in a table.
-EDIT_CHANGE_BUDGET = 60000
 #: The most score changes in each direction listed for graded items.
 EDIT_CHANGE_GRADED = 3
 #: Entries in "Your earlier reasoning", and how much of each text it keeps.
@@ -3443,7 +3435,44 @@ def _text_diff(old: str, new: str) -> str:
     return DIFF_LINE_SEPARATOR.join(lines) or "(no change)"
 
 
-def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
+def _attempt_lines(history: Sequence[dict[str, Any]],
+                   seed_values: Mapping[str, Any] | None, below: Sequence[str] = ()) -> list[str]:
+    """Every attempt so far on one line, oldest first: what it added to its parent, its
+    first As-built line, its train score beside its parent's, the gate's decision. None is
+    dropped (so a failed attempt is not repeated); none repeats its ancestors' edits. One
+    in ``below`` ("What the last edit changed" shows what it built) points there."""
+    scores = {str(c.get("id")): c.get("score") for c in history}
+
+    def score(value: Any) -> str:
+        return f"{value:.4g}" if isinstance(value, (int, float)) else "n/a"
+
+    lines = []
+    for c in history:
+        own = c.get("own")
+        built = list(c.get("built") or ())
+        parent = c.get("parent")
+        lines.append(
+            f"- `{c.get('id')}` from `{parent or '(start)'}`"
+            + (f" (epoch {c['epoch']})" if c.get("epoch") is not None else "") + ": "
+            + compact_edits(c.get("edits"), seed_values,
+                            own=own if isinstance(own, int) else None)
+            + ((" | built: under \"What the last edit changed\""
+                if str(c.get("id")) in below else
+                f" | built {_clip(built[0], AS_BUILT_LINE_CHARS)}"
+                + (f" (+{len(built) - 1} more)" if len(built) > 1 else "")) if built else "")
+            + f" | train {score(c.get('score'))}"
+            + (f" (parent {score(scores.get(str(parent)))})" if parent in scores else "")
+            + ("" if c.get("exit_ok", True) else " | its run failed")
+            + (f" | gate {c['gate']}" if c.get("gate") else ""))
+    return lines
+
+
+#: How much of an attempt's first As-built line its history line shows.
+AS_BUILT_LINE_CHARS = 240
+
+
+def compact_edits(edits: Any, before: Mapping[str, Any] | None = None,
+                  own: int | None = None) -> str:
     """A candidate's edits (its whole lineage, oldest first) for the history table,
     without whole values: each edit's op and what it names; a text ``set_knob`` as
     old -> new length and a bounded diff against the value it replaced (the previous
@@ -3452,10 +3481,18 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None) -> str:
     text (prompts, code) sharing ``HISTORY_EDIT_CHARS`` characters (``fit_edit_text``).
     A diff, value or patch is at most ``HISTORY_EDIT_CHARS`` characters plus a "(N more
     chars)" marker. The "Each step's settings" table already shows the current
-    values in full."""
+    values in full. ``own``: only the last ``own`` edits are shown."""
     values: dict[str, Any] = dict(before or {})
     parts: list[str] = []
-    for edit in list(edits) if isinstance(edits, (list, tuple)) else [edits]:
+    listed = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    # ``own``: only the last ``own`` edits are shown (the candidate's own, its ancestors'
+    # are on their own lines); the earlier ones still set the values a diff compares with.
+    start = len(listed) - own if own is not None else 0
+    for index, edit in enumerate(listed):
+        if index < start:
+            if isinstance(edit, dict) and edit.get("op") == "set_knob":
+                values[edit.get("name")] = edit.get("value", _UNKNOWN)
+            continue
         if not isinstance(edit, dict):
             parts.append(_bounded(json.dumps(edit, default=str)))
             continue
@@ -3566,15 +3603,61 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
         return said
     return [*said, "As built (its pipeline lines, new + or changed ~, read from the "
             "candidate's graph; where the proposal's words say otherwise, this is what ran):",
-            "```text", *built, "```"]
+            "```text", *built, "```",
+            *(["Check the description above against As built."] if said else [])]
 
 
-def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET,
+def _pair_block(parent: dict[str, Any], child: dict[str, Any],
+                omissions: list[dict[str, Any]] | None = None) -> str:
+    """One changed item, parent beside child, each whole: the parent's trajectory, then
+    the child's verdict and each of its steps' replies -- a reply the same as the parent's
+    at that step and attempt (a step a loop sent back runs more than once) is said so
+    rather than shown again, and the input (the same item) is not repeated. Each text cut
+    (over ``ITEM_TEXT_MAX``) is recorded in ``omissions``."""
+    from . import evidence
+
+    def cut(text: Any, step: str) -> str:
+        return evidence.clip(text, ITEM_TEXT_MAX, item=child.get("id"), step=step,
+                             omissions=omissions)
+
+    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions), "Child:"]
+    replies: dict[tuple[str, int], str] = {}
+    runs: dict[str, int] = {}
+    for exchange in parent.get("exchanges") or ():
+        node = str(exchange.get("node"))
+        runs[node] = runs.get(node, 0) + 1
+        replies[(node, runs[node])] = str(exchange.get("response") or "").strip()
+    said = [f"{_outcome(child)} (score {child.get('score')})"]
+    if child.get("prediction") is not None:
+        said.append(f"Given: {cut(child.get('prediction'), 'prediction')}")
+    if child.get("fail_reason") and not child.get("passed"):
+        said.append(f"Grader: {cut(child['fail_reason'], 'grader')}")
+    if child.get("error_text"):
+        said.append(f"Error: {cut(child['error_text'], 'error')}")
+    lines.append("; ".join(said))
+    exchanges = [e for e in child.get("exchanges") or () if isinstance(e, Mapping)]
+    attempts: dict[str, int] = {}
+    for number, exchange in enumerate(exchanges, 1):
+        node = str(exchange.get("node") or "agent")
+        attempts[node] = attempts.get(node, 0) + 1
+        reply = str(exchange.get("response") or "").strip()
+        lines.append(f"##### Step `{node}` ({number} of {len(exchanges)})")
+        if replies.get((node, attempts[node])) == reply:
+            lines.append("Reply: same as the parent's"
+                         + (f" (its run {attempts[node]} of that step)."
+                            if runs.get(node, 0) > 1 or attempts[node] > 1 else "."))
+        else:
+            lines += ["Reply:", *evidence.fenced(cut(reply, node))]
+    return "\n".join(lines)
+
+
+def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                        omissions: list[dict[str, Any]] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
-    against its parent, on train items only. Every child is listed with its counts; the
-    changed items' trajectories share ``budget`` child by child in turn, so the first
-    child's cannot crowd out a sibling's."""
+    against its parent, on train items only. Every child is listed with its counts, and
+    every changed item (fixed, broken, and the largest score rises and drops) is shown
+    whole, parent beside child (`_pair_block`); size is never a reason to leave one
+    out."""
     if not pairs:
         return []
     lines = ["## What the last edit changed",
@@ -3585,10 +3668,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
              "child's epoch, so the same seed, when it was scored then (the candidate you edit "
              "is re-scored each epoch); a pair scored with different seeds is marked, and some "
              "of its changes may be run-to-run noise."]
-    per_child: list[list[tuple[str, list[Any]]]] = []
     for pair in pairs:
-        own: list[tuple[str, list[Any]]] = []
-        per_child.append(own)
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", describe_edits(pair.get("edit"))]
@@ -3622,30 +3702,19 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
         for kind, items in (("fixed", change["fixed"]), ("broken", change["broken"]),
                             ("score rose", change["up"]), ("score dropped", change["down"])):
             for item in items:
-                block = (f"#### Item {item} -- {kind} (child {pair.get('child')})\nParent:\n"
-                         + _item_block(parent[item], budget // 2, omissions)
-                         + "\nChild:\n" + _item_block(child[item], budget // 2, omissions))
-                own.append((block, [pair.get("child"), item, kind, _outcome(parent[item]),
-                                    parent[item].get("score"), _outcome(child[item]),
-                                    child[item].get("score")]))
-    # Child by child in turn: each child's first changed item, then each one's second.
-    turns = [entry for depth in range(max((len(own) for own in per_child), default=0))
-             for own in per_child if depth < len(own) for entry in [own[depth]]]
-    used = len("\n".join(lines))
-    rest: list[list[Any]] = []
-    for block, row in turns:
-        # A block that does not fit goes to the table; a later, shorter one that does
-        # still gets its trajectories.
-        if used + len(block) + 2 > budget:
-            rest.append(row)
-            continue
-        lines += ["", block]
-        used += len(block) + 2
-    if rest:
-        lines += ["", "The other changed items (their trajectories did not fit):",
-                  _table(["child id", "item", "change", "parent", "parent score", "child",
-                          "child score"], rest)]
+                lines += ["", f"#### Item {item} -- {kind} (child {pair.get('child')})",
+                          _pair_block(parent[item], child[item], omissions)]
     return lines
+
+
+def reasoning_shown(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The reasoning entries 'Your earlier reasoning' shows in full: the latest round's.
+    Older ones are in "What this run has already tried", one line each, and in the memory
+    note, not repeated there."""
+    latest = max((e.get("epoch") for e in entries if isinstance(e.get("epoch"), int)),
+                 default=None)
+    recent = [e for e in entries if latest is None or e.get("epoch") == latest]
+    return list(recent)[-REASONING_ENTRIES:]
 
 
 def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = ()) -> list[str]:
@@ -3658,7 +3727,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
     lines = ["## Your earlier reasoning and what happened",
              "Recent candidates on the line you edit, and recently refused ones, with what you "
              "predicted when you proposed them and what came of it."]
-    for entry in list(entries)[-REASONING_ENTRIES:]:
+    for entry in reasoning_shown(entries):
         outcome = ", ".join(part for part in (
             f"gate {entry['gate']}" if entry.get("gate") else "",
             f"train score {entry.get('score')}",

@@ -63,6 +63,7 @@ import json
 import random
 from typing import Any, Mapping, Sequence
 
+from . import evidence
 from .analysts import ANALYST_ROOM, TEXT_FLOOR, fit_item, item_cap, item_text
 from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table
 
@@ -317,6 +318,23 @@ def _answer(record: Mapping[str, Any]) -> str:
     return "N/A" if value in (None, "") else _clip(value, 300)
 
 
+def _labels(same: bool) -> tuple[str, str]:
+    return ("First rollout", "Second rollout") if same else ("Start of epoch", "Now")
+
+
+def _shown(side: str, same: bool) -> dict[str, Any]:
+    """How one side's trace is rendered: headed by its rollout, so a "same as" reference
+    says which; the input and the expected answer only on the first side (the second is
+    the same item)."""
+    before, after = _labels(same)
+    return ({"label": before, "heading": "#####"} if side == "prev" else
+            {"label": after, "heading": "#####", "show_input": False, "show_expected": False})
+
+
+def _trace(entry: Mapping[str, Any], side: str, same: bool) -> str:
+    return item_text(entry[side], **_shown(side, same))
+
+
 def _side_line(label: str, record: Mapping[str, Any]) -> str:
     return (f"- {label}: {'PASS' if record.get('passed') else 'FAIL'} "
             f"(score {record.get('score')}) -- answer: {_answer(record)}")
@@ -346,14 +364,17 @@ def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
     head, tail = _frame(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
                         changes=changes, previous_note=previous_note, entries=entries,
                         tried=tried, objective=objective)
-    wholes = {(e["id"], side): item_text(e[side]) for e in shown for side in ("prev", "curr")}
+    wholes = {(e["id"], side): _trace(e, side, same) for e in shown for side in ("prev", "curr")}
     blank = _comparison(entries, {key: "" for key in wholes}, same)
     fixed = len(system) + len(head) + len(blank) + len(tail)
     cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
     texts = {key: (text if cap is None else fit_item(
-        next(e for e in shown if e["id"] == key[0])[key[1]], cap, ROOM_NAME))
+        next(e for e in shown if e["id"] == key[0])[key[1]], cap, ROOM_NAME,
+        **_shown(key[1], same)))
         for key, text in wholes.items()}
     clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
+    if cap is None:  # clipped traces keep the one length `item_cap` chose
+        texts = _deduped(entries, texts, same)
     return head + _comparison(entries, texts, same) + tail, {
         "items": len(clipped),
         "chars": sum(max(0, len(whole) - len(text)) for whole, text in clipped)}
@@ -369,9 +390,7 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
             + f"## Longitudinal comparison (the same {len(entries)} train items, "
             + ("two rollouts" if same else "two pipelines") + ")\n"
             f"Start of the epoch: {prev.get('rollout')}. Now: {curr.get('rollout')}. Each "
-            "trace is the item in full: its input, every step's input and output in the "
-            "order the steps ran, the expected answer, the prediction and the grader's "
-            "feedback.\n\n")
+            f"trace is the item in full: {evidence.TRACE_FORM}.\n\n")
     return head, f"\n\n## Answer\n{answer_text()}"
 
 
@@ -416,6 +435,20 @@ def _pipelines_text(*, prev: Mapping[str, Any], curr: Mapping[str, Any], same: b
     return pipelines
 
 
+def _deduped(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, str], str],
+             same: bool) -> dict[tuple[str, str], str]:
+    """``texts`` with each instruction text an earlier trace in the comparison's order
+    showed said as "same as" (`optim.evidence.dedup`)."""
+    from .evidence import dedup
+
+    order = [(e["id"], side) for name, traces, _label in CATEGORIES if traces
+             for e in entries if e["category"] == name for side in ("prev", "curr")
+             if (e["id"], side) in texts]
+    rest = [key for key in texts if key not in order]
+    keys = order + rest
+    return dict(zip(keys, dedup([texts[key] for key in keys])))
+
+
 def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, str], str],
                 same: bool) -> str:
     """SkillOpt's ``format_comparison_text`` (slow_update.py:287-349) over the pairs."""
@@ -425,7 +458,7 @@ def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, 
              f"- Regressed (right -> wrong): {tally['regressed']}\n"
              f"- Persistent failures (wrong -> wrong): {tally['persistent_fail']}\n"
              f"- Stable successes (right -> right): {tally['stable_success']}"]
-    before, after = ("First rollout", "Second rollout") if same else ("Start of epoch", "Now")
+    before, after = _labels(same)
     for name, traces, label in CATEGORIES:
         listed = [e for e in entries if e["category"] == name]
         if not listed:
@@ -434,6 +467,12 @@ def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, 
         lines = [f"### {label}"]
         for e in listed:
             prev, curr = e["prev"], e["curr"]
+            if traces:
+                # Each trace says its verdict, answer and grader's reason, and the first
+                # the task's input: the heading names the item only.
+                lines += ["", f"#### Task {e['id']}{_meta_text(curr)}",
+                          texts.get((e["id"], "prev"), ""), texts.get((e["id"], "curr"), "")]
+                continue
             lines += ["", f"#### Task {e['id']}: {_task_text(curr, prev, e['id'])}"
                           f"{_meta_text(curr)}",
                       _side_line(before, prev), _side_line(after, curr)]
@@ -441,9 +480,6 @@ def _comparison(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, 
                 lines.append(f"- Reason now: {_clip(_reason(curr), 600)}")
             if _reason(prev) and not prev.get("passed"):
                 lines.append(f"- Reason at the start: {_clip(_reason(prev), 600)}")
-            if traces:
-                lines += ["", f"**Trace ({before.lower()}):**", texts.get((e["id"], "prev"), ""),
-                          "", f"**Trace ({after.lower()}):**", texts.get((e["id"], "curr"), "")]
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
@@ -543,7 +579,7 @@ class MemoryRequest:
     def _whole(self, entry: Mapping[str, Any], side: str) -> str:
         key = (str(entry["id"]), side)
         if key not in self._texts:
-            self._texts[key] = item_text(entry[side])
+            self._texts[key] = _trace(entry, side, self.same)
         return self._texts[key]
 
     def parts(self, room: int = MEMORY_ROOM) -> list[list[Mapping[str, Any]]] | None:
@@ -602,10 +638,9 @@ class MemoryRequest:
                 f"{self.curr.get('rollout')}. Over all {len(self.entries)} items: "
                 f"{_tally_text(self.entries)}. The comparison did not fit one request, so "
                 "each part is read by its own call; this part holds the items below, and "
-                "its summary counts only them. Each trace is the item in full: its input, "
-                "every step's input and output in the order the steps ran, the expected "
-                "answer, the prediction and the grader's feedback.\n\n"
-                + _comparison(part, texts, self.same)
+                "its summary counts only them. Each trace is the item in full: "
+                f"{evidence.TRACE_FORM}.\n\n"
+                + _comparison(part, _deduped(part, texts, self.same), self.same)
                 + f"\n\n## Answer\n{compare_answer_text()}")
 
     def compare_prompt(self, part: Sequence[Mapping[str, Any]], index: int, total: int,
@@ -621,7 +656,8 @@ class MemoryRequest:
             part, index, total, {key: "" for key in wholes}))
         cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
         by_id = {str(e["id"]): e for e in traced}
-        texts = {key: (text if cap is None else fit_item(by_id[key[0]][key[1]], cap, ROOM_NAME))
+        texts = {key: (text if cap is None else fit_item(by_id[key[0]][key[1]], cap, ROOM_NAME,
+                                                         **_shown(key[1], self.same)))
                  for key, text in wholes.items()}
         clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
         return self._compare_text(part, index, total, texts), {

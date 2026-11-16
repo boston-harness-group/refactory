@@ -214,6 +214,13 @@ Each of these happened, and the shape of the code is the response.
   document names a module that does not import.
 - The architecture overview's rule table is checked against `nn.RULES`, so adding
   a rule means updating the overview too.
+- A pull request that changes what the optimizer's calls are sent (the proposal, the
+  analysts and their merges, memory and its comparison, the step review) includes the
+  before/after size table from `uv run python -m refactory_dsh.tools.request_sizes
+  <run dir> ...` on a run (or a replay of one) made before the change and one made
+  after it.
+  `tests/test_request_guardrails.py` fails on repeated text and on sections out of
+  order, never on size: a request may grow when it says more.
 - Prose belongs in the overview and the tutorials. A comment belongs where the
   reason for the code is local to it.
 

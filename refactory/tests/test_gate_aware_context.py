@@ -66,11 +66,10 @@ def test_rows_and_the_request_carry_the_gates_decision_and_no_val_score(tmp_path
     assert "You edit the candidate marked `current`" in text
     assert "`rejected` candidate was not shown better on validation" in text
     assert "did not generalise" not in text
-    assert "| id | parent | score | structural | ok | edits | gate |" in text
-    assert "| id | parent | score | structural | edits | gate |" in text
-    row6 = next(line for line in text.splitlines()
-                if line.startswith("| ") and history[6]["id"] in line and "rejected" in line)
-    assert row6.rstrip().endswith("| rejected |")
+    # What this run has tried: one line per attempt, ending with the gate's decision.
+    tried = text[text.index("## What this run has already tried"):]
+    row6 = next(line for line in tried.splitlines() if line.startswith(f"- `{history[6]['id']}`"))
+    assert row6.rstrip().endswith("| gate rejected")
     # The tried-line gives the current candidate's train score, labelled as train.
     assert f"train score of the validation gate's current candidate {history[7]['score']:.6g}" in text
     for score in loop._gate().cache.values():
@@ -192,7 +191,7 @@ def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkey
     assert f"### Child {ids[6]} of {ids[7]} -- gate: rejected" in section
     assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
     assert f"#### Item t5 -- broken (child {ids[6]})\nParent:\n### Item t5 — passed" in section
-    assert "Child:\n### Item t5 — answered wrong" in section
+    assert "Child:\nanswered wrong (score" in section
     assert 'name="level" -- value: 6' in section and "different seeds" in section
     assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
 
@@ -226,51 +225,42 @@ def test_graded_changes_list_the_largest_moves_each_way():
     assert change["up"] == ["i7", "i6", "i5"] and change["down"] == ["i0", "i1", "i2"]
 
 
-def test_the_comparison_stays_within_its_budget():
-    from refactory_dsh.optim.base import EDIT_CHANGE_BUDGET, _edit_change_lines
+def test_every_changed_item_is_shown_whole_parent_beside_child():
+    """Twenty broken items with long replies: each is shown whole -- size is no reason to
+    leave one out -- the input once, and a reply the child kept said as the parent's."""
+    from refactory_dsh.optim.base import _edit_change_lines
 
-    def big(item: str, passed: bool) -> dict[str, Any]:
+    def rec(item: str, passed: bool, reply: str) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
-                "exchanges": [{"node": "s", "prompt": "p", "response": "z" * 9000}]}
+                "metadata": {"question": f"QUESTION {item}"},
+                "exchanges": [{"node": "s", "prompt": "p", "response": f"KEPT {item}"},
+                              {"node": "t", "prompt": "p", "response": reply}]}
 
     pair = {"child": "c", "parent": "p", "edit": [],
-            "parent_records": [big(f"i{k}", True) for k in range(20)],
-            "child_records": [big(f"i{k}", False) for k in range(20)]}
-    text = "\n".join(_edit_change_lines([pair]))
-    assert len(text) <= EDIT_CHANGE_BUDGET + 3000
-    assert "The other changed items (their trajectories did not fit)" in text
-    assert "| c | i19 | broken |" in text
-
-
-def test_a_block_that_does_not_fit_leaves_room_for_later_ones_that_do():
-    """The first changed item is too long for what is left; the next, short one still
-    gets its trajectories rather than following it into the table."""
-    from refactory_dsh.optim.base import EDIT_CHANGE_BUDGET, _edit_change_lines
-
-    def rec(item: str, passed: bool, size: int) -> dict[str, Any]:
-        return {"id": item, "passed": passed, "score": float(passed),
-                "exchanges": [{"node": "s", "prompt": "p", "response": f"OUT-{item} " + "z" * size}]}
-
-    sizes = {"i0": EDIT_CHANGE_BUDGET // 3, "i1": EDIT_CHANGE_BUDGET // 3, "i2": 50}
-    pair = {"child": "c", "parent": "p", "edit": [],
-            "parent_records": [rec(item, False, size) for item, size in sizes.items()],
-            "child_records": [rec(item, True, size) for item, size in sizes.items()]}
-    text = "\n".join(_edit_change_lines([pair]))
-    assert "#### Item i0 -- fixed" in text and "| c | i1 | fixed |" in text
-    assert "#### Item i2 -- fixed" in text and "| c | i2 |" not in text
+            "parent_records": [rec(f"i{k}", True, f"OLD-{k} " + "z" * 9000) for k in range(20)],
+            "child_records": [rec(f"i{k}", False, f"NEW-{k} " + "y" * 9000) for k in range(20)]}
+    omissions: list = []
+    text = "\n".join(_edit_change_lines([pair], omissions=omissions))
+    for k in range(20):
+        assert f"#### Item i{k} -- broken (child c)" in text
+        assert f"OLD-{k} " + "z" * 9000 in text and f"NEW-{k} " + "y" * 9000 in text
+        assert text.count(f"QUESTION i{k}\n") == 1 and text.count(f"KEPT i{k}\n") == 1
+    assert text.count("Reply: same as the parent's.") == 20
+    assert omissions == [] and "did not fit" not in text
 
 
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
-    """The line to the edited candidate and the latest rejected child, each with
-    the rationale, prediction and diagnosis it was proposed with, the gate's
-    decision, train score and fixed/broken counts; kept across a resume."""
+    """The latest round's proposals in full -- the rationale, prediction and diagnosis
+    each was proposed with, the gate's decision, train score and fixed/broken counts --
+    and an older round's as one line with its rationale (memory summarises the rest);
+    kept across a resume."""
     loop, proposer = _run_reasoning(tmp_path, monkeypatch)
     text = proposer.contexts[2].render()
     section = text[text.index("## Your earlier reasoning"):]
     ids = {_level(c): c.id for c in loop.population}
-    assert f"### {ids[7]} (proposed in epoch 1) -- gate current" in section
     assert f"### {ids[6]} (proposed in epoch 2) -- gate rejected" in section
-    for marker in ("RATIONALE-1", "PREDICTION-1", "DIAGNOSIS-1", "RATIONALE-2", "DIAGNOSIS-2"):
+    assert f"### {ids[7]} " not in section, "an older round is one line, not a block"
+    for marker in ("RATIONALE-2", "PREDICTION-2", "DIAGNOSIS-2", "RATIONALE-1"):
         assert marker in section, marker
     assert "1 broken vs its parent" in section and "0 fixed" in section
 
@@ -546,5 +536,38 @@ def test_the_reasoning_section_shows_a_rejected_childs_item_errors(tmp_path, mon
     block = text[text.index(f"### {ids[6]} "):]
     assert block.index("Item errors: 2 of") < block.index("Edits:")
     assert "- 2 x SnippetError at node meta_gate; first (item " in block
-    seven_block = text[text.index(f"### {ids[7]} "):text.index(f"### {ids[6]} ")]
-    assert "Item errors" not in seven_block
+    assert text.count("Item errors") == 1, "the current candidate 7 shows none"
+
+
+def test_a_rationale_shown_in_full_is_not_repeated_in_every_change_so_far(tmp_path, monkeypatch):
+    """The latest round's rationale is in full under "Your earlier reasoning"; its row in
+    "Every change so far, by kind" points there; an older round's row keeps its own."""
+    _loop_, proposer = _run_reasoning(tmp_path, monkeypatch)
+    text = proposer.contexts[2].render()
+    assert text.count("RATIONALE-2") == 1
+    ledger = text[text.index("## Every change so far, by kind"):].split("\n## ", 1)[0]
+    assert '(in full under "Your earlier reasoning")' in ledger and "RATIONALE-1" in ledger
+
+
+def test_a_changed_item_s_cut_texts_are_recorded_and_replies_match_by_attempt():
+    """In "What the last edit changed": a child's answer, grader reason or reply over
+    ITEM_TEXT_MAX is cut, marked and recorded; a reply the child kept is "same as the
+    parent's" only at the same step and attempt (a loop's retries are told apart)."""
+    from refactory_dsh.optim.base import ITEM_TEXT_MAX, _pair_block
+
+    huge = "H" * (ITEM_TEXT_MAX + 500)
+    parent = {"id": "i1", "passed": True, "score": 1.0, "prediction": "B",
+              "exchanges": [{"node": "s", "prompt": "p", "response": "FIRST"},
+                            {"node": "s", "prompt": "p", "response": "SECOND"}]}
+    child = {"id": "i1", "passed": False, "score": 0.0, "prediction": huge,
+             "fail_reason": huge,
+             "exchanges": [{"node": "s", "prompt": "p", "response": "SECOND"},
+                           {"node": "s", "prompt": "p", "response": "SECOND"},
+                           {"node": "t", "prompt": "p", "response": huge}]}
+    omissions: list = []
+    block = _pair_block(parent, child, omissions)
+    assert {o["step"] for o in omissions} == {"prediction", "grader", "t"}, omissions
+    assert block.count("chars omitted]") == 3
+    steps = block.split("Child:", 1)[1].split("##### Step ")[1:]
+    assert "SECOND" in steps[0] and "same as" not in steps[0], "run 1 differs from run 1"
+    assert "same as the parent's (its run 2 of that step)." in steps[1]

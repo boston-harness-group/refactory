@@ -173,9 +173,10 @@ def test_an_analyst_reads_every_steps_input_and_output_of_a_multi_node_graph():
     records = [_rec("t1", False), _rec("t2", True)]
     AutoresearchOptimizer(client).propose(_ctx(records), 1, [])
     failure = client.of((analysts.FAILURE_SYSTEM,))[0]
-    for text in ("QUESTION t1", "#### Step `draft` (1 of 2)", "Input it was given:\nDRAFT-IN t1",
-                 "Output:\nDRAFT-OUT t1", "#### Step `final` (2 of 2)", "FINAL-IN t1",
-                 "FINAL-OUT t1", "Expected: GOLD t1", "Predicted: PRED t1", "Grader: GRADER t1",
+    for text in ("QUESTION t1", "#### Step `draft` (1 of 2)",
+                 "Rest of its prompt:\n```\nDRAFT-IN t1\n```", "Reply:\n```\nDRAFT-OUT t1\n```",
+                 "#### Step `final` (2 of 2)", "FINAL-IN t1", "FINAL-OUT t1",
+                 "Expected: GOLD t1; Given: PRED t1", "Grader: GRADER t1",
                  "### Item t1 — answered wrong (score 0.0)"):
         assert text in failure, text
     assert failure.index("DRAFT-OUT t1") < failure.index("FINAL-IN t1"), "in the order they ran"
@@ -194,7 +195,7 @@ def test_a_long_item_has_its_step_inputs_clipped_before_its_outputs():
     big = _rec("t1", False, steps={"a": ("I" * 50000, "O" * 3000), "b": ("J" * 50000, "P" * 3000)})
     text = analysts.fit_item(big, 20000)
     assert len(text) <= 20000 and "O" * 3000 in text and "P" * 3000 in text
-    assert "characters omitted" in text and text.endswith("to fit the analyst's room.)")
+    assert "chars omitted" in text and text.endswith("to fit the analyst's room.)")
     tight = analysts.fit_item(big, 6000)
     assert len(tight) <= 6000 and "O" * 3000 not in tight
     assert analysts.fit_item(_rec("t2", True), 20000) == analysts.item_text(_rec("t2", True))
@@ -685,7 +686,7 @@ def test_every_model_proposer_strategy_runs_the_stage_on_real_traces(
     analyst_prompts = [p for s, p in seen if s in ANALYST_SYSTEMS]
     assert analyst_prompts
     for prompt in analyst_prompts:
-        assert "#### Step `solve` (1 of 1)\nInput it was given:\n" in prompt
+        assert "#### Step `solve` (1 of 1)\n" in prompt and "Reply:\n```" in prompt
     for _system, prompt in seen:
         for item in (*VAL, *TEST):
             assert f"Item {item} " not in prompt and f'"{item}"' not in prompt, item
@@ -877,7 +878,10 @@ def test_a_proposer_that_asks_no_model_is_refused_and_a_custom_strategy_warned(
 def _long(item: str, chars: int, passed: bool = False) -> dict[str, Any]:
     """An item of four steps whose texts add up to about ``chars`` characters."""
     each = chars // 8
-    return _rec(item, passed, steps={f"s{n}": ("I" * each, "O" * each) for n in range(4)})
+    # Each text its own (a step's prompt does not repeat another's), so the item stays
+    # this long when a request says a repeated instruction once.
+    return _rec(item, passed, steps={f"s{n}": (f"{item}-{n} " + "I" * each,
+                                               f"{item}-{n} " + "O" * each) for n in range(4)})
 
 
 def test_a_small_batch_of_long_traces_is_not_clipped():
@@ -887,7 +891,7 @@ def test_a_small_batch_of_long_traces_is_not_clipped():
     group = [_long(f"f{i}", 120000) for i in range(3)]
     prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
     assert clip == {"items": 0, "chars": 0}
-    assert "characters omitted" not in prompt
+    assert "chars omitted" not in prompt
     assert all(analysts.item_text(record) in prompt for record in group)
     assert len(prompt) <= analysts.ANALYST_ROOM
 
@@ -900,9 +904,9 @@ def test_a_batch_over_the_room_has_its_longest_items_clipped_to_one_length():
     assert len(prompt) <= analysts.ANALYST_ROOM
     blocks = {item: prompt.split(f"### Item {item} ")[1].split("\n\n### Item ")[0]
               .split("\n\n## Answer")[0] for item in ("s0", "f6", "f7")}
-    assert "characters omitted" not in blocks["s0"], "the short items stay whole"
+    assert "chars omitted" not in blocks["s0"], "the short items stay whole"
     assert all(analysts.item_text(r) in prompt for r in shorts)
-    assert "characters omitted" in blocks["f6"] and "characters omitted" in blocks["f7"]
+    assert "chars omitted" in blocks["f6"] and "chars omitted" in blocks["f7"]
     # Both long items are cut to the same length (within one clipped text's rounding),
     # and together they use the room the short ones leave.
     assert abs(len(blocks["f6"]) - len(blocks["f7"])) <= 200
@@ -936,7 +940,7 @@ def test_clipped_items_and_characters_are_journaled_and_reported():
         r["id"] for r in group)
     for prompt in client.of((analysts.FAILURE_SYSTEM,)):
         if _items(prompt) != ["f0"]:
-            assert "characters omitted" not in prompt
+            assert "chars omitted" not in prompt
             assert all(analysts.item_text(r) in prompt for r in group if r["id"] in _items(prompt))
     assert entry["clipped_items"] == batch["clipped"] == 1
     assert entry["clipped_chars"] == batch["clipped_chars"] > 100000
@@ -965,7 +969,7 @@ def test_long_traces_are_split_across_batches_whole_never_cut(tmp_path):
     prompts = client.of((analysts.FAILURE_SYSTEM,))
     assert len(prompts) > 1, "more than one call"
     for prompt in prompts:
-        assert "characters omitted" not in prompt and "clipped head and tail" not in prompt
+        assert "chars omitted" not in prompt and "clipped head and tail" not in prompt
         assert len(analysts.FAILURE_SYSTEM) + len(prompt) <= analysts.ANALYST_ROOM
     read = [item for prompt in prompts for item in _items(prompt)]
     assert sorted(read) == sorted(r["id"] for r in group), "every item exactly once"
@@ -1122,7 +1126,7 @@ def test_an_analyst_too_long_for_the_context_is_retried_once_at_half_its_length(
     optimizer.propose(_ctx(group), 1, [])
     first, second = client.of((analysts.FAILURE_SYSTEM,))
     assert len(second) <= len(first) // 2 < len(first), "re-made at half the length"
-    assert "characters omitted" in second and "characters omitted" not in first
+    assert "chars omitted" in second and "chars omitted" not in first
     # Re-clipped by the same water-filling: every item cut to one length.
     blocks = [second.split(f"### Item f{i} ")[1].split("\n\n### Item ")[0]
               .split("\n\n## Answer")[0] for i in range(4)]

@@ -11,9 +11,8 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   item whole would take its call past ``ANALYST_ROOM`` (`batches`, `packer`): no item
   is cut to fit, the evidence is split across more calls. One call per batch. Each analyst
   sees the pipeline (its nodes, edges, each node in full and every setting's value, as
-  SkillOpt's analyst sees the current skill) and each item's full trace: its input,
-  every step's input and output in the order they ran, the expected answer, the
-  prediction, the score and the grader's feedback. It writes at most
+  SkillOpt's analyst sees the current skill) and each item's full trace
+  (`evidence.TRACE_FORM`). It writes at most
   ``FINDINGS_PER_ANALYST`` findings (SkillOpt's analyst edit budget L, 4): what goes
   wrong, where in the graph (nodes, edges, settings, the structure) and what change
   would fix it.
@@ -42,6 +41,7 @@ import json
 import random
 from typing import Any, Callable, Mapping, Sequence
 
+from . import evidence
 from .base import (
     TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _clip_middle, _expected, _node_spec,
     _ordered_items, _outcome, _table, NO_ANSWER_CAUSES,
@@ -160,19 +160,23 @@ def packer(ctx: Any, pipeline: str, failures: Sequence[dict[str, Any]],
            successes: Sequence[dict[str, Any]], room: int = ANALYST_ROOM
            ) -> Callable[[str, Sequence[dict[str, Any]]], bool]:
     """``fits`` for `batches`: whether a batch's request, measured as `analyst_batch`
-    builds it -- the system prompt, the frame with the pipeline, every item whole and
-    the separators between them -- is within ``room``. The frame is measured with the
+    builds it -- the system prompt, the frame with the pipeline, every item whole (each
+    instruction once) and the separators between them -- is within ``room``. The frame is measured with the
     largest batch number the kind can reach, so the real request is never longer."""
-    lengths: dict[int, int] = {}
+    from .evidence import dedup
+
+    texts: dict[int, str] = {}
     most = {"failure": len(failures), "success": len(successes)}
 
     def fits(kind: str, group: Sequence[dict[str, Any]]) -> bool:
         for record in group:
-            if id(record) not in lengths:
-                lengths[id(record)] = len(item_text(record))
+            if id(record) not in texts:
+                texts[id(record)] = item_text(record)
         head, tail = _analyst_frame(ctx, kind, most[kind], most[kind], len(group), pipeline)
-        return (len(system(kind)) + len(head) + len(tail) + 2 * max(0, len(group) - 1)
-                + sum(lengths[id(record)] for record in group)) <= room
+        # The items as the request joins them: an instruction an earlier item showed is
+        # said once (`evidence.dedup`).
+        body = "\n\n".join(dedup([texts[id(record)] for record in group]))
+        return len(system(kind)) + len(head) + len(tail) + len(body) <= room
 
     return fits
 
@@ -181,46 +185,27 @@ def packer(ctx: Any, pipeline: str, failures: Sequence[dict[str, Any]],
 
 
 def item_text(record: dict[str, Any], input_chars: int | None = None,
-              output_chars: int | None = None) -> str:
-    """One train item's full trace: input, every step's input and output in the order
-    they ran, the expected answer, the prediction, the score and the grader's feedback.
-    ``input_chars``/``output_chars`` clip step inputs/outputs head and tail."""
+              output_chars: int | None = None, **shown: Any) -> str:
+    """One train item's trace (`optim.evidence.render_item`): the input once, each step's
+    own instructions (what its prompt took from the input or earlier replies said by
+    name) and its reply in the order they ran, the expected answer, the prediction, the
+    score and the grader's feedback. ``input_chars``/``output_chars`` clip a step's own
+    instructions/replies head and tail; ``shown`` passes ``label``, ``show_input`` and
+    ``show_expected`` on (`evidence.render_item`)."""
+    from . import evidence
+
     big = 10 ** 9
-    ins, outs = input_chars or big, output_chars or big
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
-    declared = metadata_text(record)
-    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"
-             + (f" — {declared}" if declared else "")]
-    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
-    if key is not None:
-        lines += [f"Input ({key}):", _clip_middle(meta[key], outs)]
-    choices = _choice_lines(meta.get("choices"))
-    if choices:
-        lines += ["Choices:", *(_clip_middle(line, outs) for line in choices)]
-    for number, exchange in enumerate(exchanges, 1):
-        node = exchange.get("node") or "agent"
-        lines += [f"#### Step `{node}` ({number} of {len(exchanges)})",
-                  "Input it was given:", _clip_middle(exchange.get("prompt"), ins),
-                  "Output:", _clip_middle(exchange.get("response"), outs)]
-    if not exchanges:
-        lines.append("(no step recorded a model call for this item)")
-    expected = _expected(record)
-    if expected:
-        lines.append(f"Expected: {_clip_middle(expected, outs)}")
-    if record.get("prediction") is not None:
-        lines.append(f"Predicted: {_clip_middle(record.get('prediction'), outs)}")
-    # An errored item's grader feedback is often its error again: said once, as the error.
-    if (record.get("fail_reason") and not record.get("passed")
-            and str(record["fail_reason"]).strip() != str(record.get("error_text") or "").strip()):
-        lines.append(f"Grader: {_clip_middle(record['fail_reason'], outs)}")
-    for step, info in sorted((record.get("missing_steps") or {}).items()):
-        if isinstance(info, dict):
-            lines.append(f"No answer from step `{step}`: "
-                         f"{NO_ANSWER_CAUSES.get(str(info.get('cause')), info.get('cause'))}")
-    if record.get("error_text"):
-        lines.append(f"Error: {_clip_middle(record['error_text'], outs)}")
-    return "\n".join(lines)
+    missing = [f"No answer from step `{step}`: "
+               f"{NO_ANSWER_CAUSES.get(str(info.get('cause')), info.get('cause'))}"
+               for step, info in sorted((record.get("missing_steps") or {}).items())
+               if isinstance(info, dict)]
+    return evidence.render_item(
+        record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
+        expected=_expected(record), metadata=metadata_text(record),
+        choices=_choice_lines(meta.get("choices")), prompts=True,
+        prompt_chars=input_chars or big, reply_chars=output_chars or big, missing=missing,
+        **shown)
 
 
 #: The most characters one declared metadata value shows in an item's header.
@@ -248,11 +233,12 @@ def metadata_text(record: Mapping[str, Any]) -> str:
 _CLIPPED = "(This item's texts are clipped head and tail to fit {room}.)"
 
 
-def fit_item(record: dict[str, Any], budget: int, room_name: str = "the analyst's room") -> str:
+def fit_item(record: dict[str, Any], budget: int, room_name: str = "the analyst's room",
+             **shown: Any) -> str:
     """``item_text`` whole when it fits ``budget``; else step inputs are clipped first
     (down to ``INPUT_FLOOR``), then outputs, each to the largest limit that fits. The
     cut is said, naming ``room_name``: the request it was clipped to fit."""
-    whole = item_text(record)
+    whole = item_text(record, **shown)
     if len(whole) <= budget:
         return whole
     clipped = _CLIPPED.format(room=room_name)
@@ -270,15 +256,15 @@ def fit_item(record: dict[str, Any], budget: int, room_name: str = "the analyst'
                 high = middle - 1
         return low
 
-    inputs = largest(lambda n: item_text(record, n, None), INPUT_FLOOR)
+    inputs = largest(lambda n: item_text(record, n, None, **shown), INPUT_FLOOR)
     if inputs is not None:
-        return item_text(record, inputs, None) + "\n" + clipped
+        return item_text(record, inputs, None, **shown) + "\n" + clipped
     # Limits stay at TEXT_FLOOR or more (`_clip_middle` keeps head and tail halves).
-    outputs = largest(lambda n: item_text(record, INPUT_FLOOR, n), TEXT_FLOOR)
+    outputs = largest(lambda n: item_text(record, INPUT_FLOOR, n, **shown), TEXT_FLOOR)
     if outputs is not None:
-        return item_text(record, INPUT_FLOOR, outputs) + "\n" + clipped
-    both = largest(lambda n: item_text(record, n, n), TEXT_FLOOR) or TEXT_FLOOR
-    return item_text(record, both, both) + "\n" + clipped
+        return item_text(record, INPUT_FLOOR, outputs, **shown) + "\n" + clipped
+    both = largest(lambda n: item_text(record, n, n, **shown), TEXT_FLOOR) or TEXT_FLOOR
+    return item_text(record, both, both, **shown) + "\n" + clipped
 
 
 def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
@@ -347,9 +333,8 @@ You are a failure-analysis agent for a multi-step AI pipeline: a graph of steps 
 connected by edges, each step configured by settings (knobs) such as its prompt.
 
 You are given the pipeline and a batch of items it answered wrong or failed on, each
-with its full trace: every step's input and output, the final answer, the expected
-answer and the grader's feedback. Find the most important COMMON failure patterns
-across the batch.
+with its full trace (how a trace reads is said with the items). Find the most
+important COMMON failure patterns across the batch.
 
 ## Analysis process
 1. Read ALL items in the batch, every step of each.
@@ -376,7 +361,7 @@ You are a success-pattern analyst for a multi-step AI pipeline: a graph of steps
 connected by edges, each step configured by settings (knobs) such as its prompt.
 
 You are given the pipeline and a batch of items it answered right, each with its full
-trace: every step's input and output, the final answer and the expected answer.
+trace (how a trace reads is said with the items).
 Identify what made them work: the behaviour COMMON across the batch, which step or
 part of the structure produces it, and what a change to the pipeline must preserve so
 these items keep passing.
@@ -503,7 +488,11 @@ def analyst_batch(ctx: Any, kind: str, index: int, total: int,
     blocks = [text if cap is None else fit_item(record, cap)
               for record, text in zip(group, wholes)]
     clipped = [(whole, block) for whole, block in zip(wholes, blocks) if block != whole]
-    return head + "\n\n".join(blocks) + tail, {
+    from .evidence import dedup
+
+    # A clipped batch (the fallback path) keeps its items at the one length `item_cap`
+    # chose; a whole batch says each repeated instruction once.
+    return head + "\n\n".join(blocks if cap is not None else dedup(blocks)) + tail, {
         "items": len(clipped),
         "chars": sum(max(0, len(whole) - len(block)) for whole, block in clipped)}
 
@@ -520,9 +509,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
              f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
              f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
-             "Each item in full: its input, every step's input and output in the order the "
-             "steps ran, the expected answer, the prediction, the score and the grader's "
-             "feedback.\n\n"),
+             f"Each item in full: {evidence.TRACE_FORM}.\n\n"),
             f"\n\n## Answer\n{answer}")
 
 

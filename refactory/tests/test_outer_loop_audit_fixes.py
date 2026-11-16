@@ -60,9 +60,9 @@ def test_every_sibling_of_the_last_round_is_compared_with_its_parent(tmp_path, m
     assert {p["parent"] for p in pairs} == {by_level[5]}
 
 
-def test_siblings_share_the_comparisons_budget_in_turn():
-    """Two children with three changed items each and room for two trajectories: one of
-    each child is shown in full, not two of the first; the rest are listed by child."""
+def test_every_sibling_s_changed_items_are_shown():
+    """Two children with three changed items each: every one of each child is shown in
+    full, under its own child."""
     def record(item: str, passed: bool) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
                 "exchanges": [{"node": "s", "prompt": "p", "response": "z" * 2000}]}
@@ -72,11 +72,11 @@ def test_siblings_share_the_comparisons_budget_in_turn():
                 "parent_records": [record(f"i{k}", True) for k in range(3)],
                 "child_records": [record(f"i{k}", False) for k in range(3)]}
 
-    text = "\n".join(_edit_change_lines([pair("A"), pair("B")], budget=11000))
+    text = "\n".join(_edit_change_lines([pair("A"), pair("B")]))
     assert "### Child A of p" in text and "### Child B of p" in text
-    assert "#### Item i0 -- broken (child A)" in text
-    assert "#### Item i0 -- broken (child B)" in text
-    assert "| B | i1 | broken |" in text and "| A | i1 | broken |" in text
+    for child in "AB":
+        for k in range(3):
+            assert f"#### Item i{k} -- broken (child {child})" in text
 
 
 # ── a reloop the redone step cannot see, on both runtimes ───────────────────

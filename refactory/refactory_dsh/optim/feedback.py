@@ -206,10 +206,12 @@ def _touched_text(names: Sequence[str]) -> str:
 
 
 def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROWS,
-                 chars: int = LEDGER_CHARS) -> list[str]:
+                 chars: int = LEDGER_CHARS, in_full: Sequence[str] = ()) -> list[str]:
     """"Every change so far, by kind": a tally line per kind over the whole run, then the
     newest candidates in full, oldest first, within ``rows`` and ``chars``; the older
-    ones are only in the tally. Nothing for no entries."""
+    ones are only in the tally. A candidate whose reasoning the request shows in full
+    (``in_full``, under "Your earlier reasoning") points there instead of repeating its
+    rationale. Nothing for no entries."""
     if not entries:
         return []
     gated = any(entry.get("gate") for entry in entries)
@@ -250,7 +252,8 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
                 _touched_text(list(entry.get("touched") or ())), counts,
                 *([entry.get("gate") or ""] if gated else []),
                 *([entry.get("integrity") or "not judged"] if judged else []),
-                _clip(entry.get("rationale"), LEDGER_RATIONALE_CHARS) or "(none)"]
+                ("(in full under \"Your earlier reasoning\")" if str(entry.get("id")) in in_full
+                 else _clip(entry.get("rationale"), LEDGER_RATIONALE_CHARS) or "(none)")]
 
     shown = list(entries)[-max(1, rows):]
     table = _table(headers, [row(entry) for entry in shown])
@@ -421,6 +424,8 @@ def step_evidence(step: str, *, parent_records: Sequence[Mapping[str, Any]] | No
         "samples": samples,
         **({"instructions": instructions} if samples and (instructions := step_instructions(
             graph, step)) else {}),
+        **({"own_text": written[0], "appended": written[1]}
+           if samples and (written := step_appended(graph, step))[1] else {}),
         **({"visits": _visit_facts(visits, set(parent), flipped, change)} if visits else {}),
         **({"decision": True} if samples and decision_step(graph, step, samples) else {}),
     }
@@ -593,15 +598,21 @@ def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
 
 def _review_text(entry: Mapping[str, Any], mode_name: str,
                  samples: Sequence[Mapping[str, Any]]) -> str:
+    from .evidence import dedup_texts, fenced
+
     step = entry.get("step")
     blocks = []
-    for sample in samples:
+    # What a later item's prompt shares with an earlier one's is said as where it was.
+    given = dedup_texts([str(s.get("input") or "") for s in samples],
+                        [f"item {s.get('item')}'s prompt" for s in samples])
+    for sample, sent in zip(samples, given):
+        # Each text fenced, its headings demoted: nothing in it reads as a section here.
         block = [f"## Item {sample.get('item')}",
-                 f"### What `{step}` was given (its prompt as sent)", sample.get("input") or "(empty)",
-                 f"### What `{step}` wrote", sample.get("output") or "(empty)"]
+                 f"### What `{step}` was given (its prompt as sent)", *fenced(sent or "(empty)"),
+                 f"### What `{step}` wrote", *fenced(sample.get("output") or "(empty)")]
         if sample.get("next_step"):
             block += [f"### What the next step that reads it, `{sample['next_step']}`, wrote",
-                      sample.get("next_output") or "(empty)"]
+                      *fenced(sample.get("next_output") or "(empty)")]
         else:
             block.append("(No recorded step after it reads what it wrote.)")
         blocks.append("\n".join(block))
@@ -632,12 +643,43 @@ def _review_text(entry: Mapping[str, Any], mode_name: str,
     ])
 
 
+def step_appended(state: Mapping[str, Any] | None, step: str) -> tuple[str, str]:
+    """A step's prompt text as written for it and what the system appended to it (the
+    verdict rule it appends to a judge's prompt, `core_ops.system_appended`); ``("", "")``
+    when the system appended nothing -- for any step that is not a judge (the agent right
+    before a verdict gate only that gate reads, `pipeline_view`), whatever its text."""
+    from refactory_dsh.nn import pipeline_view
+    from refactory_dsh.nn.core_ops import system_appended
+
+    nodes = ((state or {}).get("graph") or {}).get("nodes") or {}
+    node = nodes.get(step) if isinstance(nodes, Mapping) else None
+    if not isinstance(node, Mapping) or step not in pipeline_view.judges(state or {}):
+        return "", ""
+    knobs = (state or {}).get("knobs") or {}
+    text = str(node.get("prompt_template") or "")
+    for bound, knob in node.get("field_bindings") or ():
+        value = (knobs.get(knob) or {}).get("value") if isinstance(knobs, Mapping) else None
+        if bound == "prompt_template" and isinstance(value, str):
+            text = value
+    own, appended = system_appended(text)
+    return (own, appended) if appended else ("", "")
+
+
 def _instructions_block(entry: Mapping[str, Any]) -> list[str]:
-    """The reviewed step's own instructions (its system prompt), when it has any."""
-    if not entry.get("instructions"):
-        return []
-    return [f"## `{entry.get('step')}`'s own instructions (its system prompt)\n"
-            f"{entry['instructions']}"]
+    """The reviewed step's own instructions (its system prompt), when it has any; and,
+    when the system appended a rule to its prompt, its own text and the rule side by side,
+    so the review can see whether they conflict."""
+    out = []
+    if entry.get("instructions"):
+        out.append(f"## `{entry.get('step')}`'s own instructions (its system prompt)\n"
+                   f"{entry['instructions']}")
+    if entry.get("appended"):
+        out.append(f"## `{entry.get('step')}`'s prompt as written, and what the system appended\n"
+                   f"Its own text:\n{entry.get('own_text') or '(empty)'}\n\n"
+                   f"Appended by the system after it:\n{entry['appended']}\n\n"
+                   "If the two ask for different things (where the verdict goes, say), say so "
+                   "in the note.")
+    return out
 
 
 def decision_prompt(entry: Mapping[str, Any], mode_name: str,
