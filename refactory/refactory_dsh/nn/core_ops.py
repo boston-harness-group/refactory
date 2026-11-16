@@ -1501,21 +1501,33 @@ def _pre_loop_line(edit: dict, state: dict) -> str | None:
         raise _Refused("'text' is a string")
     if edit.get("id") is not None and edit["id"] in graph.nodes:
         raise _Refused(f"node {edit['id']!r} already exists")
+    _loop_cap(edit)
     return None
 
 
-def _iterations_knob(gate_id: str) -> tuple[str, dict]:
+def _loop_cap(edit: dict) -> int:
+    """The loop's ``max_iterations`` (how often the judge may send the step back), the
+    default when the edit leaves it out; refused outside the knob's bounds."""
+    default, lo, hi = LOOP_ITERATIONS
+    cap = edit.get("max_iterations", default)
+    if isinstance(cap, bool) or not isinstance(cap, int) or not lo <= cap <= hi:
+        raise _Refused(f"'max_iterations' is a whole number from {lo} to {hi} (how often the "
+                       "judge may send the step back)")
+    return cap
+
+
+def _iterations_knob(gate_id: str, cap: int = LOOP_ITERATIONS[0]) -> tuple[str, dict]:
     from .knob import Knob
 
-    default, lo, hi = LOOP_ITERATIONS
+    _default, lo, hi = LOOP_ITERATIONS
     return f"{gate_id}__max_iterations", Knob(
-        default, "int", lo=lo, hi=hi,
+        cap, "int", lo=lo, hi=hi,
         description=f"how often {gate_id} may send the work back").spec()
 
 
 def _gate_state(gate_id: str, judge: str, text: str, seen: Sequence[tuple[str, str]], *,
-                label: str, reads: Sequence[str] = (), iterations: bool = False
-                ) -> dict[str, Any]:
+                label: str, reads: Sequence[str] = (), iterations: bool = False,
+                cap: int = LOOP_ITERATIONS[0]) -> dict[str, Any]:
     from refactory_dsh import snippet
 
     gate: dict[str, Any] = {"id": gate_id, "kind": "gate"}
@@ -1529,8 +1541,8 @@ def _gate_state(gate_id: str, judge: str, text: str, seen: Sequence[tuple[str, s
     else:
         gate.update({"evaluator": judge, "reads": [n for k, n in seen if k == "file"]})
     if iterations:
-        name, _spec_ = _iterations_knob(gate_id)
-        gate.update({"max_iterations": LOOP_ITERATIONS[0], "on_exhausted": "continue",
+        name, _spec_ = _iterations_knob(gate_id, cap)
+        gate.update({"max_iterations": cap, "on_exhausted": "continue",
                      "knobs": [name], "field_bindings": [["max_iterations", name]]})
     return gate
 
@@ -1548,7 +1560,8 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
     there = _available(graph).get(node.id, set()) | _outputs(node)
     seen = _seen(graph, state, there, _consumed(node, state) | _outputs(node), edit.get("sees"))
     gate_id = edit.get("id") or _fresh(graph, f"{node.id}_check")
-    knob, knob_spec = _iterations_knob(gate_id)
+    cap = _loop_cap(edit)
+    knob, knob_spec = _iterations_knob(gate_id, cap)
     steps: list[dict] = [{"op": "add_knob", "name": knob, "spec": knob_spec}]
     if judge == "agent":
         judge_id = _fresh(graph, f"{gate_id}_judge", (gate_id,))
@@ -1557,12 +1570,12 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
                             judge_id, seen, verdict=("proceed", "reloop"),
                             settings_from=node if node.kind == "agent" else None)
         gate = _gate_state(gate_id, judge, "", seen, label="proceed",
-                           reads=[f"{judge_id}.txt"], iterations=True)
+                           reads=[f"{judge_id}.txt"], iterations=True, cap=cap)
         steps += edits._expand_loop({"target": node.id, "gate": gate}, state)
         steps += _add_chain(nodes, {"before": gate_id})
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen, label="proceed",
-                           iterations=True)
+                           iterations=True, cap=cap)
         steps += edits._expand_loop({"target": node.id, "gate": gate}, state)
     return steps
 
@@ -1985,18 +1998,19 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {
-        "fields": ("step", "judge", "text", "sees", "id", "target", "gate"),
+        "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
                 "why}) or a callable. The judge sees what the step read and wrote, unless "
                 "'sees' says otherwise. The reason reaches the step sent back; it is sent "
-                "back at most <gate>__max_iterations times, so it runs at most that many "
-                "times plus one (the gate is <step>_check unless 'id' names it; a knob, "
-                f"default {LOOP_ITERATIONS[0]}: up to {LOOP_ITERATIONS[0] + 1} runs; "
-                f"{LOOP_ITERATIONS[1]} to {LOOP_ITERATIONS[2]}), then the run goes on",
+                "back at most 'max_iterations' times, so it runs at most that many times "
+                f"plus one (default {LOOP_ITERATIONS[0]}: up to {LOOP_ITERATIONS[0] + 1} runs; "
+                f"{LOOP_ITERATIONS[1]} to {LOOP_ITERATIONS[2]}; afterwards the knob "
+                "<gate>__max_iterations, the gate being <step>_check unless 'id' names it), "
+                "then the run goes on",
         "example": {"op": "loop", "step": "<step>", "judge": "agent",
-                    "text": "<what to check>"},
+                    "text": "<what to check>", "max_iterations": LOOP_ITERATIONS[0]},
     },
     "route": {
         "fields": ("after", "judge", "text", "to", "sees", "id"),

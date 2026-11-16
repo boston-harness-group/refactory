@@ -1760,6 +1760,37 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
                      for k, n in sorted(consumed(node, knob_values))) or "-"
 
 
+def _task_branch(fork_id: str, state: dict[str, Any]) -> str:
+    """What a new branch of ``fork_id`` that sees the task takes in, read from the graph
+    such a branch makes (its inputs, each with its maker); "-" when none can be made."""
+    from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.validate import consumed
+
+    try:
+        after = nn_edits.apply({"op": "branch", "fork": fork_id, "kind": "agent",
+                                "sees": ["task"]}, state)
+    except Exception:  # noqa: BLE001 - a fork that takes no such branch gets no line
+        return "-"
+    graph = Graph.from_state(after["graph"])
+    new = [graph.nodes[n] for n in set(graph.nodes) - set(state["graph"]["nodes"])]
+    values = {k: (e or {}).get("value") for k, e in (after.get("knobs") or {}).items()}
+    makers = made_by(graph)
+    agent = next((n for n in new if n.kind == "agent"), None)
+    if agent is None:
+        return "-"
+    taken: list[str] = []
+    for kind, name in sorted(consumed(agent, values)):
+        by = [m for m in makers.get((kind, name)) or [] if m not in {n.id for n in new}]
+        helper = next((n for n in new if n.id in (makers.get((kind, name)) or [])), None)
+        if helper is not None:  # the collect step a new step's files come through
+            taken += [f"{n} ({', '.join(makers.get((k, n)) or []) or 'task input'})"
+                      for k, n in sorted(consumed(helper, values))]
+        else:
+            taken.append(f"{name} ({', '.join(by) or 'task input'})")
+    return f"a new branch that sees the task takes in: {', '.join(taken) or 'nothing'}"
+
+
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                          knobs: Sequence[Mapping[str, Any]],
@@ -1788,7 +1819,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         node = graph.nodes[node_id]
         if node.kind not in ("agent", "op", "fork"):
             continue
-        carries = _carries(node, graph, knob_values) if node.kind == "agent" else "-"
+        carries = (_carries(node, graph, knob_values) if node.kind == "agent"
+                   else _task_branch(node_id, state) if node.kind == "fork" else "-")
         applies: list[str] = []
         reasons: dict[str, list[str]] = {}
         for label, edit in _fit_edits(node, graph, ops):

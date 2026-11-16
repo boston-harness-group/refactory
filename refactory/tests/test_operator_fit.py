@@ -448,3 +448,30 @@ def test_the_run_s_table_skips_the_code_dry_run_and_marks_new_code(tmp_path, mon
     assert "merge (not dry-run)" in rows["tally"][1].split(", "), rows["tally"]
     assert "insert" in rows["tally"][1].split(", ")  # no code changed: no mark
     assert given and all(recorded is None for recorded in given), given
+
+
+def test_a_loop_states_its_cap_in_the_edit():
+    """`max_iterations` on the loop sets how often the judge may send the step back, so
+    a proposal says its cap in the edit and not only in prose; outside 1-5 it is refused."""
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    one = nn_edits.apply({"op": "loop", "step": "review", "judge": "agent",
+                          "max_iterations": 1}, state)
+    assert one["knobs"]["review_check__max_iterations"]["value"] == 1
+    assert one["graph"]["nodes"]["review_check"]["max_iterations"] == 1
+    plain = nn_edits.apply({"op": "loop", "step": "review", "judge": "agent"}, state)
+    assert plain["knobs"]["review_check__max_iterations"]["value"] == core_ops.LOOP_ITERATIONS[0]
+    for bad in (0, 6, "2", True):
+        reason = nn_edits.precheck({"op": "loop", "step": "review", "judge": "agent",
+                                    "max_iterations": bad}, state)
+        assert reason and "'max_iterations' is a whole number from 1 to 5" in reason, bad
+    assert core_ops.OPERATORS["loop"]["example"]["max_iterations"] == core_ops.LOOP_ITERATIONS[0]
+
+
+def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
+    rows = _rows(_section(_start_state()))
+    assert rows["step_fork"][0] == ("a new branch that sees the task takes in: compare_prompt "
+                                    "(prepare), current_item.json (data), user_prompt (prepare)")
+    nested = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
+    forks = [n for n, x in nested["graph"]["nodes"].items() if x.get("kind") == "fork"]
+    assert all(_rows(_section(nested))[f][0].startswith("a new branch that sees the task")
+               for f in forks)
