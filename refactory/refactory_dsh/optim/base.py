@@ -1045,9 +1045,7 @@ class ProposalContext:
         # 5: the edits it may make, with which apply where, and the steps' settings.
         sections += [
             "## The operations you may use",
-            _table(["op", "kind", "macro", "fields", "description"],
-                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
-                    for c in self.catalogue]),
+            *operation_lines(self.catalogue),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1144,17 +1142,39 @@ def _fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _settings_lines(knobs: Sequence[dict[str, Any]]) -> list[str]:
+def operation_lines(catalogue: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The operations a request offers, one row each with its fields and its description
+    (core operators' own lines, `nn.core_ops.OPERATORS`): the proposer's "The operations
+    you may use" and the analysts' "The changes the optimizer can make" are both this, so
+    an analyst names only what the proposer is shown."""
+    return [_table(["op", "kind", "macro", "fields", "description"],
+                   [[c.get("op"), c.get("kind"), c.get("macro"),
+                     _edit_fields(c.get("fields") or ()), c.get("description")]
+                    for c in catalogue])]
+
+
+def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
+                    exact: bool = True) -> list[str]:
     """"Each step's settings": every knob in a table; a text the table cannot show as it
     is (a line break or a ``|``) is shown there by reference and whole below it, fenced,
-    so a patch can quote its target text exactly."""
+    so a patch can quote its target text exactly. ``text_chars`` clips each such text
+    (head and tail, marked), for an analyst call that must fit a smaller room. Without
+    ``exact`` (a reader that never patches: the analysts), a long line an earlier knob's
+    text showed is said as where it was (`evidence.dedup_texts`), so the steps' shared
+    paragraphs are read once."""
+    if text_chars is not None:  # a long one-line value too (a clipped one says so)
+        knobs = [{**k, "value": _clip_middle(k["value"], text_chars)}
+                 if isinstance(k.get("value"), str) else k for k in knobs]
     whole = [k for k in knobs if not _exact_in_table(k.get("value"))]
     lines = ["## Each step's settings",
-             "The prompts and parameters the steps read, which `set_knob` moves (a new step "
-             "brings its own). A patch quotes its target text exactly: a value in the table "
-             "is exact as shown"
-             + ("; a text with line breaks or `|` is shown whole after the table." if whole
-                else "."),
+             ("The prompts and parameters the steps read, which `set_knob` moves (a new step "
+              "brings its own). A patch quotes its target text exactly: a value in the table "
+              "is exact as shown"
+              + ("; a text with line breaks or `|` is shown whole after the table." if whole
+                 else ".")) if exact else
+             ("The prompts and parameters the steps read, which `set_knob` moves; a text with "
+              "line breaks or `|` is shown after the table, a line an earlier text showed "
+              "said as where it is."),
              _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
                      "description"],
                     [[k["name"], k["value"] if _exact_in_table(k.get("value"))
@@ -1162,9 +1182,15 @@ def _settings_lines(knobs: Sequence[dict[str, Any]]) -> list[str]:
                       k["kind"], k.get("values"), k.get("range"),
                       k["frozen"], k.get("reachable", True), k.get("description", "")]
                      for k in knobs])]
-    for knob in whole:
-        fence = _fence(knob["value"])
-        lines += [f"`{knob['name']}`:", fence, knob["value"], fence]
+    texts = [knob["value"] if text_chars is None else _clip_middle(knob["value"], text_chars)
+             for knob in whole]
+    if not exact:
+        from .evidence import dedup_texts
+
+        texts = dedup_texts(texts, [f"`{knob['name']}`" for knob in whole])
+    for knob, text in zip(whole, texts):
+        fence = _fence(text)
+        lines += [f"`{knob['name']}`:", fence, text, fence]
     return [*lines, ""]
 
 
@@ -1754,7 +1780,7 @@ def _view_lead() -> str:
 
     return (
         "The pipeline, one line per step, generated from the graph in the operators' own "
-        "words (full node detail is in the reference at the end): `sees` lists a step's "
+        "words: `sees` lists a step's "
         "inputs as `\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain "
         "op that only assembles a model step's input is folded in as `name (via op: its "
         "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "

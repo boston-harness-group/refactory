@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh.optim import ProposalContext, analysts, memory
+from refactory_dsh.optim import base, ProposalContext, analysts, memory
 from refactory_dsh.optim.base import Candidate
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 from refactory_dsh.outerloop import ValidationGate
@@ -110,6 +110,7 @@ def _ctx(records: list[dict[str, Any]], **settings: Any) -> ProposalContext:
         nodes=[{"id": "draft", "kind": "agent"}, {"id": "final", "kind": "agent"}],
         edges=[{"source": "draft", "target": "final"}],
         node_states=[{"id": "draft", "kind": "agent", "prompt_template": "TEMPLATE-D",
+                      "knobs": ["draft__task"],
                       "field_bindings": [["prompt_template", "draft__task"]]},
                      {"id": "final", "kind": "agent", "prompt_template": "TEMPLATE-F"}],
         knobs=[{"name": "draft__task", "kind": "str", "value": "BOUND-VALUE", "frozen": False},
@@ -181,11 +182,14 @@ def test_an_analyst_reads_every_steps_input_and_output_of_a_multi_node_graph():
         assert text in failure, text
     assert failure.index("DRAFT-OUT t1") < failure.index("FINAL-IN t1"), "in the order they ran"
     assert "t2" not in _items(failure)
-    # The pipeline: nodes, edges, each node in full with its bound setting's value, and
-    # the settings not bound to a node with theirs.
-    assert "| draft | final | null |" in failure
-    assert "BOUND-VALUE" in failure and "TEMPLATE-F" in failure and "STYLE-VALUE" in failure
-    assert "`draft__task` (str): the value of `draft`.prompt_template" in failure
+    # The pipeline in the proposer's words (the pipeline view, then each step's settings):
+    # no node table, no node JSON.
+    pipeline = failure.split("## The pipeline\n", 1)[1].split("\n## The changes", 1)[0]
+    assert pipeline.startswith(base.PIPELINE_VIEW_LEAD)
+    assert '\ndraft agent  sees run dir (tools)  told draft__task "BOUND-VALUE"' in pipeline
+    assert "\nfinal agent" in pipeline and "pipeline view unavailable" not in pipeline
+    assert "| draft__task | BOUND-VALUE | str |" in pipeline and "| style | STYLE-VALUE |" in pipeline
+    assert "Nodes:" not in failure and '"field_bindings"' not in failure
     assert "At most 4 findings" in failure
     success = client.of((analysts.SUCCESS_SYSTEM,))[0]
     assert _items(success) == ["t2"] and "FINAL-OUT t2" in success and "Grader:" not in success
@@ -1341,10 +1345,11 @@ def test_findings_past_the_sections_room_are_cut_to_fit_and_each_cut_is_said():
     assert "more finding(s) not shown" not in "\n".join(lines)
 
 
-def test_the_op_catalogue_reaches_the_analysts_whole():
+def test_the_op_catalogue_reaches_the_analysts_whole_in_the_proposer_s_rows():
     long = "Split a step into two steps " + "d" * 300 + " END."
     ctx = replace(_ctx([_rec("f0", False)]), catalogue=[{"op": "split", "description": long}])
-    assert f"- `split`: {long}" in analysts._changes_text(ctx)
+    assert "\n".join(base.operation_lines(ctx.catalogue)) == analysts._changes_text(ctx)
+    assert f"| split | null | null |  | {long} |" in analysts._changes_text(ctx)
 
 
 def test_an_errored_items_error_is_said_once():
@@ -1354,3 +1359,35 @@ def test_an_errored_items_error_is_said_once():
     assert text.count(error) == 1 and f"Error: {error}" in text and "Grader:" not in text
     other = analysts.item_text({**_rec("f1", False, error=error)})
     assert "Grader: GRADER f1" in other and f"Error: {error}" in other
+
+
+def test_an_answer_that_is_not_valid_json_says_so_and_where_never_no_findings(tmp_path):
+    """The S1-s42 analyst_success reply (round 1, group 2): an unescaped `"` inside an
+    evidence string. Its top-level object does not parse; the call's error says the JSON
+    is invalid with the parser's message and where, and never reads a nested object (a
+    finding's "where") as the answer and reports it as having no findings list."""
+    from pathlib import Path
+
+    from refactory_dsh.optim.random_optimizer import extract_json, reply_object
+
+    reply = (Path(__file__).parent / "fixtures" / "analyst_reply_unescaped_quote.txt").read_text()
+    assert "findings" not in extract_json(reply), "setup: the old reading took a nested object"
+    with pytest.raises(ValueError) as caught:
+        reply_object(reply)
+    said = str(caught.value)
+    assert said.startswith("the answer's JSON object is not valid JSON: Expecting ',' "
+                           "delimiter at line"), said
+    assert "⟨HERE⟩" in said and 'Option C ("for every such f")' not in said.split("⟨HERE⟩")[1]
+
+    def analyst(system: str, prompt: str) -> str:
+        return reply if system == analysts.SUCCESS_SYSTEM else json.dumps(
+            {"findings": [{"finding": "ok", "items": _items(prompt)}]})
+
+    client = Client(analyst=analyst)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(_ctx([_rec("f0", False), _rec("s0", True)], group_size=1), 1, [])
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    (failed,) = [t for t in trace if t["kind"] == "analyst_success"]
+    assert "not valid JSON: Expecting ',' delimiter" in failed["error"]
+    assert 'no "findings" list' not in failed["error"]

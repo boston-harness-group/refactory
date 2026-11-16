@@ -369,3 +369,36 @@ def test_the_operators_lead_is_its_constant_and_makes_no_wiring_claim(requests):
     leads = [text.split("## Structural operators\n", 1)[1].split("\n", 1)[0]
              for text, _records in requests["proposal"] if "## Structural operators" in text]
     assert leads and all(lead == base.STRUCTURAL_LEAD for lead in leads), leads[:1]
+
+
+def _view_block(text: str) -> str:
+    """The pipeline view a request shows: its lead and the fenced lines after it."""
+    start = text.index(base.PIPELINE_VIEW_LEAD)
+    fence = text.index("```text\n", start)
+    return text[start:text.index("\n```", fence + 8)]
+
+
+@pytest.mark.parametrize("kind", ["analyst_failure", "analyst_success", "analyst_merge",
+                                  "memory", "memory_compare"])
+def test_every_call_that_shows_the_pipeline_shows_the_proposer_s_view_once(kind, requests):
+    """Analysts, their merges and memory read the pipeline in the proposer's words: the
+    same view, drawn once, and no node table or node JSON."""
+    for (text, _records), (proposal, _r) in zip(requests[kind], requests["proposal"]):
+        assert text.count(base.PIPELINE_VIEW_LEAD) == 1, kind
+        if kind.startswith("analyst"):
+            assert _view_block(text) == _view_block(proposal), kind
+        assert "Nodes:" not in text and '"field_bindings"' not in text, kind
+
+
+def _op_rows(text: str, heading: str) -> list[str]:
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    return [line.split("|")[1].strip() for line in section.splitlines()
+            if line.startswith("| ") and not line.startswith("| op |")]
+
+
+@pytest.mark.parametrize("kind", ["analyst_failure", "analyst_success"])
+def test_an_analyst_names_only_operations_the_proposer_is_shown(kind, requests):
+    for (text, _records), (proposal, _r) in zip(requests[kind], requests["proposal"]):
+        analyst = _op_rows(text, "## The changes the optimizer can make")
+        shown = _op_rows(proposal, "## The operations you may use")
+        assert analyst and analyst == shown, (kind, set(analyst) ^ set(shown))

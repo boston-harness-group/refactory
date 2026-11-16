@@ -901,10 +901,11 @@ paired with a parent picker), on the train records the request carries:
   `analyst_group_size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
   batch. At most 8 calls of the stage are in flight at once, merges included (the two
   sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
-  analysts. Each reads the pipeline (its nodes and edges, each node in
-  full with the settings bound to it, every other setting's value) and each item's full
-  trace: its input, every step's input and output in the order they ran, the expected
-  answer, the prediction, the score and the grader's feedback. Each item's heading
+  analysts. Each reads the pipeline in the proposer's words, from the same renderers:
+  the pipeline view and each step's settings with their values (a paragraph the steps'
+  texts share read once, since an analyst never patches) -- no node table or node JSON
+  -- and each item's full trace: its input, every step's input and output in the order
+  they ran, the expected answer, the prediction, the score and the grader's feedback. Each item's heading
   carries the item fields its Task declares (`Task.item_metadata`, read by
   `Task.item_meta`; LiveMath shows `task_type` exactly as SkillOpt's analysts see it,
   rollout.py:132: the item's first theorem type, else `math_mcq`), never a
@@ -985,8 +986,11 @@ paired with a parent picker), on the train records the request carries:
   its analysts' edits: its text, what to change and what to keep, where (a structure
   note too), every evidence quote, line breaks kept; only when the findings pass the
   section's room are the longest texts cut to one length (never below 100 characters),
-  each cut marked `… [cut: N chars]`. The analysts read the edit catalogue's
-  descriptions whole. The analysts' item texts show an errored item's error once (not
+  each cut marked `… [cut: N chars]`. The analysts read the operations as the proposer
+  does (`base.operation_lines`, the same rows), so a finding names only an operation the
+  proposer is shown. An analyst's reply whose top-level JSON object does not parse is
+  said to be invalid JSON, with the parser's message and where (`reply_object`); it is
+  not repaired, and no object nested inside it is read as the answer. The analysts' item texts show an errored item's error once (not
   again as the grader's reason). The analysts take the readers' place: no
   reader call runs, and when the items do not fit one request the items they cite are
   shown in full first. SkillOpt's analysts are its only reading of the trajectories, so

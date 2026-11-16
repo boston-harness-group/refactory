@@ -553,7 +553,7 @@ class AutoresearchOptimizer(Optimizer):
             except (OSError, json.JSONDecodeError):
                 held = None
         if isinstance(held, dict) and isinstance(held.get("reply"), str):
-            found = parse(extract_json(held["reply"]))
+            found = parse(reply_object(held["reply"]))
             if found is not None:
                 with lock:
                     counts["cached"] += 1
@@ -582,7 +582,7 @@ class AutoresearchOptimizer(Optimizer):
                 # reply's error quotes the reply, whose prose may name a context window.
                 return None, error, None, overflow
             try:
-                found = parse(extract_json(reply))
+                found = parse(reply_object(reply))
                 if found is None:
                     raise ValueError(missing)
             except Exception as exc:
@@ -1151,6 +1151,22 @@ def extract_json(text: str) -> dict[str, Any]:
         if found is not None:
             return found
     raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
+
+
+def reply_object(text: str) -> dict[str, Any]:
+    """The reply's top-level JSON object (`_outermost_object`, never one nested inside
+    it). When that object is not valid JSON, the error says so, with the parser's message
+    and where (the line, column and the text there) -- an object nested inside a broken
+    answer (one finding's ``where``) is never read as the answer, and the reply is never
+    repaired. No object at all raises as `extract_json` does."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("the model returned nothing")
+    found, problem = _outermost_object(text)
+    if problem:
+        raise ValueError(f"the answer's JSON object is not valid JSON: {problem}")
+    if found is None:
+        raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
+    return found
 
 
 def answer_json(text: str) -> tuple[dict[str, Any], str]:
