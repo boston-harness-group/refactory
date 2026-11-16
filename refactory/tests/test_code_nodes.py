@@ -207,6 +207,20 @@ def test_the_sandbox_denies_network_files_secrets_and_memory(code, refused, tmp_
 
 
 @needs_sandbox
+def test_the_code_s_environment_is_fixed_and_the_same_on_both_platforms(monkeypatch):
+    """Nothing from the parent: its language settings, a token or anything else; the same
+    names on Linux and macOS, the language settings at their fixed value."""
+    monkeypatch.setenv("LANG", "de_DE.ISO8859-1")
+    monkeypatch.setenv("LC_ALL", "de_DE.ISO8859-1")
+    monkeypatch.setenv("SOME_API_KEY", "k")
+    seen = snippet._sandboxed("import os\ndef main(inp):\n    return dict(os.environ)\n", {},
+                              timeout_s=10, extra=())
+    assert sorted(seen) == ["HOME", "LANG", "LC_ALL", "PATH", "TMPDIR"]
+    assert seen["LANG"] == seen["LC_ALL"] == snippet.LOCALE == "C.UTF-8"
+    assert seen["PATH"] == "/usr/bin:/bin" and seen["HOME"] == seen["TMPDIR"]
+
+
+@needs_sandbox
 def test_the_sandbox_stops_code_at_its_wall_clock():
     with pytest.raises(snippet.SnippetError, match="over its 2 s limit"):
         snippet._sandboxed("def main(inp):\n    while True:\n        pass\n", {}, timeout_s=2, extra=())

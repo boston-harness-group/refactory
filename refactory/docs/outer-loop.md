@@ -1560,8 +1560,9 @@ these limits:
   reachable.
 - `/usr/bin/python3 -I -S`: the standard library only.
 - JSON on stdin and stdout.
-- An environment of `PATH`, `HOME=/tmp` and the language settings only: no knob, no node
-  manifest, no credential.
+- A fixed environment, nothing from the parent: `PATH`, `HOME` and `TMPDIR` (`/tmp`), and
+  `LANG` and `LC_ALL` at `C.UTF-8` (`snippet.LOCALE`); no knob, no node manifest, no
+  credential. macOS has the same names, with `HOME` and `TMPDIR` in its scratch directory.
 - Limits of 512 MB of memory, 10 CPU seconds, 1 MB files and 32 processes. A limit that
   cannot be set fails the node.
 - 10 s of wall time for the code, counted once the sandbox has started (its driver says
@@ -1591,7 +1592,7 @@ refactory runs on, `-I -S`, in one process:
   processes' information (their arguments and environment, the process list, their paths)
   are refused, so the process cap is one and no process is visible but its own. IOKit
   registry properties (hardware identifiers such as the serial number) are refused too.
-- The same environment, 10 CPU seconds, 1 MB files and 10 s wall clock (its process
+- The same fixed environment, 10 CPU seconds, 1 MB files and 10 s wall clock (its process
   group killed).
 - 512 MB of memory kept by a watchdog on the process's footprint, polled every 20 ms
   (macOS does not enforce `RLIMIT_AS`): the code is killed within about one poll of

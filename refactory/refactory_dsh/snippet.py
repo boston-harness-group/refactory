@@ -259,14 +259,17 @@ def allowed_attributes() -> frozenset:
 # ── the sandbox ───────────────────────────────────────────────────────────
 
 
-def _environment() -> dict[str, str]:
-    """What the snippet's process sees: the language settings `sandbox.scrub` keeps,
-    a fixed PATH and a HOME inside the empty /tmp. Never a knob, a node manifest or a
-    credential."""
-    from refactory_dsh.sandbox import scrub
+#: The language settings every code step runs with, on both platforms: fixed, never the
+#: parent's, so the interpreter decodes its JSON input the same way everywhere.
+LOCALE = "C.UTF-8"
 
-    kept = {name: value for name, value in scrub().items() if name in ("LANG", "LC_ALL")}
-    return {**kept, "PATH": "/usr/bin:/bin", "HOME": "/tmp"}
+
+def _environment() -> dict[str, str]:
+    """What the snippet's process sees, all fixed and nothing from the parent: the language
+    settings (:data:`LOCALE`), a PATH, and a HOME and TMPDIR inside the empty /tmp (macOS
+    puts them in its scratch directory). Never a knob, a node manifest or a credential."""
+    return {"LANG": LOCALE, "LC_ALL": LOCALE, "PATH": "/usr/bin:/bin", "HOME": "/tmp",
+            "TMPDIR": "/tmp"}
 
 
 def _hidden(extra: tuple[str, ...] = ()) -> list[str]:
