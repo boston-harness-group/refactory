@@ -173,6 +173,96 @@ def test_code_past_its_wall_clock_is_stopped_with_nothing_left_running():
         os.kill(pids[0], 0)
 
 
+# ── other processes and the machine ───────────────────────────────────────
+
+#: Code that reaches other processes the way the security review did, through ctypes (which
+#: loads once `os.uname`, a sysctl the profile refuses, is stood in for): the parent's
+#: arguments and environment (KERN_PROCARGS2), every process (proc_listallpids,
+#: kern.proc.all), the parent's executable (proc_pidpath) and task (proc_pidinfo).
+_PROCESSES = r"""
+import os
+os.uname = lambda: os.uname_result(("Darwin", "h", "25.0.0", "v", "arm64"))
+import ctypes
+def main(inp):
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    def call(result):
+        return [result, ctypes.get_errno()]
+    ppid, out = os.getppid(), {}
+    mib = (ctypes.c_int * 3)(1, 49, ppid)
+    size, buf = ctypes.c_size_t(1 << 20), ctypes.create_string_buffer(1 << 20)
+    out["procargs"] = call(libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0))
+    out["token"] = b"FAKE_PARENT_TOKEN" in buf.raw
+    pids = (ctypes.c_int * 4096)()
+    out["listallpids"] = call(libc.proc_listallpids(pids, ctypes.sizeof(pids)))
+    every, size = (ctypes.c_int * 3)(1, 14, 0), ctypes.c_size_t(0)
+    out["kern.proc.all"] = call(libc.sysctl(every, 3, None, ctypes.byref(size), None, 0))
+    path = ctypes.create_string_buffer(4096)
+    out["pidpath"] = call(libc.proc_pidpath(ppid, path, 4096))
+    task = ctypes.create_string_buffer(256)
+    out["pidinfo"] = call(libc.proc_pidinfo(ppid, 4, 0, task, 256))
+    out["own pidpath"] = libc.proc_pidpath(os.getpid(), path, 4096) > 0
+    return out
+"""
+
+
+@needs_seatbelt
+def test_no_other_process_s_arguments_environment_or_list_can_be_read(tmp_path):
+    """The parent carries a planted token in its environment: the code reads neither it nor
+    any process list, path or task (EPERM, 1), and still reads its own."""
+    import json
+
+    runner = ("import json, sys\nfrom refactory_dsh import snippet\n"
+              "print(json.dumps(snippet._sandboxed(sys.argv[1], {}, timeout_s=10, extra=())))\n")
+    done = subprocess.run([sys.executable, "-c", runner, _PROCESSES], capture_output=True,
+                          text=True, env={**os.environ, "FAKE_PARENT_TOKEN": "FAKE_PARENT_TOKEN-x"})
+    assert done.returncode == 0, done.stderr[-2000:]
+    seen = json.loads(done.stdout.splitlines()[-1])
+    assert seen["token"] is False
+    assert seen["procargs"] == [-1, 1] and seen["kern.proc.all"] == [-1, 1]
+    assert seen["listallpids"][0] <= 0 and seen["listallpids"][1] == 1
+    assert seen["pidpath"] == [0, 1] and seen["pidinfo"] == [0, 1]
+    assert seen["own pidpath"] is True
+
+
+_SERIAL = r"""
+import os
+os.uname = lambda: os.uname_result(("Darwin", "h", "25.0.0", "v", "arm64"))
+import ctypes
+def main(inp):
+    iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    iokit.IOServiceMatching.restype = ctypes.c_void_p
+    iokit.IOServiceGetMatchingService.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    iokit.IORegistryEntryCreateCFProperty.restype = ctypes.c_void_p
+    iokit.IORegistryEntryCreateCFProperty.argtypes = [ctypes.c_uint, ctypes.c_void_p,
+                                                      ctypes.c_void_p, ctypes.c_uint32]
+    service = iokit.IOServiceGetMatchingService(0, iokit.IOServiceMatching(b"IOPlatformExpertDevice"))
+    key = cf.CFStringCreateWithCString(None, b"IOPlatformSerialNumber", 0x08000100)
+    return bool(iokit.IORegistryEntryCreateCFProperty(service, key, None, 0))
+"""
+
+
+@needs_seatbelt
+def test_the_machine_s_serial_number_is_not_readable():
+    """The IOKit registry holds hardware identifiers; its properties are refused."""
+    assert _run(_SERIAL) is False
+
+
+@needs_seatbelt
+def test_only_the_interpreter_s_standard_library_is_readable_not_its_whole_install():
+    _python, stdlib = snippet._mac_interpreter()
+    install = os.path.dirname(os.path.dirname(stdlib))
+    other = next((os.path.join(root, name) for root, _dirs, names in os.walk(install)
+                  for name in names if not os.path.join(root, name).startswith(stdlib + "/")
+                  and os.path.join(root, name) not in (_python, *snippet._mac_libraries())), None)
+    if other is None:
+        pytest.skip(f"nothing in {install} outside its standard library")
+    with pytest.raises(snippet.SnippetError, match="PermissionError"):
+        _run("def main(inp):\n    return open(inp['facts']['p'], 'rb').read(10)\n", {"p": other})
+
+
 # ── failing closed ─────────────────────────────────────────────────────────
 
 
@@ -197,11 +287,12 @@ def test_a_profile_that_does_not_load_never_runs_the_code_unsandboxed(monkeypatc
 @needs_seatbelt
 def test_an_interpreter_installed_around_the_home_directory_is_refused(monkeypatch):
     snippet._mac_interpreter.cache_clear()
-    monkeypatch.setattr(snippet.sys, "base_prefix", "/")
+    monkeypatch.setattr(snippet.os.path, "dirname", lambda path: "/")
     try:
-        with pytest.raises(snippet.SnippetError, match="holds the home directory"):
+        with pytest.raises(snippet.SnippetError, match="holds the home"):
             snippet._mac_interpreter()
     finally:
+        monkeypatch.undo()
         snippet._mac_interpreter.cache_clear()
 
 
@@ -214,6 +305,6 @@ def test_a_path_a_profile_literal_cannot_hold_is_refused():
 
 @needs_seatbelt
 def test_a_directory_to_hide_inside_what_the_code_may_read_is_refused():
-    _python, prefix = snippet._mac_interpreter()
+    _python, stdlib = snippet._mac_interpreter()
     with pytest.raises(snippet.SnippetError, match="cannot be hidden"):
-        _run("def main(inp):\n    return 1\n", extra=(os.path.join(prefix, "lib"),))
+        _run("def main(inp):\n    return 1\n", extra=(os.path.join(stdlib, "json"),))

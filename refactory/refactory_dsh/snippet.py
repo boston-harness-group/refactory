@@ -344,19 +344,35 @@ _MAC_SYSTEM_READS = ("/usr/lib", "/System/Library")
 
 @functools.lru_cache(maxsize=None)
 def _mac_interpreter() -> tuple[str, str]:
-    """``(interpreter, its install)`` the macOS sandbox runs and may read, both resolved:
-    the base interpreter of the Python running refactory (macOS has no system Python to
-    rely on). Refused when its install is ``/``, the home directory or a directory holding
-    it, since the profile lets the code read the whole install."""
+    """``(interpreter, its standard library)`` the macOS sandbox runs and may read, both
+    resolved: the base interpreter of the Python running refactory (macOS has no system
+    Python to rely on) and the directory its ``os`` module comes from, never the rest of
+    its install (:func:`_mac_libraries` adds its shared library). Refused when that
+    directory is ``/``, the home directory or a directory holding it, since the profile
+    lets the code read all of it."""
+    import os as os_module
+
     python = os.path.realpath(sys.executable)
-    prefix = os.path.realpath(sys.base_prefix)
+    stdlib = os.path.realpath(os.path.dirname(os_module.__file__))
     home = os.path.realpath(os.path.expanduser("~"))
-    if prefix == "/" or home == prefix or home.startswith(prefix.rstrip("/") + "/"):
-        raise SnippetError(f"the interpreter's install {prefix} holds the home directory, so "
-                           "the sandbox cannot let code read it")
-    if not python.startswith(prefix.rstrip("/") + "/"):
-        raise SnippetError(f"the interpreter {python} is not inside its install {prefix}")
-    return python, prefix
+    if stdlib == "/" or home == stdlib or home.startswith(stdlib.rstrip("/") + "/"):
+        raise SnippetError(f"the interpreter's standard library {stdlib} holds the home "
+                           "directory, so the sandbox cannot let code read it")
+    return python, stdlib
+
+
+@functools.lru_cache(maxsize=None)
+def _mac_libraries() -> tuple[str, ...]:
+    """The interpreter's own shared library, resolved, as its build names it (`libpythonX.Y`
+    in ``LIBDIR``, or a framework build's ``Python``): the one file of its install beyond
+    the standard library that it loads."""
+    import sysconfig
+
+    name = sysconfig.get_config_var("LDLIBRARY") or ""
+    places = [sysconfig.get_config_var("LIBDIR") or "",
+              sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX") or ""]
+    found = {os.path.realpath(os.path.join(place, name)) for place in places if place and name}
+    return tuple(sorted(path for path in found if os.path.isfile(path)))
 
 
 def _sbpl(path: str) -> str:
@@ -366,18 +382,46 @@ def _sbpl(path: str) -> str:
     return f'"{path}"'
 
 
-def _seatbelt_profile(python: str, prefix: str, scratch: str) -> str:
+def _ancestors(path: str) -> list[str]:
+    """Every directory above ``path``, ``/`` excluded."""
+    found = []
+    parent = os.path.dirname(path)
+    while parent not in ("/", ""):
+        found.append(parent)
+        parent = os.path.dirname(parent)
+    return found
+
+
+def _seatbelt_profile(python: str, stdlib: str, scratch: str) -> str:
     """The deny-by-default profile a macOS code step runs under. Allowed: starting the one
     interpreter, reading the root directory itself (the loader opens it), the system
-    libraries, the interpreter's install, ``/dev/null`` and the scratch directory, and
-    writing the scratch directory and ``/dev/null``. Everything else is denied: the
+    libraries, the interpreter (and its bin directory), its shared library and its
+    standard library, ``/dev/null`` and the scratch directory; the metadata (not the
+    contents) of the directories above them; writing the scratch directory and
+    ``/dev/null``. Everything else is denied: the
     network, other processes (exec, fork, signals, their information), Mach and IPC
     services, and every other file -- homes, keychains, runs, projects, temporary files."""
-    reads = " ".join([f"(subpath {_sbpl(path)})" for path in (*_MAC_SYSTEM_READS, prefix, scratch)])
+    reads = " ".join([f"(subpath {_sbpl(path)})" for path in (*_MAC_SYSTEM_READS, stdlib, scratch)]
+                     + [f"(literal {_sbpl(path)})" for path in (python, *_mac_libraries())]
+                     # A framework build resolves its own bin directory as it starts.
+                     + [f"(literal {_sbpl(os.path.dirname(python))})"])
+    # The directories above what may be read, by their metadata only (no listing, no
+    # contents): the interpreter's start-up resolves its paths through them.
+    above = sorted({parent for path in (*_MAC_SYSTEM_READS, stdlib, scratch, python,
+                                        *_mac_libraries())
+                    for parent in _ancestors(path)})
+    metadata = " ".join(f"(literal {_sbpl(path)})" for path in above)
     return ("(version 1)\n"
             "(deny default)\n"
+            # Other processes are not the default's: without this, KERN_PROCARGS2 read the
+            # parent's environment and proc_listallpids listed every process.
+            "(deny process-info*)\n"
+            "(allow process-info* (target self))\n"
+            # The IOKit registry holds hardware identifiers (the serial number, for one).
+            "(deny iokit-get-properties)\n"
             f"(allow process-exec (literal {_sbpl(python)}))\n"
             f'(allow file-read* (literal "/") (literal "/dev/null") {reads})\n'
+            f"(allow file-read-metadata {metadata})\n"
             f'(allow file-write* (literal "/dev/null") (subpath {_sbpl(scratch)}))\n')
 
 
@@ -385,14 +429,14 @@ def _mac_command(scratch: str, extra: tuple[str, ...]) -> list[str]:
     """`sandbox-exec` running the driver under :func:`_seatbelt_profile`: one process, the
     interpreter exec'd in place. A directory to hide (``extra``) that the profile would let
     the code read is refused rather than exposed."""
-    python, prefix = _mac_interpreter()
+    python, stdlib = _mac_interpreter()
     for path in extra:
         resolved = os.path.realpath(path) if path else ""
         if resolved and any(resolved == allowed or resolved.startswith(allowed.rstrip("/") + "/")
-                            for allowed in (*_MAC_SYSTEM_READS, prefix)):
+                            for allowed in (*_MAC_SYSTEM_READS, stdlib, python, *_mac_libraries())):
             raise SnippetError(f"{resolved} is inside what the sandbox may read, so it cannot "
                                "be hidden")
-    return [SANDBOX_EXEC, "-p", _seatbelt_profile(python, prefix, scratch),
+    return [SANDBOX_EXEC, "-p", _seatbelt_profile(python, stdlib, scratch),
             python, "-I", "-S", "-c", _DRIVER]
 
 

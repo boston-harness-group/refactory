@@ -1579,20 +1579,27 @@ with a deny-by-default profile (`snippet._seatbelt_profile`), running the interp
 refactory runs on, `-I -S`, in one process:
 
 - No network of any kind (TCP, DNS, Unix sockets).
-- Reads only of `/` itself, `/dev/null`, `/usr/lib`, `/System/Library`, the interpreter's
-  own install and a fresh scratch directory (stricter than Linux, where `/etc` and `/usr`
-  stay readable). Homes, keychains, `/tmp`, runs and projects are refused, not just hidden.
-  An install that holds the home directory is refused.
+- Reads only of `/` itself, `/dev/null`, `/usr/lib`, `/System/Library`, the interpreter,
+  its shared library, its standard library and a fresh scratch directory (stricter than
+  Linux, where `/etc` and `/usr` stay readable). Homes, keychains, `/tmp`, runs and
+  projects are refused, not just hidden. A standard library that holds the home directory
+  is refused.
 - Writes only to the scratch directory and `/dev/null`. The scratch directory is the
   code's `HOME` and working directory, is held to 8 MB and 1,024 entries (Linux's tmpfs
   size), and is deleted after the step.
 - No other process: fork, exec (only the interpreter itself may start), signals and other
-  processes' information are refused, so the process cap is one.
+  processes' information (their arguments and environment, the process list, their paths)
+  are refused, so the process cap is one and no process is visible but its own. IOKit
+  registry properties (hardware identifiers such as the serial number) are refused too.
 - The same environment, 10 CPU seconds, 1 MB files and 10 s wall clock (its process
   group killed).
 - 512 MB of memory kept by a watchdog on the process's footprint, polled every 20 ms
   (macOS does not enforce `RLIMIT_AS`): the code is killed within about one poll of
   passing it, so it can briefly hold a little more.
+
+System V IPC (message queues, shared memory) is reachable on both platforms (Linux's
+sandbox has no IPC namespace either), and an object a step makes outlives it; closing
+that is a follow-up for both.
 
 The sandbox fails closed. It is unavailable when `unshare` or the system Python is
 missing (on macOS, `sandbox-exec`, or an interpreter whose install holds the home
