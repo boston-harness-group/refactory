@@ -967,7 +967,10 @@ class AutoresearchOptimizer(Optimizer):
             "Reply with the JSON object described under 'Answer' and nothing else."
         )
         call = {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
-                "system": self._system, "prompt": question}
+                "system": self._system, "prompt": question,
+                # What the request left out of items' texts (item, step, chars): ours to
+                # read; the request itself says only "[… N chars omitted]".
+                **({"omissions": list(ctx.omissions)} if ctx.omissions else {})}
         text, payload, malformed, attempt = self._ask_proposal(call, question)
         call["attempt"] = attempt
         if malformed:

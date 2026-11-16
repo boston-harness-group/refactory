@@ -195,7 +195,7 @@ def test_readers_read_the_fresh_records_every_epoch(tmp_path, monkeypatch):
     epochs = sorted({epoch for epoch, _prompt in client.readers})
     assert epochs == [1, 2, 3], epochs
     for epoch, prompt in client.readers:
-        assert f"Predicted: seed {train_batch_seed(SEED, epoch)}" in prompt, epoch
+        assert f"Given: seed {train_batch_seed(SEED, epoch)}" in prompt, epoch
     assert len(_events(loop, "rescore")) == 2
 
 

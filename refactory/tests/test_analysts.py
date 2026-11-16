@@ -806,9 +806,9 @@ def test_the_items_the_analysts_cite_are_shown_in_full_first():
     AutoresearchOptimizer(client).propose(ctx, 1, [])
     request = client.proposal()
     shown = request[request.index("### Some items in full"):]
-    assert "The items the analysts cited come first" in shown
-    assert shown.count("### Item ") >= 2, "setup: room for more than the cited item"
+    assert "the analysts cited, one per finding in rank order" in shown
     assert shown.split("### Item ")[1].startswith("f9 ")
+    assert shown.count("### Item ") == 1, "one failure per finding, and no passes to show"
 
 
 def test_at_most_the_concurrency_cap_of_calls_run_at_once_merges_included():

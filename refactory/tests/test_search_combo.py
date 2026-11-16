@@ -128,6 +128,9 @@ class Request:
         self.text = text
         self.index = index
         self.pipeline = _section(text, "The pipeline you may edit")
+        # The node table is in the reference at the end of the request.
+        self.reference = text.split("\n## Reference:", 1)[-1] if "\n## Reference:" in text \
+            else self.pipeline
         self.knobs = _section(text, "Each step's settings")
         self.decision = _section(text, "What this round is for")
         wanted = re.search(r"Propose at most (\d+) update", text)
@@ -140,7 +143,7 @@ class Request:
                        if phrase in kinds]
 
     def has_node(self, node_id: str) -> bool:
-        return f"| {node_id} |" in self.pipeline
+        return f"| {node_id} |" in self.reference
 
 
 Script = Callable[["ComboModel", Request], list[dict[str, Any]]]

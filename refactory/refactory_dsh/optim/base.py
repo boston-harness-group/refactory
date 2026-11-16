@@ -765,6 +765,9 @@ class ProposalContext:
     #: the table out.
     edit_check: Callable[[dict[str, Any]], Any] | None = field(default=None, repr=False,
                                                                  compare=False)
+    #: What the last ``render`` left out of an item's texts (each: item, step, chars), for
+    #: the run's own record; the request says only "[... N chars omitted]".
+    omissions: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
     preset: str = "broad"
     #: What the outer loop decided for *this* iteration, as data.
     #:
@@ -908,81 +911,12 @@ class ProposalContext:
     #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
-    def render(self) -> str:
-        """The request, as text, for a model optimizer."""
-        sections = [
-            f"# Update request — generation {self.generation}, epoch {self.epoch}",
-            "",
-            f"Mode: `{self.mode_name}`. "
-            + (f"Best score so far: {self.best_score}. " if not self.selection else
-               f"Train score of the candidate the validation gate ranks first: "
-               f"{self.best_score}. ")
-            + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
-             if self.mean_over else f"Mean score so far: {self.mean_score}."),
-            "",
-            *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
-                             gated=bool(self.selection)),
-            *time_lines(self.time_facts),
-            *([self.steering, ""] if self.steering.strip() else []),
-            *_strategy_section(self.strategy, self.strategy_name),
-            "## The pipeline you may edit",
-            _levers_line(self.catalogue),
-            *([f"Note: {self.graph_note}"] if self.graph_note else []),
-            *([f"Protected nodes: {', '.join(f'`{n}`' for n in self.protected)}. An edit may "
-               "not remove them, change their declarations or out-edges, move a knob they "
-               "read, or let a run finish without them; a new node may go in front of one."]
-              if self.protected else []),
-            *pipeline_view_lines(self.node_states, self.edges, self.knobs, self.protected,
-                                 self.graders),
-            "Nodes:",
-            _table(["id", "kind", "call", "knobs", "notes"],
-                   [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
-                     n.get("notes", "")] for n in self.nodes]),
-            "Edges:",
-            _table(["source", "target", "condition"],
-                   [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
-            *(["Wiring warnings (the graph runs, but likely not as meant; not refusals):",
-                *(f"- {w}" for w in self.wiring_warnings)] if self.wiring_warnings else []),
-            *_available_section(self.available, code_nodes=self.code_nodes),
-            "",
-            *_step_map(self),
-            "## The operations you may use",
-            _table(["op", "kind", "macro", "fields", "description"],
-                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
-                    for c in self.catalogue]),
-            "",
-            *composition_section(self.catalogue, self.node_states, self.edges,
-                                 protected=self.protected, code_nodes=self.code_nodes,
-                                 text_knobs=[k.get("name") for k in self.knobs
-                                             if k.get("kind") == "str"],
-                                 structure_guidance=self.structure_guidance,
-                                 tools=self.new_node_tools, rotation=self.generation,
-                                 knob_values={k.get("name"): k.get("value") for k in self.knobs}),
-            *operator_fit_section(self.catalogue, self.node_states, self.edges, self.knobs,
-                                  self.edit_check),
-            *_settings_lines(self.knobs),
-            *_node_reference(self),
-            "## What the author says is worth doing",
-            self.guidance or "(the mode's author offered no guidance)",
-            (
-                "Operations the author suggests trying first: "
-                + ", ".join(f"`{name}`" for name in self.preferred_edits)
-                if self.preferred_edits
-                else ""
-            ),
-            "",
-            "`score_effect: none` on a block means inserting it cannot change the "
-            "score. It is available and it may be worth having, but it is not a way "
-            "to improve the number.",
-            "",
-            "## The rules the validator checks",
-            "Every proposal is checked against these rules before anything runs; they are "
-            "the validator's own, generated from it. One that breaks a rule comes back with "
-            "the rule's code and the reason, so it can be fixed in a later answer, and it "
-            "costs nothing but the answer.",
-            _rules_text(),
-            "",
-            *_blocks_section(self.insertable, self.catalogue),
+    def _tried_lines(self) -> list[str]:
+        """What this run has tried and how each attempt did: the recent results, the
+        traces' numbers, the last edit's children and the reasoning behind recent
+        candidates (each with what its edit built), every candidate so far, the run-wide
+        feedback, earlier runs and the latest refusals."""
+        lines = [
             "## Recent results",
             *_gate_note(self.leaderboard, self.history, val_items=self.val_items,
                         selection=self.selection, population=self.population_parents),
@@ -994,29 +928,6 @@ class ProposalContext:
                      *([c.get("gate", "")] if _gate_column(self.leaderboard) else []),
                      *([_cost_cell(c.get("cost_per_item"))] if self.parsimony else [])]
                     for c in self.leaderboard]),
-            "",
-            "## Evidence from the traces",
-            _table(["what", "value"], _evidence_rows(_trace_rows(
-                self.traces, omit=UNSCORED_TRACE_KEYS
-                if self.parsimony == 0 and self.score_is_item_mean else ()),
-                [] if self.history_truncated else self.history)),
-        ]
-        if self.edit_pairs:
-            sections += ["", *_edit_change_lines(self.edit_pairs)]
-        if self.reasoning:
-            above = [str(p.get("child")) for p in self.edit_pairs or ()]
-            sections += ["", *_reasoning_lines(self.reasoning, above)]
-        if self.analysis is not None:
-            from .analysts import section_lines
-            sections += ["", *section_lines(self.analysis)]
-        if self.item_records:
-            sections += ["", *_item_evidence(self.item_records)]
-            sections += ["", *_trajectories(
-                self.item_records, budget=self.evidence_budget,
-                findings=self.reader_findings, failures=self.reader_failures,
-                analysed=(None if self.analysis is None
-                          else list(self.analysis.get("findings") or ())))]
-        sections += [
             "",
             "## What this run has already tried",
             (
@@ -1041,10 +952,21 @@ class ProposalContext:
                     for c in self.history[-16:]
                 ],
             ),
+            "",
+            "## Evidence from the traces",
+            _table(["what", "value"], _evidence_rows(_trace_rows(
+                self.traces, omit=UNSCORED_TRACE_KEYS
+                if self.parsimony == 0 and self.score_is_item_mean else ()),
+                [] if self.history_truncated else self.history)),
         ]
-        sections += _feedback_sections(self)
+        if self.edit_pairs:
+            lines += ["", *_edit_change_lines(self.edit_pairs, omissions=self.omissions)]
+        if self.reasoning:
+            above = [str(p.get("child")) for p in self.edit_pairs or ()]
+            lines += ["", *_reasoning_lines(self.reasoning, above)]
+        lines += _feedback_sections(self)
         if self.prior_runs:
-            sections += [
+            lines += [
                 "",
                 "## Previous runs of this mode",
                 "What earlier searches already settled, so it does not have to be "
@@ -1060,7 +982,7 @@ class ProposalContext:
                 ),
             ]
         if self.rejections:
-            sections += [
+            lines += [
                 "",
                 "## Why your last proposals were refused",
                 "A proposal that breaks one of these is not evaluated at all. It costs "
@@ -1068,6 +990,116 @@ class ProposalContext:
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
                 *refused_lines(self.refused),
             ]
+        return lines
+
+    def render(self) -> str:
+        """The request, as text, for a model optimizer: the score, the pipeline (once, as
+        the view), what this run has tried, what the analysts found, the edits it may
+        make, the items, then the reference, and the answer's form last. Fills
+        ``omissions`` with any text it had to leave out of an item."""
+        self.omissions.clear()
+        sections = [
+            f"# Update request — generation {self.generation}, epoch {self.epoch}",
+            "",
+            f"Mode: `{self.mode_name}`. "
+            + (f"Best score so far: {self.best_score}. " if not self.selection else
+               f"Train score of the candidate the validation gate ranks first: "
+               f"{self.best_score}. ")
+            + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
+             if self.mean_over else f"Mean score so far: {self.mean_score}."),
+            "",
+            *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
+                             gated=bool(self.selection)),
+            *time_lines(self.time_facts),
+            *([self.steering, ""] if self.steering.strip() else []),
+            *_strategy_section(self.strategy, self.strategy_name),
+            # 1-2: the score (above), then the pipeline once, in the view's lines.
+            "## The pipeline you may edit",
+            _levers_line(self.catalogue),
+            *([f"Note: {self.graph_note}"] if self.graph_note else []),
+            *([f"Protected nodes: {', '.join(f'`{n}`' for n in self.protected)}. An edit may "
+               "not remove them, change their declarations or out-edges, move a knob they "
+               "read, or let a run finish without them; a new node may go in front of one."]
+              if self.protected else []),
+            *pipeline_view_lines(self.node_states, self.edges, self.knobs, self.protected,
+                                 self.graders),
+            *(["Wiring warnings (the graph runs, but likely not as meant; not refusals):",
+                *(f"- {w}" for w in self.wiring_warnings)] if self.wiring_warnings else []),
+            REFERENCE_POINTER,
+            "",
+            # 3: what this run has tried, and how each attempt did.
+            *self._tried_lines(),
+        ]
+        # 4: what the analysts found, failures and successes, and where it fails by step.
+        if self.analysis is not None:
+            from .analysts import section_lines
+            sections += ["", *section_lines(self.analysis)]
+        sections += ["", *_step_map(self)]
+        # 5: the edits it may make, with which apply where, and the steps' settings.
+        sections += [
+            "## The operations you may use",
+            _table(["op", "kind", "macro", "fields", "description"],
+                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
+                    for c in self.catalogue]),
+            "",
+            *composition_section(self.catalogue, self.node_states, self.edges,
+                                 protected=self.protected, code_nodes=self.code_nodes,
+                                 text_knobs=[k.get("name") for k in self.knobs
+                                             if k.get("kind") == "str"],
+                                 structure_guidance=self.structure_guidance,
+                                 tools=self.new_node_tools, rotation=self.generation,
+                                 knob_values={k.get("name"): k.get("value") for k in self.knobs}),
+            *operator_fit_section(self.catalogue, self.node_states, self.edges, self.knobs,
+                                  self.edit_check),
+            *_settings_lines(self.knobs),
+            "## What the author says is worth doing",
+            self.guidance or "(the mode's author offered no guidance)",
+            (
+                "Operations the author suggests trying first: "
+                + ", ".join(f"`{name}`" for name in self.preferred_edits)
+                if self.preferred_edits
+                else ""
+            ),
+            "",
+            "`score_effect: none` on a block means inserting it cannot change the "
+            "score. It is available and it may be worth having, but it is not a way "
+            "to improve the number.",
+            "",
+            *_blocks_section(self.insertable, self.catalogue),
+        ]
+        # 6: the items themselves, chosen rather than clipped.
+        if self.item_records:
+            sections += ["", *_item_evidence(self.item_records)]
+            sections += ["", *_trajectories(
+                self.item_records, budget=self.evidence_budget,
+                findings=self.reader_findings, failures=self.reader_failures,
+                analysed=(None if self.analysis is None
+                          else list(self.analysis.get("findings") or ())),
+                omissions=self.omissions)]
+        # 7: the reference, last: every node in full, the schemas, the validator's rules.
+        sections += [
+            "",
+            REFERENCE_HEADING,
+            "The pipeline's nodes and edges as the graph declares them, what each node has "
+            "before it runs, each step in full with the node schema, and the rules the "
+            "validator checks.",
+            "Nodes:",
+            _table(["id", "kind", "call", "knobs", "notes"],
+                   [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
+                     n.get("notes", "")] for n in self.nodes]),
+            "Edges:",
+            _table(["source", "target", "condition"],
+                   [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
+            *_available_section(self.available, code_nodes=self.code_nodes),
+            "",
+            *_node_reference(self),
+            "## The rules the validator checks",
+            "Every proposal is checked against these rules before anything runs; they are "
+            "the validator's own, generated from it. One that breaks a rule comes back with "
+            "the rule's code and the reason, so it can be fixed in a later answer, and it "
+            "costs nothing but the answer.",
+            _rules_text(),
+        ]
         sections += ["", "## Answer", answer_instructions(
             self.catalogue, parsimony=self.parsimony,
             items=_item_count(self.item_records) if self.score_is_item_mean else 0,
@@ -1685,6 +1717,11 @@ def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[d
             else "pipeline view unavailable: the graph does not read back")
     return [PIPELINE_VIEW_LEAD, "```text", text, "```"]
 
+
+#: The reference at the end of the request, and the line that points to it.
+REFERENCE_HEADING = "## Reference: every node in full, the schemas and the rules"
+REFERENCE_POINTER = ("Every node in full (its declarations, what it has before it runs), the "
+                     "node schemas and the validator's rules are in the reference at the end.")
 
 #: What the pipeline view's words mean.
 def _view_lead() -> str:
@@ -2458,43 +2495,86 @@ def _choice_lines(choices: Any) -> list[str]:
 _WHOLE = 10 ** 9
 
 
-def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE) -> str:
-    """One train item in full: input, each step's output, the answer.
+#: What an item's text clipped in a request says in its place: the count only, never a
+#: path (the proposer has no tools); the full record goes to ``ProposalContext.omissions``.
+OMITTED = "[… {chars:,} chars omitted]"
 
-    The steps are in the order the record holds them, which is the order the pass
-    ran them (a fork merges its branches in branch order), never sorted by name.
-    Texts are whole unless ``text_chars`` clips them (head and tail).
+
+def _marked(text: Any, limit: int, *, item: Any = None, step: str = "",
+            omissions: list[dict[str, Any]] | None = None) -> str:
+    """``text`` whole when it fits ``limit``, else its head and tail around an
+    `OMITTED` mark; each cut is added to ``omissions`` (item, step, chars)."""
+    text = ("" if text is None else str(text)).strip()
+    if len(text) <= limit:
+        return text
+    keep = max(0, limit // 2)
+    chars = len(text) - 2 * keep
+    if omissions is not None:
+        omissions.append({"item": item, "step": step, "chars": chars})
+    return f"{text[:keep]}\n{OMITTED.format(chars=chars)}\n{text[-keep:]}"
+
+
+def _demoted(text: str) -> str:
+    """``text`` with each Markdown heading line pushed below the request's own levels, so
+    an output's "## Answer" cannot read as one of the request's sections."""
+    return re.sub(r"(?m)^(#{1,3})(?=\s)", lambda m: "#" * (len(m.group(1)) + 3), text)
+
+
+def _fenced(text: str) -> list[str]:
+    """``text`` (headings demoted) in a code fence longer than any run of backticks in it."""
+    body = _demoted(text)
+    fence = _fence(body)
+    return [fence, body, fence]
+
+
+def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
+                omissions: list[dict[str, Any]] | None = None) -> str:
+    """One train item: its verdict, what was expected and what it gave, then its input and
+    each step's output, each fenced (headings demoted) so nothing in them reads as a
+    section of the request.
+
+    The steps are in the order the record holds them, which is the order the pass ran them
+    (a fork merges its branches in branch order), never sorted by name. Texts are whole
+    unless ``text_chars`` clips them (head and tail, marked; each cut in ``omissions``).
     """
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, dict)]
     from .analysts import metadata_text
 
+    item = record.get("id")
+
+    def cut(value: Any, step: str) -> str:
+        return _marked(value, text_chars, item=item, step=step, omissions=omissions)
+
     declared = metadata_text(record)
-    lines = [f"### Item {record.get('id')} — {_outcome(record)} (score {record.get('score')})"
+    lines = [f"### Item {item} — {_outcome(record)} (score {record.get('score')})"
              + (f" — {declared}" if declared else "")]
+    expected = _expected(record)
+    said = [part for part in (
+        f"Expected: {cut(expected, 'expected')}" if expected else "",
+        f"Given: {cut(record.get('prediction'), 'prediction')}"
+        if record.get("prediction") is not None else "") if part]
+    if said:
+        lines.append("; ".join(said))
+    if record.get("fail_reason") and not record.get("passed"):
+        lines.append(f"Grader: {cut(record['fail_reason'], 'grader')}")
+    if record.get("error_text"):
+        lines.append(f"Error: {cut(record['error_text'], 'error')}")
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    choices = _choice_lines(meta.get("choices"))
     if key is not None:
-        lines += [f"Input ({key}):", _clip_middle(meta[key], text_chars)]
+        text = cut(meta[key], "input")
+        if choices:
+            text += "\n\nChoices:\n" + "\n".join(cut(line, "choices") for line in choices)
+        lines += [f"Input ({key}):", *_fenced(text)]
     elif exchanges:
         lines += ["Input (the first step's prompt):",
-                  _clip_middle(exchanges[0].get("prompt"), text_chars)]
-    choices = _choice_lines(meta.get("choices"))
-    if choices:
-        lines += ["Choices:", *(_clip_middle(line, text_chars) for line in choices)]
+                  *_fenced(cut(exchanges[0].get("prompt"), "input"))]
     for exchange in exchanges:
-        lines += [f"Step `{exchange.get('node') or 'agent'}` output:",
-                  _clip_middle(exchange.get("response"), text_chars)]
+        node = exchange.get("node") or "agent"
+        lines += [f"Step `{node}` output:", *_fenced(cut(exchange.get("response"), str(node)))]
     if not exchanges:
         lines.append("(no step output was recorded)")
-    expected = _expected(record)
-    if expected:
-        lines.append(f"Expected: {_clip_middle(expected, text_chars)}")
-    if record.get("prediction") is not None:
-        lines.append(f"Predicted: {_clip_middle(record.get('prediction'), text_chars)}")
-    if record.get("fail_reason") and not record.get("passed"):
-        lines.append(f"Grader: {_clip_middle(record['fail_reason'], text_chars)}")
-    if record.get("error_text"):
-        lines.append(f"Error: {_clip_middle(record['error_text'], text_chars)}")
     return "\n".join(lines)
 
 
@@ -2508,24 +2588,21 @@ def _expected(record: dict[str, Any]) -> str:
     return " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
 
 
-_CLIPPED_ITEM_NOTE = ("(This item alone is longer than one call's evidence budget, so its "
-                      "texts are clipped head and tail.)")
-
-
-def _item_block(record: dict[str, Any], budget: int) -> str:
-    """An item in full; clipped (head and tail, with a note) only when the item alone
-    is longer than ``budget``."""
+def _item_block(record: dict[str, Any], budget: int,
+                omissions: list[dict[str, Any]] | None = None) -> str:
+    """An item in full; clipped (each long text head and tail, marked) only when the item
+    alone is longer than ``budget``, each cut added to ``omissions``."""
     whole = _trajectory(record)
     if len(whole) <= budget:
         return whole
     low, high = 1, max(1, budget)
     while low < high:  # the largest per-text limit that fits
         middle = (low + high + 1) // 2
-        if len(_trajectory(record, middle)) + len(_CLIPPED_ITEM_NOTE) + 1 <= budget:
+        if len(_trajectory(record, middle)) <= budget:
             low = middle
         else:
             high = middle - 1
-    return _trajectory(record, low) + "\n" + _CLIPPED_ITEM_NOTE
+    return _trajectory(record, low, omissions)
 
 
 def _ordered_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2625,18 +2702,98 @@ def _cited_items(items: Sequence[dict[str, Any]],
     return chosen
 
 
+#: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
+#: every item when all of them together are under this many characters. It only decides
+#: that switch; it never cuts an item.
+SHOW_ALL_BELOW = 120000
+#: A single text of an item shown in full (a step's reply, the input) is cut only past
+#: this many characters -- one text too large to send whole; the items themselves are
+#: never cut to fit a size.
+ITEM_TEXT_MAX = 60000
+
+
+def _contrast_items(items: Sequence[dict[str, Any]], shown: Sequence[dict[str, Any]],
+                    findings: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Passing items to show beside the failures: the success findings' items first, then
+    passes of the same declared kind as a failure shown (a near miss), then the rest."""
+    from .analysts import metadata_text
+
+    passing = [r for r in items if r.get("passed")]
+    cited = [r for r in _cited_items(passing, [{"success_patterns": [
+        p for f in findings or () for p in f.get("success_patterns") or ()]}])] if findings else []
+    kinds = {metadata_text(r) for r in shown if metadata_text(r)}
+    near = [r for r in passing if metadata_text(r) in kinds]
+    out: list[dict[str, Any]] = []
+    for record in [*cited, *near, *passing]:
+        if all(record is not r for r in out):
+            out.append(record)
+    return out
+
+
+def _failure_kind(record: dict[str, Any]) -> str:
+    """What kind of failure an item is, for choosing items without findings: its outcome
+    and its declared kind (`analysts.metadata_text`), when it has one."""
+    from .analysts import metadata_text
+
+    return f"{_outcome(record)} {metadata_text(record)}".strip()
+
+
+def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, Any]] | None
+                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """The items shown whole when not all are, by rule, never by size: one failure per
+    failure finding that cites a known item, in rank order (an item already chosen is not
+    chosen twice); then one contrasting success per success finding -- or, with none, one
+    per kind of failure shown (`_failure_kind`), the same declared kind first. Without
+    findings, one failure per kind of failure. The last value says whether the failures
+    were chosen by findings."""
+    known = {str(r.get("id")) for r in items}
+    by_id = {str(r.get("id")): r for r in items}
+    patterns = [(kind, p) for kind, p in _reader_patterns(findings)
+                if known & {str(i) for i in p.get("items") or ()}]
+    failing: list[dict[str, Any]] = []
+    for kind, pattern in patterns:
+        if kind != "failure_patterns":
+            continue
+        pick = next((by_id[str(i)] for i in pattern.get("items") or ()
+                     if str(i) in by_id and not by_id[str(i)].get("passed")
+                     and all(by_id[str(i)] is not r for r in failing)), None)
+        if pick is not None:
+            failing.append(pick)
+    by_findings = bool(failing)
+    if not failing:
+        kinds: dict[str, dict[str, Any]] = {}
+        for record in items:
+            if not record.get("passed"):
+                kinds.setdefault(_failure_kind(record), record)
+        failing = list(kinds.values())
+    contrast = _contrast_items(items, failing, findings)
+    n_pass = sum(1 for kind, _p in patterns if kind == "success_patterns")
+    if n_pass:
+        passing = contrast[:n_pass]
+    else:
+        from .analysts import metadata_text
+
+        passing = []
+        for kind in dict.fromkeys(metadata_text(r) for r in failing):
+            pick = next((r for r in contrast if metadata_text(r) == kind
+                         and all(r is not p for p in passing)), None) or next(
+                (r for r in contrast if all(r is not p for p in passing)), None)
+            if pick is not None:
+                passing.append(pick)
+    return failing, passing, by_findings
+
+
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = (),
-                  analysed: Sequence[dict[str, Any]] | None = None) -> list[str]:
+                  analysed: Sequence[dict[str, Any]] | None = None,
+                  omissions: list[dict[str, Any]] | None = None) -> list[str]:
     """Every train item of the candidate being edited.
 
-    When all of them fit ``budget`` in full, every item is shown in full here. When
-    not, readers went through them in groups (``AutoresearchOptimizer``): their
-    findings come first, then a table of every item, then as many items in full as
-    the rest of the budget holds: the items the readers cited first, one per pattern
-    in turn (``_cited_items``), then failures and passes alternating. Train records
-    only.
+    When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
+    smaller ``budget``), every item is shown in full here. When not, readers went through them in groups of ``budget``
+    (``AutoresearchOptimizer``): their findings come first, then a table of every item,
+    then the items the rule picks (`_shown_items`), each whole. Train records only.
 
     ``analysed``: the analysts' ranked findings (`optim.analysts`), shown before this
     section, which take the readers' place: no reader findings are shown, and the
@@ -2652,10 +2809,12 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
               f"All {len(items)} train item(s): {wrong} answered wrong, {errored} failed with "
               f"an error, {len(items) - wrong - errored} passed."]
     groups = trajectory_groups(records, budget)
-    if len(groups) == 1:
+    whole = [_trajectory(r) for r in items]
+    if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
         return header + ["Every item in full. Read what each step produced and where it "
                          "went wrong before proposing.",
-                         *(line for _id, block in groups[0] for line in ("", block))]
+                         *(line for r in items
+                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions)))]
     if analysed is not None:
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
@@ -2719,28 +2878,22 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
                        _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
-    used = len("\n".join(lines))
-    examples = ["", "### Some items in full"]
-    failing = [r for r in items if not r.get("passed")]
-    passing = [r for r in items if r.get("passed")]
-    interleaved = [r for pair in zip(failing, passing) for r in pair]
-    interleaved += failing[len(passing):] + passing[len(failing):]
-    # The items behind the readers' patterns first, so the proposal call sees each
-    # pattern in full; then the rest by the rule above.
-    cited = _cited_items(items, findings)
-    if cited:
-        examples.append(f"The items the {'analysts' if analysed is not None else 'readers'} "
-                        "cited come first, one per pattern in turn, "
-                        "then the others.")
-    picked = {id(record) for record in cited}
-    shown = 0
-    for record in cited + [r for r in interleaved if id(r) not in picked]:
-        block = _item_block(record, budget)
-        if used + len("\n".join(examples)) + len(block) + 2 > budget:
-            continue
-        examples += ["", block]
-        shown += 1
-    return lines + (examples if shown else [])
+    # Items in full, chosen by rule (`_shown_items`) rather than cut, each whole.
+    failing, passing, cited = _shown_items(items, findings)
+    chosen = [*failing, *passing]
+    if not chosen:
+        return lines
+    examples = ["", "### Some items in full",
+                f"{len(failing)} failing item(s)"
+                + (f" the {'analysts' if analysed is not None else 'readers'} cited, "
+                   "one per finding in rank order" if cited else ", one per kind of failure")
+                + (f", then {len(passing)} passing item(s) for contrast" if passing else "")
+                + f", each whole (of {len(items)}; the table above has every one)."]
+    for record in chosen:
+        if record.get("passed"):
+            examples += ["", "(A success, for contrast.)"]
+        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions)]
+    return lines + examples
 
 
 def _edit_fields(fields: Sequence[str]) -> str:
@@ -3416,7 +3569,8 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
             "```text", *built, "```"]
 
 
-def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET) -> list[str]:
+def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANGE_BUDGET,
+                       omissions: list[dict[str, Any]] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts; the
     changed items' trajectories share ``budget`` child by child in turn, so the first
@@ -3469,8 +3623,8 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]], budget: int = EDIT_CHANG
                             ("score rose", change["up"]), ("score dropped", change["down"])):
             for item in items:
                 block = (f"#### Item {item} -- {kind} (child {pair.get('child')})\nParent:\n"
-                         + _item_block(parent[item], budget // 2)
-                         + "\nChild:\n" + _item_block(child[item], budget // 2))
+                         + _item_block(parent[item], budget // 2, omissions)
+                         + "\nChild:\n" + _item_block(child[item], budget // 2, omissions))
                 own.append((block, [pair.get("child"), item, kind, _outcome(parent[item]),
                                     parent[item].get("score"), _outcome(child[item]),
                                     child[item].get("score")]))

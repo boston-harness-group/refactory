@@ -242,7 +242,7 @@ def test_the_history_shows_edits_compactly_not_whole_values():
                        {"op": "insert_after", "target": "a", "node": node},
                        {"op": "set_knob", "name": "b", "patch": [{"find": "x" * 2000}]}]}]
     text = ProposalContext(history=rows, seed_knob_values={"a__system_prompt": seed}).render()
-    tried = text[text.index("## What this run has already tried"):]
+    tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
     assert first not in tried and "z" * 700 not in tried and "P" * 300 not in tried
     assert "x" * 700 not in tried and "more chars)" in tried
     assert f"set_knob a__system_prompt: {len(seed)} -> {len(first)} chars; diff:" in tried
@@ -289,12 +289,13 @@ def test_the_request_lists_the_facts_each_node_has_and_how_a_file_becomes_one():
     assert "compare_prompt" in available["compare"]["facts"]
     assert "decide_prompt" not in available["compare"]["facts"]
     text = _render(available=available, code_nodes=True)
-    pipeline = text[text.index("## The pipeline you may edit"):].split("\n## ", 1)[0]
-    row = next(line for line in pipeline.splitlines() if line.startswith("| decide |"))
+    # In the reference at the end, with the nodes and edges.
+    reference = text[text.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
+    row = next(line for line in reference.splitlines() if line.startswith("| decide |"))
     assert "decide_prompt" in row and "compare_notes.txt" in row
-    assert "a file's name is not a fact" in pipeline and "snippet:run" in pipeline
+    assert "a file's name is not a fact" in reference and "snippet:run" in reference
     plain = _render(available=available, code_nodes=False)
-    plain = plain[plain.index("## The pipeline you may edit"):].split("\n## ", 1)[0]
+    plain = plain[plain.index(base.REFERENCE_HEADING):].split("\n## ", 1)[0]
     assert "a file's name is not a fact" in plain and "snippet:run" not in plain
     assert "facts available" not in _render()
 
