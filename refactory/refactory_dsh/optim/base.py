@@ -1781,6 +1781,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         return []
     graph = Graph.from_state(state["graph"])
     knob_values = {k.get("name"): k.get("value") for k in knobs}
+    code_before = _code_signatures(state)
     rows: list[list[str]] = []
     full_refusals: list[list[str]] = []
     for node_id in sorted(graph.nodes):
@@ -1793,7 +1794,11 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         for label, edit in _fit_edits(node, graph, ops):
             verdict = check(edit)
             if not isinstance(verdict, list):
-                applies.append(label)
+                # Its new or changed code was not run on recorded inputs (the loop's check
+                # skips that); proposing the edit runs it, as any attempt does.
+                changed = any(code_before.get(node_id) != signature for node_id, signature
+                              in _code_signatures(verdict.state).items())
+                applies.append(f"{label} (not dry-run)" if changed else label)
                 continue
             reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
             reasons.setdefault(reason, []).append(label)

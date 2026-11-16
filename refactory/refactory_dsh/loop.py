@@ -6328,10 +6328,12 @@ class Loop(OuterLoop):
     def _edit_check(self, board: list[Candidate]) -> Any:
         """The request's operator table's verdict on one edit: `Run.mechanics` on the
         edited candidate (the seed when none is known), so the table says what an
-        attempt would, recording nothing."""
+        attempt would, recording nothing and without the code dry run (a sandbox
+        process per edit and request; the table marks an accepted code change so)."""
         parent = self._edited_candidate(board) or Candidate.from_state(self.mode.state_dict())
         run = Run(_loop=self)
-        return lambda edit: run.mechanics(Proposal(edit=edit), parent, record=False)
+        return lambda edit: run.mechanics(Proposal(edit=edit), parent, record=False,
+                                          dry_run_code=False)
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.

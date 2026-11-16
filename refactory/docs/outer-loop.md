@@ -1840,7 +1840,10 @@ which are refused, in the refusal's own words (equal reasons grouped). Each verd
 run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then
 `Optimizer.attempt` with the run's protected and grading steps, frozen and guarded knobs,
 wiring and validation; everything `Run.attempt` checks but the model-judged integrity
-check), recording nothing; a request built outside a run has no section. A refusal that
+check), recording nothing and without the code dry run (a sandbox process for each edit
+on each request): an accepted edit that adds or changes code is marked "(not dry-run)",
+and proposing it runs the dry run as any attempt does. A request built outside a run has
+no section. A refusal that
 points to replacing a step names the exact edit (`{"op": "split", "step": ..., "into":
 [one step]}`) only when an attempt would accept it (`checked_hint`), and otherwise says why
 replacing it is refused too. That check skips the code dry run (a sandbox process on every

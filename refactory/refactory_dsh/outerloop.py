@@ -136,10 +136,11 @@ class Run:
             )
         return outcome
 
-    def mechanics(self, proposal: Proposal, parent: Candidate, *,
-                  record: bool = True) -> Candidate | list[str]:
+    def mechanics(self, proposal: Proposal, parent: Candidate, *, record: bool = True,
+                  dry_run_code: bool = True) -> Candidate | list[str]:
         """Every check `attempt` makes but the model-judged integrity one, and no
-        rejection recorded (``record`` False records no optimizer call either): the catalogue (an unknown or unpermitted operation), then
+        rejection recorded (``record`` False records no optimizer call either;
+        ``dry_run_code`` False skips running new code on recorded inputs): the catalogue (an unknown or unpermitted operation), then
         `Optimizer.attempt` with this run's invariants, frozen knobs, tried states,
         protected and grading steps. The request's operator table asks it for each
         operator it lists, so the table says what an attempt would."""
@@ -161,6 +162,7 @@ class Run:
             graders=getattr(self._loop, "graders", ()),
             allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
             record=record,
+            dry_run_code=dry_run_code,
         )
 
     # ── the expensive primitive ────────────────────────────────────────────

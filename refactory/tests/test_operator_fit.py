@@ -414,3 +414,37 @@ def test_the_loop_line_says_what_the_judge_sees_and_how_often_the_step_runs():
     assert "The judge sees what the step read and wrote, unless 'sees' says otherwise" in line
     default = core_ops.LOOP_ITERATIONS[0]
     assert f"default {default}: up to {default + 1} runs" in line
+
+
+def test_the_run_s_table_skips_the_code_dry_run_and_marks_new_code(tmp_path, monkeypatch):
+    """On a graph with a code step and recorded inputs, an attempt dry-runs new or changed
+    code in a sandbox, a process each time; the table asks for every operator on every
+    request, so it skips that and marks an accepted edit that changes code."""
+    from refactory_dsh import strategies
+    from refactory_dsh.loop import LoopConfig
+    from refactory_dsh.optim import checks
+    from test_structure_first_request import _section as section_of
+
+    state = nn_edits.apply({"op": "insert", "after": "compare", "kind": "code", "id": "tally"},
+                           _start_state())
+    loop = strategies.create("default", MODE, LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", seed=1, runs_root=tmp_path,
+        edit_preset="broad"), project=Path("."))
+    seed = Candidate.from_state(state)
+    loop.population.append(seed)
+    loop._editing_parent = seed.id
+    loop.optimizer.recorded_inputs = lambda candidate: {"run": str(tmp_path), "passes": {}}
+    given = []
+    real = checks.code_dry_run
+
+    def spy(parent_id, parent_state, state, nodes, recorded, sandbox=None):
+        given.append(recorded)
+        return real(parent_id, parent_state, state, nodes, None, sandbox)
+
+    monkeypatch.setattr(checks, "code_dry_run", spy)
+    body = section_of(loop._context().render(),
+                      "What each step carries, and which operators apply to it")
+    rows = _rows([body[body.index("| step |"):]])
+    assert "merge (not dry-run)" in rows["tally"][1].split(", "), rows["tally"]
+    assert "insert" in rows["tally"][1].split(", ")  # no code changed: no mark
+    assert given and all(recorded is None for recorded in given), given
