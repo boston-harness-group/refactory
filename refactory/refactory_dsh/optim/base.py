@@ -1770,7 +1770,10 @@ def _task_branch(fork_id: str, state: dict[str, Any]) -> str:
     try:
         after = nn_edits.apply({"op": "branch", "fork": fork_id, "kind": "agent",
                                 "sees": ["task"]}, state)
-    except Exception:  # noqa: BLE001 - a fork that takes no such branch gets no line
+    except Exception as exc:  # noqa: BLE001 - a fork that takes no such branch gets no line
+        import logging
+
+        logging.getLogger(__name__).debug("no task branch for fork %s: %s", fork_id, exc)
         return "-"
     graph = Graph.from_state(after["graph"])
     new = [graph.nodes[n] for n in set(graph.nodes) - set(state["graph"]["nodes"])]
@@ -1779,7 +1782,7 @@ def _task_branch(fork_id: str, state: dict[str, Any]) -> str:
     agent = next((n for n in new if n.kind == "agent"), None)
     if agent is None:
         return "-"
-    taken: list[str] = []
+    taken: list[str] = []  # in order, each once (one collect step may bring several files)
     for kind, name in sorted(consumed(agent, values)):
         by = [m for m in makers.get((kind, name)) or [] if m not in {n.id for n in new}]
         helper = next((n for n in new if n.id in (makers.get((kind, name)) or [])), None)
@@ -1788,6 +1791,7 @@ def _task_branch(fork_id: str, state: dict[str, Any]) -> str:
                       for k, n in sorted(consumed(helper, values))]
         else:
             taken.append(f"{name} ({', '.join(by) or 'task input'})")
+    taken = list(dict.fromkeys(taken))
     return f"a new branch that sees the task takes in: {', '.join(taken) or 'nothing'}"
 
 

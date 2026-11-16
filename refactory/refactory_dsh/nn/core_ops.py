@@ -2059,6 +2059,11 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     def pre_loop(edit: dict, state: dict) -> str | None:
         if not is_one_line_loop(edit):
+            if "max_iterations" in edit:
+                # The written-out form's cap is its gate's own field; a top-level one
+                # would be ignored there, so it is refused rather than dropped.
+                return ("'max_iterations' goes with the one-line loop ('step' and 'judge'); "
+                        "written out, set the 'gate' node's own max_iterations")
             return old_loop.precondition(edit, state)
         return _guarded(_pre_loop_line)(edit, state)
 

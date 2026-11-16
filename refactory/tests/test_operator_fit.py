@@ -475,3 +475,23 @@ def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
     forks = [n for n, x in nested["graph"]["nodes"].items() if x.get("kind") == "fork"]
     assert all(_rows(_section(nested))[f][0].startswith("a new branch that sees the task")
                for f in forks)
+
+
+def test_max_iterations_is_refused_on_the_written_out_loop():
+    """The written-out loop's cap is its gate's own field: a top-level one would be
+    ignored there (even out of range), so it is refused; the one-line form takes it."""
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    gate = {"id": "review_gate", "kind": "gate", "evaluator": "refactory_dsh.snippet:gate",
+            "code": "def main(inp):\n    return {'verdict': 'proceed', 'reason': ''}\n",
+            "max_iterations": 2}
+    written = {"op": "loop", "target": "review", "gate": gate}
+    assert nn_edits.precheck(written, state) is None
+    for cap in (2, 9):
+        reason = nn_edits.precheck({**written, "max_iterations": cap}, state)
+        assert reason and "'max_iterations' goes with the one-line loop" in reason, cap
+    # The help names it in the one-line form's sentence, before the written-out form.
+    loop = next(op for op in nn_edits.catalogue("broad") if op["op"] == "loop")
+    text = json.dumps(loop)
+    assert "'max_iterations'" in text
+    assert text.index("'max_iterations'") < text.index("Or, written out"), text
+
