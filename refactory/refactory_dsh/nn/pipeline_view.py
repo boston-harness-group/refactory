@@ -42,7 +42,10 @@ TOLD_CHARS = 48
 FOLD_DEPTH = 3
 #: A loop's line: the step it sends back to, its judge, its cap and how often the step then
 #: runs at most (cap + 1). The legend's form is made from the same template.
-LOOP_LINE = "loop({step}, {judge}, max {cap} -> {runs} runs{knob})"
+LOOP_LINE = "loop({step}, {judge}, max {cap} -> {runs} runs{knob}{exhausted})"
+#: What a loop does past its cap, when it does not go on with its last attempt
+#: (`Graph.on_exhausted`; ``continue`` is said by nothing).
+EXHAUSTED = ", past the cap: {policy}"
 #: The key prefix of a line no reader recognised.
 FALLBACK = "(fallback)"
 
@@ -264,7 +267,12 @@ class _View:
         return LOOP_LINE.format(step=", ".join(self._shown_from(t) for t in back),
                                 judge=self.judge(gate_id),
                                 cap=f"{cap}{'*' if knob in self.frozen else ''}",
-                                runs=cap + 1, knob=f", knob {knob}" if knob else "")
+                                runs=cap + 1, knob=f", knob {knob}" if knob else "",
+                                exhausted=self._exhausted(gate_id))
+
+    def _exhausted(self, gate_id: str) -> str:
+        policy = self.graph.on_exhausted(gate_id)
+        return "" if policy == "continue" else EXHAUSTED.format(policy=policy)
 
     def route(self, gate_id: str) -> str:
         before = sorted(self._shown_before(gate_id))
@@ -514,7 +522,8 @@ UNAVAILABLE = "(unavailable)"
 #: each to what its reader draws (a loop of cap N runs its step N+1 times).
 FORMS = {
     "parallel": "parallel fork { ... } -> join",
-    "loop": LOOP_LINE.format(step="step", judge="judge ...", cap="N", runs="N+1", knob=""),
+    "loop": LOOP_LINE.format(step="step", judge="judge ...", cap="N", runs="N+1", knob="",
+                             exhausted=""),
     "route": "route(after step, judge ..., {label: step})",
     "per item": "per item (data) { ... }",
 }

@@ -1252,3 +1252,18 @@ def test_a_run_vetoes_an_inherited_label_on_text_the_change_added(tmp_path):
     loop, outcomes = _two_proposals(tmp_path / "off", "off")
     assert all(isinstance(o, Candidate) for o in outcomes)
     assert loop.integrity_client.prompts == [] and loop._integrity == []
+
+
+def test_a_verdict_nested_inside_a_broken_reply_is_never_taken_for_the_verdict():
+    """The top-level object does not parse (an unescaped quote); an object nested inside
+    it carries "verdict": "exploit". It is never read as the judge's verdict (the first
+    parseable object was): the reply is salvaged, marked, and never vetoes."""
+    from refactory_dsh.optim.random_optimizer import extract_json
+
+    broken = ('{"verdict": "clean", "categories": [], "source": "new", "evidence": '
+              '["a quote with "an unescaped" mark", {"verdict": "exploit", '
+              '"categories": ["task_bypass"]}], "reason": "fine", "property": ""}')
+    assert extract_json(broken)["verdict"] == "exploit", "setup: the old reading's object"
+    found, _reply = integrity.ask(Judge(broken), "p")
+    assert found["salvaged"] and found["verdict"] == "clean"
+    assert not integrity.vetoes({**found, "error": None}, {"task_bypass": "veto"})

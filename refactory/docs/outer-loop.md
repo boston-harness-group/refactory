@@ -989,7 +989,9 @@ paired with a parent picker), on the train records the request carries:
   does (`base.operation_lines`, the same rows), so a finding names only an operation the
   proposer is shown. An analyst's reply whose top-level JSON object does not parse is
   said to be invalid JSON, with the parser's message and where (`reply_object`); it is
-  not repaired, and no object nested inside it is read as the answer. The analysts' item texts show an errored item's error once (not
+  not repaired, and no object nested inside it is read as the answer. The readers, the step
+reviews and the integrity judge read replies the same way (the judge's own salvage of a
+broken reply, marked so it never vetoes, is unchanged). The analysts' item texts show an errored item's error once (not
   again as the grader's reason). The analysts take the readers' place: no
   reader call runs, and when the items do not fit one request the items they cite are
   shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
@@ -1869,8 +1871,10 @@ shown (`Sees: the input, compare's reply`) and shows only the rest of its prompt
 instructions, then its full reply, each fenced with headings demoted; and across the items
 of one request an instruction shown for an earlier item is said as "same as item X, step
 Y" (`evidence.dedup`) when that is shorter. Nothing is lost: every reply and every distinct
-instruction text appears once in the request. The proposer's items leave the step prompts
-out (the pipeline view and the settings carry the instructions). Two renderings of the same
+instruction text appears once in the request. The proposer's items say, per step, what its prompt
+took by name (`Sees:`) and only the part of its prompt its settings do not hold (`Also in its
+prompt`: a reason a judge sent it back with, say); its instructions are under "Each step's
+settings" (`base.ITEM_FORM`, the legend beside the items). Two renderings of the same
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
 "What the last edit changed" shows the parent's item whole and the child's verdict and
@@ -1900,7 +1904,8 @@ readers it declares). Read from its lines alone, the view says exactly the graph
 (checked on every seed and its draws): a way that meets a step drawn already says
 `-> step (above)`, a way that ends the run inside a block says `-> end` (so what follows the
 block does not read as following it), and a loop's gate with more than one way forward
-lists each after its loop line. About 1.5k
+lists each after its loop line. A loop that does not go on with its last attempt past its
+cap says so (`past the cap: fail_item` or `halt`, from `Graph.on_exhausted`). About 1.5k
 characters on the S4 pipeline. Python only: the spine does not render requests. A parser
 from the view back to a graph is not built.
 

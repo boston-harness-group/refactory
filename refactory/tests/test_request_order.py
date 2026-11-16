@@ -250,3 +250,38 @@ def test_each_fact_of_the_request_is_said_once():
     ungated = _ctx(records, findings=FINDINGS, parsimony=0.0, leaderboard=rows, history=rows,
                    best_score=score, mean_score=score).render()
     assert "0.5714285714285714" not in ungated and "Best score so far: 0.5714." in ungated
+
+
+def test_the_items_legend_says_what_each_item_shows_and_a_reloop_reason_reaches_it():
+    """The legend beside the items (`base.ITEM_FORM`) is what is rendered: each step's
+    `Sees:` line, its reply, and only the part of its prompt its settings do not hold --
+    so a reason a judge sent a step back with is shown at the re-run, and the step's own
+    instructions are left to "Each step's settings"."""
+    instructions = "Solve the question step by step and give one choice label."
+    knobs = [{"name": "solve__task", "kind": "str", "value": instructions, "frozen": False}]
+
+    def record(item: str) -> dict:
+        question = f"QUESTION {item}: which statement holds for the stated hypotheses?"
+        first = f"{question}\n{instructions}"
+        judge = f"reloop: the answer to {item} ignores the boundary case entirely"
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": question},
+                "exchanges": [{"node": "solve", "prompt": first, "response": f"FIRST answer for {item}, with its working"},
+                              {"node": "judge", "prompt": f"FIRST answer for {item}, with its working\n{instructions}",
+                               "response": judge},
+                              {"node": "solve", "prompt": f"{first}\nSent back because: "
+                                                          f"the answer to {item} ignores the "
+                                                          "boundary case entirely",
+                               "response": f"SECOND {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    assert base.ITEM_FORM in text and "each whole" not in text
+    item = text.split("### Item r1", 1)[1].split("### Item r2", 1)[0]
+    steps = item.split("#### Step ")[1:]
+    assert len(steps) == 3 and "Sees: the input" in steps[0] and "Sees: the input" in steps[2]
+    assert "Sees: solve's reply" in steps[1]
+    assert all(instructions not in s for s in steps), "the instructions are in the settings"
+    assert "Rest of its prompt" not in text
+    rerun = steps[2]
+    assert "Also in its prompt (not in its settings):" in rerun
+    assert "Sent back because: the answer to r1 ignores the boundary case entirely" in rerun

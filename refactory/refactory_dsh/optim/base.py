@@ -24,7 +24,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
@@ -911,6 +911,32 @@ class ProposalContext:
     #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
+    def _settled(self) -> frozenset[str]:
+        """What an item's step does not repeat of its prompt (`ITEM_FORM`): the lines of
+        every setting's text ("Each step's settings"), of the nodes' own prompt templates
+        (each node in full, in the reference), and any line a step's prompt has in two or
+        more items -- the same for every item, so not this item's (the model client's
+        wrapping, a template's headings). What is left is item-specific: a reason a judge
+        sent the step back with, say."""
+        from .evidence import _norm, settled_lines
+
+        texts = [k.get("value") for k in self.knobs]
+        texts += [n.get(field) for n in self.node_states
+                  for field in ("prompt_template", "system_prompt_template")]
+        records = [*self.item_records,
+                   *(r for pair in self.edit_pairs or ()
+                     for side in ("parent_records", "child_records")
+                     for r in pair.get(side) or ())]
+        holders: dict[tuple[str, str], set[str]] = {}
+        for record in records:
+            for exchange in record.get("exchanges") or ():
+                for line in str(exchange.get("prompt") or "").splitlines():
+                    if line.strip():
+                        holders.setdefault((str(exchange.get("node")), _norm(line)),
+                                           set()).add(str(record.get("id")).split("#")[0])
+        common = {line for (_node, line), items in holders.items() if len(items) > 1}
+        return settled_lines(texts) | common
+
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
         are in "What this run has already tried", one line each, so they are not repeated
@@ -967,7 +993,8 @@ class ProposalContext:
                 [] if self.history_truncated else self.history)),
         ]
         if self.edit_pairs:
-            lines += ["", *_edit_change_lines(self.edit_pairs, omissions=self.omissions)]
+            lines += ["", *_edit_change_lines(self.edit_pairs, omissions=self.omissions,
+                                              settled=self._settled())]
         if self.reasoning:
             above = [str(p.get("child")) for p in self.edit_pairs or ()]
             lines += ["", *_reasoning_lines(self.reasoning, above)]
@@ -1082,7 +1109,7 @@ class ProposalContext:
                 findings=self.reader_findings, failures=self.reader_failures,
                 analysed=(None if self.analysis is None
                           else list(self.analysis.get("findings") or ())),
-                omissions=self.omissions)]
+                omissions=self.omissions, settled=self._settled())]
         # 7: the reference, last: every node in full, the schemas, the validator's rules.
         sections += [
             "",
@@ -1175,10 +1202,12 @@ def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = No
     ``exact`` (a reader that never patches: the analysts), a long line an earlier knob's
     text showed is said as where it was (`evidence.dedup_texts`), so the steps' shared
     paragraphs are read once."""
-    if text_chars is not None:  # a long one-line value too (a clipped one says so)
-        knobs = [{**k, "value": _clip_middle(k["value"], text_chars)}
-                 if isinstance(k.get("value"), str) else k for k in knobs]
-    whole = [k for k in knobs if not _exact_in_table(k.get("value"))]
+    # Each text clipped once, here (a clipped one says how much was left out), whether
+    # the table shows it or it is shown after the table.
+    shown = {str(k["name"]): (_clip_middle(k["value"], text_chars)
+                              if text_chars is not None and isinstance(k.get("value"), str)
+                              else k.get("value")) for k in knobs}
+    whole = [k for k in knobs if not _exact_in_table(shown[str(k["name"])])]
     lines = ["## Each step's settings",
              ("The prompts and parameters the steps read, which `set_knob` moves (a new step "
               "brings its own). A patch quotes its target text exactly: a value in the table "
@@ -1190,13 +1219,14 @@ def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = No
               "said as where it is."),
              _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
                      "description"],
-                    [[k["name"], k["value"] if _exact_in_table(k.get("value"))
-                      else f"(shown whole below, {len(k['value'])} characters)",
+                    [[k["name"], shown[str(k["name"])]
+                      if _exact_in_table(shown[str(k["name"])])
+                      else f"(shown {'whole ' if shown[str(k['name'])] == k['value'] else ''}"
+                           f"below, {len(k['value'])} characters)",
                       k["kind"], k.get("values"), k.get("range"),
                       k["frozen"], k.get("reachable", True), k.get("description", "")]
                      for k in knobs])]
-    texts = [knob["value"] if text_chars is None else _clip_middle(knob["value"], text_chars)
-             for knob in whole]
+    texts = [shown[str(knob["name"])] for knob in whole]
     if not exact:
         from .evidence import dedup_texts
 
@@ -1787,7 +1817,7 @@ REFERENCE_POINTER = ("Every node in full (its declarations, what it has before i
 
 #: What the pipeline view's words mean.
 def _view_lead() -> str:
-    from refactory_dsh.nn.pipeline_view import FORMS
+    from refactory_dsh.nn.pipeline_view import EXHAUSTED, FORMS
 
     return (
         "The pipeline, one line per step, generated from the graph in the operators' own "
@@ -1798,6 +1828,9 @@ def _view_lead() -> str:
         "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
         "an op with several outputs, for all of them), or a code step's code; `->` what it "
         "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
+        + "; a loop that does not go on with its last attempt past its cap says so: `"
+        + EXHAUSTED.format(policy="fail_item").lstrip(", ") + "` (only that item fails) or `"
+        + EXHAUSTED.format(policy="halt").lstrip(", ") + "` (the whole run stops)"
         + "; `[optional]`; `[protected]`.")
 
 
@@ -2585,11 +2618,14 @@ def _fenced(text: str) -> list[str]:
 
 
 def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
-                omissions: list[dict[str, Any]] | None = None) -> str:
+                omissions: list[dict[str, Any]] | None = None,
+                settled: Collection[str] | None = None) -> str:
     """One train item (`optim.evidence.render_item`, as every call that reads items shows
     one): its verdict, what was expected and what it gave, the grader's reason, its input
     once, then each step's reply, each fenced (headings demoted) so nothing in them reads
-    as a section of the request.
+    as a section of the request; with ``settled`` (`evidence.settled_lines`, the steps'
+    settings), each step's ``Sees:`` line and the part of its prompt its settings do not
+    hold, as `ITEM_FORM` says.
 
     The steps are in the order the record holds them, which is the order the pass ran them
     (a fork merges its branches in branch order), never sorted by name. Texts are whole
@@ -2603,7 +2639,7 @@ def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
         expected=_expected(record), metadata=metadata_text(record),
         choices=_choice_lines(meta.get("choices")), prompts=False,
-        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions)
+        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions, settled=settled)
 
 
 def _outcome(record: dict[str, Any]) -> str:
@@ -2730,6 +2766,14 @@ def _cited_items(items: Sequence[dict[str, Any]],
     return chosen
 
 
+#: What an item shown here holds -- said once beside the items, and what `_trajectory`
+#: renders with the steps' settings as ``settled`` (a test holds the two together).
+ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the grader's "
+             "reason, its input once, then each step in the order it ran: what its prompt "
+             "took from the input or an earlier step's reply, by name (`Sees:`), any part of "
+             "its prompt that is not in its settings (`" + "Also in its prompt (not in its "
+             "settings)" + "`: a reason a judge sent it back with, say), and its reply. A "
+             "step's own instructions are its settings, under \"Each step's settings\".")
 #: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
 #: every item when all of them together are under this many characters. It only decides
 #: that switch; it never cuts an item.
@@ -2815,8 +2859,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = (),
                   analysed: Sequence[dict[str, Any]] | None = None,
-                  omissions: list[dict[str, Any]] | None = None) -> list[str]:
-    """Every train item of the candidate being edited.
+                  omissions: list[dict[str, Any]] | None = None,
+                  settled: Collection[str] | None = None) -> list[str]:
+    """Every train item of the candidate being edited, each as `ITEM_FORM` says.
 
     When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
     smaller ``budget``), every item is shown in full here. When not, readers went through
@@ -2837,10 +2882,10 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     groups = trajectory_groups(records, budget)
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
-        return header + ["Every item in full. Read what each step produced and where it "
-                         "went wrong before proposing.",
+        return header + [f"Every item. {ITEM_FORM}",
                          *(line for r in items
-                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions)))]
+                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions,
+                                                        settled)))]
     if analysed is not None:
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
@@ -2914,11 +2959,11 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                 + (f" the {'analysts' if analysed is not None else 'readers'} cited, "
                    "one per finding in rank order" if cited else ", one per kind of failure")
                 + (f", then {len(passing)} passing item(s) for contrast" if passing else "")
-                + f", each whole (of {len(items)}; the table above has every one)."]
+                + f" (of {len(items)}; the table above has every one). {ITEM_FORM}"]
     for record in chosen:
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
-        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions)]
+        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled)]
     return lines + examples
 
 
@@ -3665,7 +3710,8 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
 
 
 def _pair_block(parent: dict[str, Any], child: dict[str, Any],
-                omissions: list[dict[str, Any]] | None = None) -> str:
+                omissions: list[dict[str, Any]] | None = None,
+                settled: Collection[str] | None = None) -> str:
     """One changed item, parent beside child, each whole: the parent's trajectory, then
     the child's verdict and each of its steps' replies -- a reply the same as the parent's
     at that step and attempt (a step a loop sent back runs more than once) is said so
@@ -3677,7 +3723,7 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
         return evidence.clip(text, ITEM_TEXT_MAX, item=child.get("id"), step=step,
                              omissions=omissions)
 
-    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions), "Child:"]
+    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions, settled), "Child:"]
     replies: dict[tuple[str, int], str] = {}
     runs: dict[str, int] = {}
     for exchange in parent.get("exchanges") or ():
@@ -3694,11 +3740,22 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
     lines.append("; ".join(said))
     exchanges = [e for e in child.get("exchanges") or () if isinstance(e, Mapping)]
     attempts: dict[str, int] = {}
+    seen = evidence._Seen()
+    meta = child.get("metadata") if isinstance(child.get("metadata"), Mapping) else {}
+    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    if key is not None:
+        seen.add(meta[key], "the input")
+        for choice in _choice_lines(meta.get("choices")):
+            seen.add(choice, "the input", 1)
     for number, exchange in enumerate(exchanges, 1):
         node = str(exchange.get("node") or "agent")
         attempts[node] = attempts.get(node, 0) + 1
         reply = str(exchange.get("response") or "").strip()
         lines.append(f"##### Step `{node}` ({number} of {len(exchanges)})")
+        if settled is not None:
+            lines += evidence.prompt_lines(seen, exchange.get("prompt"), settled,
+                                           lambda text, node=node: cut(text, node))
+        seen.add(exchange.get("response"), f"{node}'s reply")
         if replies.get((node, attempts[node])) == reply:
             lines.append("Reply: same as the parent's"
                          + (f" (its run {attempts[node]} of that step)."
@@ -3709,7 +3766,8 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
 
 
 def _edit_change_lines(pairs: Sequence[dict[str, Any]],
-                       omissions: list[dict[str, Any]] | None = None) -> list[str]:
+                       omissions: list[dict[str, Any]] | None = None,
+                       settled: Collection[str] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts, and
     every changed item (fixed, broken, and the largest score rises and drops) is shown
@@ -3760,7 +3818,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                             ("score rose", change["up"]), ("score dropped", change["down"])):
             for item in items:
                 lines += ["", f"#### Item {item} -- {kind} (child {pair.get('child')})",
-                          _pair_block(parent[item], child[item], omissions)]
+                          _pair_block(parent[item], child[item], omissions, settled)]
     return lines
 
 

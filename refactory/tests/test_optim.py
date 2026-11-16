@@ -988,13 +988,20 @@ def test_a_transport_failure_is_still_retried_and_the_predicates_stay_apart(monk
     assert failure_cause(f"noise\n{TEARDOWN}\n") == TEARDOWN
 
 
-def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monkeypatch):
+def test_a_native_session_without_tools_retries_and_one_with_tools_does_not(monkeypatch,
+                                                                             tmp_path):
     """On a native backend (claude_code) a session without tools retries a transport
     failure within the configured attempts; a session with tools makes one attempt, as
-    before. The configured count survives a context round trip."""
+    before. The configured count survives a context round trip. The completion itself is
+    scripted, so the worker package only has to be present (as `install.sh` puts it), not
+    run: a runtime root of the test's own holds its package.json."""
     from refactory_dsh.model import DshModelClient
+    from refactory_dsh.workers import PACKAGES
 
-    native = DshModelClient(worker_backend="claude_code")
+    package = tmp_path / "node_modules" / PACKAGES["claude_code"]
+    package.mkdir(parents=True)
+    (package / "package.json").write_text("{}")
+    native = DshModelClient(worker_backend="claude_code", runtime_root=tmp_path)
     text = native.with_tool_policy("none")
     assert native.retry_attempts() == 1 and text.retry_attempts() == 3
     rebuilt = DshModelClient(**native.context()).with_tool_policy("none")

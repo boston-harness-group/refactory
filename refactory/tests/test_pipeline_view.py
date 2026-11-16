@@ -546,7 +546,8 @@ def test_a_way_that_meets_a_step_drawn_above_says_so():
 
 def test_a_loop_gate_s_ways_forward_are_shown_beside_its_loop_line():
     text = pv.render(_gate_with_ways())
-    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)\nthen, by its " \
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs, past the cap: " \
+        "halt)\nthen, by its " \
         "verdict:" in text
     assert "on escalate:\n    alt op" in text and "on proceed:\n    finish op" in text
 
@@ -767,7 +768,8 @@ def _two_passes(state: dict) -> dict:
 
 
 def test_shapes_code_verdict_gates_code_steps_frozen_and_protected():
-    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)" in pv.render(
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs, past the cap: " \
+        "halt)" in pv.render(
         _seed("fuzz_gate_loop"))
     flow = _seed("fuzz_dataflow")
     coded = nn_edits.apply({"op": "insert", "after": "summarise", "kind": "code", "id": "tally"},
@@ -1011,7 +1013,8 @@ def test_an_agent_only_a_later_gate_reads_keeps_its_own_line():
                   {"source": "g", "target": "end", "condition": "proceed"}]}, "knobs": {}}
     text = pv.render(state)
     assert text.splitlines()[0].startswith("a agent"), text
-    assert "loop(b, judge loop_ops:always_proceed, max 2 -> 3 runs)" in text, text
+    assert "loop(b, judge loop_ops:always_proceed, max 2 -> 3 runs, past the cap: halt)" \
+        in text, text
 
 
 def test_a_view_that_cannot_be_drawn_says_so_in_the_request_and_the_record(caplog):
@@ -1053,3 +1056,19 @@ def test_the_fallback_count_reads_the_graders_as_the_view_does():
     for graders in ((), ("check",)):
         assert pv.fallback_count(state, (), graders) == sum(
             line.key.startswith(pv.FALLBACK) for line in pv.view_lines(state, (), graders))
+
+
+def test_a_loop_says_what_happens_past_its_cap_unless_it_goes_on():
+    """`Graph.on_exhausted`, as both runtimes act: a loop in a data pass that goes on with
+    its last attempt says nothing more; one that fails the item, or halts the run, says
+    so."""
+    solver = _mode("livemath/solver").state_dict()
+    looped = nn_edits.apply({"op": "loop", "step": "solve", "judge": "code"}, solver)
+    line = next(l for l in pv.render(looped).splitlines() if "loop(solve" in l)
+    assert "past the cap" not in line, line
+    gate = next(n for n, node in looped["graph"]["nodes"].items()
+                if node.get("kind") == "gate")
+    looped["graph"]["nodes"][gate]["on_exhausted"] = "fail_item"
+    line = next(l for l in pv.render(looped).splitlines() if "loop(solve" in l)
+    assert line.rstrip().endswith(", past the cap: fail_item)"), line
+    assert "past the cap: fail_item" in base.PIPELINE_VIEW_LEAD

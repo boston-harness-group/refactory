@@ -291,7 +291,7 @@ class AutoresearchOptimizer(Optimizer):
             try:
                 reply = self._client.complete(prompt, system=READER_SYSTEM,
                                               **self._completion_options)
-                payload = extract_json(reply)
+                payload = reply_object(reply)
             except Exception as exc:
                 self.record_call(**call, reply=locals().get("reply"), error=f"{type(exc).__name__}: {exc}")
                 return None, {"group": index, "items": items, "error": f"{type(exc).__name__}: {exc}"}
@@ -460,7 +460,7 @@ class AutoresearchOptimizer(Optimizer):
                 if reply is None:
                     return None, error, overflow
                 try:
-                    found = parse(extract_json(reply))
+                    found = parse(reply_object(reply))
                 except Exception as exc:  # a failed review is shown as such, never fatal
                     error = f"{type(exc).__name__}: {exc}"
                     self.record_call(**call, attempt=made, reply=reply, error=error)

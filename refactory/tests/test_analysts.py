@@ -1395,3 +1395,18 @@ def test_an_answer_that_is_not_valid_json_says_so_and_where_never_no_findings(tm
     (failed,) = [t for t in trace if t["kind"] == "analyst_success"]
     assert "not valid JSON: Expecting ',' delimiter" in failed["error"]
     assert 'no "findings" list' not in failed["error"]
+
+
+def test_a_long_setting_is_clipped_once_and_says_its_true_omitted_count():
+    """A 5,006-character text at a 1,000-character limit: one marker, and it says 4,006
+    characters were left out (a second clip would cut out the first marker and say 35)."""
+    from refactory_dsh.optim.base import _settings_lines
+
+    text = "HEAD\n" + "x" * 4997 + "\nEND"
+    assert len(text) == 5006
+    lines = _settings_lines([{"name": "long", "kind": "str", "value": text, "frozen": False}],
+                            1000, exact=False)
+    shown = "\n".join(lines)
+    marks = __import__("re").findall(r"\[\.\.\. (\d+) characters omitted \.\.\.\]", shown)
+    assert marks == ["4006"], marks
+    assert f"{len(text)} characters)" in shown
