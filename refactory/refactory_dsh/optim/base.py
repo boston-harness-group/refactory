@@ -948,6 +948,8 @@ class ProposalContext:
                                  structure_guidance=self.structure_guidance,
                                  tools=self.new_node_tools, rotation=self.generation,
                                  knob_values={k.get("name"): k.get("value") for k in self.knobs}),
+            *operator_fit_section(self.catalogue, self.node_states, self.edges, self.knobs,
+                                  protected=self.protected),
             *_settings_lines(self.knobs),
             *_node_reference(self),
             "## What the author says is worth doing",
@@ -1622,6 +1624,152 @@ def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[s
         if nn_edits.precheck(example, dict(state)) is None:
             return option
     return placeholders
+
+
+#: The most characters the "what each step carries" section takes: past it, each refusal
+#: is cut to its first clause, then rows are left out, last first, and named.
+OPERATOR_FIT_CHARS = 7000
+
+
+def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Each core operator the run permits, aimed at one step with its default arguments:
+    a split into one step that sees only the task stands for "replace it"."""
+    from refactory_dsh import snippet
+
+    node_id = node.id
+    plain_next = [e.target for e in graph.out_edges(node_id) if e.condition is None
+                  and graph.nodes[e.target].kind in ("agent", "op")]
+    model = node.kind == "agent" or snippet.is_code_node(node)
+    if node.kind == "fork":
+        edits = [("branch", {"op": "branch", "fork": node_id, "kind": "agent"}),
+                 ("serialize", {"op": "serialize", "fork": node_id})]
+    else:
+        edits = [("insert", {"op": "insert", "after": node_id, "kind": "agent"}),
+                 ("remove", {"op": "remove", "step": node_id}),
+                 *([("rewire", {"op": "rewire", "step": node_id, "sees": ["task"]})] if model
+                   else []),
+                 ("loop", {"op": "loop", "step": node_id, "judge": "agent"}),
+                 ("route", {"op": "route", "after": node_id, "judge": "agent"}),
+                 ("split", {"op": "split", "step": node_id}),
+                 ("split (replace)", {"op": "split", "step": node_id,
+                                      "into": [{"kind": "agent", "sees": ["task"]}]}),
+                 *([("parallelize", {"op": "parallelize", "steps": [node_id], "copies": 1})]
+                   if node.kind == "agent" else [])]
+        if len(plain_next) == 1:
+            edits.append(("merge", {"op": "merge", "steps": [node_id, plain_next[0]]}))
+    return [(label, edit) for label, edit in edits if edit["op"] in ops]
+
+
+def _fit_state(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+               knobs: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The request's graph as a state, its knobs with their kind and frozen mark (the
+    operators' refusals read them)."""
+    state = _example_state(node_states, edges, {k.get("name"): k.get("value") for k in knobs})
+    if state is None:
+        return None
+    for knob in knobs:
+        entry = state["knobs"].get(knob.get("name"))
+        if entry is not None:
+            kind = knob.get("kind") if knob.get("kind") in ("int", "float", "bool") else "str"
+            entry["spec"] = {"default": knob.get("value"), "kind": kind,
+                             "frozen": bool(knob.get("frozen"))}
+    return state
+
+
+def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
+    """What a model step's prompt and reads carry, each with what made it: a plain op's
+    output is followed one step back to what the op was built from."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.validate import consumed
+
+    makers = made_by(graph)
+    parts = []
+    for kind, name in sorted(consumed(node, knob_values)):
+        made = makers.get((kind, name)) or []
+        plain = [m for m in made if graph.nodes[m].kind == "op"
+                 and not snippet.is_code_node(graph.nodes[m])]
+        if plain:
+            sources = []
+            for op_id in plain:
+                for source_kind, source in sorted(consumed(graph.nodes[op_id], knob_values)):
+                    by = makers.get((source_kind, source)) or []
+                    sources.append(f"{source} ({', '.join(by) or 'task input'})")
+            parts.append(f"{name} = op {', '.join(plain)} from "
+                         f"{', '.join(sources) or 'nothing'}")
+        else:
+            parts.append(f"{name} ({', '.join(made) or 'task input'})")
+    return "; ".join(parts) or "-"
+
+
+def operator_fit_section(catalogue: Sequence[dict[str, Any]],
+                         node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                         knobs: Sequence[Mapping[str, Any]], *, protected: Sequence[str] = (),
+                         limit: int = OPERATOR_FIT_CHARS) -> list[str]:
+    """"What each step carries, and which operators apply to it": for each model step,
+    what its prompt carries (a plain op's output followed back to what it was built from),
+    and for each step which core operators, with their default arguments, apply as written
+    and which are refused, with the refusal's own words. Computed by applying each on the
+    request's state, so it is what an attempt would say. Information only; nothing when the
+    run permits no core operator."""
+    from refactory_dsh.nn.graph import Graph
+
+    ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
+    state = _fit_state(node_states, edges, knobs) if ops else None
+    if state is None:
+        return []
+    graph = Graph.from_state(state["graph"])
+    knob_values = {k.get("name"): k.get("value") for k in knobs}
+    rows: list[list[str]] = []
+    full_refusals: list[list[str]] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind not in ("agent", "op", "fork"):
+            continue
+        carries = _carries(node, graph, knob_values) if node.kind == "agent" else "-"
+        if node_id in protected:
+            rows.append([node_id, carries, "-", "every operator: protected"])
+            full_refusals.append(["every operator: protected"])
+            continue
+        applies: list[str] = []
+        reasons: dict[str, list[str]] = {}
+        for label, edit in _fit_edits(node, graph, ops):
+            reason = nn_edits.precheck(edit, state)
+            if reason is None:
+                try:
+                    nn_edits.apply(edit, state)
+                except nn_edits.EditError as exc:
+                    reason = str(exc)
+            if reason is None:
+                applies.append(label)
+            else:
+                reasons.setdefault(reason.removeprefix("E-precondition: "), []).append(label)
+        refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
+        rows.append([node_id, carries, ", ".join(applies) or "-", " | ".join(refused) or "-"])
+        full_refusals.append(refused)
+    lead = ("## What each step carries, and which operators apply to it\n"
+            "Worked out on the current pipeline, before you choose: what each model step's "
+            "prompt and reads carry (`= op X from ...`: a fact a plain op builds, from what it "
+            "was built from), and which core operators apply to each step as written with their "
+            "default arguments (`split (replace)`: a split into one step of your own text that "
+            "sees the task) and which are refused, in the refusal's own words. A step that "
+            "alone reads a frozen knob cannot be split, merged or removed; insert beside it.")
+    header = ["step", "its prompt and reads carry", "applies as written", "refused (why)"]
+    for shorten in (False, True):
+        shown = rows if not shorten else [
+            row[:3] + [" | ".join(r.split(":", 1)[0] + ": " + r.split(":", 1)[1].split(";")[0]
+                                  .split(". ")[0].strip() for r in refused) or "-"]
+            for row, refused in zip(rows, full_refusals)]
+        text = _table(header, shown)
+        if len(lead) + len(text) <= limit:
+            return [lead, text, ""]
+    while rows:
+        rows, full_refusals = rows[:-1], full_refusals[:-1]
+        text = _table(header, rows)
+        note = f"({len(graph.nodes) - len(rows)} step(s) not listed to stay within {limit} characters)"
+        if len(lead) + len(text) + len(note) <= limit:
+            return [lead, text, note, ""]
+    return []
 
 
 def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],

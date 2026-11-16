@@ -944,6 +944,16 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
 # ── remove ────────────────────────────────────────────────────────────────
 
 
+def _replace_edit(node: Node, sees: Any = None) -> str:
+    """The exact edit that replaces ``node`` by one step of the proposer's own text: an
+    agent for an agent, code for anything else (a new agent writes only its reply)."""
+    step: dict[str, Any] = ({"kind": "agent", "text": "<what it does>"} if node.kind == "agent"
+                            else {"kind": "code", "text": "<def main(inp): ...>"})
+    if sees is not None:
+        step["sees"] = sees
+    return json.dumps({"op": "split", "step": node.id, "into": [step]})
+
+
 def _pre_remove(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     node = _require_step(graph, edit.get("step"))
@@ -954,11 +964,11 @@ def _pre_remove(edit: dict, state: dict) -> str | None:
         raise _Refused(f"{node.id!r} is a data node: the data pass is the grader's side")
     if node.id == graph.start:
         raise _Refused(f"{node.id!r} is the start step; insert a step before it, or replace it "
-                       "(split with one step)")
+                       f"with {_replace_edit(node)}")
     ends = _data_ends(graph, node.id)
     if ends:
         raise _Refused(f"{node.id!r} is the {' and '.join(ends)} of a data pass; replace it "
-                       "(split with one step) instead")
+                       f"instead: {_replace_edit(node)}")
     if node.kind == "gate":
         labels = sorted({str(e.condition) for e in graph.out_edges(node.id) if e.condition})
         keep = edit.get("keep")
@@ -1401,8 +1411,8 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
         if text.strip() and not _strip_unseen(text, keep).strip():
             raise _Refused(f"{node.id!r}'s whole prompt is a fact it would no longer see, so "
                            "rewiring would leave it no instructions; replace it with a step of "
-                           "your own text (split with one step), or name that fact's step in "
-                           "'sees'")
+                           f"your own text, {_replace_edit(node, edit.get('sees', [TASK]))}, "
+                           "or name that fact's step in 'sees'")
     return None
 
 
@@ -1960,8 +1970,12 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "loop": {
         "fields": ("step", "judge", "text", "sees", "id", "target", "gate"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
-                "(text = what to check), code (text = Python returning a verdict) or a "
-                "callable; the limit is a knob",
+                "(text = what to check; its answer starts with proceed or reloop, then why), "
+                "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
+                "why}) or a callable. The reason reaches the step sent back; it is sent back "
+                "at most <gate>__max_iterations times (the gate is <step>_check unless "
+                f"'id' names it; a knob, default {LOOP_ITERATIONS[0]}, {LOOP_ITERATIONS[1]} to {LOOP_ITERATIONS[2]}), then "
+                "the run goes on",
         "example": {"op": "loop", "step": "<step>", "judge": "agent",
                     "text": "<what to check>"},
     },

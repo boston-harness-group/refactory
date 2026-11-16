@@ -1799,6 +1799,20 @@ items -- and how many of its items timed out), and cost: with no cost term (pars
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
+**What each step carries, and which operators apply to it.** After "Structural operators"
+the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
+step's prompt and reads carry, a fact a plain op builds followed one step back to what it
+was built from (`decide_prompt = op decide_prompt from compare_notes.txt (compare), ...`),
+and which core operators apply to the step as written with their default arguments and
+which are refused, in the refusal's own words (equal reasons grouped). It is worked out by
+running each operator's precondition check and full expansion on the request's own state,
+frozen marks included, so it says what an attempt would. A refusal that points to
+replacing a step names the exact edit (`{"op": "split", "step": ..., "into": [one step]}`).
+The section fits 7000 characters: refusals are cut to their first clause, then rows are
+left out, last first, and counted. The `loop` line states the verdict format (`proceed` or
+`reloop`, then why, which reaches the step sent back) and the cap (`<gate>__max_iterations`,
+default 2, 1 to 5, after which the run goes on).
+
 **Turning it off.** The operators are in the `broad` and `structure` presets; the
 `conservative` and `knob_only` presets are unchanged, and a run that allows only some
 operations (`allowed_ops`) sees only those. The raw primitives and the written-out macros
