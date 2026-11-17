@@ -2328,6 +2328,10 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     if "loop" in ops:
         out.append(("Check and send back", [
             {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
+        span = {"op": "loop", "step": anchor[1], "back_to": step, "judge": "agent",
+                "text": "<what to check in the result>"}
+        if anchor[1] not in protected and nn_edits.precheck(span, dict(state)) is None:
+            out.append(("Check a later step and send the work back to an earlier one", [span]))
     fork = next((str(n.get("id")) for n in node_states if n.get("kind") == "fork"), None)
     if fork and "branch" in ops:
         out.append(("An independent attempt that sees only the task", [

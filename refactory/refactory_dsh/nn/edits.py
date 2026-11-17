@@ -1280,9 +1280,14 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     run -- first gets a no-op step after it (`LOOP_END_CALL`, as an ``insert_after``
     adds it, so a pass's exit moves to it): the gate's ``proceed`` edge leads there, and
     the pass still ends at a step that is not a gate (V12)."""
-    graph = _graph(state)
-    target = edit["target"]
-    gate = dict(edit["gate"])
+    return _loop_steps(_graph(state), edit["target"], dict(edit["gate"]))
+
+
+def _loop_steps(graph: Graph, target: str, gate: dict, back_to: str | None = None
+               ) -> list[dict]:
+    """The steps `_expand_loop` makes: ``gate`` after ``target``, its ``proceed`` edge to
+    what came next, and its ``reloop`` edge to ``back_to`` -- ``target`` itself unless an
+    earlier step is named (the one-line ``loop``'s ``back_to``, `core_ops`)."""
     successor = _sole_out_edge(graph, target)
     steps: list[dict] = []
     onward = successor.target if successor is not None else None
@@ -1298,7 +1303,8 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     steps.append({"op": "remove_edge", "source": successor.source,
                   "target": successor.target, "condition": successor.condition})
     steps.append({"op": "add_edge", "source": target, "target": gate["id"], "condition": None})
-    steps.append({"op": "add_edge", "source": gate["id"], "target": target, "condition": "reloop"})
+    steps.append({"op": "add_edge", "source": gate["id"], "target": back_to or target,
+                  "condition": "reloop"})
     steps.append({"op": "add_edge", "source": gate["id"], "target": onward,
                   "condition": "proceed"})
     return steps
