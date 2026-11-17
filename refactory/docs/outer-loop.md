@@ -307,10 +307,28 @@ recovered, or NOT SCORED), `report.json` `harness_incidents` (each evaluation's 
 those recovered and those not scored) and a line in `report.md`, and the request's "Item
 results" ("N item(s) (...) had a harness incident and are not scored"; listed once, read
 as no failure, as a harness timeout below). The seed cache does not replay an evaluation
-with one. **A val comparison** of two candidates (`ValidationGate.beats`, under `judge`
-and `judge_round`) uses the items both were scored on when either left one out, and logs
-it; when a score is not its items' mean it cannot be recomputed and the scores compare as
-they are. The post-training test deltas (`FinalEvaluation`) do not yet do this.
+with one. Each rerun item is a rollout (none past `max_rollouts`), and its tokens and cost
+are its trial's. A mode with no `item_scores` fact keeps its incidents in its score, and
+the run warns once (`harness_incident_kept`).
+
+**Every comparison between candidates uses the same items.** When an incident left an
+item out of any candidate's rollout, `Loop.shared_scores` puts them all on the items every
+one was scored on in every repeat (with repeats, the mean of each repeat's mean): the val
+gate's bar and its ranking of a round's siblings (`ValidationGate.judge`, `judge_round`),
+the best (`offer_best`), and the post-training test deltas (`FinalEvaluation`:
+`best_test_delta` and `final_test_delta` are then the shared-item deltas, with
+`<delta>_raw` and `<delta>_left_out` beside them). Each such comparison is logged. When
+the scores cannot be put on the same items (a score that is not its items' mean, a
+missing rollout), they compare as they are, with a warning. SkillOpt's early stop at a
+perfect val score needs every val item scored.
+
+**Which line classifies an error.** An item's error crosses a process as text; only its
+first line is written by the harness (the walker's `<node>: <Kind>: ...`, the spine's
+`<node>: ...`, the worker's `worker: ...`). `items.error_kind` reads the backstop, the
+completion timeout, the declared timeout and their retries-spent forms from that line
+only (`items.first_line`), so a model's reply quoted further down never makes an item an
+incident or a timeout. Whether the backstop is a harness incident at all is one constant,
+`items.BACKSTOP_IS_HARNESS_INCIDENT`.
 
 ## Train minibatches (`train_minibatch: N`)
 

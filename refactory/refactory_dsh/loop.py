@@ -2237,10 +2237,12 @@ class Loop(OuterLoop):
             # Items the harness backstop kept from an outcome, left out of the score
             # (`_settle_incidents`), and each scored item's score, so a val comparison
             # of two candidates can use the items both were scored on
-            # (`shared_item_scores`). Neither is shown to a strategy (`Run.part_scores`).
+            # (`shared_scores`): ``[id, score, repeat]``. Neither is shown to a strategy
+            # (`Run.part_scores`).
             **({"harness_incidents": measurements["harness_incidents"]}
                if measurements.get("harness_incidents") else {}),
-            "item_scores": [[str(r.get("id")), float(r["score"])] for r in result.item_records or ()
+            "item_scores": [[str(r.get("id")), float(r["score"]), int(r.get("repeat") or 1)]
+                            for r in result.item_records or ()
                             if isinstance(r.get("score"), (int, float))
                             and not isinstance(r.get("score"), bool)],
         }
@@ -2329,7 +2331,6 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 budget_cut = True
                 break
-            after = self.budget.snapshot() if self.budget else {}
             budget_exhausted_after_trial = False
             if self.budget:
                 try:
@@ -2343,6 +2344,8 @@ class Loop(OuterLoop):
                 candidate, trial_dir, part, seed, result, eval_kwargs,
                 rerun=not budget_exhausted_after_trial)
             budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
+            # After the incident reruns, so their tokens and cost are the trial's.
+            after = self.budget.snapshot() if self.budget else {}
             missing = [path for path in required if not (trial_dir / path).exists()]
             valid_score = isinstance(result.score, (int, float)) and math.isfinite(result.score)
             if missing or not valid_score:
@@ -2420,9 +2423,12 @@ class Loop(OuterLoop):
         ``None`` and ``not_scored: "harness_incident"``, and leaves ``item_scores``, so
         the mode's own ``score()`` -- run again here on the trial's facts -- counts it in
         neither numerator nor denominator, on every mode and runtime. Each step is
-        journaled (``harness_incident``) and shown. A trial that did not finish is left as
-        it is: its score is no measurement either way. With no item left to score the
-        trial fails ("every item was a harness incident")."""
+        journaled (``harness_incident``) and shown. Each rerun item counts as a rollout
+        (none past ``max_rollouts``), and its tokens and cost are the trial's. A trial that
+        did not finish is left as it is: its score is no measurement either way. A mode
+        with no ``item_scores`` fact keeps its incidents, as its score cannot leave them
+        out: the run warns once (``harness_incident_kept``). With no item left to score
+        the trial fails ("every item was a harness incident")."""
         from refactory_dsh.budgets import BudgetExhausted
         from refactory_dsh.items import NOT_SCORED_INCIDENT, SCORES_FACT, harness_incident
 
@@ -2433,10 +2439,26 @@ class Loop(OuterLoop):
         first = list(ids)
         facts = dict(result.facts or {})
         declared = isinstance(facts.get(SCORES_FACT), list)
+        if not declared:
+            # The mode's score() reads no item_scores fact, so nothing can take the item
+            # out of it: the records stay as they are, and the run says so once.
+            note = (f"{self.mode_id} has no {SCORES_FACT} fact, so its score cannot leave out "
+                    f"the items a harness incident stopped ({', '.join(ids)}): they stay in it")
+            with self._state_lock:
+                warned = self.__dict__.setdefault("_shared_warned", set())
+                if SCORES_FACT not in warned:
+                    warned.add(SCORES_FACT)
+                    self._journal("harness_incident_kept", id=candidate.id, part=part, items=ids)
+                    self._progress("warning", candidate=candidate.id, warning=note)
+            return [], False
         fact_entries = list(facts.get(SCORES_FACT) or [])
         budget_hit = False
         reran = 0
+        max_rollouts = getattr(self.config, "max_rollouts", None)
         while ids and rerun and reran < INCIDENT_RERUNS:
+            if max_rollouts is not None and self.rollouts + len(ids) > max_rollouts:
+                # A rerun is a rollout of each item it runs: none past the budget.
+                break
             reran += 1
             rerun_dir = trial_dir / INCIDENT_RERUN_DIR / str(reran)
             if rerun_dir.exists():
@@ -2460,6 +2482,10 @@ class Loop(OuterLoop):
                 self.bound = str(exc)
                 budget_hit = True
                 break
+            with self._state_lock:
+                # Each rerun item is a rollout, toward ``max_rollouts`` like any other.
+                self.rollouts += len(again.item_records or ()) or len(ids)
+                self._journal("rollouts", rollouts=self.rollouts)
             fresh = {str(r.get("id")): r for r in again.item_records or () if str(r.get("id")) in ids}
             fresh_facts = {str(e.get("id")): e for e in (again.facts or {}).get(SCORES_FACT) or ()
                            if isinstance(e, dict) and str(e.get("id")) in fresh}
@@ -2475,15 +2501,14 @@ class Loop(OuterLoop):
                        if str(r.get("id")) in left_out else r for r in records]
             fact_entries = [e for e in fact_entries
                             if not (isinstance(e, dict) and str(e.get("id")) in left_out)]
-        if declared:
-            facts[SCORES_FACT] = fact_entries
+        facts[SCORES_FACT] = fact_entries
         result.facts = facts
         result.item_records = records
-        if declared and not fact_entries:
+        if not fact_entries:
             result.exit_ok = False
             result.error = (f"every item was a harness incident ({', '.join(ids)}); "
                             "nothing was scored")
-        elif declared:
+        else:
             try:
                 result.score = float(self.mode_class(state=candidate.state).score(result))
             except Exception as exc:
@@ -2495,8 +2520,8 @@ class Loop(OuterLoop):
         fields = {"part": part, "items": first, "reran": reran,
                   "recovered": [i for i in first if i not in left_out], "not_scored": ids}
         with self._state_lock:
-            self._harness_incidents.append({"candidate": candidate.id, **fields,
-                                            "workdir": self._relative(trial_dir)})
+            self._note_incident({"candidate": candidate.id, **fields,
+                                 "workdir": self._relative(trial_dir)})
             self._journal("harness_incident", id=candidate.id,
                           workdir=self._relative(trial_dir), **fields)
         self._progress("harness_incident", candidate=candidate.id, part=part, items=first,
@@ -2504,36 +2529,84 @@ class Loop(OuterLoop):
                        reran=reran)
         return ids, budget_hit
 
-    def shared_item_scores(self, a_id: str, b_id: str, part: str = "val"
-                           ) -> tuple[float, float, list[str]] | None:
-        """Two candidates' scores on ``part`` over the same items, when a harness incident
-        left an item out of either's first rollout (`_settle_incidents`): each one's mean
-        over the items neither left out, and the items left out. ``None`` when neither
-        left one out (their scores already cover the same items), when either has no
-        finished rollout, or when a score is not its items' mean (another metric cannot
-        be recomputed on fewer items): the scores compare as they are."""
-        def first(cid: str) -> dict[str, Any] | None:
+    def _note_incident(self, entry: dict[str, Any]) -> None:
+        """Keep one evaluation's harness incidents for the report: an evaluation run again
+        in the same folder (an interrupted one's retry, a resume) replaces its earlier
+        attempt's entry rather than adding to it."""
+        key = (entry.get("candidate"), entry.get("part"), entry.get("workdir"))
+        self._harness_incidents = [
+            e for e in self._harness_incidents
+            if (e.get("candidate"), e.get("part"), e.get("workdir")) != key] + [entry]
+
+    def shared_scores(self, candidate_ids: Sequence[str], part: str = "val", *,
+                      latest: bool = False) -> tuple[dict[str, float], list[str]] | None:
+        """Candidates' scores on ``part`` over the same items, when a harness incident left
+        an item out of any one's rollout (`_settle_incidents`): ``({id: score}, the items
+        left out)``. Each score is its rollout's mean over the items every candidate was
+        scored on in every repeat, none of them left out; with repeats, the mean of each
+        repeat's mean, as the rollout's own score is (`_measure`). The rollout is each
+        candidate's first on ``part`` not stopped by a budget (the val score the gate
+        reads), or with ``latest`` its latest (the test score a final evaluation reads).
+
+        ``None`` when no candidate left an item out: their scores already cover the same
+        items and compare as they are. Also ``None``, with a warning (once per reason),
+        when they cannot be put on the same items -- a candidate has no finished rollout,
+        a score is not its items' mean (another metric cannot be recomputed on fewer
+        items), or no item is left that all were scored on -- so the scores compare as
+        they are and the run says so."""
+        ids = list(dict.fromkeys(str(c) for c in candidate_ids))
+        rollouts: dict[str, dict[str, Any]] = {}
+        for cid in ids:
             done = [o for o in self._part_results.get(cid, {}).get(part, [])
                     if not o.get("budget_stopped")]
-            return done[0] if done and done[0].get("score") is not None else None
-
-        a, b = first(a_id), first(b_id)
-        if a is None or b is None:
-            return None
-        left_out = set(a.get("harness_incidents") or ()) | set(b.get("harness_incidents") or ())
+            if done:
+                rollouts[cid] = done[-1] if latest else done[0]
+        left_out = sorted({str(i) for o in rollouts.values() for i in o.get("harness_incidents") or ()})
         if not left_out:
             return None
-        means = []
-        for occasion in (a, b):
-            pairs = [(str(i), float(x)) for i, x in occasion.get("item_scores") or ()]
-            if not pairs or not math.isclose(sum(x for _, x in pairs) / len(pairs),
-                                             float(occasion["score"]), rel_tol=1e-9, abs_tol=1e-9):
+
+        def unmatched(reason: str) -> None:
+            note = (f"{part} scores of {', '.join(ids)} compared as they are, not on the same "
+                    f"items, though a harness incident left {', '.join(left_out)} out: {reason}")
+            with self._state_lock:
+                warned = self.__dict__.setdefault("_shared_warned", set())
+                if reason in warned:
+                    return
+                warned.add(reason)
+                self._journal("shared_scores_unmatched", part=part, candidates=ids,
+                              left_out=left_out, reason=reason)
+            self._progress("warning", warning=note)
+
+        if len(rollouts) < len(ids) or any(o.get("score") is None for o in rollouts.values()):
+            unmatched("a candidate has no finished rollout")
+            return None
+        by_repeat: dict[str, dict[int, dict[str, float]]] = {}
+        for cid, occasion in rollouts.items():
+            repeats: dict[int, dict[str, float]] = {}
+            for entry in occasion.get("item_scores") or ():
+                item, value = str(entry[0]), float(entry[1])
+                repeats.setdefault(int(entry[2]) if len(entry) > 2 else 1, {})[item] = value
+            if not repeats or not math.isclose(
+                    statistics.mean(statistics.mean(r.values()) for r in repeats.values()),
+                    float(occasion["score"]), rel_tol=1e-9, abs_tol=1e-9):
+                unmatched("a score is not its items' mean")
                 return None
-            kept = [x for i, x in pairs if i not in left_out]
-            if not kept:
-                return None
-            means.append(sum(kept) / len(kept))
-        return means[0], means[1], sorted(left_out)
+            by_repeat[cid] = repeats
+        common = set.intersection(*(set(r) for repeats in by_repeat.values()
+                                    for r in repeats.values())) - set(left_out)
+        if not common:
+            unmatched("no item is left that every candidate was scored on")
+            return None
+        return ({cid: statistics.mean(statistics.mean(r[i] for i in common)
+                                      for r in repeats.values())
+                 for cid, repeats in by_repeat.items()}, left_out)
+
+    def part_incidents(self, candidate_id: str, part: str = "val") -> list[str]:
+        """The items a harness incident left out of the candidate's first finished
+        ``part`` rollout (`_settle_incidents`); empty when none."""
+        done = [o for o in self._part_results.get(candidate_id, {}).get(part, [])
+                if not o.get("budget_stopped")]
+        return list(done[0].get("harness_incidents") or ()) if done else []
 
     def _write_traces(self, candidate: Candidate, workdir: Path, part: str,
                       seed: int | None, records: Sequence[dict[str, Any]] | None) -> None:
@@ -4564,6 +4637,12 @@ class Loop(OuterLoop):
         for key in ("final_selection", "baseline_test", "best_test", "final_test",
                     "best_test_delta", "final_test_delta"):
             report[key] = result.get(key)
+        # A delta taken on the items both were scored on (a harness incident left one
+        # out): the raw delta and the items left out, beside it.
+        for key in ("best_test_delta", "final_test_delta"):
+            for extra in (f"{key}_raw", f"{key}_left_out"):
+                if extra in result:
+                    report[extra] = result[extra]
         return report
 
     def _save_strategy_state(self) -> None:
@@ -6963,7 +7042,7 @@ class Loop(OuterLoop):
                 if cid is not None:
                     self._train_item_records[cid] = list(record.get("records") or [])
             elif event == "harness_incident":
-                self._harness_incidents.append(
+                self._note_incident(
                     {"candidate": record.get("id"),
                      **{k: record.get(k) for k in ("part", "items", "reran", "recovered",
                                                    "not_scored", "workdir")}})
@@ -7169,9 +7248,10 @@ def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:
     left = [entry for entry in incidents if entry.get("not_scored")]
     if not left:
         return []
-    return ["", f"**{sum(len(e['not_scored']) for e in left)} item(s) had a harness incident "
-                "and are not scored**: the harness backstop stopped them, again on every "
-                "rerun, so they count in no score below, not as wrong answers.",
+    return ["", f"**{sum(len(set(e['not_scored'])) for e in left)} item(s) in {len(left)} "
+                "evaluation(s) had a harness incident and are not scored**: the harness "
+                "backstop stopped them, again on every rerun, so they count in no score "
+                "below, not as wrong answers.",
             *(f"- {e.get('candidate')} {e.get('part')}: {', '.join(map(str, e['not_scored']))} "
               f"(rerun {e.get('reran', 0)} time(s))" for e in left)]
 

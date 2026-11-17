@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,9 @@ def test_an_incident_a_rerun_answers_is_scored_as_any_item(tmp_path, evaluator):
     assert len(records) == len(TRAIN_IDS) and not any(map(harness_incident, records))
     [t2] = [r for r in records if r["id"] == "t2"]
     assert t2["passed"] is True and t2["incident_reruns"] == 1
+    # The one-item rerun is a rollout of its own (train adds 8, val 4, test 3).
+    counts = [0] + [e["rollouts"] for e in _journal_events(loop, "rollouts")]
+    assert 1 in {b - a for a, b in zip(counts, counts[1:])}
 
 
 @pytest.mark.parametrize("evaluator", RUNTIMES)
@@ -193,8 +197,9 @@ def test_a_val_comparison_leaves_out_an_item_either_candidate_could_not_be_score
     assert gate.cache[child.id] == pytest.approx(3 / 4)
     assert child.id not in loop._gate_accepted, "the child won only on the incident item"
     assert gate.current_id == seed.id
-    assert loop.shared_item_scores(child.id, seed.id) == (
-        pytest.approx(2 / 3), pytest.approx(2 / 3), ["v2"])
+    scores, left_out = loop.shared_scores([child.id, seed.id])
+    assert scores == {child.id: pytest.approx(2 / 3), seed.id: pytest.approx(2 / 3)}
+    assert left_out == ["v2"]
     [entry] = [e for e in _incidents(loop, "val") if e["id"] == seed.id]
     assert entry["not_scored"] == ["v2"] and len(VAL_IDS) == 4
 
@@ -212,3 +217,186 @@ def test_edit_effect_reads_no_harness_incident_as_a_broken_item():
              {"id": "b", "passed": False, "score": 0.0, "exchanges": ran}]
     effect = edit_effect(parent, child, new_steps={"check"})
     assert effect["broken"]["items"] == 1 and effect["broken"]["new"] == {"check": 1}
+
+
+@pytest.mark.parametrize("evaluator", RUNTIMES)
+def test_the_test_deltas_are_on_the_items_both_were_scored_on(tmp_path, evaluator):
+    """The child wins on val (v1 right) and becomes the best. On test the seed's x2 is an
+    incident every time (left out: 2 of 2 right), the child misses x1 (2 of 3). The best's
+    test delta is taken on x1 and x3 (0.5 - 1.0), with the raw delta (2/3 - 1) beside it."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/x2_&level 5.": "ACTIVE", "/v1_&level 5.": "wrong", "/x1_&level 6.": "wrong",
+              "level": "right"})
+    loop = _run(tmp_path, dsh, [[(5, 6)], []], evaluator)
+    child = next(c for c in loop.population if _level(c) == 6)
+    assert loop._gate().best_id == child.id
+    result = loop.final_evaluation()
+    assert result["baseline_test"] == pytest.approx(1.0)
+    assert result["best_test"] == pytest.approx(2 / 3)
+    assert result["best_test_delta"] == pytest.approx(-0.5)
+    assert result["best_test_delta_raw"] == pytest.approx(-1 / 3)
+    assert result["best_test_delta_left_out"] == ["x2"]
+
+
+# ── the comparisons, on the scores a loop keeps ────────────────────────────
+
+
+class _Kept:
+    """The parts of `Loop` its comparisons read: each candidate's val/test rollouts."""
+
+    def __init__(self, rollouts: dict[str, dict[str, Any]], part: str = "val") -> None:
+        import threading
+
+        self._part_results = {cid: {part: [o]} for cid, o in rollouts.items()}
+        self._state_lock = threading.RLock()
+        self.warnings: list[str] = []
+
+    def _journal(self, event: str, **fields: Any) -> None:
+        pass
+
+    def _progress(self, step: str, **fields: Any) -> None:
+        self.warnings.append(fields.get("warning", ""))
+
+    shared_scores = Loop.shared_scores
+    part_incidents = Loop.part_incidents
+
+
+def _rollout(scores: dict[str, float], *, left_out: tuple[str, ...] = (), repeat: int = 1,
+             more: list[list[Any]] | None = None, score: float | None = None) -> dict[str, Any]:
+    items = [[i, v, repeat] for i, v in scores.items()] + list(more or [])
+    if score is None:
+        by: dict[int, list[float]] = {}
+        for entry in items:
+            by.setdefault(entry[2], []).append(entry[1])
+        score = sum(sum(v) / len(v) for v in by.values()) / len(by)
+    return {"score": score, "item_scores": items,
+            **({"harness_incidents": list(left_out)} if left_out else {})}
+
+
+class _GateRun:
+    """A `Run` as `ValidationGate` reads it, over `_Kept`."""
+
+    def __init__(self, kept: _Kept) -> None:
+        self.kept = kept
+        self.logged: list[str] = []
+
+    def shared_scores(self, ids, part="val", *, latest=False):  # type: ignore[no-untyped-def]
+        return self.kept.shared_scores(ids, part, latest=latest)
+
+    def log(self, message: str) -> None:
+        self.logged.append(message)
+
+
+def test_repeats_are_put_on_the_items_scored_in_every_repeat():
+    """With two repeats, an item left out of one repeat is left out of every repeat and of
+    every candidate; each score is the mean of its repeats' means over the rest."""
+    a = _rollout({"v1": 1.0, "v3": 0.0}, left_out=("v2",),
+                 more=[["v1", 1.0, 2], ["v2", 1.0, 2], ["v3", 1.0, 2]])
+    b = _rollout({"v1": 0.0, "v2": 1.0, "v3": 1.0},
+                 more=[["v1", 1.0, 2], ["v2", 1.0, 2], ["v3", 0.0, 2]])
+    scores, left_out = _Kept({"a": a, "b": b}).shared_scores(["a", "b"])
+    assert left_out == ["v2"]
+    assert scores == {"a": pytest.approx((0.5 + 1.0) / 2), "b": pytest.approx((0.5 + 0.5) / 2)}
+
+
+def test_a_score_that_is_not_its_items_mean_is_compared_as_it_is_and_said():
+    kept = _Kept({"a": _rollout({"v1": 1.0}, left_out=("v2",), score=0.3),
+                  "b": _rollout({"v1": 1.0, "v2": 1.0})})
+    assert kept.shared_scores(["a", "b"]) is None
+    assert any("not its items' mean" in w for w in kept.warnings)
+
+
+def test_a_round_ranks_siblings_and_the_best_on_the_same_items():
+    """The incumbent left v2 out. Sibling c is higher raw (v2 right), sibling b higher on
+    the shared items: b is accepted, and becomes the best over a raw-higher best."""
+    from refactory_dsh.optim import Candidate
+    from refactory_dsh.outerloop import ValidationGate
+
+    kept = _Kept({
+        "seed": _rollout({"v1": 0.0, "v3": 1.0}, left_out=("v2",)),          # 0.5 raw
+        "b": _rollout({"v1": 1.0, "v2": 0.0, "v3": 1.0}),                    # 2/3 raw, 1.0 shared
+        "c": _rollout({"v1": 0.0, "v2": 1.0, "v3": 1.0}),                    # 2/3 raw, 0.5 shared
+    })
+    run = _GateRun(kept)
+    gate = ValidationGate()
+    gate.cache = {"seed": 0.5, "b": 2 / 3 - 1e-6, "c": 2 / 3}
+    gate.current_id = gate.best_id = "seed"
+    gate.current_score = gate.best_score = 0.5
+    b, c = Candidate(id="b", parent="seed", state={}), Candidate(id="c", parent="seed", state={})
+    accepted, rejected = gate.judge_round(run, [c, b])  # type: ignore[arg-type]
+    assert [x.id for x in accepted] == ["b"] and [x.id for x in rejected] == ["c"]
+    assert gate.best_id == "b" and run.logged
+
+    # offer_best: c (raw 2/3) is no better than the seed (raw 0.5) on the shared items.
+    gate.best_id, gate.best_score = "seed", 0.5
+    assert gate.offer_best("c", 2 / 3, run=run) is False  # type: ignore[arg-type]
+    assert gate.best_id == "seed"
+
+
+def test_a_perfect_val_score_with_an_item_left_out_stops_nothing():
+    """SkillOpt's early stop at a perfect val score needs every item scored and right."""
+    import types
+
+    from refactory_dsh.outerloop import ValidationGate
+    from refactory_packages.skillopt.loop import SkillOptLoop
+
+    stops: list[str] = []
+    held = types.SimpleNamespace(id="best")
+
+    class StopRun:
+        def candidate(self, cid):  # type: ignore[no-untyped-def]
+            return held
+
+        def part_incidents(self, candidate, part):  # type: ignore[no-untyped-def]
+            return incidents
+
+        def stop(self, reason):  # type: ignore[no-untyped-def]
+            stops.append(reason)
+
+    loop = types.SimpleNamespace(
+        early_stop_at_full_val=True, early_stop_patience=0, _stale_epochs=0,
+        gate=ValidationGate(), _trace=types.SimpleNamespace(record_decision=lambda *a, **k: None))
+    loop.gate.best_id, loop.gate.best_score = "best", 1.0
+    loop._best_unscored = types.MethodType(SkillOptLoop._best_unscored, loop)
+    incidents = ["v2"]
+    assert SkillOptLoop._early_stop(loop, StopRun()) is False and not stops
+    incidents = []
+    assert SkillOptLoop._early_stop(loop, StopRun()) is True and stops == ["perfect_val"]
+
+
+def test_an_evaluation_run_again_in_its_folder_replaces_its_incidents():
+    kept = types.SimpleNamespace(_harness_incidents=[])
+    for entry in ({"candidate": "a", "part": "val", "workdir": "w", "not_scored": ["v2"]},
+                  {"candidate": "a", "part": "val", "workdir": "w", "not_scored": ["v2"]},
+                  {"candidate": "a", "part": "val", "workdir": "w2", "not_scored": ["v2"]}):
+        Loop._note_incident(kept, entry)  # type: ignore[arg-type]
+    assert [e["workdir"] for e in kept._harness_incidents] == ["w", "w2"]
+
+
+class FactlessProbe(Probe):
+    """`Probe` whose data node declares no item_scores fact: its score is a constant."""
+
+    name = "factless_probe"
+
+    def build(self) -> nn.Graph:
+        graph = super().build()
+        graph.nodes["data"].produces = ()
+        return graph
+
+    def score(self, run: nn.RunResult) -> float:
+        return 0.5
+
+
+def test_a_mode_with_no_item_scores_keeps_its_incidents_and_says_so(tmp_path):
+    """Nothing can take an item out of a score that reads no item_scores: no rerun, the
+    record is not marked unscored, and the run warns once."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/t2_&level 5.": "ACTIVE", "level": "right"})
+    with _patch_mode(FactlessProbe):
+        loop = _interrupted_loop(tmp_path, dsh, [[]], epochs=1)  # type: ignore[arg-type]
+        loop.run()
+    seed = loop.population[0]
+    [t2] = [r for r in loop._train_item_records[seed.id] if r["id"] == "t2"]
+    assert t2["error_kind"] == "harness_incident" and "not_scored" not in t2
+    assert len(_journal_events(loop, "harness_incident_kept")) == 1
+    assert not _journal_events(loop, "harness_incident")
