@@ -202,6 +202,12 @@ PERSON_GATE = "user"
 ANSWERED_GATES = ("user", "agent")
 
 
+#: Fields the request says once in a line of their own, not in the node table: a step's own
+#: route, in the core operators' ``route`` line (`core_ops.route_field_line`), and only when
+#: the run has routes to choose from.
+SAID_ELSEWHERE = ("route",)
+
+
 def render_schema(*, person_gates: bool = True) -> list[str]:
     """The node schemas as prompt text: one field table, then each kind.
 
@@ -214,6 +220,8 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
     rows = []
     applies = field_kinds()
     for field in _fields():
+        if field.name in SAID_ELSEWHERE:
+            continue
         kinds = [name for name, entry in schema.items()
                  if (field.name in entry["optional"] or field.name in entry.get("set", ()))
                  and name.split(" ", 1)[0] in applies.get(field.name, NODE_KINDS)]
@@ -247,7 +255,8 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
             continue
         lines += [
             f"`{name}`: required {', '.join(entry['required'])}; refused "
-            f"{', '.join(entry['refused']) or 'nothing'}. Minimal example:",
+            f"{', '.join(f for f in entry['refused'] if f not in SAID_ELSEWHERE) or 'nothing'}. "
+            "Minimal example:",
             "`" + json.dumps(_example(entry, name.split(" ", 1)[0]),
                              separators=(",", ":")) + "`",
         ]

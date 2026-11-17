@@ -253,3 +253,10 @@ def test_the_route_line_s_example_applies():
     example = json.loads(core_ops.route_field_line(offered).rsplit("E.g. ", 1)[1])
     _applier, out = _attempt({"op": "insert", "after": "draft", **example})
     assert isinstance(out, Candidate), out
+
+
+def test_the_node_schema_leaves_route_to_its_one_line():
+    from refactory_dsh.nn.node_schema import render_schema
+
+    text = "\n".join(render_schema())
+    assert "| route |" not in text and ", route" not in text
