@@ -11,9 +11,12 @@ each cut is in the request's own record (``ProposalContext.omissions``) for the 
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate, ProposalContext, base
@@ -250,6 +253,175 @@ def test_each_fact_of_the_request_is_said_once():
     ungated = _ctx(records, findings=FINDINGS, parsimony=0.0, leaderboard=rows, history=rows,
                    best_score=score, mean_score=score).render()
     assert "0.5714285714285714" not in ungated and "Best score so far: 0.5714." in ungated
+
+
+def test_a_judge_reason_said_the_same_on_two_items_reaches_the_rerun_in_both():
+    """A line is settled only when it comes from no item (the settings, the templates, the
+    ops' framing), never because it recurs: a judge that sends both items back with the
+    same words has that reason shown at each item's re-run, and a choice both items share
+    is still shown, with each item's input."""
+    instructions = "Solve the question step by step and give one choice label."
+    reason = "Sent back because: the answer ignores the boundary case entirely"
+    choice = "C. Converges"
+    knobs = [{"name": "solve__task", "kind": "str", "value": instructions, "frozen": False}]
+
+    def record(item: str) -> dict:
+        first = (f"History:\n- User: QUESTION {item}: does the series converge?\n{choice}\n"
+                 f"{instructions}\nAnswer the latest user request.")
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"QUESTION {item}: does the series converge?",
+                             "choices": [{"label": "C", "text": "Converges"}]},
+                "exchanges": [{"node": "solve", "prompt": first, "response": f"FIRST {item}"},
+                              {"node": "judge", "prompt": f"FIRST {item}\n{instructions}",
+                               "response": "reloop: ignores the boundary case"},
+                              {"node": "solve", "prompt": f"{first}\n{reason}",
+                               "response": f"SECOND {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        rerun = block.split("#### Step ")[3]
+        assert "Also in its prompt (not in its settings):" in rerun, rerun
+        assert reason in rerun, rerun
+        assert "Converges" in block  # the choice, said with the item's input
+        assert instructions not in block  # the settings still hold the instructions
+        # The ops' framing, in every one of the step's prompts and from no item, is not.
+        assert "Answer the latest user request." not in block and "History:" not in block
+
+
+def test_a_line_carrying_an_items_reply_is_shown_even_in_every_prompt_of_a_step():
+    """Framing holds nothing from any item: a line quoting a step's reply is the item's
+    evidence even when it is the same in every one of the step's prompts."""
+    verdict = "the answer ignores the boundary case entirely"
+    knobs = [{"name": "report__task", "kind": "str", "value": "Write the report.",
+              "frozen": False}]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"QUESTION {item}"},
+                "exchanges": [{"node": "judge", "prompt": f"QUESTION {item}",
+                               "response": f"reloop\n{verdict}"},
+                              {"node": "report", "prompt": f"Write the report.\n"
+                                                           f"Prior verdict: {verdict}",
+                               "response": f"REPORT {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert f"Prior verdict: {verdict}" in block.split("#### Step ")[2], block
+
+
+def _fix_only_records(source: str, reason: str = "misses the boundary case at zero"
+                      ) -> list[dict]:
+    """Two items where a fix step runs only after a judge, so every one of its prompts
+    carries the judge's reason: from a code gate (the record's ``steps``, as
+    `items.gate_visit` writes it) or from a model judge's JSON reply."""
+    visit = ({"node": "check", "kind": "gate", "verdict": "reloop",
+              "reason": " ".join(reason.split())}
+             if source == "code gate" else None)
+
+    def record(item: str) -> dict:
+        exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+        if source == "model judge JSON":
+            exchanges.append({"node": "judge", "prompt": f"ANS {item}",
+                              "response": json.dumps({"verdict": "reloop", "reason": reason})})
+        exchanges.append({"node": "fix", "prompt": f"ANS {item}\nFeedback: {reason}",
+                          "response": f"FIX {item}"})
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+                **({"steps": [visit]} if visit else {})}
+
+    return [record("r1"), record("r2")]
+
+
+@pytest.mark.parametrize("source", ["code gate", "model judge JSON"])
+def test_a_judge_reason_reaching_a_step_that_only_runs_after_it_is_shown(source):
+    """The reason is in every one of the fix step's prompts, and is still each item's
+    evidence: a code gate's reason (under the record's ``steps``) and the ``reason`` of a
+    model judge's JSON reply both count as item data."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=_fix_only_records(source), knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: misses the boundary case at zero" in block, block
+
+
+@pytest.mark.parametrize("source", ["code gate", "model judge JSON"])
+def test_a_reason_over_two_lines_is_shown_line_by_line(source):
+    """A code gate's reason is recorded as one line (`items.gate_visit`) but reaches the
+    fix step over two: each prompt line holding a piece of it is the item's evidence."""
+    reason = "misses the boundary case at zero\nand the residual check is skipped"
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=_fix_only_records(source, reason),
+                           knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: misses the boundary case at zero" in block, block
+        assert "and the residual check is skipped" in block, block
+
+
+def test_a_piece_of_a_reply_quoted_in_every_prompt_is_shown():
+    """A step quoting part of an earlier reply (a judge's reason, clipped) in every one of
+    its prompts carries that item's evidence, not framing."""
+    reply = "reloop: the answer ignores the boundary case and the zero input entirely"
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "exchanges": [{"node": "judge", "prompt": f"Q {item}", "response": reply},
+                              {"node": "fix", "prompt": f"Q {item}\nFeedback: the answer "
+                                                        "ignores the boundary case",
+                               "response": f"FIX {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: the answer ignores the boundary case" in block, block
+
+
+def test_framing_is_not_taken_for_a_piece_of_a_reply_that_uses_its_words():
+    """The framing lines the real S4 runs put in every prompt stay framing although the
+    replies use their words: a tail counts only after a short label and only when long
+    enough, a datum only as whole words, and of a record's steps only a code gate's
+    reason is item data (not a visit's node id). A real label still counts."""
+    framing = ["- User: ## Question", "## Question", "## Independent",
+               "## Option Comparison Notes", "## Files from earlier steps (independent_inputs)",
+               "Before answering, read the notes and then weigh the hypotheses"]
+    reason = "misses the boundary case at zero"
+
+    def record(item: str) -> dict:
+        prompt = "\n".join(["History:", *framing, f"Q {item}", f"Feedback: {reason}",
+                             "Answer the latest user request."])
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "steps": [{"node": "independent_inputs", "kind": "op", "output": "x"},
+                          {"node": "check", "kind": "gate", "verdict": "reloop",
+                           "reason": reason}],
+                "exchanges": [{"node": "compare", "prompt": f"Q {item}",
+                               "response": f"## Option C\nThe Question is subtle. {item}\n"
+                                           "Independent of the bound, B holds; then weigh "
+                                           "the hypotheses."},
+                              {"node": "decide", "prompt": prompt, "response": f"D {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")]).render()
+    for item in ("r1", "r2"):
+        decide = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")[2]
+        assert f"Feedback: {reason}" in decide, decide
+        for line in framing:
+            assert line not in decide, (line, decide)
+
+
+def test_with_one_item_no_line_is_taken_for_framing():
+    """Framing is told from an item's own text only across two or more items; with one,
+    every line not in the settings or templates is shown."""
+    hint = "Hint from the run: try the ratio test first"
+    record = {"id": "r1", "passed": False, "score": 0.0, "prediction": "A",
+              "metadata": {"question": "QUESTION r1"},
+              "exchanges": [{"node": "solve", "prompt": f"QUESTION r1\n{hint}",
+                             "response": "ANSWER r1"}]}
+    assert hint in ProposalContext(item_records=[record]).render()
 
 
 def test_the_items_legend_says_what_each_item_shows_and_a_reloop_reason_reaches_it():

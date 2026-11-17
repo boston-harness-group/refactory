@@ -703,6 +703,83 @@ class Candidate:
         return d
 
 
+#: A prompt line's tail counts as a piece of a reason or a reply (`_settled`) only after a
+#: label of at most this many characters ("Sent back because:"), and only when the tail
+#: is at least `TAIL_MIN` characters or `TAIL_MIN_WORDS` words: a framing line's last
+#: word ("- User: ## Question") is not a piece of a reply that happens to use it.
+TAIL_LABEL_MAX = 24
+TAIL_MIN = 20
+TAIL_MIN_WORDS = 3
+#: The shortest piece of an item's data (`_data_lines`) that marks a prompt line as
+#: carrying it; a shorter one ("A", "yes") would match framing by chance.
+ITEM_DATA_MIN = 8
+
+
+def _data_lines(value: Any) -> set[str]:
+    """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
+    least `ITEM_DATA_MIN` characters: an item's input, a step's reply or what its ops and
+    code gates gave (the record's ``steps``), which a prompt line holding one carries from
+    that item. A string that is JSON (a judge's reply) counts by its own strings too, so a
+    reason extracted from one is matched in the prompt that quotes it. An op visit's
+    output counts only as the one line it is written as: its facts are often the framed
+    prompt itself, whose framing would then never be told from an item's text."""
+    from .evidence import _norm
+
+    out: set[str] = set()
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack += list(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack += list(current)
+        elif isinstance(current, str):
+            out |= {n for line in current.splitlines() if len(n := _norm(line)) >= ITEM_DATA_MIN}
+            text = current.strip()
+            if text[:1] in ("{", "[", '"'):
+                try:
+                    stack.append(json.loads(text))
+                except json.JSONDecodeError:
+                    pass
+    return out
+
+
+def _holds(line: str, datum: str) -> bool:
+    """Whether ``datum`` is in ``line`` as whole words: a reply's heading "## Option C" is
+    not in the op's heading "## Option Comparison Notes"."""
+    start = line.find(datum)
+    while start != -1:
+        end = start + len(datum)
+        if (start == 0 or not line[start - 1].isalnum()) and \
+                (end == len(line) or not line[end].isalnum()):
+            return True
+        start = line.find(datum, start + 1)
+    return False
+
+
+def _whole_texts(value: Any) -> set[str]:
+    """Each string of ``value`` (nested, and inside a JSON string) whole, normalised: a
+    reason or a reply, which a prompt line holding a piece of it carries."""
+    from .evidence import _norm
+
+    out: set[str] = set()
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack += list(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack += list(current)
+        elif isinstance(current, str) and current.strip():
+            out.add(_norm(current))
+            if current.strip()[:1] in ("{", "[", '"'):
+                try:
+                    stack.append(json.loads(current))
+                except json.JSONDecodeError:
+                    pass
+    return out
+
+
 @dataclass
 class ProposalContext:
     """The gradient: everything the optimizer is allowed to know.
@@ -912,12 +989,18 @@ class ProposalContext:
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
-        """What an item's step does not repeat of its prompt (`ITEM_FORM`): the lines of
-        every setting's text ("Each step's settings"), of the nodes' own prompt templates
-        (each node in full, in the reference), and any line a step's prompt has in two or
-        more items -- the same for every item, so not this item's (the model client's
-        wrapping, a template's headings). What is left is item-specific: a reason a judge
-        sent the step back with, say."""
+        """What an item's step does not repeat of its prompt (`ITEM_FORM`): text that
+        comes from no item. That is the lines of every setting's text ("Each step's
+        settings"), of the nodes' own prompt templates (each node in full, in the
+        reference), and the framing the step's ops put around its inputs (the model
+        client's wrapper, their headings). Framing is a line in every one of the step's
+        prompts, over two or more items, that holds nothing from any item's own data
+        (its input, a step's reply, or a code gate's reason; as whole words), nor a piece of
+        a code gate's reason or of a reply (a reason spread over several prompt lines).
+
+        Never a line just because it recurs: a judge's reason that is not in every one
+        of the step's prompts, or a choice text (part of an item's input) said the same
+        way in two items, is each item's own evidence and is shown."""
         from .evidence import _norm, settled_lines
 
         texts = [k.get("value") for k in self.knobs]
@@ -927,15 +1010,50 @@ class ProposalContext:
                    *(r for pair in self.edit_pairs or ()
                      for side in ("parent_records", "child_records")
                      for r in pair.get(side) or ())]
-        holders: dict[tuple[str, str], set[str]] = {}
+        every: dict[str, set[str]] = {}
+        items: dict[str, set[str]] = {}
+        data: set[str] = set()
+        # Reasons and replies whole: a prompt line may carry a piece of one (a gate's
+        # reason is stored as one line, and reaches a prompt over several). Never an op's
+        # output, which is often the framed prompt itself.
+        said: set[str] = set()
         for record in records:
+            # Of the record's steps, only a code gate's reason is item data: an op's
+            # output is often the framed prompt itself, and a visit's node id is no item's.
+            reasons = [step.get("reason") for step in record.get("steps") or ()
+                       if isinstance(step, Mapping) and step.get("kind") == "gate"]
+            data |= _data_lines(record.get("metadata")) | _data_lines(reasons)
+            said |= _whole_texts(reasons)
             for exchange in record.get("exchanges") or ():
-                for line in str(exchange.get("prompt") or "").splitlines():
-                    if line.strip():
-                        holders.setdefault((str(exchange.get("node")), _norm(line)),
-                                           set()).add(str(record.get("id")).split("#")[0])
-        common = {line for (_node, line), items in holders.items() if len(items) > 1}
-        return settled_lines(texts) | common
+                node = str(exchange.get("node"))
+                lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
+                         if line.strip()}
+                every[node] = lines if node not in every else every[node] & lines
+                items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
+                data |= _data_lines(exchange.get("response"))
+                said |= _whole_texts(exchange.get("response"))
+
+        def carried(line: str) -> bool:
+            if any(_holds(line, datum) for datum in data):
+                return True
+            # The line inside a reason or a reply, or its tail after a short label
+            # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
+            # ("- User: ## Question") from matching a reply that happens to use it.
+            words = line.split(" ")
+            for start in range(len(words)):
+                label, tail = " ".join(words[:start]), " ".join(words[start:])
+                if len(label) > TAIL_LABEL_MAX:
+                    return False
+                if len(tail) < ITEM_DATA_MIN or (start and len(tail) < TAIL_MIN
+                                                and len(words) - start < TAIL_MIN_WORDS):
+                    return False
+                if any(tail in text for text in said):
+                    return True
+            return False
+
+        framing = {line for node, lines in every.items() if len(items[node]) > 1
+                   for line in lines if not carried(line)}
+        return settled_lines(texts) | framing
 
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
