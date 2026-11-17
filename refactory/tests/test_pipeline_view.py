@@ -391,23 +391,23 @@ class _Reading:
         return None
 
     def _leads_to(self, a: str, gate: str) -> bool:
-        """Whether ``a`` leads to ``gate`` along forward edges through folded steps and
-        loop gates (a loop's gate belongs to the step before it): what a loop line's
+        """Whether ``a`` leads to ``gate`` along forward edges (and to a join that waits for
+        it) through folded steps and loop gates (a loop's gate belongs to the step before it): what a loop line's
         judged step says."""
         loops = {key for key, node in self.graph.nodes.items() if node.kind == "gate"
                  and any((key, e.target) in self.view.back for e in self.graph.out_edges(key))}
         todo, seen = [a], {a}
         while todo:
             node = todo.pop()
-            for e in self.graph.out_edges(node):
-                if (node, e.target) in self.view.back:
-                    continue
-                if e.target == gate:
+            joins = [key for key, n in self.graph.nodes.items()
+                     if n.kind == "join" and node in n.sources]  # waited for, edge or not
+            for target in [e.target for e in self.graph.out_edges(node)
+                           if (node, e.target) not in self.view.back] + joins:
+                if target == gate:
                     return True
-                if e.target not in seen and (
-                        self.view._hidden(e.target) or e.target in loops):
-                    seen.add(e.target)
-                    todo.append(e.target)
+                if target not in seen and (self.view._hidden(target) or target in loops):
+                    seen.add(target)
+                    todo.append(target)
         return False
 
     def _follow(self, tails: set[str], b: str) -> None:
@@ -589,6 +589,10 @@ def test_a_span_judges_steps_never_a_fork_or_a_route_gate():
          {"id": "j", "kind": "join", "sources": ["b", "c"]}, gate("g"), agent("z")],
         [("a", "f", None), ("f", "j", None), ("b", "j", None), ("c", "j", None),
          ("j", "g", None), ("g", "a", "reloop"), ("g", "z", "proceed")])
+    assert _lines(after_join)["g"].startswith("loop(a … b, c, judge ")
+    # A branch end the join waits for by its sources alone (no edge to it) is judged too.
+    edges = after_join["graph"]["edges"]
+    after_join["graph"]["edges"] = [e for e in edges if (e["source"], e["target"]) != ("c", "j")]
     assert _lines(after_join)["g"].startswith("loop(a … b, c, judge ")
     after_route = _bare(
         [agent("a"), gate("r"), gate("g"), agent("x"), agent("z")],

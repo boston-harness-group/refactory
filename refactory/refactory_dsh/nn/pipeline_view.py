@@ -367,7 +367,7 @@ class _View:
     def _shown_before(self, node_id: str) -> set[str]:
         """The drawn steps right before ``node_id``, through hidden steps and loop gates;
         a send-back into it is not before it, nor is a fork's own edge to its join (the
-        join comes after the branches)."""
+        join comes after the branches, the sources it waits for)."""
         out: set[str] = set()
         sources = {e.source for e in self.graph.in_edges(node_id)
                    if (e.source, node_id) not in self.back
@@ -375,6 +375,9 @@ class _View:
                             and self.graph.nodes[e.source].targets)} | {
             n for n, node in self.graph.nodes.items()
             if node.kind == "fork" and node_id in node.targets}
+        node = self.graph.nodes[node_id]
+        if node.kind == "join":  # it waits for its sources, edge or not
+            sources |= set(node.sources)
         for source in sources:
             # A loop's gate belongs to the step it sends back to: look through it too.
             looped = self.graph.nodes[source].kind == "gate" and any(
