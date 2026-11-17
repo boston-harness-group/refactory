@@ -433,6 +433,15 @@ COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
+#: How a model call the harness ended for time reaches an item's error as text, anchored
+#: at the start of the message or of a line: the walker's ``"<node>: CompletionTimeout: "``
+#: (`nn.executor` ``_walk_branch``) and the spine worker's stderr
+#: ``"worker: model completion timed out"`` (`worker_node.main`). Nowhere else in a text.
+_HARNESS_TIMEOUT_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: CompletionTimeout: |worker: " + re.escape(COMPLETION_TIMEOUT_TEXT) + ")",
+    re.MULTILINE)
+
+
 #: How a session the harness backstop stopped (`model.HarnessBackstop`) reaches an item
 #: record as text, anchored at a line's start: the walker's ``"<node>: HarnessBackstop: "``
 #: and the spine worker's stderr ``"worker: model session hit the harness backstop"``.
@@ -456,6 +465,15 @@ DECLARED_TIMEOUT_RETRIED_LINE = re.compile(
     r"node's declared timeout_s", re.MULTILINE)
 
 
+#: A model call the harness ended for time, once the node's declared retry is spent
+#: (`node_retry.RetriesExhausted`): the retry wrapper's own line, anchored at its start,
+#: ending on the last attempt's timeout.
+_HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: RetriesExhausted: |worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
+    r"\. Last error: (?:[A-Za-z0-9_.-]+: CompletionTimeout: )?" + re.escape(COMPLETION_TIMEOUT_TEXT),
+    re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
     backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
@@ -463,25 +481,25 @@ def error_kind(error: BaseException) -> str:
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
     else the class name.
 
-    A node that timed out reaches the record as text -- the walker's
-    ``"<node>: CompletionTimeout: model completion timed out ..."``, the spine's
-    worker stderr ``"worker: model completion timed out ..."`` -- wrapped in a
-    RuntimeError on both, so the message decides, as ``node_retry.failure_kind``
-    decides a retry.
+    A ``model.CompletionTimeout`` is one by its type. A node that timed out reaches the
+    record as text -- the walker's ``"<node>: CompletionTimeout: model completion timed
+    out ..."``, the spine's worker stderr ``"worker: model completion timed out ..."`` --
+    wrapped in a RuntimeError on both, so only that anchored prefix decides
+    (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
+    ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    import subprocess
-
-    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.node_retry import RetriesExhausted
 
     if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
         return "harness_incident"
-    from refactory_dsh.node_retry import RetriesExhausted
-
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
             or DECLARED_TIMEOUT_RETRIED_LINE.search(str(error))):
         return "declared_timeout"
-    if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
+    if (isinstance(error, CompletionTimeout) or _HARNESS_TIMEOUT_LINE.search(str(error))
+            or (isinstance(error, RetriesExhausted) and error.cause == "timeout")
+            or _HARNESS_TIMEOUT_RETRIED_LINE.search(str(error))):
         return "timeout"
     return type(error).__name__
 

@@ -118,8 +118,8 @@ def settings(*, group_size: int = GROUP_SIZE, merge_batch_size: int = MERGE_BATC
 def split(records: Sequence[dict[str, Any]], seed: int
           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Every train item once (its first repeat), split by ``passed`` as SkillOpt splits
-    them (an error is a failure), failures shuffled with ``seed`` and passes with
-    ``seed + 1`` (SkillOpt's ``reflect.py``)."""
+    them (an error is a failure; a harness timeout is neither, `base.harness_timeout`),
+    failures shuffled with ``seed`` and passes with ``seed + 1`` (SkillOpt's ``reflect.py``)."""
     items = sorted(_ordered_items(records), key=lambda r: str(r.get("id")))
     failures = [r for r in items if not r.get("passed")]
     successes = [r for r in items if r.get("passed")]
@@ -352,7 +352,8 @@ important COMMON failure patterns across the batch.
    structural change (add, remove, rewire, split, loop or parallelise steps).
 6. Address the COMMON patterns, not individual edge cases. A change must hold across
    items; do not hardcode item-specific values.
-7. Do not ask for what the pipeline already does.
+7. Do not ask for what the pipeline already does, for retries, or for a change aimed at
+   timeouts: a timeout is the harness's, not the pipeline's, and no such item is here.
 
 You reply with JSON only."""
 

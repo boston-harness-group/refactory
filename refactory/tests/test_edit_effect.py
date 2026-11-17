@@ -153,7 +153,7 @@ def _tried(name: str) -> dict:
 
 
 @pytest.mark.parametrize("name,fixed,broken", [("s1_s43_loop.json", 2, 9),
-                                               ("s1_s45_loop.json", 1, 8)])
+                                               ("s1_s45_loop.json", 0, 8)])
 def test_memory_gets_each_kind_s_tries_and_the_noise_they_sit_in(name, fixed, broken):
     """The real S1 loops, each tried once: the memory call is told the try's counts and
     the gate's word once (in the tally), the noise -- one of the 17 validation items is
@@ -182,7 +182,7 @@ def test_the_proposer_sees_the_same_tally_once_beside_the_note():
     note = text.split("## Optimizer memory", 1)[1]
     assert note.index(memory_mod.TALLY_HEADING) < note.index("NOTE-TEXT")
     assert text.count(memory_mod.TALLY_HEADING) == 1
-    assert text.count(f"`{entry['id']}` fixed 1 / broken 8") == 1
+    assert text.count(f"`{entry['id']}` fixed 0 / broken 8") == 1
     assert text.count(memory_mod.TALLY_NOISE_RULE) == 1
 
 

@@ -1318,3 +1318,25 @@ def test_a_pass_that_begins_again_counts_its_time_from_then(tmp_path):
     assert item_duration(pass_dir) > 10 ** 6
     prepare_pass_dir(tmp_path, "data", "i1", 0)
     assert item_duration(pass_dir) < 60
+
+
+def test_a_spent_timeout_retry_is_still_a_harness_timeout_and_quoted_words_are_not():
+    """Once a node's declared retry on timeout is spent, its error is the retry wrapper's
+    (`node_retry.RetriesExhausted`): the item is still ``timeout`` when the last attempt
+    went silent, from the exception or from either runtime's anchored line. The same words
+    quoted mid-line (a reply, an op's message) are no timeout."""
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.node_retry import RetriesExhausted
+
+    spent = RetriesExhausted("judge timed out twice (after 2s, then 4s); its declared retry "
+                             "is spent. Last error: model completion timed out after 4s",
+                             kind="timeout", cause="timeout")
+    assert error_kind(spent) == "timeout"
+    walker = ("judge: RetriesExhausted: judge timed out twice (after 2s, then 4s); its declared "
+              "retry is spent. Last error: model completion timed out after 4s of inactivity")
+    spine = ("worker: judge timed out twice (after 2s, then 4s); its declared retry is spent. "
+             "Last error: model completion timed out after 4s of inactivity")
+    assert error_kind(RuntimeError(walker)) == error_kind(RuntimeError(spine)) == "timeout"
+    quoted = ("parse: ValueError: reply said 'judge timed out twice. Last error: model "
+              "completion timed out after 4s'")
+    assert error_kind(RuntimeError(quoted)) == "RuntimeError"
