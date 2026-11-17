@@ -170,6 +170,9 @@ def exec_runner(command: list[str]) -> int:
     if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
         print("refactory-seal: cannot tie the runner to its parent", file=sys.stderr)
         return 97
+    # Nothing of the caller's beyond stdin, stdout and stderr reaches the runner (the seal
+    # closes them again, inside, as the command's last step).
+    os.closerange(3, os.sysconf("SC_OPEN_MAX") if os.sysconf("SC_OPEN_MAX") > 0 else 65536)
     try:
         os.execv(command[0], command)
     except OSError as exc:

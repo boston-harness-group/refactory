@@ -82,16 +82,25 @@ SCOPE_LIMITS = ("MemoryMax=8G", "MemorySwapMax=0", "TasksMax=256")
 #: (128 processes, 8 GiB of address space each).
 LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
 
-#: Sets the limits, closes every descriptor above stderr, then runs the command (after
-#: DSH's profile arguments and ``--``) in the workspace with that environment; ``$run``
-#: is what runs it (Linux: the nested, unprivileged user namespace).
+#: Closes every descriptor above stderr, then checks that none is left (a command that
+#: would start with one does not start), then runs its arguments. The last step before
+#: the command, inside every namespace the command runs in.
+_CLOSE = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
+          '[ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-" 2>/dev/null; done; '
+          'for fd in /dev/fd/*; do n="${fd##*/}"; '
+          'if [ "$n" -gt 2 ] 2>/dev/null && [ -e "$fd" ]; then '
+          'echo "refactory-seal: descriptor $n is still open" >&2; exit 97; fi; done; '
+          'exec "$@"')
+
+#: Sets the limits, then runs the command (after DSH's profile arguments and ``--``) in
+#: the workspace with that environment, through :data:`_CLOSE`; ``$run`` is what runs
+#: it (Linux: the nested, unprivileged user namespace).
 _EXEC = (f'ulimit {LIMITS} $limits || {{ echo "refactory-seal: cannot set limits" >&2; exit 97; }}; '
-         'for fd in /dev/fd/*; do n="${fd##*/}"; '
-         '[ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-" 2>/dev/null; done; '
          'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
          '[ "$1" = "--" ] || { echo "refactory-seal: no command" >&2; exit 97; }; shift; '
          'cd "$ws" || exit 97; '
-         f'exec $run /usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="{PATH}" '
+         f'exec $run /bin/bash -c \'{_CLOSE}\' refactory-seal '
+         f'/usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="{PATH}" '
          f'LANG={snippet.LOCALE} LC_ALL={snippet.LOCALE} "$@"')
 
 #: What a sealed Linux command may read besides its workspace, each bound read only and

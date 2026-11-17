@@ -89,6 +89,23 @@ def test_a_sealed_step_is_a_candidate_with_no_run_switch():
         {"graph": {"nodes": {"x": {"kind": "agent", "tool_policy": None, "tools": ["bash"]}}}})
 
 
+@pytest.fixture(params=["scoped", "unscoped"])
+def seal_path(request, monkeypatch):
+    """Each Linux path a sealed command can take: in a capped systemd user scope (where
+    this machine's user manager makes one) and without one (per-process limits only,
+    as on a CI runner with no user manager). macOS has one path."""
+    if not sys.platform.startswith("linux"):
+        if request.param == "unscoped":
+            pytest.skip("macOS has no scope")
+        return request.param
+    monkeypatch.setattr(seal, "_SCOPE", [])
+    if request.param == "unscoped":
+        monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
+    elif not seal.linux_scope():
+        pytest.skip("no systemd user scope here")
+    return request.param
+
+
 # ── the seal itself ───────────────────────────────────────────────────────────
 
 def _layout(tmp_path: Path) -> tuple[Path, workspace.Workspace]:
@@ -138,7 +155,7 @@ if sys.platform == "darwin":
 EOF"""
 
 
-def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
+def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path, seal_path):
     _sealable()
     run, place = _layout(tmp_path)
     home = os.path.expanduser("~")
@@ -206,13 +223,14 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     assert out["settings"].stdout.strip().isdigit(), out["settings"]
 
 
-def test_a_sealed_command_gets_no_descriptor_but_its_own(tmp_path):
+def test_a_sealed_command_gets_no_descriptor_but_its_own(tmp_path, seal_path):
     _sealable()
     _run, place = _layout(tmp_path)
     with open(tmp_path / "bench" / "gold.json", "rb") as gold:
-        result = _sealed(place, f"cat /dev/fd/{gold.fileno()} <&- 2>/dev/null; true",
+        result = _sealed(place, f"cat /dev/fd/{gold.fileno()} <&- 2>/dev/null; echo; ls -l /dev/fd/",
                          pass_fds=(gold.fileno(),))
-    assert "GOLD-OUTSIDE" not in result.stdout
+    assert "GOLD-OUTSIDE" not in result.stdout, (result.stdout, result.stderr, place.runner[:16])
+    assert result.returncode == 0, ("the command ran", result.stderr)
 
 
 DETACH = {
@@ -466,13 +484,14 @@ def test_where_the_seal_cannot_be_made_the_step_is_refused_never_run_unsealed(
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux's allow-list root")
-def test_a_sealed_linux_command_sees_only_the_listed_parts_of_etc_and_runs_unprivileged(tmp_path):
+def test_a_sealed_linux_command_sees_only_the_listed_parts_of_etc_and_runs_unprivileged(tmp_path, seal_path):
     _sealable()
     _run, place = _layout(tmp_path)
     result = _sealed(place, "ls -A /etc; echo uid=$(id -u); ulimit -u")
     listed = set(result.stdout.split("uid=")[0].split())
     assert listed <= {path.removeprefix("/etc/") for path in seal.LINUX_ETC}, listed
-    assert f"uid={os.getuid()}" in result.stdout and result.stdout.split()[-1] == "512"
+    assert f"uid={os.getuid()}" in result.stdout
+    assert result.stdout.split()[-1] == ("512" if seal.linux_scope() else "128")
 
 
 def test_a_sealed_step_never_runs_as_root(tmp_path, monkeypatch):
@@ -517,7 +536,7 @@ def _listener(port: int):
     return sock
 
 
-def test_a_hostile_step_is_blocked_at_every_turn_and_its_own_output_is_collected(tmp_path):
+def test_a_hostile_step_is_blocked_at_every_turn_and_its_own_output_is_collected(tmp_path, seal_path):
     """A step that tries every way out: the gold answer beside its input, the person's
     keys and credentials, writing outside, a link out at collection, the model proxy, the
     network and DNS, and becoming root. Each attempt prints a marker only when it
@@ -860,3 +879,23 @@ def test_a_failed_scope_probe_is_tried_again_and_warns(monkeypatch, capsys):
     assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2
     assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2, "kept once found"
     monkeypatch.setattr(seal.subprocess, "run", real)
+
+
+@LINUX
+def test_each_layer_closes_inherited_descriptors(tmp_path, seal_path):
+    """Both layers, each on its own: the runner's start (`seal_reaper.exec_runner`) and the
+    command's last step inside the seal (`seal._CLOSE`)."""
+    _sealable()
+    _run, place = _layout(tmp_path)
+    reaper = str(Path(seal_reaper.__file__))
+    with open(tmp_path / "bench" / "gold.json", "rb") as gold:
+        outer = subprocess.run([sys.executable, "-I", reaper, "--exec", "/bin/sh", "-c",
+                                f"cat /dev/fd/{gold.fileno()} 2>/dev/null; true"],
+                               capture_output=True, text=True, pass_fds=(gold.fileno(),))
+        inner_argv = list(place.runner[place.runner.index("--exec") + 1:])
+        inner = subprocess.run([*inner_argv, "--", "bash", "-c",
+                                f"cat /dev/fd/{gold.fileno()} <&- 2>/dev/null; echo ran"],
+                               cwd=place.path, capture_output=True, text=True,
+                               pass_fds=(gold.fileno(),))
+    assert outer.returncode == 0 and "GOLD" not in outer.stdout, outer
+    assert inner.returncode == 0 and inner.stdout.split() == ["ran"], inner
