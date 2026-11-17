@@ -15,7 +15,8 @@ or a reader no operation names, fails ``tests/test_pipeline_view.py``:
   read by an op with several outputs that does not declare which carry it
   (``knob_outputs``), so counted for all of them); a code step's code;
 - ``parallel``: a fork's branches, ``parallel fork { ... } -> join``, ``[optional]``;
-- ``loop``: a gate that sends work back, ``loop(step, judge ..., max N -> N+1 runs)``;
+- ``loop``: a gate that sends work back, ``loop(step, judge ..., max N -> N+1 runs)``, or
+  ``loop(back_to … step, ...)`` when it judges ``step`` and sends back to an earlier step;
 - ``route``: a gate choosing a way on, ``route(after step, judge ..., {label: step})``,
   each label's steps until the ways meet;
 - ``edges``: the order of the lines; what the walk cannot place is a fallback line.
@@ -47,6 +48,9 @@ FOLD_DEPTH = 3
 #: A loop's line: the step it sends back to, its judge, its cap and how often the step then
 #: runs at most (cap + 1). The legend's form is made from the same template.
 LOOP_LINE = "loop({step}, {judge}, max {cap} -> {runs} runs{knob}{exhausted})"
+#: A loop's ``{step}`` when it sends back to an earlier step than the one it judges (the
+#: ``loop`` operator's ``back_to``): every step from ``back_to`` to ``step`` runs again.
+LOOP_SPAN = "{back_to} … {step}"
 #: What a loop does past its cap, when it does not go on with its last attempt
 #: (`Graph.on_exhausted`; ``continue`` is said by nothing).
 EXHAUSTED = ", past the cap: {policy}"
@@ -275,7 +279,10 @@ class _View:
                       if (gate_id, e.target) in self.back)
         cap = node.bound("max_iterations", self.values)
         knob = node.bound_knob("max_iterations")
-        return LOOP_LINE.format(step=", ".join(self._shown_from(t) for t in back),
+        sent = ", ".join(dict.fromkeys(self._shown_from(t) for t in back))
+        judged = ", ".join(sorted(self._shown_before(gate_id)))
+        return LOOP_LINE.format(step=sent if judged in ("", sent)
+                                else LOOP_SPAN.format(back_to=sent, step=judged),
                                 judge=self.judge(gate_id),
                                 cap=f"{cap}{'*' if knob in self.frozen else ''}",
                                 runs=cap + 1, knob=f", knob {knob}" if knob else "",
@@ -351,8 +358,11 @@ class _View:
         return outs[0] if len(outs) == 1 else None
 
     def _shown_before(self, node_id: str) -> set[str]:
+        """The drawn steps right before ``node_id``, through hidden steps and loop gates;
+        a send-back into it is not before it."""
         out: set[str] = set()
-        sources = {e.source for e in self.graph.in_edges(node_id)} | {
+        sources = {e.source for e in self.graph.in_edges(node_id)
+                   if (e.source, node_id) not in self.back} | {
             n for n, node in self.graph.nodes.items()
             if node.kind == "fork" and node_id in node.targets}
         for source in sources:
@@ -535,6 +545,8 @@ FORMS = {
     "parallel": "parallel fork { ... } -> join",
     "loop": LOOP_LINE.format(step="step", judge="judge ...", cap="N", runs="N+1", knob="",
                              exhausted=""),
+    "loop back": LOOP_LINE.format(step=LOOP_SPAN.format(back_to="back_to", step="step"),
+                                  judge="judge ...", cap="N", runs="N+1", knob="", exhausted=""),
     "route": "route(after step, judge ..., {label: step})",
     "per item": "per item (data) { ... }",
 }
