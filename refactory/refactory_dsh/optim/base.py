@@ -715,36 +715,47 @@ TAIL_MIN_WORDS = 3
 ITEM_DATA_MIN = 8
 
 
+#: A heading of at most this many words is a bare label (`_bare_label`).
+BARE_HEADING_WORDS = 3
+
+
 def _bare_label(line: str) -> bool:
-    """Whether a line of an item's data is only a heading or one word ("## Question",
-    "Independent"): a reply using it says nothing that a framing line holding the same
-    word ("- User: ## Question") carries from that item."""
-    return line.startswith("#") or len(line.split()) == 1
+    """Whether a line is only a label: one word ("Independent") or a short heading
+    ("## Question", "## Option Comparison Notes"). A model's free text using one says
+    nothing that a framing line holding the same words carries from the item."""
+    words = line.split()
+    if len(words) == 1:
+        return True
+    heading = line.lstrip("#")
+    return heading != line and len(heading.split()) <= BARE_HEADING_WORDS
 
 
-def _data_lines(value: Any) -> set[str]:
+def _data_lines(value: Any, *, free: bool = False) -> set[str]:
     """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
-    least `ITEM_DATA_MIN` characters and not a bare heading or word (`_bare_label`): an
-    item's input, a step's reply or a code gate's reason, which a prompt line holding one
-    carries from that item. A string that is JSON (a judge's reply) counts by its own
-    strings too, so a reason extracted from one is matched in the prompt that quotes it."""
+    least `ITEM_DATA_MIN` characters: an item's input, a step's reply or a code gate's
+    reason, which a prompt line holding one carries from that item. With ``free`` (a
+    model's reply text), a bare label (`_bare_label`) is left out; a structured field (a
+    gate's reason, a string inside a JSON reply) counts at any length from
+    `ITEM_DATA_MIN`, one word or a heading included. A string that is JSON counts by its
+    own strings too, so a reason extracted from one is matched in the prompt quoting it."""
     from .evidence import _norm
 
     out: set[str] = set()
-    stack = [value]
+    stack: list[tuple[Any, bool]] = [(value, free)]
     while stack:
-        current = stack.pop()
+        current, loose = stack.pop()
         if isinstance(current, Mapping):
-            stack += list(current.values())
+            stack += [(v, loose) for v in current.values()]
         elif isinstance(current, (list, tuple)):
-            stack += list(current)
+            stack += [(v, loose) for v in current]
         elif isinstance(current, str):
             out |= {n for line in current.splitlines()
-                    if len(n := _norm(line)) >= ITEM_DATA_MIN and not _bare_label(n)}
+                    if len(n := _norm(line)) >= ITEM_DATA_MIN
+                    and not (loose and _bare_label(n))}
             text = current.strip()
             if text[:1] in ("{", "[", '"'):
                 try:
-                    stack.append(json.loads(text))
+                    stack.append((json.loads(text), False))
                 except json.JSONDecodeError:
                     pass
     return out
@@ -1036,7 +1047,7 @@ class ProposalContext:
                          if line.strip()}
                 every[node] = lines if node not in every else every[node] & lines
                 items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
-                data |= _data_lines(exchange.get("response"))
+                data |= _data_lines(exchange.get("response"), free=True)
                 said |= _whole_texts(exchange.get("response"))
 
         def carried(line: str) -> bool:

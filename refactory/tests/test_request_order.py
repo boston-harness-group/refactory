@@ -437,6 +437,36 @@ def test_a_reply_line_that_is_a_bare_heading_or_word_is_no_item_data(reply_line)
             assert line not in decide, (reply_line, line, decide)
 
 
+@pytest.mark.parametrize("source,said,quoted", [
+    ("model judge", "## Issue: misses the boundary case at zero",
+     "The judge sent it back with this note: ## Issue: misses the boundary case at zero"),
+    ("code gate", "incomplete", "Feedback: incomplete"),
+])
+def test_a_reason_written_as_a_heading_or_one_word_is_still_shown(source, said, quoted):
+    """Only a model's free-text line that is a bare label is left out of item data: a
+    judge's reason written as a long heading (quoted inside a sentence, so not shown by
+    name), and a code gate's one-word reason, are the item's evidence wherever they
+    repeat."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+
+    def record(item: str) -> dict:
+        exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+        if source == "model judge":
+            exchanges.append({"node": "judge", "prompt": f"ANS {item}",
+                              "response": f"{said}\nThe rest of the working is fine."})
+        exchanges.append({"node": "fix", "prompt": f"ANS {item}\n{quoted}",
+                          "response": f"FIX {item}"})
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+                **({"steps": [{"node": "check", "kind": "gate", "verdict": "reloop",
+                               "reason": said}]} if source == "code gate" else {})}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert quoted in block.split("#### Step ")[-1], block
+
+
 def test_with_one_item_no_line_is_taken_for_framing():
     """Framing is told from an item's own text only across two or more items; with one,
     every line not in the settings or templates is shown."""
