@@ -126,12 +126,14 @@
       "C1": 2.5,
       "A2": "=SUM(B1:C1)",
       "B2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "C2": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "D2": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
       "A7": "tail"
      }
     }
    ],
-   "preview": "## Sheet: Sheet1  (dim=A1:C7, max_row=7, max_col=3)\nA1=Name | B1=3 | C1=2.5\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=\nA3= | B3= | C3=\nA4= | B4= | C4=\nA5= | B5= | C5=\n... (2 more rows)\n",
-   "user": "# Instruction\nDo the thing.\nTwo lines.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Data Sheet'!B1:B3\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:C7, max_row=7, max_col=3)\nA1=Name | B1=3 | C1=2.5\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=\nA3= | B3= | C3=\nA4= | B4= | C4=\nA5= | B5= | C5=\n... (2 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+   "preview": "## Sheet: Sheet1  (dim=A1:D7, max_row=7, max_col=4)\nA1=Name | B1=3 | C1=2.5 | D1=\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy... | D2=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\nA3= | B3= | C3= | D3=\nA4= | B4= | C4= | D4=\nA5= | B5= | C5= | D5=\n... (2 more rows)\n",
+   "user": "# Instruction\nDo the thing.\nTwo lines.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Data Sheet'!B1:B3\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:D7, max_row=7, max_col=4)\nA1=Name | B1=3 | C1=2.5 | D1=\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy... | D2=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\nA3= | B3= | C3= | D3=\nA4= | B4= | C4= | D4=\nA5= | B5= | C5= | D5=\n... (2 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
   },
   "multi_sheet": {
    "spec": [

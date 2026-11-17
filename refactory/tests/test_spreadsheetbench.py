@@ -469,6 +469,7 @@ def test_an_item_past_its_budget_scores_zero(tmp_path, sb_data):
     ctx.write_json("history.json", [{"role": "user", "content": "u"}])
     shutil.copyfile(t1.metadata["gold_path"], tmp_path / tasks.PRED)
     ops.finalize(ctx)
+    assert json.loads((tmp_path / tasks.FINAL).read_text())["fail_reason"] == "task-timeout-60s"
     verdict = task.verify(t1, tmp_path)
     assert (verdict.passed, verdict.score, verdict.details) == (False, 0.0, "task-timeout-60s")
     ctx.write_json("turn.json", {"start": time.time(), "turn": 1, "status": "ran", "code": "pass"})

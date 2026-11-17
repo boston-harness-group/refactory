@@ -1065,14 +1065,23 @@ class Executor:
                 # Scale step cap for data nodes: save the initial step count
                 # and the original max_steps so we can account for the kept
                 # history after the loop. Scale max_steps by item count so
-                # large benchmarks don't hit the global cap.
+                # large benchmarks don't hit the global cap. A pass whose gates
+                # reloop walks its nodes once more per reloop, up to each gate's
+                # max_iterations, so each item is allowed that many walks.
                 _data_steps_start = len(self.steps)
                 _subgraph_node_count = len([
                     n for n in self.graph.nodes.values()
                     if n.id != node.id
                 ]) or 1
+                from .loops import loop_edges as _loop_edges
+
+                _body = self.graph.data_body(node.id)
+                _reloops = sum(
+                    self._effective_max_iterations(self.graph.nodes[gate])
+                    for gate in {key[0] for key in _loop_edges(self.graph)} & _body
+                )
                 _original_max_steps = self.max_steps
-                self.max_steps += (len(items) - 1) * _subgraph_node_count
+                self.max_steps += (len(items) - 1) * _subgraph_node_count * (1 + _reloops)
 
                 # Read part/seed from subset.json once for all items (ask 5).
                 from refactory_dsh.task import part_seed_kwargs, subset_part_seed
