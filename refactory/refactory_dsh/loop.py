@@ -5360,16 +5360,13 @@ class Loop(OuterLoop):
         )
 
     def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
-        """Time in numbers for the request (`optim.base.time_lines`): how long one model step
-        may run (the inner model's limit), and for the candidate being edited how long its
+        """Time in numbers for the request (`optim.base.time_lines`): for the candidate
+        being edited, how long its
         train items took each, from each item's own record (`items.item_duration`): median,
         90th percentile and longest, over the items the harness did not time out (those
         are said once, in "Item results"). Never its wall time over its items: that is set by
         its slowest item."""
         facts: dict[str, Any] = {}
-        limit = getattr(self.model, "timeout_s", None)
-        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
-            facts["step_limit_s"] = int(limit)
         _owner, records = self._train_records_owner(board)
         if not records:
             return facts

@@ -1827,8 +1827,8 @@ citing steps and items by id), `flow_change` (which step sees what) and a checka
 proposal record). "What the last edit changed" puts each child's prediction beside a
 mechanical check: what happened to the items it names (fixed, broken, score up or down,
 unchanged) and the steps it names (how many items a step's reply changed on, or that it is
-new or gone). Two facts are said in numbers: "Time per item" (how long one model step may
-run; how long the edited candidate's train items took each -- median, 90th percentile and
+new or gone). Two facts are said in numbers: "Time per item" (how long the edited
+candidate's train items took each -- median, 90th percentile and
 longest, from each item record's own `duration_s`, which both runtimes stamp from the
 item's pass starting (`items.item_duration`), over the items the harness did not time out;
 never its wall time over its items, which its slowest item sets), and cost: with no cost
@@ -1837,11 +1837,13 @@ that cost is not a reason for or against a change; with one, a "cost per item" c
 each candidate's measured model cost over its train items.
 
 **A harness timeout is not a target.** An item the harness ended for time
-(`base.harness_timeout`: a timeout error, or a step with no answer because it timed out,
-whatever the run's limit) still scores what it scored, 0, but no request reads it as the
+(`base.harness_timeout`: an `error_kind`, or a step's `missing_steps` cause, of `timeout`
+-- a session ended on inactivity, the item deadline -- or `harness_incident`, the
+backstop; never read from an error's text) still scores what it scored, 0, but no request reads it as the
 pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
 error row, no item shown in full, no time and no analyst's batch, and the analysts are told
-not to propose changes aimed at timeouts or retries for them. "How nodes compose" says it
+not to propose changes aimed at timeouts or retries for them. A wall a step declares
+(`timeout_s`, `declared_timeout`) is the pipeline's design and an ordinary failure. "How nodes compose" says it
 in one sentence. The SkillOpt port's own requests are SkillOpt's and unchanged.
 
 **The request's order.** The proposal request (`ProposalContext.render`) gives the right

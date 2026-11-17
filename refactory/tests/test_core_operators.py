@@ -808,10 +808,12 @@ def test_what_the_last_edit_changed_shows_the_wiring_and_the_prediction_check():
 
 
 def test_time_per_item_is_said_in_numbers():
-    lines = base_mod.time_lines({"step_limit_s": 1800, "per_item_median_s": 120,
-                                 "per_item_p90_s": 300, "per_item_max_s": 1500})
+    lines = base_mod.time_lines({"per_item_median_s": 120, "per_item_p90_s": 300,
+                                 "per_item_max_s": 1500})
     text = " ".join(lines)
-    assert "up to 1800 s" in text and "120 s per item at the median" in text
+    assert "120 s per item at the median" in text
+    # A session ends on inactivity: no step time limit is stated.
+    assert "may run for up to" not in text and "limit" not in text
     assert "300 s at the 90th percentile, 1500 s the longest" in text
     # A timed-out item is said once, in "Item results": not here, and not as a target.
     assert "timed out" not in text and "as a timeout" not in text
@@ -881,6 +883,11 @@ def test_a_harness_timeout_is_read_from_structured_fields_only():
 
     assert harness_timeout({"error_kind": "timeout"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
+    # The backstop is the harness's too; a wall the step declared is the pipeline's.
+    assert harness_timeout({"error_kind": "harness_incident"})
+    assert harness_timeout({"missing_steps": {"check": {"cause": "harness_incident"}}})
+    assert not harness_timeout({"error_kind": "declared_timeout"})
+    assert not harness_timeout({"missing_steps": {"check": {"cause": "declared_timeout"}}})
     assert not harness_timeout({"passed": True, "error_kind": "timeout"})
     # Text never decides: a reply quoted in an error, a grader's reason, a word.
     for text in ("solve: CompletionTimeout: model completion timed out after 600s",

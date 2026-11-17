@@ -1071,10 +1071,9 @@ class ProposalContext:
     #: Whether a new step may use tools in this run (``LoopConfig.allow_new_node_tools``);
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
-    #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
-    #: model step may run) and ``per_item_median_s``/``per_item_p90_s``/``per_item_max_s``
-    #: (the edited candidate's items' own times, `loop.item_time_spread`); empty says
-    #: nothing.
+    #: Time, in numbers, for "Time per item" (`time_lines`): ``per_item_median_s``/
+    #: ``per_item_p90_s``/``per_item_max_s`` (the edited candidate's items' own times,
+    #: `loop.item_time_spread`); empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
@@ -2334,25 +2333,19 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
 
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
-    """"Time per item", in numbers, so time is reasoned about from them: how long one model
-    step may run (the run's limit) and how long the
+    """"Time per item", in numbers, so time is reasoned about from them: how long the
     edited candidate's train items took each (median, 90th percentile, longest: from each
-    item's own record). Nothing when neither is known. An item that timed out is said
-    once, in "Item results" (`HARNESS_TIMEOUT`), not here."""
+    item's own record). Nothing when it is not known. A model step has no time limit to
+    state (a session ends on inactivity), and an item that timed out is said once, in
+    "Item results" (`HARNESS_TIMEOUT`), not here."""
     facts = dict(facts or {})
-    limit = facts.get("step_limit_s")
     median = facts.get("per_item_median_s")
-    if not (limit or median is not None):
+    if median is None:
         return []
-    parts = []
-    if limit:
-        parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
-                     "step).")
-    if median is not None:
-        parts.append(f"The candidate you edit took {median} s per item at the median on its "
-                     f"train evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
-                     f"{facts.get('per_item_max_s')} s the longest; each item's own time).")
-    return ["## Time per item", " ".join(parts), ""]
+    return ["## Time per item",
+            f"The candidate you edit took {median} s per item at the median on its train "
+            f"evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
+            f"{facts.get('per_item_max_s')} s the longest; each item's own time).", ""]
 
 
 def _cost_note(parsimony: float | None) -> list[str]:
@@ -2642,6 +2635,13 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
 #: model call or an item ended it, whatever that limit is (`harness_timeout`).
 HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a target"
 
+#: The ``error_kind`` (and ``missing_steps`` cause) values a harness ending sets: a model
+#: call the client ended (``timeout``: inactivity, the item deadline) and the backstop
+#: (``harness_incident``). A wall a step declares (``timeout_s``; ``declared_timeout``) is
+#: the pipeline's design, an ordinary failure the optimizer sees.
+HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
+
+
 def harness_timeout(record: Mapping[str, Any]) -> bool:
     """Whether the harness ended the item for time, from structured fields only: its
     ``error_kind`` is ``timeout`` (`items.error_kind`: a model call the client ended, or
@@ -2652,9 +2652,9 @@ def harness_timeout(record: Mapping[str, Any]) -> bool:
     as the pipeline's failure."""
     if record.get("passed"):
         return False
-    if str(record.get("error_kind") or "") == "timeout":
+    if str(record.get("error_kind") or "") in HARNESS_TIMEOUT_KINDS:
         return True
-    return any(isinstance(info, Mapping) and info.get("cause") == "timeout"
+    return any(isinstance(info, Mapping) and info.get("cause") in HARNESS_TIMEOUT_KINDS
                for info in (record.get("missing_steps") or {}).values())
 
 
