@@ -16,7 +16,8 @@ to every rule a hand-written edit is. They say nothing about what a step is for:
 - ``loop`` (one-line form): a judge after a step that can send it back with a reason;
 - ``route``: a judge after a step choosing among labelled next steps that rejoin;
 - ``split`` (one-line form): a step replaced by two new ones, or by one (replace);
-- ``merge``: two consecutive steps as one.
+- ``merge``: two consecutive steps as one;
+- ``map``: a new step run once per element of a per-item list, its results combined.
 
 **What the proposer writes** is the kind of step, where, and its text (a prompt, a
 callable or code). Every text has a default (the neighbour's, or a neutral line), so a
@@ -56,7 +57,7 @@ from .operators import TASK_MEANING
 
 #: The core operators, in the order the request lists them.
 CORE_OPS = ("insert", "remove", "parallelize", "serialize", "branch", "rewire", "loop",
-            "route", "split", "merge")
+            "route", "split", "merge", "map")
 #: The kinds of step an operator adds: a model call, a plain op (a callable), or code.
 STEP_KINDS = ("agent", "op", "code")
 #: Judges of ``loop`` and ``route`` besides a ``module:function`` callable.
@@ -71,6 +72,12 @@ NEUTRAL_STEP = "Work on the task with what you are given, and write your result.
 NEUTRAL_CHECK = "Check the work above against the task: is it complete and correct?"
 NEUTRAL_ROUTE = "Choose which way the work should go next."
 NEUTRAL_REVIEW = "Review the work above against the task and write the final result."
+NEUTRAL_ELEMENT = "Work on the element below, with what you are given, and write your result."
+NEUTRAL_COMBINE = "Combine the results for each element above into one result for the task."
+#: A map run's own prompt, before the input that holds its element and what to do with it.
+MAP_ELEMENT_PROMPT = "Do what the input below says, for the one element it gives."
+#: A map's elements by default, and at most (one branch each, `MAX_BRANCHES`).
+MAP_MAX = (4, 2, MAX_BRANCHES)
 #: What a judge agent is told about its answer's first word.
 VERDICT_RULE = ("Start your answer with one word, {labels}, alone or followed by why; "
                 "nothing before it.")
@@ -2188,6 +2195,146 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     return build.steps
 
 
+# ── map ───────────────────────────────────────────────────────────────────
+
+
+def _map_list(graph: Graph, state: Mapping[str, Any], anchor: Node, over: Any
+              ) -> tuple[str, str]:
+    """``(kind, name)`` of the list a map runs over: a fact or file there after ``anchor``,
+    or a step's output (its first fact, else its first file); refused otherwise."""
+    there = _readable(graph, state, _available(graph).get(anchor.id, set()) | _outputs(anchor))
+    if isinstance(over, str) and over in graph.nodes and over not in {n for _k, n in there}:
+        node = graph.nodes[over]
+        made = [("fact", n) for n in node.produces] + [("file", n) for n in node.writes]
+        over = next((name for key, name in ((k, k[1]) for k in made) if key in there), over)
+    for kind in ("fact", "file"):
+        if (kind, over) in there:
+            return kind, str(over)
+    names = sorted({name for _k, name in there})
+    raise _Refused(f"'over' names a list there after {anchor.id!r}: a fact, a file or a step "
+                   f"whose output it is, not {over!r}; there: {', '.join(names) or 'none'}")
+
+
+def _map_max(edit: dict) -> int:
+    default, lo, hi = MAP_MAX
+    cap = edit.get("max", default)
+    if isinstance(cap, bool) or not isinstance(cap, int) or not lo <= cap <= hi:
+        raise _Refused(f"'max' is a whole number from {lo} to {hi} (the most elements, one "
+                       "run each)")
+    return cap
+
+
+def _combine_spec(edit: dict) -> dict:
+    return _spec(edit.get("combine"), default_text=NEUTRAL_COMBINE)
+
+
+def _pre_map(edit: dict, state: dict) -> str | None:
+    graph = _edits()._graph(state)
+    anchor = _plain_step(graph, edit.get("after"), "map")
+    _sole_out(graph, anchor.id)
+    _map_list(graph, state, anchor, edit.get("over"))
+    _map_max(edit)
+    if edit.get("text") is not None and not isinstance(edit.get("text"), str):
+        raise _Refused("'text' is a string: what to do with one element")
+    combine = _combine_spec(edit)
+    _spec({"kind": "agent", "route": edit.get("route")})  # refused when it is no route
+    base = edit.get("id")
+    if base is not None and not isinstance(base, str):
+        raise _Refused("'id' is a string")
+    for name in (base, combine.get("id")):
+        if name is not None and name in graph.nodes:
+            raise _Refused(f"node {name!r} already exists")
+    return None
+
+
+def _expand_map(edit: dict, state: dict) -> list[dict]:
+    """After ``after``: an ``elements`` step (`operators.MAP_CALL`) splitting the list into
+    one prompt per element (its text knob ``<id>__task``, filled with what the new step
+    sees, then the element); a fork with one optional branch per element up to 'max', each
+    an agent reading its element (a branch with no element is missing, so it never runs a
+    model); a join; then the combine step, which sees every branch's result (one missing is
+    said so) and what the element step sees, its output placed as insert's is."""
+    from .knob import Knob
+    from .operators import MAP_CALL, collect_node
+
+    build = _Steps(state)
+    graph = build.graph
+    anchor = graph.nodes[edit["after"]]
+    kind, over = _map_list(graph, state, anchor, edit.get("over"))
+    cap = _map_max(edit)
+    base = edit.get("id") or _fresh(graph, f"{anchor.id}_map")
+    fork, join = _fresh(graph, f"{base}_fork", (base,)), _fresh(graph, f"{base}_join", (base,))
+    taken = [base, fork, join]
+    there = _available(graph).get(anchor.id, set()) | _outputs(anchor)
+    seen = [key for key in _seen(graph, state, there, _neighbour_view(graph, state, anchor),
+                                 edit.get("sees")) if key != (kind, over)]
+    facts = [name for k, name in seen if k == "fact"]
+    files = [name for k, name in seen if k == "file"]
+    nodes: list[dict[str, Any]] = []
+    if files:
+        gather = _fresh(graph, f"{base}_inputs", taken)
+        taken.append(gather)
+        nodes.append(collect_node(gather, files, gather,
+                                  notes=f"Hands {base}'s elements the files they see."))
+        facts.append(gather)
+    text = _with_sections(_strip_unseen(edit.get("text") or NEUTRAL_ELEMENT,
+                                        set(facts) | set(state.get("knobs") or {})), facts)
+    task = f"{base}__task"
+    copies = [_fresh(graph, f"{base}_{index}", taken) for index in range(1, cap + 1)]
+    taken += copies
+    nodes.append({"id": base, "kind": "op", "call": MAP_CALL, "knobs": [task],
+                  "reads": [over] if kind == "file" else [],
+                  "inputs": [*([over] if kind == "fact" else []), *facts],
+                  "writes": [f"{c}_element.txt" for c in copies],
+                  # Every element's prompt carries the one text.
+                  "knob_outputs": {f"{c}_element.txt": [task] for c in copies},
+                  "notes": f"Splits {over!r} into one prompt per element for {base}'s runs."})
+    route = _spec({"kind": "agent", "route": edit.get("route")}).get("route") or (
+        anchor.route if anchor.kind == "agent" else None)
+    branch = []
+    systems = []
+    for copy in copies:
+        # Each run has a system prompt of its own, as every new agent does; its prompt is
+        # its element's file, which a step without tools is shown (`agent_delivery.begin`),
+        # so a branch with no element does not run.
+        system = f"{copy}__system_prompt"
+        systems.append({"op": "add_knob", "name": system, "spec": Knob(
+            "You are one step of a pipeline.", "str",
+            description=f"system prompt for {copy}").spec()})
+        node: dict[str, Any] = {
+            "id": copy, "kind": "agent", "prompt_template": MAP_ELEMENT_PROMPT,
+            "system_prompt_template": "You are one step of a pipeline.",
+            "knobs": [system], "field_bindings": [["system_prompt_template", system]],
+            "reads": [f"{copy}_element.txt"], "writes": [f"{copy}.txt"], "tool_policy": "none"}
+        if anchor.kind == "agent" and anchor.role:
+            node["role"] = anchor.role
+        if route:
+            node["route"] = dict(route)
+        branch.append(node)
+    combine = _combine_spec(edit)
+    combine_id = combine.get("id") or _fresh(graph, f"{base}_combine", taken)
+    taken.append(combine_id)
+    combined = _step_nodes(graph, state, combine, combine_id,
+                           [*seen, *(("file", f"{c}.txt") for c in copies)],
+                           settings_from=anchor if anchor.kind == "agent" else None)
+    build.add(systems)
+    build.add([{"op": "add_knob", "name": task,
+                "spec": Knob(text, "str", description=f"what {base} does with one element").spec()},
+               {"op": "add_node", "node": {"id": join, "kind": "join", "sources": copies},
+                "position": {"after": anchor.id}},
+               {"op": "add_node", "node": {"id": fork, "kind": "fork", "targets": copies,
+                                           "optional_targets": copies},
+                "position": {"after": anchor.id}}])
+    build.add(_add_chain(nodes, {"after": anchor.id}))
+    for node in branch:
+        build.add(_add_detached([node], exact=copies))
+    build.add([{"op": "add_edge", "source": copy, "target": join, "condition": None}
+               for copy in copies])
+    build.add(_add_chain(combined, {"after": join}))
+    _place_all(build, _new_facts(combined), after=combine_id, to=edit.get("to"))
+    return build.steps
+
+
 # ── split (one-line form) and replace ─────────────────────────────────────
 
 
@@ -2585,13 +2732,26 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
+    "map": {
+        "reads_as": ('map',),
+        "fields": ("after", "over", "text", "sees", "max", "combine", "id", "to", "route"),
+        "line": "after a step, a new agent step run once per element of 'over' (a list there: "
+                "a fact, a file or a step's output; JSON, else one per line), at once, at most "
+                f"'max' (default {MAP_MAX[0]}, up to {MAP_MAX[2]}; more fails the item); 'text' "
+                "says what to do with one element; 'combine' (a step as in insert) sees every "
+                "result and writes one output, placed as insert's is",
+        "example": {"op": "map", "after": "<step>", "over": "<step>",
+                    "text": "<what to do with one element>",
+                    "combine": {"kind": "agent", "text": "<how to combine the results>"}},
+    },
 }
 
 
 def _resolved_texts(edit: dict, state: dict) -> dict:
     """``edit`` with each step text that is exactly a knob pointer (`nn.edits.KNOB_POINTER`,
     copied from the request's node reference) replaced by that knob's current text: the
-    edit's own 'text', and the 'text' of each new step under 'into', 'new' and 'to'. A
+    edit's own 'text', and the 'text' of each new step under 'into', 'new', 'to' and
+    'combine'. A
     pointer to a knob holding no text is refused (`edits.EditError`)."""
     edits = _edits()
 
@@ -2607,6 +2767,8 @@ def _resolved_texts(edit: dict, state: dict) -> dict:
     if isinstance(out.get("to"), dict):
         out = {**out, "to": {label: step(raw, f"{edit.get('op')}'s route {label!r}")
                              for label, raw in out["to"].items()}}
+    if isinstance(out.get("combine"), dict):
+        out = {**out, "combine": step(out["combine"], f"{edit.get('op')}'s combine")}
     return out
 
 
@@ -2747,6 +2909,8 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
             specs += edit[key]
     if isinstance(edit.get("to"), Mapping):
         specs += [v for v in edit["to"].values() if isinstance(v, Mapping)]
+    if isinstance(edit.get("combine"), Mapping):
+        specs.append(edit["combine"])
     for spec in [edit, *specs]:
         if not isinstance(spec, Mapping):
             continue
@@ -2763,12 +2927,45 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
     return None
 
 
+#: The fields a core operator names an existing node in.
+NAMING_FIELDS = ("step", "after", "before", "fork", "back_to", "takes_over", "steps")
+
+
+def _map_part(edit: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
+    """Why ``edit`` names a part of a map (its elements step, fork or runs) -- or None. Its
+    runs are one step run per element; an edit to one alone (a step before it, a serialized
+    fork, a branch beside them) would leave the others different or run one with no
+    element, so a map is edited through its text knob and its combine step."""
+    from .operators import map_of
+
+    try:
+        graph = _edits()._graph(dict(state))
+    except Exception:  # noqa: BLE001 - an unreadable state is the operator's to refuse
+        return None
+    parts: dict[str, str] = {}
+    for fork in graph.nodes:
+        op = map_of(graph, fork)
+        if op is not None:
+            parts.update({part: op for part in (op, fork, *graph.nodes[fork].targets)})
+    named = []
+    for key in NAMING_FIELDS:
+        value = edit.get(key)
+        named += [v for v in (value if isinstance(value, list) else [value])
+                  if isinstance(v, str)]
+    hit = next((name for name in named if name in parts), None)
+    if hit is None:
+        return None
+    return (f"{hit!r} is part of the map {parts[hit]!r}, whose runs each take one element; "
+            f"change what they do with its knob {parts[hit]}__task, or work on the step "
+            "before the map or its combine step")
+
+
 def _pointed(pre, expand):
     """A precondition and an expansion that read the edit with its pointer texts resolved
     (`_resolved_texts`): a pointer is never stored as a step's prompt. A field the
     operator would ignore is refused first (`_unknown_fields`)."""
     def precondition(edit: dict, state: dict) -> str | None:
-        unknown = _unknown_fields(edit)
+        unknown = _unknown_fields(edit) or _map_part(edit, state)
         if unknown:
             return unknown
         try:
@@ -2793,6 +2990,7 @@ def register(macro, macros: Mapping[str, Any]) -> None:
         "rewire": (_pre_rewire, _expand_rewire),
         "route": (_pre_route, _expand_route),
         "merge": (_pre_merge, _expand_merge),
+        "map": (_pre_map, _expand_map),
     }
     for name, (pre, expand) in simple.items():
         spec = OPERATORS[name]

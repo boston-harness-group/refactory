@@ -19,6 +19,8 @@ or a reader no operation names, fails ``tests/test_pipeline_view.py``:
   ``loop(back_to … step, ...)`` when it judges ``step`` and sends back to an earlier step;
 - ``route``: a gate choosing a way on, ``route(after step, judge ..., {label: step})``,
   each label's steps until the ways meet;
+- ``map``: a step run once per element of a list, its runs one line,
+  ``map(step … step over list, max N)``, then what it sees and is told;
 - ``edges``: the order of the lines; what the walk cannot place is a fallback line.
 
 A plain op is folded into the step it feeds only when it is a pure assembler (an op with
@@ -36,7 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .graph import Graph
-from .operators import carried_knobs, made_by
+from .operators import carried_knobs, made_by, map_of
 from .validate import consumed
 
 #: What ``name@maker`` says for a name no step makes: the run was given it.
@@ -57,6 +59,9 @@ EXHAUSTED = ", past the cap: {policy}"
 #: A step on a route of its own (`Node.route`): the fields it sets, which differ from the
 #: run's for it (`workers.StepRoutes.refusal`). The legend's form is made from it.
 ROUTE_LINE = "on {fields}"
+#: A map's line (`operators.map_of`): its runs, the list they run over and the most
+#: elements. The legend's form is made from it.
+MAP_LINE = "map({steps} over {over}, max {cap})"
 #: The key prefix of a line no reader recognised.
 FALLBACK = "(fallback)"
 
@@ -126,7 +131,7 @@ class _View:
         """Pure assemblers: plain ops (no tools, not code, not protected or the grader's)
         whose outputs only model steps read -- directly, or through the collect or
         file_text step an operator put in front of one."""
-        from .operators import COLLECT_CALL, FILE_TEXT_CALL
+        from .operators import COLLECT_CALL, FILE_TEXT_CALL, MAP_CALL
 
         # A step a gate's verdict leads to (a route's label, a loop's send-back) is named in
         # that gate's line, so it is never folded away.
@@ -135,8 +140,9 @@ class _View:
         candidates = {n for n, node in self.graph.nodes.items()
                       if node.kind == "op" and n not in self.code and not node.tools
                       and n not in self.protected and n not in self.graders}
+        # A map's elements step is one too: its runs' prompts, said in the map's line.
         helpers = {n for n in candidates
-                   if self.graph.nodes[n].call in (COLLECT_CALL, FILE_TEXT_CALL)}
+                   if self.graph.nodes[n].call in (COLLECT_CALL, FILE_TEXT_CALL, MAP_CALL)}
         candidates -= gated - helpers
         out: set[str] = set()
         changed = True
@@ -314,6 +320,22 @@ class _View:
                            for e in self.graph.out_edges(gate_id) if e.condition)
         return (f"route(after {', '.join(before) or '-'}, {self.judge(gate_id)}, "
                 f"{{{labels}}})")
+
+    def map(self, fork_id: str) -> str:
+        """A map's fork as one line: its runs (one per element, the first and the last),
+        the list, the most elements; then what its runs see and are told besides their
+        element (the elements step's other inputs, its text knob)."""
+        from .operators import map_of
+
+        op = self.graph.nodes[map_of(self.graph, fork_id) or ""]
+        runs = list(self.graph.nodes[fork_id].targets)
+        listed = ("file", op.reads[0]) if op.reads else ("fact", op.inputs[0])
+        sees = [self._input(k, n) for k, n in self._sorted(self.inputs[op.id] - {listed})]
+        told = self.told(runs[0]) if runs else ""
+        line = MAP_LINE.format(steps=" … ".join(dict.fromkeys((runs[0], runs[-1]))),
+                               over=self._input(*listed), cap=len(runs))
+        return "  ".join(part for part in (line, f"sees {', '.join(sees)}" if sees else "",
+                                           f"told {told}" if told else "") if part)
 
     def parallel(self, fork_id: str) -> str:
         return f"parallel {fork_id} {{"
@@ -505,6 +527,17 @@ class _View:
                                 + ") {", within, "step"))
                 self._chain(node.subgraph_entry, None, depth + 1, f"per item {node_id}", out)
                 out.append(Line(f"{node_id}/", depth, "}", within, "step"))
+            elif node.kind == "fork" and map_of(g, node_id):
+                # A map: its runs are one line, and the walk goes on at its join.
+                self.shown.add(node_id)
+                self.shown.update(node.targets)
+                join = self._join_of(node_id)
+                out.append(Line(node_id, depth, self.map(node_id), within, "map"))
+                if not join:
+                    return
+                self.shown.add(join)
+                node_id = self._next(join)
+                continue
             elif node.kind == "fork":
                 self.shown.add(node_id)
                 join = self._join_of(node_id)
@@ -555,6 +588,7 @@ class _View:
 READERS: dict[str, Callable[..., str]] = {
     "step": _View.step, "sees": _View.sees, "told": _View.told, "loop": _View.loop,
     "route": _View.route, "parallel": _View.parallel, "edges": _View.edges,
+    "map": _View.map,
 }
 
 
@@ -570,6 +604,7 @@ FORMS = {
     "loop back": LOOP_LINE.format(step=LOOP_SPAN.format(back_to="back_to", step="step"),
                                   judge="judge ...", cap="N", runs="N+1", knob="", exhausted=""),
     "route": "route(after step, judge ..., {label: step})",
+    "map": MAP_LINE.format(steps="step … step", over="list", cap="N"),
     "per item": "per item (data) { ... }",
     "step route": "step agent " + ROUTE_LINE.format(fields="model=M effort=E "
                                                            "max_completion_tokens=N"),

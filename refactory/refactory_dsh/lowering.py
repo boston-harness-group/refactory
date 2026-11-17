@@ -160,19 +160,27 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def needs_snippet_spec(node: Any) -> bool:
     """Whether ``node`` runs a `refactory_dsh.snippet` callable (a code op, a code gate or
-    a verdict gate), which reads its declaration from the runtime."""
+    a verdict gate), or a map's elements step, which read their declaration from the
+    runtime."""
     from refactory_dsh import snippet
 
+    from refactory_dsh.nn.operators import MAP_CALL
+
     target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
-    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT)
+    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT, MAP_CALL)
 
 
 def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[str, Any]:
     """A code or verdict node's declaration (`snippet.spec`), the same on both runtimes:
     the walker builds it for its child, the lowering writes it for the spine's runner."""
     from refactory_dsh import snippet
+    from refactory_dsh.nn.operators import MAP_CALL
 
-    return snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
+    found = snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
+    if node.kind == "op" and node.call == MAP_CALL:
+        # The text knob a map's elements step fills (`nn.operators.elements`).
+        found["task_knob"] = node.knobs[0] if node.knobs else ""
+    return found
 
 
 def write_declarations(state: dict[str, Any], workdir: Path) -> Path:

@@ -29,6 +29,7 @@ import pytest
 
 import structure_fuzz as sf
 from refactory_dsh.nn import edits as edits_mod
+from refactory_dsh.optim import Candidate
 from refactory_dsh.optim import base as base_mod
 from test_livemath_blocks import needs_spine
 
@@ -104,6 +105,28 @@ def test_the_core_operators_own_checks_are_reached_and_sound():
     for path in ("ignored field refused", "lost input refused", "takes_over accepted",
                  "takes_over: target not first"):
         assert stats.paths[path] > 0, (path, dict(stats.paths))
+
+
+def _map_cases() -> list[tuple[str, dict]]:
+    """A map over each step's own output, after it, on every seed."""
+    out = []
+    for name in sorted(sf.seeds()):
+        graph = sf._graph_of(sf.Applier(sf.seeds()[name]).seed_state)
+        for step in sorted(n for n, node in graph.nodes.items() if node.kind in ("agent", "op")):
+            out.append((name, {"op": "map", "after": step, "over": step, "max": 2}))
+    return out
+
+
+@pytest.mark.parametrize("name, edit", _map_cases(),
+                         ids=lambda v: v if isinstance(v, str) else v["after"])
+def test_every_map_a_seed_takes_is_sound(name, edit):
+    """Each map the edit layer takes keeps every invariant on the walker (a list longer
+    than its max fails its item by design, `structure_fuzz.failed_only_at_a_full_map`)."""
+    applier = sf.Applier(sf.seeds()[name])
+    outcome = applier.attempt(Candidate.from_state(applier.seed_state), edit, set())
+    if isinstance(outcome, list):
+        return
+    assert sf.check_state(applier, outcome.state, walker=True) == []
 
 
 def test_the_compound_generator_mixes_every_kind_of_edit():
@@ -352,9 +375,9 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     the grade, and the leak invariant finds it by content: the grader-only answers and
     the grader's own verdicts in the finished items' records. The leak needs no code
     node, so the walks draw none and are the same on every machine, whether or not it
-    can sandbox code nodes (this seed finds it at edit 170)."""
+    can sandbox code nodes (this seed finds it at edit 102)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
-    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=5,
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
 
 

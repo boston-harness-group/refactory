@@ -25,6 +25,7 @@ from refactory_dsh import registry
 from refactory_dsh.nn import core_ops, validate_state
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import pipeline_view as pv
+from refactory_dsh.nn.operators import map_of
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.nn.validate import consumed
 from refactory_dsh.optim import Candidate, base
@@ -262,7 +263,13 @@ def test_every_input_gate_fork_and_edge_is_shown_on_seeds_and_random_edits(seed)
         text = {line.key: line.text for line in lines}
         order = {line.key: index for index, line in enumerate(lines)}
         graph = view.graph
+        # A map's runs are its one line (`_View.map`), their element its prompt.
+        runs = {t for f in graph.nodes if map_of(graph, f) for t in graph.nodes[f].targets}
         for node_id, node in graph.nodes.items():
+            if node_id in runs:
+                fork = next(f for f in graph.nodes if node_id in graph.nodes[f].targets)
+                assert text.get(fork, "").startswith("map("), (seed, node_id)
+                continue
             if node.kind == "agent" or node_id in view.code:
                 gate = next((g for g, j in view.judges.items() if j == node_id), None)
                 line = text.get(gate) if gate else text.get(node_id)
@@ -271,7 +278,7 @@ def test_every_input_gate_fork_and_edge_is_shown_on_seeds_and_random_edits(seed)
                     assert f"{name}@" in line or f"{name} (via " in line, (seed, node_id, name)
             if node.kind == "gate":
                 assert re.match(r"(loop|route)\(", text.get(node_id, "")), (seed, node_id)
-            if node.kind == "fork":
+            if node.kind == "fork" and not map_of(graph, node_id):
                 assert text.get(node_id) == f"parallel {node_id} {{", (seed, node_id)
         reached = set(view.reach(graph.start))
         for edge in graph.edges:
@@ -447,6 +454,20 @@ class _Reading:
             elif key.endswith("/"):
                 self._end(tails)
                 return set()  # a block's closing line: its header's reading continues
+            elif self._node(key) and g.nodes[key].kind == "fork" and line.reader == "map":
+                # One line for the fork, its runs and its join: each run follows the fork
+                # and the join waits for them all; what comes next follows the join.
+                self._follow(tails, key)
+                join = self.view._join_of(key)
+                runs = g.nodes[key].targets
+                said = line.text[len("map("):].split(" over ", 1)[0].split(" … ")
+                if [runs[0], runs[-1]][:len(said)] != said:
+                    self.wrong.add((key, " … ".join(said)))
+                self.covered.update((key, run) for run in runs)
+                if join:
+                    self.covered.update((run, join) for run in runs)
+                    self.covered.update((key, join) for e in g.out_edges(key) if e.target == join)
+                tails = {join} if join else set()
             elif self._node(key) and g.nodes[key].kind == "fork":
                 self._follow(tails, key)
                 join = self.view._join_of(key)
@@ -699,6 +720,12 @@ def _touched(before: dict, after: dict) -> set[str]:
                       if r in view.graph.nodes}
     # A gate naming a step whose fold changed names the next shown step instead.
     out |= {e.source for e in view.graph.edges if e.target in flipped}
+    # Likewise a step that became, or stopped being, a gate's judge (its readers changed):
+    # its line moves into, or out of, that gate's line, and a gate naming it names the next
+    # shown step instead.
+    judged = {n for n in common if (n in view.judges.values()) != (n in was.judges.values())}
+    out |= judged | {g for v in (view, was) for g, j in v.judges.items() if j in judged}
+    out |= {e.source for e in view.graph.edges if e.target in judged}
     return out
 
 

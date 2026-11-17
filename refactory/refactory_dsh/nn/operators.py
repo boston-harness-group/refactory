@@ -16,6 +16,10 @@ same way on both runtimes (the walker in its forkserver child, the spine through
 - ``select`` (`SELECT_CALL`): reads a label from its first declared read (the first word
   or the last line, as a verdict gate reads one) and copies the declared read whose name
   that label names to its first write (and its fact, when it declares one).
+- ``elements`` (`MAP_CALL`): splits a list (its first declared read, else its first input
+  fact: a JSON list, else one element per non-empty line) into one prompt per element --
+  its one text knob, filled from the run's facts, then the element -- written to its
+  i-th write; a ``map``'s branch reads its own (`map_of`).
 
 The helpers describe and wire data without a model:
 
@@ -47,6 +51,8 @@ COLLECT_CALL = "refactory_dsh.nn.operators:collect"
 FILE_TEXT_CALL = "refactory_dsh.nn.operators:file_text"
 #: The ``select`` op: copy the file a label names.
 SELECT_CALL = "refactory_dsh.nn.operators:select"
+#: The ``elements`` op: a list to one prompt per element, for a ``map``'s branches.
+MAP_CALL = "refactory_dsh.nn.operators:elements"
 #: Past this many characters ``collect`` shows a file as its path and size, not its text.
 COLLECT_TEXT_CHARS = 40000
 
@@ -150,6 +156,72 @@ def select(ctx: Any) -> dict[str, Any]:
     text = ctx.read_text(chosen)
     ctx.write_text(writes[0], text)
     return {fact: text} if fact else {}
+
+
+def list_elements(raw: Any) -> list[str]:
+    """The elements of a list as text: a list as it is, else a JSON list, else one element
+    per non-empty line; an element that is not text is its JSON."""
+    import json
+
+    if isinstance(raw, list):
+        items: list[Any] = raw
+    else:
+        text = str(raw if raw is not None else "")
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        items = parsed if isinstance(parsed, list) else [
+            line.strip() for line in text.splitlines() if line.strip()]
+    return [item if isinstance(item, str) else json.dumps(item, sort_keys=True)
+            for item in items]
+
+
+def elements(ctx: Any) -> dict[str, Any]:
+    """`MAP_CALL`: the list (its first declared read, else its first declared input fact:
+    its declaration's ``inputs``, `lowering.snippet_spec`) split into elements; for the
+    i-th, its text knob (``task_knob``) filled from the run's facts, then the element, is
+    written to its i-th declared write. Fewer elements than writes leave the rest
+    unwritten, so the branches that read them do not run; more fail the step, naming the
+    cap."""
+    from .executor import ExecutionError, render
+
+    found = getattr(ctx, "snippet", None) or {}
+    reads = list(ctx.declared_reads)
+    inputs = list(found.get("inputs") or ())
+    source = reads[0] if reads else (inputs[0] if inputs else "")
+    if reads and not ctx.exists(source):
+        raise ExecutionError(f"map step {ctx.node_id!r}: its list {source!r} was not written")
+    if not reads and source not in ctx.facts:
+        raise ExecutionError(f"map step {ctx.node_id!r}: its list {source!r} was not set")
+    items = list_elements(ctx.read_text(source) if reads else ctx.facts[source])
+    writes = list(getattr(ctx, "_declared", ()) or ())
+    if len(items) > len(writes):
+        raise ExecutionError(f"map step {ctx.node_id!r}: {source!r} has {len(items)} elements, "
+                             f"more than its max of {len(writes)}")
+    instruction = render(str(ctx.knobs.get(found.get("task_knob") or "") or ""), ctx).rstrip()
+    for index, item in enumerate(items):
+        ctx.write_text(writes[index],
+                       f"{instruction}\n\n## Element {index + 1} of {len(items)}\n{item}\n")
+    return {}
+
+
+#: It fills each ``{{name}}`` in the knob it reads, as an agent's prompt is filled
+#: (`executor.fills_facts`): set here, since the executor imports this module.
+elements.fills_facts = True  # type: ignore[attr-defined]
+
+
+def map_of(graph: Graph, fork_id: str) -> str | None:
+    """The ``elements`` step (`MAP_CALL`) whose list fork ``fork_id`` maps over -- its one
+    way in -- or None: the fork a ``map`` builds, whose branches each read one element."""
+    fork = graph.nodes.get(fork_id)
+    if fork is None or fork.kind != "fork":
+        return None
+    before = graph.in_edges(fork_id)
+    if len(before) != 1:
+        return None
+    op = graph.nodes.get(before[0].source)
+    return op.id if op is not None and op.kind == "op" and op.call == MAP_CALL else None
 
 
 # ── what a graph's data is made of ────────────────────────────────────────
