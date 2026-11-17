@@ -715,30 +715,47 @@ TAIL_MIN_WORDS = 3
 ITEM_DATA_MIN = 8
 
 
-def _data_lines(value: Any) -> set[str]:
+#: A heading of at most this many words is a bare label (`_bare_label`).
+BARE_HEADING_WORDS = 3
+
+
+def _bare_label(line: str) -> bool:
+    """Whether a line is only a label: one word ("Independent") or a short heading
+    ("## Question", "## Option Comparison Notes"). A model's free text using one says
+    nothing that a framing line holding the same words carries from the item."""
+    words = line.split()
+    if len(words) == 1:
+        return True
+    heading = line.lstrip("#")
+    return heading != line and len(heading.split()) <= BARE_HEADING_WORDS
+
+
+def _data_lines(value: Any, *, free: bool = False) -> set[str]:
     """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
-    least `ITEM_DATA_MIN` characters: an item's input, a step's reply or what its ops and
-    code gates gave (the record's ``steps``), which a prompt line holding one carries from
-    that item. A string that is JSON (a judge's reply) counts by its own strings too, so a
-    reason extracted from one is matched in the prompt that quotes it. An op visit's
-    output counts only as the one line it is written as: its facts are often the framed
-    prompt itself, whose framing would then never be told from an item's text."""
+    least `ITEM_DATA_MIN` characters: an item's input, a step's reply or a code gate's
+    reason, which a prompt line holding one carries from that item. With ``free`` (a
+    model's reply text), a bare label (`_bare_label`) is left out; a structured field (a
+    gate's reason, a string inside a JSON reply) counts at any length from
+    `ITEM_DATA_MIN`, one word or a heading included. A string that is JSON counts by its
+    own strings too, so a reason extracted from one is matched in the prompt quoting it."""
     from .evidence import _norm
 
     out: set[str] = set()
-    stack = [value]
+    stack: list[tuple[Any, bool]] = [(value, free)]
     while stack:
-        current = stack.pop()
+        current, loose = stack.pop()
         if isinstance(current, Mapping):
-            stack += list(current.values())
+            stack += [(v, loose) for v in current.values()]
         elif isinstance(current, (list, tuple)):
-            stack += list(current)
+            stack += [(v, loose) for v in current]
         elif isinstance(current, str):
-            out |= {n for line in current.splitlines() if len(n := _norm(line)) >= ITEM_DATA_MIN}
+            out |= {n for line in current.splitlines()
+                    if len(n := _norm(line)) >= ITEM_DATA_MIN
+                    and not (loose and _bare_label(n))}
             text = current.strip()
             if text[:1] in ("{", "[", '"'):
                 try:
-                    stack.append(json.loads(text))
+                    stack.append((json.loads(text), False))
                 except json.JSONDecodeError:
                     pass
     return out
@@ -1030,7 +1047,7 @@ class ProposalContext:
                          if line.strip()}
                 every[node] = lines if node not in every else every[node] & lines
                 items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
-                data |= _data_lines(exchange.get("response"))
+                data |= _data_lines(exchange.get("response"), free=True)
                 said |= _whole_texts(exchange.get("response"))
 
         def carried(line: str) -> bool:
@@ -1039,6 +1056,10 @@ class ProposalContext:
             # The line inside a reason or a reply, or its tail after a short label
             # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
             # ("- User: ## Question") from matching a reply that happens to use it.
+            if line in said:
+                return True  # a whole reason or reply, however short ("## Reloop")
+            if _bare_label(line):
+                return False  # a heading or one word is no piece of a reason
             words = line.split(" ")
             for start in range(len(words)):
                 label, tail = " ".join(words[:start]), " ".join(words[start:])

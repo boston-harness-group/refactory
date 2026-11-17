@@ -413,6 +413,150 @@ def test_framing_is_not_taken_for_a_piece_of_a_reply_that_uses_its_words():
             assert line not in decide, (line, decide)
 
 
+@pytest.mark.parametrize("reply_line", ["## Question", "Question", "Independent",
+                                        "## Independent"])
+def test_a_reply_line_that_is_a_bare_heading_or_word_is_no_item_data(reply_line):
+    """A reply with a line that is only a heading or one word says nothing a framing line
+    holding that word carries from the item: the framing stays out of "Also"."""
+    framing = ["- User: ## Question", "## Question", "## Independent"]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "exchanges": [{"node": "compare", "prompt": f"Q {item}",
+                               "response": f"{reply_line}\nB, because {item} is bounded."},
+                              {"node": "decide",
+                               "prompt": "\n".join([*framing, f"Q {item}"]),
+                               "response": f"D {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")]).render()
+    for item in ("r1", "r2"):
+        decide = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")[2]
+        for line in framing:
+            assert line not in decide, (reply_line, line, decide)
+
+
+@pytest.mark.parametrize("source,said,quoted", [
+    ("model judge", "## Issue: misses the boundary case at zero",
+     "The judge sent it back with this note: ## Issue: misses the boundary case at zero"),
+    ("code gate", "incomplete", "Feedback: incomplete"),
+])
+def test_a_reason_written_as_a_heading_or_one_word_is_still_shown(source, said, quoted):
+    """Only a model's free-text line that is a bare label is left out of item data: a
+    judge's reason written as a long heading (quoted inside a sentence, so not shown by
+    name), and a code gate's one-word reason, are the item's evidence wherever they
+    repeat."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+
+    def record(item: str) -> dict:
+        exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+        if source == "model judge":
+            exchanges.append({"node": "judge", "prompt": f"ANS {item}",
+                              "response": f"{said}\nThe rest of the working is fine."})
+        exchanges.append({"node": "fix", "prompt": f"ANS {item}\n{quoted}",
+                          "response": f"FIX {item}"})
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+                **({"steps": [{"node": "check", "kind": "gate", "verdict": "reloop",
+                               "reason": said}]} if source == "code gate" else {})}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert quoted in block.split("#### Step ")[-1], block
+
+
+def _shown_at_fix(records: list[dict], needle: str) -> None:
+    """``needle``, a line of the fix step's prompt, reaches the proposer on both items:
+    in the fix step's own text, or said by name (``Sees: judge's reply``) with the judge's
+    reply holding it."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=records, knobs=knobs).render()
+    for item in ("r1", "r2"):
+        steps = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")
+        fix = next(step for step in steps if step.startswith("`fix`"))
+        judge = next((step for step in steps if step.startswith("`judge`")), "")
+        assert needle in fix or ("Sees: judge's reply" in fix and needle in judge), \
+            (needle, fix)
+
+
+def _probe_record(item: str, fix_prompt: str, reply: Any = None, gate: str | None = None
+                  ) -> dict:
+    exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+    if reply is not None:
+        exchanges.append({"node": "judge", "prompt": f"ANS {item}", "response": reply})
+    exchanges.append({"node": "fix", "prompt": f"ANS {item}\n{fix_prompt}",
+                      "response": f"FIX {item}"})
+    return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+            "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+            **({"steps": [{"node": "check", "kind": "gate", "verdict": "reloop",
+                           "reason": gate}]} if gate is not None else {})}
+
+
+HEADING_REASON = "# Reloop: the proof skips the base case"
+
+
+@pytest.mark.parametrize("form", ["text", "json", "dict"])
+@pytest.mark.parametrize("line", [HEADING_REASON, f"Feedback: {HEADING_REASON}"])
+def test_a_judge_reason_written_as_a_heading_reaches_the_fix_step(form, line):
+    reply = {"text": HEADING_REASON,
+             "json": json.dumps({"verdict": "reloop", "reason": HEADING_REASON}),
+             "dict": {"verdict": "reloop", "reason": HEADING_REASON}}[form]
+    _shown_at_fix([_probe_record(i, line, reply=reply) for i in ("r1", "r2")], line)
+
+
+@pytest.mark.parametrize("word", ["Divergent", "divergent."])
+@pytest.mark.parametrize("form", ["{w}", "Feedback: {w}", "Reason:\n{w}"])
+def test_a_one_word_gate_reason_reaches_the_fix_step(word, form):
+    quoted = form.format(w=word)
+    _shown_at_fix([_probe_record(i, quoted, gate=word) for i in ("r1", "r2")],
+                  quoted.splitlines()[-1])
+
+
+MULTILINE_REASON = ("## Reloop\nThe proof skips the base case n=0.\n"
+                    "Also the induction step assumes the claim.")
+
+
+@pytest.mark.parametrize("source", ["judge text", "json judge", "gate"])
+def test_every_line_of_a_reason_headed_by_a_heading_reaches_the_fix_step(source):
+    reply = {"judge text": MULTILINE_REASON,
+             "json judge": json.dumps({"verdict": "reloop", "reason": MULTILINE_REASON}),
+             "gate": None}[source]
+    gate = MULTILINE_REASON if source == "gate" else None
+    records = [_probe_record(i, f"Feedback:\n{MULTILINE_REASON}", reply=reply, gate=gate)
+               for i in ("r1", "r2")]
+    for line in MULTILINE_REASON.splitlines():
+        _shown_at_fix(records, line)
+
+
+@pytest.mark.parametrize("reply", ["# Reloop", "## Reloop"])
+@pytest.mark.parametrize("form", ["{r}", "Feedback:\n{r}"])
+def test_a_judge_reply_that_is_only_a_short_heading_reaches_the_fix_step(reply, form):
+    """A judge's whole reply, however short, is that item's reason: a fix step quoting it
+    shows it, though a short heading inside a longer reply is a bare label."""
+    _shown_at_fix([_probe_record(i, form.format(r=reply), reply=reply) for i in ("r1", "r2")],
+                  reply)
+
+
+@pytest.mark.parametrize("reply_line", ["## Question", "Question", "Independent",
+                                        "## Independent", "## Option Comparison Notes"])
+def test_a_reply_line_that_is_a_short_heading_leaves_framing_hidden(reply_line):
+    """The negatives the fixes above must keep: a reply's own short heading or word does
+    not make the framing line holding it item data."""
+    framing = ["- User: ## Question", "## Question", "## Independent",
+               "## Option Comparison Notes"]
+    records = [_probe_record(i, "\n".join(framing), reply=f"{reply_line}\nB, since {i}.")
+               for i in ("r1", "r2")]
+    text = ProposalContext(item_records=records).render()
+    for item in ("r1", "r2"):
+        fix = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step `fix`")[1]
+        for line in framing:
+            assert line not in fix, (reply_line, line, fix)
+
+
 def test_with_one_item_no_line_is_taken_for_framing():
     """Framing is told from an item's own text only across two or more items; with one,
     every line not in the settings or templates is shown."""
