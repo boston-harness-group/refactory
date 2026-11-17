@@ -1,0 +1,602 @@
+{
+ "source": "SkillOpt ec9d021 (microsoft/SkillOpt, MIT); recorded calls from the lab's runs/so-s42 (calls.jsonl, out/**/predictions)",
+ "framing": [
+  {
+   "case": "after_exec_error",
+   "source": "out/steps/step_0001/rollout/predictions/31011",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I create a formula in cell R6 that totals the values within a specified table range where the dates fall between P6 and Q6 in column A, and the times fall between R3 and R4 in row 1?\n  \n  Instruction type: Cell-Level Manipulation\n  Expected answer position: R6\n  \n  # Input spreadsheet preview\n  ## Sheet: Sheet1  (dim=A1:R20, max_row=20, max_col=18)\n  A1= | B1=00:00:00 | C1=02:00:00 | D1=04:00:00 | E1=06:00:00 | F1=08:00:00 | G1=10:00:00 | H1=12:00:00 | I1=14:00:00 | J1=16:00:00 | K1=18:00:00 | L1=20:00:00 | M1=22:00:00 | N1= | O1= | P1= | Q1= | R1=\n  A2=2024-01-01 00:00:00 | B2=56.6188 | C2=56.6188 | D2=56.6188 | E2=56.6188 | F2=56.6188 | G2=56.6188 | H2=45.2944 | I2=56.6188 | J2=45.2944 | K2=56.6188 | L2=33.9711 | M2=22.6477 | N2= | O2= | P2= | Q2= | R2=\n  A3=2024-01-02 00:00:00 | B3=56.6188 | C3=67.9421 | D3=67.9421 | E3=67.9421 | F3=56.6188 | G3=67.9421 | H3=67.9421 | I3=67.9421 | J3=56.6188 | K3=67.9421 | L3=56.6188 | M3=33.9711 | N3= | O3= | P3= | Q3=time from>> | R3=04:00:00\n  A4=2024-01-03 00:00:00 | B4=56.6188 | C4=67.9421 | D4=67.9421 | E4=67.9421 | F4=67.9421 | G4=67.9421 | H4=67.9421 | I4=56.6188 | J4=67.9421 | K4=67.9421 | L4=67.9421 | M4=45.2944 | N4= | O4= | P4= | Q4=time to>> | R4=14:00:00\n  A5=2024-01-04 00:00:00 | B5=56.4762 | C5=56.4762 | D5=56.4762 | E5=67.771 | F5=56.4762 | G5=56.4762 | H5=45.1803 | I5=56.4762 | J5=45.1803 | K5=33.8855 | L5=45.1803 | M5=33.8855 | N5= | O5= | P5=From | Q5=To | R5=\n  ... (15 more rows)\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n- Assistant: Based on the preview, I can see the structure. The formula needs SUMPRODUCT to sum values where dates (column A) are between P6/Q6 and times (row 1) are between R3/R4.\n  \n  ```python\n  import openpyxl\n  \n  INPUT_PATH = \"input.xlsx\"\n  OUTPUT_PATH = \"output.xlsx\"\n  \n  wb = openpyxl.load_workbook(INPUT_PATH)\n  ws = wb.active\n  \n  # Find the last data row (column A has dates starting at row 2)\n  last_data_row = ws.max_row\n  # Find the last data column with time headers in row 1 (B through M based on preview)\n  # Detect dynamically: time columns are in row 1 starting from B\n  last_data_col = 1\n  for col in range(2, ws.max_col + 1):\n      if ws.cell(row=1, column=col).value is not None:\n          last_data_col = col\n      else:\n          break\n  \n  last_col_letter = openpyxl.utils.get_column_letter(last_data_col)\n  \n  # Build SUMPRODUCT formula:\n  # =SUMPRODUCT(($A$2:$A${last_row}>=P6)*($A$2:$A${last_row}<=Q6)*(B$1:{L}$1>=$R$3)*(B$1:{L}$1<=$R$4)*B$2:{L}${last_row})\n  formula = (\n      f'=SUMPRODUCT(($A$2:$A${last_data_row}>=P6)*($A$2:$A${last_data_row}<=Q6)'\n      f'*(B$1:{last_col_letter}$1>=$R$3)*(B$1:{last_col_letter}$1<=$R$4)'\n      f'*B$2:{last_col_letter}${last_data_row})'\n  )\n  \n  ws['R6'] = formula\n  \n  wb.save(OUTPUT_PATH)\n  ```\n  \n  This script writes a `SUMPRODUCT` formula into cell R6 that:\n  - Checks each date in `$A$2:$A$20` against the range `P6` (from) to `Q6` (to)\n  - Checks each time in `B$1:M$1` against the range `$R$3` (time from) to `$R$4` (time to)\n  - Multiplies the matching conditions with the data values in `B$2:M$20` and sums the result\n- User: The code raised an error during execution:\n  \n  ```\n  Traceback (most recent call last):\n    File \"/tmp/skillopt-generated-6zbu5fc2/runner.py\", line 18, in <module>\n      for col in range(2, ws.max_col + 1):\n                          ^^^^^^^^^^\n  AttributeError: 'Worksheet' object has no attribute 'max_col'. Did you mean: 'max_row'?\n  ```\n  \n  Please fix the code and return a complete corrected Python script inside a ```python``` block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I create a formula in cell R6 that totals the values within a specified table range where the dates fall between P6 and Q6 in column A, and the times fall between R3 and R4 in row 1?\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: R6\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:R20, max_row=20, max_col=18)\nA1= | B1=00:00:00 | C1=02:00:00 | D1=04:00:00 | E1=06:00:00 | F1=08:00:00 | G1=10:00:00 | H1=12:00:00 | I1=14:00:00 | J1=16:00:00 | K1=18:00:00 | L1=20:00:00 | M1=22:00:00 | N1= | O1= | P1= | Q1= | R1=\nA2=2024-01-01 00:00:00 | B2=56.6188 | C2=56.6188 | D2=56.6188 | E2=56.6188 | F2=56.6188 | G2=56.6188 | H2=45.2944 | I2=56.6188 | J2=45.2944 | K2=56.6188 | L2=33.9711 | M2=22.6477 | N2= | O2= | P2= | Q2= | R2=\nA3=2024-01-02 00:00:00 | B3=56.6188 | C3=67.9421 | D3=67.9421 | E3=67.9421 | F3=56.6188 | G3=67.9421 | H3=67.9421 | I3=67.9421 | J3=56.6188 | K3=67.9421 | L3=56.6188 | M3=33.9711 | N3= | O3= | P3= | Q3=time from>> | R3=04:00:00\nA4=2024-01-03 00:00:00 | B4=56.6188 | C4=67.9421 | D4=67.9421 | E4=67.9421 | F4=67.9421 | G4=67.9421 | H4=67.9421 | I4=56.6188 | J4=67.9421 | K4=67.9421 | L4=67.9421 | M4=45.2944 | N4= | O4= | P4= | Q4=time to>> | R4=14:00:00\nA5=2024-01-04 00:00:00 | B5=56.4762 | C5=56.4762 | D5=56.4762 | E5=67.771 | F5=56.4762 | G5=56.4762 | H5=45.1803 | I5=56.4762 | J5=45.1803 | K5=33.8855 | L5=45.1803 | M5=33.8855 | N5= | O5= | P5=From | Q5=To | R5=\n... (15 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    },
+    {
+     "role": "assistant",
+     "content": "Based on the preview, I can see the structure. The formula needs SUMPRODUCT to sum values where dates (column A) are between P6/Q6 and times (row 1) are between R3/R4.\n\n```python\nimport openpyxl\n\nINPUT_PATH = \"input.xlsx\"\nOUTPUT_PATH = \"output.xlsx\"\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active\n\n# Find the last data row (column A has dates starting at row 2)\nlast_data_row = ws.max_row\n# Find the last data column with time headers in row 1 (B through M based on preview)\n# Detect dynamically: time columns are in row 1 starting from B\nlast_data_col = 1\nfor col in range(2, ws.max_col + 1):\n    if ws.cell(row=1, column=col).value is not None:\n        last_data_col = col\n    else:\n        break\n\nlast_col_letter = openpyxl.utils.get_column_letter(last_data_col)\n\n# Build SUMPRODUCT formula:\n# =SUMPRODUCT(($A$2:$A${last_row}>=P6)*($A$2:$A${last_row}<=Q6)*(B$1:{L}$1>=$R$3)*(B$1:{L}$1<=$R$4)*B$2:{L}${last_row})\nformula = (\n    f'=SUMPRODUCT(($A$2:$A${last_data_row}>=P6)*($A$2:$A${last_data_row}<=Q6)'\n    f'*(B$1:{last_col_letter}$1>=$R$3)*(B$1:{last_col_letter}$1<=$R$4)'\n    f'*B$2:{last_col_letter}${last_data_row})'\n)\n\nws['R6'] = formula\n\nwb.save(OUTPUT_PATH)\n```\n\nThis script writes a `SUMPRODUCT` formula into cell R6 that:\n- Checks each date in `$A$2:$A$20` against the range `P6` (from) to `Q6` (to)\n- Checks each time in `B$1:M$1` against the range `$R$3` (time from) to `$R$4` (time to)\n- Multiplies the matching conditions with the data values in `B$2:M$20` and sums the result"
+    },
+    {
+     "role": "user",
+     "content": "The code raised an error during execution:\n\n```\nTraceback (most recent call last):\n  File \"/tmp/skillopt-generated-6zbu5fc2/runner.py\", line 18, in <module>\n    for col in range(2, ws.max_col + 1):\n                        ^^^^^^^^^^\nAttributeError: 'Worksheet' object has no attribute 'max_col'. Did you mean: 'max_row'?\n```\n\nPlease fix the code and return a complete corrected Python script inside a ```python``` block."
+    }
+   ]
+  },
+  {
+   "case": "after_train_feedback",
+   "source": "out/steps/step_0001/rollout/predictions/32438",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I format the cells in column J to only display the standard time in 00:00:00 and AM/PM from I2, which contains both the date and the time in the format 'DD/MM/YYYY 00:00:00'? Using the =RIGHT(I2,8) function returns the time as a string of 8 numbers without the desired time formatting (e.g., 00:00:00), even after attempting to apply time formatting to the cell.\n  \n  Instruction type: Cell-Level Manipulation\n  Expected answer position: J2:J4\n  \n  # Input spreadsheet preview\n  ## Sheet: Sheet1  (dim=A1:K4, max_row=4, max_col=11)\n  A1=Email Campaign | B1=Type | C1=Activity Type | D1=Brand | E1=Send List | F1=Date | G1=Week | H1=Day of Week | I1=Time | J1= | K1=\n  A2=Campaign 1 | B2= | C2= | D2= | E2= | F2=2021-09-29 18:08:00 | G2= | H2= | I2=2021-09-29 18:08:00 | J2==RIGHT(I2,8) | K2=\n  A3=Campaign 2 | B3= | C3= | D3= | E3= | F3=2021-10-01 00:04:00 | G3= | H3= | I3=2021-10-01 00:04:00 | J3==RIGHT(I3,8) | K3=\n  A4=Campaign 3 | B4= | C4= | D4= | E4= | F4=2021-10-01 08:08:00 | G4= | H4= | I4=2021-10-01 08:08:00 | J4==RIGHT(I4,8) | K4=\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n- Assistant: ```python\n  import openpyxl\n  from datetime import datetime\n  \n  INPUT_PATH = \"input.xlsx\"\n  OUTPUT_PATH = \"output.xlsx\"\n  \n  wb = openpyxl.load_workbook(INPUT_PATH)\n  ws = wb[\"Sheet1\"]\n  \n  for row in range(2, ws.max_row + 1):\n      cell_i = ws.cell(row=row, column=9)  # Column I\n      cell_j = ws.cell(row=row, column=10)  # Column J\n      \n      if cell_i.value is not None:\n          val = cell_i.value\n          if isinstance(val, datetime):\n              time_str = val.strftime(\"%I:%M:%S %p\")\n          else:\n              # Parse from string\n              s = str(val).strip()\n              try:\n                  dt = datetime.strptime(s, \"%Y-%m-%d %H:%M:%S\")\n                  time_str = dt.strftime(\"%I:%M:%S %p\")\n              except ValueError:\n                  try:\n                      dt = datetime.strptime(s, \"%d/%m/%Y %H:%M:%S\")\n                      time_str = dt.strftime(\"%I:%M:%S %p\")\n                  except ValueError:\n                      time_str = s[-8:] if len(s) >= 8 else s\n          \n          cell_j.value = time_str\n  \n  wb.save(OUTPUT_PATH)\n  ```\n- User: Your code executed successfully but produced incorrect results.\n  The following cells have wrong values:\n    Sheet1!J2: your output = '06:08:00 PM' (WRONG)\n    Sheet1!J3: your output = '12:04:00 AM' (WRONG)\n    Sheet1!J4: your output = '08:08:00 AM' (WRONG)\n  \n  Please analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I format the cells in column J to only display the standard time in 00:00:00 and AM/PM from I2, which contains both the date and the time in the format 'DD/MM/YYYY 00:00:00'? Using the =RIGHT(I2,8) function returns the time as a string of 8 numbers without the desired time formatting (e.g., 00:00:00), even after attempting to apply time formatting to the cell.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: J2:J4\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:K4, max_row=4, max_col=11)\nA1=Email Campaign | B1=Type | C1=Activity Type | D1=Brand | E1=Send List | F1=Date | G1=Week | H1=Day of Week | I1=Time | J1= | K1=\nA2=Campaign 1 | B2= | C2= | D2= | E2= | F2=2021-09-29 18:08:00 | G2= | H2= | I2=2021-09-29 18:08:00 | J2==RIGHT(I2,8) | K2=\nA3=Campaign 2 | B3= | C3= | D3= | E3= | F3=2021-10-01 00:04:00 | G3= | H3= | I3=2021-10-01 00:04:00 | J3==RIGHT(I3,8) | K3=\nA4=Campaign 3 | B4= | C4= | D4= | E4= | F4=2021-10-01 08:08:00 | G4= | H4= | I4=2021-10-01 08:08:00 | J4==RIGHT(I4,8) | K4=\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    },
+    {
+     "role": "assistant",
+     "content": "```python\nimport openpyxl\nfrom datetime import datetime\n\nINPUT_PATH = \"input.xlsx\"\nOUTPUT_PATH = \"output.xlsx\"\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb[\"Sheet1\"]\n\nfor row in range(2, ws.max_row + 1):\n    cell_i = ws.cell(row=row, column=9)  # Column I\n    cell_j = ws.cell(row=row, column=10)  # Column J\n    \n    if cell_i.value is not None:\n        val = cell_i.value\n        if isinstance(val, datetime):\n            time_str = val.strftime(\"%I:%M:%S %p\")\n        else:\n            # Parse from string\n            s = str(val).strip()\n            try:\n                dt = datetime.strptime(s, \"%Y-%m-%d %H:%M:%S\")\n                time_str = dt.strftime(\"%I:%M:%S %p\")\n            except ValueError:\n                try:\n                    dt = datetime.strptime(s, \"%d/%m/%Y %H:%M:%S\")\n                    time_str = dt.strftime(\"%I:%M:%S %p\")\n                except ValueError:\n                    time_str = s[-8:] if len(s) >= 8 else s\n        \n        cell_j.value = time_str\n\nwb.save(OUTPUT_PATH)\n```"
+    },
+    {
+     "role": "user",
+     "content": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!J2: your output = '06:08:00 PM' (WRONG)\n  Sheet1!J3: your output = '12:04:00 AM' (WRONG)\n  Sheet1!J4: your output = '08:08:00 AM' (WRONG)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+    }
+   ]
+  },
+  {
+   "case": "answer_sheet_prefixed",
+   "source": "out/selection_eval_baseline/predictions/51-12",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I create a VBA code that will count the number of times a value in a range from A1 to M1 on an Excel sheet increases by at least 10% from a reference cell, beginning the count from A1 and restarting the counting process from the cell immediately right of each cell where a 10% increase is found, terminating the count before M1 if there is no further data, and display the count in cell B6? Additionally, I'm looking to include the ability to update the data range in the code, as the actual worksheet data range is L26 to SHA26.\n  \n  Instruction type: Sheet-Level Manipulation\n  Expected answer position: Sheet1!B6\n  \n  # Input spreadsheet preview\n  ## Sheet: Sheet1  (dim=A1:M6, max_row=6, max_col=13)\n  A1=100 | B1=105 | C1=110 | D1=200 | E1=220 | F1=250 | G1=260 | H1=275 | I1=160 | J1=175 | K1=170 | L1=177 | M1=100\n  A2= | B2= | C2=1 | D2= | E2=2 | F2= | G2= | H2=3 | I2= | J2= | K2= | L2=4 | M2=\n  A3= | B3= | C3= | D3= | E3= | F3= | G3= | H3= | I3= | J3= | K3= | L3= | M3=\n  A4= | B4= | C4= | D4= | E4= | F4= | G4= | H4= | I4= | J4= | K4= | L4= | M4=\n  A5= | B5= | C5= | D5= | E5= | F5= | G5= | H5= | I5= | J5= | K5= | L5= | M5=\n  ... (1 more rows)\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I create a VBA code that will count the number of times a value in a range from A1 to M1 on an Excel sheet increases by at least 10% from a reference cell, beginning the count from A1 and restarting the counting process from the cell immediately right of each cell where a 10% increase is found, terminating the count before M1 if there is no further data, and display the count in cell B6? Additionally, I'm looking to include the ability to update the data range in the code, as the actual worksheet data range is L26 to SHA26.\n\nInstruction type: Sheet-Level Manipulation\nExpected answer position: Sheet1!B6\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:M6, max_row=6, max_col=13)\nA1=100 | B1=105 | C1=110 | D1=200 | E1=220 | F1=250 | G1=260 | H1=275 | I1=160 | J1=175 | K1=170 | L1=177 | M1=100\nA2= | B2= | C2=1 | D2= | E2=2 | F2= | G2= | H2=3 | I2= | J2= | K2= | L2=4 | M2=\nA3= | B3= | C3= | D3= | E3= | F3= | G3= | H3= | I3= | J3= | K3= | L3= | M3=\nA4= | B4= | C4= | D4= | E4= | F4= | G4= | H4= | I4= | J4= | K4= | L4= | M4=\nA5= | B5= | C5= | D5= | E5= | F5= | G5= | H5= | I5= | J5= | K5= | L5= | M5=\n... (1 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    }
+   ]
+  },
+  {
+   "case": "formula_and_long_value",
+   "source": "out/selection_eval_baseline/predictions/55049",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I create a formula in Excel that allows me to sum values across three columns based on a single criterion? I've attempted to use SUMPRODUCT with the formula =SUMPRODUCT(book2!A:A=book1!A3)*book2!H:J, but it seems like there might be a mistake because it isn't functioning as expected. SUMIF does not seem to be an option since the sum range spans multiple columns. What would be the correct formula to achieve this result?\n  My current formula is:SUMPRODUCT(book2!A:A=book1!A3)*book2!H:J\n  \n  Instruction type: Cell-Level Manipulation\n  Expected answer position: 'book1'!B3:B23\n  \n  # Input spreadsheet preview\n  ## Sheet: book1  (dim=A1:B23, max_row=23, max_col=2)\n  A1= | B1=\n  A2=Place | B2=\n  A3=F100063 | B3=<openpyxl.worksheet.formula.ArrayForm...\n  A4=F100064 | B4=<openpyxl.worksheet.formula.ArrayForm...\n  A5=F100065 | B5=<openpyxl.worksheet.formula.ArrayForm...\n  ... (18 more rows)\n  \n  ## Sheet: book2  (dim=A1:Z240, max_row=240, max_col=26)\n  A1=Place | B1=1 | C1=2 | D1=3 | E1=4 | F1=5 | G1=6 | H1=7 | I1=8 | J1=9 | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\n  A2=F100063 | B2= | C2= | D2= | E2= | F2= | G2= | H2=0 | I2=55 | J2=6985 | K2= | L2= | M2= | N2= | O2= | P2= | Q2= | R2= | S2= | T2=\n  A3=F100064 | B3= | C3= | D3= | E3= | F3= | G3= | H3=0 | I3=0 | J3=0 | K3= | L3= | M3= | N3= | O3= | P3= | Q3= | R3= | S3= | T3=\n  A4=F100065 | B4= | C4= | D4= | E4= | F4= | G4= | H4=0 | I4=0 | J4=0 | K4= | L4= | M4= | N4= | O4= | P4= | Q4= | R4= | S4= | T4=\n  A5=F100066 | B5= | C5= | D5= | E5= | F5= | G5= | H5=0 | I5=0 | J5=0 | K5= | L5= | M5= | N5= | O5= | P5= | Q5= | R5= | S5= | T5=\n  ... (235 more rows)\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I create a formula in Excel that allows me to sum values across three columns based on a single criterion? I've attempted to use SUMPRODUCT with the formula =SUMPRODUCT(book2!A:A=book1!A3)*book2!H:J, but it seems like there might be a mistake because it isn't functioning as expected. SUMIF does not seem to be an option since the sum range spans multiple columns. What would be the correct formula to achieve this result?\nMy current formula is:SUMPRODUCT(book2!A:A=book1!A3)*book2!H:J\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'book1'!B3:B23\n\n# Input spreadsheet preview\n## Sheet: book1  (dim=A1:B23, max_row=23, max_col=2)\nA1= | B1=\nA2=Place | B2=\nA3=F100063 | B3=<openpyxl.worksheet.formula.ArrayForm...\nA4=F100064 | B4=<openpyxl.worksheet.formula.ArrayForm...\nA5=F100065 | B5=<openpyxl.worksheet.formula.ArrayForm...\n... (18 more rows)\n\n## Sheet: book2  (dim=A1:Z240, max_row=240, max_col=26)\nA1=Place | B1=1 | C1=2 | D1=3 | E1=4 | F1=5 | G1=6 | H1=7 | I1=8 | J1=9 | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\nA2=F100063 | B2= | C2= | D2= | E2= | F2= | G2= | H2=0 | I2=55 | J2=6985 | K2= | L2= | M2= | N2= | O2= | P2= | Q2= | R2= | S2= | T2=\nA3=F100064 | B3= | C3= | D3= | E3= | F3= | G3= | H3=0 | I3=0 | J3=0 | K3= | L3= | M3= | N3= | O3= | P3= | Q3= | R3= | S3= | T3=\nA4=F100065 | B4= | C4= | D4= | E4= | F4= | G4= | H4=0 | I4=0 | J4=0 | K4= | L4= | M4= | N4= | O4= | P4= | Q4= | R4= | S4= | T4=\nA5=F100066 | B5= | C5= | D5= | E5= | F5= | G5= | H5=0 | I5=0 | J5=0 | K5= | L5= | M5= | N5= | O5= | P5= | Q5= | R5= | S5= | T5=\n... (235 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    }
+   ]
+  },
+  {
+   "case": "multi_sheet",
+   "source": "out/selection_eval_baseline/predictions/55979",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I create a formula in Excel that will display the name of a supplier, which corresponds to a specific sheet, in cell B7 of my Calculation sheet when I input an item number into cell A10? I have an Excel file with 6 sheets that contain price lists and discount lists for 3 suppliers, where each supplier has 2 sheets named similarly (e.g., Supplier_1, Supplier_2, etc.), and I need to identify the supplier based on a given item number.\n  \n  Instruction type: Cell-Level Manipulation\n  Expected answer position: 'Calc'!B7\n  \n  # Input spreadsheet preview\n  ## Sheet: Calc  (dim=A6:F10, max_row=10, max_col=6)\n  A1= | B1= | C1= | D1= | E1= | F1=\n  A2= | B2= | C2= | D2= | E2= | F2=\n  A3= | B3= | C3= | D3= | E3= | F3=\n  A4= | B4= | C4= | D4= | E4= | F4=\n  A5= | B5= | C5= | D5= | E5= | F5=\n  ... (5 more rows)\n  \n  ## Sheet: Supplier_1  (dim=A1:D10, max_row=10, max_col=4)\n  A1=Item  | B1=Name | C1=PL-code | D1=Price\n  A2=A1111101 | B2=TEST 1 | C2=23 | D2=58\n  A3=A1111102 | B3=TEST2 | C3=23 | D3=62\n  A4=A1111103 | B4=TEST 3 | C4=23 | D4=14\n  A5=A1111104 | B5=TEST 4 | C5=24 | D5=35\n  ... (5 more rows)\n  \n  ## Sheet: Supplier_2  (dim=A1:D10, max_row=10, max_col=4)\n  A1=Item  | B1=Name | C1=PL-code | D1=Price\n  A2=B2222201 | B2=JUNK1 | C2=62 | D2=58\n  A3=B2222202 | B3=JUNK2 | C3=62 | D3=62\n  A4=B2222203 | B4=JUNK3 | C4=62 | D4=14\n  A5=B2222204 | B5=JUNK4 | C5=63 | D5=35\n  ... (5 more rows)\n  \n  ## Sheet: Supplier_3  (dim=A1:D10, max_row=10, max_col=4)\n  A1=Item  | B1=Name | C1=PL-code | D1=Price\n  A2=C3333301 | B2=WHEEL1 | C2=45 | D2=58\n  A3=C3333302 | B3=WHEEL2 | C3=45 | D3=62\n  A4=C3333303 | B4=WHEEL3 | C4=45 | D4=14\n  A5=C3333304 | B5=WHEEL4 | C5=46 | D5=35\n  ... (5 more rows)\n  \n  ## Sheet: Discount_S1  (dim=A1:B4, max_row=4, max_col=2)\n  A1=PL-Code | B1=Discount\n  A2=23 | B2=0.15\n  A3=24 | B3=0.1\n  A4=25 | B4=0.25\n  \n  ## Sheet: Discount_S2  (dim=A1:B4, max_row=4, max_col=2)\n  A1=PL-Code | B1=Discount\n  A2=62 | B2=0.14\n  A3=63 | B3=0.21\n  A4=64 | B4=0.23\n  \n  ## Sheet: Discount_S3  (dim=A1:B4, max_row=4, max_col=2)\n  A1=PL-Code | B1=Discount\n  A2=45 | B2=0.08\n  A3=46 | B3=0.13\n  A4=47 | B4=0.18\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I create a formula in Excel that will display the name of a supplier, which corresponds to a specific sheet, in cell B7 of my Calculation sheet when I input an item number into cell A10? I have an Excel file with 6 sheets that contain price lists and discount lists for 3 suppliers, where each supplier has 2 sheets named similarly (e.g., Supplier_1, Supplier_2, etc.), and I need to identify the supplier based on a given item number.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Calc'!B7\n\n# Input spreadsheet preview\n## Sheet: Calc  (dim=A6:F10, max_row=10, max_col=6)\nA1= | B1= | C1= | D1= | E1= | F1=\nA2= | B2= | C2= | D2= | E2= | F2=\nA3= | B3= | C3= | D3= | E3= | F3=\nA4= | B4= | C4= | D4= | E4= | F4=\nA5= | B5= | C5= | D5= | E5= | F5=\n... (5 more rows)\n\n## Sheet: Supplier_1  (dim=A1:D10, max_row=10, max_col=4)\nA1=Item  | B1=Name | C1=PL-code | D1=Price\nA2=A1111101 | B2=TEST 1 | C2=23 | D2=58\nA3=A1111102 | B3=TEST2 | C3=23 | D3=62\nA4=A1111103 | B4=TEST 3 | C4=23 | D4=14\nA5=A1111104 | B5=TEST 4 | C5=24 | D5=35\n... (5 more rows)\n\n## Sheet: Supplier_2  (dim=A1:D10, max_row=10, max_col=4)\nA1=Item  | B1=Name | C1=PL-code | D1=Price\nA2=B2222201 | B2=JUNK1 | C2=62 | D2=58\nA3=B2222202 | B3=JUNK2 | C3=62 | D3=62\nA4=B2222203 | B4=JUNK3 | C4=62 | D4=14\nA5=B2222204 | B5=JUNK4 | C5=63 | D5=35\n... (5 more rows)\n\n## Sheet: Supplier_3  (dim=A1:D10, max_row=10, max_col=4)\nA1=Item  | B1=Name | C1=PL-code | D1=Price\nA2=C3333301 | B2=WHEEL1 | C2=45 | D2=58\nA3=C3333302 | B3=WHEEL2 | C3=45 | D3=62\nA4=C3333303 | B4=WHEEL3 | C4=45 | D4=14\nA5=C3333304 | B5=WHEEL4 | C5=46 | D5=35\n... (5 more rows)\n\n## Sheet: Discount_S1  (dim=A1:B4, max_row=4, max_col=2)\nA1=PL-Code | B1=Discount\nA2=23 | B2=0.15\nA3=24 | B3=0.1\nA4=25 | B4=0.25\n\n## Sheet: Discount_S2  (dim=A1:B4, max_row=4, max_col=2)\nA1=PL-Code | B1=Discount\nA2=62 | B2=0.14\nA3=63 | B3=0.21\nA4=64 | B4=0.23\n\n## Sheet: Discount_S3  (dim=A1:B4, max_row=4, max_col=2)\nA1=PL-Code | B1=Discount\nA2=45 | B2=0.08\nA3=46 | B3=0.13\nA4=47 | B4=0.18\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    }
+   ]
+  },
+  {
+   "case": "non_ascii",
+   "source": "out/selection_eval_baseline/predictions/560-12",
+   "system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+   "prompt": "History:\n- User: # Instruction\n  How can I efficiently count the quantity of each item from a table that sometimes contains over ten thousand rows of data? I have previously used the subtotal formula, but it is time-consuming, especially when dealing with over a hundred items.The answer should be put from I3 with the Headers \"ITEM\" (from column B) and \"Qty\" (count). Sort the \"ITEM\" column from first to last in the order: A006, A004, A005 and calculate the corresponding count in the adjacent columns. Left align entire answer range with no other formatting applied\n  \n  Instruction type: Sheet-Level Manipulation\n  Expected answer position: '工作表1'!I2:J7\n  \n  # Input spreadsheet preview\n  ## Sheet: 工作表1  (dim=A1:D10, max_row=10, max_col=4)\n  A1=PO | B1=ITEM | C1=DEC | D1=Price\n  A2=123345 | B2=A006 | C2=Paper | D2=125\n  A3=123345 | B3=A004 | C3=Pen | D3=100\n  A4=123345 | B4=A005 | C4=Rule | D4=65\n  A5=123346 | B5=A006 | C5=Paper | D5=125\n  ... (5 more rows)\n  \n  \n  # Task\n  Write a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block.\n\nAnswer the latest user request.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction."
+    },
+    {
+     "role": "user",
+     "content": "# Instruction\nHow can I efficiently count the quantity of each item from a table that sometimes contains over ten thousand rows of data? I have previously used the subtotal formula, but it is time-consuming, especially when dealing with over a hundred items.The answer should be put from I3 with the Headers \"ITEM\" (from column B) and \"Qty\" (count). Sort the \"ITEM\" column from first to last in the order: A006, A004, A005 and calculate the corresponding count in the adjacent columns. Left align entire answer range with no other formatting applied\n\nInstruction type: Sheet-Level Manipulation\nExpected answer position: '工作表1'!I2:J7\n\n# Input spreadsheet preview\n## Sheet: 工作表1  (dim=A1:D10, max_row=10, max_col=4)\nA1=PO | B1=ITEM | C1=DEC | D1=Price\nA2=123345 | B2=A006 | C2=Paper | D2=125\nA3=123345 | B3=A004 | C3=Pen | D3=100\nA4=123345 | B4=A005 | C4=Rule | D4=65\nA5=123346 | B5=A006 | C5=Paper | D5=125\n... (5 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+    }
+   ]
+  }
+ ],
+ "skill_initial_system": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.\n\n## Skill\n# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` → write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters — iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.",
+ "previews": {
+  "one_sheet": {
+   "spec": [
+    {
+     "title": "Sheet1",
+     "cells": {
+      "A1": "Name",
+      "B1": 3,
+      "C1": 2.5,
+      "A2": "=SUM(B1:C1)",
+      "B2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "A7": "tail"
+     }
+    }
+   ],
+   "preview": "## Sheet: Sheet1  (dim=A1:C7, max_row=7, max_col=3)\nA1=Name | B1=3 | C1=2.5\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=\nA3= | B3= | C3=\nA4= | B4= | C4=\nA5= | B5= | C5=\n... (2 more rows)\n",
+   "user": "# Instruction\nDo the thing.\nTwo lines.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Data Sheet'!B1:B3\n\n# Input spreadsheet preview\n## Sheet: Sheet1  (dim=A1:C7, max_row=7, max_col=3)\nA1=Name | B1=3 | C1=2.5\nA2==SUM(B1:C1) | B2=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... | C2=\nA3= | B3= | C3=\nA4= | B4= | C4=\nA5= | B5= | C5=\n... (2 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+  },
+  "multi_sheet": {
+   "spec": [
+    {
+     "title": "Data Sheet",
+     "cells": {
+      "A1": "Größe",
+      "B1": {
+       "datetime": "2024-03-05T10:30:00"
+      },
+      "C1": {
+       "time": "07:15:00"
+      },
+      "V1": "beyond col 20"
+     }
+    },
+    {
+     "title": "Empty",
+     "cells": {}
+    },
+    {
+     "title": "Wide",
+     "cells": {
+      "A2": 0,
+      "B2": 1,
+      "C2": 2,
+      "D2": 3,
+      "E2": 4,
+      "F2": 5,
+      "G2": 6,
+      "H2": 7,
+      "I2": 8,
+      "J2": 9,
+      "K2": 10,
+      "L2": 11,
+      "M2": 12,
+      "N2": 13,
+      "O2": 14,
+      "P2": 15,
+      "Q2": 16,
+      "R2": 17,
+      "S2": 18,
+      "T2": 19,
+      "U2": 20,
+      "V2": 21,
+      "W2": 22,
+      "X2": 23,
+      "Y2": 24,
+      "Z2": 25
+     }
+    }
+   ],
+   "preview": "## Sheet: Data Sheet  (dim=A1:V1, max_row=1, max_col=22)\nA1=Größe | B1=2024-03-05 10:30:00 | C1=07:15:00 | D1= | E1= | F1= | G1= | H1= | I1= | J1= | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\n\n## Sheet: Empty  (dim=A1:A1, max_row=1, max_col=1)\nA1=\n\n## Sheet: Wide  (dim=A2:Z2, max_row=2, max_col=26)\nA1= | B1= | C1= | D1= | E1= | F1= | G1= | H1= | I1= | J1= | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\nA2=0 | B2=1 | C2=2 | D2=3 | E2=4 | F2=5 | G2=6 | H2=7 | I2=8 | J2=9 | K2=10 | L2=11 | M2=12 | N2=13 | O2=14 | P2=15 | Q2=16 | R2=17 | S2=18 | T2=19\n",
+   "user": "# Instruction\nDo the thing.\nTwo lines.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Data Sheet'!B1:B3\n\n# Input spreadsheet preview\n## Sheet: Data Sheet  (dim=A1:V1, max_row=1, max_col=22)\nA1=Größe | B1=2024-03-05 10:30:00 | C1=07:15:00 | D1= | E1= | F1= | G1= | H1= | I1= | J1= | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\n\n## Sheet: Empty  (dim=A1:A1, max_row=1, max_col=1)\nA1=\n\n## Sheet: Wide  (dim=A2:Z2, max_row=2, max_col=26)\nA1= | B1= | C1= | D1= | E1= | F1= | G1= | H1= | I1= | J1= | K1= | L1= | M1= | N1= | O1= | P1= | Q1= | R1= | S1= | T1=\nA2=0 | B2=1 | C2=2 | D2=3 | E2=4 | F2=5 | G2=6 | H2=7 | I2=8 | J2=9 | K2=10 | L2=11 | M2=12 | N2=13 | O2=14 | P2=15 | Q2=16 | R2=17 | S2=18 | T2=19\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+  },
+  "many_rows": {
+   "spec": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": 1,
+      "A2": 2,
+      "A3": 3,
+      "A4": 4,
+      "A5": 5,
+      "A6": 6,
+      "A7": 7,
+      "A8": 8,
+      "A9": 9,
+      "A10": 10,
+      "A11": 11
+     }
+    }
+   ],
+   "preview": "## Sheet: S  (dim=A1:A11, max_row=11, max_col=1)\nA1=1\nA2=2\nA3=3\nA4=4\nA5=5\n... (6 more rows)\n",
+   "user": "# Instruction\nDo the thing.\nTwo lines.\n\nInstruction type: Cell-Level Manipulation\nExpected answer position: 'Data Sheet'!B1:B3\n\n# Input spreadsheet preview\n## Sheet: S  (dim=A1:A11, max_row=11, max_col=1)\nA1=1\nA2=2\nA3=3\nA4=4\nA5=5\n... (6 more rows)\n\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+  },
+  "broken": {
+   "user_tail": "\n\n# Task\nWrite a Python script that reads the workbook from the variable `INPUT_PATH`, applies the instruction, and writes the modified workbook to `OUTPUT_PATH`. Preserve all other cells unchanged. The preview may be truncated — do not hardcode row counts or assume the data ends at the last previewed row; iterate over all actual rows in the workbook instead. Return only a ```python``` code block."
+  }
+ },
+ "extract_code": [
+  {
+   "text": "",
+   "code": ""
+  },
+  {
+   "text": "   ",
+   "code": ""
+  },
+  {
+   "text": "plain prose only",
+   "code": "plain prose only"
+  },
+  {
+   "text": "```python\nprint(1)\n```",
+   "code": "print(1)"
+  },
+  {
+   "text": "intro\n```\ncode\n```\nmore ```python\nsecond\n```",
+   "code": "code"
+  },
+  {
+   "text": "```python print(1)```",
+   "code": "```python print(1)```"
+  },
+  {
+   "text": "```python\nno closing",
+   "code": "```python\nno closing"
+  },
+  {
+   "text": "``` \n  a = 1  \n```",
+   "code": "a = 1"
+  }
+ ],
+ "runner": [
+  {
+   "code": "import openpyxl\nINPUT_PATH = 'x.xlsx'\n  OUTPUT_PATH='y'\nwb = openpyxl.load_workbook(INPUT_PATH)\ns = '''multi\nline'''\nwb.save(OUTPUT_PATH)",
+   "script": "\nimport os, sys, traceback\nINPUT_PATH = '/in/1_a_init.xlsx'\nOUTPUT_PATH = '/out/1_pred.xlsx'\ntry:\n    import openpyxl\n\n\n    wb = openpyxl.load_workbook(INPUT_PATH)\n    s = '''multi\n    line'''\n    wb.save(OUTPUT_PATH)\nexcept Exception:\n    traceback.print_exc()\n    sys.exit(2)\n"
+  },
+  {
+   "code": "pass",
+   "script": "\nimport os, sys, traceback\nINPUT_PATH = '/in/1_a_init.xlsx'\nOUTPUT_PATH = '/out/1_pred.xlsx'\ntry:\n    pass\nexcept Exception:\n    traceback.print_exc()\n    sys.exit(2)\n"
+  }
+ ],
+ "compare": [
+  {
+   "a": 1,
+   "b": 1.0,
+   "equal": true
+  },
+  {
+   "a": 1.234,
+   "b": 1.23,
+   "equal": true
+  },
+  {
+   "a": 1.235,
+   "b": "1.235",
+   "equal": true
+  },
+  {
+   "a": true,
+   "b": 1,
+   "equal": true
+  },
+  {
+   "a": "",
+   "b": null,
+   "equal": true
+  },
+  {
+   "a": null,
+   "b": "",
+   "equal": true
+  },
+  {
+   "a": "a",
+   "b": "a",
+   "equal": true
+  },
+  {
+   "a": "a",
+   "b": "b",
+   "equal": false
+  },
+  {
+   "a": {
+    "datetime": "2024-01-02T13:00:00"
+   },
+   "b": 45293,
+   "equal": false
+  },
+  {
+   "a": {
+    "datetime": "2024-01-02T11:00:00"
+   },
+   "b": 45293.0,
+   "equal": true
+  },
+  {
+   "a": {
+    "time": "07:15:00"
+   },
+   "b": "07:15",
+   "equal": true
+  },
+  {
+   "a": "1e3",
+   "b": 1000,
+   "equal": true
+  },
+  {
+   "a": 0,
+   "b": null,
+   "equal": false
+  },
+  {
+   "a": "",
+   "b": "",
+   "equal": true
+  }
+ ],
+ "gold": [
+  {
+   "title": "Sheet1",
+   "cells": {
+    "A1": 1,
+    "B1": 2,
+    "B2": "x",
+    "C1": 0
+   }
+  },
+  {
+   "title": "Two Words",
+   "cells": {
+    "A1": "k"
+   }
+  }
+ ],
+ "preds": {
+  "right": [
+   {
+    "title": "Sheet1",
+    "cells": {
+     "A1": 1,
+     "B1": 2.0,
+     "B2": "x",
+     "C1": 0
+    }
+   },
+   {
+    "title": "Two Words",
+    "cells": {
+     "A1": "k"
+    }
+   }
+  ],
+  "wrong": [
+   {
+    "title": "Sheet1",
+    "cells": {
+     "A1": 1,
+     "B1": 3,
+     "B2": "=A1",
+     "C1": 0
+    }
+   },
+   {
+    "title": "Two Words",
+    "cells": {
+     "A1": "z"
+    }
+   }
+  ],
+  "missing_sheet": [
+   {
+    "title": "Other",
+    "cells": {
+     "A1": 1
+    }
+   }
+  ]
+ },
+ "grading": [
+  {
+   "pred": "right",
+   "position": "B1:B2",
+   "evaluate": {
+    "ok": true,
+    "reason": "",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓"
+  },
+  {
+   "pred": "right",
+   "position": "Sheet1!A1:C2",
+   "evaluate": {
+    "ok": true,
+    "reason": "",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓\n  Sheet1!C1: got=0, expected=0 ✓\n  (+2 empty cells correct, omitted)"
+  },
+  {
+   "pred": "right",
+   "position": "'Two Words'!A1",
+   "evaluate": {
+    "ok": true,
+    "reason": "",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Two Words!A1: got='k', expected='k' ✓"
+  },
+  {
+   "pred": "right",
+   "position": "A1:B2,'Two Words'!A1:A2",
+   "evaluate": {
+    "ok": true,
+    "reason": "",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓\n  (+1 empty cells correct, omitted)\n  Two Words!A1: got='k', expected='k' ✓\n  (+1 empty cells correct, omitted)"
+  },
+  {
+   "pred": "wrong",
+   "position": "B1:B2",
+   "evaluate": {
+    "ok": false,
+    "reason": "value@Sheet1!B1: gt=2 pred=3",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗"
+  },
+  {
+   "pred": "wrong",
+   "position": "Sheet1!A1:C2",
+   "evaluate": {
+    "ok": false,
+    "reason": "value@Sheet1!B1: gt=2 pred=3",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗\n  Sheet1!C1: got=0, expected=0 ✓\n  (+2 empty cells correct, omitted)"
+  },
+  {
+   "pred": "wrong",
+   "position": "'Two Words'!A1",
+   "evaluate": {
+    "ok": false,
+    "reason": "value@Two Words!A1: gt='k' pred='z'",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Two Words!A1: got='z', expected='k' ✗"
+  },
+  {
+   "pred": "wrong",
+   "position": "A1:B2,'Two Words'!A1:A2",
+   "evaluate": {
+    "ok": false,
+    "reason": "value@Sheet1!B1: gt=2 pred=3",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗\n  (+1 empty cells correct, omitted)\n  Two Words!A1: got='z', expected='k' ✗\n  (+1 empty cells correct, omitted)"
+  },
+  {
+   "pred": "missing_sheet",
+   "position": "B1:B2",
+   "evaluate": {
+    "ok": false,
+    "reason": "worksheet not found: Sheet1",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output."
+  },
+  {
+   "pred": "missing_sheet",
+   "position": "Sheet1!A1:C2",
+   "evaluate": {
+    "ok": false,
+    "reason": "worksheet not found: Sheet1",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output."
+  },
+  {
+   "pred": "missing_sheet",
+   "position": "'Two Words'!A1",
+   "evaluate": {
+    "ok": false,
+    "reason": "worksheet not found: Two Words",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet 'Two Words' NOT FOUND in output."
+  },
+  {
+   "pred": "missing_sheet",
+   "position": "A1:B2,'Two Words'!A1:A2",
+   "evaluate": {
+    "ok": false,
+    "reason": "worksheet not found: Sheet1",
+    "instruction_type": "t"
+   },
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output.\n  Sheet 'Two Words' NOT FOUND in output."
+  },
+  {
+   "pred": null,
+   "position": "A1",
+   "evaluate": {
+    "ok": false,
+    "reason": "file not exist",
+    "instruction_type": "t"
+   },
+   "report": "Verification: output file does not exist."
+  }
+ ],
+ "feedback": [
+  {
+   "report": "## Output Verification\n  Sheet1!D2: got=None, expected=0 ✗\n  Sheet1!D10: got=None, expected=None ✓\n  (+3 empty cells correct, omitted)",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!D2: your output = None (WRONG)\n  (1 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Data Sheet!B2: got=1, expected=2 ✗\n  Data Sheet!B3: got=2, expected=2 ✓",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!A1: got='a, b', expected='c' ✗\n  Sheet1!A2: got=5, expected=5.0 ✓\n  Sheet1!A3: got=5, expected=5.0 ✓",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!A1: your output = 'a, b' (WRONG)\n  (2 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "Verification: output file does not exist.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  (2 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓\n  Sheet1!C1: got=0, expected=0 ✓\n  (+2 empty cells correct, omitted)",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  (4 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Two Words!A1: got='k', expected='k' ✓",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=2, expected=2 ✓\n  Sheet1!B2: got='x', expected='x' ✓\n  (+1 empty cells correct, omitted)\n  Two Words!A1: got='k', expected='k' ✓\n  (+1 empty cells correct, omitted)",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  (3 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!B1: your output = 3 (WRONG)\n  Sheet1!B2: your output = None (WRONG)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗\n  Sheet1!C1: got=0, expected=0 ✓\n  (+2 empty cells correct, omitted)",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!B1: your output = 3 (WRONG)\n  Sheet1!B2: your output = None (WRONG)\n  (2 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Two Words!A1: got='z', expected='k' ✗",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet1!A1: got=1, expected=1 ✓\n  Sheet1!B1: got=3, expected=2 ✗\n  Sheet1!B2: got=None, expected='x' ✗\n  (+1 empty cells correct, omitted)\n  Two Words!A1: got='z', expected='k' ✗\n  (+1 empty cells correct, omitted)",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n  Sheet1!B1: your output = 3 (WRONG)\n  Sheet1!B2: your output = None (WRONG)\n  (1 other cells are correct.)\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet 'Two Words' NOT FOUND in output.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "## Output Verification\n  Sheet 'Sheet1' NOT FOUND in output.\n  Sheet 'Two Words' NOT FOUND in output.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  },
+  {
+   "report": "Verification: output file does not exist.",
+   "feedback": "Your code executed successfully but produced incorrect results.\nThe following cells have wrong values:\n\nPlease analyze the spreadsheet data more carefully and fix the code. Return a complete corrected Python script inside a ```python``` block."
+  }
+ ],
+ "no_code": "No Python code block was found in your response. Please return a complete Python script inside a ```python``` block."
+}

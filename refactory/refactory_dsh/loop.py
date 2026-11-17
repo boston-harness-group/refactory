@@ -1921,18 +1921,22 @@ class Loop(OuterLoop):
         workdir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, workdir / LEDGER)
 
-    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None) -> None:
+    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None,
+                      gold_feedback: bool = False) -> None:
         """Name the part of the items this candidate is evaluated on.
 
         Written into the candidate's own run directory before the evaluator starts,
         and read by the item loader of either runtime. It is not a knob: a search
         that could set it would choose its own exam, and there would be no item left
-        for the audit to hold out.
+        for the audit to hold out. ``gold_feedback`` lets a train evaluation's passes be
+        told how their attempt compares with the answer (`refactory_dsh.feedback`).
         """
-        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed,
+                                 gold_feedback=gold_feedback)
 
     def _evaluate(
         self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
+        gold_feedback: bool = False,
         _budget_reserved: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
@@ -1975,7 +1979,7 @@ class Loop(OuterLoop):
         result, measurements = self._settled_measure(
             candidate, workdir, task_module.TRAIN, prepare, keep=("occasions",),
             seed=seed, items=items, item_gate=item_gate, item_slots=item_slots,
-            stop_event=stop_event,
+            stop_event=stop_event, gold_feedback=gold_feedback,
         )
         if measurements.get("budget_stopped"):
             self._budget_stopped(candidate, task_module.TRAIN, result, measurements)
@@ -2235,6 +2239,7 @@ class Loop(OuterLoop):
     def _measure(
         self, candidate: Candidate, workdir: Path, part: str, *,
         seed: int | None = None, items: list[str] | None = None,
+        gold_feedback: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
         stop_event: threading.Event | None = None,
@@ -2266,7 +2271,7 @@ class Loop(OuterLoop):
         for index in range(self.config.repeats):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
-            self._write_subset(trial_dir, part, seed=seed)
+            self._write_subset(trial_dir, part, seed=seed, gold_feedback=gold_feedback)
             # Copy the manifest to trial sub-directories so select_subset
             # finds it there too (repeats > 1 creates separate directories).
             manifest = workdir / task_module.MANIFEST

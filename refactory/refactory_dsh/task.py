@@ -124,6 +124,17 @@ class Task:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
+    def train_feedback(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> Any:
+        """What the item's attempt so far is told, judged against its answer: a JSON value,
+        or ``None`` for nothing. Called mid-pass, and only on a train evaluation the outer
+        loop asked to give gold feedback (`gold_feedback_on`), by the one grader-side op
+        that may hand grader-derived data to the pass (`refactory_dsh.feedback`). Never
+        called on val or test. Nothing by default."""
+        return None
+
 
 #: The Tasks a bare name can resolve to.
 TASKS: dict[str, type[Task]] = {}
@@ -436,19 +447,39 @@ def manifest_part_ids(manifest: Mapping[str, Any], part: str) -> list[str] | Non
     return None
 
 
-def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None) -> Path:
+def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None,
+                 gold_feedback: bool = False) -> Path:
     """Record which part of a Task's items a run directory evaluates.
 
     The outer loop writes this before it evaluates a candidate and the item loader
     reads it, so the part travels with the run directory rather than with the search.
+    ``gold_feedback`` marks a train evaluation whose passes may be told how their
+    attempt compares with the answer (`Task.train_feedback`); it is refused for any
+    other part, so val and test passes never are.
     """
+    if gold_feedback and part != TRAIN:
+        raise TaskError(f"gold feedback is for train evaluations only, not {part!r}")
     path = _subset_file(workdir)
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {"part": str(part), "holdout": float(holdout)}
     if seed is not None:
         data["seed"] = seed
+    if gold_feedback:
+        data[GOLD_FEEDBACK] = True
     path.write_text(json.dumps(data, indent=2))
     return path
+
+
+#: The ``subset.json`` key that turns gold feedback on for a train evaluation.
+GOLD_FEEDBACK = "gold_feedback"
+
+
+def gold_feedback_on(workdir: Path) -> bool:
+    """Whether a run directory's passes get gold feedback: only when its ``subset.json``
+    names the train part and turns it on. No file, any other part, or any other value
+    is off."""
+    record = read_subset(workdir)
+    return record.get("part") == TRAIN and record.get(GOLD_FEEDBACK) is True
 
 
 def read_subset(workdir: Path) -> dict[str, Any]:

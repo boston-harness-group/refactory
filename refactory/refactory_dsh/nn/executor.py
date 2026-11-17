@@ -1182,6 +1182,7 @@ class Executor:
                     _pass_dir = prepare_pass_dir(
                         _run_workdir, node.id, item_id, index,
                         declared_reads=_declared_reads,
+                        task_ref=node.task_ref or "",
                     )
                     _pass_completed = False
                     record = None

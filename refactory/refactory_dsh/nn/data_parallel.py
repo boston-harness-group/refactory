@@ -293,7 +293,8 @@ def run_data_concurrent(
         try:
 
             instance = instance_of(item)
-            pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads)
+            pass_dir = prepare_pass_dir(run_workdir, node.id, item_id, index, declared_reads=declared_reads,
+                                        task_ref=node.task_ref or "")
             child = clone_child_executor(executor, item_model(), reserve_step=reserve, gate_iterations={})
             # The item works through an alias of its pass folder, removed when the item
             # ends -- at once when a setup or verify outlives its deadline, so the

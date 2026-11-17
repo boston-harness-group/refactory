@@ -251,7 +251,8 @@ jobs:
           refactory/tests/test_qa_judge.py
 
       # Code steps run on macOS under Seatbelt (`snippet._seatbelt_profile`): the escape
-      # attempts, and every code-step test that needs the sandbox. Required here, so a
+      # attempts, and every code-step test that needs the sandbox. SpreadsheetBench's model
+      # code runs under its own Seatbelt profile (`spreadsheetbench.sandbox`). Required here, so a
       # sandbox that stopped loading fails the job instead of skipping these tests.
       - name: Python code steps under Seatbelt
         env:
@@ -260,5 +261,6 @@ jobs:
           uv run python -m pytest -q -rs -n 3
           refactory/tests/test_code_nodes_macos.py
           refactory/tests/test_code_nodes.py
+          refactory/tests/test_spreadsheetbench.py
           refactory/tests/test_core_operators.py
           refactory/tests/test_bound_settings.py
