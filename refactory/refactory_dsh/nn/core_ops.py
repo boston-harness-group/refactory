@@ -2564,6 +2564,8 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
             if extra:
                 return (f"a new step does not take {', '.join(repr(k) for k in extra)}; it "
                         f"would be ignored. A step's fields: {', '.join(STEP_FIELDS)}")
+        # Interim, until tool lists ship (the new-step-tools work replaces this): only
+        # true or false is honoured, so any other value is refused, not ignored.
         if "tools" in spec and spec["tools"] is not True and spec["tools"] is not False:
             return ("'tools' is true (the step gets tools, in a workspace of its own) or false "
                     f"(none, as when left out); {spec['tools']!r} would be ignored")
