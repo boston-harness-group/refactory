@@ -272,9 +272,10 @@ def main() -> int:
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f'{node_id}-missing.txt').write_text(
                     f'{type(error).__name__}: {error}\n')
-                if spec.get('missing_on_crash'):
-                    from refactory_dsh.node_retry import record_spent
-                    record_spent(workdir, node_id, error)
+                # Why it has no answer, when its type says (`node_retry.record_spent`): a
+                # spent retry, the output limit, or an optional branch that ended for time.
+                from refactory_dsh.node_retry import record_spent
+                record_spent(workdir, node_id, error)
                 # dm-232: settle the pending delivery marker at the point
                 # the branch is recorded missing, so it never goes stale.
                 try:

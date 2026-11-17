@@ -401,7 +401,17 @@ def _spec(raw: Any, *, default_kind: str = "agent", default_text: str = NEUTRAL_
     for key in ("id", "to"):
         if raw.get(key) is not None and not isinstance(raw.get(key), str):
             raise _Refused(f"'{key}' is a string")
-    return {**raw, "kind": kind, "text": text if text is not None else (
+    route = None
+    if raw.get("route") is not None:
+        if kind != "agent":
+            raise _Refused("only an agent step takes a 'route'")
+        from .graph import route_declaration
+
+        try:
+            route = route_declaration(raw["route"])
+        except ValueError as exc:
+            raise _Refused(str(exc)) from exc
+    return {**raw, "kind": kind, "route": route, "text": text if text is not None else (
         default_text if kind == "agent" else "")}
 
 
@@ -466,8 +476,8 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     sees (agents only) and the step itself.
 
     ``writes``/``produces`` are its outputs when it takes over another step's; by default
-    one file ``<id>.txt`` and one fact ``<id>``. ``settings_from`` is the agent whose role
-    and timeout a new agent takes; a copy (``spec["_like"]``) of an agent that uses tools
+    one file ``<id>.txt`` and one fact ``<id>``. ``settings_from`` is the agent whose role,
+    timeout and route a new agent takes, unless the spec names a route of its own; a copy (``spec["_like"]``) of an agent that uses tools
     keeps them, in a fresh workspace of its own. ``verdict`` makes it a judge: its answer
     starts with one of the labels, and it writes its reply only, for the gate to read."""
     from refactory_dsh import snippet
@@ -505,6 +515,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
                 node["role"] = source.role
             if source.timeout_s:
                 node["timeout_s"] = source.timeout_s
+        route = spec.get("route") or (source.route if source is not None
+                                      and source.kind == "agent" else None)
+        if route:
+            node["route"] = dict(route)
         if like is not None and _uses_tools(like):
             # A copy of a step that uses tools keeps them only in a fresh workspace of its
             # own, so it never works where the step it copies works (`coverage.DECISIONS`).
@@ -1869,7 +1883,143 @@ def _pre_loop_line(edit: dict, state: dict) -> str | None:
     if edit.get("id") is not None and edit["id"] in graph.nodes:
         raise _Refused(f"node {edit['id']!r} already exists")
     _loop_cap(edit)
+    if _back_to(graph, edit, node).id != node.id:
+        _loop_cycle_valid(edit, state)
     return None
+
+
+def _pass_of(graph: Graph, node_id: str) -> str | None:
+    """The innermost data pass whose body holds ``node_id`` (``None``: the top level)."""
+    bodies = [(len(body), data_id) for data_id, node in graph.nodes.items()
+              if node.kind == "data" and node_id in (body := graph.data_body(data_id))]
+    return min(bodies)[1] if bodies else None
+
+
+def _forward_flow(graph: Graph) -> dict[str, list[str]]:
+    """Each node's successors as a run walks them, retries left out: plain and verdict
+    edges, a fork to its branch heads (not its own edge to its join, which a run reaches
+    only through them), a branch's end to its join. A data node leads on past its pass
+    (whose body is a scope of its own)."""
+    from .loops import loop_edges
+
+    retries = loop_edges(graph)
+    out: dict[str, list[str]] = {key: [] for key in graph.nodes}
+    for edge in graph.edges:
+        source = graph.nodes.get(edge.source)
+        if source is not None and source.kind == "fork" and source.targets:
+            continue
+        if edge.key() not in retries and edge.source in out and edge.target in out:
+            out[edge.source].append(edge.target)
+    for key, node in graph.nodes.items():
+        if node.kind == "fork":
+            out[key] += [t for t in node.targets if t in out]
+        elif node.kind == "join":
+            for source in node.sources:
+                if source in out:
+                    out[source].append(key)
+    return out
+
+
+def _reach(flow: Mapping[str, Sequence[str]], start: str, without: str | None = None
+           ) -> set[str]:
+    seen, todo = {start}, [start]
+    while todo:
+        for nxt in flow.get(todo.pop(), ()):
+            if nxt not in seen and nxt != without:
+                seen.add(nxt)
+                todo.append(nxt)
+    return seen
+
+
+def _back_to(graph: Graph, edit: dict, node: Node) -> Node:
+    """The step a loop sends back to: ``node`` itself, or the edit's ``back_to`` -- an
+    agent (only an agent's prompt takes the judge's reason, on both runtimes) that every
+    run passes before ``node``, in the same per-item pass and fork branch as ``node``, so
+    a send-back re-runs exactly the steps from it to ``node`` (a fork in between whole)."""
+    back = edit.get("back_to")
+    if back is None or back == node.id:
+        return node
+    target = _plain_step(graph, back, "a loop's 'back_to'")
+    where, here = _pass_of(graph, target.id), _pass_of(graph, node.id)
+    if where != here:
+        inside = f"inside the per-item pass {here!r}" if here else "outside any per-item pass"
+        raise _Refused(f"'back_to' {target.id!r} is outside the pass {node.id!r} is in "
+                       f"({node.id!r} is {inside}); a loop sends back only within its pass")
+    flow = _forward_flow(graph)
+    if target.id in _reach(flow, node.id):
+        raise _Refused(f"'back_to' {target.id!r} comes after {node.id!r}; it names an earlier "
+                       f"step, where the work goes back to when the judge after {node.id!r} "
+                       "says reloop")
+    start = _scope_start(graph, here)
+    if target.id != start and node.id in _reach(flow, start, without=target.id):
+        on_every = sorted(n for n in _reach(flow, start) - {node.id}
+                          if graph.nodes[n].kind == "agent" and n != target.id
+                          and (n == start or node.id not in _reach(flow, start, without=n)))
+        raise _Refused(f"'back_to' {target.id!r} is not on every path to {node.id!r} (a branch "
+                       "or a route's way passes it by); it names a step every run passes "
+                       f"before {node.id!r}: " + (", ".join(on_every) or "none here"))
+    from .validate import fork_branches
+
+    for fork in (n for n in graph.nodes.values() if n.kind == "fork"):
+        for branch in fork_branches(graph, fork, graph.fork_join(fork.id)):
+            if node.id in branch and target.id not in branch:
+                raise _Refused(f"{node.id!r} is inside a branch of fork {fork.id!r} and "
+                               f"'back_to' {target.id!r} is not; a loop in a branch sends "
+                               "back only within it (judge a step after the fork's join to "
+                               "re-run the whole fork)")
+            if target.id in branch and node.id not in branch:
+                raise _Refused(f"'back_to' {target.id!r} is inside a branch of fork "
+                               f"{fork.id!r} and {node.id!r} is not; a send-back from after "
+                               "the join re-runs the whole fork, so it names a step before "
+                               f"{fork.id!r}")
+    if target.kind != "agent":
+        nearest = _agents_after(graph, flow, target.id, node.id)
+        raise _Refused(f"'back_to' {target.id!r} is {'code' if _is_code(target) else 'an op'}, "
+                       "which has no prompt for the judge's reason; send back to the model "
+                       "step that should act on it: "
+                       + (", ".join(nearest) or f"none between it and {node.id!r}"))
+    return target
+
+
+def _scope_start(graph: Graph, data_id: str | None) -> str:
+    """Where a run of the scope begins: the pass's entry, or the run's start."""
+    return graph.nodes[data_id].subgraph_entry if data_id else graph.start
+
+
+def _agents_after(graph: Graph, flow: Mapping[str, Sequence[str]], start: str, end: str
+                  ) -> list[str]:
+    """The first agents after ``start`` on the way to ``end`` (``end`` included)."""
+    leads = {n for n in _reach(flow, start) if end in _reach(flow, n)}
+    out, seen, todo = [], {start}, list(flow.get(start, ()))
+    while todo:
+        current = todo.pop(0)
+        if current in seen or current not in leads:
+            continue
+        seen.add(current)
+        if graph.nodes[current].kind == "agent":
+            out.append(current)
+        else:
+            todo += list(flow.get(current, ()))
+    return sorted(out)
+
+
+def _loop_cycle_valid(edit: dict, state: dict) -> None:
+    """Refused when the validator refuses the loop's cycle (V10, V12, V16) and did not
+    refuse the graph before it."""
+    from .validate import validate
+
+    rules = ("V10", "V12", "V16")
+
+    def issues(of: Mapping[str, Any]) -> list:
+        return [issue for issue in validate(_edits()._graph(of), _knob_values(of),
+                                            declared_knobs={}, resolve_calls=False)
+                if issue.code in rules]
+
+    before = {str(issue) for issue in issues(state)}
+    new = [issue for issue in issues(_simulate(state, _expand_loop_line(edit, state)))
+           if str(issue) not in before]
+    if new:
+        raise _Refused(f"the validator refuses the cycle back to {edit['back_to']!r}: {new[0]}")
 
 
 def _loop_cap(edit: dict) -> int:
@@ -1923,6 +2073,7 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
     edits = _edits()
     graph = edits._graph(state)
     node = graph.nodes[edit["step"]]
+    back = _back_to(graph, edit, node).id
     judge = _judge(edit)
     there = _available(graph).get(node.id, set()) | _outputs(node)
     seen = _seen(graph, state, there, _consumed(node, state) | _outputs(node), edit.get("sees"))
@@ -1938,12 +2089,12 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
                             settings_from=node if node.kind == "agent" else None)
         gate = _gate_state(gate_id, judge, "", seen, label="proceed",
                            reads=[f"{judge_id}.txt"], iterations=True, cap=cap)
-        steps += edits._expand_loop({"target": node.id, "gate": gate}, state)
+        steps += edits._loop_steps(graph, node.id, gate, back)
         steps += _add_chain(nodes, {"before": gate_id})
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen, label="proceed",
                            iterations=True, cap=cap)
-        steps += edits._expand_loop({"target": node.id, "gate": gate}, state)
+        steps += edits._loop_steps(graph, node.id, gate, back)
     return steps
 
 
@@ -2327,13 +2478,27 @@ REACHES = ("its output goes into the nearest prompt {where} that can take it -- 
            "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
            "with neither, nothing reads it until you add a reader")
 
+#: The field a new agent step names its own route in (`Node.route`).
+ROUTE_FIELD = "route"
+
+
+def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
+    """The request's one line for ``route``: where it goes and the run's values for it
+    (`workers.StepRoutes.offered`)."""
+    values = "; ".join(f"{key} {', '.join(vals)}" for key, vals in offered.items())
+    return (f"- `{ROUTE_FIELD}` on a new agent step (`insert`, `branch`, `merge`, or a step in "
+            "'into', 'new' or 'to'): its own model, effort or output cap, any of them, each "
+            f"one of this run's -- {values}; left out, it runs on its neighbour's. E.g. "
+            + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
+
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
-                   "reads", "tools", "takes_over"),
+                   "reads", "tools", "takes_over", "route"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call'); it "
                 "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
@@ -2368,7 +2533,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "branch": {
         "reads_as": ('parallel',),
-        "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
+        "fields": ("fork", "kind", "text", "sees", "optional", "id", "to", "route"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
                 "single fact or file names there before the fork); "
@@ -2385,8 +2550,13 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "loop": {
         "reads_as": ('loop',),
-        "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
-        "line": "a judge after a step that can send it back with its reason: 'judge' agent "
+        "fields": ("step", "back_to", "judge", "text", "sees", "max_iterations", "id", "target",
+                   "gate"),
+        "line": "a judge after a step that can send it back with its reason -- or, with "
+                "'back_to', send the work back to an earlier agent step, so every step from "
+                "there to the judge runs again (a fork in between whole); 'back_to' is one "
+                "every run passes before the step, in the same per-item pass and fork "
+                "branch: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
                 "why}) or a callable. The judge sees what the step read and wrote, unless "
@@ -2420,7 +2590,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "merge": {
         "reads_as": ('step',),
-        "fields": ("steps", "kind", "text", "id"),
+        "fields": ("steps", "kind", "text", "id", "route"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
                 "outputs",
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
@@ -2566,7 +2736,7 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
 
 #: What a new step written inside an operator ('new', 'into', a route's 'to') may say;
 #: anything else it would ignore, so it is refused (`_unknown_fields`).
-STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools")
+STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route")
 
 
 def _tools_refusal(tools: Any) -> str | None:
@@ -2652,6 +2822,11 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     def pre_loop(edit: dict, state: dict) -> str | None:
         if not is_one_line_loop(edit):
+            if "back_to" in edit:
+                # Written out, the gate's reloop goes to 'target'; a 'back_to' there would
+                # be ignored, so it is refused rather than dropped.
+                return ("'back_to' goes with the one-line loop ('step' and 'judge'); "
+                        "written out, the gate sends back to 'target'")
             if "max_iterations" in edit:
                 # The written-out form's cap is its gate's own field; a top-level one
                 # would be ignored there, so it is refused rather than dropped.
@@ -2815,8 +2990,9 @@ def sample(name: str, state: Mapping[str, Any], rng: Any) -> dict[str, Any]:
     """One instance of operator ``name`` on ``state`` with no free text, for a strategy
     with no model proposer (`edits.random_edit`): the operator's example, its step,
     next step and fork drawn from the graph (a ``rewire`` sometimes keeping one step its
-    step reads from beside ``"task"``), and its texts left to the defaults. Whether
-    it applies there is the caller's to check (`edits.precheck`)."""
+    step reads from beside ``"task"``; a ``loop`` half the time sending back to an agent
+    before its step), and its texts left to the defaults. Whether it applies there is the
+    caller's to check (`edits.precheck`)."""
     graph = _edits()._graph(state)
     ids = sorted(graph.nodes)
     step = rng.choice(ids) if ids else "<step>"
@@ -2835,4 +3011,8 @@ def sample(name: str, state: Mapping[str, Any], rng: Any) -> dict[str, Any]:
                              for m in makers.get(key, ()) if m != step})
         if reads_from and rng.random() < 0.5:
             edit["sees"] = [TASK, rng.choice(reads_from)]
+    if name == "loop" and step in graph.nodes:
+        earlier = sorted(n for n in _upstream(graph, step) if graph.nodes[n].kind == "agent")
+        if earlier and rng.random() < 0.5:
+            edit["back_to"] = rng.choice(earlier)
     return edit

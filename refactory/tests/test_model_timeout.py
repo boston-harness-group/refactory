@@ -272,7 +272,7 @@ def test_all_agent_nodes_get_command_timeout_s(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("REFACTORY_WORKER_CONTEXT", "{}")
     from refactory_dsh.ir import AgentNode, AgentRole, Workflow, GateNode
-    from refactory_dsh.model import DshModelClient, NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S, DshModelClient, NODE_DISPATCH_OVERHEAD_S
     from refactory_dsh.workers import lower_workflow
 
     # Build a minimal workflow with one agent node
@@ -285,8 +285,12 @@ def test_all_agent_nodes_get_command_timeout_s(tmp_path, monkeypatch):
     result = lower_workflow(workflow, tmp_path, ctx)
     draft = result.nodes["draft"]
     assert draft.command_timeout_s is not None
-    expected = 3 * 2000 + NODE_DISPATCH_OVERHEAD_S
-    assert draft.command_timeout_s == expected
+    # DSH reports activity, so the session has no wall: the envelope outlasts the
+    # harness backstop. Codex reports none and keeps its route's budget.
+    assert draft.command_timeout_s == DEFAULT_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    codex = lower_workflow(workflow, tmp_path / "codex",
+                           DshModelClient(timeout_s=2000, worker_backend="codex", model="m").context())
+    assert codex.nodes["draft"].command_timeout_s == 2000 + NODE_DISPATCH_OVERHEAD_S
 
 
 # ---------------------------------------------------------------------------

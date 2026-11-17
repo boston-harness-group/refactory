@@ -26,7 +26,7 @@ The mode library: the ``nn`` of the harness world.
 | class | `Knob` | `(default: 'Any', kind: 'str' = 'float', lo: 'float \| None' = None, hi: 'float \| None' = None, enum: 'tuple[Any, ...]' = (), values: 'tuple[str, ...]' = (), frozen: 'bool' = False, description: 'str' = '', required: 'bool' = False) -> None` |
 | class | `Memory` | `(namespace: 'str', kind: 'str' = 'log', retention: 'str' = 'run', description: 'str' = '') -> None` |
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = (), knob_outputs: 'dict[str, tuple[str, ...]] \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, route: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = (), knob_outputs: 'dict[str, tuple[str, ...]] \| None' = None) -> None` |
 | class | `Package` | `(name: 'str', description: 'str' = '', version: 'str' = '0.1.0', modes: "tuple[type['Mode'], ...]" = (), ops: 'tuple[str, ...]' = (), extends: 'str' = '', requires: 'tuple[str, ...]' = (), trust: 'str' = 'trusted', origin: 'str' = '', strategies: 'tuple[type, ...]' = ()) -> None` |
 | class | `Port` | `(name: 'str', path: 'str', media_type: 'str' = 'text/markdown', description: 'str' = '') -> None` |
 
@@ -52,10 +52,11 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 | class | `Edge` | `(source: 'str', target: 'str', condition: 'str \| None' = None) -> None` |
 | class | `Graph` | `(*, auto_start: 'bool' = True) -> 'None'` |
 | class | `GraphError` | `` |
-| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = (), knob_outputs: 'dict[str, tuple[str, ...]] \| None' = None) -> None` |
+| class | `Node` | `(id: 'str', kind: 'str', call: 'str' = '', evaluator: 'str' = '', gate_kind: 'str' = 'fn', knobs: 'tuple[str, ...]' = (), reads: 'tuple[str, ...]' = (), required_reads: 'tuple[str, ...]' = (), writes: 'tuple[str, ...]' = (), produces: 'tuple[str, ...]' = (), prompt_template: 'str' = '', system_prompt_template: 'str' = '', role: 'str' = 'ceo', tools: 'tuple[str, ...]' = (), max_iterations: 'int' = 1, on_exhausted: 'str' = '', notes: 'str' = '', blocking: 'bool' = True, score_effect: 'str' = 'affects', targets: 'tuple[str, ...]' = (), optional_targets: 'tuple[str, ...]' = (), sources: 'tuple[str, ...]' = (), subgraph_entry: 'str' = '', subgraph_exit: 'str' = '', task_ref: 'str' = '', source_path: 'str' = '', source_format: 'str' = '', inline_items: 'tuple[dict[str, Any], ...]' = (), limit: 'int' = 0, parallelism: 'int' = 1, parallelism_knob: 'str' = '', resource_role: 'str \| None' = None, feedback_keys: 'tuple[str, ...]' = (), timeout_s: 'int \| None' = None, retry: 'dict[str, Any] \| None' = None, outputs_only: 'bool' = False, workspace: 'dict[str, str] \| None' = None, route: 'dict[str, str] \| None' = None, tool_policy: 'str \| None' = None, field_bindings: 'tuple[tuple[str, str], ...]' = (), code: 'str' = '', inputs: 'tuple[str, ...]' = (), knob_outputs: 'dict[str, tuple[str, ...]] \| None' = None) -> None` |
 | function | `op_io` | `(node: 'Node') -> 'tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]'` |
 | function | `retry_declaration` | `(value: 'Any') -> 'dict[str, Any] \| None'` |
 | function | `retry_safe` | `(node: "'Node'") -> 'bool'` |
+| function | `route_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 | function | `workspace_declaration` | `(value: 'Any') -> 'dict[str, str] \| None'` |
 
 - **`Edge`** — One connection between two nodes, and the verdict that selects it.
@@ -65,6 +66,7 @@ The structure of a mode: nodes, edges, and their canonical serialization.
 - **`op_io`** — A node's writes, reads and facts in the order both runtimes hand them to its op
 - **`retry_declaration`** — A retry declaration in its one canonical form, or None for no retry.
 - **`retry_safe`** — Whether running ``node`` again in a fresh session cannot start from what a failed
+- **`route_declaration`** — A step route in its one canonical form (only the fields it sets, each a nonempty
 - **`workspace_declaration`** — A workspace declaration in its one canonical form, or None for ``none``.
 
 
@@ -517,7 +519,7 @@ The workflow IR this package owns and lowers a mode state into.
 | kind | name | signature |
 |---|---|---|
 | class | `AgentConfig` | `(*, role: refactory_dsh.ir.AgentRole, model: str, timeout: int = 600) -> None` |
-| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, missing_on_crash: bool \| None = None, workspace: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
+| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, missing_on_crash: bool \| None = None, workspace: dict[str, str] \| None = None, route: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
 | class | `AgentRole` | `(*values)` |
 | class | `ArtifactCheck` | `(*, path: str, must_exist: bool = True, min_size: int = 0, must_contain: list[str] = <factory>) -> None` |
 | class | `DataItem` | `(*, id: str, path: str \| None = None, metadata: dict[str, typing.Any] = <factory>, prompt: str = '') -> None` |
@@ -986,6 +988,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | kind | name | signature |
 |---|---|---|
 | class | `GraphTelemetry` | `(workdir: 'Path', context: 'dict[str, Any]', budget: 'Any' = None)` |
+| class | `StepRoutes` | `(base: 'dict[str, Any]', role_routes: 'dict[str, Any] \| None' = None, node_routes: 'dict[str, Any] \| None' = None) -> 'None'` |
 | function | `account_usage` | `(budget: 'Any', receipt: 'dict[str, Any]', *, final: 'bool' = False) -> 'None'` |
 | function | `agent_roles` | `(state: 'dict[str, Any]') -> 'dict[str, str]'` |
 | function | `begin` | `(workdir: 'Path', route: 'dict[str, Any]', *, node: 'str' = '', role: 'str' = 'worker', tool_policy: 'str' = '') -> 'Path'` |
@@ -1014,6 +1017,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `write_patch` | `(path: 'Path', runtime_root: 'Path', route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None' = None, *, workspace_root: 'Path \| None' = None, tool_home: 'Path \| None' = None, system_prompt: 'str' = '', tool_policy: 'str' = '', seal: 'dict[str, Any] \| None' = None, session_store: 'Path \| None' = None) -> 'None'` |
 
 - **`GraphTelemetry`** — One coordinator receipt; node subprocesses own distinct worker receipts.
+- **`StepRoutes`** — The routes a run names -- its own, and each role's and node's in its route maps --
 - **`account_usage`** — Keep measured DSH calls while exposing incomplete delegated coverage.
 - **`agent_roles`** — Each agent node of a mode state and the worker role it is dispatched under.
 - **`bundled_claude_code`** — The Claude Code bundled with the Agent SDK the installed adapter resolves:
@@ -1122,7 +1126,7 @@ The per-item half of a data node, from the command line.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
-- **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+- **`error_kind`** — A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None

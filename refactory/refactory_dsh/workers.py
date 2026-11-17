@@ -126,6 +126,67 @@ def resolve_route(base: dict[str, Any], *, role: str = 'worker', node: str = '',
     return validate_route(route)
 
 
+class StepRoutes:
+    """The routes a run names -- its own, and each role's and node's in its route maps --
+    which bound what a step of a searched graph may choose for itself (`Node.route`): its
+    model, effort and output cap, each a value one of those routes uses with the same
+    backend and provider. A step is never offered a model, effort or cap the run's author
+    did not name."""
+
+    def __init__(self, base: dict[str, Any], role_routes: dict[str, Any] | None = None,
+                 node_routes: dict[str, Any] | None = None) -> None:
+        self.base = validate_route(dict(base))
+        self.role_routes = dict(role_routes or {})
+        self.node_routes = dict(node_routes or {})
+        self.routes = [self.base,
+                       *(resolve_route(self.base, role=role, role_routes=self.role_routes)
+                         for role in sorted(self.role_routes)),
+                       *(resolve_route(self.base, node=node, node_routes=self.node_routes)
+                         for node in sorted(self.node_routes))]
+
+    @classmethod
+    def of(cls, model: Any) -> 'StepRoutes | None':
+        """A model client's routes, or None for a client that has none (a scripted one)."""
+        route = getattr(model, 'route', None)
+        if not callable(route):
+            return None
+        return cls(route(), getattr(model, '_role_routes', None), getattr(model, '_node_routes', None))
+
+    def step_route(self, node: str, role: str) -> dict[str, Any]:
+        """The route a step runs on before its own: its role's, then its node's."""
+        return resolve_route(self.base, role=role, node=node, role_routes=self.role_routes,
+                             node_routes=self.node_routes)
+
+    def values(self, under: dict[str, Any]) -> dict[str, list[str]]:
+        """Each field a step may set, with the values the run's routes on ``under``'s
+        backend and provider use."""
+        from refactory_dsh.nn.graph import STEP_ROUTE_FIELDS
+        same = [r for r in self.routes if (r.get('worker_backend'), r.get('provider', ''))
+                == (under.get('worker_backend'), under.get('provider', ''))]
+        return {key: sorted({str(r[key]) for r in same if r.get(key)}) for key in STEP_ROUTE_FIELDS}
+
+    def offered(self) -> dict[str, list[str]]:
+        """What a step on the run's own route may choose: each field's values other than
+        the run's own. Empty when there is nothing to choose."""
+        offered = {key: [v for v in values if v != str(self.base.get(key) or '')]
+                   for key, values in self.values(self.base).items()}
+        return {key: values for key, values in offered.items() if values}
+
+    def refusal(self, node: str, role: str, declared: dict[str, str]) -> str | None:
+        """Why ``node`` may not run on ``declared``, or None when every field it sets is a
+        value the run's routes use and not what the step runs on already."""
+        under = self.step_route(node, role)
+        allowed = self.values(under)
+        for key, value in declared.items():
+            if value not in allowed[key]:
+                return (f"step {node!r} sets route {key} {value!r}, which no route of this run "
+                        f"uses; allowed: {', '.join(allowed[key]) or 'none'}")
+            if value == str(under.get(key) or ''):
+                return (f"step {node!r} sets route {key} {value!r}, which it runs on already; "
+                        "leave it out")
+        return None
+
+
 def claude_executable_choice(route: dict[str, Any]) -> str:
     """The Claude Code executable a claude_code route names, else `CLAUDE_EXECUTABLE_ENV`'s;
     empty keeps the one bundled with the Agent SDK."""
@@ -611,6 +672,13 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                 "only a dispatched worker can give them; this graph has no worker model context, so "
                 "they would run as the CEO's subagent, in the CEO's own directory. Run it with a "
                 "worker route (the default for `refactory run` and the GUI).")
+        routed = sorted(name for name, node in workflow.nodes.items()
+                        if isinstance(node, AgentNode) and node.route)
+        if routed:
+            raise ValueError(
+                f"agent node(s) {', '.join(repr(name) for name in routed)} declare a route of their "
+                "own, which only a dispatched worker can take; this graph has no worker model "
+                "context, so they would run on the CEO's model. Run it with a worker route.")
         return workflow
     import hashlib
     import shlex
@@ -627,6 +695,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if not isinstance(node, AgentNode):
             continue
         selected = client.for_node(name, role=node.role.value)
+        if node.route is not None:
+            selected = selected.with_step_route(node.route)
         # The node's tool policy is part of its client: a session without tools may
         # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
         # below reserves every attempt.
@@ -695,6 +765,11 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         from refactory_dsh.model import DEFAULT_TIMEOUT_S, NODE_DISPATCH_OVERHEAD_S, node_session_budget_s
         attempts = selected.retry_attempts()
         per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
+        # A session that reports activity has no wall unless its node declares one: it ends
+        # on inactivity, or at the harness backstop at the latest (`model.DEFAULT_BACKSTOP_S`),
+        # so the dispatch outlasts the backstop, not a per-completion wall.
+        envelope_s = (selected.backstop_limit() + NODE_DISPATCH_OVERHEAD_S if selected.observes_activity()
+                      else node_session_budget_s(attempts, per_completion))
         if retry:
             # Every attempt's session -- the first under the node's bound, each retry
             # longer by its factor -- plus the one dispatch overhead,
@@ -711,13 +786,13 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             else:
                 # A crash retry with no node bound runs each session under the route's
                 # envelope, so the dispatch reserves one per attempt.
-                command_timeout_s = (1 + int(retry['times'])) * node_session_budget_s(attempts, per_completion)
+                command_timeout_s = (1 + int(retry['times'])) * envelope_s
         elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.
             command_timeout_s = node.timeout + NODE_DISPATCH_OVERHEAD_S
         else:
-            command_timeout_s = node_session_budget_s(attempts, per_completion)
+            command_timeout_s = envelope_s
         if node.workspace:
             # The workspace is prepared before the session starts -- a clone, its
             # installs, generate and setup -- so the dispatch outlasts the session by

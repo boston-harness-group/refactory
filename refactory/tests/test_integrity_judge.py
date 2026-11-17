@@ -287,7 +287,10 @@ def test_off_makes_no_call_and_changes_no_request_or_report(tmp_path, monkeypatc
     import re
 
     def text(ctx: Any) -> str:  # wall-clock timings differ between any two runs
-        return re.sub(r'"(\w+_s)": [0-9.]+', r'"\1": T', ctx.render())
+        rendered = re.sub(r'"(\w+_s)": [0-9.]+', r'"\1": T', ctx.render())
+        # "Time per item" is measured per item too (median, p90, longest), as in
+        # test_trace_files.
+        return re.sub(r"## Time per item\n[^\n]*\n\n?", "", rendered)
 
     assert len(proposer.contexts) == len(bare.contexts) == len(PLAN)
     for ours, theirs in zip(proposer.contexts, bare.contexts):

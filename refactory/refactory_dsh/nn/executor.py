@@ -1637,10 +1637,11 @@ class Executor:
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
-        if spent:
-            from refactory_dsh.node_retry import record_spent
+        from refactory_dsh.node_retry import record_spent
 
-            record_spent(self.ctx.workdir, node.id, exc)
+        # Why it has no answer, when its type says (`node_retry.record_spent`): a spent
+        # retry, the output limit, or an optional branch that ended for time.
+        record_spent(self.ctx.workdir, node.id, exc)
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
@@ -2040,6 +2041,13 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
+        if node.route is not None:
+            # The step's own model, effort and output cap, as the spine's worker gets them
+            # (`workers.lower_workflow`); a client that cannot take them is refused.
+            if not callable(getattr(client, "with_step_route", None)):
+                raise ValueError(f"agent node {node.id!r} declares a route, which the model "
+                                 "client cannot take")
+            client = client.with_step_route(node.route)
         # ── no-tools enforcement ──────────────────────────────────────────
         tool_policy = node.tool_policy or ""
         if callable(getattr(client, "with_tool_policy", None)):

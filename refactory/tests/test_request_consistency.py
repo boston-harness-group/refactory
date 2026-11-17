@@ -167,7 +167,9 @@ def _loop() -> None:
     """'it is sent back at most 'max_iterations' times, so it runs at most that many times
     plus one (default D: up to D+1 runs; LO to HI; afterwards the knob
     <gate>__max_iterations, the gate being <step>_check unless 'id' names it), then the run
-    goes on'; an agent judge's 'answer starts with proceed or reloop'."""
+    goes on'; an agent judge's 'answer starts with proceed or reloop'; and 'with 'back_to',
+    send the work back to an earlier agent step, so every step from there to the judge runs
+    again (a fork in between whole)'."""
     default, lo, hi = core_ops.LOOP_ITERATIONS
     line = core_ops.OPERATORS["loop"]["line"]
     assert f"default {default}: up to {default + 1} runs; {lo} to {hi}" in line
@@ -191,6 +193,17 @@ def _loop() -> None:
             step="draft", judge="", cap=cap, runs=cap + 1, knob="",
             exhausted="").split(",")[0] in drawn
         assert f"max {cap} -> {cap + 1} runs" in drawn
+    assert "with 'back_to', send the work back to an earlier agent step, so every step " \
+        "from there to the judge runs again (a fork in between whole)" in line
+    _a, out = _ok("fuzz_draft_review", {"op": "loop", "step": "review", "back_to": "draft"})
+    graph = _graph(out)
+    assert ("review_check", "draft", "reloop") in _edges(graph)
+    assert {e.target for e in graph.edges if e.source == "review_check"
+            and e.condition == "proceed"} == _succ(_seed("fuzz_draft_review"), "review")
+    assert "loop(draft … review, judge " in pipeline_view.render(out.state)
+    _a, refused = _apply("fuzz_draft_review", {"op": "loop", "step": "draft",
+                                               "back_to": "review"})
+    assert isinstance(refused, list) and "comes after 'draft'" in refused[0], refused
     for bad in (lo - 1, hi + 1):
         _a, refused = _apply("fuzz_draft_review",
                              {"op": "loop", "step": "draft", "max_iterations": bad})
