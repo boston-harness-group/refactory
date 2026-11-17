@@ -39,6 +39,15 @@ const responses: Record<string, string | string[]> = responsesFile
   : {}
 const turns: Record<string, number> = {}
 
+function readJson(path: string): Record<string, unknown> {
+  try {
+    const loaded: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return loaded !== null && typeof loaded === 'object' ? loaded as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
 function responseFor(id: string): string {
   const scripted = responses[id]
   if (!Array.isArray(scripted)) return scripted ?? `scripted response for ${id}`
@@ -181,6 +190,15 @@ for (let step = 0; step < 1000; step += 1) {
       for (const name of node.writes ?? []) {
         mkdirSync(dirname(join(base, name)), { recursive: true })
         writeFileSync(join(base, name), response)
+      }
+      // A produced fact, as the real worker records it (`worker_node.execute`): the
+      // node's first declared fact holds its first write's text (here, the reply).
+      const declared = readJson(join(workdir!, '.refactory', 'declarations.json'))[node.id] as
+        { produces?: string[] } | undefined
+      const fact = declared?.produces?.[0]
+      if (fact !== undefined) {
+        const factsFile = join(base, 'facts.json')
+        writeFileSync(factsFile, JSON.stringify({ ...readJson(factsFile), [fact]: response }))
       }
       await call('wf_done', { node: node.id, output: response })
     } else {

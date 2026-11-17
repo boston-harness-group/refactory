@@ -1782,7 +1782,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 
 | operator | one line | what the system does |
 |---|---|---|
-| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output is wired as **Wiring** below says; before a fork's branch, it takes the branch's place |
+| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`; `"takes_over": "<earlier step>"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output is wired as **Wiring** below says; before a fork's branch, it takes the branch's place |
 | `remove` | `{"op": "remove", "step": "<step>"}`; on a gate, `"keep": "<verdict>"` | predecessors to successor; a fork's branch leaves the fork's targets and the join's sources, and a fork left with one branch is folded away; an operator's own helper steps (its collect step, a loop's judge) go too, so do the slots it put in other steps' prompts and the knobs only it read; refused with the exact reader when a step still needs what only it makes. On a gate, the kept verdict's path stays and steps only the others reached go |
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
@@ -1792,6 +1792,40 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
 | `merge` | `{"op": "merge", "steps": ["A", "B"], "text": "..."}` | one step with A's inputs and B's outputs; refused when another step reads what A makes |
+
+**What a core operator holds to.** From the 2026-11-17 expressibility audit
+(`audit/easy-dsl-gaps.md` on the lab):
+
+- `insert` takes `takes_over: <step>`: the new step writes that earlier step's outputs, so
+  what read them (what is scored) reads the new step's, and the step's own go under new
+  names (`<step>.txt`, `<step>`) for the steps before the new one. "Several attempts and
+  a choice" uses it, so the chosen attempt is what is graded. The step taken over must
+  have run whenever the new one runs (a fork runs every branch, a route one), so a step on
+  a sibling branch or a route's skipped branch is refused. Also refused: a frozen knob, or
+  a knob a later step shares, that names its output; a step that names it in its code or
+  feedback keys; an agent without tools taking over a step that writes two files; and,
+  with the run's protected and grading nodes, rewiring one (`E-protected`).
+- A `parallelize` copy is the step itself under a new id (`core_ops._clone_agent`): the
+  same prompt, system prompt, role, limits and tools, each bound text in a knob of the
+  copy's own with the same value, frozen where the original's is, and no knob the step
+  lacks. It is sent byte for byte what the step is sent, on both runtimes, so it takes no
+  `sees`.
+- A step a bundle adds keeps the reader the bundle gave it: an edit of the same bundle
+  that removes its last reader (a whole `set_knob` value dropping its `{{slot}}`) is
+  refused `E-unread`, naming that edit; a new step whose output reaches no step is said in
+  the candidate's "As built" (a step ending its pass or the run is not: the Task reads it).
+- A field an operator would ignore is refused, naming the fields it takes
+  (`core_ops._unknown_fields`). That covers a role or timeout on `insert`, a tool list
+  (`tools` is true or false),
+  and a field no step takes inside `new`, `into` or a route's `to`. `insert` lists
+  `system`, which it takes.
+- An operator after which a kept step would run, on some path, without an input it had on
+  every path before is refused (`core_ops.lost_inputs`). An example is a route that skips
+  the steps making what a later step reads. An agent's prompt is read: a `{{slot}}`
+  inside `{% if name %}` is optional there, as the validator holds it (V15). An op or a
+  gate is code that cannot be read, so it keeps every read and input it has, since it may
+  need what it declares optional; only the slots of the knobs it fills honour their
+  guards. A step whose inputs cannot be read is said, never skipped.
 
 **Wiring.** Facts reach a model step as `{{slots}}` in its own prompt knob, files through
 a `collect` step in front of it (so a missing or binary file is said, not a crash); a
