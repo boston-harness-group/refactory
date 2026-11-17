@@ -252,6 +252,73 @@ def test_each_fact_of_the_request_is_said_once():
     assert "0.5714285714285714" not in ungated and "Best score so far: 0.5714." in ungated
 
 
+def test_a_judge_reason_said_the_same_on_two_items_reaches_the_rerun_in_both():
+    """A line is settled only when it comes from no item (the settings, the templates, the
+    ops' framing), never because it recurs: a judge that sends both items back with the
+    same words has that reason shown at each item's re-run, and a choice both items share
+    is still shown, with each item's input."""
+    instructions = "Solve the question step by step and give one choice label."
+    reason = "Sent back because: the answer ignores the boundary case entirely"
+    choice = "C. Converges"
+    knobs = [{"name": "solve__task", "kind": "str", "value": instructions, "frozen": False}]
+
+    def record(item: str) -> dict:
+        first = (f"History:\n- User: QUESTION {item}: does the series converge?\n{choice}\n"
+                 f"{instructions}\nAnswer the latest user request.")
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"QUESTION {item}: does the series converge?",
+                             "choices": [{"label": "C", "text": "Converges"}]},
+                "exchanges": [{"node": "solve", "prompt": first, "response": f"FIRST {item}"},
+                              {"node": "judge", "prompt": f"FIRST {item}\n{instructions}",
+                               "response": "reloop: ignores the boundary case"},
+                              {"node": "solve", "prompt": f"{first}\n{reason}",
+                               "response": f"SECOND {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        rerun = block.split("#### Step ")[3]
+        assert "Also in its prompt (not in its settings):" in rerun, rerun
+        assert reason in rerun, rerun
+        assert "Converges" in block  # the choice, said with the item's input
+        assert instructions not in block  # the settings still hold the instructions
+        # The ops' framing, in every one of the step's prompts and from no item, is not.
+        assert "Answer the latest user request." not in block and "History:" not in block
+
+
+def test_a_line_carrying_an_items_reply_is_shown_even_in_every_prompt_of_a_step():
+    """Framing holds nothing from any item: a line quoting a step's reply is the item's
+    evidence even when it is the same in every one of the step's prompts."""
+    verdict = "the answer ignores the boundary case entirely"
+    knobs = [{"name": "report__task", "kind": "str", "value": "Write the report.",
+              "frozen": False}]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"QUESTION {item}"},
+                "exchanges": [{"node": "judge", "prompt": f"QUESTION {item}",
+                               "response": f"reloop\n{verdict}"},
+                              {"node": "report", "prompt": f"Write the report.\n"
+                                                           f"Prior verdict: {verdict}",
+                               "response": f"REPORT {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert f"Prior verdict: {verdict}" in block.split("#### Step ")[2], block
+
+
+def test_with_one_item_no_line_is_taken_for_framing():
+    """Framing is told from an item's own text only across two or more items; with one,
+    every line not in the settings or templates is shown."""
+    hint = "Hint from the run: try the ratio test first"
+    record = {"id": "r1", "passed": False, "score": 0.0, "prediction": "A",
+              "metadata": {"question": "QUESTION r1"},
+              "exchanges": [{"node": "solve", "prompt": f"QUESTION r1\n{hint}",
+                             "response": "ANSWER r1"}]}
+    assert hint in ProposalContext(item_records=[record]).render()
+
+
 def test_the_items_legend_says_what_each_item_shows_and_a_reloop_reason_reaches_it():
     """The legend beside the items (`base.ITEM_FORM`) is what is rendered: each step's
     `Sees:` line, its reply, and only the part of its prompt its settings do not hold --

@@ -703,6 +703,30 @@ class Candidate:
         return d
 
 
+#: The shortest piece of an item's data (`_data_lines`) that marks a prompt line as
+#: carrying it; a shorter one ("A", "yes") would match framing by chance.
+ITEM_DATA_MIN = 8
+
+
+def _data_lines(value: Any) -> set[str]:
+    """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
+    least `ITEM_DATA_MIN` characters: an item's input or a step's reply, which a prompt
+    line holding one carries from that item."""
+    from .evidence import _norm
+
+    out: set[str] = set()
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack += list(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack += list(current)
+        elif isinstance(current, str):
+            out |= {n for line in current.splitlines() if len(n := _norm(line)) >= ITEM_DATA_MIN}
+    return out
+
+
 @dataclass
 class ProposalContext:
     """The gradient: everything the optimizer is allowed to know.
@@ -912,12 +936,17 @@ class ProposalContext:
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
-        """What an item's step does not repeat of its prompt (`ITEM_FORM`): the lines of
-        every setting's text ("Each step's settings"), of the nodes' own prompt templates
-        (each node in full, in the reference), and any line a step's prompt has in two or
-        more items -- the same for every item, so not this item's (the model client's
-        wrapping, a template's headings). What is left is item-specific: a reason a judge
-        sent the step back with, say."""
+        """What an item's step does not repeat of its prompt (`ITEM_FORM`): text that
+        comes from no item. That is the lines of every setting's text ("Each step's
+        settings"), of the nodes' own prompt templates (each node in full, in the
+        reference), and the framing the step's ops put around its inputs (the model
+        client's wrapper, their headings). Framing is a line in every one of the step's
+        prompts, over two or more items, that holds nothing from any item's own data
+        (its input or a step's reply).
+
+        Never a line just because it recurs: a judge's reason that is not in every one
+        of the step's prompts, or a choice text (part of an item's input) said the same
+        way in two items, is each item's own evidence and is shown."""
         from .evidence import _norm, settled_lines
 
         texts = [k.get("value") for k in self.knobs]
@@ -927,15 +956,21 @@ class ProposalContext:
                    *(r for pair in self.edit_pairs or ()
                      for side in ("parent_records", "child_records")
                      for r in pair.get(side) or ())]
-        holders: dict[tuple[str, str], set[str]] = {}
+        every: dict[str, set[str]] = {}
+        items: dict[str, set[str]] = {}
+        data: set[str] = set()
         for record in records:
+            data |= _data_lines(record.get("metadata"))
             for exchange in record.get("exchanges") or ():
-                for line in str(exchange.get("prompt") or "").splitlines():
-                    if line.strip():
-                        holders.setdefault((str(exchange.get("node")), _norm(line)),
-                                           set()).add(str(record.get("id")).split("#")[0])
-        common = {line for (_node, line), items in holders.items() if len(items) > 1}
-        return settled_lines(texts) | common
+                node = str(exchange.get("node"))
+                lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
+                         if line.strip()}
+                every[node] = lines if node not in every else every[node] & lines
+                items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
+                data |= _data_lines(exchange.get("response"))
+        framing = {line for node, lines in every.items() if len(items[node]) > 1
+                   for line in lines if not any(datum in line for datum in data)}
+        return settled_lines(texts) | framing
 
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
