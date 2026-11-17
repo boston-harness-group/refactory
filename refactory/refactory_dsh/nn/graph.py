@@ -29,7 +29,9 @@ ON_EXHAUSTED = ("continue", "fail_item", "halt")
 PROCEED = "proceed"
 
 #: The failures an agent node may declare a retry on (`Node.retry`): ``timeout`` (the
-#: session ran out of time; each retry's limit is ``timeout_factor`` times the last),
+#: session went silent past the inactivity limit, or ran out of a per-completion limit;
+#: or reached the node's own declared `timeout_s`, the pipeline's limit, recorded
+#: ``declared_timeout``; each retry's limit is ``timeout_factor`` times the last),
 #: ``crash`` (the worker or product failed: an invalid result, a worker error) and
 #: ``output_limit`` (the model used its whole output allowance without answering -- the
 #: model failing the question, which a graph should fix, so it is retried only when a
@@ -420,8 +422,9 @@ class Node:
     timeout_s: int | None = None
     #: `agent`: what the runtime does when the node's session fails, in its canonical
     #: form (`retry_declaration`), e.g. ``{"on": ["timeout"], "times": 1,
-    #: "timeout_factor": 2}``: a session that times out is run once more, fresh, with
-    #: twice its `timeout_s` (which a retry on timeout requires), inside the node's whole
+    #: "timeout_factor": 2}``: a session that times out (on inactivity, or at its declared
+    #: `timeout_s`, `model.DeclaredTimeout`) is run once more, fresh,
+    #: with twice its `timeout_s` (which a retry on timeout requires), inside the node's whole
     #: budget and the run's wall (`refactory_dsh.node_retry`); ``"crash"`` answers a
     #: worker or product failure, and ``"output_limit"`` a session that used its whole
     #: output allowance without answering (opt-in only).

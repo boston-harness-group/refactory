@@ -526,15 +526,17 @@ def test_the_rule_resolves_from_the_graph_and_lowers_to_the_spine():
 
 
 def test_a_crash_retry_without_a_node_bound_reserves_every_session_on_the_spine(tmp_path):
-    """The spine's command outlasts every session a crash retry may start."""
-    from refactory_dsh.model import node_session_budget_s
+    """The spine's command outlasts every session a crash retry may start: each one's
+    harness backstop (the session has no wall) plus the dispatch overhead."""
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
 
     graph = _straight()
     state = {"graph": graph.to_state()}
-    client = DshModelClient(worker_backend="dsh", provider="p", model="m", timeout_s=60, attempts=1)
+    client = DshModelClient(worker_backend="dsh", provider="p", model="m", timeout_s=60, attempts=1,
+                            backstop_s=500)
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path, client.context(),
                                      lowering.node_declarations(state))
-    one = node_session_budget_s(client.for_node("solve").with_tool_policy("none").retry_attempts(), 60)
+    one = 500 + NODE_DISPATCH_OVERHEAD_S
     assert lowered.nodes["solve"].command_timeout_s == (1 + PASS_RETRY_TIMES) * one
 
 

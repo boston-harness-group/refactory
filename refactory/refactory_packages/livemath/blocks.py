@@ -25,7 +25,7 @@ from collections import namedtuple
 
 from refactory_dsh import nn
 
-from .mode import OPS, SOLVE_TIMEOUT_S, SYSTEM_PROMPT
+from .mode import OPS, SYSTEM_PROMPT
 
 BLOCK_OPS = "refactory_packages.livemath.block_ops"
 
@@ -81,7 +81,7 @@ def _format_prompt_node() -> nn.Node:
     )
 
 
-def _agent(node_id: str, prompt_template: str, writes: str, timeout_s: int,
+def _agent(node_id: str, prompt_template: str, writes: str, timeout_s: int | None,
            produces: tuple[str, ...] = ()) -> nn.Node:
     """One solving / verifying / judging call, configured as the baseline solve."""
     return nn.Node(
@@ -110,7 +110,7 @@ def _prompt_op(node_id: str, fn: str, reads: tuple[str, ...], produces: str) -> 
 # ── block builders ────────────────────────────────────────────────────────
 
 
-def build_baseline(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+def build_baseline(timeout_s: int | None = None) -> BlockResult:
     """Block (a): the current single solve -- no structural change."""
     fmt = _format_prompt_node()
     solve = nn.Node(
@@ -135,7 +135,7 @@ def build_baseline(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
     )
 
 
-def build_solve_then_verify(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+def build_solve_then_verify(timeout_s: int | None = None) -> BlockResult:
     """Block (b): solve → build the verify prompt → verify."""
     return BlockResult(
         nodes=[
@@ -156,7 +156,7 @@ def build_solve_then_verify(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
     )
 
 
-def build_two_attempts_then_judge(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+def build_two_attempts_then_judge(timeout_s: int | None = None) -> BlockResult:
     """Block (c): fork → [solve_a | solve_b] → join → build the judge prompt → judge."""
     return BlockResult(
         nodes=[
@@ -186,7 +186,7 @@ def build_two_attempts_then_judge(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResu
     )
 
 
-def build_solve_then_self_check(timeout_s: int = SOLVE_TIMEOUT_S) -> BlockResult:
+def build_solve_then_self_check(timeout_s: int | None = None) -> BlockResult:
     """Block (d): solve → build the refinement prompt → self-check."""
     return BlockResult(
         nodes=[

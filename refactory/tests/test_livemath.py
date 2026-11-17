@@ -602,16 +602,15 @@ def test_load_items_skips_rows_like_skillopt(tmp_path):
 
 # ── SkillOpt solver defaults on the solve node ────────────────────────────
 
-def test_solve_node_carries_arm_a_exec_timeout():
-    """exec_timeout 1800 -- arm A's ``--cfg-options env.exec_timeout=1800``
-    (SkillOpt's run-train.sh:14, run-train-seed.sh:20; SkillOpt's own LiveMath
-    config default is 300) -- is the solve node's timeout, in the graph and in
-    the lowered node."""
+def test_solve_node_has_no_wall():
+    """The solve node declares no timeout, in the graph or the lowered node: its session
+    ends on inactivity only, with the harness backstop as a guard (arm A's earlier
+    ``exec_timeout=1800`` wall is a recorded deviation, livemath/mode.py)."""
     from refactory_packages.livemath.mode import Solver
 
-    assert Solver().build().nodes["solve"].timeout_s == 1800
+    assert Solver().build().nodes["solve"].timeout_s is None
     workflow = lowering.to_workflow(Solver().state_dict(), name="livemath-solver")
-    assert workflow.to_dict()["nodes"]["solve"]["timeout"] == 1800
+    assert workflow.to_dict()["nodes"]["solve"].get("timeout") is None
 
 
 def test_solve_timeout_is_configurable():
@@ -735,14 +734,19 @@ def test_skillopt_view_success_and_error_records():
 
     # The item deadline, and a model call that ran out of time inside the
     # pass, are SkillOpt's task timeout: exec_timeout + 60 (rollout.py:313, :373).
+    # The solve node has no wall, so its exec timeout is the harness backstop.
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
+
     for error_kind, error_text in (
         ("timeout", "item '202601:41' of 'data' timed out after 2000.0s"),
-        ("RuntimeError", "solve: CompletionTimeout: model completion timed out after 1800s"),
+        ("RuntimeError", "solve: CompletionTimeout: model completion timed out after 600s "
+                         "of inactivity"),
+        ("harness_incident", "solve: HarnessBackstop: model session hit the harness backstop"),
     ):
         errored = dict(_VIEW_RECORD, exchanges=[], error_text=error_text, error_kind=error_kind)
         result = rollout_result(errored, {"skill": "S"})
         assert result["conversation"] is None and result["n_turns"] == 0
-        assert result["fail_reason"] == "task-timeout-1860s"
+        assert result["fail_reason"] == f"task-timeout-{DEFAULT_BACKSTOP_S + 60}s"
     # Any other failure is process_one's ``error: {e}`` (rollout.py:286-287).
     failed = dict(_VIEW_RECORD, exchanges=[], error_kind="RuntimeError", error_text=(
         "solve: RuntimeError: Claude backend failed after 5 retries: "

@@ -104,8 +104,9 @@ completion's hang timeout (`--model-timeout`, default 1800 seconds). CLI control
 `--validation-reserve-s` and `--validation-reserve-tokens`. The GUI exposes the
 same effective run settings.
 
-`--model-timeout` sets how long one model completion may take (default 1800s).
-Each agent node's spine limit is `attempts × model-timeout + 600`; the per-node
+`--model-timeout` sets how long one model completion may take (default 1800s) where
+a call reports no activity: a CEO turn, a console call, a Codex node. An agent node's session on DSH or Claude Code has no wall: it ends after `REFACTORY_MODEL_INACTIVITY_S` (default 600) seconds with no streamed frame, thinking included, and (a step with tools only) no running tool command, or at the harness backstop `REFACTORY_MODEL_BACKSTOP_S` (default 14400 s: a harness incident while the model still streams, an inactivity timeout when only a tool kept it alive), unless the node declares its own `timeout_s` (reaching it is a `declared_timeout`, the graph's own limit).
+Such a node's spine limit is the backstop + 600 (a Codex node's: `attempts × model-timeout + 600`); the per-node
 `command_timeout_s` overrides the spine's global `commandTimeoutMs`
 (`execute.ts:344`). `--max-elapsed-s` is a deliberate wall-clock ceiling that can
 end a step mid-completion. `streamIdleTimeoutMs` is disabled by default

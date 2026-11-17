@@ -1,5 +1,5 @@
 /** Nonsecret route/usage receipts from DSH's public lifecycle/request seam. */
-import { readFileSync, writeFileSync, renameSync, appendFileSync, realpathSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, appendFileSync, realpathSync, closeSync, openSync, utimesSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 export const name = 'refactory-worker-observer'
@@ -8,6 +8,21 @@ export function apply(ctx) {
   const path = process.env.REFACTORY_WORKER_RECEIPT
   if (!path) return
   const initial = JSON.parse(readFileSync(path, 'utf8'))
+  // The session's sign of life (`model.activity_path`): touched on every streamed frame,
+  // thinking included, and on every native worker message, at most once a second. The
+  // model client's inactivity limit reads its time; a long thinking turn writes no
+  // receipt until it ends, so the receipt alone would read as silence.
+  const activity = path.replace(/\.json$/, '') + '.activity'
+  let touched = 0
+  function alive() {
+    const now = Date.now()
+    if (now - touched < 1000) return
+    touched = now
+    try {
+      const at = new Date(now)
+      try { utimesSync(activity, at, at) } catch { closeSync(openSync(activity, 'a')) }
+    } catch {}
+  }
   // A client retry runs a fresh worker process under the same receipt. The sessions
   // before this one keep their record (`earlier_sessions`) and their tokens count:
   // `usage` is the receipt's total across sessions, `session_usage` this session's own.
@@ -137,7 +152,9 @@ export function apply(ctx) {
       `DSH request: ${route.provider}/${route.model}`)
     return route
   })
+  ctx.on('refactory/worker-activity', () => alive())
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    alive()
     const key = `${agent.session.id}:${frame.attemptId ?? 'current'}`
     if (frame.type === 'start') streams.set(agent.session.id, { id: key, usage: undefined })
     if (frame.type === 'chunk' && frame.chunk.type === 'usage') {

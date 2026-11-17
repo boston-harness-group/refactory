@@ -1637,10 +1637,11 @@ class Executor:
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
-        if spent:
-            from refactory_dsh.node_retry import record_spent
+        from refactory_dsh.node_retry import record_spent
 
-            record_spent(self.ctx.workdir, node.id, exc)
+        # Why it has no answer, when its type says (`node_retry.record_spent`): a spent
+        # retry, the output limit, or an optional branch that ended for time.
+        record_spent(self.ctx.workdir, node.id, exc)
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:

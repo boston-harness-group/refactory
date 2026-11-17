@@ -808,13 +808,15 @@ def test_what_the_last_edit_changed_shows_the_wiring_and_the_prediction_check():
 
 
 def test_time_per_item_is_said_in_numbers():
-    lines = base_mod.time_lines({"step_limit_s": 1800, "per_item_median_s": 120,
-                                 "per_item_p90_s": 300, "per_item_max_s": 1831, "items": 20,
-                                 "timeouts": 2})
+    lines = base_mod.time_lines({"per_item_median_s": 120, "per_item_p90_s": 300,
+                                 "per_item_max_s": 1500})
     text = " ".join(lines)
-    assert "up to 1800 s" in text and "120 s per item at the median" in text
-    assert "300 s at the 90th percentile, 1831 s the longest" in text
-    assert "2 of its 20 train items timed out (hit the 1800 s limit)" in text
+    assert "120 s per item at the median" in text
+    # A session ends on inactivity: no step time limit is stated.
+    assert "may run for up to" not in text and "limit" not in text
+    assert "300 s at the 90th percentile, 1500 s the longest" in text
+    # A timed-out item is said once, in "Item results": not here, and not as a target.
+    assert "timed out" not in text and "as a timeout" not in text
     assert "wall time" not in text and "at once" not in text
     assert base_mod.time_lines({}) == []
 
@@ -848,13 +850,6 @@ def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_o
     assert "cost is not a reason for or against" not in priced
 
 
-def test_repeated_items_are_counted_once_and_their_runs_each_time():
-    lines = " ".join(base_mod.time_lines({"per_item_median_s": 30, "per_item_p90_s": 40,
-                                          "per_item_max_s": 50, "items": 4, "runs": 8,
-                                          "timeouts": 3}))
-    assert "3 of its 8 runs of 4 train items timed out" in lines
-
-
 def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
     """With no parent selected, the records stand for the latest candidate's parent; its
     items' times are that candidate's too, not the leaderboard best's."""
@@ -877,17 +872,65 @@ def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
                                                 "best": [{"id": "x", "duration_s": 999.0}]})
     loop._train_records_owner = lambda board: Loop._train_records_owner(loop, board)
     facts = Loop._time_facts(loop, [best])
-    assert facts["items"] == 2 and facts["runs"] == 3 and facts["timeouts"] == 1
-    assert (facts["per_item_median_s"], facts["per_item_max_s"]) == (12, 600)
+    # The timed-out run is not among the times: it is said once, in "Item results".
+    assert (facts["per_item_median_s"], facts["per_item_max_s"]) == (11, 12)
+    assert facts["timed_items"] == 2
     assert "per_item_s" not in facts
 
 
-def test_the_loop_counts_timeouts():
-    from refactory_dsh.loop import _timed_out
+def test_a_harness_timeout_is_read_from_structured_fields_only():
+    from refactory_dsh.optim.base import harness_timeout
 
-    assert _timed_out({"error_kind": "timeout"})
-    assert _timed_out({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
-    assert not _timed_out({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
+    assert harness_timeout({"error_kind": "timeout"})
+    assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
+    # The backstop is the harness's too; a wall the step declared is the pipeline's.
+    assert harness_timeout({"error_kind": "harness_incident"})
+    assert harness_timeout({"missing_steps": {"check": {"cause": "harness_incident"}}})
+    assert not harness_timeout({"error_kind": "declared_timeout"})
+    assert not harness_timeout({"missing_steps": {"check": {"cause": "declared_timeout"}}})
+    assert not harness_timeout({"passed": True, "error_kind": "timeout"})
+    # Text never decides: a reply quoted in an error, a grader's reason, a word.
+    for text in ("solve: CompletionTimeout: model completion timed out after 600s",
+                 "check: RuntimeError: the reply said 'timed out after 1800s'",
+                 "fit: ValueError: the timeout knob must be > 0"):
+        assert not harness_timeout({"error_text": text, "error_kind": "RuntimeError"}), text
+    assert not harness_timeout({"fail_reason": "MCQ=0: the timeout clause is wrong"})
+
+
+@pytest.mark.parametrize("error,kind", [
+    # The harness ended a model call: by type, or by the runtimes' anchored text.
+    ("completion", "timeout"),
+    ("walker", "timeout"),
+    ("spine", "timeout"),
+    ("inactivity", "timeout"),
+    # The pipeline's own: a quoted reply, a code step's subprocess limit, a snippet limit.
+    ("quoted", "RuntimeError"),
+    ("quoted prefix", "RuntimeError"),
+    ("expired", "TimeoutExpired"),
+    ("snippet", "SnippetTimeout"),
+])
+def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, kind):
+    import subprocess
+
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.model import CompletionTimeout
+    from refactory_dsh.snippet import SnippetTimeout
+
+    made = {
+        "completion": lambda: CompletionTimeout("model completion timed out after 1800s"),
+        "walker": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
+                                       "after 1800s; requested runtime shutdown"),
+        "spine": lambda: RuntimeError("solve exited with code 1\nworker: model completion "
+                                      "timed out after 1800s; requested runtime shutdown"),
+        "inactivity": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
+                                           "after 600s of inactivity"),
+        "quoted": lambda: RuntimeError("check: ValueError: the reply was 'model completion "
+                                       "timed out after 1800s'"),
+        "quoted prefix": lambda: RuntimeError('check: ValueError: got "x: CompletionTimeout: y"'),
+        "expired": lambda: subprocess.TimeoutExpired(["pytest"], 10),
+        "snippet": lambda: SnippetTimeout("code step ran past its 30 s limit"),
+    }[error]
+    assert error_kind(made()) == kind
 
 
 # ── a macro on a state an earlier edit of a bundle left with an unreadable cycle ──
