@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -432,8 +433,35 @@ COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
+#: How a session the harness backstop stopped (`model.HarnessBackstop`) reaches an item
+#: record as text, anchored at a line's start: the walker's ``"<node>: HarnessBackstop: "``
+#: and the spine worker's stderr ``"worker: model session hit the harness backstop"``.
+HARNESS_BACKSTOP_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: HarnessBackstop: |worker: model session hit the harness backstop)",
+    re.MULTILINE)
+
+#: How a session stopped at its node's declared wall (`model.DeclaredTimeout`) reaches an
+#: item record as text, anchored at a line's start: the walker's
+#: ``"<node>: DeclaredTimeout: "`` and the spine worker's stderr
+#: ``"worker: model session timed out at its node's declared timeout_s"``.
+DECLARED_TIMEOUT_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: DeclaredTimeout: |worker: model session timed out at its node's "
+    r"declared timeout_s)", re.MULTILINE)
+
+#: The same, once the node's declared retry is spent (`node_retry.RetriesExhausted`): the
+#: retry wrapper's own line, anchored at its start, ending on the last attempt's error.
+DECLARED_TIMEOUT_RETRIED_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: RetriesExhausted: |worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
+    r"\. Last error: (?:[A-Za-z0-9_.-]+: DeclaredTimeout: )?model session timed out at its "
+    r"node's declared timeout_s", re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
-    """A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+    """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
+    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    ``"declared_timeout"`` for one stopped at its node's declared wall
+    (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
+    else the class name.
 
     A node that timed out reaches the record as text -- the walker's
     ``"<node>: CompletionTimeout: model completion timed out ..."``, the spine's
@@ -443,6 +471,16 @@ def error_kind(error: BaseException) -> str:
     """
     import subprocess
 
+    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
+
+    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
+        return "harness_incident"
+    from refactory_dsh.node_retry import RetriesExhausted
+
+    if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
+            or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
+            or DECLARED_TIMEOUT_RETRIED_LINE.search(str(error))):
+        return "declared_timeout"
     if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
         return "timeout"
     return type(error).__name__
@@ -568,7 +606,10 @@ def make_item_record(
 #: - ``stopped``: the completion was cancelled because the run was stopping.
 #:
 #: A model timeout, a wrong or empty answer, an output limit and a product's own failure
-#: are none of these: they are the candidate's failed answers. Known gap: the spine's own
+#: are none of these: they are the candidate's failed answers. Nor is a session the
+#: harness backstop stopped (`model.HarnessBackstop`): its process did not die, it kept
+#: streaming for hours, which a rerun of the evaluation would most likely repeat at hours
+#: per try; its item is recorded as a ``harness_incident`` (`error_kind`) instead. Known gap: the spine's own
 #: worker or op process killed with no stderr reads ``exited with code null``, which
 #: names no signal, so it is not recognised there (docs/outer-loop.md).
 INTERRUPTED_MARKERS: tuple[tuple[str, str], ...] = (
@@ -610,8 +651,9 @@ def interrupted_item(record: dict[str, Any]) -> str | None:
 
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
-    ``crash``, ``timeout``; ``failed`` for an optional branch), ``sessions`` (how many ran,
-    when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
+    ``crash``, ``timeout``; for an optional branch, ``harness_incident``,
+    ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
+    `node_retry.missing_cause`), ``sessions`` (how many ran, when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
     write (`nn.fork._record_missing`, `worker_node.main`), and the step's
     `node_retry.record_spent` record."""
     from refactory_dsh.node_retry import MISSING_DIR
@@ -645,7 +687,9 @@ def _declared_outputs(workdir: Path, step: str) -> list[str]:
 
 def _spent_phrase(info: dict[str, Any]) -> str:
     cause = {"output_limit": "reached its output limit without answering",
-             "timeout": "timed out", "crash": "crashed"}.get(str(info.get("cause")), "failed")
+             "timeout": "timed out", "crash": "crashed",
+             "declared_timeout": "timed out at its declared timeout_s",
+             "harness_incident": "hit the harness backstop"}.get(str(info.get("cause")), "failed")
     sessions = info.get("sessions")
     return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
 

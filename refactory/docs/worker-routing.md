@@ -61,7 +61,7 @@ as a server or watcher, no longer holds the step: it ends with its last answer, 
 Code stops what is left, and `background_tasks_abandoned` counts it. A Claude Code that
 stays alive and silent after that is stopped within 30 s, and the step still finishes
 with its last answer (`background_stream_stopped`). A long
-research step may therefore need `--model-timeout` above the default 1800 s per call.
+research step has no wall to outgrow: it ends on inactivity (`REFACTORY_MODEL_INACTIVITY_S`).
 A turn that ends with no text (often the last one, after a background report) is not
 the answer either: the step asks Claude Code once, in the same session, for its complete
 final answer (`empty_answer_reasked`), bounded like a silent task. If that turn is empty

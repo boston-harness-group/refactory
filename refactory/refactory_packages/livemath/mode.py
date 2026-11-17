@@ -5,12 +5,15 @@ The solver graph: data → [format_prompt → solve] → finish.
 System prompt ported from SkillOpt (MIT) —
 skillopt/envs/livemathematicianbench/prompts/rollout_system.md.
 SkillOpt solver defaults:
-  exec_timeout = 1800 s -- applied as the solve node's ``timeout_s``
-    (``Solver.solve_timeout_s``). SkillOpt's LiveMath config says 300
-    (configs/livemathematicianbench/default.yaml:17), but arm A's runs override it
-    with ``--cfg-options env.exec_timeout=1800`` (SkillOpt's run-train.sh:14 and
-    run-train-seed.sh:20, recorded in each run's out/config.json ``exec_timeout``),
-    and the outer-loop protocol has arm B match arm A.
+  exec_timeout -- not applied: the solve node has no ``timeout_s``
+    (``Solver.solve_timeout_s`` is None), so its session ends on inactivity only
+    (``refactory_dsh.model.DEFAULT_INACTIVITY_S``), with the harness backstop
+    (``DEFAULT_BACKSTOP_S``) as a guard. The comparison protocol ends every arm's
+    sessions on inactivity only. Deviation: SkillOpt's LiveMath config says 300
+    (configs/livemathematicianbench/default.yaml:17) and arm A's earlier runs passed
+    ``--cfg-options env.exec_timeout=1800`` (SkillOpt's run-train.sh:14 and
+    run-train-seed.sh:20), a wall; arm A matches only when it runs with an
+    exec_timeout at least the backstop (``skillopt.replay_runner.unsupported_a_settings``).
   max_completion_tokens = 0 (no cap) -- the ``max_completion_tokens`` knob,
     applied to the solve node's route only (``Solver.run``). SkillOpt's LiveMath
     config says 16384 (livemathematicianbench/default.yaml:16), but arm A's
@@ -101,9 +104,6 @@ SYSTEM_PROMPT = (
     "<answer>B</answer>\n"
 )
 
-# Arm A's exec_timeout (run-train.sh:14, run-train-seed.sh:20); SkillOpt's own
-# configs/livemathematicianbench/default.yaml:17 default is 300.
-SOLVE_TIMEOUT_S = 1800
 # Arm A's solver output cap: none. SkillOpt's LiveMath config sets 16384
 # (configs/livemathematicianbench/default.yaml:16), but the claude_chat backend arm
 # A runs on discards it (skillopt/model/claude_backend.py:310). 0 = no cap.
@@ -127,9 +127,9 @@ class Solver(nn.Mode):
 
     name = "solver"
     description = "solve a LiveMathematicianBench item with a single agent call"
-    #: The solve node's wall limit; a subclass (or a graph edit of ``timeout_s``)
-    #: changes it.
-    solve_timeout_s: ClassVar[int] = SOLVE_TIMEOUT_S
+    #: The solve node's wall limit: none, so inactivity alone ends its session. A
+    #: subclass (or a graph edit of ``timeout_s``) can declare one.
+    solve_timeout_s: ClassVar[int | None] = None
 
     def __init__(
         self,
