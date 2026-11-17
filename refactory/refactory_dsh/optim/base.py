@@ -168,6 +168,26 @@ def _lowering_refusal(parent_state: dict[str, Any], state: dict[str, Any]) -> st
     return None
 
 
+def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str, Any],
+                         routes: Any) -> list[str]:
+    """``E-route`` for each agent step whose own route (`Node.route`) the proposal sets or
+    changes to a model, effort or cap that no route of the run uses, or that the step runs
+    on already (`workers.StepRoutes.refusal`); every one when the run has no routes to
+    choose from (a scripted model)."""
+    before = (parent_state.get("graph") or {}).get("nodes") or {}
+    reasons = []
+    for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
+        declared = node.get("route")
+        if not declared or (before.get(node_id) or {}).get("route") == declared:
+            continue
+        reason = (routes.refusal(node_id, str(node.get("role") or "ceo"), declared)
+                  if routes is not None else
+                  f"step {node_id!r} sets a route of its own, and this run has none to choose from")
+        if reason:
+            reasons.append(f"E-route: {reason}")
+    return reasons
+
+
 def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                     allowed: bool) -> list[str]:
     """``E-new-node-tools`` for each agent node the search added that would run with tools.
@@ -1071,6 +1091,9 @@ class ProposalContext:
     #: Whether a new step may use tools in this run (``LoopConfig.allow_new_node_tools``);
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
+    #: What a new agent step may choose for its own route, field by field
+    #: (`workers.StepRoutes.offered`); empty offers no route, and the request says none.
+    step_routes: dict[str, list[str]] = field(default_factory=dict)
     #: Time, in numbers, for "Time per item" (`time_lines`): ``per_item_median_s``/
     #: ``per_item_p90_s``/``per_item_max_s`` (the edited candidate's items' own times,
     #: `loop.item_time_spread`); empty says nothing.
@@ -1223,7 +1246,8 @@ class ProposalContext:
             "## The operations you may use",
             *operation_lines(self.catalogue, self.node_states, self.edges,
                              protected=self.protected,
-                             knob_values={k.get("name"): k.get("value") for k in self.knobs}),
+                             knob_values={k.get("name"): k.get("value") for k in self.knobs},
+                             step_routes=self.step_routes),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1325,7 +1349,8 @@ def _fence(text: str) -> str:
 def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                     node_states: Sequence[dict[str, Any]] = (),
                     edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
-                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
+                    knob_values: Mapping[str, Any] | None = None,
+                    step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     """The operations a request offers, each said once: the written-out operations in a
     table (fields and description), then the core operators, one line and one example each
     (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
@@ -1338,7 +1363,7 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                       _edit_fields(c.get("fields") or ()), c.get("description")]
                      for c in written])] if written else []
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
-                                  knob_values=knob_values)
+                                  knob_values=knob_values, step_routes=step_routes)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -2221,12 +2246,14 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
 
 def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
-                   knob_values: Mapping[str, Any] | None = None) -> list[str]:
+                   knob_values: Mapping[str, Any] | None = None,
+                   step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     """"Structural operators": what the system wires for every one, then each core operator
     the run permits in one line -- its fields and its catalogue description (its
     `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
-    example, its ids taken from this graph where it has them. Nothing when the run
-    permits none."""
+    example, its ids taken from this graph where it has them. When the run has routes to
+    choose from (``step_routes``), one line says the ``route`` field and its values; without,
+    no operator lists it. Nothing when the run permits none."""
     from refactory_dsh.nn import core_ops
 
     ops = {op.get("op") for op in catalogue}
@@ -2251,8 +2278,12 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
             name, ids, node_states, edges, protected, state)
         entry = by_op.get(name) or {}
         description = str(entry.get("description") or f"{spec['line']}.")
-        lines.append(f"- `{name}` ({_core_fields(entry.get('fields') or spec['fields'])}): "
+        fields = [f for f in entry.get("fields") or spec["fields"]
+                  if step_routes or f != core_ops.ROUTE_FIELD]
+        lines.append(f"- `{name}` ({_core_fields(fields)}): "
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
+    if step_routes:
+        lines.append(core_ops.route_field_line(step_routes))
     return lines
 
 
@@ -4248,6 +4279,9 @@ class Optimizer:
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from
     #: ``allow_code_nodes``.
     allow_code_nodes: bool = True
+    #: What a step may choose its own route from (`workers.StepRoutes`); one outside it is
+    #: refused with ``E-route``. The loop sets it from its model; None offers nothing.
+    step_routes: Any = None
     #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
     #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
     sandbox: tuple[bool, str] | None = None
@@ -4648,6 +4682,9 @@ class Optimizer:
                                  allow_new_node_tools)
         if tooled:
             return tooled
+        routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))
+        if routed:
+            return routed
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
                                     bool(getattr(self, "allow_code_nodes", True)),
                                     getattr(self, "sandbox", None))

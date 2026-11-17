@@ -20,7 +20,8 @@ topology. A field outside that is reachable only by removing a node and adding a
 The user's decisions the map records (`DECISIONS`): what an existing step reads may be
 rewired; a copy of a step that uses tools may keep its tools when it gets its own fresh
 workspace; settings bound to knobs may be loop limits and optional branches, never tools or
-``outputs_only``; timeouts, retries, the workspace kind, the model role and the per-sub-item
+``outputs_only``; a new step may choose its own model, effort and output cap among the run's
+routes; timeouts, retries, the workspace kind, the model role and the per-sub-item
 experiment are deferred.
 """
 
@@ -53,6 +54,11 @@ DECISIONS: dict[str, str] = {
     "configure": "settings bound to knobs, which set_knob moves: a loop gate's max_iterations "
                  "(`loop` makes its knob) and a branch's optional (`branch` with 'optional'); "
                  "never tools, tool_policy or outputs_only",
+    "step routes": "approved 2026-11-17: a new agent step may set its own model, effort "
+                   "and output cap (`route`), each a value one of the run's routes already "
+                   "uses (`workers.StepRoutes`), never one it runs on already; failing fast "
+                   "earns nothing, as parsimony is 0 and a time-out is a harness incident, "
+                   "not a scored failure. A step's role stays its neighbour's",
     "deferred": "left for later on 2026-11-16: timeout_s, retry and on_exhausted as knobs "
                 "(they mostly trade cost and reliability, invite failing fast to game the "
                 "score against 'a time-out counts as a failure', and touch node_retry on both "
@@ -157,6 +163,9 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "system_prompt_template": (_NEW, ("set_knob",)),
     "code": (_NEW, ("set_knob",)),
     "role": (_NEW, Gap("deferred", "the model role among the run's routes")),
+    # A step's own model, effort and cap, among the run's routes (DECISIONS['step routes']).
+    "route": (("add_node", "insert", "branch", "merge", "split", "parallelize", "route"),
+              _REPLACE),
     "tools": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "tool_policy": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),

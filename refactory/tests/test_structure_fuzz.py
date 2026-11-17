@@ -328,6 +328,16 @@ def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
+def test_mutation_route_without_the_run_s_routes_is_caught(monkeypatch):
+    monkeypatch.setattr(base_mod, "_step_route_refusals", lambda parent, state, routes: [])
+    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"))
+
+
+def test_mutation_walker_ignoring_a_step_s_route_is_caught(monkeypatch):
+    monkeypatch.setattr(sf.ScriptedModel, "with_step_route", lambda self, route: self)
+    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"), walker=True, edits=400)
+
+
 @pytest.mark.skipif(not __import__("refactory_dsh.snippet").snippet.available()[0],
                     reason="no code-node sandbox here: new code nodes are refused before V18")
 def test_mutation_code_without_the_static_code_rule_is_caught(monkeypatch):

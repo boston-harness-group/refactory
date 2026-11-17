@@ -374,6 +374,39 @@ describe('describing nodes that declare only their type', () => {
   })
 })
 
+describe('a step\'s own route', () => {
+  /** An agent as Python lowers it with a worker route: dispatched, its route beside it. */
+  function withRoute(fields: Record<string, unknown>): WorkflowGraph {
+    return {
+      name: 'route',
+      start_node: 'polish',
+      nodes: {
+        polish: {
+          _type: 'AgentNode', id: 'polish', role: 'ceo', reads: [], writes: ['final.md'],
+          dispatch_command: 'python worker_node.py polish.json',
+          route: { model: 'small-model', effort: 'low', max_completion_tokens: '900' },
+          ...fields,
+        },
+      },
+      edges: [],
+    }
+  }
+
+  it('accepts a dispatched agent\'s route', () => {
+    expect(validateGraph(withRoute({}))).toEqual([])
+  })
+
+  it.each([
+    [{ route: { temperature: '1' } }, 'a route sets model, effort, max_completion_tokens; unknown: temperature'],
+    [{ route: { model: 3 } }, "route 'model' is a nonempty string"],
+    [{ route: ['small-model'] }, 'a route is an object of model, effort, max_completion_tokens'],
+    [{ dispatch_command: undefined }, 'declares a route, which only a dispatched worker can take; run it with a worker route'],
+    [{ _type: 'FnNode', command: 'true' }, "node type 'FnNode' declares a route; only an agent does"],
+  ])('refuses %j', (fields, message) => {
+    expect(validateGraph(withRoute(fields))).toEqual([{ node: 'polish', message }])
+  })
+})
+
 describe('an op\'s knob_outputs', () => {
   /** prepare as Python lowers it: the bare question carries no knob, compare's prompt carries its task. */
   function withPrepare(fields: Record<string, unknown>): WorkflowGraph {

@@ -306,7 +306,8 @@ def _changes_text(ctx: Any) -> str:
         return "(not listed)"
     return "\n".join(operation_lines(
         ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
-        knob_values={k.get("name"): k.get("value") for k in ctx.knobs}))
+        knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
+        step_routes=getattr(ctx, "step_routes", None)))
 
 
 def _memory_text(ctx: Any) -> str:
