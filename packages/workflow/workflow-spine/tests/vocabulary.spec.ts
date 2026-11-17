@@ -414,7 +414,7 @@ describe('an op\'s knob_outputs', () => {
   ])('accepts %s as Python lowers it, with %s\'s declaration', (name, op, declared) => {
     const path = fileURLToPath(new URL(`../../../../refactory/tests/lowering_snapshots/${name}.graph.json`, import.meta.url))
     const graph = JSON.parse(readFileSync(path, 'utf8')) as WorkflowGraph
-    expect(graph.nodes[op].knob_outputs).toEqual(declared)
+    expect(graph.nodes[op]?.knob_outputs).toEqual(declared)
     expect(validateGraph(graph)).toEqual([])
   })
 
@@ -435,7 +435,9 @@ describe('an op\'s knob_outputs', () => {
 
   it('refuses it on anything but an op', () => {
     const graph = withPrepare({})
-    graph.nodes.prepare = { ...graph.nodes.prepare, _type: 'AgentNode' }
+    const prepare = graph.nodes.prepare
+    if (prepare === undefined) throw new Error('withPrepare builds a prepare node')
+    graph.nodes.prepare = { ...prepare, _type: 'AgentNode' }
     expect(validateGraph(graph)).toContainEqual(
       { node: 'prepare', message: "node type 'AgentNode' declares knob_outputs; only an op does" })
   })
