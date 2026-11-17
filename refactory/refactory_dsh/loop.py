@@ -5483,6 +5483,17 @@ class Loop(OuterLoop):
             })
         return pairs
 
+    def _rescore_spread(self, candidate_id: str) -> float | None:
+        """How far ``candidate_id``'s train score (its items' mean) moved between the
+        epochs it was scored in this run; ``None`` before a second score."""
+        scores = []
+        for records in (self._records_by_epoch.get(candidate_id) or {}).values():
+            values = [float(r["score"]) for r in records
+                      if isinstance(r.get("score"), (int, float))]
+            if values:
+                scores.append(sum(values) / len(values))
+        return round(max(scores) - min(scores), 3) if len(scores) > 1 else None
+
     def _reply_judge(self) -> Any:
         """How a step's reply is read as an item's answer, from the mode's Tasks
         (`task.reply_judge`); ``None`` when no Task reads replies. Looked up once."""
@@ -5801,8 +5812,14 @@ class Loop(OuterLoop):
             "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
 
         tried, refused = self._tried_in_round(epoch - 1)
+        gated = bool(self.selection_mode())
+        # The tally of each kind tried against the noise (`memory.kind_tally_lines`): one
+        # source for this call and, with the note it writes, the proposer's request.
+        tally = memory.kind_tally_lines(tried, val_items=len(self._manifest_val_ids()),
+                                        spread=self._rescore_spread(prev.id), gated=gated)
+        self._pending_tally = tally
         tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1, current=current.id,
-                                         gated=bool(self.selection_mode()))
+                                         gated=gated, tally=tally)
         objective = self._objective()
 
         # The request: one call when it fits the room whole, else split into comparison
@@ -5901,7 +5918,9 @@ class Loop(OuterLoop):
         if note:
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
-                            "curr": record.get("curr")}
+                            "curr": record.get("curr"),
+                            **({"tally": list(self._pending_tally)}
+                               if getattr(self, "_pending_tally", None) else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
             self._memory = {**self._memory, "not_updated": {

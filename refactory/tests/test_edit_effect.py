@@ -8,8 +8,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from refactory_dsh.optim.base import _edit_change_lines
 from refactory_dsh.optim.edit_effect import edit_effect, effect_lines
+from refactory_dsh.optim import memory as memory_mod
 from refactory_dsh.optim.memory import tried_lines
 from refactory_dsh.task import Task, reply_judge
 from refactory_packages.livemath.tasks import LiveMathTask
@@ -120,3 +123,53 @@ def test_the_loop_gives_the_request_and_memory_each_structural_childs_effect(
     round_ = (loop.proposals.get(child.id) or {}).get("epoch")
     (entry,) = loop._tried_in_round(round_)[0]
     assert entry["effect"]["broken"]["first_right"] == {"solve": 5}
+    # The tally the memory pass was given is kept with the note it wrote, for the proposer.
+    loop._pending_tally = ["TALLY-LINE"]
+    loop._keep_memory({"epoch": 2}, {"text": "NOTE"})
+    assert loop._memory["tally"] == ["TALLY-LINE"]
+
+
+# ── finding 15: each kind tried, against the noise ──────────────────────────
+
+
+def _tried(name: str) -> dict:
+    """A tried entry for the real loop in fixture ``name``, as the loop makes one."""
+    from refactory_dsh.optim.base import edit_change
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "edit_effect" / name).read_text())
+    change = edit_change(fixture["parent"], fixture["child"])
+    return {"id": fixture["child_id"], "parent": fixture["parent_id"], "round": 1,
+            "kind": "loop", "structural": True, "edits": "loop solve", "score": 0.5,
+            "exit_ok": True, "evaluated": True, "fixed": len(change["fixed"]),
+            "broken": len(change["broken"]), "shared": fixture["shared"], "gate": "rejected",
+            "effect": edit_effect(fixture["parent"], fixture["child"], _judge())}, fixture
+
+
+@pytest.mark.parametrize("name,fixed,broken", [("s1_s43_loop.json", 2, 9),
+                                               ("s1_s45_loop.json", 1, 8)])
+def test_memory_gets_each_kind_s_tries_and_the_noise_they_sit_in(name, fixed, broken):
+    """The real S1 loops, each tried once: the memory call is told the try's counts and
+    the gate's word once (in the tally), the noise -- one of the 17 validation items is
+    0.059 -- and how the try moved its items, so its note can say what went wrong instead
+    of banning loops."""
+    entry, fixture = _tried(name)
+    tally = memory_mod.kind_tally_lines([entry], val_items=fixture["val_items"], gated=True)
+    text = "\n".join(tried_lines([entry], [], round_=1, current=None, gated=True, tally=tally))
+    assert f"one item of the validation part moves its mean by 1/17 = 0.059" in text
+    assert (f"- loop: 1 try: `{entry['id']}` fixed {fixed} / broken {broken} of 35 train "
+            "items, gate: rejected") in text
+    assert text.count(f"fixed {fixed} / broken {broken}") == 1
+    assert "is no evidence against the kind" in text and "first reply was already right" in text
+    assert "never" in memory_mod.MEMORY_SYSTEM and "inside the noise" in memory_mod.MEMORY_SYSTEM
+
+
+def test_the_proposer_sees_the_same_tally_once_beside_the_note():
+    from refactory_dsh.optim.base import ProposalContext
+
+    entry, fixture = _tried("s1_s45_loop.json")
+    tally = memory_mod.kind_tally_lines([entry], val_items=17, gated=True)
+    text = ProposalContext(memory={"text": "NOTE-TEXT", "epoch": 2, "tally": tally}).render()
+    note = text.split("## Optimizer memory", 1)[1]
+    assert note.index(memory_mod.TALLY_HEADING) < note.index("NOTE-TEXT")
+    assert text.count(memory_mod.TALLY_HEADING) == 1
+    assert text.count(f"`{entry['id']}` fixed 1 / broken 8") == 1

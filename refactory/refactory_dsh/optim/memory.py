@@ -197,6 +197,9 @@ This memory should capture things like:
 - Judge only kinds of change with evidence in front of you: this epoch's tries, or
   what the previous memory records of earlier ones. Any other kind is untested: do
   not advise for or against it, and do not list the untested kinds.
+- A kind tried once whose result is inside the noise the tally gives is no evidence
+  against the kind. Say what went wrong in that try (how it moved its items), never
+  "avoid" the kind.
 - Keep it compact and high-signal. Prefer a few durable principles.
 - Revise or remove parts of the previous memory if they did not help.
 - Do not output instructions for the pipeline's own steps.
@@ -761,9 +764,52 @@ def edits_text(edits: Any, chars: int = TRIED_EDITS_CHARS) -> str:
     return _clip("; ".join(parts) or "(none)", chars)
 
 
+#: The heading of the per-kind tally (`kind_tally_lines`).
+TALLY_HEADING = "Each kind of change tried this epoch, against the noise"
+
+
+def kind_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0,
+                     spread: float | None = None, gated: bool = False) -> list[str]:
+    """Per kind of change tried (`feedback.change_kind`): how many tries, and each one's
+    fixed/broken train items and the gate's word; then how large a noise one try sits in:
+    one validation item's share of the validation part's mean (``1 / val_items``; never a
+    validation score) and, when the run
+    re-scored the parent, how far its train score moved between re-scores (``spread``).
+    One source for the memory call and the proposer request (beside the note). Empty
+    without an evaluated try."""
+    kinds: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in tried:
+        if entry.get("evaluated", True):
+            kinds.setdefault(str(entry.get("kind") or "other"), []).append(entry)
+    if not kinds:
+        return []
+    noise = []
+    if val_items:
+        noise.append(f"one item of the validation part moves its mean by 1/{val_items} = "
+                     f"{1 / val_items:.3f}")
+    if spread is not None:
+        noise.append(f"the parent's train score moved by up to {spread:.3f} between its "
+                     "re-scores")
+    lines = [f"{TALLY_HEADING}"
+             + (" (" + "; ".join(noise) + ")" if noise else "") + ":"]
+    for kind, entries in kinds.items():
+        tries = []
+        for entry in entries:
+            fixed, broken = entry.get("fixed"), entry.get("broken")
+            counts = (f"fixed {fixed} / broken {broken} of {entry.get('shared')} train items"
+                      if isinstance(fixed, int) and isinstance(broken, int) else "fixed/broken n/a")
+            tries.append(f"`{entry.get('id')}` {counts}"
+                         + (f", gate: {entry.get('gate') or 'not gated'}" if gated else ""))
+        lines.append(f"- {kind}: {len(entries)} tr{'y' if len(entries) == 1 else 'ies'}: "
+                     + "; ".join(tries))
+    lines.append("A kind tried once whose result is inside that noise is no evidence against "
+                 "the kind; what went wrong is that try's own (see how it moved its items).")
+    return lines
+
+
 def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
                 round_: int | None, current: str | None, gated: bool,
-                chars: int = TRIED_CHARS) -> list[str]:
+                chars: int = TRIED_CHARS, tally: Sequence[str] = ()) -> list[str]:
     """"What was tried this epoch": every change the optimizer proposed in ``round_`` (the
     proposal round the start-of-epoch pipeline opened, which this epoch evaluated and
     judged), newest first -- the evaluated ones, then the ones refused before they ran.
@@ -788,7 +834,11 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
              + ". A change tried and not kept, or refused, is evidence too."]
     if not tried and not refused:
         return [*lines, NOTHING_TRIED]
-    entries = [_tried_line(entry, current, gated) for entry in reversed(list(tried))]
+    # With the per-kind tally (`kind_tally_lines`) the counts and the gate's word are said
+    # there, once; each entry says its edits and score.
+    lines += list(tally)
+    entries = [_tried_line(entry, current, gated, counted=bool(tally))
+               for entry in reversed(list(tried))]
     entries += [_refused_line(entry) for entry in reversed(list(refused))]
     used = sum(len(line) + 1 for line in lines)
     for index, line in enumerate(entries):
@@ -812,7 +862,8 @@ def _change_text(entry: Mapping[str, Any]) -> str:
             else f"knob change: {kind}")
 
 
-def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> str:
+def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool,
+                counted: bool = False) -> str:
     fixed, broken = entry.get("fixed"), entry.get("broken")
     if not entry.get("evaluated", True):
         outcome = "not evaluated"
@@ -820,7 +871,9 @@ def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> s
         outcome = "its train run failed"
     else:
         outcome = f"train score {fmt_score(entry.get('score'))}"
-        if isinstance(fixed, int) and isinstance(broken, int):
+        if counted:
+            pass  # its fixed/broken counts are in the tally above
+        elif isinstance(fixed, int) and isinstance(broken, int):
             outcome += (f"; vs its parent fixed {fixed} / broken {broken} of "
                         f"{entry.get('shared')} train items")
         elif entry.get("same_seed") is False:
@@ -833,7 +886,7 @@ def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> s
     how = effect_lines(entry.get("effect") or {})
     return (f"- `{entry.get('id')}` (round {entry.get('round')}, from `{entry.get('parent')}`; "
             f"{_change_text(entry)}): {entry.get('edits')} -- {outcome}"
-            + (f" -- gate: {gate or 'not gated'}" if gated else "")
+            + (f" -- gate: {gate or 'not gated'}" if gated and not counted else "")
             + (" -- the pipeline now" if entry.get("id") == current and not gated else "")
             + (f" -- integrity: {entry['integrity']}" if entry.get("integrity") else "")
             + "".join(f"\n  {line}" for line in how))
@@ -948,7 +1001,11 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                      f"({_clip(stale.get('why'), 300)})"
                      + ("; this is the earlier note, unchanged." if text
                         else "; there is no note yet."))
-    return [*lines, *([text] if text else [])]
+    tally = list(memory.get("tally") or ())
+    if text and tally:
+        lines.append("The note was written from this tally of the epoch's tries, so the note "
+                     "can be weighed against it:")
+    return [*lines, *(tally if text else []), *([text] if text else [])]
 
 
 # ── the journal and the report ──────────────────────────────────────────────

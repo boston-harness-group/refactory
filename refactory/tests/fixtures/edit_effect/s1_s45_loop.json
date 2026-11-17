@@ -1,5 +1,9 @@
 {
  "_doc": "S1-s45 (stopped run e1da122b0d, epoch 4): loop candidate 44548d72f753 and its parent 7691424216b6, the 9 train items the loop changed (8 broken, 1 fixed), trimmed to the fields optim.edit_effect reads (no prompts, gate visits only). The audit (scripts/loopbreak.py) found 5 broken items whose first solve was right before the judge sent it back.",
+ "child_id": "44548d72f753",
+ "parent_id": "7691424216b6",
+ "shared": 35,
+ "val_items": 17,
  "parent": [
   {
    "id": "202602:27",

@@ -1813,6 +1813,19 @@ runs with when it works in such a workspace (`E-new-node-tools` otherwise, unles
 allows tools for new nodes). A step that uses tools in the run directory is not run
 beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
 
+**Each kind tried, against the noise.** A kind tried once with a small result read as a
+run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,
+after one branch, "DON'T add more parallel analysis branches". Yet one of S1's 17
+validation items is 0.059 of the validation mean, so a single try is inside the noise
+either way. The memory call now gets, per kind tried, the tries and each one's train
+fixed/broken counts and the gate's word, with the noise they sit in: one validation item's
+share (`1/|val|`, from the split) and, when the run re-scored the parent, how far its train
+score moved (`memory.kind_tally_lines`). The counts are said there once; the tried entries
+keep their edits and score. `MEMORY_SYSTEM` says a kind tried once inside that noise is no
+evidence against the kind: the note says what went wrong in that try, from how it moved its
+items, never "avoid" it. The untested-kinds rule stands. The proposer sees the same tally,
+kept with the note it was written from, beside the note (`memory.request_lines`).
+
 **How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
 that an edit moved items, not how. For a child that ran steps its parent did not, the
 records say it (`optim.edit_effect`): for its broken and its fixed items, which new steps
