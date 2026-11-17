@@ -868,11 +868,6 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
         # undeclared fact or file): the runtime refused it, which is the point.
         NOTES["code_node_failed_at_run_time"] += 1
         return seen, None
-    if not result.exit_ok and failed_only_at_a_full_map(graph, result):
-        # A list longer than its map's 'max' fails the item, naming the cap: the data, not
-        # the graph (the walks map over whatever a step writes).
-        NOTES["map_list_over_max"] += 1
-        return seen, None
     if result.halted:
         # A halt is a defined ending: a gate out of reloops (the scripted evaluator always
         # answers proceed, which may be a loop's retry edge) or a halt verdict.
@@ -900,26 +895,6 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     if not _terminals_reached(graph, workdir):
         return [*seen, Violation("walker", "finished without completing a terminal")], result
     return seen, result
-
-
-def failed_only_at_a_full_map(graph: Graph, result: Any) -> bool:
-    """Whether a failed walk failed only where a map's elements step found more elements
-    than its 'max' (`operators.elements`): the walk's error, or every failed item's."""
-    from refactory_dsh.nn.operators import MAP_CALL
-
-    maps = [n.id for n in graph.nodes.values() if n.kind == "op" and n.call == MAP_CALL]
-
-    def full(error: Any) -> bool:
-        return any(str(error or "").startswith(f"{node}:") for node in maps) and \
-            "more than its max of" in str(error)
-
-    if not maps:
-        return False
-    if full(result.error):
-        return True
-    items = [r.get("error_text") for r in getattr(result, "item_records", None) or ()
-             if r.get("error_text")]
-    return bool(items) and all(full(error) for error in items)
 
 
 def failed_only_at_marked_code(graph: Graph, state: dict[str, Any], result: Any) -> bool:

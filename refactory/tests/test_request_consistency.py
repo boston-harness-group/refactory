@@ -261,6 +261,8 @@ def _map() -> None:
     once, at most 'max' ...; then 'combine' ... sees every result and writes one output'"""
     from refactory_dsh.nn.operators import MAP_CALL, map_of
 
+    line = core_ops.OPERATORS["map"]["line"]
+    assert "one model call each" in line and "the combine is told so" in line
     before = _seed("fuzz_draft_review")
     _a, out = _ok("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft",
                                         "max": 3})

@@ -1301,6 +1301,10 @@ def _replace_hint(node: Node, state: dict, sees: Any = None) -> str:
 def _pre_remove(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     node = _require_step(graph, edit.get("step"))
+    found = _map_removed(graph, state, node.id)
+    if found is not None:
+        _pre_remove_map(graph, state, found)
+        return None
     if node.kind in ("fork", "join"):
         raise _Refused(f"{node.id!r} is a {node.kind}; 'serialize' the fork to run its branches "
                        "one after another, or remove a branch's step")
@@ -1397,6 +1401,9 @@ def _expand_remove(edit: dict, state: dict) -> list[dict]:
     build = _Steps(state)
     graph = build.graph
     node = graph.nodes[edit["step"]]
+    found = _map_removed(graph, state, node.id)
+    if found is not None:
+        return _remove_map(state, found)
     if node.kind == "gate":
         keep = edit.get("keep")
         kept = [e for e in graph.out_edges(node.id) if keep is None or e.condition == keep][:1]
@@ -1951,7 +1958,7 @@ def _back_to(graph: Graph, edit: dict, node: Node) -> Node:
                        "says reloop")
     start = _scope_start(graph, here)
     if target.id != start and node.id in _reach(flow, start, without=target.id):
-        on_every = sorted(n for n in _reach(flow, start) - {node.id}
+        on_every = sorted(n for n in _reach(flow, start) - {node.id} - _map_runs(graph)
                           if graph.nodes[n].kind == "agent" and n != target.id
                           and (n == start or node.id not in _reach(flow, start, without=n)))
         raise _Refused(f"'back_to' {target.id!r} is not on every path to {node.id!r} (a branch "
@@ -1980,6 +1987,14 @@ def _back_to(graph: Graph, edit: dict, node: Node) -> Node:
     return target
 
 
+def _map_runs(graph: Graph) -> set[str]:
+    """The runs of every map (`operators.map_of`): never a step to name alone."""
+    from .operators import map_of
+
+    return {run for fork in graph.nodes if map_of(graph, fork)
+            for run in graph.nodes[fork].targets}
+
+
 def _scope_start(graph: Graph, data_id: str | None) -> str:
     """Where a run of the scope begins: the pass's entry, or the run's start."""
     return graph.nodes[data_id].subgraph_entry if data_id else graph.start
@@ -1989,13 +2004,14 @@ def _agents_after(graph: Graph, flow: Mapping[str, Sequence[str]], start: str, e
                   ) -> list[str]:
     """The first agents after ``start`` on the way to ``end`` (``end`` included)."""
     leads = {n for n in _reach(flow, start) if end in _reach(flow, n)}
+    runs = _map_runs(graph)
     out, seen, todo = [], {start}, list(flow.get(start, ()))
     while todo:
         current = todo.pop(0)
         if current in seen or current not in leads:
             continue
         seen.add(current)
-        if graph.nodes[current].kind == "agent":
+        if graph.nodes[current].kind == "agent" and current not in runs:
             out.append(current)
         else:
             todo += list(flow.get(current, ()))
@@ -2250,10 +2266,11 @@ def _pre_map(edit: dict, state: dict) -> str | None:
 def _expand_map(edit: dict, state: dict) -> list[dict]:
     """After ``after``: an ``elements`` step (`operators.MAP_CALL`) splitting the list into
     one prompt per element (its text knob ``<id>__task``, filled with what the new step
-    sees, then the element); a fork with one optional branch per element up to 'max', each
-    an agent reading its element (a branch with no element is missing, so it never runs a
-    model); a join; then the combine step, which sees every branch's result (one missing is
-    said so) and what the element step sees, its output placed as insert's is."""
+    sees, then the element), whose fact says how many ran; a fork with one optional branch
+    per element up to 'max', each an agent reading its element (a branch with no element is
+    refused before any model call and recorded as not needed); a join; then the combine
+    step, which sees how many ran, every branch's result (one not written is said so) and
+    what the element step sees, its output placed as insert's is."""
     from .knob import Knob
     from .operators import MAP_CALL, collect_node
 
@@ -2286,8 +2303,10 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
                   "reads": [over] if kind == "file" else [],
                   "inputs": [*([over] if kind == "fact" else []), *facts],
                   "writes": [f"{c}_element.txt" for c in copies],
-                  # Every element's prompt carries the one text.
-                  "knob_outputs": {f"{c}_element.txt": [task] for c in copies},
+                  # How many elements ran, for the combine step: "ran K of N (max M)".
+                  "produces": [base],
+                  # Every element's prompt carries the one text; the count none.
+                  "knob_outputs": {**{f"{c}_element.txt": [task] for c in copies}, base: []},
                   "notes": f"Splits {over!r} into one prompt per element for {base}'s runs."})
     route = _spec({"kind": "agent", "route": edit.get("route")}).get("route") or (
         anchor.route if anchor.kind == "agent" else None)
@@ -2315,7 +2334,7 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
     combine_id = combine.get("id") or _fresh(graph, f"{base}_combine", taken)
     taken.append(combine_id)
     combined = _step_nodes(graph, state, combine, combine_id,
-                           [*seen, *(("file", f"{c}.txt") for c in copies)],
+                           [("fact", base), *seen, *(("file", f"{c}.txt") for c in copies)],
                            settings_from=anchor if anchor.kind == "agent" else None)
     build.add(systems)
     build.add([{"op": "add_knob", "name": task,
@@ -2736,10 +2755,13 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "reads_as": ('map',),
         "fields": ("after", "over", "text", "sees", "max", "combine", "id", "to", "route"),
         "line": "after a step, a new agent step run once per element of 'over' (a list there: "
-                "a fact, a file or a step's output; JSON, else one per line), at once, at most "
-                f"'max' (default {MAP_MAX[0]}, up to {MAP_MAX[2]}; more fails the item); 'text' "
+                "a fact, a file or a step's output), one model call each, all at once: a JSON "
+                "array gives its items, a bulleted, numbered or lettered list its items, other "
+                f"text its non-empty lines; at most 'max' run (default {MAP_MAX[0]}, up to "
+                f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
-                "result and writes one output, placed as insert's is",
+                "result and writes one output, placed as insert's is; remove the elements step "
+                "or the combine and the whole map goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",
                     "combine": {"kind": "agent", "text": "<how to combine the results>"}},
@@ -2928,36 +2950,132 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
 
 
 #: The fields a core operator names an existing node in.
-NAMING_FIELDS = ("step", "after", "before", "fork", "back_to", "takes_over", "steps")
+NAMING_FIELDS = ("step", "after", "before", "fork", "back_to", "takes_over", "steps", "over")
+
+
+def _maps(graph: Graph, state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Each map, by its elements step (`operators.MAP_CALL`): ``inner`` its parts no edit
+    names alone (the collect step before the elements step, the fork, the runs, the join,
+    the combine's collect step), ``combine`` its combine step, ``nodes`` every node it
+    added, ``first`` the node its way in leads to."""
+    from .operators import map_of
+
+    out: dict[str, dict[str, Any]] = {}
+    for fork_id in sorted(graph.nodes):
+        op = map_of(graph, fork_id)
+        join = graph.fork_join(fork_id) if op is not None else None
+        if op is None or join is None:
+            continue
+        before = _owned(graph, op, state)
+        after = _sole_out(graph, join)
+        combine, gather = after, []
+        if after is not None and after.endswith("_inputs"):
+            step = after.removesuffix("_inputs")
+            if [e.target for e in graph.out_edges(after)] == [step]:
+                combine, gather = step, [after]
+        inner = [*before, fork_id, *graph.nodes[fork_id].targets, join, *gather]
+        out[op] = {"inner": inner, "combine": combine, "first": (before or [op])[0],
+                   "nodes": [*before, op, *inner[len(before):], *([combine] if combine else [])]}
+    return out
 
 
 def _map_part(edit: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
-    """Why ``edit`` names a part of a map (its elements step, fork or runs) -- or None. Its
-    runs are one step run per element; an edit to one alone (a step before it, a serialized
-    fork, a branch beside them) would leave the others different or run one with no
-    element, so a map is edited through its text knob and its combine step."""
-    from .operators import map_of
-
+    """Why ``edit`` names a part of a map (its elements step, fork, runs, join or the
+    collect steps around them) -- or None. Its runs are one step run per element; an edit
+    to one alone (a step before it, a serialized fork, a branch beside them) would leave
+    the others different or run one with no element, so a map is edited through its text
+    knob and its combine step, and ``remove`` of its elements step or its combine takes the
+    whole map out (`_remove_map`)."""
     try:
         graph = _edits()._graph(dict(state))
     except Exception:  # noqa: BLE001 - an unreadable state is the operator's to refuse
         return None
-    parts: dict[str, str] = {}
-    for fork in graph.nodes:
-        op = map_of(graph, fork)
-        if op is not None:
-            parts.update({part: op for part in (op, fork, *graph.nodes[fork].targets)})
+    maps = _maps(graph, state)
+    parts = {part: op for op, found in maps.items() for part in (op, *found["inner"])}
     named = []
     for key in NAMING_FIELDS:
         value = edit.get(key)
         named += [v for v in (value if isinstance(value, list) else [value])
                   if isinstance(v, str)]
+    if edit.get("op") == "remove" and edit.get("step") in maps:
+        return None
     hit = next((name for name in named if name in parts), None)
     if hit is None:
         return None
     return (f"{hit!r} is part of the map {parts[hit]!r}, whose runs each take one element; "
-            f"change what they do with its knob {parts[hit]}__task, or work on the step "
-            "before the map or its combine step")
+            f"change what they do with its knob {parts[hit]}__task, work on the step "
+            "before the map or its combine step, or remove the map by its elements step")
+
+
+def _map_removed(graph: Graph, state: Mapping[str, Any], step: str) -> dict[str, Any] | None:
+    """The map ``remove`` of ``step`` takes out whole: ``step`` is its elements step or its
+    combine; None otherwise."""
+    for op, found in _maps(graph, state).items():
+        if step in (op, found["combine"]):
+            return {"op": op, **found}
+    return None
+
+
+def _unplaced(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
+    """Steps that take the combine's output out of every knob it was put in (`_place`, which
+    may be a knob an op fills, as 'to' names it), a frozen one never."""
+    graph = _edits()._graph(dict(state))
+    facts = set(graph.nodes[found["combine"]].produces) if found["combine"] else set()
+    steps = []
+    for name, entry in sorted((state.get("knobs") or {}).items()):
+        value = (entry or {}).get("value")
+        if not isinstance(value, str) or ((entry or {}).get("spec") or {}).get("frozen"):
+            continue
+        from .validate import template_names
+
+        names = template_names(value)
+        if names & facts:
+            new = _strip_unseen(value, (names - facts) | set(state.get("knobs") or {})).rstrip()
+            if new != value:
+                steps.append({"op": "set_knob", "name": name, "value": new})
+    return steps
+
+
+def _pre_remove_map(graph: Graph, state: Mapping[str, Any], found: dict[str, Any]) -> None:
+    combine = found["combine"]
+    if combine is None or len(graph.out_edges(combine)) > 1:
+        raise _Refused(f"map {found['op']!r} has no one combine step to remove it by")
+    gone = set(found["nodes"])
+    outside = sorted({e.source for n in gone for e in graph.in_edges(n)} - gone)
+    if len(outside) != 1:
+        raise _Refused(f"map {found['op']!r} is entered from {outside} (a loop sends work back "
+                       "into it?); remove that loop's gate first (remove it with 'keep')")
+    unplaced = _simulate(state, _unplaced(state, found))
+    hard, _strip, _drop = _losses(_edits()._graph(unplaced), unplaced, gone)
+    if hard:
+        raise _Refused(f"removing map {found['op']!r} leaves steps without an input only it "
+                       f"makes: {'; '.join(hard)}; remove or rewire those first")
+
+
+def _remove_map(state: Mapping[str, Any], found: dict[str, Any]) -> list[dict]:
+    """Primitive steps that take a map out whole and lead the step before it to the step
+    after its combine, as before the map: its combine's output is taken out of the prompts
+    it was put in, and its knobs go with it."""
+    build = _Steps(state)
+    graph = build.graph
+    gone = set(found["nodes"])
+    anchor = next(e.source for n in gone for e in graph.in_edges(n) if e.source not in gone)
+    after = _sole_out(graph, found["combine"])
+    build.add(_unplaced(state, found))
+    _hard, strip, drop = _losses(build.graph, build.state, gone)
+    build.add(_strip_steps(build.state, strip))
+    for reader, names in sorted(drop.items()):
+        changed = build.graph.nodes[reader].to_state()
+        changed["reads"] = [r for r in changed.get("reads") or () if r not in names]
+        build.add(_respec(build.state, reader, changed))
+    for data in graph.nodes.values():
+        if data.kind == "data" and data.subgraph_exit == found["combine"]:
+            build.add(_respec(build.state, data.id, {**data.to_state(), "subgraph_exit": anchor}))
+    build.add([{"op": "remove_node", "id": node_id} for node_id in found["nodes"]])
+    if after is not None:
+        build.add([{"op": "add_edge", "source": anchor, "target": after, "condition": None}])
+    _drop_orphans(build)
+    return build.steps
 
 
 def _pointed(pre, expand):

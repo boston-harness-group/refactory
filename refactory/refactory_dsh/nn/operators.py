@@ -17,9 +17,9 @@ same way on both runtimes (the walker in its forkserver child, the spine through
   or the last line, as a verdict gate reads one) and copies the declared read whose name
   that label names to its first write (and its fact, when it declares one).
 - ``elements`` (`MAP_CALL`): splits a list (its first declared read, else its first input
-  fact: a JSON list, else one element per non-empty line) into one prompt per element --
-  its one text knob, filled from the run's facts, then the element -- written to its
-  i-th write; a ``map``'s branch reads its own (`map_of`).
+  fact; `list_elements`) into one prompt per element -- its one text knob, filled from
+  the run's facts, then the element -- written to its i-th write; a ``map``'s branch
+  reads its own (`map_of`).
 
 The helpers describe and wire data without a model:
 
@@ -158,32 +158,69 @@ def select(ctx: Any) -> dict[str, Any]:
     return {fact: text} if fact else {}
 
 
+#: A line that starts a list item: a bullet, or a number or letter then ``.`` or ``)``.
+LIST_ITEM = re.compile(r"^\s*(?:[-*+\u2022]|\(?(?:\d+|[A-Za-z])[.)])\s+\S")
+#: A code fence around the whole list (```json ... ```).
+FENCED = re.compile(r"^```[\w-]*[ \t]*\n(.*?)\n?```$", re.DOTALL)
+
+
 def list_elements(raw: Any) -> list[str]:
-    """The elements of a list as text: a list as it is, else a JSON list, else one element
-    per non-empty line; an element that is not text is its JSON."""
+    """The elements of a list, as text. A code fence around it is taken off. A JSON array
+    gives its items (an item that is not text as compact JSON); other JSON (an object) is
+    one element. Text with two or more lines that start a list item (``-``, ``*``, ``1.``,
+    ``2)``, ``A)``, ``b.``) gives one element per item, its following lines kept with it and
+    lines before the first item left out (an introduction). Any other text gives one
+    element per non-empty line."""
     import json
 
     if isinstance(raw, list):
         items: list[Any] = raw
     else:
-        text = str(raw if raw is not None else "")
+        text = str(raw if raw is not None else "").strip()
+        fenced = FENCED.match(text)
+        if fenced:
+            text = fenced.group(1).strip()
         try:
             parsed = json.loads(text)
         except ValueError:
             parsed = None
-        items = parsed if isinstance(parsed, list) else [
-            line.strip() for line in text.splitlines() if line.strip()]
-    return [item if isinstance(item, str) else json.dumps(item, sort_keys=True)
+        lines = [line.rstrip() for line in text.splitlines()]
+        if isinstance(parsed, list):
+            items = parsed
+        elif parsed is not None:
+            items = [text]
+        elif sum(bool(LIST_ITEM.match(line)) for line in lines) >= 2:
+            items = []
+            for line in lines:
+                if LIST_ITEM.match(line):
+                    items.append(line.strip())
+                elif items and line.strip():
+                    items[-1] += "\n" + line.strip()
+        else:
+            items = [line.strip() for line in lines if line.strip()]
+    return [item if isinstance(item, str) else json.dumps(item, separators=(",", ":"))
             for item in items]
+
+
+#: The cause a map's unused run is recorded under (`items.missing_steps` leaves it out):
+#: the list had fewer elements than the map has runs, so it had nothing to do.
+NOT_NEEDED = "not_needed"
 
 
 def elements(ctx: Any) -> dict[str, Any]:
     """`MAP_CALL`: the list (its first declared read, else its first declared input fact:
-    its declaration's ``inputs``, `lowering.snippet_spec`) split into elements; for the
-    i-th, its text knob (``task_knob``) filled from the run's facts, then the element, is
-    written to its i-th declared write. Fewer elements than writes leave the rest
-    unwritten, so the branches that read them do not run; more fail the step, naming the
-    cap."""
+    its declaration's ``inputs``, `lowering.snippet_spec`) split into elements
+    (`list_elements`); for the i-th of the first as many as it has writes, its text knob
+    (``task_knob``) filled from the run's facts, then the element, is written to its i-th
+    declared write. First every element file, and every output of the map's runs
+    (``runs``), is taken away, so a pass run again (a loop) never shows a run an element or
+    a result from before. A run with no element this time is recorded as not needed
+    (`NOT_NEEDED`), never as a step that failed. Its fact says how many ran: ``ran K of N
+    elements (max M)``, which the combine step sees."""
+    import json
+
+    from refactory_dsh.node_retry import MISSING_DIR
+
     from .executor import ExecutionError, render
 
     found = getattr(ctx, "snippet", None) or {}
@@ -196,14 +233,28 @@ def elements(ctx: Any) -> dict[str, Any]:
         raise ExecutionError(f"map step {ctx.node_id!r}: its list {source!r} was not set")
     items = list_elements(ctx.read_text(source) if reads else ctx.facts[source])
     writes = list(getattr(ctx, "_declared", ()) or ())
-    if len(items) > len(writes):
-        raise ExecutionError(f"map step {ctx.node_id!r}: {source!r} has {len(items)} elements, "
-                             f"more than its max of {len(writes)}")
+    runs = list(found.get("runs") or ())
+    workdir = Path(ctx.workdir)
+    for run in runs:
+        for name in (*run.get("writes", ()), f"reviews/{run['id']}-missing.txt",
+                     f"{MISSING_DIR}/{run['id']}.json"):
+            (workdir / name).unlink(missing_ok=True)
+    for name in writes:
+        (workdir / name).unlink(missing_ok=True)
+    used = items[:len(writes)]
     instruction = render(str(ctx.knobs.get(found.get("task_knob") or "") or ""), ctx).rstrip()
-    for index, item in enumerate(items):
+    for index, item in enumerate(used):
         ctx.write_text(writes[index],
-                       f"{instruction}\n\n## Element {index + 1} of {len(items)}\n{item}\n")
-    return {}
+                       f"{instruction}\n\n## Element {index + 1} of {len(used)}\n{item}\n")
+    for run in runs[len(used):]:
+        marker = workdir / MISSING_DIR / f"{run['id']}.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"cause": NOT_NEEDED, "sessions": 0,
+                                      "error": f"not needed: the list had {len(items)} "
+                                               "element(s)"}) + "\n")
+    facts = list(getattr(ctx, "_declared_facts", ()) or ())
+    said = f"ran {len(used)} of {len(items)} elements (max {len(writes)})"
+    return {facts[0]: said} if facts else {}
 
 
 #: It fills each ``{{name}}`` in the knob it reads, as an agent's prompt is filled

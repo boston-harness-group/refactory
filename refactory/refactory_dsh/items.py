@@ -673,7 +673,9 @@ def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
     `node_retry.missing_cause`), ``sessions`` (how many ran, when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
     write (`nn.fork._record_missing`, `worker_node.main`), and the step's
-    `node_retry.record_spent` record."""
+    `node_retry.record_spent` record. A map's run the list had no element for is left
+    out (`nn.operators.NOT_NEEDED`): it had nothing to do."""
+    from refactory_dsh.nn.operators import NOT_NEEDED
     from refactory_dsh.node_retry import MISSING_DIR
 
     reviews = Path(pass_dir) / "reviews"
@@ -691,6 +693,9 @@ def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
                          if key in ("cause", "sessions", "error")})
         except (OSError, ValueError):
             pass
+        if info.get("cause") == NOT_NEEDED:
+            # A map's run with no element this time: nothing to do, never a missing answer.
+            continue
         found[step] = info
     return found
 

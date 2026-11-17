@@ -174,12 +174,17 @@ def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[s
     """A code or verdict node's declaration (`snippet.spec`), the same on both runtimes:
     the walker builds it for its child, the lowering writes it for the spine's runner."""
     from refactory_dsh import snippet
-    from refactory_dsh.nn.operators import MAP_CALL
+    from refactory_dsh.nn.operators import MAP_CALL, map_of
 
     found = snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
     if node.kind == "op" and node.call == MAP_CALL:
-        # The text knob a map's elements step fills (`nn.operators.elements`).
+        # The text knob a map's elements step fills, and the map's runs with what each
+        # writes, which it clears before a pass (`nn.operators.elements`).
         found["task_knob"] = node.knobs[0] if node.knobs else ""
+        fork = next((e.target for e in graph.out_edges(node.id)
+                     if map_of(graph, e.target) == node.id), None)
+        found["runs"] = [{"id": run, "writes": list(graph.nodes[run].writes)}
+                         for run in (graph.nodes[fork].targets if fork else ())]
     return found
 
 

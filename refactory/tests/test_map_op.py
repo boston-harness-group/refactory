@@ -6,19 +6,23 @@ so a map is not one. It is built from what both runtimes already run: an ``eleme
 (`operators.MAP_CALL`) writes one prompt per element (the map's one text knob, then the
 element); a fork runs one optional branch per element up to ``max``, each an agent that
 reads its element's file, so a branch with no element is refused before any model call and
-is missing, never a failure; a join; and the combine step, which sees every result (a
-missing one said so) through a collect step.
+recorded as not needed, never as a missing answer; a join; and the combine step, which
+sees how many ran and every result (one not written said so) through a collect step.
 
 - **What the edit builds** on LiveMath S1 (``solver``) and S4 (``skill_graph``), each with a
   code step before it that lists the item's options; the view's one line; the lowering;
   the refusals; the elements op's lists.
 - **Both runtimes** (the walker; the spine with dispatched workers) on S1 and S4 with a
   scripted model: one run per option, none for the fifth branch, the combine sees each
-  result and its output reaches decide (S4); a list longer than ``max`` fails the item.
+  result and its output reaches decide (S4); a list longer than ``max`` runs its first
+  ``max``, said so; a map in a loop never reruns an old element; a short list leaves no
+  "no answer" in what the optimizer is told; ``remove`` takes a map out whole.
 """
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -178,10 +182,25 @@ def test_refusals():
 
 
 def test_the_elements_of_a_list():
+    """As a model writes them: a fenced JSON array, a bulleted list with wrapped lines and
+    an introduction, lettered options, numbered steps, an object, prose."""
     assert list_elements('["A: x", "B: y"]') == ["A: x", "B: y"]
-    assert list_elements('[{"label": "A"}, 2]') == ['{"label": "A"}', "2"]
-    assert list_elements("first\n\n  second  \n") == ["first", "second"]
-    assert list_elements(["a", {"b": 1}]) == ["a", '{"b": 1}']
+    assert list_elements('[{"label": "A"}, 2]') == ['{"label":"A"}', "2"]
+    assert list_elements('Here they are:\n```json\n["a", "b", "c"]\n```') == [
+        "Here they are:", '```json', '["a", "b", "c"]', "```"]  # a fence inside prose
+    assert list_elements('```json\n[\n  "a",\n  "b",\n  "c"\n]\n```') == ["a", "b", "c"]
+    assert list_elements("The claims:\n- the series diverges, since its terms\n  do not tend "
+                         "to zero\n- it converges\n* by comparison") == [
+        "- the series diverges, since its terms\ndo not tend to zero", "- it converges",
+        "* by comparison"]
+    assert list_elements("A) Diverges\nB) Converges conditionally\nC) Oscillates") == [
+        "A) Diverges", "B) Converges conditionally", "C) Oscillates"]
+    assert list_elements("1. Read it.\n2. Solve it.\n   Show the work.") == [
+        "1. Read it.", "2. Solve it.\nShow the work."]
+    assert list_elements('{\n  "a": 1,\n  "b": 2\n}') == ['{\n  "a": 1,\n  "b": 2\n}']
+    assert list_elements("The answer is A.\nIt is the only one.") == [
+        "The answer is A.", "It is the only one."]
+    assert list_elements(["a", {"b": 1}]) == ["a", '{"b":1}']
     assert list_elements("") == []
 
 
@@ -244,6 +263,7 @@ def _one_run_per_option(prompts: dict[str, list[str]]) -> None:
     assert len(prompts["options_map_combine"]) == ITEMS
     for prompt in prompts["options_map_combine"]:
         assert WEIGH in prompt and "### options_map_5.txt\n(not written" in prompt
+        assert "ran 4 of 4 elements (max 5)" in prompt
 
 
 @pytest.mark.parametrize("name, state", [("livemath/solver", _s1),
@@ -252,6 +272,8 @@ def test_walker_runs_the_step_once_per_option_and_combines(name, state, tmp_path
     result, log = _walk(name, state(), tmp_path, monkeypatch)
     assert result.exit_ok, result.error
     _graded_b(result.facts["item_scores"])
+    # The unused fifth run is no missing step: it had nothing to do.
+    assert all("missing_steps" not in r for r in result.facts["item_scores"])
     prompts: dict[str, list[str]] = {}
     for node, prompt in log:
         prompts.setdefault(node, []).append(prompt)
@@ -271,10 +293,12 @@ def test_spine_runs_the_step_once_per_option_and_combines(name, state, tmp_path)
                                                CHECK: ["a verdict on this option"],
                                                "": ["<answer>B</answer>"]}, tmp_path)
     _graded_b(records)
+    assert all("missing_steps" not in r for r in records)
     assert dsh.calls(CHECK) == 4 * ITEMS and dsh.calls(WEIGH) == ITEMS
     combines = dsh.prompts(WEIGH)
     assert all(p.count("a verdict on this option") == 4 for p in combines)
     assert all("### options_map_5.txt\n(not written" in p for p in combines)
+    assert all("ran 4 of 4 elements (max 5)" in p for p in combines)
     checks = dsh.prompts(CHECK)
     for index in range(1, 5):
         assert sum(f"## Element {index} of 4\n" in p for p in checks) == ITEMS
@@ -284,23 +308,33 @@ def test_spine_runs_the_step_once_per_option_and_combines(name, state, tmp_path)
 
 
 @pytest.mark.parametrize("runtime", ["walker", pytest.param("spine", marks=needs_spine)])
-def test_a_list_longer_than_max_fails_the_item_naming_the_cap(runtime, tmp_path, monkeypatch):
+def test_a_list_longer_than_max_runs_the_first_max_and_says_so(runtime, tmp_path, monkeypatch):
+    """Four options, max 3: the first three run, the item is scored, and the combine and
+    the item's record say "ran 3 of 4 elements (max 3)" -- a design limit, not an error."""
     state = _s1(max=3)
     if runtime == "walker":
         result, log = _walk("livemath/solver", state, tmp_path, monkeypatch)
-        assert not result.exit_ok  # every item failing fails the run
+        assert result.exit_ok, result.error
         records = result.facts["item_scores"]
-        assert not [node for node, _p in log if node.startswith("options_map")]
+        runs = [n for n, _p in log if n.startswith("options_map_") and n[-1].isdigit()]
+        combines = [p for n, p in log if n == "options_map_combine"]
     else:
-        records, dsh = _dispatched("livemath/solver", state, {"": ["<answer>B</answer>"]},
-                                   tmp_path, ok=False)
-        assert dsh.calls() == 0
-    assert len(records) == ITEMS
-    failed = [r for r in records if r.get("error_text")]
-    # The all-failed rule ends the spine's pass at its last item (`items`), recorded without it.
-    assert len(failed) >= ITEMS - 1 and not any(r.get("prediction") for r in records)
-    for record in failed:
-        assert "'options' has 4 elements, more than its max of 3" in record["error_text"], record
+        records, dsh = _dispatched("livemath/solver", state, {
+            WEIGH: ["<answer>B</answer>"], CHECK: ["a verdict"], "": ["<answer>B</answer>"]},
+            tmp_path)
+        runs = ["run"] * dsh.calls(CHECK)
+        combines = dsh.prompts(WEIGH)
+    _graded_b(records)
+    assert len(runs) == 3 * ITEMS and len(combines) == ITEMS
+    assert all("ran 3 of 4 elements (max 3)" in p for p in combines)
+    for record in records:
+        assert "missing_steps" not in record
+        # The elements step's visit in the record says it (on the walker; the spine's visit
+        # records were seen to drop steps under heavy test load, so its count is checked in
+        # the combine's prompt above).
+        assert runtime == "spine" or any(
+            "ran 3 of 4 elements (max 3)" in str(step.get("output"))
+            for step in record["steps"]), record["steps"]
 
 
 def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True
@@ -379,13 +413,174 @@ def test_an_edit_to_one_part_of_a_map_is_refused():
     step, fork or runs) is refused, saying what to edit instead."""
     state = _s4()
     reason = ("'{}' is part of the map 'options_map', whose runs each take one element; "
-              "change what they do with its knob options_map__task, or work on the step "
-              "before the map or its combine step")
+              "change what they do with its knob options_map__task, work on the step "
+              "before the map or its combine step, or remove the map by its elements step")
     for edit, part in (({"op": "serialize", "fork": "options_map_fork"}, "options_map_fork"),
                        ({"op": "insert", "after": "options_map_2"}, "options_map_2"),
                        ({"op": "branch", "fork": "options_map_fork"}, "options_map_fork"),
-                       ({"op": "remove", "step": "options_map"}, "options_map"),
+                       ({"op": "remove", "step": "options_map_join"}, "options_map_join"),
+                       ({"op": "insert", "after": "options_map"}, "options_map"),
+                       ({"op": "map", "after": "options_map_combine", "over": "options_map_3"},
+                        "options_map_3"),
                        ({"op": "merge", "steps": ["options_map_5", "options_map_combine"]},
                         "options_map_5")):
         assert _refused(edit, state) == reason.format(part), edit
     assert nn_edits.precheck({"op": "insert", "after": "options_map_combine"}, state) is None
+
+
+# ── a map run again, short lists, removal, the knob's slots ────────────────
+
+
+def _looped() -> dict[str, Any]:
+    """S1 with an agent listing things before solve, a map over its list, and a loop judging
+    the combine that sends the work back to the lister: a pass of the map runs again."""
+    state = nn_edits.apply({"op": "insert", "before": "solve", "kind": "agent", "id": "lister",
+                            "text": "List things."}, _state("livemath/solver"))
+    state = nn_edits.apply({"op": "map", "after": "lister", "over": "lister", "text": "Check",
+                            "combine": {"kind": "agent", "text": "Combine."}}, state)
+    return nn_edits.apply({"op": "loop", "step": "lister_map_combine", "back_to": "lister",
+                           "judge": "agent", "text": "ok?", "max_iterations": 1}, state)
+
+
+class _Lister(_Model):
+    """Three things on an item's first list, one on its second; the judge sends back once."""
+
+    def for_node(self, node_id: str, role: str = "") -> "_Lister":
+        return _Lister(self.log, node_id)
+
+    def complete(self, prompt: str, **_: Any) -> str:
+        self.log.append((self.node, prompt))
+        seen = sum(node == self.node for node, _p in self.log)
+        if self.node == "lister":
+            return "x1\nx2\nx3" if seen % 2 else "only"
+        if self.node == "lister_map_combine_check_judge":
+            return "reloop: again" if seen % 2 else "proceed"
+        if self.node.startswith("lister_map_") and self.node[-1].isdigit():
+            return f"VERD of {self.node}"
+        return "<answer>B</answer>"
+
+
+def _second_pass(runs: list[str], combines: list[str]) -> None:
+    """Per item: the first pass runs three elements, the second one; the second combine
+    sees one result and no old one."""
+    assert len(combines) == 2 * ITEMS
+    assert sorted(p.count("VERD") for p in combines) == [1] * ITEMS + [3] * ITEMS
+    assert sum("ran 1 of 1 elements (max 4)" in p for p in combines) == ITEMS
+    assert sorted(runs) == sorted([*["## Element 1 of 3\nx1", "## Element 2 of 3\nx2",
+                                     "## Element 3 of 3\nx3"] * ITEMS,
+                                   *["## Element 1 of 1\nonly"] * ITEMS])
+
+
+def test_walker_a_map_run_again_never_shows_an_old_element_or_result(tmp_path, monkeypatch):
+    import re
+
+    _patch_task(monkeypatch)
+    log: list = []
+    run = tmp_path / "walker"
+    run.mkdir()
+    result = _mode("livemath/solver", _looped()).run(run, model=_Lister(log))
+    assert result.exit_ok, result.error
+    runs = [re.search(r"## Element \d+ of \d+\n\S+", p).group(0) for n, p in log
+            if n.startswith("lister_map_") and n[-1].isdigit()]
+    _second_pass(runs, [p for n, p in log if n == "lister_map_combine"])
+    assert all("missing_steps" not in r for r in result.facts["item_scores"])
+
+
+@needs_spine
+def test_spine_a_map_run_again_never_shows_an_old_element_or_result(tmp_path):
+    import re
+
+    # The dsh plan answers by key across the run: items one after another (parallelism 1).
+    state = nn_edits.configure(_looped(), "data_parallelism", "1")
+    records, dsh = _dispatched("livemath/solver", state, {
+        "ok?": ["reloop: again", "proceed"] * ITEMS, "Combine.": ["CC"], "Check": ["VERD"],
+        "List things": ["x1\nx2\nx3", "only"] * ITEMS, "": ["<answer>B</answer>"]}, tmp_path)
+    runs = [re.search(r"## Element \d+ of \d+\n\S+", p).group(0) for p in dsh.prompts("Check")]
+    _second_pass(runs, dsh.prompts("Combine."))
+    assert all("missing_steps" not in r for r in records)
+
+
+#: Each item's options cut short, so some runs have nothing to do (item 202503:1: none).
+SHORT = ("import json\n"
+         "def main(inp):\n"
+         "    item = json.loads(inp['files']['current_item.json'])\n"
+         "    n = {'202501:1': 4, '202501:2': 1, '202503:1': 0, '202503:2': 4,\n"
+         "         '202503:3': 2}[str(item.get('id'))]\n"
+         "    return {'facts': {'options': json.dumps([c['label'] + ': ' + c['text']\n"
+         "                                             for c in item['choices']][:n])}}\n")
+
+
+def test_a_short_list_is_no_missing_answer_to_the_optimizer(tmp_path, monkeypatch):
+    """Runs the list had no element for are not needed: no item lists them as missing, the
+    proposer's item results count no item without an answer, and an analyst's trace says
+    no "No answer from step" -- an item answered wrong stays answered wrong."""
+    import test_map_op as module
+    from refactory_dsh.optim import analysts, base
+
+    monkeypatch.setattr(module, "OPTIONS", SHORT)
+    result, log = _walk("livemath/solver", _s1(), tmp_path, monkeypatch)
+    assert result.exit_ok, result.error
+    records = result.facts["item_scores"]
+    assert all("missing_steps" not in r and r["error_text"] is None for r in records)
+    ran = Counter(n for n, _p in log if n.startswith("options_map_") and n[-1].isdigit())
+    assert sum(ran.values()) == 4 + 1 + 0 + 4 + 2
+    combines = [p for n, p in log if n == "options_map_combine"]
+    assert sorted(re.search(r"ran (\d) of \d", p).group(1) for p in combines) == \
+        ["0", "1", "2", "4", "4"]
+    evidence = "\n".join(base._item_evidence(records))
+    wrong = sum(1 for r in records if not r["passed"])
+    assert f"{wrong} answered wrong" in evidence and "no answer" not in evidence
+    for record in records:
+        assert "No answer from step" not in analysts.item_text(record)
+
+
+@pytest.mark.parametrize("state, original", [
+    (_s1, lambda: nn_edits.apply({"op": "insert", "before": "solve", "kind": "code",
+                                  "id": "options", "sees": ["current_item.json"],
+                                  "text": OPTIONS}, _state("livemath/solver"))),
+    (_s4, lambda: nn_edits.apply({"op": "insert", "before": "compare", "kind": "code",
+                                  "id": "options", "sees": ["current_item.json"],
+                                  "text": OPTIONS}, _state("livemath/skill_graph")))],
+    ids=["S1", "S4"])
+@pytest.mark.parametrize("step", ["options_map", "options_map_combine"])
+def test_remove_by_the_elements_step_or_the_combine_takes_the_map_out_whole(
+        state, original, step):
+    """As before the map: its nodes and knobs gone, the step before it leading to the step
+    after it, its output taken out of the prompt it was put in (S4: decide_task)."""
+    removed = nn_edits.apply({"op": "remove", "step": step}, state())
+    assert validate_state(removed) == []
+    assert _same(removed, original())
+
+
+def _same(a: dict, b: dict) -> bool:
+    def key(state: dict) -> tuple:
+        graph = state["graph"]
+        return (graph["nodes"], sorted(json.dumps(e, sort_keys=True) for e in graph["edges"]),
+                graph.get("start"), state.get("knobs"))
+    return key(a) == key(b)
+
+
+def test_a_slot_in_the_map_s_knob_is_filled_from_the_facts(tmp_path, monkeypatch):
+    """The elements step fills its knob's ``{{name}}`` slots, as an agent's prompt is
+    filled: the validator takes the slot (V20, `operators.elements` fills facts) and each
+    element's prompt carries the fact's value."""
+    from refactory_dsh.nn.validate import consumed
+
+    state = nn_edits.apply({"op": "set_knob", "name": "options_map__task",
+                            "value": "The question: {{solver_prompt}} Is this one right?"},
+                           _s1())
+    assert validate_state(state) == []
+    values = {name: entry["value"] for name, entry in state["knobs"].items()}
+    # The slot is one of the step's inputs, so the validator holds it to its maker (V15).
+    assert ("fact", "solver_prompt") in consumed(_graph(state).nodes["options_map"], values)
+    result, log = _walk("livemath/solver", state, tmp_path, monkeypatch)
+    assert result.exit_ok, result.error
+    runs = [p for n, p in log if n == "options_map_1"]
+    assert len(runs) == ITEMS and all("The question: History:" in p for p in runs)
+    assert sum("Which of the following series" in p for p in runs) == 1
+
+
+def test_a_loop_s_hint_never_names_a_map_s_run():
+    reason = nn_edits.precheck({"op": "loop", "step": "decide", "back_to": "options",
+                                "judge": "agent"}, _s4())
+    assert reason.endswith("act on it: options_map_combine"), reason

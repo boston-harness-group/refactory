@@ -29,6 +29,7 @@ import pytest
 
 import structure_fuzz as sf
 from refactory_dsh.nn import edits as edits_mod
+from refactory_dsh.nn.operators import MAP_CALL
 from refactory_dsh.optim import Candidate
 from refactory_dsh.optim import base as base_mod
 from test_livemath_blocks import needs_spine
@@ -120,13 +121,24 @@ def _map_cases() -> list[tuple[str, dict]]:
 @pytest.mark.parametrize("name, edit", _map_cases(),
                          ids=lambda v: v if isinstance(v, str) else v["after"])
 def test_every_map_a_seed_takes_is_sound(name, edit):
-    """Each map the edit layer takes keeps every invariant on the walker (a list longer
-    than its max fails its item by design, `structure_fuzz.failed_only_at_a_full_map`)."""
+    """Each map the edit layer takes keeps every invariant on the walker, and removing it
+    by its elements step gives back the seed's graph and knobs."""
     applier = sf.Applier(sf.seeds()[name])
-    outcome = applier.attempt(Candidate.from_state(applier.seed_state), edit, set())
+    seed = Candidate.from_state(applier.seed_state)
+    outcome = applier.attempt(seed, edit, set())
     if isinstance(outcome, list):
         return
     assert sf.check_state(applier, outcome.state, walker=True) == []
+    [op] = [n for n in edits_mod._graph(outcome.state).nodes if n not in applier.seed_state[
+        "graph"]["nodes"] and edits_mod._graph(outcome.state).nodes[n].call == MAP_CALL]
+    removed = applier.attempt(outcome, {"op": "remove", "step": op}, set())
+    assert not isinstance(removed, list), removed
+
+    def key(state: dict) -> tuple:
+        graph = state["graph"]
+        return (graph["nodes"], sorted(json.dumps(e, sort_keys=True) for e in graph["edges"]),
+                state.get("knobs"))
+    assert key(removed.state) == key(applier.seed_state)
 
 
 def test_the_compound_generator_mixes_every_kind_of_edit():
