@@ -678,6 +678,11 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         from refactory_dsh.model import DEFAULT_TIMEOUT_S, NODE_DISPATCH_OVERHEAD_S, node_session_budget_s
         attempts = selected.retry_attempts()
         per_completion = int(selected_context.get('timeout_s') or DEFAULT_TIMEOUT_S)
+        # A session that reports activity has no wall unless its node declares one: it ends
+        # on inactivity, or at the harness backstop at the latest (`model.DEFAULT_BACKSTOP_S`),
+        # so the dispatch outlasts the backstop, not a per-completion wall.
+        envelope_s = (selected.backstop_limit() + NODE_DISPATCH_OVERHEAD_S if selected.observes_activity()
+                      else node_session_budget_s(attempts, per_completion))
         if retry:
             # Every attempt's session -- the first under the node's bound, each retry
             # longer by its factor -- plus the one dispatch overhead,
@@ -694,13 +699,13 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             else:
                 # A crash retry with no node bound runs each session under the route's
                 # envelope, so the dispatch reserves one per attempt.
-                command_timeout_s = (1 + int(retry['times'])) * node_session_budget_s(attempts, per_completion)
+                command_timeout_s = (1 + int(retry['times'])) * envelope_s
         elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.
             command_timeout_s = node.timeout + NODE_DISPATCH_OVERHEAD_S
         else:
-            command_timeout_s = node_session_budget_s(attempts, per_completion)
+            command_timeout_s = envelope_s
         if node.workspace:
             # The workspace is prepared before the session starts -- a clone, its
             # installs, generate and setup -- so the dispatch outlasts the session by

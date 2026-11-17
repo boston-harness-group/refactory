@@ -142,15 +142,6 @@ def _new_steps(parent: Any, child: Any) -> set[str]:
     return nodes(child) - nodes(parent)
 
 
-def _timed_out(record: Mapping[str, Any]) -> bool:
-    """Whether an item record says the item ran out of time (its error kind, or its error
-    or failure text)."""
-    if str(record.get("error_kind") or "").lower() == "timeout":
-        return True
-    text = f"{record.get('error_text') or ''} {record.get('fail_reason') or ''}".lower()
-    return "timed out" in text or "timeout" in text
-
-
 class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
 
@@ -5380,23 +5371,19 @@ class Loop(OuterLoop):
         )
 
     def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
-        """Time in numbers for the request (`optim.base.time_lines`): how long one model step
-        may run (the inner model's limit), and for the candidate being edited how long its
+        """Time in numbers for the request (`optim.base.time_lines`): for the candidate
+        being edited, how long its
         train items took each, from each item's own record (`items.item_duration`): median,
-        90th percentile and longest. Also how many of its train items timed out. Never its
-        wall time over its items: that is set by its slowest item."""
+        90th percentile and longest, over the items the harness did not time out (those
+        are said once, in "Item results"). Never its wall time over its items: that is set by
+        its slowest item."""
         facts: dict[str, Any] = {}
-        limit = getattr(self.model, "timeout_s", None)
-        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
-            facts["step_limit_s"] = int(limit)
         _owner, records = self._train_records_owner(board)
         if not records:
             return facts
-        # A repeated item has a record per run: items are counted once, runs each time.
-        facts["items"] = len({record.get("id", index) for index, record in enumerate(records)})
-        facts["runs"] = len(records)
-        facts["timeouts"] = sum(1 for record in records if _timed_out(record))
-        facts.update(item_time_spread(records))
+        from refactory_dsh.optim.base import harness_timeout
+
+        facts.update(item_time_spread([r for r in records if not harness_timeout(r)]))
         return facts
 
     def _request_order(self, board: list[Candidate]) -> list[Candidate]:
@@ -5569,7 +5556,7 @@ class Loop(OuterLoop):
         """The optimizer's own reasoning about recent candidates -- the line from the
         seed to the edited candidate, and the latest refused children -- beside what
         happened to each. Train scores, train item errors and gate decisions only."""
-        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, item_errors
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, pipeline_item_errors
 
         by_id = {c.id: c for c in self.population}
         line: list[Candidate] = []
@@ -5616,7 +5603,7 @@ class Loop(OuterLoop):
                 "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
-                "errors": item_errors(records), "items": len(records),
+                "errors": pipeline_item_errors(records), "items": len(records),
             })
         return entries
 

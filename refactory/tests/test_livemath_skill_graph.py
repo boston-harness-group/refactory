@@ -219,11 +219,11 @@ def test_seed_sections_are_arm_a_seed_skill():
 
 
 def test_every_agent_is_configured_as_the_baseline_solve():
-    from refactory_packages.livemath.mode import SOLVE_TIMEOUT_S, Solver
+    from refactory_packages.livemath.mode import Solver
     from refactory_packages.livemath.skill_graph import SkillGraph
 
     solve = Solver().build().nodes["solve"]
-    for cls, timeout in ((SkillGraph, SOLVE_TIMEOUT_S),
+    for cls, timeout in ((SkillGraph, None),
                          (type("Short", (SkillGraph,), {"solve_timeout_s": 60}), 60)):
         graph = cls().build()
         for step in AGENTS:

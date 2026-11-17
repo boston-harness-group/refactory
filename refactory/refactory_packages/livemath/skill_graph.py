@@ -54,7 +54,7 @@ from typing import Any, ClassVar, Mapping
 from refactory_dsh import nn
 
 from .grading import normalize_label, parse_choice_label
-from .mode import MAX_COMPLETION_TOKENS, OPS, SOLVE_TIMEOUT_S, SYSTEM_PROMPT, TASK
+from .mode import MAX_COMPLETION_TOKENS, OPS, SYSTEM_PROMPT, TASK
 from .ops import build_user_prompt, claude_backend_prompt, skill_section
 
 SKILL_GRAPH_OPS = "refactory_packages.livemath.skill_graph"
@@ -281,7 +281,7 @@ def _op(node_id: str, fn: str, *, reads: tuple[str, ...], produces: tuple[str, .
                    **({"knob_outputs": knob_outputs} if knob_outputs is not None else {}))
 
 
-def _agent(step: str, writes: str, timeout_s: int) -> nn.Node:
+def _agent(step: str, writes: str, timeout_s: int | None) -> nn.Node:
     """One step, configured as the baseline solve node."""
     knob = system_prompt_knob(step)
     return nn.Node(
@@ -303,8 +303,8 @@ class SkillGraph(nn.Mode):
     name = "skill_graph"
     description = ("solve a LiveMathematicianBench item with the seed skill's four "
                    "sections as four agent steps")
-    #: Every agent node's wall limit, as ``Solver.solve_timeout_s``.
-    solve_timeout_s: ClassVar[int] = SOLVE_TIMEOUT_S
+    #: Every agent node's wall limit, as ``Solver.solve_timeout_s``: none.
+    solve_timeout_s: ClassVar[int | None] = None
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:

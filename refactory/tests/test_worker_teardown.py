@@ -233,11 +233,11 @@ def test_the_bridge_and_the_client_name_the_same_warning():
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_timeout_whose_shutdown_hangs_is_still_a_timeout(tmp_path, runtime, monkeypatch):
-    """[both runtimes] Item 0's session outlives its 2 s limit and then ignores the
-    shutdown request (forced exit, cleanup unconfirmed). The item is a timeout -- error
-    kind ``timeout``, a ``CompletionTimeout`` at ``solve`` whose message says it timed
-    out and carries the shutdown failure -- with a warning recorded; it is not retried.
-    The other items answer."""
+    """[both runtimes] Item 0's session outlives its declared 2 s limit and then ignores
+    the shutdown request (forced exit, cleanup unconfirmed). The item is a timeout at its
+    declared wall -- error kind ``declared_timeout``, at ``solve``, whose message says it
+    timed out and carries the shutdown failure -- with a warning recorded; it is not
+    retried. The other items answer."""
     from refactory_dsh import owned_process
 
     monkeypatch.setattr(owned_process, "SHUTDOWN_GRACE_S", 1)  # the walker's; the spine's is 10 s
@@ -246,12 +246,12 @@ def test_a_timeout_whose_shutdown_hangs_is_still_a_timeout(tmp_path, runtime, mo
     by_id = {str(record["id"]): record for record in scores}
     assert [by_id[item]["passed"] for item in "123"] == [True, True, True]
     timed_out = by_id["0"]
-    assert timed_out["error_kind"] == "timeout"
-    assert "model completion timed out after 2s" in timed_out["error_text"]
+    assert timed_out["error_kind"] == "declared_timeout"
+    assert "model session timed out at its node's declared timeout_s (2s)" in timed_out["error_text"]
     assert "did not finish shutdown" in timed_out["error_text"]
     [error] = item_errors([timed_out])
-    assert (error["kind"], error["node"]) == ("CompletionTimeout", "solve")
-    assert error["first"].startswith("model completion timed out")
+    assert error["node"] == "solve"
+    assert error["first"].startswith("model session timed out at its node's declared timeout_s")
     directory = _pass(run, "0")
     [warning] = _events(directory, SHUTDOWN_EVENT)
     assert warning["state"] == "warning" and "did not finish shutdown" in warning["error"]

@@ -64,8 +64,30 @@ class CompletionFailed(RuntimeError):
         self.kind = kind
 
 
+class HarnessBackstop(RuntimeError):
+    """A node's model session was still streaming at the harness backstop
+    (`DEFAULT_BACKSTOP_S`): a model frame came within the inactivity limit before it.
+
+    A harness incident, not the method's failure: not a ``CompletionTimeout``, so no
+    timeout retry replays it, and its item is recorded with ``error_kind``
+    ``harness_incident``. A session whose model had gone quiet by then, kept alive only
+    by a running tool, is an inactivity timeout instead (`CompletionTimeout`)."""
+
+
+class DeclaredTimeout(RuntimeError):
+    """A node's model session reached the wall its node declares (`Node.timeout_s`, or a
+    declared retry's longer wall).
+
+    The pipeline's own limit, so its failure is the pipeline's: its item is recorded with
+    ``error_kind`` ``declared_timeout`` (`items.error_kind`). A retry on timeout the node
+    declares still answers it (`node_retry.failure_kind`): the wall and its retry are
+    both the graph's choice. Its message starts with
+    `DECLARED_TIMEOUT_TEXT`, which is how the spine's worker error names it."""
+
+
 class InactivityTimeout(subprocess.TimeoutExpired):
-    """The session showed no model output and ran no tool command for ``inactive_s``."""
+    """The session's model streamed nothing for ``inactive_s`` (and, in a tool session, no
+    tool command it started was still running)."""
 
     def __init__(self, cmd: Any, inactive_s: float) -> None:
         super().__init__(cmd, inactive_s)
@@ -257,14 +279,43 @@ DEFAULT_TIMEOUT_S = 1800
 
 #: How long a node's model session may show no sign of life before it is stopped (seconds).
 #:
-#: A node's declared `timeout_s` is a hard maximum, a backstop; this is the limit that
-#: normally ends a stuck session. A session is alive while it produces model output (the
-#: worker receipt the DSH observer rewrites on every request and finished response), or
-#: while a tool command it started is still running (a process started after the last
-#: receipt write, beneath the session). A builder busy on a 6-minute test run is alive; a
-#: silent one is stopped after this long. Overridable via ``REFACTORY_MODEL_INACTIVITY_S``,
-#: or per client with ``inactivity_s``; 0 turns it off. Applies to node sessions only.
+#: This is the one limit that ends a node's model session: a session that keeps working
+#: runs as long as it needs. Activity is the model's stream: every frame, thinking
+#: included, touches the session's activity file (`activity_path`), and the worker
+#: receipt is rewritten at each request and finished response. In a session with tools,
+#: a tool command it started that is still running (a process started after the last
+#: frame, beneath the session) also counts, so a builder busy on a 6-minute test run is
+#: alive; a session with no tools (``tool_policy`` none) has only its stream. A silent
+#: session is stopped after this long. Overridable via ``REFACTORY_MODEL_INACTIVITY_S``,
+#: or per client with ``inactivity_s``; 0 turns it off. Applies to node sessions on the
+#: backends that report activity (`ACTIVITY_BACKENDS`).
+#:
+#: 600 s is far above a live session's gaps: a lab probe of a long thinking call
+#: (`tools.thinking_probe`) saw at most 4.4 s between frames on the raw stream and 5.8 s
+#: in a refactory session of 53 minutes.
 DEFAULT_INACTIVITY_S = int(os.environ.get("REFACTORY_MODEL_INACTIVITY_S", "600"))
+
+#: The worker backends whose sessions report activity, so inactivity alone ends them.
+#: Codex reports none: its node sessions keep the per-completion ``timeout_s``.
+ACTIVITY_BACKENDS = ("dsh", "claude_code")
+
+#: The harness guard on one node's model session (seconds): four hours, by default.
+#:
+#: Not a limit on the method. A node with no declared ``timeout_s`` has no wall; this
+#: only stops a session that is still active after this long, so a harness fault cannot
+#: hold a run forever. A session it stops whose model still streamed within the
+#: inactivity limit is a harness incident (`HarnessBackstop`; its item's ``error_kind`` is
+#: ``harness_incident``), never a timeout of the method. One whose model had gone quiet,
+#: kept alive only by a running tool (a background job, a loop), timed out on inactivity.
+#: Overridable via ``REFACTORY_MODEL_BACKSTOP_S``, or per client with ``backstop_s``.
+DEFAULT_BACKSTOP_S = int(os.environ.get("REFACTORY_MODEL_BACKSTOP_S", "14400"))
+
+#: What a session the harness backstop stopped says, on every runtime (`items.error_kind`).
+HARNESS_BACKSTOP_TEXT = "hit the harness backstop"
+
+#: What a session stopped at its node's declared wall says first (`DeclaredTimeout`), on
+#: every runtime (`items.error_kind`).
+DECLARED_TIMEOUT_TEXT = "model session timed out at its node's declared timeout_s"
 
 #: How often a session's activity is looked at (capped at a quarter of the limit).
 ACTIVITY_POLL_S = 2.0
@@ -297,14 +348,18 @@ def get_environment_overlay() -> Callable[[Path], dict[str, str] | None] | None:
     return _environment_overlay
 
 
-def node_session_budget_s(attempts: int, timeout_s: int) -> int:
-    """The wall a node's dispatch reserves: attempts sessions plus overhead.
+def activity_path(receipt: Path) -> Path:
+    """The file the worker observer touches on every streamed frame of ``receipt``'s session."""
+    return receipt.with_suffix(".activity")
 
-    One wall, computed one way, so the spine's `command_timeout_s` and the model
-    client's session deadline cannot disagree about when a node's work ends. A
-    deadline is never retried — replaying a tool-using session can duplicate real
-    work — so the session inside the dispatch gets the whole envelope rather than
-    the per-completion `timeout_s` alone.
+
+def node_session_budget_s(attempts: int, timeout_s: int) -> int:
+    """The wall a node's dispatch reserves on a backend that reports no activity
+    (`ACTIVITY_BACKENDS`): attempts sessions plus overhead. A deadline is never
+    retried, so the session gets the whole envelope rather than one `timeout_s`.
+
+    A session that reports activity has no such wall: its dispatch reserves the
+    harness backstop instead (`workers.lower_workflow`).
     """
     return max(1, int(attempts)) * int(timeout_s) + NODE_DISPATCH_OVERHEAD_S
 
@@ -750,6 +805,7 @@ class DshModelClient:
         node_wall_s: int | None = None,
         tool_policy: str = "",
         inactivity_s: int | None = None,
+        backstop_s: int | None = None,
         max_completion_tokens: str = "",
         setting_sources: str = "",
         dsh_sessions: str = "",
@@ -805,6 +861,9 @@ class DshModelClient:
         #: Set only when a caller chose it; otherwise `DEFAULT_INACTIVITY_S` applies.
         inactivity_s = inactivity_s if inactivity_s is not None else inherited.get("inactivity_s")
         self._inactivity_s = int(inactivity_s) if inactivity_s is not None else None
+        #: Likewise: set only when a caller chose it; otherwise `DEFAULT_BACKSTOP_S`.
+        backstop_s = backstop_s if backstop_s is not None else inherited.get("backstop_s")
+        self._backstop_s = int(backstop_s) if backstop_s is not None else None
         self._worker_backend = worker_backend or os.environ.get("REFACTORY_WORKER_BACKEND", "dsh")
         self._effort = effort or (os.environ.get("REFACTORY_MODEL_EFFORT", "") if self._worker_backend == "dsh" and not routes_resolved else "")
         # Both ride `context()`, so a dispatched worker rebuilt from it (`worker_node`)
@@ -1050,6 +1109,8 @@ class DshModelClient:
                else {}),
             **({"inactivity_s": ia} if (ia := getattr(self, "_inactivity_s", None)) is not None
                else {}),
+            **({"backstop_s": bs} if (bs := getattr(self, "_backstop_s", None)) is not None
+               else {}),
             **({"max_completion_tokens": mct} if (mct := getattr(self, "_max_completion_tokens", ""))
                else {}),
             **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
@@ -1212,6 +1273,8 @@ class DshModelClient:
             state = "failed"
             if isinstance(error, (CancelledError, KeyboardInterrupt, SystemExit)):
                 state = "cancelled"
+            elif isinstance(error, HarnessBackstop):
+                state = "harness_backstop"
             elif "timed out" in str(error):
                 state = "timed_out"
             elif type(error).__name__ == "BudgetExhausted":
@@ -1303,32 +1366,34 @@ class DshModelClient:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         last = ""
-        # A node's dispatch is one session whose deadline is never retried, so it
-        # runs under the whole envelope `workers.lower_workflow` reserved for it —
-        # attempts sessions plus overhead — rather than the per-completion
-        # `timeout_s` alone (#307). A CEO turn or a console call keeps the plain
-        # completion deadline. The wall is absolute across attempts: a transport
-        # retry spends whatever remains of the same envelope.
+        # A node session on a backend that reports activity has no wall of its own: it
+        # ends on inactivity (`_run_completion`), at a wall its node declares, or at the
+        # harness backstop, a guard and never the method's limit. The deadline is
+        # absolute across attempts: a transport retry spends what remains of it, and a
+        # deadline is never retried. ``at_backstop`` says the deadline in force is the
+        # backstop, so a session stopped there while its model streams is a harness
+        # incident (`HarnessBackstop`), not a timeout. A deadline at the node's declared
+        # wall is the pipeline's own limit (`DeclaredTimeout`).
         #
-        # ``cap_s`` is the longest one attempt may run; ``total_s`` the node's limit
-        # across its attempts, when it has one. A node with a wall has that one limit on
-        # every backend: an attempt runs for at most ``cap_s`` and never past the wall,
-        # so a retry spends what remains of the wall, not a fresh `timeout_s`, and gets
-        # no less than an attempt's own time while the wall allows it.
-        dsh_node = self._worker_backend == "dsh" and bool(self._node_id)
-        cap_s = node_session_budget_s(self._attempts, self._timeout_s) if dsh_node else self._timeout_s
-        total_s: int | None = cap_s if dsh_node else None
+        # Any other call (a CEO turn, a console call, a Codex node) keeps the plain
+        # completion deadline ``timeout_s``. ``cap_s`` is the longest one attempt may run;
+        # ``total_s`` the node's limit across its attempts, when it has one: a node with a
+        # wall has that one limit, an attempt runs for at most ``cap_s`` and never past
+        # the wall, so a retry spends what remains of the wall, not a fresh `timeout_s`.
         wall = getattr(self, "_node_wall_s", None)
-        if wall is not None:
-            exact = getattr(self, "_node_wall_exact", False)
-            if dsh_node:
-                if wall < cap_s or exact:
-                    cap_s = total_s = wall
-            else:
-                total_s = wall
-                if wall < cap_s or exact:
-                    cap_s = wall
-        stop_at = time.monotonic() + total_s if total_s is not None else None
+        at_backstop = False
+        cap_s = self._timeout_s
+        total_s: int | None = None
+        if self.observes_activity():
+            # A wall its node declares is the graph's own choice and stands as declared.
+            at_backstop = wall is None
+            cap_s = total_s = self.backstop_limit() if wall is None else wall
+        elif wall is not None:
+            total_s = wall
+            if wall < cap_s or getattr(self, "_node_wall_exact", False):
+                cap_s = wall
+        started = time.monotonic()
+        stop_at = started + total_s if total_s is not None else None
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
         #: The outage this call is waiting out, if any (`_wait_for_network`), and how long
@@ -1366,11 +1431,37 @@ class DshModelClient:
                                    summary=f"{who}: timed out, and its runtime did not finish shutting "
                                            "down; child cleanup unconfirmed")
                     detail = f"; {unconfirmed}" if unconfirmed else ""
-                    if isinstance(exc, InactivityTimeout):
+                    # The call's own time up to its deadline, across attempts: a transport
+                    # retry's ``budget_s`` is only what was left of it.
+                    elapsed_s = int(round(min(time.monotonic(), attempt_stop) - started))
+                    quiet_s = getattr(exc, "stream_quiet_s", None)
+                    inactivity_s = self._inactivity_limit()
+                    error: RuntimeError
+                    if (at_backstop and not isinstance(exc, InactivityTimeout) and inactivity_s
+                            and quiet_s is not None and quiet_s >= inactivity_s):
+                        # At the harness guard, but the model had gone quiet: only a running
+                        # tool kept the session alive. That is inactivity, not an incident.
+                        error = CompletionTimeout(
+                            f"model completion timed out after {int(quiet_s)}s of inactivity "
+                            f"(no model output; a tool command was still running at the "
+                            f"{elapsed_s}s harness backstop); requested runtime shutdown; the "
+                            f"client does not replay a deadline{detail}")
+                    elif at_backstop and not isinstance(exc, InactivityTimeout):
+                        # Still streaming at the harness guard: the harness's incident.
+                        error = HarnessBackstop(
+                            f"model session {HARNESS_BACKSTOP_TEXT} after {elapsed_s}s "
+                            "(REFACTORY_MODEL_BACKSTOP_S) while still active; a harness incident, "
+                            f"not the method's failure; requested runtime shutdown{detail}")
+                    elif isinstance(exc, InactivityTimeout):
                         error = CompletionTimeout(
                             f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
                             "(no model output and no running tool command); requested runtime "
                             f"shutdown; the client does not replay a deadline{detail}")
+                    elif wall is not None and stop_at is not None and attempt_stop >= stop_at:
+                        # The node's own wall: the pipeline's limit, not the harness's.
+                        error = DeclaredTimeout(
+                            f"{DECLARED_TIMEOUT_TEXT} ({wall}s) after {elapsed_s}s; requested "
+                            f"runtime shutdown; the client does not replay a deadline{detail}")
                     else:
                         # A tool-using completion may already have changed its workdir.
                         # A deadline is not a transport failure: replaying the prompt can
@@ -1612,23 +1703,45 @@ class DshModelClient:
                    summary=f"{who}: attempt {attempt} of {self._attempts} failed on the wire; "
                            "asking again")
 
+    def observes_activity(self) -> bool:
+        """Whether this is a node session on a backend that reports activity
+        (`ACTIVITY_BACKENDS`): inactivity, not a wall, ends it."""
+        return self._worker_backend in ACTIVITY_BACKENDS and bool(getattr(self, "_node_id", ""))
+
+    def backstop_limit(self) -> int:
+        """The harness backstop on this node's session (`DEFAULT_BACKSTOP_S` unless set)."""
+        chosen = getattr(self, "_backstop_s", None)
+        return max(1, int(chosen if chosen is not None else DEFAULT_BACKSTOP_S))
+
     def _inactivity_limit(self) -> float:
-        """The inactivity limit for this session: node sessions on DSH only, else 0 (off)."""
-        if self._worker_backend != "dsh" or not self._node_id:
+        """The inactivity limit for this session: node sessions on a backend that reports
+        activity only, else 0 (off)."""
+        if not self.observes_activity():
             return 0
         limit = self._inactivity_s if self._inactivity_s is not None else DEFAULT_INACTIVITY_S
         return max(0, limit)
 
-    def _last_activity(self, pid: int, started_epoch: float, now: float) -> float:
-        """When (monotonic) the session last showed life: model output, or a tool running."""
+    def _last_frame(self, started_epoch: float) -> float:
+        """When (epoch seconds) the session's model last streamed, or ``started_epoch``:
+        the receipt (each request, each finished response) and the activity file (every
+        streamed frame, thinking included: `worker_observer.mjs`)."""
         receipt = getattr(self, "_worker_receipt", None)
         written = started_epoch
-        try:
-            if receipt is not None:
-                written = max(written, receipt.stat().st_mtime)
-        except OSError:
-            pass
-        if tool_command_running_since(pid, written):
+        if receipt is not None:
+            for path in (receipt, activity_path(receipt)):
+                try:
+                    written = max(written, path.stat().st_mtime)
+                except OSError:
+                    pass
+        return written
+
+    def _last_activity(self, pid: int, started_epoch: float, now: float) -> float:
+        """When (monotonic) the session last showed life: its model's last frame
+        (`_last_frame`), or ``now`` while a tool command it started after that frame is
+        still running. A session with no tools (``tool_policy`` none) has only its
+        stream: a process beneath it is no sign of the model's life."""
+        written = self._last_frame(started_epoch)
+        if getattr(self, "_tool_policy", "") != "none" and tool_command_running_since(pid, written):
             return now
         return now - max(0.0, time.time() - written)
 
@@ -1668,10 +1781,10 @@ class DshModelClient:
                     # shutdown request: DSH escalates a second signal to immediate exit.
                     start_new_session=os.name == "posix",
                 )
+                started_epoch = time.time()
                 try:
                     deadline = stop_at if stop_at is not None else time.monotonic() + self._timeout_s
                     last_activity = time.monotonic()
-                    started_epoch = time.time()
                     next_look = last_activity
                     look_every = min(ACTIVITY_POLL_S, inactivity_s / 4) if inactivity_s else 0.0
                     while True:
@@ -1699,6 +1812,13 @@ class DshModelClient:
                             if time.monotonic() >= deadline:
                                 raise
                 except BaseException as error:
+                    if isinstance(error, subprocess.TimeoutExpired) and not isinstance(
+                            error, InactivityTimeout):
+                        # How long the model had streamed nothing when the deadline came,
+                        # whatever tools ran: at the backstop that tells a streaming
+                        # session (an incident) from a quiet one (`_complete`).
+                        error.stream_quiet_s = max(  # type: ignore[attr-defined]
+                            0.0, time.time() - self._last_frame(started_epoch))
                     # Direct interruption or the fork's cooperative event both use the
                     # runtime-owned cleanup before propagating failure.
                     try:
