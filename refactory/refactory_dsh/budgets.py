@@ -50,6 +50,13 @@ class _UnmeteredModel:
         inner = getattr(self._model, "with_tool_policy", None)
         return type(self)(inner(policy) if callable(inner) else self._model, self._budget)
 
+    def with_step_route(self, step_route: Any) -> Any:
+        """The inner model on a step's own route, still behind this guard."""
+        inner = getattr(self._model, "with_step_route", None)
+        if not callable(inner):
+            raise ValueError("the model client cannot take a step's own route")
+        return type(self)(inner(step_route), self._budget)
+
     def for_node(self, node_id: str, role: str = "worker") -> Any:
         route = getattr(self._model, "for_node", None)
         model = route(node_id, role=role) if callable(route) else self._model

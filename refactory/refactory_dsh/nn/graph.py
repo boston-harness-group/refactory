@@ -97,6 +97,37 @@ def retry_safe(node: "Node") -> bool:
     none``), so its only effect is the reply the runtime captures."""
     return bool(node.outputs_only or node.workspace is not None or node.tool_policy == "none")
 
+#: What an agent step's own route may set (`Node.route`): its model, reasoning effort and
+#: output cap, each a value the run's routes already use (`workers.step_route_refusal`).
+STEP_ROUTE_FIELDS = ("model", "effort", "max_completion_tokens")
+
+
+def route_declaration(value: Any) -> dict[str, str] | None:
+    """A step route in its one canonical form (only the fields it sets, each a nonempty
+    string; a cap given as a whole number becomes its text), or None for none."""
+    if value is None or value == {}:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(f"a step's route is an object of {list(STEP_ROUTE_FIELDS)}, not {value!r}")
+    unknown = sorted(set(value) - set(STEP_ROUTE_FIELDS))
+    if unknown:
+        raise ValueError(f"a step's route sets {list(STEP_ROUTE_FIELDS)}; unknown: {unknown}")
+    out = {}
+    for key in STEP_ROUTE_FIELDS:
+        given = value.get(key)
+        if given is None or given == "":
+            continue
+        if key == "max_completion_tokens" and isinstance(given, int) and not isinstance(given, bool):
+            given = str(given)
+        if not isinstance(given, str) or (key == "max_completion_tokens"
+                                          and not (given.isdigit() and int(given) > 0)):
+            raise ValueError(f"a step's route {key!r} is " + (
+                "a positive whole number" if key == "max_completion_tokens" else "a string")
+                + f", not {given!r}")
+        out[key] = given
+    return out or None
+
+
 #: Where an agent node works (`Node.workspace`). ``none`` is the run directory, as
 #: every node had before workspaces; ``scratch`` is a fresh empty folder per dispatch;
 #: ``clone`` is a prepared clone of the run's worktree (`refactory_dsh.workspace`).
@@ -192,6 +223,7 @@ _NODE_FIELDS = frozenset(
         "retry",
         "outputs_only",
         "workspace",
+        "route",
         "system_prompt_template",
         "tool_policy",
         "parallelism",
@@ -413,6 +445,10 @@ class Node:
     #: the runtime collects the node's output from its workspace before delivery
     #: checks it (`refactory_dsh.workspace`).
     workspace: dict[str, str] | None = None
+    #: `agent`: the step's own model, effort and output cap (`route_declaration`), over
+    #: whatever its role and the run's routes give it, on both runtimes
+    #: (`DshModelClient.with_step_route`). None takes the run's route as it is.
+    route: dict[str, str] | None = None
     #: `agent`: optional tool policy. When ``"none"``, the model receives no
     #: tools and the runtime captures its text reply as the node's single declared
     #: output. ``None`` (the default) preserves existing tool-enabled behavior.
@@ -553,6 +589,14 @@ class Node:
                 raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
                                  "into its first declared write, and it declares none")
 
+        if self.route is not None:
+            try:
+                self.route = route_declaration(self.route)
+            except ValueError as exc:
+                raise GraphError(f"node {self.id!r}: {exc}") from exc
+            if self.route is not None and self.kind != "agent":
+                raise GraphError(f"node {self.id!r} is not an agent but declares a route")
+
         if self.knob_outputs is not None:
             self.knob_outputs = _knob_outputs(self)
 
@@ -654,6 +698,7 @@ class Node:
                if self.retry is not None else {}),
             **({"outputs_only": True} if self.outputs_only else {}),
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
+            **({"route": dict(self.route)} if self.route is not None else {}),
             **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
             **({"field_bindings": [list(pair) for pair in self.field_bindings]} if self.field_bindings else {}),
             **({"code": self.code} if self.code else {}),
@@ -709,6 +754,8 @@ class Node:
             outputs_only=bool(state.get("outputs_only", False)),
             workspace=(dict(state["workspace"]) if isinstance(state.get("workspace"), dict)
                        else state.get("workspace")),
+            route=(dict(state["route"]) if isinstance(state.get("route"), dict)
+                   else state.get("route")),
             tool_policy=state.get("tool_policy"),
             field_bindings=tuple(
                 tuple(pair) for pair in (state.get("field_bindings") or ())

@@ -236,6 +236,9 @@ export function validateGraph(graph: WorkflowGraph): GraphIssue[] {
     if (node.knob_outputs !== undefined) {
       issues.push(...knobOutputIssues(id, node))
     }
+    if (node.route !== undefined) {
+      issues.push(...routeIssues(id, node))
+    }
   }
 
   for (const issue of unreachableNodes(graph, ids, outgoing)) {
@@ -291,6 +294,39 @@ function knobOutputIssues(id: string, node: WorkflowNode): GraphIssue[] {
     if (new Set(carried).size !== carried.length) {
       issues.push({ node: id, message: `knob_outputs['${out}'] names a knob twice` })
     }
+  }
+  return issues
+}
+
+/** What a step's own route may set, as Python's `nn.graph.STEP_ROUTE_FIELDS`. */
+const STEP_ROUTE_FIELDS = ['model', 'effort', 'max_completion_tokens']
+
+/**
+ * What is wrong with a step's own `route`, by the rules Python's `Node` holds it to
+ * (`nn.graph.route_declaration`): only an agent declares it, as an object of nonempty
+ * strings among `STEP_ROUTE_FIELDS`. Its worker's model context carries it
+ * (`workers.lower_workflow`), so an agent the spine would hand to the driving agent
+ * instead (no `dispatch_command`) is refused: the route would be dropped.
+ */
+function routeIssues(id: string, node: WorkflowNode): GraphIssue[] {
+  const declared = node.route as unknown
+  if (node._type !== 'AgentNode') {
+    return [{ node: id, message: `node type '${node._type}' declares a route; only an agent does` }]
+  }
+  if (declared === null || typeof declared !== 'object' || Array.isArray(declared)) {
+    return [{ node: id, message: `a route is an object of ${STEP_ROUTE_FIELDS.join(', ')}` }]
+  }
+  const issues: GraphIssue[] = []
+  for (const [key, value] of Object.entries(declared as Record<string, unknown>)) {
+    if (!STEP_ROUTE_FIELDS.includes(key)) {
+      issues.push({ node: id, message: `a route sets ${STEP_ROUTE_FIELDS.join(', ')}; unknown: ${key}` })
+    } else if (typeof value !== 'string' || value === '') {
+      issues.push({ node: id, message: `route '${key}' is a nonempty string` })
+    }
+  }
+  if (typeof node.dispatch_command !== 'string' || node.dispatch_command.trim() === '') {
+    issues.push({ node: id, message: 'declares a route, which only a dispatched worker can take; '
+      + 'run it with a worker route' })
   }
   return issues
 }
