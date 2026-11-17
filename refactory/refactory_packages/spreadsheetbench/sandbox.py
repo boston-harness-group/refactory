@@ -4,28 +4,26 @@ SkillOpt runs generated code as the trainer's user with no sandbox (its executor
 so, executor.py:60-61), with ``INPUT_PATH`` pointing into the dataset directory where
 the item's golden file sits beside the input. The lab's runs added a sandbox that hid
 secret paths and kept the network off, but left the golden file readable. The port is
-stricter, and that can only lower a score that came from reading the answer:
+stricter, and that can only lower a score that came from reading the answer.
 
-- the code sees a fresh directory outside the run and the dataset, holding a copy of
-  the item's input (``in/``), its output directory (``out/``, also ``HOME``) and an
-  empty working directory (``cwd/``);
-- the dataset directory, the run, the outer loop's root (every candidate's records)
-  and the user's secrets (the lab wrapper's list, plus refactory's own directory) are
-  hidden;
-- there is no network; of the places a user can write (the home directory, ``/tmp``,
-  ``/var/tmp``, ``/dev/shm``), only the output directory and the runner's temporary
-  directory are writable.
+Linux: an allow-list. The code runs in a fresh root holding only the system directories
+(`SYSTEM_DIRS`, read-only), the interpreter's own directories (read-only), a few device
+files, the directories it is given -- a copy of the item's input and its working
+directory, read-only -- and its output and temporary directories, the only writable
+ones. Nothing else exists there: not the dataset or any copy of it, not the run or the
+outer loop's root, not the home directory, ``/tmp``, a model cache or a shared drive,
+and there is no network. After the lab's ``sandbox-exec.sh`` and bubblewrap: user,
+mount, network and PID namespaces (``unshare -rnmpf``), a tmpfs root built from bind
+mounts and a fresh ``/proc``, entered with ``pivot_root`` (the old root detached, so
+there is no path back to it), then a further user and mount namespace: the mounts are
+locked there, so the code cannot undo them, and it sees no process outside its own.
 
-Linux, after the lab's ``sandbox-exec.sh``: in user, mount and network namespaces
-(``unshare -rnm``), empty read-only tmpfs over hidden directories and ``/dev/null`` over
-hidden files, the writable directories bound to themselves, then the home directory and
-the temporary roots remounted read-only around them. The code itself then runs in a
-further user, mount and PID namespace with a fresh ``/proc``: the mounts above are locked
-there, so it cannot undo them, and it sees no process outside its own (no
-``/proc/<pid>/root`` into an unhidden view). macOS: Seatbelt (``sandbox-exec``) allowing
-by default and denying the network, reads and writes of the hidden paths, and every write
-outside the two writable directories. Where neither can run, code is not run: there is
-no unsandboxed fallback (`available`).
+macOS: a hide-list. Seatbelt (``sandbox-exec``) allowing by default and denying the
+network, reads and writes of the hidden paths (`hidden_paths`: the dataset and copies of
+the release beside it, the run, the outer loop's root, model caches, the shared drive and
+the user's secrets), and every write outside the two writable directories.
+
+Where neither can run, code is not run: there is no unsandboxed fallback (`available`).
 """
 from __future__ import annotations
 
@@ -39,42 +37,88 @@ from pathlib import Path
 from typing import Iterable
 
 #: Secret paths under the home directory, as the lab's wrapper hides them
-#: (``skillopt_sb.py`` ``_HIDE``).
+#: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
 HOME_SECRETS = (".claude", ".claude.json", ".config", ".ssh", ".aws", ".huggingface",
                 ".cache/huggingface", ".netrc", ".git-credentials", ".gnupg", ".docker",
                 ".kube", ".dsh", ".local/share/keyrings", ".bash_history",
                 ".python_history")
 
+#: Shared drives a copy of the release may sit on, hidden on macOS.
+SHARED_DIRS = ("/new_data",)
+
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
-#: Where a user can write, made read-only around the writable directories on Linux.
-TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+#: The system directories model code sees, read-only (Linux); a symlink among them is
+#: recreated as one (``/bin`` -> ``usr/bin``).
+SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc")
+#: The device files model code may open.
+DEVICES = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 
-# sandbox-exec.sh's order: hide, bind the writable directories to themselves, then make
-# the roots read-only around them (a bind keeps the flags it is made with, so binding
-# after the read-only remount would make the writable ones read-only too). Then a
-# nested user, mount and PID namespace locks those mounts and shows a fresh /proc.
-def _linux_script(read_only: list[str]) -> str:
-    """The setup script, with the read-only roots written into it (quoted)."""
+
+def _q(path: str) -> str:
     import shlex
 
-    roots = " ".join(shlex.quote(r) for r in read_only)
-    return ("set -e\n"
-            'W1=$1; W2=$2; shift 2\n'
-            'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do\n'
-            '  if [ -d "$1" ]; then mount -n -t tmpfs -o ro,size=16k,mode=000 sbhide "$1"\n'
-            '  elif [ -e "$1" ]; then mount -n --bind /dev/null "$1"; fi\n'
-            "  shift\n"
-            "done\n"
-            "shift\n"
-            'mount -n --bind "$W1" "$W1"\n'
-            'mount -n --bind "$W2" "$W2"\n'
-            f"for r in {roots}; do\n"
-            '  [ -d "$r" ] || continue\n'
-            '  mount -n --rbind "$r" "$r"\n'
-            '  mount -n -o remount,bind,ro "$r"\n'
-            "done\n"
-            'exec unshare -U -r -m -p -f --mount-proc -- "$@"\n')
+    return shlex.quote(path)
+
+
+def _linux_script(read_only: list[str], writable: list[str], links: dict[str, str]) -> str:
+    """The setup script, run as PID 1 of a new PID namespace: build a tmpfs root under
+    the temporary directory (``$1``) with ``links`` as symlinks, ``read_only`` bound
+    read-only, ``writable`` and the devices bound as they are and a fresh ``/proc`` of
+    this PID namespace, enter it with ``pivot_root``, detach the old root, then run the
+    command (the rest of the arguments) from ``$2`` (its working directory) in a nested
+    user and mount namespace, where these mounts are locked."""
+    lines = ["set -e",
+             'R="$1/.sbroot"; WD=$2; shift 2',
+             'mkdir "$R"',
+             'mount -n -t tmpfs -o mode=755 sbroot "$R"']
+    for link, target in links.items():
+        lines.append(f'mkdir -p "$R"{_q(os.path.dirname(link))}; ln -s {_q(target)} "$R"{_q(link)}')
+    for path in read_only:
+        lines.append(f'mkdir -p "$R"{_q(path)}; mount -n --bind {_q(path)} "$R"{_q(path)}; '
+                     f'mount -n -o remount,bind,ro "$R"{_q(path)}')
+    for path in writable:
+        lines.append(f'mkdir -p "$R"{_q(path)}; mount -n --bind {_q(path)} "$R"{_q(path)}')
+    for dev in DEVICES:
+        if os.path.exists(dev):
+            lines.append(f'mkdir -p "$R/dev"; touch "$R"{_q(dev)}; '
+                         f'mount -n --bind {_q(dev)} "$R"{_q(dev)}')
+    lines += ['mkdir -p "$R/proc"; mount -n -t proc -o nosuid,nodev,noexec proc "$R/proc"',
+              'mkdir "$R/.old"; cd "$R"; pivot_root . .old; umount -n -l /.old; rmdir /.old',
+              'cd "$WD" 2>/dev/null || cd /',
+              'exec unshare -U -r -m -- "$@"']
+    return "\n".join(lines) + "\n"
+
+
+@lru_cache(maxsize=None)
+def interpreter_dirs(python: str) -> tuple[str, ...]:
+    """The directories ``python`` runs from: its prefixes, as it reports them, and where
+    its executable resolves to. Read-only in the sandbox."""
+    import json
+
+    found = [os.path.dirname(os.path.dirname(os.path.realpath(python))),
+             os.path.dirname(os.path.dirname(os.path.abspath(python)))]
+    try:
+        proc = subprocess.run(
+            [python, "-I", "-c", "import json, sys; print(json.dumps([sys.prefix, "
+             "sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]))"],
+            capture_output=True, text=True, timeout=60)
+        found += json.loads(proc.stdout) if proc.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return tuple(_distinct(found))
+
+
+def _distinct(paths: Iterable[str]) -> list[str]:
+    """Absolute and resolved forms of ``paths``, existing ones only, in order, without
+    one that another of them contains."""
+    out: list[str] = []
+    for path in paths:
+        for form in (os.path.abspath(path), os.path.realpath(path)):
+            if os.path.exists(form) and form not in out:
+                out.append(form)
+    return [p for p in out
+            if not any(o != p and (p + "/").startswith(o.rstrip("/") + "/") for o in out)]
 
 
 class SandboxError(RuntimeError):
@@ -82,13 +126,26 @@ class SandboxError(RuntimeError):
 
 
 def hidden_paths(extra: Iterable[str | os.PathLike] = ()) -> list[str]:
-    """What the code must not see: ``extra`` (the dataset and the run) and the secrets."""
+    """What the code must not see (macOS hides it; on Linux nothing outside the
+    allow-list is there, and these are checked against it): ``extra`` (the dataset and
+    the run), copies of the release beside the dataset, the model caches, the shared
+    drives and the secrets."""
     from refactory_dsh.paths import refactory_home
 
     home = Path.home()
     paths = [str(p) for p in extra if p]
+    paths += [os.path.realpath(p) for p in list(paths)]
+    paths += _release_copies([str(p) for p in extra if p])
     paths += [str(home / p) for p in HOME_SECRETS]
     paths.append(str(refactory_home()))
+    cache = os.environ.get("XDG_CACHE_HOME", "").strip()
+    if cache:
+        paths.append(os.path.join(cache, "huggingface"))
+    for name in ("HF_HOME", "HF_DATASETS_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            paths.append(os.path.abspath(os.path.expanduser(value)))
+    paths += SHARED_DIRS
     gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if gac:
         paths.append(os.path.abspath(gac))
@@ -97,6 +154,22 @@ def hidden_paths(extra: Iterable[str | os.PathLike] = ()) -> list[str]:
         if os.path.lexists(path) and path not in seen:
             seen.append(path)
     return seen
+
+
+def _release_copies(extra: list[str]) -> list[str]:
+    """Beside each directory of ``extra``: the entries named like the release
+    (``spreadsheetbench...``: the archive, other extractions of it)."""
+    found: list[str] = []
+    for path in extra:
+        for form in {os.path.abspath(path), os.path.realpath(path)}:
+            parent = os.path.dirname(form.rstrip("/"))
+            try:
+                names = os.listdir(parent)
+            except OSError:
+                continue
+            found += [os.path.join(parent, name) for name in sorted(names)
+                      if "spreadsheetbench" in name.lower()]
+    return found
 
 
 def _sbpl(path: str) -> str:
@@ -120,24 +193,33 @@ def seatbelt_profile(writable: Iterable[str], hidden: Iterable[str]) -> str:
             + (f"(deny file-read* file-write* {hide})\n" if hide else ""))
 
 
-def wrapper(hidden: Iterable[str]):
+def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
     """``wrap(command, writable_dir, temp_dir)`` for `skillopt_port.run_generated_code`:
-    the command confined on this platform, ``writable_dir`` and ``temp_dir`` writable."""
+    the command confined on this platform, ``writable_dir`` and ``temp_dir`` writable.
+    ``visible``: what else the code reads (the input copy, its working directory), and,
+    on Linux, the first one that is a directory is where it starts."""
     hidden = list(hidden)
+    visible = [os.path.abspath(p) for p in visible]
 
     def wrap(command: list[str], writable_dir: str, temp_dir: str) -> list[str]:
-        writable = [writable_dir, temp_dir]
+        writable = [os.path.abspath(writable_dir), os.path.abspath(temp_dir)]
         for path in hidden:
             inside = os.path.realpath(path).rstrip("/") + "/"
-            for needed in (*writable, command[0]):
+            for needed in (*writable, *visible, command[0]):
                 if os.path.realpath(needed).startswith(inside):
                     raise SandboxError(f"{needed} is inside the hidden {path}")
         if sys.platform == "darwin":
             return [SANDBOX_EXEC, "-p", seatbelt_profile(writable, hidden), *command]
+        links = {p: os.readlink(p) for p in SYSTEM_DIRS if os.path.islink(p)}
+        read_only = _distinct([*(p for p in SYSTEM_DIRS if p not in links),
+                               *interpreter_dirs(command[0]), *visible])
+        read_only = [p for p in read_only
+                     if not any((p + "/").startswith(w.rstrip("/") + "/") for w in writable)]
+        start = next((p for p in visible if os.path.isdir(p)), "/")
         unshare = shutil.which("unshare") or "unshare"
-        read_only = [str(Path.home()), *TEMP_ROOTS]
-        return [unshare, "-rnm", "--", "/bin/sh", "-c", _linux_script(read_only), "sh",
-                *writable, *hidden, "--", *command]
+        return [unshare, "-rnmpf", "--", "/bin/sh", "-c",
+                _linux_script(read_only, _distinct(writable), links), "sh",
+                os.path.abspath(temp_dir), start, *command]
 
     return wrap
 
@@ -159,8 +241,8 @@ else:
 @lru_cache(maxsize=None)
 def _probe(python: str) -> tuple[bool, str]:
     """The sandbox runs ``python``, which can write both writable directories and cannot
-    read a file in a hidden one (on Linux a hidden directory is an empty tmpfs: it lists,
-    empty)."""
+    read a file in a hidden one (on Linux it is not there at all: nothing outside the
+    allow-list is)."""
     with tempfile.TemporaryDirectory(prefix="sb-probe-") as work:
         out, tmp, hidden = (Path(work) / name for name in ("out", "tmp", "hidden"))
         for d in (out, tmp, hidden):

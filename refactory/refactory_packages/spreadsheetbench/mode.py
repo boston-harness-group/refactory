@@ -23,16 +23,18 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
    for each call and for each item's turn loop. An item past it is a harness incident
    (its record's ``error_kind`` is ``harness_incident``), never a score of 0. The lab's
    SkillOpt wrapper is to run with the same backstop as its item limit.
-3. *Interpreter*: a pinned environment with SkillOpt's versions (`interpreter`), with
+2. *Interpreter*: a pinned environment with SkillOpt's versions (`interpreter`), with
    pandas installed in it rather than added through ``PYTHONPATH``.
-4. *Grader*: ``recalc`` by default (`recalc`); ``SB_GRADER=cached`` is SkillOpt's.
-5. *Sandbox*: model code cannot read the golden file, the dataset or the run
+3. *Grader*: ``recalc`` by default (`recalc`); ``SB_GRADER=cached`` is SkillOpt's.
+   Scores compare only with a SkillOpt run graded the same way (the lab's
+   ``SB_GRADER=recalc`` wrapper), never with SkillOpt's cached-grader numbers. A
+   recalculation that fails is a harness incident (`recalc.RecalcFailed`), not a wrong
+   answer.
+4. *Sandbox*: model code cannot read the golden file, the dataset or the run
    (`sandbox`); SkillOpt's could. Stricter, so it can only lower a score that came
    from reading the answer (none of so-s42's generated code mentions the golden
    file, ``listdir`` or ``glob``; port spec §3).
-6. *Tools*: none on the solve call (above).
-7. *Retries*: a crashed solve call gets the data pass's default 2 fresh sessions (3 in
-   all); SkillOpt's wrapper makes 5 attempts per turn.
+5. *Tools*: none on the solve call (above).
 """
 from __future__ import annotations
 
@@ -53,6 +55,9 @@ MAX_TURNS = 30
 #: The solve node's system prompt: the system file, then the skill section.
 SYSTEM_PROMPT = port.CODEGEN_SYSTEM + "{{skill_section}}"
 SYSTEM_PROMPT_KNOB = "solve__system_prompt"
+#: A crashed solve call is run again in a fresh session up to 4 times, 5 attempts in
+#: all, as SkillOpt's wrapper attempts each call (rather than the data pass's default 2).
+SOLVE_RETRY = {"on": ["crash"], "times": 4}
 
 
 class Solver(nn.Mode):
@@ -104,6 +109,7 @@ class Solver(nn.Mode):
         g.add(nn.Node("solve", "agent", prompt_template="{{solver_prompt}}",
                       system_prompt_template=SYSTEM_PROMPT, writes=("reply.txt",),
                       tool_policy="none", role="solver", outputs_only=True,
+                      retry=SOLVE_RETRY,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
         g.add(nn.Node("run_turn", "op", call=f"{OPS}:run_turn",

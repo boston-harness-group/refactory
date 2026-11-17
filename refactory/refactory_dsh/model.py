@@ -64,7 +64,15 @@ class CompletionFailed(RuntimeError):
         self.kind = kind
 
 
-class HarnessBackstop(RuntimeError):
+class HarnessIncident(RuntimeError):
+    """The harness failed an item, not the method: its record's ``error_kind`` is
+    ``harness_incident`` (`items.error_kind`), which every score excludes and reports
+    beside the other harness incidents, never a score of 0. Raised by a Task's grader
+    when its own machinery fails (SpreadsheetBench's LibreOffice recalculation), and the
+    base of `HarnessBackstop`."""
+
+
+class HarnessBackstop(HarnessIncident):
     """A node's model session was still streaming at the harness backstop
     (`DEFAULT_BACKSTOP_S`): a model frame came within the inactivity limit before it.
 

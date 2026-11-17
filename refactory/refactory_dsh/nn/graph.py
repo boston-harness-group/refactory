@@ -41,8 +41,10 @@ PROCEED = "proceed"
 RETRY_ON = ("crash", "output_limit", "timeout")
 
 #: The most retries one node may declare, and the largest factor its limit may grow by
-#: per retry. A bound, so a declared rule cannot hold a run for an unbounded time.
-MAX_RETRY_TIMES = 3
+#: per retry. A bound, so a declared rule cannot hold a run for an unbounded time. Four
+#: retries is five attempts, as SkillOpt's model wrapper makes per call (the
+#: SpreadsheetBench solver declares it).
+MAX_RETRY_TIMES = 4
 MAX_TIMEOUT_FACTOR = 10
 
 #: How many fresh sessions an agent step in a data pass gets, by default, when its

@@ -1007,6 +1007,21 @@ class Loop(OuterLoop):
             self.__dict__["_grader_secret_values"] = cached
         return cached
 
+    def _train_gold_feedback(self) -> bool:
+        """Whether this loop's own train evaluations ask for gold feedback: when the
+        run's Task offers it (`task.offers_train_feedback`), as SkillOpt's train rollouts
+        (``SkillOptLoop``) do, so both arms' train passes get the same information. Never
+        val or test (`task.write_subset` refuses it), and not the memory pass's rollouts,
+        SkillOpt's slow-update rollouts' counterpart. Read once."""
+        cached = self.__dict__.get("_offers_train_feedback")
+        if cached is None:
+            try:
+                cached = task_module.offers_train_feedback(self.mode.state_dict())
+            except Exception:  # noqa: BLE001 - a Task that cannot load offers nothing
+                cached = False
+            self.__dict__["_offers_train_feedback"] = cached
+        return cached
+
     def permitted_ops(self) -> list[str]:
         """The edit operations this run may apply.
 
@@ -1589,6 +1604,7 @@ class Loop(OuterLoop):
         # when scoring a run's last proposals (an explicit ``epoch``): no proposal reads
         # those comparisons.
         parent = self._round_parent(batch, at) if epoch is None and batch else None
+        gold = self._train_gold_feedback()
         index = 0
         while index < len(batch):
             if self.evaluations >= self.config.max_evaluations:
@@ -1625,7 +1641,7 @@ class Loop(OuterLoop):
                     start = index
                     Run(_loop=self).evaluate_many(
                         [*(EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items,
-                                       seed=seed) for candidate in wave),
+                                       seed=seed, gold_feedback=gold) for candidate in wave),
                          EvalRequest(candidate=beside, part=task_module.TRAIN, items=items,
                                      seed=seed, rescore_epoch=at)],
                         on_result=lambda position, candidate: (
@@ -1633,12 +1649,13 @@ class Loop(OuterLoop):
                             if position < len(wave) else None),
                     )
                 elif len(wave) == 1:
-                    self._evaluate(wave[0], seed=seed, items=items)
+                    self._evaluate(wave[0], seed=seed, items=items, gold_feedback=gold)
                     self._forwarded(wave[0], index, len(batch), at, items)
                 else:
                     start = index
                     Run(_loop=self).evaluate_many(
-                        [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed)
+                        [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed,
+                                     gold_feedback=gold)
                          for candidate in wave],
                         on_result=lambda position, candidate: self._forwarded(
                             candidate, start + position, len(batch), at, items),
@@ -1856,7 +1873,8 @@ class Loop(OuterLoop):
         result, measurements = self._settled_measure(
             parent, workdir, task_module.TRAIN, prepare, rescore_epoch=epoch,
             seed=self._train_seed(epoch), items=batch, item_gate=item_gate,
-            item_slots=item_slots, stop_event=stop_event)
+            item_slots=item_slots, stop_event=stop_event,
+            gold_feedback=self._train_gold_feedback())
         if not measurements.get("count"):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.

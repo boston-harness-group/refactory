@@ -483,7 +483,8 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
 
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
-    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's) or
+    any other `model.HarnessIncident` (a grader whose own machinery failed),
     ``"declared_timeout"`` for one stopped at its node's declared wall
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
     else the class name.
@@ -495,10 +496,10 @@ def error_kind(error: BaseException) -> str:
     (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
     ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessIncident
     from refactory_dsh.node_retry import RetriesExhausted
 
-    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
+    if isinstance(error, HarnessIncident) or HARNESS_BACKSTOP_LINE.search(str(error)):
         return "harness_incident"
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")

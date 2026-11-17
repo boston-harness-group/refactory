@@ -68,20 +68,31 @@ refactory this is a declared library mechanism, `refactory_dsh.feedback`:
   writes and one fact, asks the Task only on such a train evaluation; elsewhere its fact
   is empty. Rule V17 lets that fact, and nothing else grader-derived, through.
 
-The SkillOpt strategy asks for it on its train rollout only.
+Both arms ask for it, so both get the same information: the SkillOpt strategy on its
+train rollout, and the default loop on its own train evaluations (each candidate's train
+rollout and the parent's re-score) whenever the Task offers it (`Task.train_feedback`).
+Neither asks on val or test, nor on the rollouts that only compare skills (SkillOpt's
+slow update, the default loop's memory pass).
 
 ## Where model code runs
 
 A pinned interpreter with SkillOpt's versions (Python 3.12, openpyxl 3.1.5, pandas 2.3.3,
 numpy 2.5.4 and pandas' own dependencies), built once with
 `python -m refactory_packages.spreadsheetbench.interpreter` or named by `SB_PYTHON`. The
-code runs in a fresh directory holding a copy of the input, with no network; the dataset,
-the run, the outer loop's root and the home directory's secrets hidden; and, of the places
-a user can write (home, `/tmp`, `/var/tmp`, `/dev/shm`), only its output and temporary
-directories writable. Linux: user, mount and network namespaces set up as the lab's
-`sandbox-exec.sh` does, then a nested user, mount and PID namespace, so the code cannot
-undo the hiding or reach another process's view of the files. macOS: Seatbelt. Where
-neither can run, code is not run.
+code runs with no network, and only its output and temporary directories writable.
+
+- Linux: an allow-list. The code's root holds only the system directories (`/usr`,
+  `/etc` and the `/bin`, `/lib` links), the interpreter's own directories, a few device
+  files, a copy of the item's input and an empty working directory (read-only), and its
+  output and temporary directories. The dataset and any copy of it, the run, the outer
+  loop's root, the home directory, `/tmp`, model caches and shared drives are simply not
+  there. Built in user, mount, network and PID namespaces and entered with `pivot_root`,
+  then a nested user and mount namespace, so the code cannot undo it.
+- macOS: Seatbelt with a hide-list: the dataset and entries named like the release beside
+  it, the run, the outer loop's root, the Hugging Face caches (`$XDG_CACHE_HOME/huggingface`,
+  `HF_HOME`, `HF_DATASETS_CACHE`), `/new_data` and the home directory's secrets.
+
+Where neither can run, code is not run.
 
 ## Differences from SkillOpt as shipped
 
@@ -93,20 +104,22 @@ neither can run, code is not run.
    The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
 2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
    the pass's first step runs.
-3. **Retries**: a crashed call gets a data pass's default 2 fresh sessions (3 in all);
-   SkillOpt's wrapper makes 5 attempts.
-4. **Tools**: none on the solve call. SkillOpt sends no tool schemas, but its CLI calls
+3. **Tools**: none on the solve call. SkillOpt sends no tool schemas, but its CLI calls
    carried Claude Code's default tools, which `dontAsk` refused (74% of so-s42's target
    calls tried one).
-5. **Interpreter**: pandas installed in the pinned environment, not added through
+4. **Interpreter**: pandas installed in the pinned environment, not added through
    `PYTHONPATH`; `PYTHONPATH` and `PYTHONHOME` are not passed to model code.
    `INPUT_PATH` names a copy of the input and the code runs in an empty working
    directory (SkillOpt's inherits the trainer's), so paths in tracebacks differ.
-6. **Sandbox**: model code cannot read the golden file, which in SkillOpt's runs sat
+5. **Sandbox**: model code cannot read the golden file, which in SkillOpt's runs sat
    readable beside the input (the lab's sandbox hid secrets only). Stricter, so it can
    only lower a score that came from reading the answer.
-7. **Grader**: `recalc` by default.
-8. **Analysts' view**: a feedback message after the last model call (a loop that ended on
+6. **Grader**: `recalc` by default. Its scores compare only with a SkillOpt run graded
+   the same way (the lab's wrapper with `SB_GRADER=recalc`), never with SkillOpt's
+   cached-grader numbers. A recalculation LibreOffice cannot make (it fails, or runs past
+   its 180 s wall) is a harness incident (`error_kind` `harness_incident`), not a wrong
+   answer.
+7. **Analysts' view**: a feedback message after the last model call (a loop that ended on
    turns or the backstop) is not in the conversation the analysts see; `n_turns` counts
    model calls; each message is shown stripped, as the History framing sends it.
 

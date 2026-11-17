@@ -170,8 +170,8 @@
         "on": [
           "crash"
         ],
-        "times": 2,
-        "timeout_factor": 1
+        "times": 4,
+        "timeout_factor": 2
       },
       "missing_on_crash": true,
       "tool_policy": "none",

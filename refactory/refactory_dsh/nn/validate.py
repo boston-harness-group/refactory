@@ -1410,6 +1410,8 @@ def feedback_channel_issues(graph: Graph, *, grader_side: Iterable[str] = ()) ->
         wrong = []
         if node.kind != "op":
             wrong.append(f"is a {node.kind}, not an op")
+        # Known limit, kept: with no grader side given (a graph validated on its own,
+        # outside the outer loop) an unprotected channel is not reported here.
         if side and node_id not in side:
             wrong.append("is not protected")
         if node_id not in in_pass:

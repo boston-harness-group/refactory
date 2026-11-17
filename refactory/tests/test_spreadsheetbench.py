@@ -231,7 +231,8 @@ wb.save(OUTPUT_PATH)
 """
         hidden = sandbox.hidden_paths([str(tmp_path / "data"), str(run)])
         ok, err = port.run_generated_code(code, str(source), str(work / "out" / "1_pred.xlsx"),
-                                          python=sb_python, wrap=sandbox.wrapper(hidden),
+                                          python=sb_python,
+                                          wrap=sandbox.wrapper(hidden, visible=[work]),
                                           cwd=str(work))
         assert ok, err
         import openpyxl
@@ -303,6 +304,76 @@ def sb_data(tmp_path, monkeypatch):
     monkeypatch.setenv(tasks.MANIFEST_ENV, str(manifest))
     monkeypatch.setenv(recalc.GRADER_ENV, "cached")
     return tmp_path / "dataset"
+
+
+class _CrashesFirst(FakeModel):
+    """Crashes its first ``n`` sessions the way the model client reports a product
+    failure, then answers ``_good(7)``."""
+
+    def __init__(self, n: int) -> None:
+        super().__init__([])
+        self.left = n
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:  # type: ignore[override]
+        from refactory_dsh import model
+
+        self.prompts.append(prompt)
+        if self.left > 0:
+            self.left -= 1
+            raise model.CompletionFailed("model completion failed (exit 1): dsh: worker error: "
+                                         "Product subagent failure: the answer was empty")
+        return _good(7)
+
+
+@pytest.mark.parametrize("crashes", [4, 5])
+def test_a_crashed_solve_call_gets_five_attempts(tmp_path, sb_env, crashes):
+    """SkillOpt's wrapper attempts each call 5 times: after 4 crashes the fifth attempt
+    answers the first turn; after 5 the turn is left unanswered and the next turn asks
+    again."""
+    assert sb_mode.Solver().build().retry_rule("solve")["times"] == 4
+    model = _CrashesFirst(crashes)
+    result, prompts = _walk(tmp_path, "val", model)
+    (record,) = result.item_records
+    assert record["passed"], record
+    assert len(set(prompts[:5])) == 1  # one turn's prompt, attempted five times
+    assert len(prompts) == (5 if crashes == 4 else 6)
+    if crashes == 5:
+        assert prompts[5] != prompts[0]
+
+
+def test_hostile_code_walking_the_filesystem_finds_no_golden_file(tmp_path, sb_env,
+                                                                monkeypatch):
+    """Model code that searches the whole filesystem for the item's golden file finds
+    none: not the dataset's, not a copy beside it, in a model cache, in the home
+    directory or under the temporary root (Linux: only an allow-list is there)."""
+    import tempfile
+
+    golden = sb_env / "sb400" / "spreadsheet" / "t1" / "1_t1_golden.xlsx"
+    assert golden.exists()
+    cache = tmp_path / "xdg"
+    elsewhere = Path(tempfile.mkdtemp(prefix="sb-copy-"))
+    copies = [sb_env / "spreadsheetbench_verified_400" / golden.name,
+              cache / "huggingface" / "datasets" / golden.name,
+              tmp_path / "home" / "Downloads" / golden.name,
+              elsewhere / golden.name]
+    for copy in copies:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(golden, copy)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    walk = ("```python\nimport os, openpyxl\nfound = []\n"
+            "for top, dirs, files in os.walk('/'):\n"
+            "    if top == '/proc' or top.startswith('/proc/') or top.startswith('/sys'):\n"
+            "        dirs[:] = []\n        continue\n"
+            "    found += [os.path.join(top, f) for f in files if 'golden' in f]\n"
+            "if found:\n    raise SystemExit('FOUND ' + repr(found))\n"
+            "wb = openpyxl.load_workbook(INPUT_PATH)\nwb.active['B1'] = 42\n"
+            "wb.save(OUTPUT_PATH)\n```")
+    try:
+        result, prompts = _walk(tmp_path, "train", [walk], gold_feedback=True)
+    finally:
+        shutil.rmtree(elsewhere, ignore_errors=True)
+    (record,) = result.item_records
+    assert len(prompts) == 1 and record["passed"], record
 
 
 def test_task_items_hide_the_answer(sb_data):
@@ -606,6 +677,78 @@ def test_evaluate_many_passes_gold_feedback_to_the_train_run(tmp_path, monkeypat
     assert asked == [True]
 
 
+class _WrongFirst(FakeModel):
+    """Answers every item by its instruction: a wrong value first, then the right one."""
+
+    thread_safe = True
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.seen: dict[str, int] = {}
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:  # type: ignore[override]
+        import re
+
+        found = re.findall(r"Put (\d+) in B1\.", prompt)
+        target = int(found[-1]) if found else 1
+        key = found[-1] if found else "?"
+        self.prompts.append(prompt)
+        self.seen[key] = self.seen.get(key, 0) + 1
+        return _good(target if self.seen[key] > 1 else target + 1)
+
+
+def test_the_default_loop_asks_gold_feedback_on_train_only(tmp_path, sb_env):
+    """Information parity with SkillOpt's arm (`SkillOptLoop` asks for it on its train
+    rollouts): the default loop's own train evaluation of an SB candidate gets the
+    answer-guided feedback turn; its val and test evaluations do not."""
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.outerloop import Run
+
+    _, state = _state()
+    model = _WrongFirst()
+    parts = tmp_path / "parts.json"
+    parts.write_text(json.dumps(PARTS))
+    loop = Loop(f"spreadsheetbench/{sb_mode.Solver.name}", LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", evaluator="walker", seed=3,
+        runs_root=tmp_path / "run", max_evaluations=4, parts_manifest=str(parts)),
+        project=Path("."), model=model)
+    loop.init()
+    seed = loop.population[0]
+    seed.state = state
+    assert loop._train_gold_feedback()  # noqa: SLF001
+    loop.forward(epoch=0)
+    train_prompts = list(model.prompts)
+    told = [p for p in train_prompts if EVAL_FEEDBACK_HEAD in p]
+    assert len(told) == 2 and len(train_prompts) == 4
+    assert json.loads((tmp_path / "run" / "runs" / seed.id / task_module.SUBSET)
+                      .read_text()).get(task_module.GOLD_FEEDBACK) is True
+    before = len(model.prompts)
+    Run(_loop=loop).evaluate(seed, part="val")
+    assert len(model.prompts) == before + 1  # the wrong clean run ends the val item
+    assert not any(EVAL_FEEDBACK_HEAD in p for p in model.prompts[before:])
+    # Test's one item (x1) has no input to solve; its subset carries no flag either.
+    Run(_loop=loop).evaluate(seed, part="test")
+    for part in ("val", "test"):
+        subset = tmp_path / "run" / "runs" / seed.id / "occasions" / f"{part}_0" / task_module.SUBSET
+        assert json.loads(subset.read_text()).get(task_module.GOLD_FEEDBACK) is None, part
+
+
+def test_a_task_without_train_feedback_is_not_asked(tmp_path):
+    """LiveMath and every other Task that says nothing to a train attempt: the default
+    loop's train evaluations stay as they were (no gold-feedback flag in subset.json)."""
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", seed=3, runs_root=tmp_path / "run",
+        max_evaluations=4), project=Path("."))
+    loop.init()
+    assert not loop._train_gold_feedback()  # noqa: SLF001
+    from refactory_dsh.task import Task
+    from refactory_packages.livemath.tasks import LiveMathTask
+
+    assert LiveMathTask.train_feedback is Task.train_feedback
+
+
 def _pass_ctx(tmp_path: Path, part: str, flag: bool) -> RunContext:
     from refactory_dsh.items import prepare_pass_dir
 
@@ -798,17 +941,82 @@ def test_an_item_past_the_backstop_is_a_harness_incident_on_both_runtimes(tmp_pa
                                                                           monkeypatch):
     """A 1 s backstop and a 2 s turn pause: the first turn runs past it, so on either
     runtime the item's record is a harness incident, not a score of 0."""
+    import child_patches
+
     monkeypatch.setenv("REFACTORY_MODEL_BACKSTOP_S", "1")
     from refactory_dsh import model
 
-    monkeypatch.setattr(model, "DEFAULT_BACKSTOP_S", 1)
+    # The walker's ops run in a forkserver child that may have started before this test
+    # (`child_patches`), so the backstop reaches it as a patch, not by the environment.
+    child_patches.for_test(monkeypatch).setattr(model, "DEFAULT_BACKSTOP_S", 1)
     # One item, failed: the run itself fails ("all items failed"), its record stands.
     walked, _ = _walk(tmp_path, "val", [_good(7)], turn_pause_s=2, expect_ok=False)
     records, _ = _spine(tmp_path, "val", [_good(7)], gold_feedback=False, turn_pause_s=2,
                         expect_ok=False)
     for record in (*walked.item_records, *records):
-        assert record["error_kind"] == "harness_incident", record.get("error_text")
+        assert record["error_kind"] == "harness_incident", record
         assert record["passed"] is False
+
+
+def _formula(text: str) -> str:
+    return ("```python\nimport openpyxl\nwb = openpyxl.load_workbook(INPUT_PATH)\n"
+            f"wb.active['B1'] = '{text}'\nwb.save(OUTPUT_PATH)\n```")
+
+
+def _broken_soffice(tmp_path: Path, monkeypatch) -> None:
+    """A LibreOffice that fails every conversion, under the recalc grader: in this process
+    and in the spine's (`SB_SOFFICE` travels in the environment)."""
+    fake = tmp_path / "soffice"
+    fake.write_text("#!/bin/sh\nexit 1\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv(recalc.SOFFICE_ENV, str(fake))
+    monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+
+
+def test_a_failed_recalculation_is_a_harness_incident(tmp_path, sb_data, monkeypatch):
+    """The grader's own failure is the harness's: never a wrong answer, never told to
+    the attempt as wrong cells."""
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.model import HarnessIncident
+
+    _broken_soffice(tmp_path, monkeypatch)
+    task = tasks.SpreadsheetBenchTask()
+    t1 = task.instances()[0]
+    pred = make_workbook(tmp_path / "pred.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": "=40+2"}}])
+    with pytest.raises(recalc.RecalcFailed) as raised:
+        recalc.evaluate(str(pred), t1.metadata["gold_path"], "Cell-Level Manipulation",
+                        t1.metadata["answer_position_eval"])
+    assert isinstance(raised.value, HarnessIncident)
+    assert error_kind(raised.value) == "harness_incident"
+    # A prediction without formulas never needs LibreOffice: graded as before.
+    plain = make_workbook(tmp_path / "plain.xlsx",
+                          [{"title": "Sheet1", "cells": {"A1": 1, "B1": 41}}])
+    assert not recalc.evaluate(str(plain), t1.metadata["gold_path"], "Cell-Level Manipulation",
+                               t1.metadata["answer_position_eval"])["ok"]
+
+
+@pytest.mark.parametrize("part,flag", [("val", False), ("train", True)])
+def test_a_failed_recalculation_is_no_score_on_the_walker(tmp_path, sb_env, monkeypatch,
+                                                         part, flag):
+    _broken_soffice(tmp_path, monkeypatch)
+    result, prompts = _walk(tmp_path, part, [_formula("=6+1" if part == "val" else "=40+1")],
+                            gold_feedback=flag, expect_ok=False)
+    (record,) = result.item_records
+    assert record["error_kind"] == "harness_incident", record
+    assert len(prompts) == 1 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
+
+
+@pytest.mark.skipif(NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/"
+                                         "@deepseek-ai/cordis").exists(),
+                    reason="the spine drain needs Node and the installed workspace")
+def test_a_failed_recalculation_is_no_score_on_the_spine(tmp_path, sb_env, monkeypatch):
+    _broken_soffice(tmp_path, monkeypatch)
+    records, prompts = _spine(tmp_path, "train", [_formula("=40+1")], gold_feedback=True,
+                              expect_ok=False)
+    (record,) = records
+    assert record["error_kind"] == "harness_incident", record
+    assert len(prompts) == 1 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
 
 
 # ── the real data (lab) ─────────────────────────────────────────────────────

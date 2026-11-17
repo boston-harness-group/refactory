@@ -131,7 +131,8 @@ def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
             shutil.copyfile(workdir / PRED, output_path)
         ok, err = port.run_generated_code(
             code, str(input_path), str(output_path), RUN_TIMEOUT_S,
-            python=python, wrap=sandbox.wrapper(hidden), cwd=str(root / "cwd"))
+            python=python, wrap=sandbox.wrapper(hidden, visible=[root / "cwd", root / "in"]),
+            cwd=str(root / "cwd"))
         ctx._note_write(PRED)  # noqa: SLF001 - a declared write, copied in place
         if output_path.exists():
             shutil.copyfile(output_path, ctx._writable(PRED))  # noqa: SLF001

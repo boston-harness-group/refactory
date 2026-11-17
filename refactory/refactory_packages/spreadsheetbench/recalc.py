@@ -24,6 +24,8 @@ from typing import Any
 
 import openpyxl
 
+from refactory_dsh.model import HarnessIncident
+
 from . import skillopt_port as port
 
 #: The grader choice, shared with the lab's SkillOpt wrapper: ``recalc`` (default) or
@@ -43,6 +45,12 @@ _XCU = ('<?xml version="1.0" encoding="UTF-8"?>\n<oor:items xmlns:oor="http://op
         + "".join(f'<item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="{k}" '
                   f'oor:op="fuse"><value>0</value></prop></item>\n' for k in ("OOXMLRecalcMode", "ODFRecalcMode"))
         + "</oor:items>\n")
+
+
+class RecalcFailed(HarnessIncident):
+    """LibreOffice produced no recalculated copy (it failed, or ran past its 180 s wall):
+    the grader's failure, not the model's, so the item is a harness incident rather than
+    a wrong answer."""
 
 
 def grader(choice: str | None = None) -> str:
@@ -145,7 +153,8 @@ def recalculated(pred_path: str) -> str | None:
 def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_position: str,
              *, choice: str | None = None) -> dict[str, Any]:
     """The grade: cached first; under ``recalc``, a failing prediction whose answer
-    cells hold formulas is graded again on its recalculated copy."""
+    cells hold formulas is graded again on its recalculated copy. Raises `RecalcFailed`
+    when that copy cannot be made: a harness incident, never a wrong answer."""
     r = port.evaluate_cached(pred_path, gold_path, instruction_type, answer_position)
     if grader(choice) == "cached":
         return r
@@ -153,8 +162,8 @@ def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_posit
         return r
     rc = recalculated(pred_path)
     if not rc:
-        r["reason"] = f"{r.get('reason', '')} [formula recalculation failed]"
-        return r
+        raise RecalcFailed(f"LibreOffice could not recalculate {pred_path} "
+                           f"(cached grade: {str(r.get('reason', ''))[:200]})")
     r2 = port.evaluate_cached(rc, gold_path, instruction_type, answer_position)
     r2["recalculated"] = True
     return r2

@@ -187,7 +187,8 @@ def check_executor(run: Path, data: Path, skillopt: Path | None, limit: int) -> 
                 (root / side / "in" / Path(cases[0][1]).name).write_bytes(Path(cases[0][1]).read_bytes())
             mine = port.run_generated_code(
                 code, str(root / "port/in" / Path(cases[0][1]).name), str(root / "port/out/1_pred.xlsx"),
-                python=python, wrap=sandbox.wrapper(hidden), cwd=str(root / "port"))
+                python=python, wrap=sandbox.wrapper(hidden, visible=[root / "port"]),
+                cwd=str(root / "port"))
             result: dict[str, Any] = {"id": item["id"], "port": [mine[0], _TEMP.sub("<tmp>", mine[1])[-300:]]}
             same = True
             if so_executor is not None:

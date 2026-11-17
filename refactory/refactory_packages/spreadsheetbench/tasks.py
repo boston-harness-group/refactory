@@ -159,7 +159,13 @@ class SpreadsheetBenchTask(Task):
                 or not meta.get("answer_position_eval"):
             return None
         pred = Path(workspace) / PRED
-        if self._grade(instance, pred)["ok"]:
+        try:
+            graded = self._grade(instance, pred)
+        except recalc.RecalcFailed:
+            # The grader failed, not the attempt: nothing to tell it. The item's grade
+            # meets the same failure and records a harness incident (`verify`).
+            return None
+        if graded["ok"]:
             return {"passed": True}
         report = recalc.auto_verify_output(str(pred), meta["gold_path"],
                                            meta["answer_position_eval"], choice=self.grader)
@@ -189,6 +195,8 @@ class SpreadsheetBenchTask(Task):
         ape = meta.get("answer_position_eval", "")
         try:
             ev = self._grade(instance, pred)
+        except recalc.RecalcFailed:
+            raise  # a harness incident (`model.HarnessIncident`), never a score of 0
         except Exception as e:  # noqa: BLE001 - rollout.py:820-823
             ev = {"ok": False, "reason": f"eval-exception: {type(e).__name__}: {e}"}
         verification = ""

@@ -229,6 +229,25 @@ def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str
     return secrets
 
 
+def offers_train_feedback(state: dict[str, Any]) -> bool:
+    """Whether a data node's Task of ``state`` says what a train attempt is told
+    (it overrides `Task.train_feedback`). The default loop then asks for gold feedback
+    on its train evaluations, as SkillOpt's train rollouts do; a Task that cannot be
+    loaded offers nothing."""
+    from refactory_dsh.nn.graph import Graph
+
+    graph = Graph.from_state(state.get("graph") or {})
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    for ref in refs:
+        try:
+            task = load_task(ref)
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        if type(task).train_feedback is not Task.train_feedback:
+            return True
+    return False
+
+
 def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
     """What the graph's Tasks declare for the integrity judge: ``{"policy": {...},
     "allowances": {...}}``, from each data node's Task (``Task.integrity_policy``,

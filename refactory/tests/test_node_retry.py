@@ -491,7 +491,7 @@ def test_the_declaration_has_one_canonical_form():
     # times 0 declares no retry, turning off a data pass's default.
     assert retry_declaration({"times": 0})["times"] == 0
     for bad, says in [({"on": ["error"]}, "unknown"), ({"on": "timeout"}, "non-empty list"),
-                      ({"times": -1}, "times"), ({"times": 4}, "times"), ({"times": True}, "times"),
+                      ({"times": -1}, "times"), ({"times": 5}, "times"), ({"times": True}, "times"),
                       ({"timeout_factor": 0.5}, "timeout_factor"), ({"wait": 1}, "unknown"),
                       ("timeout", "mapping")]:
         with pytest.raises(ValueError, match=says):
@@ -568,11 +568,19 @@ def test_design_mode_retries_its_builder_and_verifier():
 def test_other_modes_declare_no_retry():
     from test_lowering_smoke import _mode_classes
 
+    from refactory_packages.spreadsheetbench.mode import SOLVE_RETRY
+
     for key, mode_cls in _mode_classes():
         if key == "default_pack-design":
             continue
         state = mode_cls().state_dict()
-        assert all("retry" not in node for node in state["graph"]["nodes"].values()), key
+        nodes = state["graph"]["nodes"]
+        if key == "spreadsheetbench-solver":
+            # SkillOpt's 5 attempts per call, on the solve node only.
+            assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
+                {"solve": retry_declaration(SOLVE_RETRY)}
+            continue
+        assert all("retry" not in node for node in nodes.values()), key
 
 
 # ── builder retry (workspace-based isolation) ────────────────────────────────────
