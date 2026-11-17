@@ -2338,7 +2338,8 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "",
         "Rules:",
         '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>} or, '
-        'for a text parameter, the same with "patch" in place of "value" (below).',
+        'for a text parameter, the same with "patch" in place of "value" (its form is in the '
+        '`set_knob` row above).',
     ]
     if any(op.get("op") == "set_knob" for op in catalogue):
         # SkillOpt's patch mode edits its skill only by local append/insert/replace/delete

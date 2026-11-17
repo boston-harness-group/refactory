@@ -826,7 +826,7 @@ def test_spine_relooops_like_the_walker(monkeypatch, tmp_path):
 
 def test_the_request_describes_the_primitives_with_examples_from_this_graph():
     from refactory_dsh.nn import edits as edits_mod
-    from refactory_dsh.optim.base import composition_section
+    from refactory_dsh.optim.base import composition_section, operation_lines
 
     applier = _applier()
     nodes = [dict(state, id=node_id) for node_id, state in applier.seed_state["graph"]["nodes"].items()]
@@ -847,7 +847,13 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
         assert "ends the whole run (no later item runs)" in text
         assert "wire what the branches make into the step after the join" in text
         assert '"step": "compare"' in text  # an example built from this graph's ids
-        assert "## Structural operators" in text and "compose your own" in text
+        assert "compose your own" in text
+        # The core operators are listed once, in the single op list, not here again.
+        assert "## Structural operators" not in text
+    ops = "\n".join(operation_lines(edits_mod.catalogue(), nodes, edges,
+                                    protected=applier.protected))
+    assert ops.count("## Structural operators") == 1
+    assert '"step": "compare"' in ops  # its examples are built from this graph's ids too
     assert snippet.RUN in on and snippet.RUN not in off and snippet.GATE not in off
     assert composition_section([{"op": "set_knob", "kind": "knob", "fields": []}], nodes, edges) == []
     # Every example in it is a proposal this graph accepts.

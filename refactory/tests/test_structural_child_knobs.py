@@ -20,7 +20,7 @@ from refactory_dsh import events as run_events
 from refactory_dsh.loop import Loop, LoopConfig
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
-from refactory_dsh.optim.base import answer_instructions
+from refactory_dsh.optim.base import answer_instructions, operation_lines
 from refactory_dsh.outerloop import Run
 from refactory_packages.livemath.skill_graph import SkillGraph
 
@@ -202,14 +202,18 @@ def test_the_patch_format_names_its_key_and_its_example_applies():
     rules = answer_instructions(catalogue)
     state = SkillGraph().state_dict()
     current = state["knobs"]["compare__system_prompt"]["value"]
-    for text in (description, rules):
-        assert '"kind": <action>' in text and 'under "kind"' in text
-        example = _example(text)
-        assert example["patch"][0]["kind"] == "replace"
-        example["name"] = "compare__system_prompt"
-        example["patch"][0].update(target=current[:20], content="PATCHED")
-        out = nn_edits.apply(example, state)
-        assert out["knobs"]["compare__system_prompt"]["value"].startswith("PATCHED")
+    # The patch form is said once, in set_knob's row; the Answer rules point to it.
+    assert '"kind": <action>' in description and 'under "kind"' in description
+    assert '"kind": <action>' not in rules and "`set_knob` row above" in rules
+    example = _example(description)
+    assert example["patch"][0]["kind"] == "replace"
+    example["name"] = "compare__system_prompt"
+    example["patch"][0].update(target=current[:20], content="PATCHED")
+    out = nn_edits.apply(example, state)
+    assert out["knobs"]["compare__system_prompt"]["value"].startswith("PATCHED")
+    # In the request the proposer reads, the row is there once with that form.
+    rows = "\n".join(operation_lines(catalogue))
+    assert rows.count('"kind": <action>') == 1
 
 
 def test_a_patch_entry_without_kind_is_refused_naming_the_key():
