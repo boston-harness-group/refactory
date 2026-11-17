@@ -362,7 +362,8 @@ def _state(**knobs: Any) -> tuple[sb_mode.Solver, dict[str, Any]]:
 
 
 def _walk(tmp_path: Path, part: str, answers: list[str] | FakeModel, *,
-          gold_feedback: bool = False, train: list[str] = ("t1",), **knobs: Any):
+          gold_feedback: bool = False, train: list[str] = ("t1",), expect_ok: bool = True,
+          **knobs: Any):
     mode, state = _state(**knobs)
     work = tmp_path / f"walk-{part}"
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
@@ -370,7 +371,7 @@ def _walk(tmp_path: Path, part: str, answers: list[str] | FakeModel, *,
     task_module.write_subset(work, part, 0.0, gold_feedback=gold_feedback)
     model = answers if isinstance(answers, FakeModel) else FakeModel(list(answers))
     result = WalkerEvaluator(model=model, project=Path("."), max_steps=4000).evaluate(mode, state, work)
-    assert result.exit_ok, result.error
+    assert result.exit_ok or not expect_ok, result.error
     return result, model.prompts
 
 
@@ -520,8 +521,9 @@ def test_an_item_past_the_backstop_is_a_harness_incident(tmp_path, sb_data, monk
                                  "code": "pass"})
     ctx.write_json("history.json", [{"role": "user", "content": "u"}])
     shutil.copyfile(t1.metadata["gold_path"], tmp_path / tasks.PRED)
-    with pytest.raises(ops.ItemBackstop) as raised:
-        ops.finalize(ctx)
+    ops.finalize(ctx)
+    with pytest.raises(model.HarnessBackstop) as raised:
+        task.verify(t1, tmp_path)
     assert error_kind(raised.value) == "harness_incident"
     # A long item inside the backstop is graded as any other.
     ctx.write_json("turn.json", {"start": time.time() - 59, "turn": 1, "status": "ran",
@@ -735,10 +737,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain-agent.mts"
 
 
-def _spine(tmp_path: Path, part: str, answers: list[str], *, gold_feedback: bool) -> tuple[list[dict], list[str]]:
+def _spine(tmp_path: Path, part: str, answers: list[str], *, gold_feedback: bool,
+           expect_ok: bool = True, **knobs: Any) -> tuple[list[dict], list[str]]:
     from refactory_dsh import lowering
 
-    mode, state = _state()
+    mode, state = _state(**knobs)
     work = tmp_path / f"spine-{part}"
     work.mkdir(parents=True)
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
@@ -756,7 +759,7 @@ def _spine(tmp_path: Path, part: str, answers: list[str], *, gold_feedback: bool
         [str(NODE), "--import", "tsx/esm", str(DRAIN), str(graph_path), str(work),
          str(REPO_ROOT / ".venv/bin/python"), "120000", str(work / "responses.json")],
         capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, env=env)
-    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert proc.returncode == 0 or not expect_ok, proc.stdout[-2000:] + proc.stderr[-2000:]
     records = json.loads((work / "facts.json").read_text())["item_scores"]
     prompts = [json.loads(line)["prompt"] for line in record.read_text().splitlines()
                if json.loads(line).get("node") == "solve" and "prompt" in json.loads(line)]
@@ -786,6 +789,26 @@ def test_the_spine_runs_the_loop_as_the_walker_does(tmp_path, sb_env, part, flag
         [(r["id"], r["passed"], r["fail_reason"]) for r in walked.item_records]
     feedback_seen = any(EVAL_FEEDBACK_HEAD in p for p in spine_prompts)
     assert feedback_seen is (part == "train")
+
+
+@pytest.mark.skipif(NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/"
+                                         "@deepseek-ai/cordis").exists(),
+                    reason="the spine drain needs Node and the installed workspace")
+def test_an_item_past_the_backstop_is_a_harness_incident_on_both_runtimes(tmp_path, sb_env,
+                                                                          monkeypatch):
+    """A 1 s backstop and a 2 s turn pause: the first turn runs past it, so on either
+    runtime the item's record is a harness incident, not a score of 0."""
+    monkeypatch.setenv("REFACTORY_MODEL_BACKSTOP_S", "1")
+    from refactory_dsh import model
+
+    monkeypatch.setattr(model, "DEFAULT_BACKSTOP_S", 1)
+    # One item, failed: the run itself fails ("all items failed"), its record stands.
+    walked, _ = _walk(tmp_path, "val", [_good(7)], turn_pause_s=2, expect_ok=False)
+    records, _ = _spine(tmp_path, "val", [_good(7)], gold_feedback=False, turn_pause_s=2,
+                        expect_ok=False)
+    for record in (*walked.item_records, *records):
+        assert record["error_kind"] == "harness_incident", record.get("error_text")
+        assert record["passed"] is False
 
 
 # ── the real data (lab) ─────────────────────────────────────────────────────

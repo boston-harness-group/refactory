@@ -13,8 +13,9 @@ There is no item budget (SkillOpt's 600 s ``exec_timeout``): calls end on inacti
 and the one limit is the harness backstop (`item_limit_s`, ``REFACTORY_MODEL_BACKSTOP_S``).
 SkillOpt's check is kept against it: `prepare` records the item's start, `turn_gate`
 starts no turn with 10 s or less of it left (codegen_agent.py:704-711), and `finalize`
-fails an item past it as a harness incident (`refactory_dsh.model.HARNESS_BACKSTOP_TEXT`,
-recorded as ``error_kind`` ``harness_incident``), never as a score of 0.
+records an item past it, which the Task's ``verify`` reports as
+`refactory_dsh.model.HarnessBackstop`: a harness incident (``error_kind``
+``harness_incident``), never a score of 0.
 """
 from __future__ import annotations
 
@@ -46,10 +47,6 @@ PREVIEW_FILE = "spreadsheet_preview.txt"
 LAST_TURN_MARGIN_S = 10
 #: executor.py's default per-run limit (codegen_agent.py:729-734, rollout.py:799-800).
 RUN_TIMEOUT_S = 120
-
-
-class ItemBackstop(RuntimeError):
-    """An item's turn loop ran past the harness backstop: the harness's fault."""
 
 
 def item_limit_s() -> float:
@@ -236,10 +233,8 @@ def turn_gate(ctx: Any) -> Any:
 def finalize(ctx: Any) -> dict[str, Any]:
     """The item's outcome before grading (rollout.py:779-812): an empty last code block
     fails; a missing prediction gets one more run of the last code. Writes `tasks.FINAL`
-    and SkillOpt's ``conversation.json`` (the history after the first user message). An
-    item past the harness backstop raises `ItemBackstop`: a harness incident, not a
-    score."""
-    from refactory_dsh.model import HARNESS_BACKSTOP_TEXT
+    and SkillOpt's ``conversation.json`` (the history after the first user message), with
+    ``backstop`` set when the item's turns ran past the harness backstop."""
 
     item = _item(ctx)
     turn = ctx.read_json(TURN, {}) or {}
@@ -265,8 +260,6 @@ def finalize(ctx: Any) -> dict[str, Any]:
     elapsed = time.time() - float(turn.get("start") or time.time())
     ctx.write_json(CONVERSATION, history[1:])
     ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns,
-                           "elapsed_s": round(elapsed, 3)})
-    if elapsed > item_limit_s():
-        raise ItemBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "
-                           f"({elapsed:.0f} s of {item_limit_s():.0f} s)")
+                           "elapsed_s": round(elapsed, 3),
+                           "backstop": elapsed > item_limit_s(), "limit_s": item_limit_s()})
     return {"finished": True}

@@ -174,6 +174,12 @@ class SpreadsheetBenchTask(Task):
         meta = instance.metadata
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
+        if final.get("backstop"):
+            # The harness's fault, not the method's: never a score of 0.
+            from refactory_dsh.model import HARNESS_BACKSTOP_TEXT, HarnessBackstop
+
+            raise HarnessBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "
+                                  f"({final.get('elapsed_s')} s of {final.get('limit_s')} s)")
         reason = str(final.get("fail_reason") or "")
         if not meta.get("gold_path"):
             reason = "no-test-cases"
