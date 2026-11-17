@@ -313,14 +313,11 @@ def test_a_line_carrying_an_items_reply_is_shown_even_in_every_prompt_of_a_step(
 
 def _fix_only_records(source: str) -> list[dict]:
     """Two items where a fix step runs only after a judge, so every one of its prompts
-    carries the judge's reason: from a code gate or an op (the record's ``steps``, as
-    `items.gate_visit` and `items.op_visit` write them) or from a model judge's JSON
-    reply."""
+    carries the judge's reason: from a code gate (the record's ``steps``, as
+    `items.gate_visit` writes it) or from a model judge's JSON reply."""
     reason = "misses the boundary case at zero"
-    visit = {"code gate": {"node": "check", "kind": "gate", "verdict": "reloop",
-                           "reason": reason},
-             "op": {"node": "check", "kind": "op", "output": f"reason={json.dumps(reason)}; "
-                                                              'verdict="reloop"'}}.get(source)
+    visit = ({"node": "check", "kind": "gate", "verdict": "reloop", "reason": reason}
+             if source == "code gate" else None)
 
     def record(item: str) -> dict:
         exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
@@ -336,11 +333,11 @@ def _fix_only_records(source: str) -> list[dict]:
     return [record("r1"), record("r2")]
 
 
-@pytest.mark.parametrize("source", ["code gate", "op", "model judge JSON"])
+@pytest.mark.parametrize("source", ["code gate", "model judge JSON"])
 def test_a_judge_reason_reaching_a_step_that_only_runs_after_it_is_shown(source):
     """The reason is in every one of the fix step's prompts, and is still each item's
-    evidence: a code gate's reason and an op's facts (under the record's ``steps``) and
-    the ``reason`` of a model judge's JSON reply all count as item data."""
+    evidence: a code gate's reason (under the record's ``steps``) and the ``reason`` of a
+    model judge's JSON reply both count as item data."""
     knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
     text = ProposalContext(item_records=_fix_only_records(source), knobs=knobs).render()
     for item in ("r1", "r2"):

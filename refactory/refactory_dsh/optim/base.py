@@ -712,9 +712,10 @@ def _data_lines(value: Any) -> set[str]:
     """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
     least `ITEM_DATA_MIN` characters: an item's input, a step's reply or what its ops and
     code gates gave (the record's ``steps``), which a prompt line holding one carries from
-    that item. A string that is JSON (a judge's reply) counts by its own strings too, and
-    an op visit's ``name=<json>`` facts by their values, so a reason extracted from one
-    is matched in the prompt that quotes it."""
+    that item. A string that is JSON (a judge's reply) counts by its own strings too, so a
+    reason extracted from one is matched in the prompt that quotes it. An op visit's
+    output counts only as the one line it is written as: its facts are often the framed
+    prompt itself, whose framing would then never be told from an item's text."""
     from .evidence import _norm
 
     out: set[str] = set()
@@ -733,13 +734,6 @@ def _data_lines(value: Any) -> set[str]:
                     stack.append(json.loads(text))
                 except json.JSONDecodeError:
                     pass
-            for piece in text.split("; "):
-                name, eq, rest = piece.partition("=")
-                if eq and re.fullmatch(r"\w+", name):
-                    try:
-                        stack.append(json.loads(rest))
-                    except json.JSONDecodeError:
-                        pass
     return out
 
 
