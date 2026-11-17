@@ -2335,7 +2335,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
     """"Time per item", in numbers, so time is reasoned about from them: how long one model
-    step may run (the run's limit; a step's own ``timeout_s`` overrides it) and how long the
+    step may run (the run's limit) and how long the
     edited candidate's train items took each (median, 90th percentile, longest: from each
     item's own record). Nothing when neither is known. An item that timed out is said
     once, in "Item results" (`HARNESS_TIMEOUT`), not here."""
@@ -2347,7 +2347,7 @@ def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
     parts = []
     if limit:
         parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
-                     "step; a step's own `timeout_s` overrides it).")
+                     "step).")
     if median is not None:
         parts.append(f"The candidate you edit took {median} s per item at the median on its "
                      f"train evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
@@ -2642,21 +2642,17 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
 #: model call or an item ended it, whatever that limit is (`harness_timeout`).
 HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a target"
 
-#: The exceptions a model call raises when the harness ends it for time.
-_TIMEOUT_ERRORS = re.compile(r"\b(?:CompletionTimeout|InactivityTimeout|TimeoutExpired)\b"
-                             r"|\btimed out after\b")
-
-
 def harness_timeout(record: Mapping[str, Any]) -> bool:
-    """Whether the harness ended the item for time: its error kind is ``timeout``, its
-    error names a timeout, or a step of it has no answer because it timed out. The item
-    still scores what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads
-    none of it as the pipeline's failure."""
+    """Whether the harness ended the item for time, from structured fields only: its
+    ``error_kind`` is ``timeout`` (`items.error_kind`: a model call the client ended, or
+    the item deadline), or a step of it has no answer because it timed out. Never from
+    an error's text: an op that quotes a reply saying "timed out", a code step's own
+    ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
+    what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
+    as the pipeline's failure."""
     if record.get("passed"):
         return False
-    if str(record.get("error_kind") or "").lower() == "timeout":
-        return True
-    if _TIMEOUT_ERRORS.search(str(record.get("error_text") or "")):
+    if str(record.get("error_kind") or "") == "timeout":
         return True
     return any(isinstance(info, Mapping) and info.get("cause") == "timeout"
                for info in (record.get("missing_steps") or {}).values())
@@ -2665,6 +2661,12 @@ def harness_timeout(record: Mapping[str, Any]) -> bool:
 def _pipeline_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """The records a request reads as the pipeline's doing: all but harness timeouts."""
     return [r for r in records if not harness_timeout(r)]
+
+
+def pipeline_item_errors(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A candidate's item errors (`item_errors`) as every request section says them: a
+    harness timeout is none of them ("Item results" lists it once)."""
+    return item_errors(_pipeline_items(records))
 
 
 #: How the optimizer is told why a step gave no answer (`items.missing_steps` causes).
@@ -2729,8 +2731,8 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         "item's run failing (its cause is below), not a wrong answer.",
     ]
     if timed_out:
-        ids = ", ".join(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
-        lines.append(f"{len(timed_out)} more ({ids}), each a {HARNESS_TIMEOUT}"
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
+        lines.append(f"{len(ids)} more ({', '.join(ids)}), each a {HARNESS_TIMEOUT}"
                      + (f"; mean score over all {total}:{mean.removeprefix(', mean score')}."
                         if mean else "."))
     if unanswered:
@@ -3651,7 +3653,10 @@ def edit_change(parent_records: Sequence[dict[str, Any]] | None,
     largest score changes either way among the rest. Uses only each record's
     ``passed`` and ``score``."""
     parent, child = _by_item(parent_records), _by_item(child_records)
-    shared = sorted(set(parent) & set(child))
+    both = sorted(set(parent) & set(child))
+    # An item the harness timed out on either side moved for no reason of the edit's.
+    timed_out = [i for i in both if harness_timeout(parent[i]) or harness_timeout(child[i])]
+    shared = [i for i in both if i not in timed_out]
     fixed = [i for i in shared if not parent[i].get("passed") and child[i].get("passed")]
     broken = [i for i in shared if parent[i].get("passed") and not child[i].get("passed")]
     moved = []
@@ -3664,7 +3669,7 @@ def edit_change(parent_records: Sequence[dict[str, Any]] | None,
     up = [item for delta, item in sorted(moved, reverse=True) if delta > 0][:EDIT_CHANGE_GRADED]
     down = [item for delta, item in sorted(moved) if delta < 0][:EDIT_CHANGE_GRADED]
     return {"shared": len(shared), "fixed": fixed, "broken": broken, "up": up, "down": down,
-            "deltas": {item: round(delta, 6) for delta, item in moved}}
+            "deltas": {item: round(delta, 6) for delta, item in moved}, "timed_out": timed_out}
 
 
 #: How much of each long field of an edit (a value, a patch, a node) a listing of a
@@ -4055,7 +4060,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
         child_records = list(pair.get("child_records") or ())
-        lines += _item_error_lines(item_errors(child_records), len(child_records))
+        lines += _item_error_lines(pipeline_item_errors(child_records), len(child_records))
         if not pair.get("parent"):
             lines.append("This candidate has no parent (it is the seed), so there is nothing "
                          "to compare.")
@@ -4067,7 +4072,9 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
         lines.append(f"On {change['shared']} shared train item(s): {len(change['fixed'])} fixed "
                      f"(parent wrong, child right), {len(change['broken'])} broken (parent right, "
                      f"child wrong); largest score rises {change['up'] or 'none'}, largest drops "
-                     f"{change['down'] or 'none'}.")
+                     f"{change['down'] or 'none'}."
+                     + (f" Left out: {len(change['timed_out'])} item(s) the harness timed out "
+                        "on one side." if change.get("timed_out") else ""))
         if pair.get("prediction"):
             checked = prediction_check(pair["prediction"], pair.get("parent_records"),
                                        pair.get("child_records"), pair.get("steps") or ())

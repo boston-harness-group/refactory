@@ -1122,7 +1122,7 @@ The per-item half of a data node, from the command line.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
-- **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+- **`error_kind`** — A failed item's ``error_kind``: ``"timeout"`` when the harness ended a model call for
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None

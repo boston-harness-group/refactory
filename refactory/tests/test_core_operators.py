@@ -876,20 +876,52 @@ def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
     assert "per_item_s" not in facts
 
 
-def test_a_harness_timeout_is_told_from_a_failure():
+def test_a_harness_timeout_is_read_from_structured_fields_only():
     from refactory_dsh.optim.base import harness_timeout
 
     assert harness_timeout({"error_kind": "timeout"})
-    assert harness_timeout({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
-    assert harness_timeout({"error_text": "solve: CompletionTimeout: model completion timed out "
-                                          "after 600s of inactivity"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
-    assert not harness_timeout({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
-    # A grader's reason that says "timeout" is the grader's, not the harness's.
-    assert not harness_timeout({"fail_reason": "MCQ=0: the timeout clause is wrong"})
     assert not harness_timeout({"passed": True, "error_kind": "timeout"})
-    # An error that only names the word is the pipeline's own.
-    assert not harness_timeout({"error_text": "fit: ValueError: the timeout knob must be > 0"})
+    # Text never decides: a reply quoted in an error, a grader's reason, a word.
+    for text in ("solve: CompletionTimeout: model completion timed out after 600s",
+                 "check: RuntimeError: the reply said 'timed out after 1800s'",
+                 "fit: ValueError: the timeout knob must be > 0"):
+        assert not harness_timeout({"error_text": text, "error_kind": "RuntimeError"}), text
+    assert not harness_timeout({"fail_reason": "MCQ=0: the timeout clause is wrong"})
+
+
+@pytest.mark.parametrize("error,kind", [
+    # The harness ended a model call: by type, or by the runtimes' anchored text.
+    ("completion", "timeout"),
+    ("walker", "timeout"),
+    ("spine", "timeout"),
+    ("inactivity", "timeout"),
+    # The pipeline's own: a quoted reply, a code step's subprocess limit, a snippet limit.
+    ("quoted", "RuntimeError"),
+    ("expired", "TimeoutExpired"),
+    ("snippet", "SnippetTimeout"),
+])
+def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, kind):
+    import subprocess
+
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.model import CompletionTimeout
+    from refactory_dsh.snippet import SnippetTimeout
+
+    made = {
+        "completion": lambda: CompletionTimeout("model completion timed out after 1800s"),
+        "walker": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
+                                       "after 1800s; requested runtime shutdown"),
+        "spine": lambda: RuntimeError("solve exited with code 1\nworker: model completion "
+                                      "timed out after 1800s; requested runtime shutdown"),
+        "inactivity": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
+                                           "after 600s of inactivity"),
+        "quoted": lambda: RuntimeError("check: ValueError: the reply was 'model completion "
+                                       "timed out after 1800s'"),
+        "expired": lambda: subprocess.TimeoutExpired(["pytest"], 10),
+        "snippet": lambda: SnippetTimeout("code step ran past its 30 s limit"),
+    }[error]
+    assert error_kind(made()) == kind
 
 
 # ── a macro on a state an earlier edit of a bundle left with an unreadable cycle ──

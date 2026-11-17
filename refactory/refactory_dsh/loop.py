@@ -5521,7 +5521,7 @@ class Loop(OuterLoop):
         """The optimizer's own reasoning about recent candidates -- the line from the
         seed to the edited candidate, and the latest refused children -- beside what
         happened to each. Train scores, train item errors and gate decisions only."""
-        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, item_errors
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, pipeline_item_errors
 
         by_id = {c.id: c for c in self.population}
         line: list[Candidate] = []
@@ -5568,7 +5568,7 @@ class Loop(OuterLoop):
                 "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
-                "errors": item_errors(records), "items": len(records),
+                "errors": pipeline_item_errors(records), "items": len(records),
             })
         return entries
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -432,18 +433,29 @@ COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
+#: How a model call the harness ended for time reaches an item's error as text, anchored
+#: at the start of the message or of a line: the walker's ``"<node>: CompletionTimeout: "``
+#: (`nn.executor` ``_walk_branch``) and the spine worker's stderr
+#: ``"worker: model completion timed out"`` (`worker_node.main`). Nowhere else in a text.
+_HARNESS_TIMEOUT_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: CompletionTimeout: |worker: " + re.escape(COMPLETION_TIMEOUT_TEXT) + ")",
+    re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
-    """A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+    """A failed item's ``error_kind``: ``"timeout"`` when the harness ended a model call for
+    time, else the class name.
 
-    A node that timed out reaches the record as text -- the walker's
-    ``"<node>: CompletionTimeout: model completion timed out ..."``, the spine's
-    worker stderr ``"worker: model completion timed out ..."`` -- wrapped in a
-    RuntimeError on both, so the message decides, as ``node_retry.failure_kind``
-    decides a retry.
+    A ``model.CompletionTimeout`` is one by its type. A node that timed out reaches the
+    record as text -- the walker's ``"<node>: CompletionTimeout: model completion timed
+    out ..."``, the spine's worker stderr ``"worker: model completion timed out ..."`` --
+    wrapped in a RuntimeError on both, so only that anchored prefix decides
+    (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
+    ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    import subprocess
+    from refactory_dsh.model import CompletionTimeout
 
-    if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
+    if isinstance(error, CompletionTimeout) or _HARNESS_TIMEOUT_LINE.search(str(error)):
         return "timeout"
     return type(error).__name__
 

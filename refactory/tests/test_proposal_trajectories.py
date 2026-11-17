@@ -851,3 +851,24 @@ def test_how_nodes_compose_says_a_timeout_in_one_sentence():
     compose = text.split("- **crashes**", 1)[1].split("\n- **", 1)[0]
     assert f"An item that times out is a {base.HARNESS_TIMEOUT}." in compose
     assert "not retried" not in compose and "count toward" not in compose
+
+
+def test_what_the_last_edit_changed_reads_no_harness_timeout_as_the_edit_s():
+    """A child that timed out on an item its parent passed broke nothing: the pair is
+    left out of the counts and the pairs, said once, and its error is no item error."""
+    parent = [_record("w1"), _record("p1", passed=True), _record("p2", passed=True)]
+    child = [_record("w1"), _record("p1", passed=True), _timed_out("p2")]
+    change = base.edit_change(parent, child)
+    assert change["broken"] == [] and change["timed_out"] == ["p2"] and change["shared"] == 2
+    lines = "\n".join(base._edit_change_lines([{
+        "child": "c", "parent": "p", "edit": [], "child_records": child,
+        "parent_records": parent}]))
+    assert "0 broken" in lines and "Left out: 1 item(s) the harness timed out" in lines
+    assert "Item errors:" not in lines and "### Item p2" not in lines
+    assert base.pipeline_item_errors(child) == []
+
+
+def test_a_repeated_harness_timeout_is_one_item():
+    records = [_record("w1"), _timed_out("t1"), {**_timed_out("t1"), "repeat": 2}]
+    results = _render(records).split("## Item results", 1)[1].split("\n## ", 1)[0]
+    assert "1 more (t1), each a" in results and "2 more" not in results
