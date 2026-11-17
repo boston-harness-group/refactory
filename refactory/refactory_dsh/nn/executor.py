@@ -2021,12 +2021,14 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
-        # Refuse an agent node with a tools field, matching the spine's
-        # lowering refusal (workers.py:306-307) — SWEEP-7 / gap 15.
-        if getattr(node, "tools", None):
+        # Refuse an agent node with a tools field it cannot run sealed, matching the
+        # spine's lowering refusal (`workers.lower_workflow`) — SWEEP-7 / gap 15.
+        from refactory_dsh.workspace import SEALED_TOOLS, is_sealed
+        if getattr(node, "tools", None) and not is_sealed(node):
             raise ValueError(
-                f"agent node {node.id!r} declares a 'tools' field; "
-                "tools are not supported on agent nodes"
+                f"agent node {node.id!r} declares tools {list(node.tools)} it cannot run "
+                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)}, "
+                "in a 'scratch' workspace, with no tool_policy"
             )
         from refactory_dsh.agent_delivery import _path, fill_feedback, with_feedback
 
@@ -2098,6 +2100,7 @@ class Executor:
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
                 route=route, budget=self.ctx.budget, fresh=retrying,
+                tools=node.tools if is_sealed(node) else (), reads=node.reads,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 

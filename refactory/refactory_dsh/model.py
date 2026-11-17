@@ -1255,14 +1255,16 @@ class DshModelClient:
     def complete(
         self, prompt: str, *, system: str = "", workdir: Path | None = None,
         cwd: Path | None = None, env: dict[str, str | None] | None = None,
-        confine: bool = False,
+        confine: bool = False, seal: dict[str, Any] | None = None,
     ) -> str:
         """One completion. ``workdir`` is the run directory: the worker's receipt and
         patch are written there, and the run's worktree environment is found from it.
         ``cwd`` is where the agent works, the run directory unless given (an agent
         workspace, `workspace.py`); ``env`` overrides its environment last, a None value
         removing the name; ``confine`` makes DSH's sandbox policy workspace-write, rooted
-        at ``cwd`` (`workers.permission_patch`).
+        at ``cwd`` (`workers.permission_patch`). ``seal`` (``tools``, ``runner``) runs
+        the agent sealed (`refactory_dsh.seal`): only those tools, each command under
+        that runner (`workers.write_patch`).
         """
         from refactory_dsh import workers
         scratch = Path(os.environ.get("REFACTORY_MODEL_SCRATCH", "/tmp")) / "refactory-model"
@@ -1273,6 +1275,9 @@ class DshModelClient:
         client._cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
         client._env_overrides = dict(env or {})
         client._confine = bool(confine and cwd is not None)
+        if seal is not None and (cwd is None or self._worker_backend != "dsh"):
+            raise ValueError("a sealed agent runs on the dsh worker backend, in a workspace")
+        client._seal = dict(seal) if seal is not None else None
         client._checkpoint()
         if client._budget is not None:
             client._budget.require_usage_capability(self._worker_backend == "dsh")
@@ -1363,6 +1368,7 @@ class DshModelClient:
                         tool_home=tool_dsh_home(cwd) if cwd is not None else None,
                         system_prompt=system,
                         tool_policy=getattr(self, '_tool_policy', ''),
+                        seal=getattr(self, "_seal", None),
                         session_store=session_store(self._worker_receipt,
                                                     getattr(self, "_dsh_sessions", None)))
             cmd += ["--patch", str(patch)]

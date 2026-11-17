@@ -85,7 +85,7 @@ SEARCH_ONLY_FIELDS = {
         "a search budget or batch shape: how much is searched, not what an item scores"),
     **dict.fromkeys(
         ("optimizer", "strategy", "strategy_options", "parent_picker", "portfolio",
-         "edit_preset", "allowed_ops", "frozen", "allow_new_node_tools", "allow_code_nodes",
+         "edit_preset", "allowed_ops", "frozen", "allow_code_nodes",
          "early_stop_patience",
          "early_stop_at_full_val", "selection", "pool_size",
          "run_ledger", "lessons", "step_review", "structure_guidance",
