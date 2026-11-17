@@ -181,7 +181,7 @@ class SpreadsheetBenchTask(Task):
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
         if final.get("backstop"):
-            # The harness's fault, not the method's: never a score of 0.
+            # The harness's fault, not the method's: recorded as a harness incident.
             from refactory_dsh.model import HARNESS_BACKSTOP_TEXT, HarnessBackstop
 
             raise HarnessBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "
@@ -196,7 +196,7 @@ class SpreadsheetBenchTask(Task):
         try:
             ev = self._grade(instance, pred)
         except recalc.RecalcFailed:
-            raise  # a harness incident (`model.HarnessIncident`), never a score of 0
+            raise  # recorded as a harness incident (`model.HarnessIncident`)
         except Exception as e:  # noqa: BLE001 - rollout.py:820-823
             ev = {"ok": False, "reason": f"eval-exception: {type(e).__name__}: {e}"}
         verification = ""

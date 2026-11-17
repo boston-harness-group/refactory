@@ -24,7 +24,7 @@ from typing import Any
 
 import openpyxl
 
-from refactory_dsh.model import HarnessIncident
+from refactory_dsh.model import HARNESS_INCIDENT_TEXT, HarnessIncident
 
 from . import skillopt_port as port
 
@@ -154,7 +154,7 @@ def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_posit
              *, choice: str | None = None) -> dict[str, Any]:
     """The grade: cached first; under ``recalc``, a failing prediction whose answer
     cells hold formulas is graded again on its recalculated copy. Raises `RecalcFailed`
-    when that copy cannot be made: a harness incident, never a wrong answer."""
+    when that copy cannot be made: recorded as a harness incident, not a wrong answer."""
     r = port.evaluate_cached(pred_path, gold_path, instruction_type, answer_position)
     if grader(choice) == "cached":
         return r
@@ -162,7 +162,7 @@ def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_posit
         return r
     rc = recalculated(pred_path)
     if not rc:
-        raise RecalcFailed(f"LibreOffice could not recalculate {pred_path} "
+        raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}LibreOffice could not recalculate {pred_path} "
                            f"(cached grade: {str(r.get('reason', ''))[:200]})")
     r2 = port.evaluate_cached(rc, gold_path, instruction_type, answer_position)
     r2["recalculated"] = True

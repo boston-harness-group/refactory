@@ -100,7 +100,9 @@ Where neither can run, code is not run.
    A solve call ends on inactivity only (`REFACTORY_MODEL_INACTIVITY_S`: nothing
    streamed and no command running); the one limit is the harness backstop
    (`REFACTORY_MODEL_BACKSTOP_S`, 4 h), for each call and for each item's turn loop. An
-   item past it is a harness incident (`error_kind` `harness_incident`), never a score.
+   item past it is recorded as a harness incident (`error_kind` `harness_incident`), not a
+   wrong answer; it still scores 0 until a later change reruns such items and leaves them
+   out of the score.
    The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
 2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
    the pass's first step runs.

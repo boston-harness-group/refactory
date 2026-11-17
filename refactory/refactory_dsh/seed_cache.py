@@ -254,6 +254,14 @@ def _trials(records: list[dict[str, Any]], measurements: dict[str, Any] | None) 
     return result
 
 
+def _gold_feedback(workdir: Path) -> bool:
+    """Whether the train evaluation in ``workdir`` gave its passes gold feedback (its
+    ``subset.json``, `task.gold_feedback_on`)."""
+    from refactory_dsh.task import gold_feedback_on
+
+    return gold_feedback_on(workdir)
+
+
 def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> dict[str, Any]:
     """The seed's first complete result on each part of a finished or running run."""
     from refactory_dsh import registry
@@ -297,6 +305,8 @@ def export(run_dir: Path, *, project: Path, inactivity_s: int | None = None) -> 
             "items": sorted({str(r["id"]) for trial in trials for r in trial["item_records"]}),
             # The rollout seed it was measured with (a Task may shuffle an item by it).
             "seed": score.get("seed"),
+            # Whether its passes were told how their attempts compared with the answer.
+            "gold_feedback": _gold_feedback(run_dir / "runs" / cid),
             "workdir": str(run_dir / "runs" / cid),
             "result": {"score": score.get("raw_score"), "exit_ok": True, "error": None,
                        "duration_s": score.get("duration_s") or 0.0,

@@ -481,6 +481,12 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
     re.MULTILINE)
 
 
+#: A `model.HarnessIncident` that crossed a process as text: its message starts with
+#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "``, the spine
+#: worker's ``"worker: "`` or a traceback's ``"<Class>: "``, anchored at a line's start.
+_HARNESS_INCIDENT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )*harness incident: ", re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
     backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's) or
@@ -499,7 +505,8 @@ def error_kind(error: BaseException) -> str:
     from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessIncident
     from refactory_dsh.node_retry import RetriesExhausted
 
-    if isinstance(error, HarnessIncident) or HARNESS_BACKSTOP_LINE.search(str(error)):
+    if (isinstance(error, HarnessIncident) or HARNESS_BACKSTOP_LINE.search(str(error))
+            or _HARNESS_INCIDENT_LINE.search(str(error))):
         return "harness_incident"
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")

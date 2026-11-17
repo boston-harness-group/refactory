@@ -266,24 +266,58 @@ def run_generated_code(code: str, input_path: str, output_path: str, timeout: in
             f.write(script)
         safe_env = generated_code_env(output_dir, temp_dir)
         command = [python, runner]
+        ready_r = ready_w = None
         if wrap is not None:
-            command = wrap(command, output_dir, temp_dir)
+            if getattr(wrap, "confirms_start", False):
+                # Not SkillOpt's: the sandbox says on this pipe when the code starts, so
+                # a setup failure is the harness's (`sandbox.SandboxFailed`), not the
+                # model's code error.
+                ready_r, ready_w = os.pipe()
+                command = wrap(command, output_dir, temp_dir, ready_fd=ready_w)
+            else:
+                command = wrap(command, output_dir, temp_dir)
         try:
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=timeout if timeout and timeout > 0 else None,
-                env=safe_env,
-                cwd=cwd,
-            )
+            try:
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout if timeout and timeout > 0 else None,
+                    env=safe_env,
+                    cwd=cwd,
+                    pass_fds=(ready_w,) if ready_w is not None else (),
+                )
+            except subprocess.TimeoutExpired:
+                _require_started(ready_r, ready_w, "")
+                return False, f"timeout after {timeout}s"
+            _require_started(ready_r, ready_w, proc.stderr)
             if proc.returncode != 0:
                 return False, (proc.stdout + "\n" + proc.stderr).strip()
             if not os.path.exists(output_path):
                 return False, "output file was not created"
             return True, ""
-        except subprocess.TimeoutExpired:
-            return False, f"timeout after {timeout}s"
+        finally:
+            for fd in (ready_r, ready_w):
+                if fd is not None:
+                    os.close(fd)
+
+
+def _require_started(ready_r: int | None, ready_w: int | None, stderr: str) -> None:
+    """Raise `sandbox.SandboxFailed` when a sandbox that confirms its start never did."""
+    if ready_r is None or ready_w is None:
+        return
+    os.set_blocking(ready_r, False)  # the write end stays open here: no EOF to wait for
+    try:
+        said = os.read(ready_r, 16)
+    except BlockingIOError:
+        said = b""
+    if said != b"ok":
+        from refactory_dsh.model import HARNESS_INCIDENT_TEXT
+
+        from .sandbox import SandboxFailed
+
+        raise SandboxFailed(f"{HARNESS_INCIDENT_TEXT}the model-code sandbox failed to start: "
+                            f"{stderr.strip()[-500:]}")
 
 
 # ── grading: evaluator.py (a port of the official evaluator) ───────────────

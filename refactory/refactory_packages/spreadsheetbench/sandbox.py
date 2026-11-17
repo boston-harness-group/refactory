@@ -36,6 +36,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from refactory_dsh.model import HarnessIncident
+
 #: Secret paths under the home directory, as the lab's wrapper hides them
 #: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
 HOME_SECRETS = (".claude", ".claude.json", ".config", ".ssh", ".aws", ".huggingface",
@@ -61,13 +63,15 @@ def _q(path: str) -> str:
     return shlex.quote(path)
 
 
-def _linux_script(read_only: list[str], writable: list[str], links: dict[str, str]) -> str:
+def _linux_script(read_only: list[str], writable: list[str], links: dict[str, str],
+                  ready_fd: int | None = None) -> str:
     """The setup script, run as PID 1 of a new PID namespace: build a tmpfs root under
     the temporary directory (``$1``) with ``links`` as symlinks, ``read_only`` bound
     read-only, ``writable`` and the devices bound as they are and a fresh ``/proc`` of
     this PID namespace, enter it with ``pivot_root``, detach the old root, then run the
     command (the rest of the arguments) from ``$2`` (its working directory) in a nested
-    user and mount namespace, where these mounts are locked."""
+    user and mount namespace, where these mounts are locked. With ``ready_fd``, ``ok``
+    is written to it just before the code starts: a setup that failed never writes it."""
     lines = ["set -e",
              'R="$1/.sbroot"; WD=$2; shift 2',
              'mkdir "$R"',
@@ -86,7 +90,11 @@ def _linux_script(read_only: list[str], writable: list[str], links: dict[str, st
     lines += ['mkdir -p "$R/proc"; mount -n -t proc -o nosuid,nodev,noexec proc "$R/proc"',
               'mkdir "$R/.old"; cd "$R"; pivot_root . .old; umount -n -l /.old; rmdir /.old',
               'cd "$WD" 2>/dev/null || cd /',
-              'exec unshare -U -r -m -- "$@"']
+              ('exec unshare -U -r -m -- "$@"' if ready_fd is None else
+               # The last step before the code: say so on the caller's pipe, then close
+               # it, so the code never holds it (`skillopt_port.run_generated_code`).
+               f'exec unshare -U -r -m -- /bin/sh -c \'printf ok >&{ready_fd}; '
+               f'exec {ready_fd}>&-; exec "$@"\' sh "$@"')]
     return "\n".join(lines) + "\n"
 
 
@@ -123,6 +131,12 @@ def _distinct(paths: Iterable[str]) -> list[str]:
 
 class SandboxError(RuntimeError):
     """The sandbox cannot run here, or cannot hide what it must."""
+
+
+class SandboxFailed(HarnessIncident):
+    """The sandbox's setup failed for one call (a mount, a namespace) before the code
+    started: the harness's failure, recorded as a harness incident, never the model's
+    code error or one of its turns."""
 
 
 def hidden_paths(extra: Iterable[str | os.PathLike] = ()) -> list[str]:
@@ -201,7 +215,8 @@ def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
     hidden = list(hidden)
     visible = [os.path.abspath(p) for p in visible]
 
-    def wrap(command: list[str], writable_dir: str, temp_dir: str) -> list[str]:
+    def wrap(command: list[str], writable_dir: str, temp_dir: str,
+             ready_fd: int | None = None) -> list[str]:
         writable = [os.path.abspath(writable_dir), os.path.abspath(temp_dir)]
         for path in hidden:
             inside = os.path.realpath(path).rstrip("/") + "/"
@@ -215,13 +230,28 @@ def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
                                *interpreter_dirs(command[0]), *visible])
         read_only = [p for p in read_only
                      if not any((p + "/").startswith(w.rstrip("/") + "/") for w in writable)]
+        _refuse_covering([*read_only, *writable], [*hidden, str(Path.home())])
         start = next((p for p in visible if os.path.isdir(p)), "/")
         unshare = shutil.which("unshare") or "unshare"
         return [unshare, "-rnmpf", "--", "/bin/sh", "-c",
-                _linux_script(read_only, _distinct(writable), links), "sh",
+                _linux_script(read_only, _distinct(writable), links, ready_fd=ready_fd), "sh",
                 os.path.abspath(temp_dir), start, *command]
 
+    # Linux says when the code starts (``ready_fd``); Seatbelt has no setup to fail.
+    wrap.confirms_start = not sys.platform == "darwin"  # type: ignore[attr-defined]
     return wrap
+
+
+def _refuse_covering(bound: Iterable[str], secret: Iterable[str]) -> None:
+    """The reverse of the hidden check: no directory bound into the code's root may hold
+    the home directory, the dataset or another hidden path (an interpreter installed in
+    the home directory itself would bring all of it along). Refused, never narrowed."""
+    for path in secret:
+        real = os.path.realpath(path).rstrip("/") + "/"
+        for dir_ in bound:
+            if real.startswith(os.path.realpath(dir_).rstrip("/") + "/"):
+                raise SandboxError(f"the sandbox would show {path}: it is inside {dir_}, "
+                                   "which the code needs")
 
 
 _PROBE = """

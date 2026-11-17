@@ -64,12 +64,19 @@ class CompletionFailed(RuntimeError):
         self.kind = kind
 
 
+#: How a `HarnessIncident` raised in another process's node is told apart in an item
+#: record's text (`items.error_kind`): its message starts with this.
+HARNESS_INCIDENT_TEXT = "harness incident: "
+
+
 class HarnessIncident(RuntimeError):
     """The harness failed an item, not the method: its record's ``error_kind`` is
-    ``harness_incident`` (`items.error_kind`), which every score excludes and reports
-    beside the other harness incidents, never a score of 0. Raised by a Task's grader
-    when its own machinery fails (SpreadsheetBench's LibreOffice recalculation), and the
-    base of `HarnessBackstop`."""
+    ``harness_incident`` (`items.error_kind`), so it is told apart from a wrong answer.
+    Its record still scores 0 for now (a later change reruns such items and leaves
+    them out of the score). Raised by a Task's grader or an op when the harness's own
+    machinery fails (SpreadsheetBench's LibreOffice recalculation, its model-code
+    sandbox), and the base of `HarnessBackstop`. One raised in an op child reaches the
+    record as text, so its message starts with `HARNESS_INCIDENT_TEXT`."""
 
 
 class HarnessBackstop(HarnessIncident):

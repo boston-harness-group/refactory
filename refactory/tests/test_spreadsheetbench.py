@@ -266,6 +266,21 @@ def test_the_run_and_the_loop_root_are_hidden_from_a_concurrent_pass(tmp_path):
     assert ops._run_roots(alias) == [str(run.resolve()), str(root.resolve())]
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux binds an allow-list")
+def test_sandbox_refuses_to_show_what_a_needed_directory_holds(tmp_path, monkeypatch):
+    """The reverse: a directory the code needs that holds the dataset or the home
+    directory is refused, not bound with them inside."""
+    (tmp_path / "data").mkdir()
+    wrap = sandbox.wrapper([str(tmp_path / "data")], visible=[tmp_path])
+    with pytest.raises(sandbox.SandboxError, match="would show"):
+        wrap([sys.executable, "r.py"], "/elsewhere/out", "/elsewhere/tmp")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    wrap = sandbox.wrapper([], visible=[tmp_path])
+    with pytest.raises(sandbox.SandboxError, match="would show"):
+        wrap([sys.executable, "r.py"], "/elsewhere/out", "/elsewhere/tmp")
+
+
 def test_sandbox_refuses_to_hide_what_the_code_needs(tmp_path):
     wrap = sandbox.wrapper([str(tmp_path)])
     with pytest.raises(sandbox.SandboxError, match="inside the hidden"):
@@ -579,7 +594,7 @@ def test_turn_gate_stops_with_ten_seconds_left_before_the_backstop(tmp_path, mon
 
 def test_an_item_past_the_backstop_is_a_harness_incident(tmp_path, sb_data, monkeypatch):
     """No item budget: an item whose turns ran past the harness backstop is the harness's
-    fault (``error_kind`` ``harness_incident``), not a score of 0."""
+    fault, recorded with ``error_kind`` ``harness_incident``."""
     from refactory_dsh import model
     from refactory_dsh.items import error_kind
 
@@ -733,6 +748,44 @@ def test_the_default_loop_asks_gold_feedback_on_train_only(tmp_path, sb_env):
         assert json.loads(subset.read_text()).get(task_module.GOLD_FEEDBACK) is None, part
 
 
+def _flagged(path: Path) -> bool:
+    return json.loads((path / task_module.SUBSET).read_text()).get(task_module.GOLD_FEEDBACK) is True
+
+
+def test_the_default_loop_asks_gold_feedback_in_a_wave_and_a_rescore(tmp_path, sb_env):
+    """The concurrent wave (``Run.evaluate_many``) and the parent's re-score
+    (``_rescore``, also the beside-the-wave request) ask for it too."""
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.optim.base import Candidate
+
+    _, state = _state()
+    parts = tmp_path / "parts.json"
+    parts.write_text(json.dumps(PARTS))
+    loop = Loop(f"spreadsheetbench/{sb_mode.Solver.name}", LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", evaluator="walker", seed=3,
+        runs_root=tmp_path / "run", max_evaluations=8, parts_manifest=str(parts),
+        max_concurrent_evaluations=3), project=Path("."), model=_WrongFirst())
+    loop.init()
+    seed = loop.population[0]
+    seed.state = state
+    loop.population += [Candidate(id=f"c{i}", parent=seed.id, state=state) for i in (1, 2)]
+    loop.forward(epoch=0)
+    runs = tmp_path / "run" / "runs"
+    assert all(c.evaluated for c in loop.population)
+    assert all(_flagged(runs / c.id) for c in loop.population)
+    assert loop._rescore(seed, 1)  # noqa: SLF001
+    assert _flagged(loop._rescore_dir(seed.id, 1))  # noqa: SLF001
+
+
+def test_a_task_that_cannot_load_fails_rather_than_drop_the_feedback():
+    """Not "no feedback, quietly": a run whose Task cannot be loaded cannot say what its
+    train passes are told."""
+    state = sb_mode.Solver().state_dict()
+    state["graph"]["nodes"]["data"]["task_ref"] = "no_such_module_xyz:Task"
+    with pytest.raises(Exception, match="no_such_module_xyz"):
+        task_module.offers_train_feedback(state)
+
+
 def test_a_task_without_train_feedback_is_not_asked(tmp_path):
     """LiveMath and every other Task that says nothing to a train attempt: the default
     loop's train evaluations stay as they were (no gold-feedback flag in subset.json)."""
@@ -881,14 +934,15 @@ DRAIN = REPO_ROOT / "packages/workflow/workflow-spine/tests/fixtures/data-drain-
 
 
 def _spine(tmp_path: Path, part: str, answers: list[str], *, gold_feedback: bool,
-           expect_ok: bool = True, **knobs: Any) -> tuple[list[dict], list[str]]:
+           expect_ok: bool = True, train: list[str] = ("t1",),
+           **knobs: Any) -> tuple[list[dict], list[str]]:
     from refactory_dsh import lowering
 
     mode, state = _state(**knobs)
     work = tmp_path / f"spine-{part}"
     work.mkdir(parents=True)
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
-                                       if p != "train"}, train_ids=["t1"])
+                                       if p != "train"}, train_ids=list(train))
     task_module.write_subset(work, part, 0.0, gold_feedback=gold_feedback)
     lowering.write_declarations(state, work)
     graph_path, _ = lowering.write_mode_graph(state, tmp_path / f"graphs-{part}", name="sb")
@@ -940,7 +994,7 @@ def test_the_spine_runs_the_loop_as_the_walker_does(tmp_path, sb_env, part, flag
 def test_an_item_past_the_backstop_is_a_harness_incident_on_both_runtimes(tmp_path, sb_env,
                                                                           monkeypatch):
     """A 1 s backstop and a 2 s turn pause: the first turn runs past it, so on either
-    runtime the item's record is a harness incident, not a score of 0."""
+    runtime the item's record is a harness incident (``error_kind``)."""
     import child_patches
 
     monkeypatch.setenv("REFACTORY_MODEL_BACKSTOP_S", "1")
@@ -996,27 +1050,61 @@ def test_a_failed_recalculation_is_a_harness_incident(tmp_path, sb_data, monkeyp
                                t1.metadata["answer_position_eval"])["ok"]
 
 
-@pytest.mark.parametrize("part,flag", [("val", False), ("train", True)])
-def test_a_failed_recalculation_is_no_score_on_the_walker(tmp_path, sb_env, monkeypatch,
-                                                         part, flag):
-    _broken_soffice(tmp_path, monkeypatch)
-    result, prompts = _walk(tmp_path, part, [_formula("=6+1" if part == "val" else "=40+1")],
-                            gold_feedback=flag, expect_ok=False)
+def _failing_setup(*args: Any, ready_fd: int | None = None) -> str:
+    """A sandbox setup that fails (a mount refused) on every real call; the availability
+    probe (no ``ready_fd``) still passes."""
+    from child_patches import real
+
+    if ready_fd is None:
+        return real(sandbox, "_linux_script")(*args)
+    return "echo 'mount: /usr: permission denied.' >&2\nexit 32\n"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux setup")
+def test_a_sandbox_setup_failure_is_a_harness_incident(tmp_path, sb_env, monkeypatch):
+    """A mount that fails before the code starts is the harness's: the item is recorded
+    as a harness incident, the model is not told it as its code's error, and no turn of
+    it is used."""
+    import child_patches
+
+    child_patches.for_test(monkeypatch).setattr(sandbox, "_linux_script", _failing_setup)
+    result, prompts = _walk(tmp_path, "val", [_good(7), _good(7)], expect_ok=False)
     (record,) = result.item_records
+    Path("/tmp/claude-1000/sbfail.json").write_text(json.dumps(record, default=str))
     assert record["error_kind"] == "harness_incident", record
-    assert len(prompts) == 1 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
+    assert len(prompts) == 1
+
+
+def _incident_and_graded(records: list[dict]) -> None:
+    """t1's formula met the broken recalculation: recorded as a harness incident; t2's
+    plain value was graded as usual, right, with no incident. (Its score is not checked:
+    an incident still scores 0 until a later change reruns it and leaves it out.)"""
+    by_id = {r["id"]: r for r in records}
+    assert set(by_id) == {"t1", "t2"}, records
+    assert by_id["t1"]["error_kind"] == "harness_incident", by_id["t1"]
+    assert by_id["t2"]["error_kind"] is None and by_id["t2"]["passed"], by_id["t2"]
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_a_failed_recalculation_is_a_harness_incident_on_the_walker(tmp_path, sb_env,
+                                                                    monkeypatch, flag):
+    _broken_soffice(tmp_path, monkeypatch)
+    result, prompts = _walk(tmp_path, "train", [_formula("=40+1"), _good(9)],
+                            gold_feedback=flag, train=["t1", "t2"], expect_ok=False)
+    _incident_and_graded(result.item_records)
+    assert len(prompts) == 2 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
 
 
 @pytest.mark.skipif(NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/"
                                          "@deepseek-ai/cordis").exists(),
                     reason="the spine drain needs Node and the installed workspace")
-def test_a_failed_recalculation_is_no_score_on_the_spine(tmp_path, sb_env, monkeypatch):
+def test_a_failed_recalculation_is_a_harness_incident_on_the_spine(tmp_path, sb_env,
+                                                                   monkeypatch):
     _broken_soffice(tmp_path, monkeypatch)
-    records, prompts = _spine(tmp_path, "train", [_formula("=40+1")], gold_feedback=True,
-                              expect_ok=False)
-    (record,) = records
-    assert record["error_kind"] == "harness_incident", record
-    assert len(prompts) == 1 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
+    records, prompts = _spine(tmp_path, "train", [_formula("=40+1"), _good(9)],
+                              gold_feedback=True, train=["t1", "t2"], expect_ok=False)
+    _incident_and_graded(records)
+    assert len(prompts) == 2 and not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
 
 
 # ── the real data (lab) ─────────────────────────────────────────────────────

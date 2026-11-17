@@ -1012,13 +1012,11 @@ class Loop(OuterLoop):
         run's Task offers it (`task.offers_train_feedback`), as SkillOpt's train rollouts
         (``SkillOptLoop``) do, so both arms' train passes get the same information. Never
         val or test (`task.write_subset` refuses it), and not the memory pass's rollouts,
-        SkillOpt's slow-update rollouts' counterpart. Read once."""
+        SkillOpt's slow-update rollouts' counterpart. Read once; a Task that cannot be
+        loaded fails the run here rather than run it without the feedback."""
         cached = self.__dict__.get("_offers_train_feedback")
         if cached is None:
-            try:
-                cached = task_module.offers_train_feedback(self.mode.state_dict())
-            except Exception:  # noqa: BLE001 - a Task that cannot load offers nothing
-                cached = False
+            cached = task_module.offers_train_feedback(self.mode.state_dict())
             self.__dict__["_offers_train_feedback"] = cached
         return cached
 
@@ -2282,7 +2280,8 @@ class Loop(OuterLoop):
         if items is not None:
             expected_ids = set(str(i) for i in items)
 
-        cached = self._cached_measure(candidate, workdir, part, expected_ids, seed)
+        cached = self._cached_measure(candidate, workdir, part, expected_ids, seed,
+                                      gold_feedback=gold_feedback)
         if cached is not None:
             self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
             return cached
@@ -2462,14 +2461,15 @@ class Loop(OuterLoop):
 
     def _cached_measure(
         self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
-        seed: int | None = None,
+        seed: int | None = None, gold_feedback: bool = False,
     ) -> tuple[Any, dict[str, Any]] | None:
         """The ``--seed-results`` entry for this evaluation, if one applies.
 
         Only the cache's own candidate, only on the exact item set it recorded and
         with the rollout seed it was measured with (a Task may shuffle an item by it:
         a gated run's train rollouts use SkillOpt's per-epoch seed, an ungated run's
-        the run's own), and only once per part: a later occasion is a fresh measurement. The
+        the run's own), with the same gold feedback (an entry without the flag had none),
+        and only once per part: a later occasion is a fresh measurement. The
         recorded run directory is copied in, so an optimizer that reads a
         candidate's pass files finds them as if the evaluation had run here.
         """
@@ -2489,12 +2489,13 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
+        other_feedback = bool(entry.get("gold_feedback")) != bool(gold_feedback)
         # A cached item that died with its run's processes is no result to replay
         # (`items.interrupted_item`): the part is measured here instead.
         from refactory_dsh.items import interrupted_item
         died = any(interrupted_item(record) for trial in trials
                    for record in trial.get("item_records") or ())
-        if (set(entry.get("items") or ()) != expected_ids or other_seed
+        if (set(entry.get("items") or ()) != expected_ids or other_seed or other_feedback
                 or len(trials) != self.config.repeats or died):
             # The cache's own candidate on a part it covers, measured on other items
             # (a train minibatch), with another rollout seed, or with items that died:
@@ -2504,6 +2505,8 @@ class Loop(OuterLoop):
                     self._seed_cache_missed.add(part)
                     reason = ("other items" if set(entry.get("items") or ()) != expected_ids
                               else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
+                              else (f"gold feedback {bool(gold_feedback)}, cached "
+                                    f"{bool(entry.get('gold_feedback'))}") if other_feedback
                               else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
                               if len(trials) != self.config.repeats
                               else "cached items died with their run's processes")

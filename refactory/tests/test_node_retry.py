@@ -568,17 +568,17 @@ def test_design_mode_retries_its_builder_and_verifier():
 def test_other_modes_declare_no_retry():
     from test_lowering_smoke import _mode_classes
 
-    from refactory_packages.spreadsheetbench.mode import SOLVE_RETRY
-
     for key, mode_cls in _mode_classes():
         if key == "default_pack-design":
             continue
         state = mode_cls().state_dict()
         nodes = state["graph"]["nodes"]
         if key == "spreadsheetbench-solver":
-            # SkillOpt's 5 attempts per call, on the solve node only.
+            # SkillOpt's 5 attempts per call (4 retries), on the solve node only; a
+            # crashing solve run through them: test_spreadsheetbench's
+            # test_a_crashed_solve_call_gets_five_attempts.
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
-                {"solve": retry_declaration(SOLVE_RETRY)}
+                {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2}}
             continue
         assert all("retry" not in node for node in nodes.values()), key
 
