@@ -632,4 +632,8 @@ def changed_lines(before: Mapping[str, Any], after: Mapping[str, Any],
             out.append(f"~ {where}{line.text}")
     gone = sorted(set(old) - {line.key for line in new})
     out += [f"- removed {key.removeprefix(FALLBACK)}" for key in gone if not _structural(key)]
+    from .core_ops import unread_new_steps
+
+    out += [f"! new step {step}: its output reaches no step"
+            for step in unread_new_steps(before, after)]
     return out

@@ -131,6 +131,17 @@ def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
 
 
+def _new_steps(parent: Any, child: Any) -> set[str]:
+    """The child graph's steps its parent's graph lacks (none without a parent)."""
+    if parent is None:
+        return set()
+
+    def nodes(candidate: Any) -> set[str]:
+        return set(((candidate.state.get("graph") or {}).get("nodes") or {}))
+
+    return nodes(child) - nodes(parent)
+
+
 def _timed_out(record: Mapping[str, Any]) -> bool:
     """Whether an item record says the item ran out of time (its error kind, or its error
     or failure text)."""
@@ -5458,11 +5469,18 @@ class Loop(OuterLoop):
             parent_records, same = (self._records_like(parent.id, child.id) if parent
                                     else ([], None))
             record = self.proposals.get(child.id) or {}
+            child_records = list(self._train_item_records.get(child.id, []))
+            from refactory_dsh.optim.edit_effect import edit_effect
+
+            effect = edit_effect(parent_records, child_records, self._reply_judge(),
+                                 new_steps=_new_steps(parent, child))
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
-                "child_records": list(self._train_item_records.get(child.id, [])),
+                "child_records": child_records,
                 "parent_records": parent_records, "same_seed": same,
+                # How a structural edit moved the items it changed (`optim.edit_effect`).
+                **({"effect": effect} if effect else {}),
                 # What the proposal predicted and said, for the prediction check, and
                 # what the system did beside its edits (the core operators' wiring).
                 **{key: record[key] for key in ("prediction", "addresses", "flow_change")
@@ -5476,6 +5494,26 @@ class Loop(OuterLoop):
                                       if parent else ())),
             })
         return pairs
+
+    def _rescore_spread(self, candidate_id: str) -> float | None:
+        """How far ``candidate_id``'s train score (its items' mean) moved between the
+        epochs it was scored in this run; ``None`` before a second score."""
+        scores = []
+        for records in (self._records_by_epoch.get(candidate_id) or {}).values():
+            values = [float(r["score"]) for r in records
+                      if isinstance(r.get("score"), (int, float))]
+            if values:
+                scores.append(sum(values) / len(values))
+        return round(max(scores) - min(scores), 3) if len(scores) > 1 else None
+
+    def _reply_judge(self) -> Any:
+        """How a step's reply is read as an item's answer, from the mode's Tasks
+        (`task.reply_judge`); ``None`` when no Task reads replies. Looked up once."""
+        if not hasattr(self, "_reply_judge_found"):
+            from refactory_dsh.task import reply_judge
+
+            self._reply_judge_found = reply_judge(self.mode.state_dict())
+        return self._reply_judge_found
 
     def _last_round(self, children: Sequence[Candidate]) -> list[Candidate]:
         """The children proposed in the epoch of the last of them (population order),
@@ -5786,8 +5824,14 @@ class Loop(OuterLoop):
             "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
 
         tried, refused = self._tried_in_round(epoch - 1)
+        gated = bool(self.selection_mode())
+        # The tally of each kind tried against the noise (`memory.kind_tally_lines`): one
+        # source for this call and, with the note it writes, the proposer's request.
+        tally = memory.kind_tally_lines(tried, val_items=len(self._manifest_val_ids()),
+                                        spread=self._rescore_spread(prev.id), gated=gated)
+        self._pending_tally = tally
         tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1, current=current.id,
-                                         gated=bool(self.selection_mode()))
+                                         gated=gated, tally=tally)
         objective = self._objective()
 
         # The request: one call when it fits the room whole, else split into comparison
@@ -5860,10 +5904,17 @@ class Loop(OuterLoop):
                                  parent_records=parent_records, child_records=child_records,
                                  gate=self._gate_decision(candidate.id), same_seed=same,
                                  integrity=self._integrity_of(candidate.id))
+            from refactory_dsh.optim.edit_effect import edit_effect
+
+            effect = (edit_effect(parent_records, child_records, self._reply_judge(),
+                                  new_steps=_new_steps(by_id.get(candidate.parent or ""),
+                                                       candidate))
+                      if candidate.is_structural() else {})
             tried.append({**entry, "structural": candidate.is_structural(),
                           "edits": memory.edits_text(candidate.own_edits()),
                           "score": candidate.score, "exit_ok": candidate.exit_ok,
-                          "evaluated": candidate.evaluated})
+                          "evaluated": candidate.evaluated,
+                          **({"effect": effect} if effect else {})})
         refused = []
         for rejection in self._round_refusals.get(round_) or ():
             steps = Proposal(edit=rejection.edit).steps
@@ -5881,7 +5932,9 @@ class Loop(OuterLoop):
         if note:
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
-                            "curr": record.get("curr")}
+                            "curr": record.get("curr"),
+                            **({"tally": list(self._pending_tally)}
+                               if getattr(self, "_pending_tally", None) else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
             self._memory = {**self._memory, "not_updated": {
