@@ -369,6 +369,10 @@ def test_per_item_deadline_covers_setup_and_verify(tmp_path, monkeypatch, parall
         ("slow_verify", "timeout", False),
         ("slow_walk", None, True),
     ]
+    # A timed-out item says how long it ran too: at least the deadline it outlasted.
+    times = {r["id"]: r.get("duration_s") for r in result.facts["item_scores"]}
+    assert times["slow_setup"] >= 1.0 and times["slow_verify"] >= 1.0, times
+    assert times["slow_walk"] >= 2.0, times
 
 
 def test_per_item_deadline_holds_on_a_pool_thread(tmp_path, monkeypatch):

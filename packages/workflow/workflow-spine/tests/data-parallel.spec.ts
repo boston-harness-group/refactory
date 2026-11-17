@@ -267,6 +267,11 @@ function facts(workdir: string): Record<string, unknown> {
 }
 
 /** Eight items; the first sleeps longest, so the items end in reverse order. */
+/** Item records without each item's own time, which differs between two runs of them. */
+function untimed(records: unknown): unknown {
+  return (records as Array<Record<string, unknown>>).map(({ duration_s: _time, ...rest }) => rest)
+}
+
 const ITEMS = Array.from({ length: 8 }, (_, index) => ({ id: `i${index}`, delay: (8 - index) * 0.15 }))
 
 describe('data-parallel: the concurrent drain', () => {
@@ -308,7 +313,13 @@ describe('data-parallel: the concurrent drain', () => {
     // Item order, though item 7 ended first.
     expect((results[4]!.scores as Array<{ id: string }>).map(entry => entry.id)).toEqual(ITEMS.map(item => item.id))
     expect(results[4]!.scores).toEqual(results[1]!.scores)
-    expect(results[4]!.records).toEqual(results[1]!.records)
+    // Each item's own time (`duration_s`, from its pass starting) is its run's own: every
+    // record has one, and the records agree on everything else.
+    for (const parallelism of [1, 4]) {
+      const records = results[parallelism]!.records as Array<Record<string, unknown>>
+      expect(records.every(record => typeof record.duration_s === 'number')).toBe(true)
+    }
+    expect(untimed(results[4]!.records)).toEqual(untimed(results[1]!.records))
   }, 60_000)
 
   it('runs a wf_open run concurrently, with no configured graph', async () => {

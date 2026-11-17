@@ -44,7 +44,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import evidence
 from .base import (
-    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected,
+    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected, shown_label,
     _ordered_items, _outcome, _table, NO_ANSWER_CAUSES,
 )
 
@@ -217,7 +217,7 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
                if isinstance(info, dict)]
     return evidence.render_item(
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
-        expected=_expected(record), expected_label=str(record.get("label") or ""),
+        expected=_expected(record), expected_label=shown_label(record),
         metadata=metadata_text(record), choices=_choice_lines(meta.get("choices")), prompts=True,
         prompt_chars=input_chars or big, reply_chars=output_chars or big, missing=missing,
         **shown)

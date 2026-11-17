@@ -463,3 +463,44 @@ def test_the_schemas_kinds_column_names_only_kinds_a_field_applies_to():
     for name, cells in rows.items():
         named = {k.split(" ")[0] for k in cells[3].split(", ")} if cells[3] != "all" else None
         assert named is None or named <= set(applies[name]), (name, cells[3])
+
+
+def test_every_field_names_its_kinds_and_a_lost_prefix_is_loud(monkeypatch):
+    """Every field's kinds are non-empty; the gate-only fields are the gate's; a comment
+    that loses its kind prefix fails instead of widening the field to every kind."""
+    import inspect
+
+    from refactory_dsh.nn import node_schema
+    from refactory_dsh.nn.graph import Node
+
+    applies = node_schema.field_kinds()
+    assert all(applies[f.name] for f in dataclasses.fields(Node))
+    for name in ("gate_kind", "on_exhausted", "evaluator"):
+        assert applies[name] == ("gate",), name
+    source = inspect.getsource(Node)
+    lost = source.replace("#: `op`: ", "#: ", 1)
+    assert lost != source
+    node_schema.field_kinds.cache_clear()
+    monkeypatch.setattr(node_schema.inspect, "getsource", lambda _obj: lost)
+    try:
+        with pytest.raises(ValueError, match="names no kind, but EVERY_KIND_FIELDS omits"):
+            node_schema.field_kinds()
+    finally:
+        monkeypatch.undo()
+        node_schema.field_kinds.cache_clear()
+
+
+def test_each_minimal_example_shows_only_its_kind_s_fields():
+    from refactory_dsh.nn import node_schema
+
+    applies = node_schema.field_kinds()
+    text = "\n".join(node_schema.render_schema())
+    for name, entry in node_schema.node_schema().items():
+        if entry.get("example") is None:
+            continue
+        kind = name.split(" ", 1)[0]
+        line = text.split(f"`{name}`: required", 1)[1].splitlines()[1].strip("`")
+        shown = json.loads(line)
+        assert all(kind in applies[field] or field in entry["set"] for field in shown), (
+            name, [f for f in shown if kind not in applies[f]])
+    assert '"prompt_template"' not in text.split("`op`: required", 1)[1].splitlines()[1]

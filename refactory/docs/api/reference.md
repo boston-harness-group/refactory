@@ -1104,7 +1104,7 @@ The per-item half of a data node, from the command line.
 | function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
-| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = ()) -> 'Path'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |

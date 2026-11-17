@@ -1305,3 +1305,16 @@ def test_an_op_visit_says_what_it_gave_and_whether_it_was_empty(tmp_path):
     assert items.op_visit(tmp_path, "op", 0)["empty"] is True, "no facts returned"
     wrote = items.op_visit(tmp_path, "op", {}, ["out.txt"])
     assert wrote["empty"] is False and "out.txt: found it" in wrote["output"], "a file it wrote"
+
+
+def test_a_pass_that_begins_again_counts_its_time_from_then(tmp_path):
+    """A resumed or retried item's pass begins again: its time starts over, so it never
+    counts the time the run was stopped; the spine's end reuses the pass's stamp."""
+    from refactory_dsh.items import ITEM_STARTED, item_duration, prepare_pass_dir
+
+    pass_dir = prepare_pass_dir(tmp_path, "data", "i1", 0)
+    (pass_dir / ITEM_STARTED).write_text("1000.000\n")
+    assert prepare_pass_dir(tmp_path, "data", "i1", 0, starting=False) == pass_dir
+    assert item_duration(pass_dir) > 10 ** 6
+    prepare_pass_dir(tmp_path, "data", "i1", 0)
+    assert item_duration(pass_dir) < 60

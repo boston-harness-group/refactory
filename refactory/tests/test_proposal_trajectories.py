@@ -769,3 +769,35 @@ def test_an_items_expected_choice_text_is_said_once_with_its_choices():
     hidden = next(r["id"] for r in records if r["id"] not in shown)
     row = next(r for r in table.splitlines() if r.startswith(f"| {hidden} |"))
     assert LONG_CHOICE[:60] in row, row
+
+
+def test_an_item_s_cause_number_is_its_row_in_errors_by_cause():
+    """Tied counts and repeats: the table and the items number causes over the same
+    records, so item a points at the row holding its own error, never at b's."""
+    records = [_record("b", error="X broke"), _record("a", error="Y broke"),
+               {**_record("a", error="Y broke"), "repeat": 2},
+               {**_record("b", error="X broke"), "repeat": 2}]
+    text = _render(records)
+    table = text.split("Errors, by cause:", 1)[1].split("## ", 1)[0]
+    rows = [line for line in table.splitlines() if "broke" in line]
+    for item, error in (("a", "Y broke"), ("b", "X broke")):
+        block = text.split(f"### Item {item} — failed with an error", 1)[1].split("### Item ", 1)[0]
+        number = int(re.search(r"cause (\d+) under", block).group(1))
+        assert error in rows[number - 1], (item, number, rows)
+
+
+@pytest.mark.parametrize("label,label_text,whole", [
+    ("C", "Every bounded sequence has a convergent subsequence", False),
+    ("yes", "Every bounded sequence has a convergent subsequence", True),
+    ("C", "A different statement", True),
+])
+def test_expected_is_a_label_only_when_a_shown_choice_says_its_text(label, label_text, whole):
+    """A label whose choice line is shown with that text says the rest; any other label
+    (no such choice, or a choice with other text) keeps the expected text."""
+    record = {**_record("w1"), "label": label, "label_text": label_text}
+    text = _render([record])
+    item = text.split("### Item w1", 1)[1].split("### Item ", 1)[0]
+    expected = f"Expected: {label} — {label_text}" if whole else f"Expected: {label};"
+    assert expected in item, item
+    # The table of every item reads the same rule.
+    assert base._expected(record, label_only=True) == (f"{label} — {label_text}" if whole else label)

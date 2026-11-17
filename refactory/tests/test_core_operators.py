@@ -832,6 +832,9 @@ def test_one_timeout_moves_the_longest_never_the_median():
     assert with_timeout["per_item_median_s"] - without["per_item_median_s"] <= 1
     assert with_timeout["per_item_max_s"] == 1831 and without["per_item_max_s"] == 133
     assert item_time_spread([{"id": "a"}]) == {}
+    # The 90th percentile is the 9th of 10, not the longest.
+    spread = item_time_spread([{"id": str(i), "duration_s": float(i)} for i in range(1, 11)])
+    assert (spread["per_item_p90_s"], spread["per_item_max_s"]) == (9, 10)
 
 
 def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_one():

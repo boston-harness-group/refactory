@@ -79,6 +79,15 @@ def field_meanings() -> dict[str, str]:
     return meanings
 
 
+#: The fields that apply to every node kind: the only ones whose ``#:`` comment names no
+#: kind. A field missing from here whose comment lost its kind prefix would otherwise
+#: widen to every kind unnoticed, so `field_kinds` refuses either mismatch.
+EVERY_KIND_FIELDS = frozenset({
+    "id", "kind", "knobs", "reads", "writes", "produces", "notes", "blocking",
+    "score_effect", "resource_role", "field_bindings",
+})
+
+
 @lru_cache(maxsize=1)
 def field_kinds() -> dict[str, tuple[str, ...]]:
     """The node kinds each field applies to, as its ``#:`` comment opens (an ``agent``
@@ -98,9 +107,26 @@ def field_kinds() -> dict[str, tuple[str, ...]]:
             lead = re.match(r"^((?:`\w+`(?:,? or |, )?)+)[^:]*:", " ".join(pending))
             named = tuple(k for k in re.findall(r"`(\w+)`", lead.group(1)) if k in NODE_KINDS) \
                 if lead else ()
-            kinds[match.group(1)] = named or tuple(NODE_KINDS)
+            name = match.group(1)
+            if bool(named) == (name in EVERY_KIND_FIELDS):
+                raise ValueError(
+                    f"Node.{name}: its #: comment names {list(named) or 'no kind'}, but "
+                    f"EVERY_KIND_FIELDS {'lists' if name in EVERY_KIND_FIELDS else 'omits'} "
+                    "it; open the comment with the kinds it applies to, or list it there")
+            kinds[name] = named or tuple(NODE_KINDS)
         pending = []
+    missing = [f.name for f in _fields() if f.name not in kinds]
+    if missing:
+        raise ValueError(f"Node fields without a #: comment saying their kinds: {missing}")
     return kinds
+
+
+def _example(entry: dict[str, Any], kind: str) -> dict[str, Any]:
+    """A minimal example with only the fields of its kind (`field_kinds`): ``to_state``
+    lists every field, and an agent's fields on an op would say the op takes them."""
+    applies = field_kinds()
+    return {name: value for name, value in entry["example"].items()
+            if name in entry.get("set", ()) or kind in applies.get(name, NODE_KINDS)}
 
 
 def _minimal(kind: str, gate_kind: str = "fn") -> dict[str, Any]:
@@ -222,7 +248,8 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
         lines += [
             f"`{name}`: required {', '.join(entry['required'])}; refused "
             f"{', '.join(entry['refused']) or 'nothing'}. Minimal example:",
-            "`" + json.dumps(entry["example"], separators=(",", ":")) + "`",
+            "`" + json.dumps(_example(entry, name.split(" ", 1)[0]),
+                             separators=(",", ":")) + "`",
         ]
     return lines
 

@@ -2821,7 +2821,7 @@ def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     return evidence.render_item(
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
-        expected=_expected(record), expected_label=str(record.get("label") or ""),
+        expected=_expected(record), expected_label=shown_label(record),
         metadata=metadata_text(record), choices=_choice_lines(meta.get("choices")),
         prompts=False,
         prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions, settled=settled,
@@ -2833,13 +2833,28 @@ def _outcome(record: dict[str, Any]) -> str:
             "failed with an error" if record.get("error_text") else "answered wrong")
 
 
+def shown_label(record: dict[str, Any]) -> str:
+    """The expected answer's label when one of the item's choices is that label with the
+    expected text (or the record has no text for it), so the choice line shown with the
+    item says the rest; else empty, and the expected answer is said whole."""
+    label, label_text = record.get("label"), record.get("label_text")
+    if label in (None, ""):
+        return ""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    choices = meta.get("choices") if isinstance(meta.get("choices"), list) else []
+    for index, choice in enumerate(choices):
+        own, text = ((choice.get("label", chr(ord("A") + index)), choice.get("text", ""))
+                     if isinstance(choice, dict) else (chr(ord("A") + index), choice))
+        if str(own) == str(label) and (label_text in (None, "") or str(text) == str(label_text)):
+            return str(label)
+    return ""
+
+
 def _expected(record: dict[str, Any], *, label_only: bool = False) -> str:
     """The expected answer: its label and its text; with ``label_only``, only the label
-    when the item has labelled choices (shown with the item, so its choice line says the
-    text)."""
+    when a choice shown with the item says the text (`shown_label`)."""
     label, label_text = record.get("label"), record.get("label_text")
-    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    if label_only and label not in (None, "") and _choice_lines(meta.get("choices")):
+    if label_only and shown_label(record):
         return str(label)
     return " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
 
@@ -3073,7 +3088,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     header = ["## Trajectories of the candidate being edited",
               f"The {len(items)} train item(s) counted under \"Item results\"."]
     groups = trajectory_groups(records, budget)
-    refs = error_refs(items)
+    # Numbered over the records "Errors, by cause" numbers its rows over (`_item_evidence`),
+    # so an item's "cause N" is that table's row N.
+    refs = error_refs(records)
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
         return header + [f"Every item. {ITEM_FORM}",

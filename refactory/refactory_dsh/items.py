@@ -164,6 +164,8 @@ def prepare_pass_dir(
     item_id: str,
     index: int,
     declared_reads: tuple[str, ...] | list[str] = (),
+    *,
+    starting: bool = True,
 ) -> Path:
     """Create and return the pass directory for one item.
 
@@ -175,6 +177,10 @@ def prepare_pass_dir(
       *run_dir* and not yet in the pass, so subgraph nodes read them in place.
       A write to one of them is detached from the run first
       (:func:`detach_read_through`), so a pass cannot change a run-level input.
+    * With ``starting`` (the item's pass begins, a resumed or retried one included),
+      stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
+      attempt's and never counts the time a run spent stopped; the spine's ``end``
+      reuses the directory with ``starting`` False.
     """
     run_dir = Path(run_dir)
     pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
@@ -194,7 +200,7 @@ def prepare_pass_dir(
             dst.symlink_to(src.resolve())
 
     started = pass_dir / ITEM_STARTED
-    if not started.exists():
+    if starting or not started.exists():
         started.parent.mkdir(parents=True, exist_ok=True)
         started.write_text(f"{time.time():.3f}\n")
     marker = pass_dir / PASS_MARKER
@@ -1082,7 +1088,7 @@ def command_end(
     item_id = str(item.get("id") or index)
 
     # Compute the pass directory (idempotent — reuses the one command_begin created).
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False)
 
     # F4 parity: when the caller says the item's subgraph failed, skip verify
     # and write a failure record directly, as the walker does.
