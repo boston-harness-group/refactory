@@ -685,16 +685,21 @@ def test_the_request_explains_each_core_operator_in_one_line_with_one_example():
 
 @pytest.mark.parametrize("seed", sorted(sf.seeds()))
 def test_every_composition_example_uses_only_core_operators_and_applies_as_written(seed):
-    ctx = _context(seed, new_node_tools=True)
+    from refactory_dsh import seal
+
+    # A tool step is offered where its tools can run sealed, as the loop offers it.
+    sealed = seal.available()[0]
+    ctx = _context(seed, new_node_tools=sealed)
     examples = base_mod.composition_examples(
         ctx.catalogue, ctx.node_states, ctx.edges, protected=list(sf.Applier(
-            sf.seeds()[seed]).protected), code_nodes=CODE, tools=True,
+            sf.seeds()[seed]).protected), code_nodes=CODE, tools=sealed,
         knob_values={k["name"]: k["value"] for k in ctx.knobs})
     if seed in ("fuzz_draft_review", "fuzz_dataflow"):
         titles = {title for title, _b in examples}
         assert {"Several attempts and a choice", "Check and send back",
                 "Another attempt beside it, sent exactly what it is sent",
-                "A background pass beside an experiment", "A tool step before reasoning"} <= titles
+                "A background pass beside an experiment"} <= titles
+        assert ("A tool step before reasoning" in titles) == sealed, titles
         # The code-step shapes are offered only where code steps can run (`snippet.available`).
         code_titles = {"A simulation step, then an analysis of its results",
                        "Iterative fitting: repeat a step until a code check passes"}

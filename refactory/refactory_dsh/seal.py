@@ -9,6 +9,7 @@ front of the command (its ``runnerCommand``). What the command can then see:
 - the operating system's own programs and libraries, read only;
 - nothing else: no other item's directory, no run directory, no project, no home
   directory, no grader file or gold answer wherever the run keeps them, no network;
+- limits on its CPU time, file size and, on Linux, processes and memory (:data:`LIMITS`);
 - an environment of its own (`PATH`, its workspace as HOME and TMPDIR, the locale) and
   no inherited descriptor: nothing of the DSH process's, so no credential or run
   variable; no other process's arguments or environment either.
@@ -16,9 +17,10 @@ front of the command (its ``runnerCommand``). What the command can then see:
 It is the code step's sandbox (`snippet`) with a writable workspace and a shell:
 
 - **Linux**: user, network, mount and PID namespaces (``unshare -Urnmp``). A new root
-  is built from an allow-list (:data:`LINUX_READS` read only, four ``/dev`` nodes, a
-  fresh ``/proc`` and ``/tmp``, the workspace read and write at its own path) and
-  pivoted to; the old root is detached. The command then runs in a nested user
+  is built from an allow-list (:data:`LINUX_READS` and the :data:`LINUX_ETC` files, each
+  bound alone and read only; four ``/dev`` nodes; a fresh ``/proc`` and ``/tmp``; the
+  workspace read and write at its own path) and pivoted to; the old root is detached.
+  It never runs as root (:class:`SealError`). The command then runs in a nested user
   namespace as the caller's own uid, not root, so every mount is locked: nothing can be
   unmounted or remounted to reveal what is underneath. The network namespace has only
   a down loopback, and the PID namespace shows only the step's own processes.
@@ -60,10 +62,18 @@ FAILURE = "refactory-seal: "
 #: credential, no run variable), only these, with HOME and TMPDIR its workspace.
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-#: Closes every descriptor above stderr, then runs the command (after DSH's profile
-#: arguments and ``--``) in the workspace with that environment; ``$run`` is what runs
-#: it (Linux: the nested, unprivileged user namespace).
-_EXEC = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
+#: A sealed command's limits, as ``ulimit`` takes them: CPU seconds, the largest file
+#: (KiB), and on Linux its processes (counted in its own user namespace) and address
+#: space (KiB). macOS counts processes per user, not per sandbox, and does not enforce
+#: an address-space limit, so neither is set there.
+LIMITS = "-t 3600 -f 4194304"
+LINUX_LIMITS = "-u 512 -v 33554432"
+
+#: Sets the limits, closes every descriptor above stderr, then runs the command (after
+#: DSH's profile arguments and ``--``) in the workspace with that environment; ``$run``
+#: is what runs it (Linux: the nested, unprivileged user namespace).
+_EXEC = (f'ulimit {LIMITS} $limits || {{ echo "refactory-seal: cannot set limits" >&2; exit 97; }}; '
+         'for fd in /dev/fd/*; do n="${fd##*/}"; '
          '[ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-" 2>/dev/null; done; '
          'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
          '[ "$1" = "--" ] || { echo "refactory-seal: no command" >&2; exit 97; }; shift; '
@@ -71,8 +81,14 @@ _EXEC = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
          f'exec $run /usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="{PATH}" '
          f'LANG={snippet.LOCALE} LC_ALL={snippet.LOCALE} "$@"')
 
-#: What a sealed Linux command may read besides its workspace, each bound read only.
-LINUX_READS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc")
+#: What a sealed Linux command may read besides its workspace, each bound read only and
+#: alone (never what is mounted inside it): the programs and libraries, and from /etc
+#: only what they need to start (the loader's cache, users and groups by name, time
+#: zones, certificates, the alternatives programs link through).
+LINUX_READS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+LINUX_ETC = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/passwd",
+             "/etc/group", "/etc/nsswitch.conf", "/etc/localtime", "/etc/ssl", "/etc/alternatives",
+             "/etc/ca-certificates")
 
 #: The shell that builds the new root inside the new namespaces (Linux), where it is
 #: root of its own user namespace. Arguments: the workspace, the caller's uid and gid,
@@ -84,11 +100,15 @@ _SHELL = (
     'mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"; '
     'r=/tmp/root; mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r" '
     '|| fail "cannot make the new root"; '
-    f'for d in {" ".join(LINUX_READS)}; do '
+    # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along
+    # with flags of its own, then made read only.
+    'mkdir -p "$r/etc" || fail "cannot make /etc"; '
+    f'for d in {" ".join(LINUX_READS + LINUX_ETC)}; do '
     'if [ -L "$d" ]; then cp -P "$d" "$r$d" || fail "cannot link $d"; '
-    'elif [ -d "$d" ]; then mkdir -p "$r$d" && mount -n --rbind "$d" "$r$d" '
+    'elif [ -e "$d" ]; then { if [ -d "$d" ]; then mkdir -p "$r$d"; else touch "$r$d"; fi; } '
+    '&& mount -n --bind "$d" "$r$d" '
     '&& mount -n -o remount,bind,ro "$r$d" || fail "cannot bind $d"; fi; done; '
-    'mkdir -p "$r/dev" "$r/proc" "$r/tmp" "$r$ws" || fail "cannot make the mount points"; '
+    'mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"; '
     'for n in null zero random urandom; do touch "$r/dev/$n" '
     '&& mount -n --bind "/dev/$n" "$r/dev/$n" || fail "cannot bind /dev/$n"; done; '
     'ln -s /proc/self/fd "$r/dev/fd" && ln -s /proc/self/fd/0 "$r/dev/stdin" '
@@ -96,24 +116,31 @@ _SHELL = (
     '|| fail "cannot link /dev/fd"; '
     'mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"; '
     'mount -n -t tmpfs -o mode=1777,size=64m seal "$r/tmp" || fail "cannot mount /tmp"; '
-    'mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
+    # Made last, so a workspace under /tmp lies in the new root's own /tmp.
+    'mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
     'exec 3<&-; '
     'cd "$r" && mkdir .old && pivot_root . .old || fail "cannot pivot to the new root"; '
     'cd / && umount -n -l /.old && rmdir /.old || fail "cannot detach the old root"; '
     'run="/usr/bin/unshare --user --mount --map-user=$uid --map-group=$gid --"; '
+    f'limits="{LINUX_LIMITS}"; '
     + _EXEC
 )
 
 #: What a sealed macOS command may read besides its workspace: the system's programs and
-#: libraries, the command-line tools, Homebrew's, and the files the shell itself opens.
-MAC_READS = ("/usr", "/bin", "/sbin", "/System", "/Library/Developer/CommandLineTools",
-             "/opt/homebrew", "/private/etc", "/private/var/select")
-#: Inside those, what holds a person's or a service's data rather than programs.
-MAC_DATA = ("/usr/local/var", "/usr/local/etc", "/opt/homebrew/var", "/opt/homebrew/etc")
+#: libraries, the command-line tools, Homebrew's programs and libraries (never its or
+#: ``/usr/local``'s ``etc``, ``var`` or anything else a person or service keeps there),
+#: and the files the shell itself opens.
+_TOOLCHAIN = ("bin", "sbin", "lib", "libexec", "opt", "Cellar", "Frameworks", "include")
+MAC_READS = ("/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin",
+             "/System", "/Library/Developer/CommandLineTools",
+             *(f"{root}/{part}" for root in ("/opt/homebrew", "/usr/local") for part in _TOOLCHAIN),
+             "/private/etc", "/private/var/select")
 #: The devices a sealed macOS command may open; ``/dev/fd`` is its own descriptors.
 MAC_DEVICES = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
-#: The system settings a sealed macOS command may read (`sysctl`): the machine's shape,
-#: never another process's arguments and environment (``kern.procargs2``).
+#: The system settings a sealed macOS command may read (`sysctlbyname`): the machine's
+#: shape, never another process's arguments and environment (``kern.procargs2``). The
+#: ``sysctl`` command itself also reads each setting's format through an unnamed entry,
+#: which stays denied, so it fails where a program asking by name does not.
 MAC_SYSCTLS = ('(sysctl-name-prefix "hw.") (sysctl-name-prefix "kern.os") '
                '(sysctl-name-prefix "machdep.cpu.") (sysctl-name "kern.hostname") '
                '(sysctl-name "kern.version") (sysctl-name "kern.argmax") '
@@ -123,7 +150,7 @@ MAC_SYSCTLS = ('(sysctl-name-prefix "hw.") (sysctl-name-prefix "kern.os") '
 
 #: The shim that runs the command inside the profile sandbox-exec applies (macOS).
 #: Arguments: the workspace, then whatever DSH appends.
-_MAC_SHIM = 'ws="$1"; shift; run=; ' + _EXEC
+_MAC_SHIM = 'ws="$1"; shift; run=; limits=; ' + _EXEC
 
 
 class SealError(RuntimeError):
@@ -146,7 +173,6 @@ def mac_profile(workspace: Path) -> str:
     ws = _check(workspace, tuple(reads))
     above = sorted({parent for path in (*reads, ws) for parent in snippet._ancestors(path)})
     readable = " ".join(f"(subpath {snippet._sbpl(path)})" for path in reads)
-    data = " ".join(f"(subpath {snippet._sbpl(path)})" for path in MAC_DATA)
     devices = " ".join(f"(literal {snippet._sbpl(path)})" for path in MAC_DEVICES)
     metadata = " ".join(f"(literal {snippet._sbpl(path)})" for path in above)
     return ("(version 1)\n"
@@ -163,7 +189,6 @@ def mac_profile(workspace: Path) -> str:
             f"(allow sysctl-read {MAC_SYSCTLS})\n"
             f'(allow file-read* (literal "/") (literal "/dev") {devices} '
             f'(regex #"^/dev/fd(/|$)") {readable} (subpath {snippet._sbpl(ws)}))\n'
-            f"(deny file-read* (with no-report) {data})\n"
             + (f"(allow file-read-metadata {metadata})\n" if metadata else "")
             + f'(allow file-write* (literal "/dev/null") (regex #"^/dev/fd/") '
               f'(subpath {snippet._sbpl(ws)}))\n')
@@ -180,7 +205,11 @@ def runner_command(workspace: Path) -> list[str]:
                 "/bin/sh", "-c", _MAC_SHIM, "refactory-seal", ws]
     if not sys.platform.startswith("linux"):
         raise SealError(f"no sealed workspace on {sys.platform}")
-    ws = _check(workspace, LINUX_READS)
+    ws = _check(workspace, LINUX_READS + LINUX_ETC)
+    if os.getuid() == 0:
+        # Root here is root inside, which reads what only root may (/etc/shadow and the
+        # like): a sealed step runs as an ordinary user, or not at all.
+        raise SealError("a sealed step does not run as root")
     return [shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
             "--mount-proc", "--", snippet.BASH, "-c", _SHELL, "refactory-seal", ws,
             str(os.getuid()), str(os.getgid())]

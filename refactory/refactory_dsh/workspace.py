@@ -388,7 +388,8 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
             # Opened without following a link, so a link swapped in after the check is
             # refused rather than copied from wherever it points.
             fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd, "rb") as given, open(target, "wb") as copy:
+            made = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "rb") as given, os.fdopen(made, "wb") as copy:
                 shutil.copyfileobj(given, copy)
     workspace.tools = tools
     workspace.runner = tuple(seal.runner_command(workspace.path))
@@ -935,8 +936,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     materialise sends back to the node with the reasons (`refusal_for`); the next
     dispatch finds its workspace as it left it, so it can fix what was named. Any other
     write the node declares is its final response, unless the agent wrote it.
-    ``files``: each declared write found in the workspace is copied to the run directory.
-    A sealed workspace is collected after every process its commands left is ended.
+    ``files``: each declared write found in the workspace is copied to the run directory;
+    one that is, or lies under, a link is refused, so nothing outside the workspace is
+    copied out of it. A sealed workspace is collected after every process its commands
+    left is ended and it is moved off the one path its sandbox may write, so nothing
+    sealed changes it while it is read.
     """
     from refactory_dsh.agent_delivery import _path
 
@@ -944,6 +948,9 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         from refactory_dsh.seal_reaper import reap
 
         reap(str(workspace.path))
+        moved = workspace.path.with_name(workspace.path.name + ".collected")
+        os.rename(workspace.path, moved)
+        workspace.path = moved
 
     workdir = Path(workdir).resolve()
     summary: dict[str, Any] = {"collect": workspace.collect, "path": str(workspace.path)}
@@ -996,9 +1003,10 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             if relative.is_absolute() or ".." in relative.parts:
                 raise WorkspaceError(f"output {name!r} must be relative")
             source = workspace.path / relative
-            if source.is_symlink():
+            if source.is_symlink() or (source.exists() and source.resolve() != (
+                    workspace.path.resolve() / relative)):
                 raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace as a "
-                                     "symlink; an output is a file or a directory of files")
+                                     "symlink, or under one; an output is a file or a directory of files")
             if not source.exists():
                 continue
             destination = _path(workdir, name)
@@ -1010,7 +1018,9 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
                                 ignore=lambda folder, names: [item for item in names
                                                               if (Path(folder) / item).is_symlink()])
             else:
-                shutil.copyfile(source, destination)
+                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(fd, "rb") as given, open(destination, "wb") as copy:
+                    shutil.copyfileobj(given, copy)
             copied.append(name)
         summary["copied"] = copied
     _write_json(workspace.root / "collected.json", summary)

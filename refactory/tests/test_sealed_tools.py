@@ -169,8 +169,11 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
                    "&& echo WROTE; ls /usr/x /etc/x /x 2>/dev/null",
         "terminals": "for t in /dev/tty* /dev/pts/*; do [ -e \"$t\" ] && exec 9<\"$t\" "
                      "&& echo OPENED $t; done 2>/dev/null; true",
-        "homebrew data": "ls /opt/homebrew/etc /opt/homebrew/var /usr/local/etc /usr/local/var "
-                         "2>/dev/null | head -1",
+        "homebrew data": "for d in /opt/homebrew /opt/homebrew/etc /opt/homebrew/var /usr/local "
+                         "/usr/local/etc /usr/local/var; do ls -A $d 2>/dev/null; done | head -1",
+        "system secrets": "cat /etc/shadow /etc/sudoers /etc/hostname /etc/hosts 2>/dev/null | head -1",
+        "limits": "ulimit -t; ulimit -f",
+        "settings": "python3 -c 'import os; print(os.cpu_count())'",
         "write inside": "echo made > made.txt && cat made.txt",
     }
     out = {name: _sealed(place, script) for name, script in probes.items()}
@@ -196,6 +199,9 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     assert "WROTE" not in out["remount"].stdout and out["remount"].stdout == ""
     assert "OPENED" not in out["terminals"].stdout, out["terminals"].stdout
     assert out["homebrew data"].stdout == ""
+    assert out["system secrets"].stdout == ""
+    assert out["limits"].stdout.split() == ["3600", "4194304"], out["limits"]
+    assert out["settings"].stdout.strip().isdigit(), out["settings"]
 
 
 def test_a_sealed_command_gets_no_descriptor_but_its_own(tmp_path):
@@ -305,7 +311,7 @@ def test_the_patch_mounts_the_runner_and_the_tools_plugin_admits_only_the_listed
     assert observed["sandbox"] == {"runnerCommand": ["/bin/echo", "runner"],
                                    "runnerFailureSignatures": [seal.FAILURE.strip()]}
     assert observed["offered"] == ["bash"]
-    assert observed["requests"] == 4, observed
+    assert observed["requests"] == 5, observed
     assert observed["hostile_executions"] == 0 and observed["bash_executions"] == 1
 
 
@@ -452,3 +458,38 @@ def test_where_the_seal_cannot_be_made_the_step_is_refused_never_run_unsealed(
                               tools=("bash",))
     finally:
         seal.available.cache_clear()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux's allow-list root")
+def test_a_sealed_linux_command_sees_only_the_listed_parts_of_etc_and_runs_unprivileged(tmp_path):
+    _sealable()
+    _run, place = _layout(tmp_path)
+    result = _sealed(place, "ls -A /etc; echo uid=$(id -u); ulimit -u")
+    listed = set(result.stdout.split("uid=")[0].split())
+    assert listed <= {path.removeprefix("/etc/") for path in seal.LINUX_ETC}, listed
+    assert f"uid={os.getuid()}" in result.stdout and result.stdout.split()[-1] == "512"
+
+
+def test_a_sealed_step_never_runs_as_root(tmp_path, monkeypatch):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux maps the caller's uid into the seal")
+    monkeypatch.setattr(seal.os, "getuid", lambda: 0)
+    with pytest.raises(seal.SealError, match="does not run as root"):
+        seal.runner_command(tmp_path)
+
+
+def test_collect_moves_a_sealed_workspace_out_and_never_copies_through_a_link(tmp_path):
+    _sealable()
+    run, place = _layout(tmp_path)
+    _sealed(place, f"mkdir -p real && echo mine > real/a.txt && ln -s {tmp_path / 'bench'} linked "
+                   "&& echo ok > answer.txt")
+    with pytest.raises(workspace.WorkspaceError, match="under one"):
+        workspace.collect(place, run, ["linked/gold.json"])
+    assert place.path.name.endswith(".collected"), "moved off the path its sandbox may write"
+    assert not (run / "linked").exists()
+    with pytest.raises(workspace.WorkspaceError, match="as a symlink"):
+        (place.path / "alias.txt").symlink_to(place.path / "answer.txt")
+        workspace.collect(place, run, ["alias.txt"])
+    copied = workspace.collect(place, run, ["answer.txt", "real/a.txt"])
+    assert copied["copied"] == ["answer.txt", "real/a.txt"]
+    assert (run / "answer.txt").read_text() == "ok\n"

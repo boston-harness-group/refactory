@@ -75,7 +75,8 @@ if (mode === 'provider') {
       offered ??= (options.tools ?? []).map(t => t.name).sort()
       // A tool it does not list, the one it lists, and that one asking for wider access.
       const call = { 1: ['web_fetch', {}], 2: ['bash', {}],
-        3: ['bash', { sandbox_permissions: 'danger-full-access', justification: 'needs it' }] }[requests]
+        3: ['bash', { sandbox_permissions: 'danger-full-access', justification: 'needs it' }],
+        4: ['bash', { command: 'sleep 99', run_in_background: true }] }[requests]
       if (call) {
         const block = { type: 'tool-call', id: `call-${requests}`, name: call[0],
           arguments: JSON.stringify(call[1]) }
