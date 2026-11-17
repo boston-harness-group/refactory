@@ -988,7 +988,92 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
     spec = _insert_spec(edit, anchor, state)
     if spec.get("id") is not None and spec["id"] in graph.nodes:
         raise _Refused(f"node {spec['id']!r} already exists")
+    if edit.get("takes_over") is not None:
+        _take_over_plan(graph, state, edit["takes_over"], side, anchor)
     return None
+
+
+def _downstream(graph: Graph, start: str) -> set[str]:
+    """``start`` and every step after it (fork branches included, no reloop back)."""
+    from .loops import loop_edges
+
+    back = {(source, target) for source, target, _c in loop_edges(graph)}
+    out, queue = {start}, [start]
+    while queue:
+        node = graph.nodes.get(queue.pop())
+        if node is None:
+            continue
+        following = [e.target for e in graph.out_edges(node.id) if (node.id, e.target) not in back]
+        for target in [*(node.targets if node.kind == "fork" else ()), *following]:
+            if target not in out:
+                out.add(target)
+                queue.append(target)
+    return out
+
+
+def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
+                    anchor: Node) -> tuple[Node, dict[tuple[str, str], str], set[str]]:
+    """What ``insert``'s 'takes_over' does: the step it takes over, the new name of each of
+    that step's outputs (``(kind, name) -> new name``: ``<step>.txt`` and ``<step>`` when
+    free), and the steps that read on under the new names -- every step that does not run
+    after the new one. Refused when the step does not run before the new one on every
+    path, has no outputs, or a frozen text would have to change."""
+    if not isinstance(target_id, str) or target_id not in graph.nodes:
+        raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
+    target = graph.nodes[target_id]
+    if target.kind not in ("agent", "op") or not (target.writes or target.produces):
+        raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    following = [e.target for e in graph.out_edges(anchor.id)] if side == "after" else [anchor.id]
+    after = _downstream(graph, following[0]) if following else set()
+    if target_id in after:
+        raise _Refused(f"{target_id!r} does not run before the new step; 'takes_over' names a "
+                       "step the new one comes after")
+    made = {("file", n) for node in graph.nodes.values() for n in node.writes}
+    made |= {("fact", n) for node in graph.nodes.values() for n in node.produces}
+    names: dict[tuple[str, str], str] = {}
+    for kind, outputs, own in (("file", target.writes, f"{target_id}.txt"),
+                               ("fact", target.produces, target_id)):
+        for index, name in enumerate(outputs):
+            new = own if index == 0 and (kind, own) not in made else f"{target_id}_own_{name}"
+            names[(kind, name)] = new
+            made.add((kind, new))
+    readers = {n for n in graph.nodes if n not in after and n != target_id}
+    frozen = {name for name, entry in (state.get("knobs") or {}).items()
+              if (entry.get("spec") or {}).get("frozen")}
+    for node_id in readers:
+        node = graph.nodes[node_id]
+        for _field, knob in node.field_bindings:
+            text = str((state.get("knobs") or {}).get(knob, {}).get("value") or "")
+            if knob in frozen and _renamed_slots(text, names) != text:
+                raise _Refused(f"{node_id!r}'s frozen {knob!r} reads {target_id!r}'s output by "
+                               "name; it cannot be changed to read it under its new name")
+    return target, names, readers
+
+
+def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
+    """``text`` with each renamed fact's ``{{slot}}`` and ``{% if %}`` test renamed."""
+    for (kind, old), new in names.items():
+        if kind != "fact":
+            continue
+        text = re.sub(r"\{\{\s*" + re.escape(old) + r"\s*\}\}", "{{" + new + "}}", text)
+        text = re.sub(r"(\{%\s*(?:el)?if\s+)" + re.escape(old) + r"(\s*%\})",
+                      lambda m: m.group(1) + new + m.group(2), text)
+    return text
+
+
+def _renamed_refs(node_state: dict[str, Any], names: Mapping[tuple[str, str], str]
+                  ) -> dict[str, Any]:
+    """A node state reading each renamed output under its new name."""
+    out = dict(node_state)
+    files = {old: new for (kind, old), new in names.items() if kind == "file"}
+    facts = {old: new for (kind, old), new in names.items() if kind == "fact"}
+    for key, table in (("reads", files), ("required_reads", files), ("inputs", facts)):
+        if out.get(key):
+            out[key] = [table.get(name, name) for name in out[key]]
+    for key in ("prompt_template", "system_prompt_template"):
+        if out.get(key):
+            out[key] = _renamed_slots(str(out[key]), names)
+    return out
 
 
 def _select_reads(graph: Graph, anchor: Node) -> list[str]:
@@ -1030,14 +1115,40 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
     node_id = spec.get("id") or _fresh(graph, f"{anchor.id}_{'next' if side == 'after' else 'prep'}")
     if spec["kind"] == "op" and spec["call"] == SELECT_CALL and not spec.get("reads"):
         spec["reads"] = _select_reads(graph, anchor) if side == "after" else []
+    takes = edit.get("takes_over")
+    plan = _take_over_plan(graph, state, takes, side, anchor) if takes is not None else None
     nodes = _step_nodes(graph, state, spec, node_id,
                         _seen(graph, state, there, view, spec.get("sees")),
-                        settings_from=anchor if anchor.kind == "agent" else None)
+                        settings_from=anchor if anchor.kind == "agent" else None,
+                        **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
+                           if plan is not None else {}))
+    if plan is not None:
+        target, names, readers = plan
+        # The step taken over writes under new names, and every step before the new one
+        # (the new one too) reads them there; the steps after it read the new step's.
+        build.add(_respec(build.state, target.id, {
+            **target.to_state(),
+            "writes": [names[("file", n)] for n in target.writes],
+            "produces": [names[("fact", n)] for n in target.produces]}))
+        knobs = state.get("knobs") or {}
+        for reader in sorted(readers):
+            node = build.graph.nodes[reader]
+            before = node.to_state()
+            after = _renamed_refs(before, names)
+            if after != before:
+                build.add(_respec(build.state, reader, after))
+            for _field, knob in node.field_bindings:
+                text = str((knobs.get(knob) or {}).get("value") or "")
+                if _renamed_slots(text, names) != text:
+                    build.add([{"op": "set_knob", "name": knob,
+                                "value": _renamed_slots(text, names)}])
+        nodes = [_renamed_refs(n, names) for n in nodes]
     head, _end = _chain(nodes)
     if side == "before":
         build.add(_renamed(build.state, anchor.id, [head], joins=False))
     build.add(_add_chain(nodes, {side: anchor.id}))
-    _place_all(build, _new_facts(nodes), after=node_id, to=spec.get("to"))
+    if plan is None:
+        _place_all(build, _new_facts(nodes), after=node_id, to=spec.get("to"))
     return build.steps
 
 
@@ -1254,6 +1365,10 @@ def _pre_parallelize(edit: dict, state: dict) -> str | None:
         if node.kind != "agent":
             raise _Refused(f"{node.id!r} is not a model step; a copy of an op or of code would "
                            "compute the same thing again. Copy an agent")
+        if edit.get("sees") is not None:
+            raise _Refused("a copy is sent exactly what the step is sent, so it sees what the "
+                           "step sees; for a new attempt with other inputs, give 'new' steps "
+                           "('after' and 'new', each with its 'sees')")
         if _tools_beside(node):
             raise _Refused(f"{node.id!r} uses tools in the run directory, so a copy beside it "
                            "could see its half-done work; copy a step without tools, or one "
@@ -1289,6 +1404,46 @@ def _pre_parallelize(edit: dict, state: dict) -> str | None:
 def _fork_join_ids(graph: Graph, base: str) -> tuple[str, str]:
     fork = _fresh(graph, f"{base}_fork")
     return fork, _fresh(graph, f"{base}_join", (fork,))
+
+
+def _clone_agent(node: Node, state: Mapping[str, Any], copy_id: str
+                 ) -> tuple[list[dict], dict[str, Any]]:
+    """A copy of agent ``node`` as ``copy_id``: the same prompts, system prompt, role,
+    limits and tools, so it is sent byte for byte what ``node`` is sent, with outputs of its
+    own (``<copy_id>.txt``, ``<copy_id>``). A text bound to one of ``node``'s knobs is bound
+    to a knob of the copy's own (`<copy_id>__...`) holding the same value, frozen when
+    ``node``'s is; a knob ``node`` shares with other steps stays shared. Returns the
+    primitive steps declaring those knobs, and the copy's node state."""
+    knobs = state.get("knobs") or {}
+    copy = node.to_state()
+    copy["id"] = copy_id
+    if node.writes:
+        copy["writes"] = [f"{copy_id}.txt", *(f"{copy_id}_{name}" for name in node.writes[1:])]
+    if node.produces:
+        copy["produces"] = [copy_id, *(f"{copy_id}_{name}" for name in node.produces[1:])]
+    steps: list[dict] = []
+    renamed: dict[str, str] = {}
+    suffixes = {"prompt_template": "task", "system_prompt_template": "system_prompt",
+                "code": "code"}
+    for field_name, knob in node.field_bindings:
+        own = (knob[len(node.id) + 2:] if knob.startswith(f"{node.id}__")
+               else suffixes.get(field_name, field_name))
+        new_knob = f"{copy_id}__{own}"
+        entry = knobs.get(knob) or {}
+        # Declared at the original's value, so a frozen knob needs no set_knob.
+        spec = {**dict(entry.get("spec") or {}), "default": entry.get("value")}
+        steps.append({"op": "add_knob", "name": new_knob, "spec": spec})
+        renamed[knob] = new_knob
+    copy["knobs"] = [renamed.get(k, k) for k in node.knobs]
+    copy["field_bindings"] = [[f, renamed.get(k, k)] for f, k in node.field_bindings]
+    # Its tools as the original's, said outright: a new agent without a tool_policy is
+    # given none (`edits._add_node`).
+    copy["tool_policy"] = node.tool_policy
+    if node.workspace is not None or _uses_tools(node):
+        # A copy never works where the step it copies works (`coverage.DECISIONS`).
+        copy["workspace"] = {"kind": "scratch"}
+    copy.pop("notes", None)
+    return steps, copy
 
 
 def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
@@ -1335,11 +1490,9 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
         for index in range(int(edit["copies"])):
             copy_id = _fresh(graph, f"{first.id}_copy{index + 1}", taken)
             taken.append(copy_id)
-            nodes = _step_nodes(graph, state, _copy_spec(first, state), copy_id,
-                                _seen(graph, state, there, _consumed(first, state),
-                                      edit.get("sees")), settings_from=first)
-            taken += [str(n["id"]) for n in nodes]
-            copies.append(nodes)
+            knob_steps, node = _clone_agent(first, state, copy_id)
+            build.add(knob_steps)
+            copies.append([node])
     heads = [ids[0], *(_chain(n)[0] for n in copies)] if copies else list(ids)
     ends = [ids[-1], *(_chain(n)[1] for n in copies)] if copies else list(ids)
     # The new fork stands where the first step stood in an enclosing fork, and the new
@@ -2072,11 +2225,14 @@ REACHES = ("its output goes into the nearest prompt {where} that can take it -- 
 OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
-        "fields": ("after", "before", "kind", "text", "sees", "to", "id", "call", "reads",
-                   "tools"),
-        "line": "a new step after (or before) a step: 'kind' agent (text = its prompt), code "
-                "(text = Python) or op (with 'call'); it sees what that step sees plus its "
-                "outputs; " + REACHES.format(where="after it"),
+        "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
+                   "reads", "tools", "takes_over"),
+        "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
+                "'system' its system prompt), code (text = Python) or op (with 'call'); it "
+                "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
+                + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
+                "so what read them reads the new step's (a choice among attempts reaching "
+                "what is scored), and that step's own go under new names",
         "example": {"op": "insert", "after": "<step>", "kind": "agent",
                     "text": "<what the new step does>"},
     },
@@ -2185,10 +2341,89 @@ def _resolved_texts(edit: dict, state: dict) -> dict:
     return out
 
 
+def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | None:
+    """Why an operator's result would fail items at run time: a step it kept now runs, on
+    some path, without an input it had on every path before -- one still made elsewhere in
+    the graph (a route that skips the steps making it, say) -- or ``None``. The validator
+    holds a step's required inputs to every path (V15); this holds every input the step
+    takes in, since an op may need what it declares optional (LiveMath's ``decide_prompt``
+    needs a note from at least one of the steps a skip passes by). An input no step makes
+    any more is the operator's own to settle (`remove` reconnects or refuses)."""
+    from .operators import made_by
+    from .validate import available_inputs
+
+    edits = _edits()
+    try:
+        old, new = edits._graph(dict(before)), edits._graph(dict(after))
+    except Exception:  # noqa: BLE001 - an unreadable graph is the validator's to report
+        return None
+    had, has = available_inputs(old), available_inputs(new)
+    makers = made_by(new)
+    values = _knob_values(after)
+    for node_id in sorted(set(old.nodes) & set(new.nodes)):
+        try:
+            takes = _consumed(new.nodes[node_id], after)
+        except Exception:  # noqa: BLE001
+            continue
+        lost = sorted((had.get(node_id, set()) & takes) - has.get(node_id, set())
+                      - {k for k in takes if k[0] == "fact" and k[1] in values})
+        lost = [key for key in lost if makers.get(key)]
+        if lost:
+            names = ", ".join(f"{name} (made by {', '.join(makers[(kind, name)])})"
+                              for kind, name in lost)
+            return (f"{node_id!r} would run without {names} on a path this edit adds: no step "
+                    "on that path makes it before it, so the step would fail or answer without "
+                    "it on every item that takes the path. Route to a step that needs none of "
+                    "what the skipped steps make, or give the path its own step making it")
+    return None
+
+
+#: What a new step written inside an operator ('new', 'into', a route's 'to') may say;
+#: anything else it would ignore, so it is refused (`_unknown_fields`).
+STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools")
+
+
+def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
+    """Why ``edit`` names a field its operator would ignore -- a role, a timeout, a tool
+    list -- or ``None``. An ignored field would let the proposer believe it set what it
+    did not, so it is refused, naming the fields the operator takes."""
+    name = str(edit.get("op"))
+    fields = OPERATORS[name]["fields"] if name in OPERATORS else ()
+    unknown = sorted(k for k in edit if k != "op" and k not in fields and not k.startswith("_"))
+    if unknown:
+        return (f"'{name}' does not take {', '.join(repr(k) for k in unknown)}; it would be "
+                f"ignored. Its fields: {', '.join(f for f in fields if f not in ('target', 'gate'))}")
+    specs: list[Any] = []
+    for key in ("new", "into"):
+        # The written-out split's 'into' is two whole node objects, not step specs.
+        if key == "into" and name == "split" and not is_one_line_split(edit):
+            continue
+        if isinstance(edit.get(key), list):
+            specs += edit[key]
+    if isinstance(edit.get("to"), Mapping):
+        specs += [v for v in edit["to"].values() if isinstance(v, Mapping)]
+    for spec in [edit, *specs]:
+        if not isinstance(spec, Mapping):
+            continue
+        if spec is not edit:
+            extra = sorted(k for k in spec if k not in STEP_FIELDS and not k.startswith("_"))
+            if extra:
+                return (f"a new step does not take {', '.join(repr(k) for k in extra)}; it "
+                        f"would be ignored. A step's fields: {', '.join(STEP_FIELDS)}")
+        if "tools" in spec and spec["tools"] is not True:
+            return ("'tools' is true (the step gets tools, in a workspace of its own) or left "
+                    f"out; {spec['tools']!r} would be ignored")
+    return None
+
+
 def _pointed(pre, expand):
     """A precondition and an expansion that read the edit with its pointer texts resolved
-    (`_resolved_texts`): a pointer is never stored as a step's prompt."""
+    (`_resolved_texts`): a pointer is never stored as a step's prompt. A field the
+    operator would ignore is refused first (`_unknown_fields`)."""
     def precondition(edit: dict, state: dict) -> str | None:
+        unknown = _unknown_fields(edit)
+        if unknown:
+            return unknown
         try:
             edit = _resolved_texts(edit, state)
         except _edits().EditError as exc:
