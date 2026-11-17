@@ -1094,6 +1094,7 @@ The per-item half of a data node, from the command line.
 | function | `error_kind` | `(error: 'BaseException') -> 'str'` |
 | function | `finished_pass_record` | `(pass_dir: 'Path') -> 'dict[str, Any] \| None'` |
 | function | `gate_visit` | `(node: 'str', verdict: 'Any') -> 'dict[str, Any]'` |
+| function | `harness_incident` | `(record: 'dict[str, Any]') -> 'bool'` |
 | function | `interrupted_cause` | `(text: 'str \| None') -> 'str \| None'` |
 | function | `interrupted_item` | `(record: 'dict[str, Any]') -> 'str \| None'` |
 | function | `item_duration` | `(pass_dir: 'Path \| None') -> 'float \| None'` |
@@ -1129,6 +1130,7 @@ The per-item half of a data node, from the command line.
 - **`error_kind`** — A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
+- **`harness_incident`** — Whether an item record is a harness incident: the harness backstop
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None
 - **`interrupted_item`** — Why an item record's outcome is unknown, or None when it is the item's own result.
 - **`item_duration`** — Seconds from the item's pass starting (`ITEM_STARTED`) to now, its record being
