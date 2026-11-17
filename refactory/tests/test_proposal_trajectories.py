@@ -19,6 +19,7 @@ import pytest
 from refactory_dsh.loop import Loop, LoopConfig
 from refactory_dsh.optim import ProposalContext, base
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+import structure_fuzz as sf
 
 NODES = [{"id": "compare", "kind": "agent"}, {"id": "precision", "kind": "agent"},
          {"id": "decide", "kind": "agent"}]
@@ -122,7 +123,7 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     steps), then passed, each by id."""
     records = ([_record(f"w{i:02d}") for i in range(12)]
                + [_record(f"p{i}", passed=True) for i in range(5)]
-               + [_record("e1", error="CompletionTimeout: timed out")])
+               + [_record("e1", error="RuntimeError: worker exited with code 1")])
     stepped = {**_record("e2"), "error_text": "RuntimeError: decide crashed",
                "error_kind": "RuntimeError"}
     long = "HEAD " + "x" * 9000 + " TAIL"
@@ -135,7 +136,7 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     # Its error is said once, under "Errors, by cause"; the item points there.
     item = text.split("### Item e1 — failed with an error", 1)[1].split("### Item ", 1)[0]
     assert 'Error: cause 1 under "Errors, by cause" above' in item, item
-    assert text.count("CompletionTimeout: timed out") == 1
+    assert text.count("RuntimeError: worker exited with code 1") == 1
     assert f"Every item. {base.ITEM_FORM}" in text and long in text and "chars omitted" not in text
     assert "### Item e2 — failed with an error" in text
     assert text.count("RuntimeError: decide crashed") == 1 and "Error: cause 2 under" in text
@@ -801,3 +802,52 @@ def test_expected_is_a_label_only_when_a_shown_choice_says_its_text(label, label
     assert expected in item, item
     # The table of every item reads the same rule.
     assert base._expected(record, label_only=True) == (f"{label} — {label_text}" if whole else label)
+
+
+# ── a harness timeout is not a target ───────────────────────────────────────
+
+
+def _timed_out(item: str, how: str = "error") -> dict[str, Any]:
+    if how == "error":
+        return {**_record(item, error="solve: CompletionTimeout: model completion timed out "
+                                      "after 600s of inactivity"), "error_kind": "timeout"}
+    return {**_record(item), "missing_steps": {"decide": {"cause": "timeout", "sessions": 1}}}
+
+
+@pytest.mark.parametrize("how", ["error", "missing step"])
+def test_a_harness_timeout_is_listed_once_and_read_as_nothing_else(how):
+    """The item is listed once, by id, as the harness's; it is in no error row, no item
+    shown in full, no count of the pipeline's failures and no time; it still scores 0."""
+    # The timed-out item first: were it numbered with the errors, e1 would be cause 2.
+    records = [_timed_out("t1", how), _record("w1"),
+               _record("e1", error="RuntimeError: worker exited with code 1"),
+               _record("p1", passed=True)]
+    text = _render(records)
+    results = text.split("## Item results", 1)[1].split("\n## ", 1)[0]
+    assert f"1 more (t1), each a {base.HARNESS_TIMEOUT}; mean score over all 4: 0.25." in results
+    assert "3 train item(s): 1 passed, 1 answered wrong, 1 failed with an error." in results
+    assert "| t1" not in results and results.count("t1") == 1
+    assert "timed out after 600s" not in text and "No answer --" not in text
+    assert "### Item t1" not in text and _shown(text) == ["w1", "e1", "p1"]
+    assert 'Error: cause 1 under "Errors, by cause" above' in text
+
+
+def test_the_analysts_read_no_harness_timeout():
+    from refactory_dsh.optim import analysts
+
+    failures, successes = analysts.split([_record("w1"), _timed_out("t1"),
+                                          _record("p1", passed=True)], seed=1)
+    assert [r["id"] for r in failures] == ["w1"] and [r["id"] for r in successes] == ["p1"]
+    assert "a change aimed at\n   timeouts" in analysts.FAILURE_SYSTEM
+
+
+def test_how_nodes_compose_says_a_timeout_in_one_sentence():
+    from refactory_dsh.nn import edits as edits_mod
+
+    state = sf.seeds()["fuzz_draft_review"].state()
+    graph = state["graph"]
+    text = "\n".join(base.composition_section(edits_mod.catalogue(),
+                                               list(graph["nodes"].values()), graph["edges"]))
+    compose = text.split("- **crashes**", 1)[1].split("\n- **", 1)[0]
+    assert f"An item that times out is a {base.HARNESS_TIMEOUT}." in compose
+    assert "not retried" not in compose and "count toward" not in compose

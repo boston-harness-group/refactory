@@ -809,12 +809,12 @@ def test_what_the_last_edit_changed_shows_the_wiring_and_the_prediction_check():
 
 def test_time_per_item_is_said_in_numbers():
     lines = base_mod.time_lines({"step_limit_s": 1800, "per_item_median_s": 120,
-                                 "per_item_p90_s": 300, "per_item_max_s": 1831, "items": 20,
-                                 "timeouts": 2})
+                                 "per_item_p90_s": 300, "per_item_max_s": 1500})
     text = " ".join(lines)
     assert "up to 1800 s" in text and "120 s per item at the median" in text
-    assert "300 s at the 90th percentile, 1831 s the longest" in text
-    assert "2 of its 20 train items timed out (hit the 1800 s limit)" in text
+    assert "300 s at the 90th percentile, 1500 s the longest" in text
+    # A timed-out item is said once, in "Item results": not here, and not as a target.
+    assert "timed out" not in text and "as a timeout" not in text
     assert "wall time" not in text and "at once" not in text
     assert base_mod.time_lines({}) == []
 
@@ -848,13 +848,6 @@ def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_o
     assert "cost is not a reason for or against" not in priced
 
 
-def test_repeated_items_are_counted_once_and_their_runs_each_time():
-    lines = " ".join(base_mod.time_lines({"per_item_median_s": 30, "per_item_p90_s": 40,
-                                          "per_item_max_s": 50, "items": 4, "runs": 8,
-                                          "timeouts": 3}))
-    assert "3 of its 8 runs of 4 train items timed out" in lines
-
-
 def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
     """With no parent selected, the records stand for the latest candidate's parent; its
     items' times are that candidate's too, not the leaderboard best's."""
@@ -877,17 +870,26 @@ def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
                                                 "best": [{"id": "x", "duration_s": 999.0}]})
     loop._train_records_owner = lambda board: Loop._train_records_owner(loop, board)
     facts = Loop._time_facts(loop, [best])
-    assert facts["items"] == 2 and facts["runs"] == 3 and facts["timeouts"] == 1
-    assert (facts["per_item_median_s"], facts["per_item_max_s"]) == (12, 600)
+    # The timed-out run is not among the times: it is said once, in "Item results".
+    assert (facts["per_item_median_s"], facts["per_item_max_s"]) == (11, 12)
+    assert facts["timed_items"] == 2
     assert "per_item_s" not in facts
 
 
-def test_the_loop_counts_timeouts():
-    from refactory_dsh.loop import _timed_out
+def test_a_harness_timeout_is_told_from_a_failure():
+    from refactory_dsh.optim.base import harness_timeout
 
-    assert _timed_out({"error_kind": "timeout"})
-    assert _timed_out({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
-    assert not _timed_out({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
+    assert harness_timeout({"error_kind": "timeout"})
+    assert harness_timeout({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
+    assert harness_timeout({"error_text": "solve: CompletionTimeout: model completion timed out "
+                                          "after 600s of inactivity"})
+    assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
+    assert not harness_timeout({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
+    # A grader's reason that says "timeout" is the grader's, not the harness's.
+    assert not harness_timeout({"fail_reason": "MCQ=0: the timeout clause is wrong"})
+    assert not harness_timeout({"passed": True, "error_kind": "timeout"})
+    # An error that only names the word is the pipeline's own.
+    assert not harness_timeout({"error_text": "fit: ValueError: the timeout knob must be > 0"})
 
 
 # ── a macro on a state an earlier edit of a bundle left with an unreadable cycle ──
