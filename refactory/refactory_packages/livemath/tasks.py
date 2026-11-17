@@ -15,7 +15,7 @@ from typing import Any
 
 from refactory_dsh.task import Task, TaskInstance, VerifyResult
 
-from .grading import evaluate, normalize_label as _normalize_label
+from .grading import evaluate, normalize_label as _normalize_label, parse_choice_label
 from .shuffling import shuffle_item_choices
 
 # Ported from skillopt/envs/livemathematicianbench/dataloader.py:16 (MIT)
@@ -223,6 +223,18 @@ class LiveMathTask(Task):
                 },
             ))
         return result
+
+    def reply_correct(self, reply: str, metadata: Any) -> bool | None:
+        """Whether a reply's choice (read as `verify` reads answer.txt,
+        ``grading.parse_choice_label``) is the item's correct one; ``None`` when it names
+        none of the item's choices."""
+        choices = list(metadata.get("choices") or [])
+        correct = metadata.get("correct_choice") or {}
+        label = parse_choice_label(str(reply or ""), choices)
+        valid = {_normalize_label(choice.get("label", "")) for choice in choices}
+        if label not in valid or not correct:
+            return None
+        return label == _normalize_label(correct.get("label", ""))
 
     def verify(self, instance: TaskInstance, workspace: Path) -> VerifyResult:
         """Grade the solver's pass using SkillOpt's evaluator logic.
