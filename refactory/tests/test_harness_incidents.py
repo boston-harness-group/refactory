@@ -306,31 +306,43 @@ def test_a_score_that_is_not_its_items_mean_is_compared_as_it_is_and_said():
     assert any("not its items' mean" in w for w in kept.warnings)
 
 
-def test_a_round_ranks_siblings_and_the_best_on_the_same_items():
-    """The incumbent left v2 out. Sibling c is higher raw (v2 right), sibling b higher on
-    the shared items: b is accepted, and becomes the best over a raw-higher best."""
+def _gate_case():  # type: ignore[no-untyped-def]
+    """The incumbent (seed) left v2 out: 0.25 on v1, v3, v4, v5. Its kept val score is
+    0.8 (a carried score), and the siblings' raw val scores are cached so that c leads
+    raw while b leads on the shared items (b 0.75, c 0.5)."""
     from refactory_dsh.optim import Candidate
     from refactory_dsh.outerloop import ValidationGate
 
     kept = _Kept({
-        "seed": _rollout({"v1": 0.0, "v3": 1.0}, left_out=("v2",)),          # 0.5 raw
-        "b": _rollout({"v1": 1.0, "v2": 0.0, "v3": 1.0}),                    # 2/3 raw, 1.0 shared
-        "c": _rollout({"v1": 0.0, "v2": 1.0, "v3": 1.0}),                    # 2/3 raw, 0.5 shared
+        "seed": _rollout({"v1": 0.0, "v3": 0.0, "v4": 0.0, "v5": 1.0}, left_out=("v2",)),
+        "b": _rollout({"v1": 1.0, "v2": 0.0, "v3": 1.0, "v4": 1.0, "v5": 0.0}),
+        "c": _rollout({"v1": 1.0, "v2": 1.0, "v3": 0.0, "v4": 0.0, "v5": 1.0}),
+        "d": _rollout({"v1": 0.0, "v2": 1.0, "v3": 0.0, "v4": 0.0, "v5": 1.0}),  # 0.25 shared
     })
-    run = _GateRun(kept)
     gate = ValidationGate()
-    gate.cache = {"seed": 0.5, "b": 2 / 3 - 1e-6, "c": 2 / 3}
+    gate.cache = {"seed": 0.8, "b": 0.7, "c": 0.9}
     gate.current_id = gate.best_id = "seed"
-    gate.current_score = gate.best_score = 0.5
-    b, c = Candidate(id="b", parent="seed", state={}), Candidate(id="c", parent="seed", state={})
+    gate.current_score = gate.best_score = 0.8
+    return (_GateRun(kept), gate, Candidate(id="b", parent="seed", state={}),
+            Candidate(id="c", parent="seed", state={}))
+
+
+def test_a_round_ranks_siblings_and_the_bar_on_the_same_items():
+    """Both siblings beat the incumbent on the shared items (its raw 0.8 would beat b);
+    b, ahead there, is accepted over c, ahead raw, and becomes the best."""
+    run, gate, b, c = _gate_case()
     accepted, rejected = gate.judge_round(run, [c, b])  # type: ignore[arg-type]
     assert [x.id for x in accepted] == ["b"] and [x.id for x in rejected] == ["c"]
     assert gate.best_id == "b" and run.logged
 
-    # offer_best: c (raw 2/3) is no better than the seed (raw 0.5) on the shared items.
-    gate.best_id, gate.best_score = "seed", 0.5
-    assert gate.offer_best("c", 2 / 3, run=run) is False  # type: ignore[arg-type]
+
+def test_judge_and_offer_best_compare_on_the_same_items():
+    run, gate, b, c = _gate_case()
+    # offer_best: d (raw 0.9 > the seed's 0.8) only ties the seed on the shared items.
+    assert gate.offer_best("d", 0.9, run=run) is False  # type: ignore[arg-type]
     assert gate.best_id == "seed"
+    assert gate.judge(run, b).accepted is True  # type: ignore[arg-type]  # raw 0.7 < 0.8
+    assert gate.best_id == "b"
 
 
 def test_a_perfect_val_score_with_an_item_left_out_stops_nothing():
