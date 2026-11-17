@@ -18,11 +18,13 @@ It is the code step's sandbox (`snippet`) with a writable workspace and a shell:
 
 - **Linux**: user, network, mount and PID namespaces (``unshare -Urnmp``). A new root
   is built from an allow-list (:data:`LINUX_READS` and the :data:`LINUX_ETC` files, each
-  bound alone and read only; four ``/dev`` nodes; a fresh ``/proc`` and ``/tmp``; the
-  workspace read and write at its own path) and pivoted to; the old root is detached.
+  bound alone and read only; four ``/dev`` nodes; a fresh ``/proc``; the
+  workspace read and write at its own path) and pivoted to; the old root is detached
+  and the new one is read only, so the workspace is the one place it writes.
   It never runs as root (:class:`SealError`). The command then runs in a nested user
-  namespace as the caller's own uid, not root, so every mount is locked: nothing can be
-  unmounted or remounted to reveal what is underneath. The network namespace has only
+  namespace as the caller's own uid, not root, and can make no user namespace of its
+  own, so every mount is locked: nothing can be unmounted or remounted to reveal what
+  is underneath. The network namespace has only
   a down loopback, and the PID namespace shows only the step's own processes.
 - **macOS**: Seatbelt, deny by default (:func:`mac_profile`): reads of the system's
   programs and libraries (not Homebrew's or ``/usr/local``'s data), reads and writes of
@@ -97,6 +99,9 @@ _SHELL = (
     'ws="$1"; uid="$2"; gid="$3"; shift 3; '
     'fail() { echo "refactory-seal: $1" >&2; exit 97; }; '
     'exec 3<"$ws" || fail "cannot open the workspace"; '
+    # One more user namespace (the unprivileged one the command runs in) and none after
+    # it: the command cannot become root of a namespace of its own.
+    'echo 1 > /proc/sys/user/max_user_namespaces || fail "cannot limit user namespaces"; '
     'mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"; '
     'r=/tmp/root; mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r" '
     '|| fail "cannot make the new root"; '
@@ -115,12 +120,13 @@ _SHELL = (
     '&& ln -s /proc/self/fd/1 "$r/dev/stdout" && ln -s /proc/self/fd/2 "$r/dev/stderr" '
     '|| fail "cannot link /dev/fd"; '
     'mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"; '
-    'mount -n -t tmpfs -o mode=1777,size=64m seal "$r/tmp" || fail "cannot mount /tmp"; '
-    # Made last, so a workspace under /tmp lies in the new root's own /tmp.
     'mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
     'exec 3<&-; '
     'cd "$r" && mkdir .old && pivot_root . .old || fail "cannot pivot to the new root"; '
     'cd / && umount -n -l /.old && rmdir /.old || fail "cannot detach the old root"; '
+    # The new root itself (/, /tmp, the folders above the workspace) is read only, as
+    # macOS's is: the workspace is the one place a sealed command writes.
+    'mount -n -o remount,bind,ro / || fail "cannot make the new root read only"; '
     'run="/usr/bin/unshare --user --mount --map-user=$uid --map-group=$gid --"; '
     f'limits="{LINUX_LIMITS}"; '
     + _EXEC

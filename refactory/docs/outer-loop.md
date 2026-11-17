@@ -1467,11 +1467,13 @@ state is promised, on any graph shape:
   through `seal.runner_command`, set as DSH's local sandbox provider's `runnerCommand`:
   on Linux, user, network, mount and PID namespaces around a new root built from an
   allow-list (`seal.LINUX_READS` read only, the workspace read and write), the command
-  running unprivileged in a nested user namespace so no mount can be undone; on macOS, a
-  deny-by-default Seatbelt profile. It reads nothing outside its workspace and the
-  system's programs (no other item, no grader file, no gold answer, no other process's
-  environment), writes only its workspace, has no network, and starts with an
-  environment of its own (no credential).
+  running unprivileged in a nested user namespace, unable to make one of its own, so no
+  mount can be undone; on macOS, a deny-by-default Seatbelt profile. It reads nothing
+  outside its workspace and the system's programs (no other item, no grader file, no gold
+  answer, no other process's environment), writes only its workspace, has no network, and
+  starts with an environment of its own (no credential). Its outputs are collected one
+  name at a time, each opened relative to its folder's descriptor without following a
+  link, so nothing it leaves or swaps in makes collection read outside the workspace.
   DSH's in-process tools (file, web) run outside the runner, so they are never listed.
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does

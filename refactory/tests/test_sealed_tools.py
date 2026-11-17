@@ -198,7 +198,9 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     assert out["unmount"].stdout == "", out["unmount"]
     assert "WROTE" not in out["remount"].stdout and out["remount"].stdout == ""
     assert "OPENED" not in out["terminals"].stdout, out["terminals"].stdout
-    assert out["homebrew data"].stdout == ""
+    if sys.platform == "darwin":
+        # On Linux /usr/local lies inside /usr, which every sealed command reads.
+        assert out["homebrew data"].stdout == ""
     assert out["system secrets"].stdout == ""
     assert out["limits"].stdout.split() == ["3600", "4194304"], out["limits"]
     assert out["settings"].stdout.strip().isdigit(), out["settings"]
@@ -493,3 +495,170 @@ def test_collect_moves_a_sealed_workspace_out_and_never_copies_through_a_link(tm
     copied = workspace.collect(place, run, ["answer.txt", "real/a.txt"])
     assert copied["copied"] == ["answer.txt", "real/a.txt"]
     assert (run / "answer.txt").read_text() == "ok\n"
+
+
+# ── a hostile step, end to end ────────────────────────────────────────────────
+
+def _listener(port: int):
+    """A TCP listener on loopback at ``port`` (0: any free one), or ``None`` where that
+    port is taken (the lab's model proxy holds 8082: it is then the real target)."""
+    import socket
+
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        return None
+    sock.listen(8)
+    return sock
+
+
+def test_a_hostile_step_is_blocked_at_every_turn_and_its_own_output_is_collected(tmp_path):
+    """A step that tries every way out: the gold answer beside its input, the person's
+    keys and credentials, writing outside, a link out at collection, the model proxy, the
+    network and DNS, and becoming root. Each attempt prints a marker only when it
+    succeeds, so no secret is ever printed; the step's own output is still collected."""
+    _sealable()
+    home = Path(os.path.expanduser("~"))
+    run = tmp_path / "run"
+    item = run / "items" / "a"
+    item.mkdir(parents=True)
+    (item / "input.txt").write_text("THE-INPUT")
+    (item / "expected.txt").write_text("GOLD-BESIDE-INPUT")
+    (run / "items" / "b").mkdir()
+    (run / "items" / "b" / "expected.txt").write_text("GOLD-OTHER-ITEM")
+    credentials = tmp_path / "creds" / "service-account.json"
+    credentials.parent.mkdir()
+    credentials.write_text('{"private_key": "PLANTED-KEY"}')
+    # The person's real files where they exist, and the run's credentials file (the
+    # DSH process's GOOGLE_APPLICATION_CREDENTIALS where it has one, else a planted one).
+    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or str(credentials)
+    secrets = {"ssh dir": home / ".ssh", "claude.json": home / ".claude.json",
+               "credentials": Path(gac), "planted credentials": credentials,
+               "gold beside input": item / "expected.txt",
+               "gold of another item": run / "items" / "b" / "expected.txt"}
+    place = workspace.prepare(run, "hostile", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",), reads=("items/a/input.txt",))
+    assert place is not None and place.runner
+    assert sorted(os.listdir(place.path / "items" / "a")) == ["input.txt"], "only the input is staged"
+
+    proxy = _listener(8082)
+    free = _listener(0)
+    ports = [8082, free.getsockname()[1]]
+
+    def q(path: Path | str) -> str:
+        return shlex.quote(str(path))
+
+    reads = "; ".join(
+        f"{{ cat {q(path)} || ls -A {q(path)}; }} >/dev/null 2>&1 && test -n \"$(cat {q(path)} "
+        f"2>/dev/null; ls -A {q(path)} 2>/dev/null)\" && echo 'GOT:{name}'"
+        for name, path in secrets.items())
+    script = "\n".join([
+        # The gold beside the input, by its absolute path above, relatively from the
+        # staged copy, and by searching for it.
+        reads,
+        f"cat {q(os.path.relpath(item / 'expected.txt', place.path))} >/dev/null 2>&1 "
+        "&& echo 'GOT:gold relative'",
+        f"find {q(tmp_path)} / -maxdepth 4 -name expected.txt -print 2>/dev/null | grep -q . "
+        "&& echo 'GOT:gold found'",
+        f"grep -rl GOLD- {q(tmp_path)} 2>/dev/null | grep -q . && echo 'GOT:gold grep'",
+        "cat \"$GOOGLE_APPLICATION_CREDENTIALS\" >/dev/null 2>&1 && echo 'GOT:credentials by env'",
+        # Writing outside the workspace.
+        f"echo x > {q(run / 'planted.txt')} 2>/dev/null && echo 'WROTE:run dir'",
+        f"echo x > {q(home / '.refactory-hostile-probe')} 2>/dev/null && echo 'WROTE:home'",
+        "echo x > /tmp/refactory-hostile-probe 2>/dev/null && echo 'WROTE:/tmp'",
+        "echo x > ../escaped.txt 2>/dev/null && echo 'WROTE:above the workspace'",
+        # Links for the collector to follow out: the answer a link to the gold, an output
+        # directory a link to the run directory, and a directory output holding a link.
+        f"ln -s {q(item / 'expected.txt')} linked-answer.txt",
+        f"ln -s {q(run)} linked-dir",
+        f"mkdir -p report && ln -s {q(item / 'expected.txt')} report/gold.txt "
+        "&& echo 'MINE' > report/own.txt",
+        # The model proxy, any loopback listener, the internet and DNS.
+        *(f"(exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo 'NET:loopback {port}'"
+          for port in ports),
+        "(exec 3<>/dev/tcp/8.8.8.8/53) 2>/dev/null && echo 'NET:8.8.8.8:53 tcp'",
+        "python3 -c \"import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); "
+        "s.settimeout(3); s.sendto(b'x', ('8.8.8.8', 53)); print('NET:8.8.8.8:53 udp')\" 2>/dev/null",
+        "python3 -c \"import socket; socket.getaddrinfo('example.com', 443); print('NET:dns')\" "
+        "2>/dev/null",
+        "getent hosts example.com >/dev/null 2>&1 && echo 'NET:dns getent'",
+        # Root: as it starts, through setuid, a namespace of its own, sudo and su.
+        "[ \"$(id -u)\" = 0 ] && echo 'ROOT:id'",
+        "python3 -c 'import os; os.setuid(0); print(\"ROOT:setuid\")' 2>/dev/null",
+        "[ \"$(unshare -r id -u 2>/dev/null)\" = 0 ] && echo 'ROOT:unshare'",
+        "sudo -n true >/dev/null 2>&1 && echo 'ROOT:sudo'",
+        "su -c true root </dev/null >/dev/null 2>&1 && echo 'ROOT:su'",
+        # Its own work.
+        "echo 'MY-ANSWER' > answer.txt",
+        "true",
+    ])
+    env_extra = {"GOOGLE_APPLICATION_CREDENTIALS": gac}
+    argv = [*place.runner, "--ro-bind", "/", "/", "--bind", str(place.path), str(place.path),
+            "--", "bash", "-c", script]
+    try:
+        result = subprocess.run(argv, cwd=place.path, capture_output=True, text=True, timeout=300,
+                                env={**os.environ, **env_extra})
+    finally:
+        for sock in (proxy, free):
+            if sock is not None:
+                sock.close()
+    escaped = [line for line in result.stdout.splitlines()
+               if line.split(":", 1)[0] in ("GOT", "WROTE", "NET", "ROOT")]
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert escaped == [], escaped
+    assert not (run / "planted.txt").exists() and not (home / ".refactory-hostile-probe").exists()
+    assert not (place.path.parent / "escaped.txt").exists()
+    for secret in ("GOLD-BESIDE-INPUT", "GOLD-OTHER-ITEM", "PLANTED-KEY"):
+        assert secret not in result.stdout + result.stderr, secret
+
+    # Collection follows no link out, and still takes the step's own output.
+    for name in ("linked-answer.txt", "linked-dir/items/a/expected.txt"):
+        with pytest.raises(workspace.WorkspaceError, match="symlink, or under one"):
+            workspace.collect(place, run, [name])
+    copied = workspace.collect(place, run, ["answer.txt", "report"])
+    assert copied["copied"] == ["answer.txt", "report"]
+    assert (run / "answer.txt").read_text() == "MY-ANSWER\n"
+    assert sorted(os.listdir(run / "report")) == ["own.txt"], "the link inside it is left out"
+    assert not (run / "linked-answer.txt").exists()
+
+
+def test_collection_reads_no_link_a_still_running_process_swaps_in(tmp_path):
+    """A sealed process that outlives its command (as on macOS before the reaper ends it)
+    swaps the answer between a file and a link to the gold answer while it is collected:
+    every collection copies the file or refuses the link, never the gold."""
+    _sealable()
+    run, place = _layout(tmp_path)
+    gold = tmp_path / "bench" / "gold.json"
+    # The answer is swapped between a file and a link to the gold; the directory output
+    # between a real one and a link to the gold's directory.
+    swapper = subprocess.Popen(
+        [sys.executable, "-c", "import os, sys\nws, gold = sys.argv[1:]\nos.chdir(ws)\n"
+         "os.mkdir('dA'); open('dA/x', 'w').write('MINE')\n"
+         "os.symlink(os.path.dirname(gold), 'dL')\n"
+         "while True:\n"
+         "    open('a.tmp', 'w').write('MINE')\n    os.replace('a.tmp', 'answer.txt')\n"
+         "    os.symlink(gold, 'l.tmp')\n    os.replace('l.tmp', 'answer.txt')\n"
+         "    os.rename('dA', 'dir')\n    os.rename('dir', 'dA')\n"
+         "    os.rename('dL', 'dir')\n    os.rename('dir', 'dL')\n",
+         str(place.path), str(gold)])
+    unsealed = workspace.Workspace(**{**place.__dict__, "runner": (), "tools": ()})
+    try:
+        outcomes = {"copied": 0, "refused": 0}
+        for _ in range(300):
+            try:
+                workspace.collect(unsealed, run, ["answer.txt", "dir"])
+            except workspace.WorkspaceError:
+                outcomes["refused"] += 1
+                continue
+            outcomes["copied"] += 1
+            if (run / "answer.txt").exists():
+                assert (run / "answer.txt").read_text() in ("", "MINE")
+            if (run / "dir").exists():
+                for name in os.listdir(run / "dir"):
+                    assert "GOLD" not in (run / "dir" / name).read_text()
+    finally:
+        swapper.kill()
+        swapper.wait()
+    assert outcomes["copied"] and outcomes["refused"], outcomes

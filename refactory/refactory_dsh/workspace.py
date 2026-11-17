@@ -36,6 +36,7 @@ sandbox, the agent runs there, and the folder comes back to the same collect ste
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import functools
 import hashlib
@@ -45,6 +46,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -998,33 +1000,108 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         summary["files"] = len(re.findall(r"^===(?:FILE|DELETE): ", emission, re.MULTILINE))
     else:
         copied = []
-        for name in writes:
-            relative = Path(name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise WorkspaceError(f"output {name!r} must be relative")
-            source = workspace.path / relative
-            if source.is_symlink() or (source.exists() and source.resolve() != (
-                    workspace.path.resolve() / relative)):
-                raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace as a "
-                                     "symlink, or under one; an output is a file or a directory of files")
-            if not source.exists():
-                continue
-            destination = _path(workdir, name)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if source.is_dir():
-                if destination.exists():
-                    shutil.rmtree(destination)
-                shutil.copytree(source, destination, symlinks=False,
-                                ignore=lambda folder, names: [item for item in names
-                                                              if (Path(folder) / item).is_symlink()])
-            else:
-                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(fd, "rb") as given, open(destination, "wb") as copy:
-                    shutil.copyfileobj(given, copy)
-            copied.append(name)
+        root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in writes:
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                    raise WorkspaceError(f"output {name!r} must be relative")
+                try:
+                    source = _open_beneath(root, relative.parts)
+                except _Linked:
+                    raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace as a "
+                                         "symlink, or under one; an output is a file or a directory of "
+                                         "files") from None
+                if source is None:
+                    continue
+                destination = _path(workdir, name)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if stat.S_ISDIR(os.fstat(source).st_mode):
+                        if destination.exists():
+                            shutil.rmtree(destination)
+                        _copy_dir_beneath(source, destination)
+                    elif stat.S_ISREG(os.fstat(source).st_mode):
+                        _copy_file(source, destination)
+                    else:
+                        raise WorkspaceError(f"agent node {workspace.node!r} left {name} in its workspace "
+                                             "as neither a file nor a directory")
+                finally:
+                    os.close(source)
+                copied.append(name)
+        finally:
+            os.close(root)
         summary["copied"] = copied
     _write_json(workspace.root / "collected.json", summary)
     return summary
+
+
+class _Linked(Exception):
+    """An output is a symlink, or lies under one."""
+
+
+#: Opens a file of the workspace without following a link and without blocking on a FIFO.
+_NOFOLLOW = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+def _open_beneath(root: int, parts: tuple[str, ...]) -> int | None:
+    """A descriptor for ``parts`` under the directory ``root``, opened one name at a time
+    relative to its parent's descriptor, never following a link (`_Linked`); ``None``
+    where it does not exist. Nothing a still-running process does to the paths after a
+    name is opened changes what that descriptor reads."""
+    parent = os.dup(root)
+    try:
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            try:
+                fd = os.open(part, _NOFOLLOW if last else _NOFOLLOW | os.O_DIRECTORY, dir_fd=parent)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    raise
+                try:
+                    found = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    return None
+                if stat.S_ISLNK(found.st_mode):
+                    raise _Linked from None
+                return None  # under a file, not a directory: no such output
+            os.close(parent)
+            parent = fd
+        result, parent = parent, -1
+        return result
+    finally:
+        if parent >= 0:
+            os.close(parent)
+
+
+def _copy_file(source: int, destination: Path) -> None:
+    with open(destination, "wb") as copy:
+        while chunk := os.read(source, 1 << 20):
+            copy.write(chunk)
+
+
+def _copy_dir_beneath(source: int, destination: Path) -> None:
+    """Copy the directory open at ``source`` to ``destination``, leaving out links (and
+    anything neither a file nor a directory), each entry opened relative to its
+    directory's descriptor without following a link."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in sorted(os.listdir(source)):
+        try:
+            fd = os.open(name, _NOFOLLOW, dir_fd=source)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOENT, errno.EMLINK, errno.ENXIO):
+                continue  # a link (or gone): left out, as a link always is
+            raise
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISDIR(mode):
+                _copy_dir_beneath(fd, destination / name)
+            elif stat.S_ISREG(mode):
+                _copy_file(fd, destination / name)
+        finally:
+            os.close(fd)
 
 
 def refusal_for(workdir: Path, name: str, text: str) -> str | None:
