@@ -64,17 +64,27 @@ REPEAT_SENTENCE = 100
 def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE) -> list[str]:
     """Each sentence of ``shortest``+ characters that ``text`` says more than once, read
     outside code fences and with table and list formatting taken off (a table cell and a
-    list item that say the same thing are the same sentence)."""
+    list item that say the same thing are the same sentence; backticks and bold do not
+    count). A sentence ends at ``.``, ``!`` or ``?``; its ``;``-separated clauses are
+    counted too, so a long sentence is caught whole and a long clause inside two
+    different sentences is caught alone.
+
+    Not checked, by decision: text inside fences (knob texts quoted whole, the pipeline
+    view, examples -- the block and view-once guards in ``test_request_guardrails`` hold
+    those), and anything shorter than ``shortest`` (step names, short table cells and
+    labels repeat by design)."""
     plain = []
     for line in _outside_fences(text):
         line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)  # a list item's marker
         plain += [cell.strip() for cell in re.split(r"(?<!\\)\|", line)]  # table cells
     counts: dict[str, int] = collections.Counter()
     for cell in plain:
-        for sentence in re.split(r"(?<=[.!?;])\s+", cell):
-            norm = " ".join(sentence.replace("`", "").replace("**", "").split()).rstrip(".;")
-            if len(norm) >= shortest:
-                counts[norm] += 1
+        for sentence in re.split(r"(?<=[.!?])\s+", cell):
+            parts = re.split(r"(?<=;)\s+", sentence)
+            for part in dict.fromkeys([sentence, *(parts if len(parts) > 1 else [])]):
+                norm = " ".join(part.replace("`", "").replace("**", "").split()).rstrip(".;")
+                if len(norm) >= shortest:
+                    counts[norm] += 1
     return [sentence for sentence, n in counts.items() if n > 1]
 
 

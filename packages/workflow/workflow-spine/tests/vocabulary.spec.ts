@@ -418,6 +418,21 @@ describe('an op\'s knob_outputs', () => {
     expect(validateGraph(graph)).toEqual([])
   })
 
+  const shared = JSON.parse(readFileSync(fileURLToPath(new URL(
+    '../../../../refactory/tests/fixtures/knob_outputs_cases.json', import.meta.url)), 'utf8')) as {
+    op: { knobs: string[], writes: string[], produces: string[] }
+    cases: Array<{ knob_outputs: unknown, why: string | null }>
+  }
+  it.each(shared.cases)('reads the declarations the walker reads the same way: %j', ({ knob_outputs, why }) => {
+    const graph: WorkflowGraph = {
+      name: 'shared', start_node: 'build', edges: [],
+      nodes: { build: { _type: 'FnNode', id: 'build', command: 'true', reads: [], ...shared.op, knob_outputs } as WorkflowGraph['nodes'][string] },
+    }
+    const messages = validateGraph(graph).map(issue => issue.message)
+    if (why === null) expect(messages).toEqual([])
+    else expect(messages.some(message => message.includes(why))).toBe(true)
+  })
+
   it('refuses it on anything but an op', () => {
     const graph = withPrepare({})
     graph.nodes.prepare = { ...graph.nodes.prepare, _type: 'AgentNode' }

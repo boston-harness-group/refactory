@@ -822,7 +822,7 @@ def test_the_request_shows_the_view_first_and_as_built_beside_the_words():
             "wiring": ["+ loop(solve, judge j, max 2 -> 3 runs)"]}
     lines = base._edit_change_lines([pair])
     said = lines.index("Flow change, as proposed: the judge sends solve back once")
-    assert lines[said + 1].startswith("As built (its pipeline lines")
+    assert lines[said + 1].startswith("As built (the candidate's new + and changed ~ pipeline lines")
     assert lines[said + 2:said + 5] == ["```text", "+ loop(solve, judge j, max 2 -> 3 runs)",
                                         "```"]
     text = "\n".join(base._reasoning_lines([{**pair, "id": "c1", "epoch": 1}]))

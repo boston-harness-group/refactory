@@ -1154,19 +1154,57 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 def reply_object(text: str) -> dict[str, Any]:
-    """The reply's top-level JSON object (`_outermost_object`, never one nested inside
-    it). When that object is not valid JSON, the error says so, with the parser's message
-    and where (the line, column and the text there) -- an object nested inside a broken
-    answer (one finding's ``where``) is never read as the answer, and the reply is never
-    repaired. No object at all raises as `extract_json` does."""
+    """The JSON object a reader's, a step review's or the integrity judge's reply answers
+    with: the first top-level object of the first fenced block that has one, else of the
+    reply (`_top_object`: by its own braces, strings skipped; never one nested inside
+    another). A top-level span that starts like a JSON object and does not parse refuses
+    the reply only when no earlier top-level object parsed, with the parser's message
+    and where (the line, column and the text there): so an object nested inside a broken
+    answer is never read as the answer, a broken fragment after a valid answer (an
+    example in prose) does not undo it, and nothing is repaired. The proposer's answer
+    has its own rules (`answer_json`). No object at all raises as `extract_json` does."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
-    found, problem = _outermost_object(text)
+    for chunk in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+        found, _problem = _top_object(chunk)
+        if found is not None:
+            return found
+    found, problem = _top_object(text)
+    if found is not None:
+        return found
     if problem:
         raise ValueError(f"the answer's JSON object is not valid JSON: {problem}")
-    if found is None:
-        raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
-    return found
+    raise ValueError(f"no JSON object in the model's answer: {text[:400]!r}")
+
+
+def _top_object(text: str) -> tuple[dict[str, Any] | None, str]:
+    """``text``'s first top-level JSON object and ``""``; or ``None`` and why, when a
+    span that starts like a JSON object is broken (or never closed) before any object
+    parses; or ``(None, "")`` when there is none. Braces in prose (``{a, b}``) are
+    skipped."""
+    start = text.find("{")
+    while start != -1:
+        end = _object_end(text, start)
+        looks_json = _JSON_START.match(text, start) is not None
+        if end is None:
+            if looks_json:
+                return None, (f"its object opened at character {start + 1} is never closed "
+                              f"(cut off? it ends: …{' '.join(text[-120:].split())})")
+            start = text.find("{", start + 1)
+            continue
+        try:
+            loaded = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            if looks_json:
+                at = start + exc.pos
+                return None, (f"{exc.msg} at line {exc.lineno} column {exc.colno}, here: "
+                              f"…{' '.join(text[max(start, at - 120):at].split())} ⟨HERE⟩ "
+                              f"{' '.join(text[at:at + 60].split())}…")
+        else:
+            if isinstance(loaded, dict):
+                return loaded, ""
+        start = text.find("{", end + 1)
+    return None, ""
 
 
 def answer_json(text: str) -> tuple[dict[str, Any], str]:

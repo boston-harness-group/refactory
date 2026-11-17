@@ -2021,11 +2021,17 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         full_refusals.append(refused)
     if not rows:
         return []
-    from refactory_dsh.nn.core_ops import TASK, _readable, _task_inputs
+    from refactory_dsh.nn.core_ops import TASK, _readable, _Refused, _task_inputs
     from refactory_dsh.nn.operators import TASK_MEANING
 
-    task = sorted(_readable(graph, state, _task_inputs(graph, state)),
-                  key=lambda key: (key[0] != "fact", key[1]))
+    try:
+        task = sorted(_readable(graph, state, _task_inputs(graph, state)),
+                      key=lambda key: (key[0] != "fact", key[1]))
+    except _Refused as exc:  # logged, never raised: the lead then names no task inputs
+        import logging
+
+        logging.getLogger(__name__).warning("no task inputs: %s", exc)
+        task = []
     task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step "
                  f"{', '.join(name for _k, name in task)}, where it is there before the step: "
                  f"{TASK_MEANING}." if task else "") + (
@@ -3710,8 +3716,9 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
             if entry.get("flow_change") else [])
     if not built:
         return said
-    return [*said, "As built (its pipeline lines, new + or changed ~, read from the "
-            "candidate's graph; where the proposal's words say otherwise, this is what ran):",
+    # Short, because it heads every candidate's lines: a 100+ character label said once
+    # per candidate is a repeat (`request_sizes.repeated_sentences`).
+    return [*said, "As built (the candidate's new + and changed ~ pipeline lines: what ran):",
             "```text", *built, "```",
             *(["Check the description above against As built."] if said else [])]
 

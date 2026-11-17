@@ -254,3 +254,34 @@ def test_task_that_gives_nothing_without_an_undeclared_op_says_to_name_inputs():
     state = {"graph": graph.to_state(), "knobs": {}}
     reason = nn_edits.precheck({"op": "rewire", "step": "check", "sees": ["task"]}, state)
     assert reason and "gives nothing" in reason and "knob_outputs" not in reason, reason
+
+
+def test_a_task_that_cannot_be_worked_out_refuses_with_the_real_error(monkeypatch):
+    """An error reading the graph is said as itself, never as a task that gives nothing."""
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("node 'prepare' cannot be read")
+
+    monkeypatch.setattr(operators, "task_inputs", broken)
+    with pytest.raises(nn_edits.EditError) as refused:
+        nn_edits.apply({"op": "branch", "fork": "step_fork", "kind": "agent",
+                        "sees": ["task"]}, _state("livemath/skill_graph"))
+    reason = str(refused.value)
+    assert "what \"task\" gives cannot be worked out: RuntimeError: node 'prepare' cannot be " \
+        "read" in reason and "gives nothing" not in reason, reason
+
+
+CASES = json.loads((Path(__file__).parent / "fixtures" / "knob_outputs_cases.json").read_text())
+
+
+@pytest.mark.parametrize("case", CASES["cases"], ids=lambda c: str(c["why"]))
+def test_the_walker_reads_the_shared_declarations_as_the_spine_does(case):
+    """The same cases ``vocabulary.spec.ts`` runs through the spine's validateGraph."""
+    op = CASES["op"]
+    make = lambda: nn.Node("build", "op", call="json:dumps", knobs=tuple(op["knobs"]),  # noqa: E731
+                           writes=tuple(op["writes"]), produces=tuple(op["produces"]),
+                           knob_outputs=case["knob_outputs"])
+    if case["why"] is None:
+        make()
+    else:
+        with pytest.raises(GraphError, match=case["why"]):
+            make()

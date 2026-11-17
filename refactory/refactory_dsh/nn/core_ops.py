@@ -140,17 +140,15 @@ def _grader_side(graph: Graph, state: Mapping[str, Any]) -> set[tuple[str, str]]
 
 
 def _task_inputs(graph: Graph, state: Mapping[str, Any]) -> set[tuple[str, str]]:
-    """What ``"sees": ["task"]`` gives (`operators.task_inputs`); nothing, with a warning,
-    when a node cannot be read (the validator says why)."""
+    """What ``"sees": ["task"]`` gives (`operators.task_inputs`). A node that cannot be
+    read refuses the edit with the real error, never as a task that gives nothing."""
     from .operators import task_inputs
 
     try:
         return task_inputs(graph, _knob_values(state))
-    except Exception as exc:  # noqa: BLE001 - a node that cannot be read is the validator's
-        import logging
-
-        logging.getLogger(__name__).warning("no task inputs: %s: %s", type(exc).__name__, exc)
-        return set()
+    except Exception as exc:  # noqa: BLE001 - said in the refusal
+        raise _Refused(f"what \"task\" gives cannot be worked out: {type(exc).__name__}: "
+                       f"{exc}") from exc
 
 
 def _taken_names(graph: Graph) -> set[str]:
@@ -267,9 +265,6 @@ def _no_task(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]]
     something (so all its outputs count as carrying its knobs only for want of it)."""
     from dataclasses import replace
 
-    from .operators import task_inputs
-
-    values = _knob_values(state)
     undeclared = []
     for node in graph.nodes.values():
         if node.kind != "op" or node.knob_outputs is not None or not node.knobs:
@@ -277,7 +272,7 @@ def _no_task(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]]
         trial = graph.copy()
         trial.nodes[node.id] = replace(node, knob_outputs={
             out: () for out in [*node.writes, *node.produces]})
-        if task_inputs(trial, values) & there:
+        if _task_inputs(trial, state) & there:
             undeclared.append(node.id)
     why = ("\"task\" gives nothing before this step: no fact or file there is free of a "
            "step's output and of a knob's text, so the step would see nothing")
