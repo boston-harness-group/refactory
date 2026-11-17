@@ -448,6 +448,13 @@ DECLARED_TIMEOUT_LINE = re.compile(
     r"^(?:[A-Za-z0-9_.-]+: DeclaredTimeout: |worker: model session timed out at its node's "
     r"declared timeout_s)", re.MULTILINE)
 
+#: The same, once the node's declared retry is spent (`node_retry.RetriesExhausted`): the
+#: retry wrapper's own line, anchored at its start, ending on the last attempt's error.
+DECLARED_TIMEOUT_RETRIED_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: RetriesExhausted: |worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
+    r"\. Last error: (?:[A-Za-z0-9_.-]+: DeclaredTimeout: )?model session timed out at its "
+    r"node's declared timeout_s", re.MULTILINE)
+
 
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
@@ -468,7 +475,11 @@ def error_kind(error: BaseException) -> str:
 
     if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
         return "harness_incident"
-    if isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error)):
+    from refactory_dsh.node_retry import RetriesExhausted
+
+    if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
+            or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
+            or DECLARED_TIMEOUT_RETRIED_LINE.search(str(error))):
         return "declared_timeout"
     if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
         return "timeout"

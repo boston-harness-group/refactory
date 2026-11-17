@@ -78,9 +78,10 @@ class DeclaredTimeout(RuntimeError):
     """A node's model session reached the wall its node declares (`Node.timeout_s`, or a
     declared retry's longer wall).
 
-    The pipeline's own limit, so its failure is the pipeline's: not a ``CompletionTimeout``,
-    so no timeout retry replays it (`node_retry.failure_kind`), and its item is recorded
-    with ``error_kind`` ``declared_timeout`` (`items.error_kind`). Its message starts with
+    The pipeline's own limit, so its failure is the pipeline's: its item is recorded with
+    ``error_kind`` ``declared_timeout`` (`items.error_kind`). A retry on timeout the node
+    declares still answers it (`node_retry.failure_kind`): the wall and its retry are
+    both the graph's choice. Its message starts with
     `DECLARED_TIMEOUT_TEXT`, which is how the spine's worker error names it."""
 
 

@@ -142,9 +142,12 @@ def failure_kind(error: BaseException) -> str | None:
     """The `nn.graph.RETRY_ON` failure ``error`` is, or None when it is none of them.
 
     A timeout is the model client's deadline (`model.CompletionTimeout`: inactivity, or
-    a per-completion limit), or a timeout another client reports the same way. A session
-    stopped at its node's declared wall (`model.DeclaredTimeout`, the pipeline's own
-    limit) or at the harness backstop (`model.HarnessBackstop`) is not one. A crash is a session the worker or product
+    a per-completion limit), a timeout another client reports the same way, or a session
+    stopped at its node's declared wall (`model.DeclaredTimeout`): the wall and the retry
+    rule a node declares are both the graph's own choice, so a node that declares a retry
+    on timeout gets it at its wall (its item is still recorded ``declared_timeout``, the
+    pipeline's limit, by `items.error_kind`). A session stopped at the harness backstop
+    (`model.HarnessBackstop`) is not one. A crash is a session the worker or product
     failed (`model.CompletionFailed` of kind ``worker``: an invalid result, a worker
     error). ``output_limit`` is the model using its whole output allowance without
     answering: the model's own failure on the question, retried only when a step opts in.
@@ -153,13 +156,13 @@ def failure_kind(error: BaseException) -> str | None:
     Cancellation, budget exhaustion, a refusal and a bad answer are never retried, and
     neither is a session whose runtime did not finish shutting down.
     """
-    from refactory_dsh.model import CompletionFailed, CompletionTimeout
+    from refactory_dsh.model import CompletionFailed, CompletionTimeout, DeclaredTimeout
 
     if getattr(error, "cleanup_unconfirmed", False) or "child cleanup unconfirmed" in str(error):
         # A session whose runtime did not finish shutting down (a timeout that then
         # hung): its tools may still be running, so a fresh session could collide.
         return None
-    if isinstance(error, (CompletionTimeout, subprocess.TimeoutExpired)):
+    if isinstance(error, (CompletionTimeout, DeclaredTimeout, subprocess.TimeoutExpired)):
         return "timeout"
     if isinstance(error, RuntimeError) and str(error).startswith("model completion timed out"):
         return "timeout"
@@ -168,6 +171,20 @@ def failure_kind(error: BaseException) -> str | None:
         # the provider refuses would fail the next session the same way.
         return {"worker": "crash", "output_limit": "output_limit"}.get(error.kind)
     return None
+
+
+def _cause(error: BaseException, kind: str) -> str:
+    """What a `RetriesExhausted` says its last attempt ended on: ``output_limit``, or
+    ``declared_timeout`` for a session its node's declared wall stopped
+    (`model.DeclaredTimeout`, the pipeline's limit, though its declared retry answered it),
+    else the retry kind."""
+    from refactory_dsh.model import DeclaredTimeout
+
+    if _output_limit(error):
+        return "output_limit"
+    if isinstance(error, DeclaredTimeout):
+        return "declared_timeout"
+    return kind
 
 
 def _output_limit(error: BaseException) -> bool:
@@ -347,8 +364,7 @@ def deliver(
             if index + 1 >= tries:
                 raise RetriesExhausted(
                     f"{node} {failed} {_times(len(ran))} (after {spent}); {its} "
-                    f"is spent. Last error: {error}", kind=kind,
-                    cause="output_limit" if _output_limit(error) else kind,
+                    f"is spent. Last error: {error}", kind=kind, cause=_cause(error, kind),
                     sessions=len(ran)) from error
             limit: int | None = None
             if walls:
@@ -365,8 +381,7 @@ def deliver(
                         f"{node} {failed} (after {spent}) and {its} was not "
                         f"started: {max(0, limit)}s is left of the node's envelope and the "
                         f"run's wall. Last error: {error}", kind=kind,
-                        cause="output_limit" if _output_limit(error) else kind,
-                        sessions=len(ran)) from error
+                        cause=_cause(error, kind), sessions=len(ran)) from error
             if budget is not None:
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"{failed} after {ran[-1]}s; retried by the "

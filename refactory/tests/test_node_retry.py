@@ -254,19 +254,20 @@ def test_an_optional_node_that_times_out_twice_is_missing_and_says_why(tmp_path,
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_declared_wall_is_the_pipelines_limit_and_is_not_retried(tmp_path, runtime):
+def test_a_declared_wall_is_the_pipelines_limit_and_its_declared_retry_answers_it(tmp_path, runtime):
     """A session still streaming at its node's declared 2 s wall stops there as a
-    `DeclaredTimeout`: the node's timeout retry does not answer it, and its item would be
-    recorded ``declared_timeout`` from either runtime's text (`items.error_kind`)."""
+    `DeclaredTimeout`, recorded ``declared_timeout`` from either runtime's text
+    (`items.error_kind`): the pipeline's own limit. The retry on timeout the node declares
+    is the graph's choice too, so it answers the wall: with every attempt still streaming
+    at its wall, the node is tried once more and then fails as ``declared_timeout``."""
     from refactory_dsh.items import error_kind
 
-    dsh = Scripted(tmp_path / "dsh", [{"active": 30}, {"answer": "late"}])
+    dsh = Scripted(tmp_path / "dsh", [{"active": 30}, {"active": 30}, {"answer": "late"}])
     ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=2)), dsh.client())
     assert not ok
-    said = "model session timed out at its node's declared timeout_s (2s) after 2s"
-    assert (f"reviewer: DeclaredTimeout: {said}" if runtime == "walker" else f"worker: {said}") in error
+    assert "declared timeout_s" in error
     assert error_kind(RuntimeError(error)) == "declared_timeout"
-    assert dsh.calls == 1 and _retried(tmp_path / "run") == []
+    assert dsh.calls == 1 + int(RULE["times"]) and len(_retried(tmp_path / "run")) == int(RULE["times"])
 
 
 def _missing_verifier(runtime: str, tmp_path: Path, verifier: Node, plan: list[dict],
@@ -745,10 +746,11 @@ def test_only_a_timeout_is_a_timeout():
     assert failure_kind(subprocess.TimeoutExpired("dsh", 1)) == "timeout"
     assert failure_kind(RuntimeError("model completion failed (exit 1): timed out reading")) is None
     assert failure_kind(BudgetExhausted("elapsed-time budget exhausted")) is None
-    # A declared wall is the pipeline's own limit, and the backstop the harness's guard:
-    # neither is a timeout a retry answers.
+    # A declared wall is the pipeline's own limit; a retry on timeout the node declares
+    # answers it (both are the graph's choice). The backstop is the harness's guard: no
+    # retry answers it.
     from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
-    assert failure_kind(DeclaredTimeout("model session timed out at its node's declared timeout_s")) is None
+    assert failure_kind(DeclaredTimeout("model session timed out at its node's declared timeout_s")) == "timeout"
     assert failure_kind(HarnessBackstop("model session hit the harness backstop after 9s")) is None
 
 
