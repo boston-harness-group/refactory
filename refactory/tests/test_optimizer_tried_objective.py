@@ -70,11 +70,15 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     assert "proposed in round 2" in tried
     assert "Nothing this epoch replaced it (what was tried and not kept" in prompt
     six = by_level[6].id
-    (line,) = [l for l in tried.splitlines() if f"`{six}`" in l]
+    (line,) = [l for l in tried.splitlines() if l.startswith(f"- `{six}`")]
     assert f"from `{by_level[7].id}`" in line and "knob change: prompt/setting" in line
-    assert "set_knob: level" in line and "gate: rejected" in line
+    assert "set_knob: level" in line and f"train score {by_level[6].score}" in line
+    # Its counts and the gate's word are in the per-kind tally, said once there.
+    (tally,) = [l for l in tried.splitlines() if f"`{six}`" in l and l is not line
+                and not l.startswith(f"- `{six}`")]
     # 7 passes t1-t5, 6 passes t1-t4: one broken, none fixed.
-    assert "fixed 0 / broken 1 of" in line and f"train score {by_level[6].score}" in line
+    assert "fixed 0 / broken 1 of" in tally and "gate: rejected" in tally
+    assert "fixed 0 / broken 1" not in line and "gate:" not in line
     refusals = [l for l in tried.splitlines() if l.startswith("- refused before it ran")]
     assert len(refusals) == 2
     # Newest first: the bypass was refused after the unreadable entry.
