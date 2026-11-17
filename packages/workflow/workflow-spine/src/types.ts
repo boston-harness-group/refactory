@@ -109,6 +109,19 @@ export interface WorkflowNode {
    * output. Absent preserves existing tool-enabled behavior.
    */
   tool_policy?: 'none'
+  /**
+   * `FnNode`: which of the op's outputs (a file in `writes` or a fact in `produces`)
+   * carry which of its `knobs`' text, naming every output once (Python's
+   * `Node.knob_outputs`). Declared for the optimizer, which reads it to keep a step told
+   * to see the task's own input from another step's instructions; the spine checks it
+   * (`validateGraph`) and does not otherwise read it. `knobs` and `produces` travel only
+   * beside it.
+   */
+  knob_outputs?: Record<string, string[]>
+  /** `FnNode` with `knob_outputs`: the op's knobs. */
+  knobs?: string[]
+  /** `FnNode` with `knob_outputs`: the facts the op produces. */
+  produces?: string[]
   [key: string]: unknown
 }
 

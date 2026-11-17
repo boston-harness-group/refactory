@@ -133,8 +133,10 @@ def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
     carries = _rows(_section(state))["summarise"][0]
     assert "raw.txt (op load, not followed further)" in carries, carries
     _package, mode = registry.resolve(Path("."), "livemath/solver")
-    assert "knob(s) skill (the op's, for all 3 of its outputs)" in _rows(
-        _section(mode().state_dict()))["solve"][0]
+    # format_prompt declares that only skill_section carries the skill knob.
+    assert _rows(_section(mode().state_dict()))["solve"][0] == (
+        "skill_section (op format_prompt, which reads current_item.json (data), knob skill); "
+        "solver_prompt (op format_prompt, which reads current_item.json (data))")
 
 
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
@@ -384,29 +386,29 @@ def test_a_code_replacing_hint_is_checked_without_a_code_dry_run_and_says_so(mon
 
 
 def test_the_lead_names_what_sees_task_gives_on_this_pipeline():
-    """A branch that `sees: ["task"]` also gets compare's prompt fact (built by a plain op
-    from the item and compare's instruction knob): the lead lists it, so a proposal does
-    not describe such a step as seeing the question alone."""
+    """A branch that `sees: ["task"]` gets the question once (prepare's user_prompt), never
+    compare's prompt fact (prepare declares that it carries compare's instruction knob) or
+    the item record: the lead lists exactly that, in the words the operator line uses."""
     from refactory_dsh.nn import core_ops
     from refactory_dsh.nn.graph import Graph
+    from refactory_dsh.nn.operators import TASK_MEANING
 
     state = _start_state()
     lead = _section(state)[0]
     names = sorted(name for _kind, name in core_ops._task_inputs(
         Graph.from_state(state["graph"]), state))
-    assert '`"sees": ["task"]` gives a new step these' in lead
-    for name in ("compare_prompt", "user_prompt", "current_item.json"):
-        assert name in names and name in lead.split('["task"]', 1)[1], name
+    assert names == ["user_prompt"]
+    assert '`"sees": ["task"]` gives a new step user_prompt, where it is there before the ' \
+        f"step: {TASK_MEANING}." in lead, lead
     branch = nn_edits.apply({"op": "branch", "fork": "step_fork", "kind": "agent",
                              "text": "{{user_prompt}}", "sees": ["task"]}, state)
-    # The branch that sees "task" does take compare's prompt fact in, as the lead says.
     from refactory_dsh.nn.validate import consumed
 
     graph = Graph.from_state(branch["graph"])
     agent = next(n for n in set(graph.nodes) - set(state["graph"]["nodes"])
                  if graph.nodes[n].kind == "agent")
     values = {k: e["value"] for k, e in branch["knobs"].items()}
-    assert ("fact", "compare_prompt") in consumed(graph.nodes[agent], values)
+    assert consumed(graph.nodes[agent], values) == {("fact", "user_prompt")}
 
 
 def test_the_loop_line_says_what_the_judge_sees_and_how_often_the_step_runs():
@@ -473,8 +475,8 @@ def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
         "a new branch here can see: compare_prompt@prepare (+knob compare_task), "
         "hypotheses_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
         "precision_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
-        "user_prompt@prepare (+knob compare_task), compare_notes.txt@compare, "
-        "current_item.json@data; \"task\" gives compare_prompt, user_prompt, current_item.json")
+        "user_prompt@prepare, compare_notes.txt@compare, "
+        "current_item.json@data; \"task\" gives user_prompt")
     nested = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
     forks = [n for n, x in nested["graph"]["nodes"].items() if x.get("kind") == "fork"]
     assert all(_rows(_section(nested))[f][0].startswith("a new branch here can see: ")

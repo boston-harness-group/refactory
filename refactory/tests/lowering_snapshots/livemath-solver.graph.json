@@ -44,6 +44,21 @@
       "command": "python -m refactory_dsh.run refactory_packages.livemath.ops:format_prompt",
       "callable_name": "refactory_packages.livemath.ops:format_prompt",
       "notes": "",
+      "knob_outputs": {
+        "user_prompt": [],
+        "solver_prompt": [],
+        "skill_section": [
+          "skill"
+        ]
+      },
+      "knobs": [
+        "skill"
+      ],
+      "produces": [
+        "user_prompt",
+        "solver_prompt",
+        "skill_section"
+      ],
       "_type": "FnNode"
     },
     "solve": {

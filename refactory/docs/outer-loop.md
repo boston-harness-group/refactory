@@ -531,13 +531,12 @@ spine through its runner, the walker in memory).
   keeping a candidate only when it beats the current one; a train score only breaks a
   tie between candidates that beat the current one by the same validation score, and a
   tie with the current candidate is rejected. The proposal request (not the analyst,
-  merge or memory calls) adds the run's **compute policy** from the same settings: with
-  `parsimony` 0, extra steps and model calls per item are not penalised, so a change
-  that adds them is weighed by the score it should reach like any other (when the score
-  is the items' mean: per-item cost is reported separately and is not part of the
-  score; otherwise cost counts only as far as the task's own score measures it). With
+  merge or memory calls) adds the run's **compute policy**, only what the score text
+  does not already say: with `parsimony` 0, cost is not a reason for or against a change
+  (and, when the score is the items' mean, per-item cost is reported separately). With
   `parsimony` above 0 the size-cost lines stand alone. Nothing steers toward any kind of
-  change.
+  change. The validation gate's rule is said here once; the results' gate note points to
+  it.
 
 - **Order.** Items answered wrong come first, then those that failed with an error
   (with their error, whether or not any step ran; they are in the cause table too),
@@ -901,10 +900,11 @@ paired with a parent picker), on the train records the request carries:
   `analyst_group_size` (8, SkillOpt's `minibatch_size`); one optimizer-model call per
   batch. At most 8 calls of the stage are in flight at once, merges included (the two
   sides' merges run side by side), so 35 train items (5 or 6 batches) take one wave of
-  analysts. Each reads the pipeline (its nodes and edges, each node in
-  full with the settings bound to it, every other setting's value) and each item's full
-  trace: its input, every step's input and output in the order they ran, the expected
-  answer, the prediction, the score and the grader's feedback. Each item's heading
+  analysts. Each reads the pipeline in the proposer's words, from the same renderers:
+  the pipeline view and each step's settings with their values (a paragraph the steps'
+  texts share read once, since an analyst never patches) -- no node table or node JSON
+  -- and each item's full trace: its input, every step's input and output in the order
+  they ran, the expected answer, the prediction, the score and the grader's feedback. Each item's heading
   carries the item fields its Task declares (`Task.item_metadata`, read by
   `Task.item_meta`; LiveMath shows `task_type` exactly as SkillOpt's analysts see it,
   rollout.py:132: the item's first theorem type, else `math_mcq`), never a
@@ -985,8 +985,13 @@ paired with a parent picker), on the train records the request carries:
   its analysts' edits: its text, what to change and what to keep, where (a structure
   note too), every evidence quote, line breaks kept; only when the findings pass the
   section's room are the longest texts cut to one length (never below 100 characters),
-  each cut marked `… [cut: N chars]`. The analysts read the edit catalogue's
-  descriptions whole. The analysts' item texts show an errored item's error once (not
+  each cut marked `… [cut: N chars]`. The analysts read the operations as the proposer
+  does (`base.operation_lines`, the same rows), so a finding names only an operation the
+  proposer is shown. An analyst's reply whose top-level JSON object does not parse is
+  said to be invalid JSON, with the parser's message and where (`reply_object`); it is
+  not repaired, and no object nested inside it is read as the answer. The readers, the step
+reviews and the integrity judge read replies the same way (the judge's own salvage of a
+broken reply, marked so it never vetoes, is unchanged). The analysts' item texts show an errored item's error once (not
   again as the grader's reason). The analysts take the readers' place: no
   reader call runs, and when the items do not fit one request the items they cite are
   shown in full first. SkillOpt's analysts are its only reading of the trajectories, so
@@ -1677,12 +1682,11 @@ the same way on both runtimes:
 Neither is prescribed: no combiner, vote or normalisation is built in, and a proposer
 that wants a vote writes it as a code step.
 
-**What each node has.** The request's table of what each node can use names, beside each
-fact and file, the step that makes it, and marks with "(task input)" the ones no model
-step's output reaches (`nn.operators.model_free_inputs`: the task's own inputs and what
-plain ops build from them alone, as nodes declare them). A step given only those sees
-the task and none of the other steps' work, and a step's input is no longer mistaken for
-its output. The composition text says an agent without tools sees its prompt and the
+**What each node has.** The request's table of what each node can use writes each fact
+and file as the pipeline view does (`name@maker`, `@run` when no step makes it), so a
+fact has one label everywhere. Nodes with the same row share it, and a row that holds
+all of another's names is said as that row plus the rest ("as at `X`, plus ..."). A
+step's input is no longer mistaken for its output. The composition text says an agent without tools sees its prompt and the
 files it lists in `reads` (pasted in after the prompt), as both runtimes deliver them.
 `nn.operators.place_output` puts a new step's fact into the prompt knob of the next model
 step downstream (or a named one), and says where; the core operators below place their
@@ -1783,7 +1787,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
 | `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output is wired after the join as **Wiring** below says, guarded (`{% if %}`) when `optional` is given |
-| `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own inputs (facts and files no model step's output reaches), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
+| `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own input, once, as the model steps receive it (never a step's output or a knob's text: an op's output carries the knobs it declares in `knob_outputs`, else every knob it reads), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
 | `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
@@ -1835,10 +1839,12 @@ pipeline view; what this run has tried and how each attempt did (recent results,
 candidate so far, the traces' numbers, the last edit's children and the reasoning behind
 recent candidates with what each edit built, the run's feedback and memory, earlier runs,
 the latest refusals); what the analysts found, failures and successes, with the per-step
-failure map; the edits it may make (the operations, how nodes compose, one worked example
-per structural operator, which apply to each step, the steps' settings, the author's
-guidance); the items; then a reference at the end (every node and edge, what each node has
-before it runs, each step in full with the node schema, the validator's rules); and the
+failure map; the edits it may make (the operations, each said once -- the written-out
+ones in a table, then the core operators one line and one example each, the same rows the
+analysts read -- how nodes compose, which apply to each step, the steps' settings, the
+author's guidance); the items; then a reference at the end (what each node has before it
+runs, each step in full with the node schema, the validator's rules; the nodes and edges
+only when the pipeline view could not be drawn); and the
 answer's form last. Items are chosen rather than cut, and size is never a reason to cut
 one: every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
 characters; it only decides that, and never cuts); otherwise a table lists every item,
@@ -1865,8 +1871,10 @@ shown (`Sees: the input, compare's reply`) and shows only the rest of its prompt
 instructions, then its full reply, each fenced with headings demoted; and across the items
 of one request an instruction shown for an earlier item is said as "same as item X, step
 Y" (`evidence.dedup`) when that is shorter. Nothing is lost: every reply and every distinct
-instruction text appears once in the request. The proposer's items leave the step prompts
-out (the pipeline view and the settings carry the instructions). Two renderings of the same
+instruction text appears once in the request. The proposer's items say, per step, what its prompt
+took by name (`Sees:`) and only the part of its prompt its settings do not hold (`Also in its
+prompt`: a reason a judge sent it back with, say); its instructions are under "Each step's
+settings" (`base.ITEM_FORM`, the legend beside the items). Two renderings of the same
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
 "What the last edit changed" shows the parent's item whole and the child's verdict and
@@ -1896,7 +1904,8 @@ readers it declares). Read from its lines alone, the view says exactly the graph
 (checked on every seed and its draws): a way that meets a step drawn already says
 `-> step (above)`, a way that ends the run inside a block says `-> end` (so what follows the
 block does not read as following it), and a loop's gate with more than one way forward
-lists each after its loop line. About 1.5k
+lists each after its loop line. A loop that does not go on with its last attempt past its
+cap says so (`past the cap: fail_item` or `halt`, from `Graph.on_exhausted`). About 1.5k
 characters on the S4 pipeline. Python only: the spine does not render requests. A parser
 from the view back to a graph is not built.
 
@@ -1914,12 +1923,32 @@ pipeline view (at most 12 lines a candidate, the rest counted).
 **Naming inputs.** `"sees"` takes `"task"`, step ids, or single fact or file names there
 before the new step (that input alone); the catalogue says so, a name that is not there is
 refused with the names that are, and each fork's row in the operator table lists what a new
-branch there can name, `(+knob k)` marking one built by an op that reads text knob `k`.
+branch there can name, `(+knob k)` marking an output that carries text knob `k`.
+
+**What `"task"` gives.** `operators.task_inputs` is the one definition the operator line,
+the pipeline view, the step-carries table and the operators' wiring read: the task's own
+input, once, as the model steps receive it. A name is out when an agent makes it, when an
+op makes it with a text knob's value, or when a node that takes such a name in makes it.
+Of the rest, it is what is there before some model step and made by an op of the mode
+(never a data node's per-item record, such as `current_item.json`, nor a pass-through
+copy by `collect`, `file_text` or `select`); when a model step takes some of those in
+directly, only those, so the same question built twice (a message and its framed prompt)
+is given once. Which output of a multi-output op carries which knob is the mode's
+declaration, the op node's `knob_outputs` (`{output: [knobs]}`, every output named, each
+knob one the op reads). An op that reads a knob and declares nothing carries it in every
+output, and the view marks it `?`. Both runtimes accept the field and refuse a bad one
+(the walker's `Node`, the spine's `validateGraph`); lowering carries it into the IR's
+`FnNode` with the op's `knobs` and `produces` beside it, and into the node declarations.
+LiveMath's seeds declare it: S4's `prepare` (`user_prompt` carries nothing,
+`compare_prompt` carries `compare_task`) and S1's `format_prompt` (`user_prompt` and
+`solver_prompt` carry nothing, `skill_section` carries `skill`). So "task" is
+`user_prompt` on S4 and `solver_prompt` on S1. A `rewire` that would leave a step seeing
+what it sees now is refused.
 
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
 step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
-through the plain ops that built it to its sources (model steps, the task's own inputs,
+through the plain ops that built it to its sources (model steps, what the run was given,
 knobs; at most 4 ops deep, `CARRIES_DEPTH`). No op says which of its outputs a knob feeds,
 so an op with several outputs has its knobs marked as the op's
 (`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))`),
@@ -1938,9 +1967,9 @@ replacing it is refused too. That check skips the code dry run (a sandbox proces
 request), so an accepted code replacement is marked "(not dry-run)"; proposing it runs
 the dry run as any attempt does. The section fits 7000 characters: refusals are cut to their
 first clause, then rows are left out, last first, and counted among the listed steps.
-The lead also names what `"sees": ["task"]` gives a new step on this pipeline (the
-model-free inputs as the steps declare them), since a fact a plain op builds from a knob
-carries that knob's text. The `loop` line states the verdict format (`proceed` or
+The lead also names what `"sees": ["task"]` gives a new step on this pipeline, in the
+words the `rewire` line uses (`operators.TASK_MEANING`, computed by
+`operators.task_inputs`). The `loop` line states the verdict format (`proceed` or
 `reloop`, then why, which reaches the step sent back), what the judge sees by default (what
 the step read and wrote) and the cap (`max_iterations` in the edit, then the knob
 `<gate>__max_iterations`: send-backs, so at most that many runs plus one; default 2, 1 to
@@ -2031,6 +2060,7 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: binding a new setting on an existing step* | - |
 | node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `inputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `rewire` | - |
+| node field: `knob_outputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: the mode's declaration of what its op does* | - |
 | edge form: `plain` | `add_edge`, `insert_after`, `insert_before`, `insert` | `remove_edge`, `add_edge`, `serialize`, `remove` | `remove_edge`, `remove` |
 | edge form: `verdict` | `add_edge`, `loop`, `wrap`, `route` | `remove_edge`, `add_edge` | `remove_edge`, `remove` |
 | edge form: `reloop` | `loop`, `add_edge` | `remove_edge`, `add_edge` | `remove_edge`, `remove` |

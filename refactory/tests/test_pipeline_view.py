@@ -198,7 +198,8 @@ def test_the_s4_and_s1_views_say_each_step_in_one_line_under_2k():
     assert lines[0] == "per item (data -> current_item.json) {"
     assert lines[1].startswith("  compare agent  sees compare_prompt (via prepare: "
                                "current_item.json@data)  told compare__system_prompt \"")
-    assert "compare_task? \"" in lines[1] and lines[1].endswith("-> compare_notes.txt")
+    # prepare declares which output carries compare_task: no `?`.
+    assert "; compare_task \"" in lines[1] and lines[1].endswith("-> compare_notes.txt")
     assert lines[2] == "  parallel step_fork {"
     assert lines[3].startswith("    precision agent  sees precision_prompt (via notes_prompts: "
                                "compare_notes.txt@compare)")
@@ -546,7 +547,8 @@ def test_a_way_that_meets_a_step_drawn_above_says_so():
 
 def test_a_loop_gate_s_ways_forward_are_shown_beside_its_loop_line():
     text = pv.render(_gate_with_ways())
-    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)\nthen, by its " \
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs, past the cap: " \
+        "halt)\nthen, by its " \
         "verdict:" in text
     assert "on escalate:\n    alt op" in text and "on proceed:\n    finish op" in text
 
@@ -688,8 +690,8 @@ def test_a_branch_s_sees_line_names_exactly_what_it_was_given():
                        line.split("  sees ", 1)[1].split("  told")[0])
     assert names[0] == "user_prompt"
     assert _lines(nn_edits.apply({**edit, "sees": [names[0]]}, s4))["fresh"] == line
-    assert "compare_prompt (via prepare" in _lines(
-        nn_edits.apply({**edit, "sees": ["task"]}, s4))["fresh"]
+    # "task" is the question once: the same line as naming user_prompt.
+    assert _lines(nn_edits.apply({**edit, "sees": ["task"]}, s4))["fresh"] == line
 
 
 def test_sees_takes_a_file_name_on_a_nested_fork_and_lists_names_when_refused():
@@ -767,7 +769,8 @@ def _two_passes(state: dict) -> dict:
 
 
 def test_shapes_code_verdict_gates_code_steps_frozen_and_protected():
-    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs)" in pv.render(
+    assert "loop(work, judge structure_fuzz_graphs:proceed, max 3 -> 4 runs, past the cap: " \
+        "halt)" in pv.render(
         _seed("fuzz_gate_loop"))
     flow = _seed("fuzz_dataflow")
     coded = nn_edits.apply({"op": "insert", "after": "summarise", "kind": "code", "id": "tally"},
@@ -802,7 +805,8 @@ def test_what_an_edit_built_is_its_new_and_changed_view_lines():
                                "sees": ["task"], "id": "independent"}, s4)
     built = pv.changed_lines(s4, branched)
     assert any(line.startswith("+ [in parallel step_fork] independent agent  sees "
-                               "compare_prompt (via prepare") for line in built), built
+                               "user_prompt (via prepare: current_item.json@data)  told")
+               for line in built), built
     assert any(line.startswith("~ [in per item data] decide agent") and
                "independent@independent" in line for line in built), built
     draft = _seed("fuzz_draft_review")
@@ -818,7 +822,7 @@ def test_the_request_shows_the_view_first_and_as_built_beside_the_words():
             "wiring": ["+ loop(solve, judge j, max 2 -> 3 runs)"]}
     lines = base._edit_change_lines([pair])
     said = lines.index("Flow change, as proposed: the judge sends solve back once")
-    assert lines[said + 1].startswith("As built (its pipeline lines")
+    assert lines[said + 1].startswith("As built (the candidate's new + and changed ~ pipeline lines")
     assert lines[said + 2:said + 5] == ["```text", "+ loop(solve, judge j, max 2 -> 3 runs)",
                                         "```"]
     text = "\n".join(base._reasoning_lines([{**pair, "id": "c1", "epoch": 1}]))
@@ -873,7 +877,7 @@ def test_the_loop_s_request_opens_with_the_view_and_shows_what_was_built(tmp_pat
                                 "origin": "optimizer",
                                 "flow_change": "solve is sent back once at most"}
     text = loop._context().render()
-    pipeline = text.split("## The pipeline you may edit", 1)[1].split("Nodes:", 1)[0]
+    pipeline = text.split("## The pipeline you may edit", 1)[1].split(base.REFERENCE_HEADING, 1)[0]
     assert pipeline.index(base.PIPELINE_VIEW_LEAD) < pipeline.index("```text\nper item (data")
     assert "loop(solve, judge solve_check_judge" in pipeline
     changed = text.split("## What the last edit changed", 1)[1].split("\n## ", 1)[0]
@@ -1011,7 +1015,8 @@ def test_an_agent_only_a_later_gate_reads_keeps_its_own_line():
                   {"source": "g", "target": "end", "condition": "proceed"}]}, "knobs": {}}
     text = pv.render(state)
     assert text.splitlines()[0].startswith("a agent"), text
-    assert "loop(b, judge loop_ops:always_proceed, max 2 -> 3 runs)" in text, text
+    assert "loop(b, judge loop_ops:always_proceed, max 2 -> 3 runs, past the cap: halt)" \
+        in text, text
 
 
 def test_a_view_that_cannot_be_drawn_says_so_in_the_request_and_the_record(caplog):
@@ -1053,3 +1058,19 @@ def test_the_fallback_count_reads_the_graders_as_the_view_does():
     for graders in ((), ("check",)):
         assert pv.fallback_count(state, (), graders) == sum(
             line.key.startswith(pv.FALLBACK) for line in pv.view_lines(state, (), graders))
+
+
+def test_a_loop_says_what_happens_past_its_cap_unless_it_goes_on():
+    """`Graph.on_exhausted`, as both runtimes act: a loop in a data pass that goes on with
+    its last attempt says nothing more; one that fails the item, or halts the run, says
+    so."""
+    solver = _mode("livemath/solver").state_dict()
+    looped = nn_edits.apply({"op": "loop", "step": "solve", "judge": "code"}, solver)
+    line = next(l for l in pv.render(looped).splitlines() if "loop(solve" in l)
+    assert "past the cap" not in line, line
+    gate = next(n for n, node in looped["graph"]["nodes"].items()
+                if node.get("kind") == "gate")
+    looped["graph"]["nodes"][gate]["on_exhausted"] = "fail_item"
+    line = next(l for l in pv.render(looped).splitlines() if "loop(solve" in l)
+    assert line.rstrip().endswith(", past the cap: fail_item)"), line
+    assert "past the cap: fail_item" in base.PIPELINE_VIEW_LEAD

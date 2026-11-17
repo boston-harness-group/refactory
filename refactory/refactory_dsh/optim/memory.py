@@ -65,7 +65,7 @@ from typing import Any, Mapping, Sequence
 
 from . import evidence
 from .analysts import ANALYST_ROOM, TEXT_FLOOR, fit_item, item_cap, item_text
-from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table
+from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table, fmt_score
 
 #: SkillOpt's ``slow_update_samples`` (``_base_/default.yaml:99``): the train items the
 #: two rollouts are compared on.
@@ -337,7 +337,7 @@ def _trace(entry: Mapping[str, Any], side: str, same: bool) -> str:
 
 def _side_line(label: str, record: Mapping[str, Any]) -> str:
     return (f"- {label}: {'PASS' if record.get('passed') else 'FAIL'} "
-            f"(score {record.get('score')}) -- answer: {_answer(record)}")
+            f"(score {fmt_score(record.get('score'))}) -- answer: {_answer(record)}")
 
 
 def _reason(record: Mapping[str, Any]) -> str:
@@ -801,7 +801,7 @@ def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> s
     elif entry.get("exit_ok") is False:
         outcome = "its train run failed"
     else:
-        outcome = f"train score {entry.get('score')}"
+        outcome = f"train score {fmt_score(entry.get('score'))}"
         if isinstance(fixed, int) and isinstance(broken, int):
             outcome += (f"; vs its parent fixed {fixed} / broken {broken} of "
                         f"{entry.get('shared')} train items")

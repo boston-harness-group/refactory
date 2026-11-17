@@ -22,13 +22,23 @@ knowledge of the task or the pipeline.
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 #: A reply's line shorter than this (after stripping) is never matched as repeated text:
 #: a bare heading or label is not worth a reference. The task's input matches whole.
 MIN_LINE = 12
 #: What heads the part of a step's prompt that is its own, which `dedup` looks for.
 REST = "Rest of its prompt"
+#: What heads the part of a step's prompt that its settings do not hold (`render_item`
+#: with ``settled``): a reloop's reason, say.
+ALSO = "Also in its prompt (not in its settings)"
+
+
+def settled_lines(texts: Iterable[Any]) -> frozenset[str]:
+    """The lines of ``texts`` (each step's settings, shown elsewhere in the request),
+    normalised as `render_item` compares a step's prompt with them."""
+    return frozenset(_norm(line) for text in texts if isinstance(text, str)
+                     for line in text.splitlines() if line.strip())
 #: How an item rendered here reads, said once for every call that shows items.
 TRACE_FORM = ("its input once, then each step in the order the steps ran -- what its prompt "
               "took from the input or an earlier step's reply, said by name (`Sees:`), the "
@@ -36,6 +46,12 @@ TRACE_FORM = ("its input once, then each step in the order the steps ran -- what
               "said as `same as`), and its reply -- the expected answer, the prediction, the "
               "score and the grader's feedback")
 _WHOLE = 10 ** 9
+
+
+def _fmt_score(value: Any) -> str:
+    from .base import fmt_score
+
+    return fmt_score(value)
 
 
 def _norm(line: str) -> str:
@@ -109,12 +125,31 @@ class _Seen:
         return sources, "" if only_refs else text
 
 
+def prompt_lines(seen: "_Seen", prompt: Any, settled: Collection[str] | None,
+                 cut: Any) -> list[str]:
+    """What a step's prompt took from what is shown, by name (``Sees:``), then the rest of
+    it: whole (`REST`), or, with ``settled``, only what the request does not show
+    elsewhere (`ALSO`); ``cut`` clips that text."""
+    sources, rest = seen.split(prompt)
+    lines = [f"Sees: {', '.join(sources)}"] if sources else []
+    if settled is not None:
+        rest = "\n".join(line for line in rest.splitlines()
+                          if line.strip() and _norm(line) not in settled
+                          and not re.fullmatch(r"\[[^\]]+\]", line.strip()))
+        if rest:
+            lines += [f"{ALSO}:", *fenced(cut(rest))]
+    elif rest:
+        lines += [f"{REST}:", *fenced(cut(rest))]
+    return lines
+
+
 def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
                 outcome: str, expected: str, metadata: str, choices: Sequence[str],
                 prompts: bool = True, prompt_chars: int = _WHOLE, reply_chars: int = _WHOLE,
                 omissions: list[dict[str, Any]] | None = None,
                 heading: str = "###", missing: Sequence[str] = (), label: str = "",
-                show_input: bool = True, show_expected: bool = True) -> str:
+                show_input: bool = True, show_expected: bool = True,
+                settled: Collection[str] | None = None) -> str:
     """One item: its verdict, what was expected and what it gave, the grader's reason, the
     task's input once, then each step -- with ``prompts``, what it saw by name and the rest
     of its prompt -- and its reply, every text fenced. ``prompt_chars``/``reply_chars``
@@ -122,7 +157,10 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     of the item (a rollout) in its heading, so a "same as" reference says which one;
     without ``show_input``/``show_expected`` the input and the expected answer are left
     out (another rendering of the same item shows them), the input still read as what a
-    step's prompt took ("Sees: the input")."""
+    step's prompt took ("Sees: the input"). With ``settled`` (the lines of the texts the
+    request shows elsewhere, each step's settings: `settled_lines`), each step says what it
+    saw by name and only the part of its prompt that is in neither (a judge's reason on a
+    re-run, say), as `ALSO`; its instructions are left to where they are shown."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, Mapping)]
     item = record.get("id")
@@ -131,7 +169,7 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
         return clip(value, limit, item=item, step=step, omissions=omissions)
 
     lines = [f"{heading} Item {item}{f' ({label})' if label else ''} — {outcome} "
-             f"(score {record.get('score')})"
+             f"(score {_fmt_score(record.get('score'))})"
              + (f" — {metadata}" if metadata else "")]
     said = [part for part in (
         f"Expected: {cut(expected, 'expected', reply_chars)}"
@@ -161,18 +199,15 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
         seen.add(meta[key], "the input")
         for choice in choices:
             seen.add(choice, "the input", 1)
-    elif exchanges and not prompts:
+    elif exchanges and not prompts and settled is None:
         lines += ["Input (the first step's prompt):",
                   *fenced(cut(exchanges[0].get("prompt"), "input", prompt_chars))]
     for number, exchange in enumerate(exchanges, 1):
         node = str(exchange.get("node") or "agent")
         lines.append(f"{heading}# Step `{node}` ({number} of {len(exchanges)})")
-        if prompts:
-            sources, rest = seen.split(exchange.get("prompt"))
-            if sources:
-                lines.append(f"Sees: {', '.join(sources)}")
-            if rest:
-                lines += [f"{REST}:", *fenced(cut(rest, node, prompt_chars))]
+        if prompts or settled is not None:
+            lines += prompt_lines(seen, exchange.get("prompt"), settled,
+                                  lambda text, node=node: cut(text, node, prompt_chars))
         lines += ["Reply:", *fenced(cut(exchange.get("response"), node, reply_chars))]
         seen.add(exchange.get("response"), f"{node}'s reply")
     if not exchanges:

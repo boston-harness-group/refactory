@@ -834,15 +834,15 @@ def ask(client: Any, prompt: str, categories: Sequence[str] | None = None,
         **options: Any) -> tuple[dict[str, Any], str]:
     """One judge call: ``(verdict, reply)``. Raises what the client raises, or
     ``ValueError`` for a reply without a readable verdict."""
-    from .random_optimizer import extract_json
+    from .random_optimizer import reply_object
 
     reply = client.complete(prompt, system=SYSTEM, **options)
     try:
-        return parse_verdict(extract_json(reply), categories), reply
+        return parse_verdict(reply_object(reply), categories), reply
     except ValueError:
-        # Not valid JSON, or the first object found in it is not the verdict (a quoted
-        # ``{}`` inside a reply that is not valid JSON): read what can be read, marked so
-        # it never vetoes.
+        # Its top-level object is not valid JSON, or is not a verdict: read what can be
+        # read, marked so it never vetoes (an object nested inside a broken reply is never
+        # taken for the verdict).
         return salvage(reply, categories), reply
 
 

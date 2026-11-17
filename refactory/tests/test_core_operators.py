@@ -674,8 +674,10 @@ def test_the_request_explains_each_core_operator_in_one_line_with_one_example():
     text = _context("fuzz_draft_review").render()
     section = text.split("## Structural operators", 1)[1].split("Compositions built", 1)[0]
     for name in core_ops.CORE_OPS:
-        lines = [line for line in section.splitlines() if line.startswith(f"- `{name}`: ")]
+        lines = [line for line in section.splitlines() if line.startswith(f"- `{name}` (")]
         assert len(lines) == 1, (name, lines)
+        assert core_ops.OPERATORS[name]["line"] in lines[0]
+        assert text.count(core_ops.OPERATORS[name]["line"]) == 1, "said once in the request"
         example = json.loads(lines[0].split(" E.g. ", 1)[1])
         assert example["op"] == name
     assert "none is the preferred shape; compose your own" in text
@@ -816,13 +818,13 @@ def test_time_per_item_is_said_in_numbers():
 
 def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_one():
     zero = _context("fuzz_draft_review", parsimony=0.0).render()
-    assert "Cost is not a reason for or against a change in this run." in zero
+    assert "cost is not a reason for or against a change in this run." in zero
     assert "cost per item" not in zero
     row = {"id": "c1", "parent": None, "score": 0.5, "structural": False, "edits": [],
            "cost_per_item": 0.0123}
     priced = _context("fuzz_draft_review", parsimony=0.01, leaderboard=[row]).render()
     assert "cost per item" in priced and "0.0123" in priced
-    assert "Cost is not a reason for or against" not in priced
+    assert "cost is not a reason for or against" not in priced
 
 
 def test_repeated_items_are_counted_once_and_their_runs_each_time():

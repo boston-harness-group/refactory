@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { Spine, validateGraph } from '../src/spine.ts'
 import type { WorkflowGraph } from '../src/types.ts'
@@ -369,5 +371,74 @@ describe('describing nodes that declare only their type', () => {
     expect(view.strategy).toBe('best_score')
     expect(view.reads).toEqual([])
     expect(view.writes).toEqual([])
+  })
+})
+
+describe('an op\'s knob_outputs', () => {
+  /** prepare as Python lowers it: the bare question carries no knob, compare's prompt carries its task. */
+  function withPrepare(fields: Record<string, unknown>): WorkflowGraph {
+    return {
+      name: 'knob-outputs',
+      start_node: 'prepare',
+      nodes: {
+        prepare: {
+          _type: 'FnNode', id: 'prepare', command: 'true', reads: ['current_item.json'], writes: [],
+          knobs: ['compare_task'], produces: ['user_prompt', 'compare_prompt'],
+          knob_outputs: { user_prompt: [], compare_prompt: ['compare_task'] },
+          ...fields,
+        },
+      },
+      edges: [],
+    }
+  }
+
+  it('accepts a declaration that names every output with the op\'s own knobs', () => {
+    expect(validateGraph(withPrepare({}))).toEqual([])
+  })
+
+  it.each([
+    [{ user_prompt: [], compare_prompt: ['compare_task'], ghost: [] }, 'knob_outputs names ghost, which the node neither writes nor produces'],
+    [{ compare_prompt: ['compare_task'] }, 'knob_outputs leaves out user_prompt; it names every output'],
+    [{ user_prompt: ['skill'], compare_prompt: ['compare_task'] }, "knob_outputs['user_prompt'] names skill, which the node does not read"],
+    [{ user_prompt: [], compare_prompt: ['compare_task', 'compare_task'] }, "knob_outputs['compare_prompt'] names a knob twice"],
+    [{ user_prompt: 'compare_task', compare_prompt: [] }, "knob_outputs['user_prompt'] is a list of knob names"],
+    [['user_prompt'], 'knob_outputs is a mapping of each output to the knobs it carries'],
+  ])('refuses %j', (declared, message) => {
+    expect(validateGraph(withPrepare({ knob_outputs: declared })))
+      .toEqual([{ node: 'prepare', message }])
+  })
+
+  it.each([
+    ['livemath-skill_graph', 'prepare', { user_prompt: [], compare_prompt: ['compare_task'] }],
+    ['livemath-solver', 'format_prompt', { user_prompt: [], solver_prompt: [], skill_section: ['skill'] }],
+  ])('accepts %s as Python lowers it, with %s\'s declaration', (name, op, declared) => {
+    const path = fileURLToPath(new URL(`../../../../refactory/tests/lowering_snapshots/${name}.graph.json`, import.meta.url))
+    const graph = JSON.parse(readFileSync(path, 'utf8')) as WorkflowGraph
+    expect(graph.nodes[op]?.knob_outputs).toEqual(declared)
+    expect(validateGraph(graph)).toEqual([])
+  })
+
+  const shared = JSON.parse(readFileSync(fileURLToPath(new URL(
+    '../../../../refactory/tests/fixtures/knob_outputs_cases.json', import.meta.url)), 'utf8')) as {
+    op: { knobs: string[], writes: string[], produces: string[] }
+    cases: Array<{ knob_outputs: unknown, why: string | null }>
+  }
+  it.each(shared.cases)('reads the declarations the walker reads the same way: %j', ({ knob_outputs, why }) => {
+    const graph: WorkflowGraph = {
+      name: 'shared', start_node: 'build', edges: [],
+      nodes: { build: { _type: 'FnNode', id: 'build', command: 'true', reads: [], ...shared.op, knob_outputs } as WorkflowGraph['nodes'][string] },
+    }
+    const messages = validateGraph(graph).map(issue => issue.message)
+    if (why === null) expect(messages).toEqual([])
+    else expect(messages.some(message => message.includes(why))).toBe(true)
+  })
+
+  it('refuses it on anything but an op', () => {
+    const graph = withPrepare({})
+    const prepare = graph.nodes.prepare
+    if (prepare === undefined) throw new Error('withPrepare builds a prepare node')
+    graph.nodes.prepare = { ...prepare, _type: 'AgentNode' }
+    expect(validateGraph(graph)).toContainEqual(
+      { node: 'prepare', message: "node type 'AgentNode' declares knob_outputs; only an op does" })
   })
 })

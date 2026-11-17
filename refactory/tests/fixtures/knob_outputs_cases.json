@@ -1,0 +1,14 @@
+{
+  "_doc": "One op's knob_outputs declarations, read by both validators: the walker's Node (tests/test_task_inputs.py) and the spine's validateGraph (packages/workflow/workflow-spine/tests/vocabulary.spec.ts). Each case is accepted (why is null) or refused with a message containing why, on both.",
+  "op": {"knobs": ["a", "b"], "writes": ["x.txt"], "produces": ["x", "y"]},
+  "cases": [
+    {"knob_outputs": {"x.txt": [], "x": ["a"], "y": ["a", "b"]}, "why": null},
+    {"knob_outputs": {"x.txt": [], "x": [], "y": []}, "why": null},
+    {"knob_outputs": {"x.txt": [], "x": ["a"], "y": [], "z": []}, "why": "neither writes nor produces"},
+    {"knob_outputs": {"x.txt": [], "x": ["a"]}, "why": "leaves out"},
+    {"knob_outputs": {"x.txt": [], "x": ["c"], "y": []}, "why": "does not read"},
+    {"knob_outputs": {"x.txt": [], "x": ["a", "a"], "y": []}, "why": "names a knob twice"},
+    {"knob_outputs": {"x.txt": [], "x": "a", "y": []}, "why": "is a list of knob names"},
+    {"knob_outputs": ["x"], "why": "is a mapping"}
+  ]
+}

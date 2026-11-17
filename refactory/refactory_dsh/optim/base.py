@@ -24,7 +24,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
@@ -911,6 +911,32 @@ class ProposalContext:
     #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
+    def _settled(self) -> frozenset[str]:
+        """What an item's step does not repeat of its prompt (`ITEM_FORM`): the lines of
+        every setting's text ("Each step's settings"), of the nodes' own prompt templates
+        (each node in full, in the reference), and any line a step's prompt has in two or
+        more items -- the same for every item, so not this item's (the model client's
+        wrapping, a template's headings). What is left is item-specific: a reason a judge
+        sent the step back with, say."""
+        from .evidence import _norm, settled_lines
+
+        texts = [k.get("value") for k in self.knobs]
+        texts += [n.get(field) for n in self.node_states
+                  for field in ("prompt_template", "system_prompt_template")]
+        records = [*self.item_records,
+                   *(r for pair in self.edit_pairs or ()
+                     for side in ("parent_records", "child_records")
+                     for r in pair.get(side) or ())]
+        holders: dict[tuple[str, str], set[str]] = {}
+        for record in records:
+            for exchange in record.get("exchanges") or ():
+                for line in str(exchange.get("prompt") or "").splitlines():
+                    if line.strip():
+                        holders.setdefault((str(exchange.get("node")), _norm(line)),
+                                           set()).add(str(record.get("id")).split("#")[0])
+        common = {line for (_node, line), items in holders.items() if len(items) > 1}
+        return settled_lines(texts) | common
+
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
         are in "What this run has already tried", one line each, so they are not repeated
@@ -921,7 +947,7 @@ class ProposalContext:
         return [_table(
             ["id", "parent", "score", "structural", *(["edits"] if missing else []), *gate,
              *(["cost per item"] if self.parsimony else [])],
-            [[c["id"], c.get("parent"), c.get("score"), c.get("structural"),
+            [[c["id"], c.get("parent"), fmt_score(c.get("score")), c.get("structural"),
               *([compact_edits(c.get("edits"), self.seed_knob_values)
                  if c.get("id") not in listed else "(below)"] if missing else []),
               *([c.get("gate", "")] if gate else []),
@@ -943,7 +969,7 @@ class ProposalContext:
             "## What this run has already tried",
             (
                 f"{len(self.history)} candidate(s), best "
-                f"{max((c.get('score') or 0.0) for c in self.history):.6g}"
+                f"{fmt_score(max((c.get('score') or 0.0) for c in self.history))}"
                 if self.history and not _gate_column(self.history)
                 else f"{len(self.history)} candidate(s); {_current_line(self.history)}"
                 if self.history
@@ -967,7 +993,8 @@ class ProposalContext:
                 [] if self.history_truncated else self.history)),
         ]
         if self.edit_pairs:
-            lines += ["", *_edit_change_lines(self.edit_pairs, omissions=self.omissions)]
+            lines += ["", *_edit_change_lines(self.edit_pairs, omissions=self.omissions,
+                                              settled=self._settled())]
         if self.reasoning:
             above = [str(p.get("child")) for p in self.edit_pairs or ()]
             lines += ["", *_reasoning_lines(self.reasoning, above)]
@@ -981,8 +1008,8 @@ class ProposalContext:
                 _table(
                     ["path", "optimizer", "seed", "best", "bound", "best edits"],
                     [
-                        [r.get("path"), r.get("optimizer"), r.get("seed_score"),
-                         r.get("best_score"), r.get("bound"),
+                        [r.get("path"), r.get("optimizer"), fmt_score(r.get("seed_score")),
+                         fmt_score(r.get("best_score")), r.get("bound"),
                          json.dumps(r.get("best_edits"), default=str)]
                         for r in self.prior_runs
                     ],
@@ -1009,11 +1036,12 @@ class ProposalContext:
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
             "",
             f"Mode: `{self.mode_name}`. "
-            + (f"Best score so far: {self.best_score}. " if not self.selection else
+            + (f"Best score so far: {fmt_score(self.best_score)}. " if not self.selection else
                f"Train score of the candidate the validation gate ranks first: "
-               f"{self.best_score}. ")
-            + (f"Mean over the {self.mean_over} candidate(s) scored so far: {self.mean_score}."
-             if self.mean_over else f"Mean score so far: {self.mean_score}."),
+               f"{fmt_score(self.best_score)}. ")
+            + (f"Mean over the {self.mean_over} candidate(s) scored so far: "
+               f"{fmt_score(self.mean_score)}."
+             if self.mean_over else f"Mean score so far: {fmt_score(self.mean_score)}."),
             "",
             *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
                              gated=bool(self.selection)),
@@ -1045,9 +1073,9 @@ class ProposalContext:
         # 5: the edits it may make, with which apply where, and the steps' settings.
         sections += [
             "## The operations you may use",
-            _table(["op", "kind", "macro", "fields", "description"],
-                   [[c["op"], c["kind"], c["macro"], _edit_fields(c["fields"]), c["description"]]
-                    for c in self.catalogue]),
+            *operation_lines(self.catalogue, self.node_states, self.edges,
+                             protected=self.protected,
+                             knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1068,10 +1096,9 @@ class ProposalContext:
                 else ""
             ),
             "",
-            "`score_effect: none` on a block means inserting it cannot change the "
-            "score. It is available and it may be worth having, but it is not a way "
-            "to improve the number.",
-            "",
+            *(["`score_effect: none` on a block means inserting it cannot change the "
+               "score. It is available and it may be worth having, but it is not a way "
+               "to improve the number.", ""] if self.insertable else []),
             *_blocks_section(self.insertable, self.catalogue),
         ]
         # 6: the items themselves, chosen rather than clipped.
@@ -1082,21 +1109,24 @@ class ProposalContext:
                 findings=self.reader_findings, failures=self.reader_failures,
                 analysed=(None if self.analysis is None
                           else list(self.analysis.get("findings") or ())),
-                omissions=self.omissions)]
+                omissions=self.omissions, settled=self._settled())]
         # 7: the reference, last: every node in full, the schemas, the validator's rules.
         sections += [
             "",
             REFERENCE_HEADING,
-            "The pipeline's nodes and edges as the graph declares them, what each node has "
-            "before it runs, each step in full with the node schema, and the rules the "
-            "validator checks.",
-            "Nodes:",
-            _table(["id", "kind", "call", "knobs", "notes"],
-                   [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
-                     n.get("notes", "")] for n in self.nodes]),
-            "Edges:",
-            _table(["source", "target", "condition"],
-                   [[e["source"], e["target"], e.get("condition")] for e in self.edges]),
+            "What each node has before it runs, each step in full with the node schema, and "
+            "the rules the validator checks (the pipeline view above is the graph's steps "
+            "and edges).",
+            # Only when the view could not be drawn are the nodes and edges listed here.
+            *([] if _fit_state(self.node_states, self.edges, self.knobs) is not None else [
+                "The pipeline view could not be drawn; the graph as it declares itself:",
+                "Nodes:",
+                _table(["id", "kind", "call", "knobs", "notes"],
+                       [[n["id"], n["kind"], n.get("call", ""), n.get("knobs", []),
+                         n.get("notes", "")] for n in self.nodes]),
+                "Edges:",
+                _table(["source", "target", "condition"],
+                       [[e["source"], e["target"], e.get("condition")] for e in self.edges])]),
             *_available_section(self.available, code_nodes=self.code_nodes),
             "",
             *_node_reference(self),
@@ -1144,27 +1174,66 @@ def _fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _settings_lines(knobs: Sequence[dict[str, Any]]) -> list[str]:
+def operation_lines(catalogue: Sequence[Mapping[str, Any]],
+                    node_states: Sequence[dict[str, Any]] = (),
+                    edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
+                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
+    """The operations a request offers, each said once: the written-out operations in a
+    table (fields and description), then the core operators, one line and one example each
+    (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
+    use" and the analysts' "The changes the optimizer can make" are both this, word for
+    word."""
+    core = set(CORE_OPERATORS)
+    written = [c for c in catalogue if c.get("op") not in core]
+    lines = [_table(["op", "kind", "macro", "fields", "description"],
+                    [[c.get("op"), c.get("kind"), c.get("macro"),
+                      _edit_fields(c.get("fields") or ()), c.get("description")]
+                     for c in written])] if written else []
+    return lines + operator_lines(catalogue, node_states, edges, protected=protected,
+                                  knob_values=knob_values)
+
+
+def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
+                    exact: bool = True) -> list[str]:
     """"Each step's settings": every knob in a table; a text the table cannot show as it
     is (a line break or a ``|``) is shown there by reference and whole below it, fenced,
-    so a patch can quote its target text exactly."""
-    whole = [k for k in knobs if not _exact_in_table(k.get("value"))]
+    so a patch can quote its target text exactly. ``text_chars`` clips each such text
+    (head and tail, marked), for an analyst call that must fit a smaller room. Without
+    ``exact`` (a reader that never patches: the analysts), a long line an earlier knob's
+    text showed is said as where it was (`evidence.dedup_texts`), so the steps' shared
+    paragraphs are read once."""
+    # Each text clipped once, here (a clipped one says how much was left out), whether
+    # the table shows it or it is shown after the table.
+    shown = {str(k["name"]): (_clip_middle(k["value"], text_chars)
+                              if text_chars is not None and isinstance(k.get("value"), str)
+                              else k.get("value")) for k in knobs}
+    whole = [k for k in knobs if not _exact_in_table(shown[str(k["name"])])]
     lines = ["## Each step's settings",
-             "The prompts and parameters the steps read, which `set_knob` moves (a new step "
-             "brings its own). A patch quotes its target text exactly: a value in the table "
-             "is exact as shown"
-             + ("; a text with line breaks or `|` is shown whole after the table." if whole
-                else "."),
+             ("The prompts and parameters the steps read, which `set_knob` moves (a new step "
+              "brings its own). A patch quotes its target text exactly: a value in the table "
+              "is exact as shown"
+              + ("; a text with line breaks or `|` is shown whole after the table." if whole
+                 else ".")) if exact else
+             ("The prompts and parameters the steps read, which `set_knob` moves; a text with "
+              "line breaks or `|` is shown after the table, a line an earlier text showed "
+              "said as where it is."),
              _table(["name", "value", "kind", "values", "range", "frozen", "reachable",
                      "description"],
-                    [[k["name"], k["value"] if _exact_in_table(k.get("value"))
-                      else f"(shown whole below, {len(k['value'])} characters)",
+                    [[k["name"], shown[str(k["name"])]
+                      if _exact_in_table(shown[str(k["name"])])
+                      else f"(shown {'whole ' if shown[str(k['name'])] == k['value'] else ''}"
+                           f"below, {len(k['value'])} characters)",
                       k["kind"], k.get("values"), k.get("range"),
                       k["frozen"], k.get("reachable", True), k.get("description", "")]
                      for k in knobs])]
-    for knob in whole:
-        fence = _fence(knob["value"])
-        lines += [f"`{knob['name']}`:", fence, knob["value"], fence]
+    texts = [shown[str(knob["name"])] for knob in whole]
+    if not exact:
+        from .evidence import dedup_texts
+
+        texts = dedup_texts(texts, [f"`{knob['name']}`" for knob in whole])
+    for knob, text in zip(whole, texts):
+        fence = _fence(text)
+        lines += [f"`{knob['name']}`:", fence, text, fence]
     return [*lines, ""]
 
 
@@ -1573,8 +1642,6 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
     if structure_guidance:
         from .feedback import STRUCTURE_GUIDANCE
         lines.append(STRUCTURE_GUIDANCE)
-    lines += operator_lines(catalogue, node_states, edges, protected=protected,
-                            knob_values=knob_values)
     examples = composition_examples(catalogue, node_states, edges, protected=protected,
                                     code_nodes=code_nodes, tools=tools,
                                     knob_values=knob_values)
@@ -1750,17 +1817,20 @@ REFERENCE_POINTER = ("Every node in full (its declarations, what it has before i
 
 #: What the pipeline view's words mean.
 def _view_lead() -> str:
-    from refactory_dsh.nn.pipeline_view import FORMS
+    from refactory_dsh.nn.pipeline_view import EXHAUSTED, FORMS
 
     return (
         "The pipeline, one line per step, generated from the graph in the operators' own "
-        "words (full node detail is in the reference at the end): `sees` lists a step's "
-        "inputs as `\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain "
+        "words: `sees` lists a step's "
+        "inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain "
         "op that only assembles a model step's input is folded in as `name (via op: its "
         "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "
         "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
         "an op with several outputs, for all of them), or a code step's code; `->` what it "
         "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
+        + "; a loop that does not go on with its last attempt past its cap says so: `"
+        + EXHAUSTED.format(policy="fail_item").lstrip(", ") + "` (only that item fails) or `"
+        + EXHAUSTED.format(policy="halt").lstrip(", ") + "` (the whole run stops)"
         + "; `[optional]`; `[protected]`.")
 
 
@@ -1825,10 +1895,12 @@ CARRIES_DEPTH = 4
 def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
     """What a model step's prompt and reads carry, each with what made it: a plain op's
     output is followed back through the plain ops that built it to its sources (model
-    steps, the task's own inputs, knobs), at most `CARRIES_DEPTH` ops deep. The knobs an
-    op with several outputs reads are the op's: no op says which output a knob feeds."""
+    steps, what the run was given, knobs), at most `CARRIES_DEPTH` ops deep. The knobs
+    an output carries are those its op declares for it (``knob_outputs``,
+    `operators.carried_knobs`); an op with several outputs that declares nothing carries
+    every knob it reads in each."""
     from refactory_dsh import snippet
-    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.operators import carried_knobs, made_by
     from refactory_dsh.nn.validate import consumed
 
     makers = made_by(graph)
@@ -1838,7 +1910,7 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
         plain = [m for m in made if graph.nodes[m].kind == "op"
                  and not snippet.is_code_node(graph.nodes[m]) and m not in seen]
         if not plain:
-            return f"{name} ({', '.join(made) or 'task input'})"
+            return f"{name} ({', '.join(made) or 'given to the run'})"
         if depth >= CARRIES_DEPTH:
             return f"{name} (op {', '.join(plain)}, not followed further)"
         parts = []
@@ -1846,9 +1918,12 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
             op = graph.nodes[op_id]
             sources = [described(k, n, depth + 1, seen | {op_id})
                        for k, n in sorted(consumed(op, knob_values))]
-            knobs = list(dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]))
             outputs = len(op.produces) + len(op.writes)
-            if knobs and outputs > 1:
+            if op.knob_outputs is not None:
+                knobs = list(carried_knobs(op).get((kind, name), ()))
+            else:
+                knobs = list(dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]))
+            if knobs and outputs > 1 and op.knob_outputs is None:
                 sources.append(f"knob(s) {', '.join(knobs)} (the op's, for all {outputs} "
                                "of its outputs)")
             else:
@@ -1869,7 +1944,8 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
     from refactory_dsh import snippet
     from refactory_dsh.nn import core_ops
     from refactory_dsh.nn.graph import Graph
-    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.operators import carried_knobs, made_by
+    from refactory_dsh.nn.pipeline_view import RUN_MAKER
 
     try:
         graph = Graph.from_state(state["graph"])
@@ -1887,8 +1963,9 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
         made = makers.get((kind, name)) or []
         texts = [k for m in made if graph.nodes[m].kind == "op"
                  and not snippet.is_code_node(graph.nodes[m])
-                 for k in graph.nodes[m].knobs if isinstance(values.get(k), str)]
-        return (f"{name}@{','.join(made) or 'task'}"
+                 for k in carried_knobs(graph.nodes[m]).get((kind, name), ())
+                 if isinstance(values.get(k), str)]
+        return (f"{name}@{','.join(made) or RUN_MAKER}"
                 + (f" (+knob {', '.join(dict.fromkeys(texts))})" if texts else ""))
 
     order = sorted(there, key=lambda key: (key[0] != "fact", key[1]))
@@ -1944,18 +2021,23 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
         full_refusals.append(refused)
     if not rows:
         return []
-    from refactory_dsh.nn.core_ops import TASK, _readable, _task_inputs
+    from refactory_dsh.nn.core_ops import TASK, _readable, _Refused, _task_inputs
+    from refactory_dsh.nn.operators import TASK_MEANING
 
-    task = sorted(_readable(graph, state, _task_inputs(graph, state)),
-                  key=lambda key: (key[0] != "fact", key[1]))
-    task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step these, each where it is there "
-                 f"before the step: {', '.join(name for _k, name in task)}: what no model "
-                 "step's output reaches, as the steps declare their inputs. A fact a plain op "
-                 "builds from a knob carries that knob's text (another step's instructions, "
-                 "say)." if task else "") + (
+    try:
+        task = sorted(_readable(graph, state, _task_inputs(graph, state)),
+                      key=lambda key: (key[0] != "fact", key[1]))
+    except _Refused as exc:  # logged, never raised: the lead then names no task inputs
+        import logging
+
+        logging.getLogger(__name__).warning("no task inputs: %s", exc)
+        task = []
+    task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step "
+                 f"{', '.join(name for _k, name in task)}, where it is there before the step: "
+                 f"{TASK_MEANING}." if task else "") + (
         " A fork's row lists every name a new branch there can put in `sees` for that input "
-        "alone (`name@maker`; `(+knob k)`: built by an op that reads text knob k, so it may "
-        "carry that text); a new step after a step can name what that step sees (its line in "
+        "alone (`name@maker`; `(+knob k)`: an op's output that carries text knob k, so it "
+        "carries that text); a new step after a step can name what that step sees (its line in "
         "the pipeline view) or what it writes.")
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
@@ -1994,11 +2076,14 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
     """"Structural operators": what the system wires for every one, then each core operator
-    the run permits in one line with one example (`nn.core_ops.OPERATORS`), its ids taken
-    from this graph where it has them. Nothing when the run permits none."""
+    the run permits in one line -- its fields and its catalogue description (its
+    `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
+    example, its ids taken from this graph where it has them. Nothing when the run
+    permits none."""
     from refactory_dsh.nn import core_ops
 
     ops = {op.get("op") for op in catalogue}
+    by_op = {op.get("op"): op for op in catalogue}
     chosen = [name for name in CORE_OPERATORS if name in ops]
     if not chosen:
         return []
@@ -2017,8 +2102,10 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
         # graph can lose for `remove`; placeholders otherwise, never a step it refuses.
         own = {**ids, "step": removable or "<step>"} if name == "remove" else _fitting_ids(
             name, ids, node_states, edges, protected, state)
-        lines.append(f"- `{name}`: {spec['line']}. E.g. "
-                     + json.dumps(core_ops.example(name, own)))
+        entry = by_op.get(name) or {}
+        description = str(entry.get("description") or f"{spec['line']}.")
+        lines.append(f"- `{name}` ({_edit_fields(entry.get('fields') or spec['fields'])}): "
+                     f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     return lines
 
 
@@ -2135,6 +2222,14 @@ def _cost_note(parsimony: float | None) -> list[str]:
             "carries; - where it was not measured."]
 
 
+def fmt_score(value: Any) -> str:
+    """A score as every request prints it: 4 significant figures (``0.5714``); anything
+    that is not a number as it is (``None`` as "n/a")."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "n/a" if value is None else str(value)
+    return f"{float(value):.4g}"
+
+
 def _cost_cell(value: Any) -> str:
     return f"{float(value):.4g}" if isinstance(value, (int, float)) else "-"
 
@@ -2203,16 +2298,9 @@ def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
     what a node costs) or when the settings are not known."""
     if parsimony is None or parsimony:
         return ""
-    if item_mean:
-        return ("Compute policy: this run does not penalise extra steps or model calls per "
-                "item. Per-item cost is reported separately and is not part of the score, so "
-                "a change that adds steps or model calls is weighed only by the score it "
-                "should reach, as any other change is. Cost is not a reason for or against a "
-                "change in this run.")
-    return ("Compute policy: the loop does not penalise extra steps or model calls per item "
-            "(parsimony is 0), so a change that adds them is weighed by the score it should "
-            "reach, as any other change is; cost counts only as far as the task's own score "
-            "measures it. Cost is not a reason for or against a change in this run.")
+    # What the score text above does not say already (it says what the score is).
+    return ("Compute policy: cost is not a reason for or against a change in this run"
+            + ("; per-item cost is reported separately." if item_mean else "."))
 
 
 def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float | None = None,
@@ -2250,13 +2338,14 @@ def answer_instructions(catalogue: Sequence[dict[str, Any]], *, parsimony: float
         "",
         "Rules:",
         '- A parameter move is {"op": "set_knob", "name": "<parameter>", "value": <value>} or, '
-        'for a text parameter, the same with "patch" in place of "value" (below).',
+        'for a text parameter, the same with "patch" in place of "value" (its form is in the '
+        '`set_knob` row above).',
     ]
     if any(op.get("op") == "set_knob" for op in catalogue):
         # SkillOpt's patch mode edits its skill only by local append/insert/replace/delete
         # patches; a whole new value stays available for what a patch cannot express.
-        lines += ["- To change a text parameter such as a prompt, patch it: "
-                  + nn_edits.PATCH_FORMAT + ".",
+        lines += ["- To change a text parameter such as a prompt, patch it, in the form "
+                  "the `set_knob` row above gives.",
                   "  Patch the parts the evidence says to change and keep the rest. A whole new",
                   "  `value` is for a setting that is not text, a new step's own prompt, or a",
                   "  prompt that has to be replaced outright."]
@@ -2432,7 +2521,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     wrong = [r for r in records if not r.get("error_text") and not r.get("passed")
              and not r.get("missing_steps")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
-    mean = f", mean score {sum(scores) / len(scores):.3g}" if scores else ""
+    mean = f", mean score {fmt_score(sum(scores) / len(scores))}" if scores else ""
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
@@ -2475,7 +2564,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
             "",
             "Wrong answers, with the grader's reason:",
             _table(["item", "score", "reason"],
-                   [[r.get("id"), r.get("score"), _clip(r["fail_reason"])]
+                   [[r.get("id"), fmt_score(r.get("score")), _clip(r["fail_reason"])]
                     for r in reasons[:ITEM_EVIDENCE_ROWS]]),
         ]
         if len(reasons) > ITEM_EVIDENCE_ROWS:
@@ -2542,11 +2631,14 @@ def _fenced(text: str) -> list[str]:
 
 
 def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
-                omissions: list[dict[str, Any]] | None = None) -> str:
+                omissions: list[dict[str, Any]] | None = None,
+                settled: Collection[str] | None = None) -> str:
     """One train item (`optim.evidence.render_item`, as every call that reads items shows
     one): its verdict, what was expected and what it gave, the grader's reason, its input
     once, then each step's reply, each fenced (headings demoted) so nothing in them reads
-    as a section of the request.
+    as a section of the request; with ``settled`` (`evidence.settled_lines`, the steps'
+    settings), each step's ``Sees:`` line and the part of its prompt its settings do not
+    hold, as `ITEM_FORM` says.
 
     The steps are in the order the record holds them, which is the order the pass ran them
     (a fork merges its branches in branch order), never sorted by name. Texts are whole
@@ -2560,7 +2652,7 @@ def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
         expected=_expected(record), metadata=metadata_text(record),
         choices=_choice_lines(meta.get("choices")), prompts=False,
-        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions)
+        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions, settled=settled)
 
 
 def _outcome(record: dict[str, Any]) -> str:
@@ -2687,6 +2779,14 @@ def _cited_items(items: Sequence[dict[str, Any]],
     return chosen
 
 
+#: What an item shown here holds -- said once beside the items, and what `_trajectory`
+#: renders with the steps' settings as ``settled`` (a test holds the two together).
+ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the grader's "
+             "reason, its input once, then each step in the order it ran: what its prompt "
+             "took from the input or an earlier step's reply, by name (`Sees:`), any part of "
+             "its prompt that is not in its settings (`" + "Also in its prompt (not in its "
+             "settings)" + "`: a reason a judge sent it back with, say), and its reply. A "
+             "step's own instructions are its settings, under \"Each step's settings\".")
 #: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
 #: every item when all of them together are under this many characters. It only decides
 #: that switch; it never cuts an item.
@@ -2772,8 +2872,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = (),
                   analysed: Sequence[dict[str, Any]] | None = None,
-                  omissions: list[dict[str, Any]] | None = None) -> list[str]:
-    """Every train item of the candidate being edited.
+                  omissions: list[dict[str, Any]] | None = None,
+                  settled: Collection[str] | None = None) -> list[str]:
+    """Every train item of the candidate being edited, each as `ITEM_FORM` says.
 
     When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
     smaller ``budget``), every item is shown in full here. When not, readers went through
@@ -2789,18 +2890,15 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     items = _ordered_items(records)
     if not items:
         return []
-    wrong = sum(1 for r in items if _outcome(r) == "answered wrong")
-    errored = sum(1 for r in items if _outcome(r) == "failed with an error")
     header = ["## Trajectories of the candidate being edited",
-              f"All {len(items)} train item(s): {wrong} answered wrong, {errored} failed with "
-              f"an error, {len(items) - wrong - errored} passed."]
+              f"The {len(items)} train item(s) counted under \"Item results\"."]
     groups = trajectory_groups(records, budget)
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
-        return header + ["Every item in full. Read what each step produced and where it "
-                         "went wrong before proposing.",
+        return header + [f"Every item. {ITEM_FORM}",
                          *(line for r in items
-                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions)))]
+                           for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions,
+                                                        settled)))]
     if analysed is not None:
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
@@ -2860,7 +2958,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
     lines += ["", "### Every item",
-              _table(["item", "outcome", "expected", "predicted", "grader", "error"],
+              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error"],
                      [[r.get("id"), _outcome(r), _clip(_expected(r), _TABLE_CELL_CHARS),
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
@@ -2874,11 +2972,11 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                 + (f" the {'analysts' if analysed is not None else 'readers'} cited, "
                    "one per finding in rank order" if cited else ", one per kind of failure")
                 + (f", then {len(passing)} passing item(s) for contrast" if passing else "")
-                + f", each whole (of {len(items)}; the table above has every one)."]
+                + f" (of {len(items)}; the table above has every one). {ITEM_FORM}"]
     for record in chosen:
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
-        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions)]
+        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled)]
     return lines + examples
 
 
@@ -2941,10 +3039,10 @@ def available_before(graph_state: Mapping[str, Any],
     """For each node a run can reach, the facts and files there before it starts on every
     path that reaches it (`nn.validate.available_inputs`, the sets rule V15 checks
     against), with who makes each one (``made_by``: name -> step ids, `nn.operators.made_by`)
-    and which carry no model output (``task_inputs``, `nn.operators.model_free_inputs`;
+    and which are the task's own input (``task_inputs``, `nn.operators.task_inputs`;
     ``knob_values`` fills the slots of bound prompts); empty when the graph does not parse."""
     from refactory_dsh.nn.graph import Graph
-    from refactory_dsh.nn.operators import made_by, model_free_inputs
+    from refactory_dsh.nn.operators import made_by, task_inputs
     from refactory_dsh.nn.validate import available_inputs
 
     try:
@@ -2954,7 +3052,7 @@ def available_before(graph_state: Mapping[str, Any],
     have = available_inputs(graph)
     makers = made_by(graph)
     try:
-        free = model_free_inputs(graph, knob_values)
+        free = task_inputs(graph, knob_values)
     except Exception:  # a node that cannot be read is the validator's to report
         free = set()
     out: dict[str, dict[str, Any]] = {}
@@ -2978,10 +3076,11 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
                        code_nodes: bool = False,
                        limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
     """What each node can use: the facts a `{{name}}` may name there, and the files already
-    written, each with the step that makes it, the ones that carry no model output marked
-    "(task input)", and how a file's text reaches a prompt. Fits ``limit``. Nothing when
-    not known."""
+    written, each as the pipeline view writes it (``name@maker``, ``@run`` when no step
+    makes it), nodes with the same row listed together, and how a file's text reaches a
+    prompt. Fits ``limit``. Nothing when not known."""
     from refactory_dsh.nn.operators import COLLECT_CALL, COLLECT_TEXT_CHARS, FILE_TEXT_CALL
+    from refactory_dsh.nn.pipeline_view import RUN_MAKER
 
     if not available:
         return []
@@ -2989,11 +3088,10 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
            "`produces` the fact" if code_nodes else "an op that reads the file and `produces` "
            "the fact")
     lead = (
-        "What each node has before it runs (on every path that reaches it), each with the "
-        "step that makes it in parentheses. \"(task input)\" marks one that no model step's "
-        "output reaches: the task's own inputs, and what plain ops make from them alone, so a "
-        "step given only these sees the task and none of the other steps' work. A step's "
-        "input is not its output: name the fact or file the step makes. A prompt's "
+        "What each node has before it runs (on every path that reaches it), each written as "
+        "the pipeline view writes it (`name@maker`; `@run`: no step makes it); nodes with "
+        "the same row share it. A step's input is not its output: name the fact or file the "
+        "step makes. A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
         "not a fact, and `{{notes}}` does not read `notes.txt`. An agent without tools sees "
         "its prompt and the files it lists in `reads`, pasted in after the prompt. To hand "
@@ -3006,10 +3104,8 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         "reply that fact too.")
 
     def named(entry: Mapping[str, Any], name: str) -> str:
-        if name in (entry.get("task_inputs") or ()):
-            return f"{name} (task input)"
         makers = (entry.get("made_by") or {}).get(name) or ()
-        return f"{name} ({', '.join(makers)})" if makers else name
+        return f"{name}@{','.join(makers) or RUN_MAKER}"
 
     def cell(entry: Mapping[str, Any], key: str, keep: int | None) -> str:
         names = [named(entry, name) for name in entry.get(key) or ()]
@@ -3020,9 +3116,32 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
         return ", ".join(names[:keep]) + f" (+{len(names) - keep} more)"
 
     def table(rows: Sequence[tuple[str, Mapping[str, Any]]], keep: int | None) -> str:
-        return _table(["node", "facts available (made by)", "files written before it (made by)"],
-                      [[node_id, cell(entry, "facts", keep), cell(entry, "files", keep)]
-                       for node_id, entry in rows])
+        # Nodes with the same row share it; a row that holds all of another row's names
+        # is said as that row plus the rest, so no list of names is written twice.
+        groups: dict[tuple[frozenset, frozenset], list[str]] = {}
+        entries: dict[tuple[frozenset, frozenset], Mapping[str, Any]] = {}
+        for node_id, entry in rows:
+            key = (frozenset(entry.get("facts") or ()), frozenset(entry.get("files") or ()))
+            groups.setdefault(key, []).append(node_id)
+            entries.setdefault(key, entry)
+        out = []
+        for key, nodes in groups.items():
+            within = [other for other in groups if other != key
+                      and other[0] <= key[0] and other[1] <= key[1] and (other[0] or other[1])]
+            base = max(within, key=lambda o: (len(o[0]) + len(o[1]), groups[o]), default=None)
+            entry = entries[key]
+            if base is None:
+                facts, files = cell(entry, "facts", keep), cell(entry, "files", keep)
+            else:
+                said = f"as at `{groups[base][0]}`"
+                more = {k: [n for n in entry.get(k) or () if n not in base[i]]
+                        for i, k in enumerate(("facts", "files"))}
+                facts = said + (", plus " + cell({**entry, "facts": more["facts"]}, "facts",
+                                                 keep) if more["facts"] else "")
+                files = said + (", plus " + cell({**entry, "files": more["files"]}, "files",
+                                                 keep) if more["files"] else "")
+            out.append([", ".join(nodes), facts, files])
+        return _table(["node(s)", "facts available", "files written before it"], out)
 
     rows = sorted(available.items())
     room = max(0, limit - len(lead))
@@ -3116,7 +3235,7 @@ def _current_line(history: Sequence[dict[str, Any]]) -> str:
                 else "the validation gate's current candidate is older than this list")
     score = current.get("score")
     return ("train score of the validation gate's current candidate "
-            + (f"{score:.6g}" if isinstance(score, (int, float)) else "n/a (its train run failed)"))
+            + (fmt_score(score) if isinstance(score, (int, float)) else "n/a (its train run failed)"))
 
 
 def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
@@ -3137,10 +3256,8 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
         # ranking, so it is never shown): what changes is that a parent may be any
         # candidate that scored well there (with a population picker, any judged
         # candidate), a rejected one included.
-        return ["This run has a validation gate with a pool of parents: each candidate "
-                "was also run on held-out items, and the gate kept it only if it scored "
-                "strictly higher there than the current candidate (an equal score is "
-                "rejected); the best so far is marked `current`. "
+        return ["This run has a validation gate (its rule is under \"What the score "
+                "measures\") with a pool of parents; the best so far is marked `current`. "
                 + ("A parent may be any candidate judged so far, a `rejected` one included, "
                    "as the parent picker chooses. " if population else
                    "A parent may be any of the candidates that scored well there, a "
@@ -3153,9 +3270,8 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                 "its parent (when shown below) were strongly positive, its direction may still "
                 "be right: you may build on it or combine it with edits to other steps in the "
                 "same failure path."]
-    return ["This run has a validation gate: each candidate was also run on held-out "
-            "items, and the gate kept it only if it scored strictly higher there than the "
-            "current candidate (an equal score is rejected). Scores here are train scores; "
+    return ["This run has a validation gate (its rule is under \"What the score "
+            "measures\"). Scores here are train scores; "
             "held-out scores are never shown. You edit the candidate marked `current`. A "
             "`rejected` candidate was not shown better on validation; that is all a "
             "rejection says. " + resolution + "A rejected candidate is never kept, and its "
@@ -3444,7 +3560,7 @@ def _attempt_lines(history: Sequence[dict[str, Any]],
     scores = {str(c.get("id")): c.get("score") for c in history}
 
     def score(value: Any) -> str:
-        return f"{value:.4g}" if isinstance(value, (int, float)) else "n/a"
+        return fmt_score(value)
 
     lines = []
     for c in history:
@@ -3601,14 +3717,16 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
             if entry.get("flow_change") else [])
     if not built:
         return said
-    return [*said, "As built (its pipeline lines, new + or changed ~, read from the "
-            "candidate's graph; where the proposal's words say otherwise, this is what ran):",
+    # Short, because it heads every candidate's lines: a 100+ character label said once
+    # per candidate is a repeat (`request_sizes.repeated_sentences`).
+    return [*said, "As built (the candidate's new + and changed ~ pipeline lines: what ran):",
             "```text", *built, "```",
             *(["Check the description above against As built."] if said else [])]
 
 
 def _pair_block(parent: dict[str, Any], child: dict[str, Any],
-                omissions: list[dict[str, Any]] | None = None) -> str:
+                omissions: list[dict[str, Any]] | None = None,
+                settled: Collection[str] | None = None) -> str:
     """One changed item, parent beside child, each whole: the parent's trajectory, then
     the child's verdict and each of its steps' replies -- a reply the same as the parent's
     at that step and attempt (a step a loop sent back runs more than once) is said so
@@ -3620,14 +3738,14 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
         return evidence.clip(text, ITEM_TEXT_MAX, item=child.get("id"), step=step,
                              omissions=omissions)
 
-    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions), "Child:"]
+    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions, settled), "Child:"]
     replies: dict[tuple[str, int], str] = {}
     runs: dict[str, int] = {}
     for exchange in parent.get("exchanges") or ():
         node = str(exchange.get("node"))
         runs[node] = runs.get(node, 0) + 1
         replies[(node, runs[node])] = str(exchange.get("response") or "").strip()
-    said = [f"{_outcome(child)} (score {child.get('score')})"]
+    said = [f"{_outcome(child)} (score {fmt_score(child.get('score'))})"]
     if child.get("prediction") is not None:
         said.append(f"Given: {cut(child.get('prediction'), 'prediction')}")
     if child.get("fail_reason") and not child.get("passed"):
@@ -3637,11 +3755,22 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
     lines.append("; ".join(said))
     exchanges = [e for e in child.get("exchanges") or () if isinstance(e, Mapping)]
     attempts: dict[str, int] = {}
+    seen = evidence._Seen()
+    meta = child.get("metadata") if isinstance(child.get("metadata"), Mapping) else {}
+    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    if key is not None:
+        seen.add(meta[key], "the input")
+        for choice in _choice_lines(meta.get("choices")):
+            seen.add(choice, "the input", 1)
     for number, exchange in enumerate(exchanges, 1):
         node = str(exchange.get("node") or "agent")
         attempts[node] = attempts.get(node, 0) + 1
         reply = str(exchange.get("response") or "").strip()
         lines.append(f"##### Step `{node}` ({number} of {len(exchanges)})")
+        if settled is not None:
+            lines += evidence.prompt_lines(seen, exchange.get("prompt"), settled,
+                                           lambda text, node=node: cut(text, node))
+        seen.add(exchange.get("response"), f"{node}'s reply")
         if replies.get((node, attempts[node])) == reply:
             lines.append("Reply: same as the parent's"
                          + (f" (its run {attempts[node]} of that step)."
@@ -3652,7 +3781,8 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
 
 
 def _edit_change_lines(pairs: Sequence[dict[str, Any]],
-                       omissions: list[dict[str, Any]] | None = None) -> list[str]:
+                       omissions: list[dict[str, Any]] | None = None,
+                       settled: Collection[str] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts, and
     every changed item (fixed, broken, and the largest score rises and drops) is shown
@@ -3703,7 +3833,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                             ("score rose", change["up"]), ("score dropped", change["down"])):
             for item in items:
                 lines += ["", f"#### Item {item} -- {kind} (child {pair.get('child')})",
-                          _pair_block(parent[item], child[item], omissions)]
+                          _pair_block(parent[item], child[item], omissions, settled)]
     return lines
 
 
@@ -3730,7 +3860,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
     for entry in reasoning_shown(entries):
         outcome = ", ".join(part for part in (
             f"gate {entry['gate']}" if entry.get("gate") else "",
-            f"train score {entry.get('score')}",
+            f"train score {fmt_score(entry.get('score'))}",
             (f"{entry['fixed']} fixed / {entry['broken']} broken vs its parent"
              + (" (scored with different seeds)" if entry.get("same_seed") is False else "")
              if entry.get("fixed") is not None else "")) if part)
@@ -3826,6 +3956,13 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
         "| " + " | ".join(_cell(value) for value in row) + " |" for row in rows
     ]
     return "\n".join([head, rule, *body])
+
+
+def _table_filled(headers: list[str], rows: list[list[Any]]) -> str:
+    """`_table` without the columns that are empty in every row (nothing to read there)."""
+    keep = [i for i in range(len(headers))
+            if any(row[i] not in (None, "", []) for row in rows)]
+    return _table([headers[i] for i in keep], [[row[i] for i in keep] for row in rows])
 
 
 def _cell(value: Any) -> str:

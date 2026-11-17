@@ -188,7 +188,8 @@ def _loop() -> None:
                 if e.source == gate_id and e.condition == "proceed"} == old_next
         drawn = pipeline_view.render(out.state)
         assert pipeline_view.LOOP_LINE.format(
-            step="draft", judge="", cap=cap, runs=cap + 1, knob="").split(",")[0] in drawn
+            step="draft", judge="", cap=cap, runs=cap + 1, knob="",
+            exhausted="").split(",")[0] in drawn
         assert f"max {cap} -> {cap + 1} runs" in drawn
     for bad in (lo - 1, hi + 1):
         _a, refused = _apply("fuzz_draft_review",

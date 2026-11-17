@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from refactory_dsh.loop import Loop, LoopConfig
-from refactory_dsh.optim import ProposalContext
+from refactory_dsh.optim import ProposalContext, base
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 
 NODES = [{"id": "compare", "kind": "agent"}, {"id": "precision", "kind": "agent"},
@@ -128,9 +128,10 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     records[0] = _record("w00", outputs={"compare": long, "precision": "p", "decide": "d"})
     text = _render(records + [stepped])
     assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
-    assert "All 19 train item(s): 12 answered wrong, 2 failed with an error, 5 passed." in text
+    assert "19 train item(s): 5 passed, 12 answered wrong, 2 failed with an error" in text
+    assert text.count("12 answered wrong") == 1, "the counts are said once"
     assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
-    assert "Every item in full" in text and long in text and "chars omitted" not in text
+    assert f"Every item. {base.ITEM_FORM}" in text and long in text and "chars omitted" not in text
     assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
 
 
@@ -705,3 +706,27 @@ def test_without_cited_items_failures_by_id_then_passes_for_contrast():
     kinds = [{**r, "item_meta": {"type": "algebra" if int(r["id"][1:]) % 2 else "topology"}}
              for r in records]
     assert _full(_render(kinds)) == ["w00", "w01", "p00", "p01"]
+
+
+def test_a_reader_reply_that_is_not_valid_json_is_a_failed_group_not_an_empty_one():
+    """The S1-s42 reply with an unescaped quote, as a reader's reply: the group is said to
+    have failed, with the JSON error -- not read as a group with no patterns."""
+    from pathlib import Path
+
+    from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+    bad = (Path(__file__).parent / "fixtures" / "analyst_reply_unescaped_quote.txt").read_text()
+
+    class Broken(_ReaderClient):
+        def complete(self, prompt: str, *, system: str = "") -> str:
+            if system == READER_SYSTEM:
+                with self.lock:
+                    self.readers.append(prompt)
+                return bad
+            return super().complete(prompt, system=system)
+
+    client = Broken()
+    AutoresearchOptimizer(client).propose(
+        ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
+    section = _section(client.proposals[0])
+    assert "could not be read: ValueError: the answer's JSON object is not valid JSON" in section

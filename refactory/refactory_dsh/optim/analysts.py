@@ -10,8 +10,8 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   ``group_size`` (SkillOpt's ``minibatch_size``, 8), a batch closed early when the next
   item whole would take its call past ``ANALYST_ROOM`` (`batches`, `packer`): no item
   is cut to fit, the evidence is split across more calls. One call per batch. Each analyst
-  sees the pipeline (its nodes, edges, each node in full and every setting's value, as
-  SkillOpt's analyst sees the current skill) and each item's full trace
+  sees the pipeline in the proposer's words (`pipeline_text`: the pipeline view and each
+  step's settings, as SkillOpt's analyst sees the current skill) and each item's full trace
   (`evidence.TRACE_FORM`). It writes at most
   ``FINDINGS_PER_ANALYST`` findings (SkillOpt's analyst edit budget L, 4): what goes
   wrong, where in the graph (nodes, edges, settings, the structure) and what change
@@ -43,7 +43,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import evidence
 from .base import (
-    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _clip_middle, _expected, _node_spec,
+    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected,
     _ordered_items, _outcome, _table, NO_ANSWER_CAUSES,
 )
 
@@ -268,45 +268,30 @@ def fit_item(record: dict[str, Any], budget: int, room_name: str = "the analyst'
 
 
 def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
-    """The pipeline as an analyst reads it (SkillOpt's analyst reads the current skill):
-    its nodes and edges, each node in full with the values of the settings bound to it,
-    and every setting's value; each long text at most ``text_chars``, head and tail."""
-    knob_values = {k.get("name"): k.get("value") for k in ctx.knobs}
-    lines = ["Nodes:",
-             _table(["id", "kind", "call", "knobs"],
-                    [[n.get("id"), n.get("kind"), n.get("call", ""), n.get("knobs", [])]
-                     for n in ctx.nodes]),
-             "Edges:",
-             _table(["source", "target", "condition"],
-                    [[e.get("source"), e.get("target"), e.get("condition")] for e in ctx.edges])]
-    if ctx.node_states:
-        lines += ["", "Each node in full:"]
-        lines += [_node_spec(state, text_chars, knob_values)
-                  for state in sorted(ctx.node_states, key=lambda s: str(s.get("id")))]
-    bound = {str(pair[1]): f"`{state.get('id')}`.{pair[0]}"
-             for state in ctx.node_states for pair in state.get("field_bindings") or ()
-             if isinstance(pair, (list, tuple)) and len(pair) == 2}
-    if ctx.knobs:
-        lines += ["", "Settings (knobs) and their current values:"]
-        for knob in ctx.knobs:
-            if str(knob.get("name")) in bound:
-                lines.append(f"- `{knob.get('name')}` ({knob.get('kind')}): the value of "
-                             f"{bound[str(knob.get('name'))]}, shown in the node above")
-                continue
-            value = knob.get("value")
-            text = value if isinstance(value, str) else json.dumps(value, default=str)
-            lines += [f"- `{knob.get('name')}` ({knob.get('kind')}"
-                      + (", frozen" if knob.get("frozen") else "") + "):",
-                      _clip_middle(text, text_chars)]
-    return "\n".join(lines)
+    """The pipeline as an analyst reads it (SkillOpt's analyst reads the current skill),
+    in the proposer's own words from the same renderers: the pipeline view
+    (`base.pipeline_view_lines`) and each step's settings with their values
+    (`base._settings_lines`, a paragraph the steps' texts share read once: an analyst never
+    patches); each long setting text at most ``text_chars``, head and tail (a call retried
+    after a context overflow clips it lower)."""
+    from .base import _settings_lines, pipeline_view_lines
+
+    view = pipeline_view_lines(ctx.node_states, ctx.edges, ctx.knobs,
+                               getattr(ctx, "protected", ()) or (),
+                               getattr(ctx, "graders", ()) or ())
+    return "\n".join([*view, "", *_settings_lines(ctx.knobs, text_chars, exact=False)]).rstrip()
 
 
 def _changes_text(ctx: Any) -> str:
-    """The kinds of change the optimizer may make, so a finding can say which fits."""
+    """The changes the optimizer can make, in the proposer's own lines from the same
+    source (`base.operation_lines`), so a finding names only what the proposer is shown."""
+    from .base import operation_lines
+
     if not ctx.catalogue:
         return "(not listed)"
-    return "\n".join(f"- `{op.get('op')}`: {op.get('description', '')}"
-                     for op in ctx.catalogue)
+    return "\n".join(operation_lines(
+        ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
+        knob_values={k.get("name"): k.get("value") for k in ctx.knobs}))
 
 
 def _memory_text(ctx: Any) -> str:

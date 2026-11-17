@@ -143,7 +143,7 @@ class Request:
                        if phrase in kinds]
 
     def has_node(self, node_id: str) -> bool:
-        return f"| {node_id} |" in self.reference
+        return f"#### `{node_id}` (" in self.reference  # each node in full
 
 
 Script = Callable[["ComboModel", Request], list[dict[str, Any]]]

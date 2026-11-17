@@ -1272,3 +1272,18 @@ def test_a_step_whose_writes_nothing_reads_is_not_the_decision_unless_it_ends_th
         "final": {"id": "final", "kind": "agent", "writes": ["answer.txt"]}}}}
     assert feedback.decision_step(state, "side") is False, "unread: a no_effect question"
     assert feedback.decision_step(state, "final") is True, "the grader reads the pass's end"
+
+
+def test_a_review_that_is_not_valid_json_says_so_with_where(tmp_path):
+    """The S1-s42 reply with an unescaped quote, as a step review's reply: the recorded
+    error is the JSON error and where, not "unknown verdict" from a nested object."""
+    reply = (Path(__file__).parent / "fixtures" / "analyst_reply_unescaped_quote.txt").read_text()
+    client = _Answering({"proposals": [{"edit": {"op": "set_knob", "name": "k", "value": 2}}]},
+                        reply)
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(added_steps=_added()), 1, [])
+    trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    (failed,) = [t for t in trace if t["kind"] == "step_review"]
+    assert "not valid JSON: Expecting ',' delimiter" in failed["error"], failed["error"]
+    assert "unknown verdict" not in failed["error"]

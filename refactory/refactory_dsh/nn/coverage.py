@@ -160,6 +160,8 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "tools": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "tool_policy": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),
+    "knob_outputs": (_NEW, Gap("excluded by decision",
+                               "the mode's declaration of what its op does")),
     "max_iterations": (_GATE_ADD, ("set_knob",)),
     "on_exhausted": (_GATE_ADD, _DEFERRED_SETTING),
     "timeout_s": (_NEW, _DEFERRED_SETTING),

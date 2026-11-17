@@ -250,7 +250,9 @@ def _make_route_client():
 #: shakedown fixes changed it again: ``use_theorem`` and ``use_sketch`` are frozen. The
 #: solve node now carries the data pass's crash retry and ``missing_on_crash``. Then
 #: ``use_theorem`` and ``use_sketch`` were removed (the theorem states the answer).
-BASELINE_SNAPSHOT_SHA256 = "8627082f3bf3debab0ee70ff98987aabc434184aeeef671aaa38febc95615cb5"
+#: Then format_prompt declared which outputs carry its knob (``knob_outputs``), lowered
+#: with its knobs and facts; its prompts are unchanged.
+BASELINE_SNAPSHOT_SHA256 = "5283073c4516f42c652df1403adeaca30ae362e3f4250f51e43bf1e0a225249a"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
