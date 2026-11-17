@@ -5,8 +5,8 @@ every operation in the catalogue names the readers that render what it builds
 (``EditSpec.reads_as``), and `READERS` holds them, so a new operation without a reader,
 or a reader no operation names, fails ``tests/test_pipeline_view.py``:
 
-- ``step``: a model, code or plain step on one line -- what it ``sees``, what it is
-  ``told``, what it writes (``->``);
+- ``step``: a model, code or plain step on one line -- the route of its own it runs on
+  (``on model=...``), what it ``sees``, what it is ``told``, what it writes (``->``);
 - ``sees``: a step's inputs as ``sees`` handles, ``name@maker`` (``@run``: no step makes
   it); a plain op that only
   assembles them folded in as ``name (via op: its inputs)``; an agent with tools sees the
@@ -54,6 +54,9 @@ LOOP_SPAN = "{back_to} … {step}"
 #: What a loop does past its cap, when it does not go on with its last attempt
 #: (`Graph.on_exhausted`; ``continue`` is said by nothing).
 EXHAUSTED = ", past the cap: {policy}"
+#: A step on a route of its own (`Node.route`): the fields it sets, which differ from the
+#: run's for it (`workers.StepRoutes.refusal`). The legend's form is made from it.
+ROUTE_LINE = "on {fields}"
 #: The key prefix of a line no reader recognised.
 FALLBACK = "(fallback)"
 
@@ -260,15 +263,21 @@ class _View:
         marks = "".join(f"[{m}] " for m, on in (("protected", node_id in self.protected),
                                                 ("optional", node_id in self.optional)) if on)
         return marks + "  ".join(part for part in (
-            f"{node_id} {kind}", f"sees {sees}" if sees else "", f"told {told}" if told else "",
+            f"{node_id} {kind}{self._route(node_id)}", f"sees {sees}" if sees else "", f"told {told}" if told else "",
             f"-> {', '.join(outs)}" if outs else "") if part)
+
+    def _route(self, node_id: str) -> str:
+        """`` on model=...``: the route of its own a step runs on, or nothing."""
+        route = self.graph.nodes[node_id].route
+        return " " + ROUTE_LINE.format(fields=" ".join(f"{k}={v}" for k, v in route.items())) \
+            if route else ""
 
     def judge(self, gate_id: str) -> str:
         gate = self.graph.nodes[gate_id]
         judge = self.judges.get(gate_id)
         if judge:
             body = self.step(judge).split("  ", 1)
-            return f"judge {judge}" + (f" ({body[1]})" if len(body) > 1 else "")
+            return f"judge {judge}{self._route(judge)}" + (f" ({body[1]})" if len(body) > 1 else "")
         if gate_id in self.code:
             return f"judge code ({self.told(gate_id) or 'its code'})"
         return f"judge {gate.evaluator or gate.gate_kind}"
@@ -562,6 +571,8 @@ FORMS = {
                                   judge="judge ...", cap="N", runs="N+1", knob="", exhausted=""),
     "route": "route(after step, judge ..., {label: step})",
     "per item": "per item (data) { ... }",
+    "step route": "step agent " + ROUTE_LINE.format(fields="model=M effort=E "
+                                                           "max_completion_tokens=N"),
 }
 
 

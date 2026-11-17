@@ -127,6 +127,10 @@ class AgentNode(Node):
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
     workspace: dict[str, str] | None = None
+    #: The step's own model, effort and output cap (`nn.graph.route_declaration`'s
+    #: canonical form), set on its worker's model context. None is the run's route, and is
+    #: left out of the serialized graph.
+    route: dict[str, str] | None = None
     #: Optional tool policy. ``"none"`` disables all tools; ``None`` preserves defaults.
     tool_policy: str | None = None
 
@@ -286,6 +290,8 @@ class Workflow(BaseModel):
                 d.pop("missing_on_crash")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
+            if "route" in d and d["route"] is None:
+                d.pop("route")
             if not d.get("system_prompt"):
                 d.pop("system_prompt", None)
             if "tool_policy" in d and d["tool_policy"] is None:

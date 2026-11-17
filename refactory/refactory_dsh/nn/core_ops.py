@@ -399,7 +399,17 @@ def _spec(raw: Any, *, default_kind: str = "agent", default_text: str = NEUTRAL_
     for key in ("id", "to"):
         if raw.get(key) is not None and not isinstance(raw.get(key), str):
             raise _Refused(f"'{key}' is a string")
-    return {**raw, "kind": kind, "text": text if text is not None else (
+    route = None
+    if raw.get("route") is not None:
+        if kind != "agent":
+            raise _Refused("only an agent step takes a 'route'")
+        from .graph import route_declaration
+
+        try:
+            route = route_declaration(raw["route"])
+        except ValueError as exc:
+            raise _Refused(str(exc)) from exc
+    return {**raw, "kind": kind, "route": route, "text": text if text is not None else (
         default_text if kind == "agent" else "")}
 
 
@@ -464,8 +474,8 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     sees (agents only) and the step itself.
 
     ``writes``/``produces`` are its outputs when it takes over another step's; by default
-    one file ``<id>.txt`` and one fact ``<id>``. ``settings_from`` is the agent whose role
-    and timeout a new agent takes; a copy (``spec["_like"]``) of an agent that uses tools
+    one file ``<id>.txt`` and one fact ``<id>``. ``settings_from`` is the agent whose role,
+    timeout and route a new agent takes, unless the spec names a route of its own; a copy (``spec["_like"]``) of an agent that uses tools
     keeps them, in a fresh workspace of its own. ``verdict`` makes it a judge: its answer
     starts with one of the labels, and it writes its reply only, for the gate to read."""
     from refactory_dsh import snippet
@@ -502,6 +512,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
                 node["role"] = source.role
             if source.timeout_s:
                 node["timeout_s"] = source.timeout_s
+        route = spec.get("route") or (source.route if source is not None
+                                      and source.kind == "agent" else None)
+        if route:
+            node["route"] = dict(route)
         if like is not None and _uses_tools(like):
             # A copy of a step that uses tools keeps them only in a fresh workspace of its
             # own, so it never works where the step it copies works (`coverage.DECISIONS`).
@@ -2456,13 +2470,27 @@ REACHES = ("its output goes into the nearest prompt {where} that can take it -- 
            "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
            "with neither, nothing reads it until you add a reader")
 
+#: The field a new agent step names its own route in (`Node.route`).
+ROUTE_FIELD = "route"
+
+
+def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
+    """The request's one line for ``route``: where it goes and the run's values for it
+    (`workers.StepRoutes.offered`)."""
+    values = "; ".join(f"{key} {', '.join(vals)}" for key, vals in offered.items())
+    return (f"- `{ROUTE_FIELD}` on a new agent step (`insert`, `branch`, `merge`, or a step in "
+            "'into', 'new' or 'to'): its own model, effort or output cap, any of them, each "
+            f"one of this run's -- {values}; left out, it runs on its neighbour's. E.g. "
+            + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
+
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
     "insert": {
         "reads_as": ('step',),
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
-                   "reads", "tools", "takes_over"),
+                   "reads", "tools", "takes_over", "route"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call'); it "
                 "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
@@ -2494,7 +2522,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "branch": {
         "reads_as": ('parallel',),
-        "fields": ("fork", "kind", "text", "sees", "optional", "id", "to"),
+        "fields": ("fork", "kind", "text", "sees", "optional", "id", "to", "route"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
                 "single fact or file names there before the fork); "
@@ -2551,7 +2579,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "merge": {
         "reads_as": ('step',),
-        "fields": ("steps", "kind", "text", "id"),
+        "fields": ("steps", "kind", "text", "id", "route"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
                 "outputs",
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
@@ -2697,7 +2725,7 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
 
 #: What a new step written inside an operator ('new', 'into', a route's 'to') may say;
 #: anything else it would ignore, so it is refused (`_unknown_fields`).
-STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools")
+STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route")
 
 
 def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
