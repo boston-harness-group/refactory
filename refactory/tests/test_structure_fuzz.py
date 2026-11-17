@@ -337,7 +337,9 @@ def test_mutation_route_without_the_run_s_routes_is_caught(monkeypatch):
 
 def test_mutation_walker_ignoring_a_step_s_route_is_caught(monkeypatch):
     monkeypatch.setattr(sf.ScriptedModel, "with_step_route", lambda self, route: self)
-    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"), walker=True, edits=400)
+    # Seed 4: the sealed tool asks the generator draws shift its walks, and seed 3's first
+    # 400 edits no longer run a routed step on the walker.
+    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"), walker=True, edits=400, seed=4)
 
 
 @pytest.mark.skipif(not __import__("refactory_dsh.snippet").snippet.available()[0],
