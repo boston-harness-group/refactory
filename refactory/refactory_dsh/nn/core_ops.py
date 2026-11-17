@@ -999,7 +999,8 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
 
 
 def _downstream(graph: Graph, start: str) -> set[str]:
-    """``start`` and every step after it (fork branches included, no reloop back)."""
+    """``start`` and every step after it (fork branches and a data pass's steps included,
+    no reloop back)."""
     from .loops import loop_edges
 
     back = {(source, target) for source, target, _c in loop_edges(graph)}
@@ -1009,7 +1010,9 @@ def _downstream(graph: Graph, start: str) -> set[str]:
         if node is None:
             continue
         following = [e.target for e in graph.out_edges(node.id) if (node.id, e.target) not in back]
-        for target in [*(node.targets if node.kind == "fork" else ()), *following]:
+        for target in [*(node.targets if node.kind == "fork" else ()),
+                       *((node.subgraph_entry,) if node.kind == "data" and node.subgraph_entry
+                         else ()), *following]:
             if target not in out:
                 out.add(target)
                 queue.append(target)
@@ -2495,6 +2498,23 @@ def unread_by_bundle(parent: Mapping[str, Any], states: Sequence[Mapping[str, An
     return None
 
 
+def _needed(node: Node, values: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """What a step cannot run without. An agent's prompt is read here: its reads and the
+    ``{{slots}}`` it needs filled, a slot inside ``{% if name %}`` being optional, as the
+    validator holds it (V15, `validate.template_facts`). An op or a gate is code that
+    cannot be read, so it needs everything it takes in (its reads and inputs, which it
+    may need though it declares them optional); only the slots of the knobs it fills are
+    read, guards and all."""
+    from .validate import consumed, knob_slot_facts, template_facts
+
+    if node.kind == "agent":
+        return ({("file", name) for name in node.reads}
+                | {("fact", name) for name in template_facts(node, values)})
+    filled = knob_slot_facts(node, values, guarded=True)
+    return ((consumed(node, values) - {("fact", name) for name in filled})
+            | {("fact", name) for name in knob_slot_facts(node, values)})
+
+
 def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | None:
     """Why an operator's result would fail items at run time: a step it kept now runs, on
     some path, without an input it had on every path before -- one still made elsewhere in
@@ -2516,11 +2536,12 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
     values = _knob_values(after)
     for node_id in sorted(set(old.nodes) & set(new.nodes)):
         try:
-            takes = _consumed(new.nodes[node_id], after)
-        except Exception:  # noqa: BLE001
-            continue
-        lost = sorted((had.get(node_id, set()) & takes) - has.get(node_id, set())
-                      - {k for k in takes if k[0] == "fact" and k[1] in values})
+            takes = _needed(new.nodes[node_id], values)
+        except Exception as exc:  # noqa: BLE001 - said, never skipped
+            return (f"{node_id!r}'s inputs cannot be read ({type(exc).__name__}: {exc}), so "
+                    "whether it keeps them after this edit is unknown")
+        # A {{name}} a knob fills is no input (`validate.consumed` drops the knobs).
+        lost = sorted((had.get(node_id, set()) & takes) - has.get(node_id, set()))
         lost = [key for key in lost if makers.get(key)]
         if lost:
             names = ", ".join(f"{name} (made by {', '.join(makers[(kind, name)])})"

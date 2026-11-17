@@ -1821,9 +1821,11 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
   `system`, which it takes.
 - An operator after which a kept step would run, on some path, without an input it had on
   every path before is refused (`core_ops.lost_inputs`). An example is a route that skips
-  the steps making what a later step reads. The validator holds required inputs to every
-  path (V15); this holds every input a step takes in, since an op may need what it
-  declares optional.
+  the steps making what a later step reads. An agent's prompt is read: a `{{slot}}`
+  inside `{% if name %}` is optional there, as the validator holds it (V15). An op or a
+  gate is code that cannot be read, so it keeps every read and input it has, since it may
+  need what it declares optional; only the slots of the knobs it fills honour their
+  guards. A step whose inputs cannot be read is said, never skipped.
 
 **Wiring.** Facts reach a model step as `{{slots}}` in its own prompt knob, files through
 a `collect` step in front of it (so a missing or binary file is said, not a crash); a

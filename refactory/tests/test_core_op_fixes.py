@@ -397,3 +397,102 @@ def test_a_new_step_ending_the_pass_leaves_its_output_to_the_task():
     _mode_, chosen = _solver(*CHOICE)
     assert not [line for line in pipeline_view.changed_lines(parent, chosen)
                 if "reaches no step" in line]
+
+
+# ── re-review: what a skip loses, and the readers a takeover renames ────────
+
+
+ROUTE_SKIPPING_REVIEW = {"op": "route", "after": "draft", "judge": "agent", "text": "x",
+                         "to": {"needs_review": "review", "fine": "finalize"}}
+
+
+def test_a_route_skipping_a_step_a_later_prompt_reads_only_under_a_guard_is_taken():
+    """finalize reads {{review}} only inside {% if review %}: a route that skips review
+    loses nothing finalize needs (the validator's own rule for an optional slot)."""
+    state = _fuzz("fuzz_draft_review")
+    with pytest.raises(nn_edits.EditError, match="'finalize' would run without review"):
+        nn_edits.apply(ROUTE_SKIPPING_REVIEW, state)
+    guarded = nn_edits.apply({"op": "set_knob", "name": "finalize_task", "value": (
+        "Write the final answer.\n\n## Draft\n{{draft}}"
+        "{% if review %}\n\n## Review\n{{review}}{% endif %}")}, state)
+    assert validate_state(nn_edits.apply(ROUTE_SKIPPING_REVIEW, guarded)) == []
+
+
+def test_a_slot_a_knob_fills_is_never_lost():
+    """A {{name}} a knob of that name fills is there on every path: no step need make it."""
+    state = _fuzz("fuzz_draft_review")
+    state = nn_edits.apply({"op": "add_knob", "name": "review",
+                            "spec": {"default": "No review.", "kind": "str"}}, state)
+    assert core_ops.lost_inputs(state, _skip_review(state)) is None
+
+
+def _skip_review(state: dict) -> dict:
+    """The state the route leaves, without the operator's own check."""
+    steps = nn_edits._specs()["route"].expand(ROUTE_SKIPPING_REVIEW, dict(state))
+    for step in steps:
+        state = nn_edits.apply(step, state)
+    return state
+
+
+def test_a_pass_after_the_new_step_reads_the_new_step_s_output():
+    """A takeover before a data node: the pass's steps run after the new one, so they
+    read the new step's output under the old name, never the taken-over step's."""
+    state = _fuzz("fuzz_data_pass")
+    state = nn_edits.apply({"op": "add_node", "position": {"start": True}, "node": {
+        "id": "guide", "kind": "agent", "prompt_template": "Write a hint for every item.",
+        "writes": ["guide.txt"], "produces": ["guide"]}}, state)
+    state["graph"]["nodes"]["solve"]["prompt_template"] = "Solve: {{question}}\nHint: {{guide}}"
+    assert validate_state(state) == []
+    after = nn_edits.apply({"op": "insert", "after": "guide", "kind": "code", "id": "pick",
+                            "takes_over": "guide"}, state)
+    graph = Graph.from_state(after["graph"])
+    from refactory_dsh.nn.validate import consumed
+
+    values = {k: e["value"] for k, e in after["knobs"].items()}
+    assert ("fact", "guide") in consumed(graph.nodes["solve"], values)
+    assert graph.nodes["pick"].produces == ("guide",)
+
+
+def test_a_reader_whose_code_cannot_be_read_is_refused():
+    """An op that takes the target's fact as an input reads it by name in code no
+    renaming reaches: refused, whatever the op is."""
+    state = _fuzz("fuzz_draft_review")
+    old = state["graph"]["nodes"]["review"]
+    state["graph"]["nodes"]["review"] = {
+        "id": "review", "kind": "op", "call": "loop_ops:noop", "inputs": ["draft"],
+        "writes": list(old.get("writes") or []), "produces": list(old.get("produces") or [])}
+    state["knobs"] = {k: v for k, v in state["knobs"].items() if not k.startswith("review")}
+    reason = nn_edits.precheck({"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                                "takes_over": "draft"}, state)
+    assert reason and "'review' reads 'draft'" in reason and "in its code or feedback" in reason
+
+
+def test_a_fact_a_reader_takes_as_feedback_is_refused():
+    state = _fuzz("fuzz_draft_review")
+    state["graph"]["nodes"]["review"]["feedback_keys"] = ["draft"]
+    reason = nn_edits.precheck({"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                                "takes_over": "draft"}, state)
+    assert reason and "'review' reads 'draft'" in reason
+
+
+def test_a_copy_keeps_the_step_s_current_text_not_its_default():
+    s4 = nn_edits.apply({"op": "set_knob", "name": "decide__system_prompt",
+                         "value": "TUNED SYSTEM PROMPT"}, _mode("livemath/skill_graph").state_dict())
+    assert s4["knobs"]["decide__system_prompt"]["spec"].get("default") != "TUNED SYSTEM PROMPT"
+    after = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1}, s4)
+    assert after["knobs"]["decide_copy1__system_prompt"]["value"] == "TUNED SYSTEM PROMPT"
+
+
+def test_a_step_whose_inputs_cannot_be_read_is_said_not_skipped(monkeypatch):
+    import importlib
+
+    validate = importlib.import_module("refactory_dsh.nn.validate")
+    state = _fuzz("fuzz_draft_review")
+    after = _skip_review(state)
+
+    def unreadable(node, values):
+        raise ValueError("bad template")
+
+    monkeypatch.setattr(validate, "template_facts", unreadable)
+    said = core_ops.lost_inputs(state, after)
+    assert said and "inputs cannot be read (ValueError: bad template)" in said
