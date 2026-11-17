@@ -269,14 +269,16 @@ def extract_answer(ctx: Any) -> dict[str, Any]:
 
 
 def _op(node_id: str, fn: str, *, reads: tuple[str, ...], produces: tuple[str, ...],
-        knobs: tuple[str, ...] = (), required: tuple[str, ...] | None = None) -> nn.Node:
+        knobs: tuple[str, ...] = (), required: tuple[str, ...] | None = None,
+        knob_outputs: dict[str, tuple[str, ...]] | None = None) -> nn.Node:
     """An op of this graph. It needs its reads (the item, or the notes and the answer the
     steps before it wrote), so they are ``required_reads`` -- no edit may put one where
     they are not written first -- except the fork's notes for decide_prompt, which goes on
     with the step that answered (``required``)."""
     return nn.Node(node_id, "op", call=f"{SKILL_GRAPH_OPS}:{fn}", reads=reads,
                    required_reads=reads if required is None else required, produces=produces,
-                   **({"knobs": knobs} if knobs else {}))
+                   **({"knobs": knobs} if knobs else {}),
+                   **({"knob_outputs": knob_outputs} if knob_outputs is not None else {}))
 
 
 def _agent(step: str, writes: str, timeout_s: int) -> nn.Node:
@@ -342,7 +344,10 @@ class SkillGraph(nn.Mode):
             ),
             _op("prepare", "prepare", reads=("current_item.json",),
                 produces=("user_prompt", "compare_prompt"),
-                knobs=(task_knob("compare"),)),
+                knobs=(task_knob("compare"),),
+                # The bare question carries no knob; compare's prompt carries its task.
+                knob_outputs={"user_prompt": (),
+                              "compare_prompt": (task_knob("compare"),)}),
             _agent("compare", compare_notes, t),
             _op("notes_prompts", "notes_prompts", reads=(compare_notes,),
                 produces=("precision_prompt", "hypotheses_prompt"),

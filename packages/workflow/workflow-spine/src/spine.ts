@@ -233,6 +233,9 @@ export function validateGraph(graph: WorkflowGraph): GraphIssue[] {
     if (node._type === 'DataNode') {
       issues.push(...dataSubgraphIssues(graph, id, node, ids, outgoing))
     }
+    if (node.knob_outputs !== undefined) {
+      issues.push(...knobOutputIssues(id, node))
+    }
   }
 
   for (const issue of unreachableNodes(graph, ids, outgoing)) {
@@ -246,6 +249,49 @@ export function validateGraph(graph: WorkflowGraph): GraphIssue[] {
   // Cross-container reloop check: a gate inside a fork body may not reloop
   // to a target outside that fork's body.
   issues.push(...crossContainerReloopIssues(graph, outgoing))
+  return issues
+}
+
+/**
+ * What is wrong with an op's `knob_outputs`, by the rules Python's `Node` holds it to
+ * (`nn.graph._knob_outputs`): only an op declares it; it names each of the op's outputs
+ * (its writes and facts) exactly once and nothing else; each output's knobs are a list
+ * of the op's own knobs, each once.
+ */
+function knobOutputIssues(id: string, node: WorkflowNode): GraphIssue[] {
+  const declared = node.knob_outputs as unknown
+  if (node._type !== 'FnNode') {
+    return [{ node: id, message: `node type '${node._type}' declares knob_outputs; only an op does` }]
+  }
+  if (declared === null || typeof declared !== 'object' || Array.isArray(declared)) {
+    return [{ node: id, message: 'knob_outputs is a mapping of each output to the knobs it carries' }]
+  }
+  const map = declared as Record<string, unknown>
+  const knobs = new Set(node.knobs ?? [])
+  const outputs = [...(node.writes ?? []), ...(node.produces ?? []).filter(f => !(node.writes ?? []).includes(f))]
+  const issues: GraphIssue[] = []
+  const unknown = Object.keys(map).filter(out => !outputs.includes(out)).sort()
+  if (unknown.length > 0) {
+    issues.push({ node: id, message: `knob_outputs names ${unknown.join(', ')}, which the node neither writes nor produces` })
+  }
+  const missing = outputs.filter(out => !(out in map))
+  if (missing.length > 0) {
+    issues.push({ node: id, message: `knob_outputs leaves out ${missing.join(', ')}; it names every output` })
+  }
+  for (const out of outputs.filter(o => o in map)) {
+    const carried = map[out]
+    if (!Array.isArray(carried) || !carried.every(k => typeof k === 'string')) {
+      issues.push({ node: id, message: `knob_outputs['${out}'] is a list of knob names` })
+      continue
+    }
+    const foreign = carried.filter(k => !knobs.has(k)).sort()
+    if (foreign.length > 0) {
+      issues.push({ node: id, message: `knob_outputs['${out}'] names ${foreign.join(', ')}, which the node does not read` })
+    }
+    if (new Set(carried).size !== carried.length) {
+      issues.push({ node: id, message: `knob_outputs['${out}'] names a knob twice` })
+    }
+  }
   return issues
 }
 

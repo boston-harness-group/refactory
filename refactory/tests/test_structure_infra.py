@@ -202,28 +202,30 @@ def test_select_fails_on_a_label_naming_no_file(tmp_path):
         operators.select(ctx)
 
 
-# ── who makes each fact and file, and which carry no model output ──────────
+# ── who makes each fact and file, and which are the task's own input ───────
 
 
-def test_model_free_inputs_are_the_tasks_own_and_what_plain_ops_make_from_them():
+def test_task_inputs_are_what_the_model_step_takes_from_plain_ops_without_text_knobs():
     graph = nn.Graph.from_state(_state("fuzz_dataflow")["graph"])
-    free = operators.model_free_inputs(graph)
-    # load and clean are ops reading only the task's files: model-free. summarise is a
-    # model step, and emit reads its summary: both carry model output.
-    assert {("fact", "source"), ("file", "raw.txt"), ("fact", "cleaned")} <= free
-    assert not {("file", "summary.txt"), ("fact", "summary"), ("file", "answer.txt")} & free
+    task = operators.task_inputs(graph, {"depth": 2})
+    # load and clean are ops reading only the task's files (clean's knob is a number, not
+    # text), and summarise takes in what they make: the task's input as it receives it.
+    # emit reads summarise's summary: model output.
+    assert task == {("fact", "source"), ("fact", "cleaned"), ("file", "clean.txt")}
+    assert not {("file", "summary.txt"), ("fact", "summary"), ("file", "answer.txt")} & task
     assert operators.made_by(graph)[("file", "clean.txt")] == ["clean"]
 
 
 def test_the_node_inputs_table_says_who_makes_each_one_and_marks_task_inputs():
     state = _state("fuzz_dataflow")
-    available = base.available_before(state["graph"])
+    available = base.available_before(
+        state["graph"], {k: e["value"] for k, e in state["knobs"].items()})
     assert available["emit"]["made_by"]["summary.txt"] == ["summarise"]
-    assert "raw.txt" in available["emit"]["task_inputs"]
+    assert "clean.txt" in available["summarise"]["task_inputs"]
     assert "summary.txt" not in available["emit"]["task_inputs"]
     text = "\n".join(base._available_section(available))
     # Each written as the pipeline view writes it: one label per fact or file.
-    raw = ",".join(available["emit"]["made_by"].get("raw.txt") or ()) or "task"
+    raw = ",".join(available["emit"]["made_by"].get("raw.txt") or ()) or "run"
     assert "summary.txt@summarise" in text and f"raw.txt@{raw}" in text
     assert "(task input)" not in text
     assert "`name@maker`" in text and operators.COLLECT_CALL in text

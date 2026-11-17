@@ -20,9 +20,10 @@ same way on both runtimes (the walker in its forkserver child, the spine through
 The helpers describe and wire data without a model:
 
 - `made_by`: which steps make each fact and file.
-- `model_free_inputs`: the facts and files no model step's output reaches -- the task's
-  own inputs, and what plain ops make from them alone -- so a step can be made to see
-  the task without seeing another step's work.
+- `carried_knobs` / `task_inputs`: which knobs' text each op output carries (declared in
+  ``knob_outputs``, else all of the op's knobs), and the task's own input, once, as the
+  model steps receive it -- what ``"sees": ["task"]`` gives, so a step can be made to see
+  the task without another step's work or instructions.
 - `collect_node` / `file_text_node`: the node state of a ``collect`` step for a set of
   files, or of a ``file_text`` step for one.
 - `place_output`: puts a step's fact where the next model step downstream fills facts
@@ -166,35 +167,80 @@ def made_by(graph: Graph) -> dict[tuple[str, str], list[str]]:
     return {key: sorted(ids) for key, ids in out.items()}
 
 
-def model_free_inputs(graph: Graph, knob_values: Mapping[str, Any] | None = None
-                      ) -> set[tuple[str, str]]:
-    """The facts and files no model step's output reaches, as nodes declare them
-    (``knob_values``: the knobs' values by name, for the slots in bound prompts).
+#: What ``"sees": ["task"]`` gives, in the words every request uses (the operator line,
+#: the pipeline view, the step-carries table): `task_inputs` computes it.
+TASK_MEANING = ("the task's own input, once, as the model steps receive it: never a "
+                "step's output or a knob's text (an op's output carries the knobs the op "
+                "declares for it in `knob_outputs`, else every knob the op reads)")
 
-    A name carries model output when an agent makes it, or when a node that takes in
-    (`validate.consumed`) a name carrying model output makes it, to a fixpoint. Every
-    other name a node makes is model-free: what a data node gives each item, and what
-    plain ops build from that and from knobs alone. Static and conservative: a name
-    made by two steps, one of them downstream of a model, carries model output.
+#: The core ops that only hand on what they read (a file as a fact, a chosen file): what
+#: they make is that input again, so it is never the task's input a second time.
+PASS_THROUGH_CALLS = frozenset((COLLECT_CALL, FILE_TEXT_CALL, SELECT_CALL))
+
+
+def carried_knobs(node: Node) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Each output of an op or gate, ``("file"|"fact", name)``, with the knobs whose value
+    may reach its text: as the op declares (``knob_outputs``), else every knob it reads,
+    for every output. Empty for any other kind (an agent's outputs are model output, and
+    a data node's knobs set how it runs, not what it gives)."""
+    if node.kind not in ("op", "gate"):
+        return {}
+    outputs = [("file", n) for n in node.writes] + [("fact", n) for n in node.produces]
+    if node.knob_outputs is not None:
+        return {(kind, name): tuple(node.knob_outputs.get(name, ())) for kind, name in outputs}
+    return {key: tuple(node.knobs) for key in outputs}
+
+
+def task_inputs(graph: Graph, knob_values: Mapping[str, Any] | None = None
+                ) -> set[tuple[str, str]]:
+    """The task's own input, once, as the model steps receive it: what ``"sees":
+    ["task"]`` gives a new step (``knob_values``: the knobs' values by name).
+
+    A name carries a step's work or instructions when an agent makes it, when an op makes
+    it with a text knob's value (`carried_knobs`; a knob with no value counts), or when a
+    node that takes in such a name makes it, to a fixpoint. Of the rest, the task's input
+    is what is there before some model step (`validate.available_inputs`) and is made by
+    an op of the mode -- not a data node's per-item record and not a pass-through op's
+    copy (`PASS_THROUGH_CALLS`) -- and, when a model step takes one of those in directly,
+    only those: the same question built twice (a message and its framed prompt) is given
+    once, in the form the steps get it.
     """
-    from .validate import consumed
+    from .validate import available_inputs, consumed
 
     values = dict(knob_values or {})
-    makers = made_by(graph)
+
+    def text_knob(name: str) -> bool:
+        return values.get(name) is None or isinstance(values.get(name), str)
+
+    takes = {node_id: consumed(node, values) for node_id, node in graph.nodes.items()}
     carrying: set[tuple[str, str]] = set()
-    takes = {node_id: consumed(node, values)
-             for node_id, node in graph.nodes.items()}
+    for node in graph.nodes.values():
+        if node.kind == "agent":
+            carrying |= {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
+        carrying |= {key for key, knobs in carried_knobs(node).items()
+                     if any(text_knob(k) for k in knobs)}
     changed = True
     while changed:
         changed = False
         for node_id, node in graph.nodes.items():
-            if node.kind != "agent" and not (takes[node_id] & carrying):
+            if not (takes[node_id] & carrying):
                 continue
             made = {("file", n) for n in node.writes} | {("fact", n) for n in node.produces}
             if not made <= carrying:
                 carrying |= made
                 changed = True
-    return set(makers) - carrying
+    agents = [node_id for node_id, node in graph.nodes.items() if node.kind == "agent"]
+    have = available_inputs(graph)
+    before = set().union(*(have.get(a, set()) for a in agents)) if agents else set()
+    own = set()
+    for key, makers in made_by(graph).items():
+        if key in carrying or key not in before:
+            continue
+        if all(graph.nodes[m].kind == "op" and graph.nodes[m].call not in PASS_THROUGH_CALLS
+               for m in makers):
+            own.add(key)
+    received = {key for key in own if any(key in takes[a] for a in agents)}
+    return received or own
 
 
 # ── helpers an edit uses to wire data ─────────────────────────────────────

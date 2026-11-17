@@ -146,6 +146,8 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["workspace"] = dict(node.workspace)
         if node.inputs:
             entry["inputs"] = list(node.inputs)
+        if node.knob_outputs is not None:
+            entry["knob_outputs"] = {out: list(k) for out, k in node.knob_outputs.items()}
         if node_id in blind:
             entry["blind_reloops"] = blind[node_id]
         if needs_snippet_spec(node):
@@ -258,6 +260,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 callable_name=node.call,
                 command=f"{RUNNER} {node.call}",
                 notes=node.notes,
+                **({"knob_outputs": {out: list(k) for out, k in node.knob_outputs.items()},
+                    "knobs": list(node.knobs), "produces": list(node.produces)}
+                   if node.knob_outputs is not None else {}),
             )
         elif node.kind == "gate":
             # Who answers it decides whether there is a command at all. `fn` runs its

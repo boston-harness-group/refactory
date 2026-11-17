@@ -148,6 +148,14 @@ class FnNode(Node):
     callable_name: str | None = None
     notes: str = ""
     command_timeout_s: int | None = Field(default=None, gt=0, le=2_147_483)
+    #: Which outputs carry which of the op's knobs (`nn.graph.Node.knob_outputs`), with the
+    #: op's ``knobs`` and ``produces`` beside it so the spine can check it (``validateGraph``)
+    #: as the walker does. All three are None when the op declares none, and are left out
+    #: of the serialized graph, so such a graph is byte-identical to one lowered before
+    #: the field existed.
+    knob_outputs: dict[str, list[str]] | None = None
+    knobs: list[str] | None = None
+    produces: list[str] | None = None
 
 
 class GateNode(Node):
@@ -284,6 +292,9 @@ class Workflow(BaseModel):
                 d.pop("tool_policy")
             if "on_exhausted" in d and d["on_exhausted"] is None:
                 d.pop("on_exhausted")
+            for field_name in ("knob_outputs", "knobs", "produces"):
+                if field_name in d and d[field_name] is None:
+                    d.pop(field_name)
             for field_name in ("reads", "writes"):
                 value = d.get(field_name)
                 if isinstance(value, list):

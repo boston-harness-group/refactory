@@ -366,7 +366,7 @@ def test_the_available_table_fits_its_limit_on_a_large_graph():
     assert "more)" in text and "not listed" in text
     assert "the files it lists in `reads`, pasted in after the prompt" in lines[0]
     small = "\n".join(base._available_section({"a": {"facts": ["f"], "files": ["x.txt"]}}))
-    assert "| a | f@task | x.txt@task |" in small
+    assert "| a | f@run | x.txt@run |" in small
 
 
 # ── past edits keep their wiring whole wherever a request shows them ─────────

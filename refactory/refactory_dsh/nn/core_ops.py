@@ -12,7 +12,7 @@ to every rule a hand-written edit is. They say nothing about what a step is for:
   once between a fork and a join;
 - ``serialize``: a fork's branches one after another, in their declared order;
 - ``branch``: a new step as another (optionally optional) branch of an existing fork;
-- ``rewire``: what an existing step sees (the task's own inputs, other steps' outputs);
+- ``rewire``: what an existing step sees (the task's own input, other steps' outputs);
 - ``loop`` (one-line form): a judge after a step that can send it back with a reason;
 - ``route``: a judge after a step choosing among labelled next steps that rejoin;
 - ``split`` (one-line form): a step replaced by two new ones, or by one (replace);
@@ -25,8 +25,8 @@ strategy with no model can apply any operator.
 **What the system wires** (`_seen`, `_step_nodes`, `_place`):
 
 - a new step's inputs: by default what its neighbour sees plus the neighbour's outputs
-  (``sees`` names others: ``"task"`` for the task's own inputs, facts no model step
-  made, or a step id for that step's outputs). Facts reach a model step as ``{{slots}}``
+  (``sees`` names others: ``"task"`` for the task's own input, `operators.task_inputs`,
+  or a step id for that step's outputs). Facts reach a model step as ``{{slots}}``
   in its own prompt knob; files through a ``collect`` step in front of it
   (`operators.collect`), so a missing file is said, not a crash. A code step gets the
   same files and facts in ``inp``;
@@ -52,6 +52,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 from .graph import Graph, Node
+from .operators import TASK_MEANING
 
 #: The core operators, in the order the request lists them.
 CORE_OPS = ("insert", "remove", "parallelize", "serialize", "branch", "rewire", "loop",
@@ -87,7 +88,7 @@ def system_appended(text: str) -> tuple[str, str]:
 
 #: The loop's default iteration limit and its knob's bounds.
 LOOP_ITERATIONS = (2, 1, 5)
-#: What ``sees`` calls the task's own inputs.
+#: What ``sees`` calls the task's own input (`operators.task_inputs`).
 TASK = "task"
 #: The heading a ``collect`` step's fact gets in a prompt.
 FILES_HEADING = "Files from earlier steps"
@@ -139,11 +140,16 @@ def _grader_side(graph: Graph, state: Mapping[str, Any]) -> set[tuple[str, str]]
 
 
 def _task_inputs(graph: Graph, state: Mapping[str, Any]) -> set[tuple[str, str]]:
-    from .operators import model_free_inputs
+    """What ``"sees": ["task"]`` gives (`operators.task_inputs`); nothing, with a warning,
+    when a node cannot be read (the validator says why)."""
+    from .operators import task_inputs
 
     try:
-        return model_free_inputs(graph, _knob_values(state))
-    except Exception:  # noqa: BLE001
+        return task_inputs(graph, _knob_values(state))
+    except Exception as exc:  # noqa: BLE001 - a node that cannot be read is the validator's
+        import logging
+
+        logging.getLogger(__name__).warning("no task inputs: %s: %s", type(exc).__name__, exc)
         return set()
 
 
@@ -1486,6 +1492,13 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
     helper = gather if gather in _owned(graph, node.id, state) else None
     there = set(_available(graph).get(helper or node.id, set()))
     seen = _seen(graph, state, there, set(), edit.get("sees", [TASK]))
+    now = _consumed(node, state)
+    if helper is not None:
+        now = (now - {("fact", gather)}) | _consumed(graph.nodes[helper], state)
+    if set(seen) == _readable(graph, state, now):
+        raise _Refused(f"{node.id!r} already sees exactly that "
+                       f"({', '.join(name for _k, name in seen) or 'nothing'}), so rewiring "
+                       "would change nothing")
     if kind == "agent":
         knob = _task_knob(node)
         if knob is not None and len(graph.knob_consumers().get(knob, ())) > 1:
@@ -2073,9 +2086,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "rewire": {
         "reads_as": ('sees', 'told'),
         "fields": ("step", "sees"),
-        "line": "change what a step sees: \"task\" (the task's own inputs, no model output), "
-                "step ids (their outputs), or single fact or file names there before it (that "
-                "input alone)",
+        "line": f"change what a step sees: \"task\" ({TASK_MEANING}), step ids (their "
+                "outputs), or single fact or file names there before it (that input alone)",
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {
@@ -2345,7 +2357,8 @@ def _without_text(value: Any) -> Any:
 def sample(name: str, state: Mapping[str, Any], rng: Any) -> dict[str, Any]:
     """One instance of operator ``name`` on ``state`` with no free text, for a strategy
     with no model proposer (`edits.random_edit`): the operator's example, its step,
-    next step and fork drawn from the graph, and its texts left to the defaults. Whether
+    next step and fork drawn from the graph (a ``rewire`` sometimes keeping one step its
+    step reads from beside ``"task"``), and its texts left to the defaults. Whether
     it applies there is the caller's to check (`edits.precheck`)."""
     graph = _edits()._graph(state)
     ids = sorted(graph.nodes)
@@ -2354,4 +2367,15 @@ def sample(name: str, state: Mapping[str, Any], rng: Any) -> dict[str, Any]:
     forks = sorted(n.id for n in graph.nodes.values() if n.kind == "fork")
     filled = {"step": step, "next step": rng.choice(after) if after else step,
               "fork": rng.choice(forks) if forks else step}
-    return _without_text(example(name, filled))
+    edit = _without_text(example(name, filled))
+    if name == "rewire" and step in graph.nodes:
+        # "task" alone takes away a prompt built from another step's output; half the
+        # time keep one step the step reads from beside it.
+        from .operators import made_by
+
+        makers = made_by(graph)
+        reads_from = sorted({m for key in _consumed(graph.nodes[step], state)
+                             for m in makers.get(key, ()) if m != step})
+        if reads_from and rng.random() < 0.5:
+            edit["sees"] = [TASK, rng.choice(reads_from)]
+    return edit

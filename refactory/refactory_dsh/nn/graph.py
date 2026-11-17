@@ -198,6 +198,7 @@ _NODE_FIELDS = frozenset(
         "parallelism_knob",
         "field_bindings",
         "code",
+        "knob_outputs",
         "inputs",
     }
 )
@@ -230,6 +231,45 @@ def op_io(node: Node) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]
 
 class GraphError(ValueError):
     """A graph could not be built or read from its serialized form."""
+
+
+def _knob_outputs(node: "Node") -> dict[str, tuple[str, ...]]:
+    """``node.knob_outputs`` in its canonical form (each output's knobs a tuple, in the
+    order declared), or a `GraphError` saying what is wrong with it: only an op declares
+    it; it names each of the op's outputs exactly once and nothing else; each output's
+    knobs are a list of the op's own knobs, each once. The spine refuses the same
+    declarations (``validateGraph``)."""
+    value = node.knob_outputs
+    if node.kind != "op":
+        raise GraphError(f"node {node.id!r} is a {node.kind} and declares knob_outputs; only "
+                         "an op does")
+    if not isinstance(value, Mapping):
+        raise GraphError(f"node {node.id!r}: knob_outputs is a mapping of each output to the "
+                         "knobs it carries")
+    outputs = [*node.writes, *(f for f in node.produces if f not in node.writes)]
+    unknown = sorted(str(k) for k in value if k not in outputs)
+    if unknown:
+        raise GraphError(f"node {node.id!r}: knob_outputs names {unknown}, which the node "
+                         f"neither writes nor produces; its outputs: {outputs}")
+    missing = [out for out in outputs if out not in value]
+    if missing:
+        raise GraphError(f"node {node.id!r}: knob_outputs leaves out {missing}; it names every "
+                         "output, with [] for one that carries no knob")
+    out: dict[str, tuple[str, ...]] = {}
+    for output in outputs:
+        knobs = value[output]
+        if isinstance(knobs, str) or not isinstance(knobs, (list, tuple)) \
+                or not all(isinstance(k, str) for k in knobs):
+            raise GraphError(f"node {node.id!r}: knob_outputs[{output!r}] is a list of knob "
+                             "names")
+        foreign = sorted(set(knobs) - set(node.knobs))
+        if foreign:
+            raise GraphError(f"node {node.id!r}: knob_outputs[{output!r}] names {foreign}, "
+                             f"which the node does not read; its knobs: {list(node.knobs)}")
+        if len(set(knobs)) != len(knobs):
+            raise GraphError(f"node {node.id!r}: knob_outputs[{output!r}] names a knob twice")
+        out[output] = tuple(knobs)
+    return out
 
 
 #: The most items a data node runs at once, whether set as ``parallelism`` or by its
@@ -388,6 +428,13 @@ class Node:
     #: a verdict gate reads its first one when it has no ``required_reads``). Each must be
     #: produced upstream on every path to the node (V15); V17 holds them to the grader rule.
     inputs: tuple[str, ...] = ()
+    #: `op`: which of its outputs carry which of its knobs' text, ``{output: [knobs]}``,
+    #: naming every output (a file it writes or a fact it produces) once, each with the
+    #: knobs (among ``knobs``) whose value may reach that output's text, possibly none.
+    #: Declared, never inferred: an op that reads a knob and declares nothing counts as
+    #: carrying it in every output (`operators.carried_knobs`), so a step told to see the
+    #: task's own input (``"sees": ["task"]``) never gets another step's instructions.
+    knob_outputs: dict[str, tuple[str, ...]] | None = None
 
     def __post_init__(self) -> None:
         if self.tool_policy is not None and self.tool_policy != "none":
@@ -505,6 +552,9 @@ class Node:
                 raise GraphError(f"node {self.id!r} collects its workspace's diff, which is written "
                                  "into its first declared write, and it declares none")
 
+        if self.knob_outputs is not None:
+            self.knob_outputs = _knob_outputs(self)
+
         # field_bindings: structural validation only (pair shape, knob membership).
         # Domain rules (bindable fields, parallelism on data nodes) are checked
         # by V14 in validate.py, so a state with invalid bindings can be parsed
@@ -607,6 +657,8 @@ class Node:
             **({"field_bindings": [list(pair) for pair in self.field_bindings]} if self.field_bindings else {}),
             **({"code": self.code} if self.code else {}),
             **({"inputs": list(self.inputs)} if self.inputs else {}),
+            **({"knob_outputs": {out: list(knobs) for out, knobs in self.knob_outputs.items()}}
+               if self.knob_outputs is not None else {}),
         }
 
     @classmethod
@@ -662,6 +714,7 @@ class Node:
             ),
             code=str(state.get("code") or ""),
             inputs=tuple(state.get("inputs") or ()),
+            knob_outputs=state.get("knob_outputs"),
         )
 
     def bound_knob(self, field_name: str) -> str:

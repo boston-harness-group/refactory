@@ -1822,7 +1822,7 @@ def _view_lead() -> str:
     return (
         "The pipeline, one line per step, generated from the graph in the operators' own "
         "words: `sees` lists a step's "
-        "inputs as `\"sees\"` names them, `name@maker` (`@task`: no step makes it); a plain "
+        "inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain "
         "op that only assembles a model step's input is folded in as `name (via op: its "
         "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "
         "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
@@ -1895,10 +1895,12 @@ CARRIES_DEPTH = 4
 def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
     """What a model step's prompt and reads carry, each with what made it: a plain op's
     output is followed back through the plain ops that built it to its sources (model
-    steps, the task's own inputs, knobs), at most `CARRIES_DEPTH` ops deep. The knobs an
-    op with several outputs reads are the op's: no op says which output a knob feeds."""
+    steps, what the run was given, knobs), at most `CARRIES_DEPTH` ops deep. The knobs
+    an output carries are those its op declares for it (``knob_outputs``,
+    `operators.carried_knobs`); an op with several outputs that declares nothing carries
+    every knob it reads in each."""
     from refactory_dsh import snippet
-    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.operators import carried_knobs, made_by
     from refactory_dsh.nn.validate import consumed
 
     makers = made_by(graph)
@@ -1908,7 +1910,7 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
         plain = [m for m in made if graph.nodes[m].kind == "op"
                  and not snippet.is_code_node(graph.nodes[m]) and m not in seen]
         if not plain:
-            return f"{name} ({', '.join(made) or 'task input'})"
+            return f"{name} ({', '.join(made) or 'given to the run'})"
         if depth >= CARRIES_DEPTH:
             return f"{name} (op {', '.join(plain)}, not followed further)"
         parts = []
@@ -1916,9 +1918,12 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
             op = graph.nodes[op_id]
             sources = [described(k, n, depth + 1, seen | {op_id})
                        for k, n in sorted(consumed(op, knob_values))]
-            knobs = list(dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]))
             outputs = len(op.produces) + len(op.writes)
-            if knobs and outputs > 1:
+            if op.knob_outputs is not None:
+                knobs = list(carried_knobs(op).get((kind, name), ()))
+            else:
+                knobs = list(dict.fromkeys([*op.knobs, *(k for _f, k in op.field_bindings)]))
+            if knobs and outputs > 1 and op.knob_outputs is None:
                 sources.append(f"knob(s) {', '.join(knobs)} (the op's, for all {outputs} "
                                "of its outputs)")
             else:
@@ -1939,7 +1944,8 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
     from refactory_dsh import snippet
     from refactory_dsh.nn import core_ops
     from refactory_dsh.nn.graph import Graph
-    from refactory_dsh.nn.operators import made_by
+    from refactory_dsh.nn.operators import carried_knobs, made_by
+    from refactory_dsh.nn.pipeline_view import RUN_MAKER
 
     try:
         graph = Graph.from_state(state["graph"])
@@ -1957,8 +1963,9 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
         made = makers.get((kind, name)) or []
         texts = [k for m in made if graph.nodes[m].kind == "op"
                  and not snippet.is_code_node(graph.nodes[m])
-                 for k in graph.nodes[m].knobs if isinstance(values.get(k), str)]
-        return (f"{name}@{','.join(made) or 'task'}"
+                 for k in carried_knobs(graph.nodes[m]).get((kind, name), ())
+                 if isinstance(values.get(k), str)]
+        return (f"{name}@{','.join(made) or RUN_MAKER}"
                 + (f" (+knob {', '.join(dict.fromkeys(texts))})" if texts else ""))
 
     order = sorted(there, key=lambda key: (key[0] != "fact", key[1]))
@@ -2015,17 +2022,16 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
     if not rows:
         return []
     from refactory_dsh.nn.core_ops import TASK, _readable, _task_inputs
+    from refactory_dsh.nn.operators import TASK_MEANING
 
     task = sorted(_readable(graph, state, _task_inputs(graph, state)),
                   key=lambda key: (key[0] != "fact", key[1]))
-    task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step these, each where it is there "
-                 f"before the step: {', '.join(name for _k, name in task)}: what no model "
-                 "step's output reaches, as the steps declare their inputs. A fact a plain op "
-                 "builds from a knob carries that knob's text (another step's instructions, "
-                 "say)." if task else "") + (
+    task_line = (f" `\"sees\": [\"{TASK}\"]` gives a new step "
+                 f"{', '.join(name for _k, name in task)}, where it is there before the step: "
+                 f"{TASK_MEANING}." if task else "") + (
         " A fork's row lists every name a new branch there can put in `sees` for that input "
-        "alone (`name@maker`; `(+knob k)`: built by an op that reads text knob k, so it may "
-        "carry that text); a new step after a step can name what that step sees (its line in "
+        "alone (`name@maker`; `(+knob k)`: an op's output that carries text knob k, so it "
+        "carries that text); a new step after a step can name what that step sees (its line in "
         "the pipeline view) or what it writes.")
     lead = ("## What each step carries, and which operators apply to it\n"
             "Worked out on the current pipeline, before you choose: what each model step's "
@@ -3026,10 +3032,10 @@ def available_before(graph_state: Mapping[str, Any],
     """For each node a run can reach, the facts and files there before it starts on every
     path that reaches it (`nn.validate.available_inputs`, the sets rule V15 checks
     against), with who makes each one (``made_by``: name -> step ids, `nn.operators.made_by`)
-    and which carry no model output (``task_inputs``, `nn.operators.model_free_inputs`;
+    and which are the task's own input (``task_inputs``, `nn.operators.task_inputs`;
     ``knob_values`` fills the slots of bound prompts); empty when the graph does not parse."""
     from refactory_dsh.nn.graph import Graph
-    from refactory_dsh.nn.operators import made_by, model_free_inputs
+    from refactory_dsh.nn.operators import made_by, task_inputs
     from refactory_dsh.nn.validate import available_inputs
 
     try:
@@ -3039,7 +3045,7 @@ def available_before(graph_state: Mapping[str, Any],
     have = available_inputs(graph)
     makers = made_by(graph)
     try:
-        free = model_free_inputs(graph, knob_values)
+        free = task_inputs(graph, knob_values)
     except Exception:  # a node that cannot be read is the validator's to report
         free = set()
     out: dict[str, dict[str, Any]] = {}
@@ -3063,10 +3069,11 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
                        code_nodes: bool = False,
                        limit: int = AVAILABLE_SECTION_CHARS) -> list[str]:
     """What each node can use: the facts a `{{name}}` may name there, and the files already
-    written, each as the pipeline view writes it (``name@maker``, ``@task`` when no step
+    written, each as the pipeline view writes it (``name@maker``, ``@run`` when no step
     makes it), nodes with the same row listed together, and how a file's text reaches a
     prompt. Fits ``limit``. Nothing when not known."""
     from refactory_dsh.nn.operators import COLLECT_CALL, COLLECT_TEXT_CHARS, FILE_TEXT_CALL
+    from refactory_dsh.nn.pipeline_view import RUN_MAKER
 
     if not available:
         return []
@@ -3075,7 +3082,7 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
            "the fact")
     lead = (
         "What each node has before it runs (on every path that reaches it), each written as "
-        "the pipeline view writes it (`name@maker`; `@task`: no step makes it); nodes with "
+        "the pipeline view writes it (`name@maker`; `@run`: no step makes it); nodes with "
         "the same row share it. A step's input is not its output: name the fact or file the "
         "step makes. A prompt's "
         "`{{name}}` may name only a fact listed for its node (or a knob): a file's name is "
@@ -3091,7 +3098,7 @@ def _available_section(available: Mapping[str, Mapping[str, Any]], *,
 
     def named(entry: Mapping[str, Any], name: str) -> str:
         makers = (entry.get("made_by") or {}).get(name) or ()
-        return f"{name}@{','.join(makers) or 'task'}"
+        return f"{name}@{','.join(makers) or RUN_MAKER}"
 
     def cell(entry: Mapping[str, Any], key: str, keep: int | None) -> str:
         names = [named(entry, name) for name in entry.get(key) or ()]

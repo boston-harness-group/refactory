@@ -75,6 +75,9 @@ def _format_prompt_node() -> nn.Node:
         reads=("current_item.json",),
         knobs=("skill",),
         produces=("user_prompt", "solver_prompt", "skill_section"),
+        # Only the skill's own section carries the skill knob: the framed prompt wraps
+        # the bare question alone (`ops.format_prompt`).
+        knob_outputs={"user_prompt": (), "solver_prompt": (), "skill_section": ("skill",)},
     )
 
 

@@ -187,6 +187,19 @@
       "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:prepare",
       "callable_name": "refactory_packages.livemath.skill_graph:prepare",
       "notes": "",
+      "knob_outputs": {
+        "user_prompt": [],
+        "compare_prompt": [
+          "compare_task"
+        ]
+      },
+      "knobs": [
+        "compare_task"
+      ],
+      "produces": [
+        "user_prompt",
+        "compare_prompt"
+      ],
       "_type": "FnNode"
     },
     "step_fork": {

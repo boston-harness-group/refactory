@@ -7,11 +7,13 @@ or a reader no operation names, fails ``tests/test_pipeline_view.py``:
 
 - ``step``: a model, code or plain step on one line -- what it ``sees``, what it is
   ``told``, what it writes (``->``);
-- ``sees``: a step's inputs as ``sees`` handles, ``name@maker``; a plain op that only
+- ``sees``: a step's inputs as ``sees`` handles, ``name@maker`` (``@run``: no step makes
+  it); a plain op that only
   assembles them folded in as ``name (via op: its inputs)``; an agent with tools sees the
   run directory (or its own workspace);
 - ``told``: each knob whose text reaches the step, its opening words (``*`` frozen, ``?``
-  read by an op with several outputs, for all of them); a code step's code;
+  read by an op with several outputs that does not declare which carry it
+  (``knob_outputs``), so counted for all of them); a code step's code;
 - ``parallel``: a fork's branches, ``parallel fork { ... } -> join``, ``[optional]``;
 - ``loop``: a gate that sends work back, ``loop(step, judge ..., max N -> N+1 runs)``;
 - ``route``: a gate choosing a way on, ``route(after step, judge ..., {label: step})``,
@@ -33,9 +35,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .graph import Graph
-from .operators import made_by
+from .operators import carried_knobs, made_by
 from .validate import consumed
 
+#: What ``name@maker`` says for a name no step makes: the run was given it.
+RUN_MAKER = "run"
 #: How much of a knob's text a ``told`` entry shows.
 TOLD_CHARS = 48
 #: How many folded ops deep an input's making is shown.
@@ -171,7 +175,7 @@ class _View:
         made = self.makers.get((kind, name)) or []
         folded = [m for m in made if m in self.folded]
         if not folded or depth >= FOLD_DEPTH:
-            return f"{name}@{','.join(made) or 'task'}"
+            return f"{name}@{','.join(made) or RUN_MAKER}"
         parts = []
         for op_id in folded:
             inner = [self._input(k, n, depth + 1) for k, n in self._sorted(self.inputs[op_id])]
@@ -207,21 +211,28 @@ class _View:
             first = str(getattr(node, "code", "") or "").strip().splitlines()
             told.append(f"code \"{_clip(first[0] if first else '')}\"")
         shared: set[str] = set()
-        todo = [m for k, n in self._sorted(self.inputs[node_id])
-                for m in self.makers.get((k, n)) or [] if m in self.folded]
-        seen: set[str] = set()
+
+        def made_here(taker: str) -> list[tuple[str, tuple[str, str]]]:
+            return [(m, (k, n)) for k, n in self._sorted(self.inputs[taker])
+                    for m in self.makers.get((k, n)) or [] if m in self.folded]
+
+        todo = made_here(node_id)
+        seen: set[tuple[str, tuple[str, str]]] = set()
         while todo:
-            op_id = todo.pop(0)
-            if op_id in seen:
+            op_id, output = todo.pop(0)
+            if (op_id, output) in seen:
                 continue
-            seen.add(op_id)
+            seen.add((op_id, output))
             op = g.nodes[op_id]
-            texts = [k for k in op.knobs if isinstance(self.values.get(k), str)]
+            # The knobs whose text reaches this output (`operators.carried_knobs`): as the
+            # op declares, else all it reads, which the view marks `?` when the op has
+            # several outputs.
+            carried = carried_knobs(op).get(output, ())
+            texts = [k for k in carried if isinstance(self.values.get(k), str)]
             names += texts
-            if len(op.produces) + len(op.writes) > 1:
+            if op.knob_outputs is None and len(op.produces) + len(op.writes) > 1:
                 shared.update(texts)
-            todo += [m for k, n in self._sorted(self.inputs[op_id])
-                     for m in self.makers.get((k, n)) or [] if m in self.folded]
+            todo += made_here(op_id)
         from .core_ops import system_appended
 
         # The system appends its verdict rule to a judge's own prompt (where `core_ops`

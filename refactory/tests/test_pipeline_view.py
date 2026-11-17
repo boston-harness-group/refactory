@@ -198,7 +198,8 @@ def test_the_s4_and_s1_views_say_each_step_in_one_line_under_2k():
     assert lines[0] == "per item (data -> current_item.json) {"
     assert lines[1].startswith("  compare agent  sees compare_prompt (via prepare: "
                                "current_item.json@data)  told compare__system_prompt \"")
-    assert "compare_task? \"" in lines[1] and lines[1].endswith("-> compare_notes.txt")
+    # prepare declares which output carries compare_task: no `?`.
+    assert "; compare_task \"" in lines[1] and lines[1].endswith("-> compare_notes.txt")
     assert lines[2] == "  parallel step_fork {"
     assert lines[3].startswith("    precision agent  sees precision_prompt (via notes_prompts: "
                                "compare_notes.txt@compare)")
@@ -689,8 +690,8 @@ def test_a_branch_s_sees_line_names_exactly_what_it_was_given():
                        line.split("  sees ", 1)[1].split("  told")[0])
     assert names[0] == "user_prompt"
     assert _lines(nn_edits.apply({**edit, "sees": [names[0]]}, s4))["fresh"] == line
-    assert "compare_prompt (via prepare" in _lines(
-        nn_edits.apply({**edit, "sees": ["task"]}, s4))["fresh"]
+    # "task" is the question once: the same line as naming user_prompt.
+    assert _lines(nn_edits.apply({**edit, "sees": ["task"]}, s4))["fresh"] == line
 
 
 def test_sees_takes_a_file_name_on_a_nested_fork_and_lists_names_when_refused():
@@ -804,7 +805,8 @@ def test_what_an_edit_built_is_its_new_and_changed_view_lines():
                                "sees": ["task"], "id": "independent"}, s4)
     built = pv.changed_lines(s4, branched)
     assert any(line.startswith("+ [in parallel step_fork] independent agent  sees "
-                               "compare_prompt (via prepare") for line in built), built
+                               "user_prompt (via prepare: current_item.json@data)  told")
+               for line in built), built
     assert any(line.startswith("~ [in per item data] decide agent") and
                "independent@independent" in line for line in built), built
     draft = _seed("fuzz_draft_review")
