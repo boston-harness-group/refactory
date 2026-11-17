@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad57a4f98f2 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba732435fb5b20d 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -147,7 +147,8 @@ function failureDiagnostic(facts) {
@@ -70,7 +70,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +273,197 @@ function successfulResult(message) {
+@@ -231,20 +273,200 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -109,7 +109,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
 +function emptySuccess(message) {
 +	return message.subtype === "success" && !message.is_error && typeof message.result === "string" && message.result.trim().length === 0;
 +}
-+async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata, sent, releaseInput, abortQuery, askAgain) {
++async function consumeClaudeQuery(query, onPermissionDenied, onResult, onRefactoryMetadata, sent, releaseInput, abortQuery, askAgain, onActivity) {
  	let answer;
 -	for await (const message of query) {
 -		if (message.type === "system" && message.subtype === "permission_denied") {
@@ -175,6 +175,9 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
 +	};
 +	try {
 +		for await (const message of untilGivenUp(query, gaveUp)) {
++			// Every message is a sign of life, a partial one (a thinking or text delta)
++			// included: the delegating side's inactivity limit reads it (refactory).
++			onActivity?.();
 +			// Any message while waiting (progress, a report, a result) restarts the bound.
 +			if (quietReleased) armAfterRelease();
 +			else if (waiting) armQuiet();
@@ -277,7 +280,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  	});
  	return {
  		output: [{
-@@ -295,15 +514,33 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +517,36 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -309,6 +312,9 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
 -		},
 +		env: _rfEnv,
  		persistSession: false,
++		// Partial messages stream every delta, thinking included, so a long turn still
++		// shows activity while it runs (refactory's inactivity limit, `onActivity`).
++		includePartialMessages: true,
 +		// Flag settings outrank every other source, so the person's own choice
 +		// (autoCompactEnabled in ~/.claude.json, which a worker reads through its real HOME)
 +		// stays theirs and is never written; only this worker compacts.
@@ -316,7 +322,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,9 +564,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,9 +570,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -354,7 +360,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
  * @param request - resolved shared subagent request.
-@@ -338,6 +602,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +608,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -400,7 +406,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +661,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +667,7 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -408,7 +414,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +679,26 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +685,26 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -437,7 +443,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +751,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +757,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -445,11 +451,11 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
 +				}, spec.onRefactoryMetadata, sent, releaseInput, () => {
 +					stoppedWithAnswer = true;
 +					requestCancel();
-+				}, askAgain), publishedProcessFailure]);
++				}, askAgain, spec.onActivity), publishedProcessFailure]);
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +778,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +784,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -458,7 +464,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,6 +790,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,6 +796,7 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -466,12 +472,15 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6d58243ccc12d82fc56cc8d5ff912ad5
  			try {
  				await disposeClaudeCodeChild(publishedQuery, publishedChild);
  			} catch (error) {
-@@ -529,6 +850,9 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +856,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),
 +			onRefactoryMetadata: (metadata) => {
 +				try { this.ctx.emit("refactory/worker-metadata", request.parent.session.id, metadata); } catch {}
++			},
++			onActivity: () => {
++				try { this.ctx.emit("refactory/worker-activity", request.parent.session.id); } catch {}
 +			},
  			onError: (error, stopReason) => {
  				this.ctx.logger.warn(`subagent-claude-code "${this.name}": child run failed (${stopReason}): %o`, error);
