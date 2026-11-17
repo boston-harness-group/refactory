@@ -59,3 +59,12 @@ def note_unless_first(ctx: Any) -> dict[str, Any]:
     if str((ctx.read_json("current_item.json", {}) or {}).get("id")) != "0":
         ctx.write_text("notes.txt", "noted\n")
     return {}
+
+
+def right_unless_first(ctx: Any) -> dict[str, Any]:
+    """A solving op that answers ``right`` -- except on item ``0``, where it raises (the
+    ``fallback`` operator's genuine failure)."""
+    if str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0":
+        raise ValueError("item 0 breaks the solver")
+    ctx.write_text("answer.txt", "right\n")
+    return {}

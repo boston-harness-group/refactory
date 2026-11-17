@@ -370,6 +370,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
             }
             if entry.get("optional"):
                 result["optional"] = True
+            if entry.get("falls_back"):
+                result["falls_back"] = True
             if entry.get("required_reads"):
                 result["required_reads"] = list(entry["required_reads"])
             if isinstance(entry.get("snippet"), dict):
@@ -502,10 +504,13 @@ def run_node(
             produced = resolve(target)(ctx)
         except Exception as retry_exc:
             _write_facts()
-            # Optional nodes (named in a fork's optional_targets) are recorded
-            # as missing instead of failing the run.
+            # Optional nodes (named in a fork's optional_targets), and a step with a
+            # fallback that genuinely failed (`falls_back`), are recorded as missing
+            # instead of failing the run.
+            from refactory_dsh.node_retry import falls_back_on
+
             decl = declarations(directory, node_id)
-            if decl.get("optional"):
+            if decl.get("optional") or (decl.get("falls_back") and falls_back_on(retry_exc)):
                 reviews_dir = directory / "reviews"
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f"{node_id}-missing.txt").write_text(

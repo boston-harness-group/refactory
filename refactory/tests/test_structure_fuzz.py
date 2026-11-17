@@ -29,6 +29,7 @@ import pytest
 
 import structure_fuzz as sf
 from refactory_dsh.nn import edits as edits_mod
+from refactory_dsh.optim import Candidate
 from refactory_dsh.optim import base as base_mod
 from test_livemath_blocks import needs_spine
 
@@ -97,13 +98,39 @@ def test_quick_tier_every_accepted_edit_is_sound():
 
 
 def test_the_core_operators_own_checks_are_reached_and_sound():
-    """'takes_over' (taken and refused), a field an operator would ignore and a route that
-    loses an input are drawn and reached, and every edit accepted on the way is sound."""
+    """'takes_over' (taken and refused), a field an operator would ignore, a route that
+    loses an input and a 'fallback' outside a pass are drawn and reached, and every edit
+    accepted on the way is sound."""
     stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1000)
     assert not stats.findings, _report(stats)
     for path in ("ignored field refused", "lost input refused", "takes_over accepted",
-                 "takes_over: target not first"):
+                 "takes_over: target not first", "fallback: outside a pass"):
         assert stats.paths[path] > 0, (path, dict(stats.paths))
+
+
+def _fallback_cases() -> list[tuple[str, dict]]:
+    """A fallback, agent and code, on every step of each seed with a per-item pass."""
+    out = []
+    for name in ("fuzz_data_pass", "livemath_skill_graph"):
+        graph = sf._graph_of(sf.Applier(sf.seeds()[name]).seed_state)
+        for step in sorted(n for n, node in graph.nodes.items()
+                           if node.kind in ("agent", "op") and graph.in_data_pass(n)):
+            for kind in ("agent", "code") if sf.CODE_NODES else ("agent",):
+                out.append((name, {"op": "fallback", "step": step, "kind": kind}))
+    return out
+
+
+@pytest.mark.parametrize("name, edit", _fallback_cases(),
+                         ids=lambda v: v if isinstance(v, str) else f"{v['step']}-{v['kind']}")
+def test_every_fallback_a_seed_takes_is_sound(name, edit):
+    """Each fallback the edit layer takes on a seed with a per-item pass keeps every
+    invariant on the walker (the protected grader steps are refused, never broken)."""
+    applier = sf.Applier(sf.seeds()[name])
+    outcome = applier.attempt(Candidate.from_state(applier.seed_state), edit, set())
+    if isinstance(outcome, list):
+        assert outcome[0].startswith(("E-protected", "E-precondition")), outcome
+        return
+    assert sf.check_state(applier, outcome.state, walker=True) == []
 
 
 def test_the_compound_generator_mixes_every_kind_of_edit():
@@ -352,9 +379,9 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     the grade, and the leak invariant finds it by content: the grader-only answers and
     the grader's own verdicts in the finished items' records. The leak needs no code
     node, so the walks draw none and are the same on every machine, whether or not it
-    can sandbox code nodes (this seed finds it at edit 170)."""
+    can sandbox code nodes (this seed finds it at edit 102)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
-    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=5,
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
 
 

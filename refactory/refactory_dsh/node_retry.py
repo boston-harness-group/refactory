@@ -114,6 +114,26 @@ def missing_cause(error: BaseException) -> str | None:
     return "timeout" if failure_kind(error) == "timeout" else None
 
 
+#: The causes and error kinds that are a step running out of time, never its failing:
+#: what `missing_cause` and `items.error_kind` say for a timeout. A fallback never
+#: answers one (`falls_back_on`).
+TIMEOUT_KINDS = frozenset({"timeout", "declared_timeout", "harness_incident"})
+
+
+def falls_back_on(error: BaseException) -> bool:
+    """Whether ``error`` is a genuine failure of a step with a fallback (`nn.graph.Graph.
+    falls_back`), which leaves it missing so its fallback answers: not a timeout of any
+    kind (`items.error_kind`, `TIMEOUT_KINDS`, which a spent retry carries as its cause),
+    nor the run's budget or a build-loop stop, which end the run as before."""
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.run import BuildLoopStop
+
+    if isinstance(error, (BudgetExhausted, BuildLoopStop)):
+        return False
+    return error_kind(error) not in TIMEOUT_KINDS
+
+
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
     """Record why a step left without an answer has none (`MISSING_DIR`): its retries
     were spent, it ran out of output, or (an optional branch) it ended for time

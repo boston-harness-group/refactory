@@ -123,6 +123,11 @@ class AgentNode(Node):
     #: than failed (`nn.graph.Graph.missing_on_crash`): its worker records it missing and
     #: the spine lets it fail and go on. None is left out of the serialized graph.
     missing_on_crash: bool | None = None
+    #: True for a step with a fallback (`nn.graph.Graph.falls_back`): a genuine failure,
+    #: never a timeout, leaves it missing rather than failed -- its worker or runner
+    #: records it so and the spine lets it fail and go on -- and its fallback gate sends
+    #: the item to the fallback step. None is left out of the serialized graph.
+    falls_back: bool | None = None
     #: Where the node works (`nn.graph.workspace_declaration`'s canonical form). None is
     #: the run directory, and is left out of the serialized graph, so a graph that
     #: declares no workspace is byte-identical to one lowered before the field existed.
@@ -160,6 +165,11 @@ class FnNode(Node):
     knob_outputs: dict[str, list[str]] | None = None
     knobs: list[str] | None = None
     produces: list[str] | None = None
+    #: True for a step with a fallback (`nn.graph.Graph.falls_back`): a genuine failure,
+    #: never a timeout, leaves it missing rather than failed -- its worker or runner
+    #: records it so and the spine lets it fail and go on -- and its fallback gate sends
+    #: the item to the fallback step. None is left out of the serialized graph.
+    falls_back: bool | None = None
 
 
 class GateNode(Node):
@@ -288,6 +298,8 @@ class Workflow(BaseModel):
                 d.pop("retry")
             if "missing_on_crash" in d and d["missing_on_crash"] is None:
                 d.pop("missing_on_crash")
+            if "falls_back" in d and d["falls_back"] is None:
+                d.pop("falls_back")
             if "workspace" in d and d["workspace"] is None:
                 d.pop("workspace")
             if "route" in d and d["route"] is None:

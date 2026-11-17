@@ -16,6 +16,9 @@ same way on both runtimes (the walker in its forkserver child, the spine through
 - ``select`` (`SELECT_CALL`): reads a label from its first declared read (the first word
   or the last line, as a verdict gate reads one) and copies the declared read whose name
   that label names to its first write (and its fact, when it declares one).
+- ``step_failed`` (`graph.FALLBACK_GATE_CALL`): a fallback gate's verdict, ``fallback``
+  when the step before it is missing because it failed (``items.missing_steps``) and not
+  because it ran out of time (`node_retry.TIMEOUT_KINDS`), else ``proceed``.
 
 The helpers describe and wire data without a model:
 
@@ -150,6 +153,32 @@ def select(ctx: Any) -> dict[str, Any]:
     text = ctx.read_text(chosen)
     ctx.write_text(writes[0], text)
     return {fact: text} if fact else {}
+
+
+def step_failed(ctx: Any) -> Any:
+    """`graph.FALLBACK_GATE_CALL`: ``fallback`` when the step before this gate (its
+    declaration's ``step``, `lowering.snippet_spec`) was recorded missing in this run
+    directory -- the item's pass -- for a failure that is not a timeout (its cause, from
+    ``items.missing_steps``, outside `node_retry.TIMEOUT_KINDS`), with that failure as the
+    reason; ``proceed`` otherwise: the step answered, or ran out of time and the item goes
+    on without its answer as it would with no fallback."""
+    from refactory_dsh.items import missing_steps
+    from refactory_dsh.node_retry import TIMEOUT_KINDS
+
+    from .executor import ExecutionError, Verdict
+    from .graph import FALLBACK, PROCEED
+
+    step = str((getattr(ctx, "snippet", None) or {}).get("step") or "")
+    if not step:
+        raise ExecutionError(f"fallback gate {ctx.node_id!r}: the runtime named no step for "
+                             "it to read")
+    info = missing_steps(Path(ctx.workdir)).get(step)
+    if info is None:
+        return Verdict(PROCEED, reason=f"{step} answered")
+    cause = str(info.get("cause") or "failed")
+    if cause in TIMEOUT_KINDS:
+        return Verdict(PROCEED, reason=f"{step} ran out of time ({cause}); no fallback")
+    return Verdict(FALLBACK, reason=f"{step} failed ({cause}): {info.get('error') or ''}"[:2000])
 
 
 # ── what a graph's data is made of ────────────────────────────────────────

@@ -260,12 +260,14 @@ def main() -> int:
             print(json.dumps({'node': receipt['node'], 'status': receipt['status']}))
             return 0
         except Exception as error:
-            from refactory_dsh.node_retry import leaves_no_answer
+            from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
             # An optional fork branch is missing on any failure; an agent step in a data
             # pass only when its retries are spent or it ran out of output without
-            # answering (`missing_on_crash`).
+            # answering (`missing_on_crash`); a step with a fallback on a genuine failure,
+            # never a timeout (`falls_back`).
             if spec.get('optional') or (spec.get('missing_on_crash')
-                                        and leaves_no_answer(error)):
+                                        and leaves_no_answer(error)) or (
+                    spec.get('falls_back') and falls_back_on(error)):
                 node_id = spec.get('node_id', 'unknown')
                 reviews_dir = workdir / 'reviews'
                 reviews_dir.mkdir(parents=True, exist_ok=True)

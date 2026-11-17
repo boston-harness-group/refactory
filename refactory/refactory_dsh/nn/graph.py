@@ -28,6 +28,12 @@ ON_EXHAUSTED = ("continue", "fail_item", "halt")
 #: The gate out-edge an exhausted ``continue`` gate takes.
 PROCEED = "proceed"
 
+#: The evaluator of a fallback gate (`Graph.fallback_gate`): it answers `FALLBACK` when
+#: the step before it failed rather than timed out (`nn.operators.step_failed`).
+FALLBACK_GATE_CALL = "refactory_dsh.nn.operators:step_failed"
+#: The verdict, and the edge, of a fallback gate that leads to the fallback step.
+FALLBACK = "fallback"
+
 #: The failures an agent node may declare a retry on (`Node.retry`): ``timeout`` (the
 #: session went silent past the inactivity limit, or ran out of a per-completion limit;
 #: or reached the node's own declared `timeout_s`, the pipeline's limit, recorded
@@ -1018,6 +1024,29 @@ class Graph:
         answering, is missing rather than failed: an agent step in a data pass with a
         retry rule (declared or the default)."""
         return self.in_data_pass(node_id) and self.retry_rule(node_id) is not None
+
+    def fallback_gate(self, node_id: str) -> str | None:
+        """The fallback gate after ``node_id``, or None: a gate whose evaluator is
+        `FALLBACK_GATE_CALL` and whose one way in is ``node_id``'s one out-edge, an agent or
+        op step in a data pass. Its `FALLBACK` edge leads to the step that answers instead
+        when ``node_id`` fails (the ``fallback`` operator, `nn.core_ops`)."""
+        node = self.nodes.get(node_id)
+        out = self.out_edges(node_id)
+        if node is None or node.kind not in ("agent", "op") or len(out) != 1:
+            return None
+        gate = self.nodes.get(out[0].target)
+        if (gate is None or gate.kind != "gate" or gate.evaluator != FALLBACK_GATE_CALL
+                or len(self.in_edges(gate.id)) != 1 or not self.in_data_pass(node_id)):
+            return None
+        return gate.id
+
+    def falls_back(self, node_id: str) -> bool:
+        """Whether ``node_id``, when it genuinely fails -- it raises, or its session crashes
+        and its retries are spent; never a timeout (`node_retry.falls_back_on`) -- is
+        missing rather than failed, so its fallback gate sends the item to the fallback
+        step. Both runtimes read it here: the walker's executor, and lowering for the spine
+        (``falls_back`` on the node's declaration and worker spec)."""
+        return self.fallback_gate(node_id) is not None
 
     def exhaustion_exit(self, gate_id: str) -> str | None:
         """Where an exhausted ``continue`` gate goes: its ``proceed`` edge's target, when

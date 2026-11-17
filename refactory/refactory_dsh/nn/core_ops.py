@@ -16,7 +16,9 @@ to every rule a hand-written edit is. They say nothing about what a step is for:
 - ``loop`` (one-line form): a judge after a step that can send it back with a reason;
 - ``route``: a judge after a step choosing among labelled next steps that rejoin;
 - ``split`` (one-line form): a step replaced by two new ones, or by one (replace);
-- ``merge``: two consecutive steps as one.
+- ``merge``: two consecutive steps as one;
+- ``fallback``: a step that answers instead when a per-item step genuinely fails (never
+  when it runs out of time), writing that step's outputs.
 
 **What the proposer writes** is the kind of step, where, and its text (a prompt, a
 callable or code). Every text has a default (the neighbour's, or a neutral line), so a
@@ -56,7 +58,7 @@ from .operators import TASK_MEANING
 
 #: The core operators, in the order the request lists them.
 CORE_OPS = ("insert", "remove", "parallelize", "serialize", "branch", "rewire", "loop",
-            "route", "split", "merge")
+            "route", "split", "merge", "fallback")
 #: The kinds of step an operator adds: a model call, a plain op (a callable), or code.
 STEP_KINDS = ("agent", "op", "code")
 #: Judges of ``loop`` and ``route`` besides a ``module:function`` callable.
@@ -2188,6 +2190,79 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     return build.steps
 
 
+# ── fallback ──────────────────────────────────────────────────────────────
+
+
+def _fallback_spec(edit: dict, step: Node) -> dict:
+    spec = _spec({k: v for k, v in edit.items() if k not in ("op", "step")})
+    if spec["kind"] == "agent" and spec.get("tools") is not True and len(step.writes) > 1:
+        raise _Refused(f"{step.id!r} writes {len(step.writes)} files, and a new agent step "
+                       "without tools writes only its reply; give it a code step, or "
+                       "'tools': true")
+    return spec
+
+
+def _pre_fallback(edit: dict, state: dict) -> str | None:
+    graph = _edits()._graph(state)
+    node = _plain_step(graph, edit.get("step"), "fallback")
+    if _pass_of(graph, node.id) is None:
+        raise _Refused(f"{node.id!r} runs outside any per-item pass; a fallback answers for "
+                       "a step that runs once per item")
+    if graph.falls_back(node.id):
+        raise _Refused(f"{node.id!r} has a fallback already, after "
+                       f"{graph.fallback_gate(node.id)!r}")
+    if not (node.writes or node.produces):
+        raise _Refused(f"{node.id!r} has no outputs for a fallback to write")
+    onward = _sole_out(graph, node.id)
+    if onward is not None and graph.nodes[onward].kind == "join":
+        raise _Refused(f"{node.id!r} ends a fork branch; insert a step after it first, or "
+                       "give the fallback to a step inside the branch")
+    spec = _fallback_spec(edit, node)
+    _verdict_read(graph, node, spec)
+    if spec.get("id") is not None and spec["id"] in graph.nodes:
+        raise _Refused(f"node {spec['id']!r} already exists")
+    return None
+
+
+def _expand_fallback(edit: dict, state: dict) -> list[dict]:
+    """A fallback gate after the step (`graph.FALLBACK_GATE_CALL`): ``proceed`` to what
+    came next, ``fallback`` to the new step, which sees what the step sees, writes its
+    outputs and leads to the same next step. A step that ends its pass first gets a no-op
+    step after it (`LOOP_END_CALL`), as a loop's gate does, so the pass ends at a step."""
+    from .graph import FALLBACK, FALLBACK_GATE_CALL, PROCEED
+    from .loops import LOOP_END_CALL
+
+    build = _Steps(state)
+    graph = build.graph
+    node = graph.nodes[edit["step"]]
+    spec = _fallback_spec(edit, node)
+    gate_id = _fresh(graph, f"{node.id}_failed")
+    node_id = spec.get("id") or _fresh(graph, f"{node.id}_fallback", (gate_id,))
+    there = _available(graph).get(node.id, set())
+    seen = _seen(graph, state, there, _consumed(node, state), spec.get("sees"))
+    nodes = _step_nodes(graph, state, spec, node_id, seen, writes=list(node.writes),
+                        produces=list(node.produces),
+                        settings_from=node if node.kind == "agent" else None)
+    onward = _sole_out(graph, node.id)
+    if onward is None:
+        onward = _fresh(graph, f"{node.id}_done", (gate_id, *(str(n["id"]) for n in nodes)))
+        build.add([{"op": "add_node", "position": {"after": node.id}, "node": {
+            "id": onward, "kind": "op", "call": LOOP_END_CALL, "score_effect": "none",
+            "notes": f"Ends what {node.id!r} ended, after its fallback gate {gate_id!r}."}}])
+    build.add([{"op": "add_node", "position": {"detached": True}, "node": {
+                   "id": gate_id, "kind": "gate", "evaluator": FALLBACK_GATE_CALL,
+                   "notes": f"Sends the item to {node_id!r} when {node.id!r} failed."}},
+               {"op": "remove_edge", "source": node.id, "target": onward, "condition": None},
+               {"op": "add_edge", "source": node.id, "target": gate_id, "condition": None},
+               {"op": "add_edge", "source": gate_id, "target": onward, "condition": PROCEED}])
+    build.add(_add_detached(nodes))
+    build.add([{"op": "add_edge", "source": gate_id, "target": nodes[0]["id"],
+                "condition": FALLBACK},
+               {"op": "add_edge", "source": nodes[-1]["id"], "target": onward,
+                "condition": None}])
+    return build.steps
+
+
 # ── split (one-line form) and replace ─────────────────────────────────────
 
 
@@ -2210,6 +2285,22 @@ def _split_specs(node: Node, edit: dict, state: Mapping[str, Any]) -> list[dict]
     return [_spec(raw) for raw in into]
 
 
+def _verdict_read(graph: Graph, node: Node, spec: Mapping[str, Any]) -> None:
+    """Refused when a new code step with no text of its own would write what a verdict gate
+    reads from ``node`` (a judge's reply): its default code joins its inputs, which never
+    starts with a verdict, so the gate would fail on every run."""
+    from refactory_dsh import snippet
+
+    if spec.get("kind") != "code" or spec.get("text"):
+        return
+    for gate in graph.nodes.values():
+        if gate.kind == "gate" and gate.evaluator == snippet.VERDICT \
+                and set(gate.reads) & set(node.writes):
+            raise _Refused(f"{gate.id!r} reads its verdict from what {node.id!r} writes; a code "
+                           "step taking that over needs its own 'text' (code whose output "
+                           "starts with the verdict), or make it an agent")
+
+
 def _pre_split_line(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     node = _plain_step(graph, edit.get("step", edit.get("target")), "split")
@@ -2229,6 +2320,7 @@ def _pre_split_line(edit: dict, state: dict) -> str | None:
         if spec.get("id") is not None and spec["id"] in graph.nodes:
             raise _Refused(f"node {spec['id']!r} already exists")
     last = specs[-1]
+    _verdict_read(graph, node, last)
     carried = _carried_knobs(last["kind"], last.get("text"), last.get("system"), _shared_knobs(node))
     frozen = [k for k in _frozen_settings(graph, state, {node.id}) if k not in carried]
     if frozen:
@@ -2585,6 +2677,17 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
+    "fallback": {
+        "reads_as": ('fallback',),
+        "fields": ("step", "kind", "text", "system", "sees", "id", "call", "reads", "tools",
+                   "route"),
+        "line": "a step run instead when 'step' (one run per item) fails -- it raises, or "
+                "its session crashes and its retries are spent; never when it runs out of "
+                "time: it writes that step's outputs, so what reads them still gets an "
+                "answer; 'kind' as in insert; it sees what 'step' sees",
+        "example": {"op": "fallback", "step": "<step>", "kind": "agent",
+                    "text": "<a simpler way to the same output>"},
+    },
 }
 
 
@@ -2793,6 +2896,7 @@ def register(macro, macros: Mapping[str, Any]) -> None:
         "rewire": (_pre_rewire, _expand_rewire),
         "route": (_pre_route, _expand_route),
         "merge": (_pre_merge, _expand_merge),
+        "fallback": (_pre_fallback, _expand_fallback),
     }
     for name, (pre, expand) in simple.items():
         spec = OPERATORS[name]

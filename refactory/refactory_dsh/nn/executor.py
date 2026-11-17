@@ -1621,9 +1621,14 @@ class Executor:
         its item goes on
         without its answer, so a gate after it can reloop and a join sees the branch
         without one, as the spine's worker records it (``missing_on_crash``).
+
+        So is a step with a fallback that genuinely failed, never for time
+        (`Graph.falls_back`, `node_retry.falls_back_on`): its fallback gate, next, sends
+        the item to the fallback step, as the spine's worker and runner record it
+        (``falls_back``).
         """
         from refactory_dsh.budgets import BudgetExhausted
-        from refactory_dsh.node_retry import leaves_no_answer
+        from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
         from refactory_dsh.run import BuildLoopStop
 
         from .fork import _record_missing, _settle_missing
@@ -1631,7 +1636,8 @@ class Executor:
         optional = any(node.id in self.graph.optional_targets_of(fork, self.ctx.knobs)
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
         spent = leaves_no_answer(exc) and self.graph.missing_on_crash(node.id)
-        if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(
+        fell = self.graph.falls_back(node.id) and falls_back_on(exc)
+        if not (optional or spent or fell) or node.kind not in ("op", "agent") or isinstance(
                 exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
             return False
         error = f"{type(exc).__name__}: {exc}"
