@@ -131,6 +131,17 @@ def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
 
 
+def _new_steps(parent: Any, child: Any) -> set[str]:
+    """The child graph's steps its parent's graph lacks (none without a parent)."""
+    if parent is None:
+        return set()
+
+    def nodes(candidate: Any) -> set[str]:
+        return set(((candidate.state.get("graph") or {}).get("nodes") or {}))
+
+    return nodes(child) - nodes(parent)
+
+
 def _timed_out(record: Mapping[str, Any]) -> bool:
     """Whether an item record says the item ran out of time (its error kind, or its error
     or failure text)."""
@@ -5461,7 +5472,8 @@ class Loop(OuterLoop):
             child_records = list(self._train_item_records.get(child.id, []))
             from refactory_dsh.optim.edit_effect import edit_effect
 
-            effect = edit_effect(parent_records, child_records, self._reply_judge())
+            effect = edit_effect(parent_records, child_records, self._reply_judge(),
+                                 new_steps=_new_steps(parent, child))
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
@@ -5894,7 +5906,9 @@ class Loop(OuterLoop):
                                  integrity=self._integrity_of(candidate.id))
             from refactory_dsh.optim.edit_effect import edit_effect
 
-            effect = (edit_effect(parent_records, child_records, self._reply_judge())
+            effect = (edit_effect(parent_records, child_records, self._reply_judge(),
+                                  new_steps=_new_steps(by_id.get(candidate.parent or ""),
+                                                       candidate))
                       if candidate.is_structural() else {})
             tried.append({**entry, "structural": candidate.is_structural(),
                           "edits": memory.edits_text(candidate.own_edits()),

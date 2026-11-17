@@ -1827,14 +1827,17 @@ items, never "avoid" it. The untested-kinds rule stands. The proposer sees the s
 kept with the note it was written from, beside the note (`memory.request_lines`).
 
 **How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
-that an edit moved items, not how. For a child that ran steps its parent did not, the
-records say it (`optim.edit_effect`): for its broken and its fixed items, which new steps
-ran on them, what each new gate answered, which step ran more than once and -- where the
-mode's Task reads a reply as an answer (`Task.reply_correct`, found by
-`task.reply_judge`) -- on how many the first reply was already right and then changed to a
-wrong one, or was never right. It is computed from the records, with no model call, and
-it is generic: steps are compared by name, verdicts are the gates' own, and only the Task
-reads a reply. "What the last edit changed" shows it under each child's counts (a rejected
+that an edit moved items, not how. For a child whose graph has steps its parent's lacks,
+the records say it (`optim.edit_effect`): for its broken and its fixed items, which of
+those new steps ran on them, what each new gate answered (an item counted under each
+verdict it got at least once), which step the child called more often than the parent did
+on the same item and -- where the mode's Task reads a reply as an answer
+(`Task.reply_correct`, found by `task.reply_judge`) -- of those, on how many the first
+reply was already right and then changed to a wrong one, or was never right. A reply the
+Task cannot read, a reading that fails, a Task that reads no reply and an item whose
+parent run failed are each said, never dropped. It is computed from the records, with no
+model call, and it is generic: steps are compared by name, verdicts are the gates' own,
+and only the Task reads a reply. "What the last edit changed" shows it under each child's counts (a rejected
 child too), and memory's "What was tried this epoch" under each structural change. On the
 stopped S1-s45 run the loop broke 8 items; on 5, the solver's first reply was right before
 the judge sent it back.

@@ -308,19 +308,15 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
 def reply_judge(state: dict[str, Any]) -> Any:
     """How a step's reply is read as an item's answer for the graph's Tasks
     (`Task.reply_correct`): a function ``(reply, metadata) -> bool | None``, the first
-    Task with a reading deciding; ``None`` when none has one or none can be loaded."""
+    Task with a reading deciding; ``None`` when none has one. A graph that cannot be
+    built or a Task that cannot be loaded raises: the run could not evaluate it either.
+    A reading that raises raises too; its caller says so (`optim.edit_effect`)."""
     from refactory_dsh.nn.graph import Graph
 
-    try:
-        graph = Graph.from_state(state.get("graph") or {})
-    except Exception:  # noqa: BLE001 - a graph that cannot be built reads nothing
-        return None
+    graph = Graph.from_state(state.get("graph") or {})
     tasks = []
     for ref in sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref}):
-        try:
-            task = load_task(ref)
-        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
-            continue
+        task = load_task(ref)
         if type(task).reply_correct is not Task.reply_correct:
             tasks.append(task)
     if not tasks:
@@ -328,10 +324,7 @@ def reply_judge(state: dict[str, Any]) -> Any:
 
     def judge(reply: str, metadata: Mapping[str, Any]) -> bool | None:
         for task in tasks:
-            try:
-                verdict = task.reply_correct(reply, metadata)
-            except Exception:  # noqa: BLE001 - a reply that cannot be read says nothing
-                continue
+            verdict = task.reply_correct(reply, metadata)
             if verdict is not None:
                 return bool(verdict)
         return None
