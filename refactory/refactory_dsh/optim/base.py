@@ -737,6 +737,29 @@ def _data_lines(value: Any) -> set[str]:
     return out
 
 
+def _whole_texts(value: Any) -> set[str]:
+    """Each string of ``value`` (nested, and inside a JSON string) whole, normalised: a
+    reason or a reply, which a prompt line holding a piece of it carries."""
+    from .evidence import _norm
+
+    out: set[str] = set()
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            stack += list(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack += list(current)
+        elif isinstance(current, str) and current.strip():
+            out.add(_norm(current))
+            if current.strip()[:1] in ("{", "[", '"'):
+                try:
+                    stack.append(json.loads(current))
+                except json.JSONDecodeError:
+                    pass
+    return out
+
+
 @dataclass
 class ProposalContext:
     """The gradient: everything the optimizer is allowed to know.
@@ -952,7 +975,8 @@ class ProposalContext:
         reference), and the framing the step's ops put around its inputs (the model
         client's wrapper, their headings). Framing is a line in every one of the step's
         prompts, over two or more items, that holds nothing from any item's own data
-        (its input, a step's reply, or what its ops and code gates gave).
+        (its input, a step's reply, or what its ops and code gates gave), nor a piece of
+        a code gate's reason or of a reply (a reason spread over several prompt lines).
 
         Never a line just because it recurs: a judge's reason that is not in every one
         of the step's prompts, or a choice text (part of an item's input) said the same
@@ -969,8 +993,14 @@ class ProposalContext:
         every: dict[str, set[str]] = {}
         items: dict[str, set[str]] = {}
         data: set[str] = set()
+        # Reasons and replies whole: a prompt line may carry a piece of one (a gate's
+        # reason is stored as one line, and reaches a prompt over several). Never an op's
+        # output, which is often the framed prompt itself.
+        said: set[str] = set()
         for record in records:
             data |= _data_lines(record.get("metadata")) | _data_lines(record.get("steps"))
+            said |= _whole_texts([step.get("reason") for step in record.get("steps") or ()
+                                  if isinstance(step, Mapping) and step.get("kind") == "gate"])
             for exchange in record.get("exchanges") or ():
                 node = str(exchange.get("node"))
                 lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
@@ -978,8 +1008,24 @@ class ProposalContext:
                 every[node] = lines if node not in every else every[node] & lines
                 items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
                 data |= _data_lines(exchange.get("response"))
+                said |= _whole_texts(exchange.get("response"))
+
+        def carried(line: str) -> bool:
+            if any(datum in line for datum in data):
+                return True
+            # The line, or its tail after a label ("Feedback: ..."), inside a reason or a
+            # reply: a piece of it.
+            words = line.split(" ")
+            for start in range(len(words)):
+                tail = " ".join(words[start:])
+                if len(tail) < ITEM_DATA_MIN:
+                    return False
+                if any(tail in text for text in said):
+                    return True
+            return False
+
         framing = {line for node, lines in every.items() if len(items[node]) > 1
-                   for line in lines if not any(datum in line for datum in data)}
+                   for line in lines if not carried(line)}
         return settled_lines(texts) | framing
 
     def _leaderboard_lines(self) -> list[str]:

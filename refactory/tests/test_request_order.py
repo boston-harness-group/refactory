@@ -311,12 +311,13 @@ def test_a_line_carrying_an_items_reply_is_shown_even_in_every_prompt_of_a_step(
         assert f"Prior verdict: {verdict}" in block.split("#### Step ")[2], block
 
 
-def _fix_only_records(source: str) -> list[dict]:
+def _fix_only_records(source: str, reason: str = "misses the boundary case at zero"
+                      ) -> list[dict]:
     """Two items where a fix step runs only after a judge, so every one of its prompts
     carries the judge's reason: from a code gate (the record's ``steps``, as
     `items.gate_visit` writes it) or from a model judge's JSON reply."""
-    reason = "misses the boundary case at zero"
-    visit = ({"node": "check", "kind": "gate", "verdict": "reloop", "reason": reason}
+    visit = ({"node": "check", "kind": "gate", "verdict": "reloop",
+              "reason": " ".join(reason.split())}
              if source == "code gate" else None)
 
     def record(item: str) -> dict:
@@ -343,6 +344,40 @@ def test_a_judge_reason_reaching_a_step_that_only_runs_after_it_is_shown(source)
     for item in ("r1", "r2"):
         block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
         assert "Feedback: misses the boundary case at zero" in block, block
+
+
+@pytest.mark.parametrize("source", ["code gate", "model judge JSON"])
+def test_a_reason_over_two_lines_is_shown_line_by_line(source):
+    """A code gate's reason is recorded as one line (`items.gate_visit`) but reaches the
+    fix step over two: each prompt line holding a piece of it is the item's evidence."""
+    reason = "misses the boundary case at zero\nand the residual check is skipped"
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=_fix_only_records(source, reason),
+                           knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: misses the boundary case at zero" in block, block
+        assert "and the residual check is skipped" in block, block
+
+
+def test_a_piece_of_a_reply_quoted_in_every_prompt_is_shown():
+    """A step quoting part of an earlier reply (a judge's reason, clipped) in every one of
+    its prompts carries that item's evidence, not framing."""
+    reply = "reloop: the answer ignores the boundary case and the zero input entirely"
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "exchanges": [{"node": "judge", "prompt": f"Q {item}", "response": reply},
+                              {"node": "fix", "prompt": f"Q {item}\nFeedback: the answer "
+                                                        "ignores the boundary case",
+                               "response": f"FIX {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")], knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: the answer ignores the boundary case" in block, block
 
 
 def test_with_one_item_no_line_is_taken_for_framing():
