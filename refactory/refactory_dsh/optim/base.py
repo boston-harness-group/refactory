@@ -2286,14 +2286,17 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     if {"parallelize", "insert"} <= ops:
         join = core_ops.parallel_join_id(graph, step)
         copies = [f"{step}_copy{n}" for n in (1, 2)]
-        stems = [str(anchor[0]["writes"][0]).rsplit(".", 1)[0], *copies]
+        # The choice takes over the step's outputs, so what read them (what is scored)
+        # reads the chosen attempt; the step's own reply is then `<step>.txt`.
+        stems = [step, *copies]
         choose = f"{step}_choose"
         out.append(("Several attempts and a choice", [
             {"op": "parallelize", "steps": [step], "copies": 2},
             {"op": "insert", "after": join, "kind": "agent", "id": choose,
              "text": "<compare the attempts against the task>; start your answer with the "
                      f"best one's name: {', '.join(stems)}"},
-            {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call()}]))
+            {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call(),
+             "takes_over": step}]))
     if "loop" in ops:
         out.append(("Check and send back", [
             {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
@@ -2303,8 +2306,8 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
             {"op": "branch", "fork": fork, "kind": "agent", "text": "<solve it your own way>",
              "sees": ["task"]}]))
     elif "parallelize" in ops:
-        out.append(("An independent attempt that sees only the task", [
-            {"op": "parallelize", "steps": [step], "copies": 1, "sees": ["task"]}]))
+        out.append(("Another attempt beside it, sent exactly what it is sent", [
+            {"op": "parallelize", "steps": [step], "copies": 1}]))
     if code_nodes and "insert" in ops:
         sim = f"{step}_sim"
         out.append(("A simulation step, then an analysis of its results", [
@@ -4567,6 +4570,19 @@ class Optimizer:
         if violation:
             return [f"E-protected: {violation}" + _protected_culprit(applied, parent.state,
                                                                       prefixes, protected)]
+        # A grading node is never rewired by an edit either (V17's grader side).
+        for grader in graders:
+            old = nn_edits._graph(parent.state).nodes.get(grader)
+            new = nn_edits._graph(state).nodes.get(grader)
+            if old is not None and (new is None or new.to_state() != old.to_state()):
+                return [f"E-protected: node {grader!r} grades, and the edit changes its "
+                        "declaration"]
+        # A step the bundle adds keeps the reader the bundle gave it (finding 16).
+        from refactory_dsh.nn.core_ops import unread_by_bundle
+
+        unread = unread_by_bundle(parent.state, prefixes, applied)
+        if unread:
+            return [f"E-unread: {unread}"]
 
         # A bundle that changes nothing at all is refused below as one no-op.
         dead = (_dead_edit(applied, parent.state, state)
