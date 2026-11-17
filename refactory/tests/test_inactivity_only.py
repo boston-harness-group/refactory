@@ -245,8 +245,11 @@ def test_a_harness_incident_is_read_from_anchored_signals_only():
     assert error_kind(HarnessBackstop("model session hit the harness backstop after 9s")) == "harness_incident"
     assert error_kind(RuntimeError("solve: HarnessBackstop: model session hit the harness backstop")) \
         == "harness_incident"
-    assert error_kind(RuntimeError("solve exited with code 1\nworker: model session hit the harness "
-                                   "backstop after 9s")) == "harness_incident"
+    # The spine's item error (`nodeErrorText`): the node's line, then the worker's stderr.
+    assert error_kind(RuntimeError("solve: model session hit the harness backstop after 9s\nworker: "
+                                   "model session hit the harness backstop after 9s")) == "harness_incident"
+    assert error_kind(RuntimeError("worker: model session hit the harness backstop after 9s")) \
+        == "harness_incident"
     assert error_kind(RuntimeError("solve: ValueError: the answer says it hit the harness backstop")) \
         == "RuntimeError"
     assert error_kind(RuntimeError("solve: CompletionTimeout: model completion timed out after 5s of "
@@ -258,3 +261,30 @@ def test_a_harness_incident_is_read_from_anchored_signals_only():
     assert error_kind(RuntimeError(f"solve: DeclaredTimeout: {said}")) == "declared_timeout"
     assert error_kind(RuntimeError(f"solve: {said}\nworker: {said}")) == "declared_timeout"
     assert error_kind(RuntimeError(f"solve: ValueError: the log says {said}")) == "RuntimeError"
+
+
+#: Each harness-written line `items.error_kind` classifies, as a model's reply could quote
+#: it on a later line of another failure's text.
+QUOTED_LINES = [
+    "worker: model session hit the harness backstop after 1s",
+    "solve: HarnessBackstop: model session hit the harness backstop after 1s",
+    "solve: model session hit the harness backstop after 1s",
+    "worker: model completion timed out after 5s",
+    "solve: CompletionTimeout: model completion timed out after 5s",
+    "worker: model session timed out at its node's declared timeout_s (60s) after 60s",
+    "solve: DeclaredTimeout: model session timed out at its node's declared timeout_s (60s)",
+    "solve: RetriesExhausted: solve timed out twice. Last error: model session timed out at "
+    "its node's declared timeout_s (60s)",
+    "worker: solve timed out twice. Last error: model completion timed out after 5s",
+]
+
+
+@pytest.mark.parametrize("line", QUOTED_LINES)
+def test_a_harness_line_only_counts_as_the_errors_first_line(line):
+    """Only an error's first line is the harness's (`items.first_line`): the same line
+    quoted from a model's reply further down another failure's text classifies nothing,
+    while as the first line it does."""
+    from refactory_dsh.items import error_kind
+
+    assert error_kind(RuntimeError(f"parse: ValueError: bad reply:\n{line}")) == "RuntimeError"
+    assert error_kind(RuntimeError(line)) in ("harness_incident", "timeout", "declared_timeout")

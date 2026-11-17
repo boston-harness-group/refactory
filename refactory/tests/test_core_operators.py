@@ -921,8 +921,9 @@ def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, ki
         "completion": lambda: CompletionTimeout("model completion timed out after 1800s"),
         "walker": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
                                        "after 1800s; requested runtime shutdown"),
-        "spine": lambda: RuntimeError("solve exited with code 1\nworker: model completion "
-                                      "timed out after 1800s; requested runtime shutdown"),
+        # The spine's item error (`nodeErrorText`): the node's line first, then the tail.
+        "spine": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out after "
+                                      "1800s\nworker: model completion timed out after 1800s"),
         "inactivity": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
                                            "after 600s of inactivity"),
         "quoted": lambda: RuntimeError("check: ValueError: the reply was 'model completion "

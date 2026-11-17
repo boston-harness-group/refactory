@@ -2677,7 +2677,13 @@ HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a t
 #: call the client ended (``timeout``: inactivity, the item deadline) and the backstop
 #: (``harness_incident``). A wall a step declares (``timeout_s``; ``declared_timeout``) is
 #: the pipeline's design, an ordinary failure the optimizer sees.
-HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
+def _harness_timeout_kinds() -> frozenset[str]:
+    from refactory_dsh.items import BACKSTOP_IS_HARNESS_INCIDENT
+
+    return frozenset({"timeout", *(("harness_incident",) if BACKSTOP_IS_HARNESS_INCIDENT else ())})
+
+
+HARNESS_TIMEOUT_KINDS = _harness_timeout_kinds()
 
 
 def harness_timeout(record: Mapping[str, Any]) -> bool:

@@ -426,6 +426,8 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
 #: (``model.CompletionTimeout``); a failed pass carries it in its text on both runtimes.
 COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 
+from refactory_dsh.model import DECLARED_TIMEOUT_TEXT, HARNESS_BACKSTOP_TEXT  # noqa: E402
+
 
 #: How much of a failed item's error its record keeps: the spine's 4096-character stderr
 #: tail, after the one line (at most 512 characters) that names the failed node and its
@@ -433,45 +435,50 @@ COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
-#: How a model call the harness ended for time reaches an item's error as text, anchored
-#: at the start of the message or of a line: the walker's ``"<node>: CompletionTimeout: "``
-#: (`nn.executor` ``_walk_branch``) and the spine worker's stderr
-#: ``"worker: model completion timed out"`` (`worker_node.main`). Nowhere else in a text.
+#: An item's error crosses a process as text, and only its FIRST line is the harness's
+#: own: the walker's ``"<node>: <Kind>: <message>"`` (`nn.executor` ``_walk_branch``),
+#: the spine's ``"<node>: <the worker's last 'worker:' line>"`` (`workflow-spine`
+#: ``nodeErrorText``/``nodeErrorLine``, which also prefixes ``CompletionTimeout: `` to a
+#: completion timeout), or the worker's own ``"worker: <message>"``. Every later line is a
+#: stderr tail or a message that may quote a model's reply, so none of them classifies an
+#: item (`first_line`). The classifiers below each match that first line's start:
+#:
+#: - `_HARNESS_TIMEOUT_LINE`: a model call the harness ended for time (``timeout``);
+#: - `HARNESS_BACKSTOP_LINE`: the harness backstop (``harness_incident``);
+#: - `DECLARED_TIMEOUT_LINE`: the node's declared wall (``declared_timeout``);
+#: - `DECLARED_TIMEOUT_RETRIED_LINE`, `_HARNESS_TIMEOUT_RETRIED_LINE`: the same two, once
+#:   the node's declared retry is spent (`node_retry.RetriesExhausted`).
+_NODE = r"[A-Za-z0-9_.-]+: "
+
 _HARNESS_TIMEOUT_LINE = re.compile(
-    r"^(?:[A-Za-z0-9_.-]+: CompletionTimeout: |worker: " + re.escape(COMPLETION_TIMEOUT_TEXT) + ")",
-    re.MULTILINE)
+    rf"(?:{_NODE}CompletionTimeout: |worker: ){re.escape(COMPLETION_TIMEOUT_TEXT)}")
 
-
-#: How a session the harness backstop stopped (`model.HarnessBackstop`) reaches an item
-#: record as text, anchored at a line's start: the walker's ``"<node>: HarnessBackstop: "``
-#: and the spine worker's stderr ``"worker: model session hit the harness backstop"``.
 HARNESS_BACKSTOP_LINE = re.compile(
-    r"^(?:[A-Za-z0-9_.-]+: HarnessBackstop: |worker: model session hit the harness backstop)",
-    re.MULTILINE)
+    rf"(?:{_NODE}(?:HarnessBackstop: )?|worker: )model session {re.escape(HARNESS_BACKSTOP_TEXT)}")
 
-#: How a session stopped at its node's declared wall (`model.DeclaredTimeout`) reaches an
-#: item record as text, anchored at a line's start: the walker's
-#: ``"<node>: DeclaredTimeout: "`` and the spine worker's stderr
-#: ``"worker: model session timed out at its node's declared timeout_s"``.
 DECLARED_TIMEOUT_LINE = re.compile(
-    r"^(?:[A-Za-z0-9_.-]+: DeclaredTimeout: |worker: model session timed out at its node's "
-    r"declared timeout_s)", re.MULTILINE)
+    rf"(?:{_NODE}(?:DeclaredTimeout: )?|worker: ){re.escape(DECLARED_TIMEOUT_TEXT)}")
 
-#: The same, once the node's declared retry is spent (`node_retry.RetriesExhausted`): the
-#: retry wrapper's own line, anchored at its start, ending on the last attempt's error.
 DECLARED_TIMEOUT_RETRIED_LINE = re.compile(
-    r"^(?:[A-Za-z0-9_.-]+: RetriesExhausted: |worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
-    r"\. Last error: (?:[A-Za-z0-9_.-]+: DeclaredTimeout: )?model session timed out at its "
-    r"node's declared timeout_s", re.MULTILINE)
+    rf"(?:{_NODE}(?:RetriesExhausted: )?|worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
+    rf"\. Last error: (?:{_NODE}DeclaredTimeout: )?{re.escape(DECLARED_TIMEOUT_TEXT)}")
 
-
-#: A model call the harness ended for time, once the node's declared retry is spent
-#: (`node_retry.RetriesExhausted`): the retry wrapper's own line, anchored at its start,
-#: ending on the last attempt's timeout.
 _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
-    r"^(?:[A-Za-z0-9_.-]+: RetriesExhausted: |worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
-    r"\. Last error: (?:[A-Za-z0-9_.-]+: CompletionTimeout: )?" + re.escape(COMPLETION_TIMEOUT_TEXT),
-    re.MULTILINE)
+    rf"(?:{_NODE}(?:RetriesExhausted: )?|worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
+    rf"\. Last error: (?:{_NODE}CompletionTimeout: )?{re.escape(COMPLETION_TIMEOUT_TEXT)}")
+
+
+def first_line(text: Any) -> str:
+    """The first line of an error's text: the only one the harness writes itself."""
+    return str(text or "").split("\n", 1)[0]
+
+
+#: Whether a session the harness backstop stopped while its model still streamed
+#: (`model.HarnessBackstop`) is the harness's incident -- rerun, then left out of the
+#: score, and no optimizer target -- rather than the candidate's own failure. The one
+#: place that decides it: `error_kind`, `harness_incident` and
+#: `optim.base.HARNESS_TIMEOUT_KINDS` all read it.
+BACKSTOP_IS_HARNESS_INCIDENT = True
 
 
 def error_kind(error: BaseException) -> str:
@@ -491,15 +498,16 @@ def error_kind(error: BaseException) -> str:
     from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
     from refactory_dsh.node_retry import RetriesExhausted
 
-    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
+    head = first_line(error)
+    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.match(head):
         return "harness_incident"
-    if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
+    if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.match(head)
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
-            or DECLARED_TIMEOUT_RETRIED_LINE.search(str(error))):
+            or DECLARED_TIMEOUT_RETRIED_LINE.match(head)):
         return "declared_timeout"
-    if (isinstance(error, CompletionTimeout) or _HARNESS_TIMEOUT_LINE.search(str(error))
+    if (isinstance(error, CompletionTimeout) or _HARNESS_TIMEOUT_LINE.match(head)
             or (isinstance(error, RetriesExhausted) and error.cause == "timeout")
-            or _HARNESS_TIMEOUT_RETRIED_LINE.search(str(error))):
+            or _HARNESS_TIMEOUT_RETRIED_LINE.match(head)):
         return "timeout"
     return type(error).__name__
 
@@ -680,7 +688,9 @@ def harness_incident(record: dict[str, Any]) -> bool:
     without hit the backstop (``missing_steps`` cause ``harness_incident``). An item the
     Task graded is its result, whatever a fork's other branch did. The loop runs such an
     item again and, still an incident, leaves it out of the score
-    (`loop.INCIDENT_RERUNS`)."""
+    (`loop.INCIDENT_RERUNS`). Never one while `BACKSTOP_IS_HARNESS_INCIDENT` is off."""
+    if not BACKSTOP_IS_HARNESS_INCIDENT:
+        return False
     if record.get("error_kind") == "harness_incident":
         return True
     if not str(record.get("fail_reason") or "").startswith(NO_ANSWER):
