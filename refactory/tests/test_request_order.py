@@ -467,6 +467,87 @@ def test_a_reason_written_as_a_heading_or_one_word_is_still_shown(source, said, 
         assert quoted in block.split("#### Step ")[-1], block
 
 
+def _shown_at_fix(records: list[dict], needle: str) -> None:
+    """``needle``, a line of the fix step's prompt, reaches the proposer on both items:
+    in the fix step's own text, or said by name (``Sees: judge's reply``) with the judge's
+    reply holding it."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=records, knobs=knobs).render()
+    for item in ("r1", "r2"):
+        steps = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")
+        fix = next(step for step in steps if step.startswith("`fix`"))
+        judge = next((step for step in steps if step.startswith("`judge`")), "")
+        assert needle in fix or ("Sees: judge's reply" in fix and needle in judge), \
+            (needle, fix)
+
+
+def _probe_record(item: str, fix_prompt: str, reply: Any = None, gate: str | None = None
+                  ) -> dict:
+    exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+    if reply is not None:
+        exchanges.append({"node": "judge", "prompt": f"ANS {item}", "response": reply})
+    exchanges.append({"node": "fix", "prompt": f"ANS {item}\n{fix_prompt}",
+                      "response": f"FIX {item}"})
+    return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+            "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+            **({"steps": [{"node": "check", "kind": "gate", "verdict": "reloop",
+                           "reason": gate}]} if gate is not None else {})}
+
+
+HEADING_REASON = "# Reloop: the proof skips the base case"
+
+
+@pytest.mark.parametrize("form", ["text", "json", "dict"])
+@pytest.mark.parametrize("line", [HEADING_REASON, f"Feedback: {HEADING_REASON}"])
+def test_a_judge_reason_written_as_a_heading_reaches_the_fix_step(form, line):
+    reply = {"text": HEADING_REASON,
+             "json": json.dumps({"verdict": "reloop", "reason": HEADING_REASON}),
+             "dict": {"verdict": "reloop", "reason": HEADING_REASON}}[form]
+    _shown_at_fix([_probe_record(i, line, reply=reply) for i in ("r1", "r2")], line)
+
+
+@pytest.mark.parametrize("word", ["Divergent", "divergent."])
+@pytest.mark.parametrize("form", ["{w}", "Feedback: {w}", "Reason:\n{w}"])
+def test_a_one_word_gate_reason_reaches_the_fix_step(word, form):
+    quoted = form.format(w=word)
+    _shown_at_fix([_probe_record(i, quoted, gate=word) for i in ("r1", "r2")],
+                  quoted.splitlines()[-1])
+
+
+MULTILINE_REASON = ("## Reloop\nThe proof skips the base case n=0.\n"
+                    "Also the induction step assumes the claim.")
+
+
+@pytest.mark.parametrize("source", ["judge text", "json judge", "gate"])
+def test_every_line_of_a_reason_headed_by_a_heading_reaches_the_fix_step(source):
+    reply = {"judge text": MULTILINE_REASON,
+             "json judge": json.dumps({"verdict": "reloop", "reason": MULTILINE_REASON}),
+             "gate": None}[source]
+    gate = MULTILINE_REASON if source == "gate" else None
+    records = [_probe_record(i, f"Feedback:\n{MULTILINE_REASON}", reply=reply, gate=gate)
+               for i in ("r1", "r2")]
+    for line in MULTILINE_REASON.splitlines():
+        _shown_at_fix(records, line)
+
+
+@pytest.mark.parametrize("reply_line", ["## Question", "Question", "Independent",
+                                        "## Independent", "## Option Comparison Notes"])
+def test_a_reply_line_that_is_a_short_heading_leaves_framing_hidden(reply_line):
+    """The negatives the fixes above must keep: a reply's own short heading or word does
+    not make the framing line holding it item data."""
+    framing = ["- User: ## Question", "## Question", "## Independent",
+               "## Option Comparison Notes"]
+    records = [_probe_record(i, "\n".join(framing), reply=f"{reply_line}\nB, since {i}.")
+               for i in ("r1", "r2")]
+    text = ProposalContext(item_records=records).render()
+    for item in ("r1", "r2"):
+        fix = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step `fix`")[1]
+        for line in framing:
+            assert line not in fix, (reply_line, line, fix)
+
+
 def test_with_one_item_no_line_is_taken_for_framing():
     """Framing is told from an item's own text only across two or more items; with one,
     every line not in the settings or templates is shown."""
