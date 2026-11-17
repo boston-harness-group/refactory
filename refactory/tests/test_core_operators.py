@@ -694,7 +694,7 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
         titles = {title for title, _b in examples}
         assert {"Several attempts and a choice", "Check and send back",
                 "Check a later step and send the work back to an earlier one",
-                "An independent attempt that sees only the task",
+                "Another attempt beside it, sent exactly what it is sent",
                 "A background pass beside an experiment", "A tool step before reasoning"} <= titles
         # The code-step shapes are offered only where code steps can run (`snippet.available`).
         code_titles = {"A simulation step, then an analysis of its results",

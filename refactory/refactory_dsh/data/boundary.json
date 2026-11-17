@@ -55,6 +55,7 @@
     "refactory_dsh.optim.checks",
     "refactory_dsh.optim.compose",
     "refactory_dsh.optim.edit_count",
+    "refactory_dsh.optim.edit_effect",
     "refactory_dsh.optim.evidence",
     "refactory_dsh.optim.feedback",
     "refactory_dsh.optim.integrity",

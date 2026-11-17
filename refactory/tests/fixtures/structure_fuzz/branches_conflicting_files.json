@@ -20,6 +20,6 @@
     "forks: join step_join belongs to no fork",
     "walker: failed: data: all 5 items failed"
   ],
-  "fixed_by": "V16 (fork_branch_conflicts)",
-  "refused_with": "V16"
+  "fixed_by": "V16 (fork_branch_conflicts); since the core-op lost-input rule (core_ops.lost_inputs), refused before V16: the loop would let decide_prompt run without the fork's notes",
+  "refused_with": "E-precondition: 'decide_prompt' would run without"
 }

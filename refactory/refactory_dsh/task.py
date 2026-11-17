@@ -124,6 +124,14 @@ class Task:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
+    def reply_correct(self, reply: str, metadata: Mapping[str, Any]) -> bool | None:
+        """Whether ``reply``, taken as the item's answer, is what this Task would grade
+        correct (``metadata``: the item's record metadata); ``None`` when a reply cannot be
+        read as an answer. The optimizer reads a step's replies with it -- was a step's
+        first reply already right before a judge sent it back? -- and never edits by it.
+        Default: no reading."""
+        return None
+
 
 #: The Tasks a bare name can resolve to.
 TASKS: dict[str, type[Task]] = {}
@@ -295,6 +303,33 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         return out
 
     return read
+
+
+def reply_judge(state: dict[str, Any]) -> Any:
+    """How a step's reply is read as an item's answer for the graph's Tasks
+    (`Task.reply_correct`): a function ``(reply, metadata) -> bool | None``, the first
+    Task with a reading deciding; ``None`` when none has one. A graph that cannot be
+    built or a Task that cannot be loaded raises: the run could not evaluate it either.
+    A reading that raises raises too; its caller says so (`optim.edit_effect`)."""
+    from refactory_dsh.nn.graph import Graph
+
+    graph = Graph.from_state(state.get("graph") or {})
+    tasks = []
+    for ref in sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref}):
+        task = load_task(ref)
+        if type(task).reply_correct is not Task.reply_correct:
+            tasks.append(task)
+    if not tasks:
+        return None
+
+    def judge(reply: str, metadata: Mapping[str, Any]) -> bool | None:
+        for task in tasks:
+            verdict = task.reply_correct(reply, metadata)
+            if verdict is not None:
+                return bool(verdict)
+        return None
+
+    return judge
 
 
 def node_item(item: dict[str, Any], task: Task | None) -> dict[str, Any]:
