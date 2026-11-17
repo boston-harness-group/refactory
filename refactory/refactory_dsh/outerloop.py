@@ -1092,7 +1092,9 @@ class ValidationGate:
         the items both were scored on (`Run.shared_val_scores`), and the log says so; an
         item the harness kept from one candidate is never another's win or loss."""
         if incumbent_id is not None and incumbent_id != candidate.id:
-            shared = run.shared_val_scores(candidate.id, incumbent_id)
+            # A stand-in run (a test double, a strategy's own) may not keep item scores.
+            compare = getattr(run, "shared_val_scores", None)
+            shared = compare(candidate.id, incumbent_id) if callable(compare) else None
             if shared is not None:
                 mine, theirs, left_out = shared
                 run.log(f"val gate: {candidate.id} vs {incumbent_id} compared on the items "
