@@ -151,6 +151,15 @@ def code_dry_run(parent_id: str, parent_state: Mapping[str, Any], state: Mapping
                 else:
                     snippet.checked_result(node_id, result, node.writes, node.produces)
             except snippet.SandboxUnavailable as exc:
+                if isinstance(exc, snippet.NoSandbox):
+                    # No sandbox at all refuses, as any failure does; a busy machine
+                    # that did not start one in time only skips the item.
+                    refusals.append(
+                        f"E-code-run: code node {node_id!r} failed when run on the parent's "
+                        f"recorded inputs for item {folder.name!r}: {str(exc)[:1500]}. Its "
+                        f"inputs there: files {sorted(inp['files'])}, facts "
+                        f"{sorted(inp['facts'])}; read each one's shape before using it")
+                    break
                 skipped.append(f"{folder.name}: {exc}")
                 continue
             except Exception as exc:  # noqa: BLE001 - any failure is what the dry run is for

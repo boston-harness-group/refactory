@@ -475,9 +475,10 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
 
 
 #: How a code step that ran over its fixed wall (`snippet.SnippetTimeout`,
-#: `snippet.WALL_S`) reaches an item record as text, anchored at a line's start: the
-#: walker's ``"<node>: SnippetTimeout: "`` and the spine runner's stderr
-#: ``"SnippetTimeout: "`` (`run.main`).
+#: `snippet.WALL_S`) reaches a record as text, anchored at a line's start: the walker's
+#: ``"<node>: SnippetTimeout: "`` and the spine runner's stderr ``"SnippetTimeout: "``
+#: (`run.main`). Its code's fault, so never a harness timeout; only no fallback answers it
+#: (`node_retry.falls_back_on`).
 SNIPPET_TIMEOUT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )?SnippetTimeout: the code ran over its ",
                                   re.MULTILINE)
 
@@ -491,21 +492,20 @@ def error_kind(error: BaseException) -> str:
     backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's) or a
     code step whose sandbox did not start (`snippet.SandboxUnavailable`: the machine),
     ``"declared_timeout"`` for one stopped at its node's declared wall
-    (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout --
-    a code step past the fixed wall every snippet gets (`snippet.SnippetTimeout`) is one
-    -- else the class name.
+    (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
+    else the class name.
 
     A ``model.CompletionTimeout`` is one by its type. A node that timed out reaches the
     record as text -- the walker's ``"<node>: CompletionTimeout: model completion timed
     out ..."``, the spine's worker stderr ``"worker: model completion timed out ..."`` --
     wrapped in a RuntimeError on both, so only that anchored prefix decides
-    (`_HARNESS_TIMEOUT_LINE`, `SNIPPET_TIMEOUT_LINE`). An op's own
-    ``subprocess.TimeoutExpired``, or a text that merely says "timed out", is the
-    pipeline's.
+    (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
+    ``SnippetTimeout`` (its code's fault, a target), or a text that merely says "timed
+    out", is the pipeline's.
     """
     from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
     from refactory_dsh.node_retry import RetriesExhausted
-    from refactory_dsh.snippet import SandboxUnavailable, SnippetTimeout
+    from refactory_dsh.snippet import SandboxUnavailable
 
     if (isinstance(error, (HarnessBackstop, SandboxUnavailable))
             or HARNESS_BACKSTOP_LINE.search(str(error))
@@ -515,8 +515,7 @@ def error_kind(error: BaseException) -> str:
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
             or DECLARED_TIMEOUT_RETRIED_LINE.search(str(error))):
         return "declared_timeout"
-    if (isinstance(error, (CompletionTimeout, SnippetTimeout))
-            or _HARNESS_TIMEOUT_LINE.search(str(error)) or SNIPPET_TIMEOUT_LINE.search(str(error))
+    if (isinstance(error, CompletionTimeout) or _HARNESS_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "timeout")
             or _HARNESS_TIMEOUT_RETRIED_LINE.search(str(error))):
         return "timeout"
@@ -726,7 +725,8 @@ def _spent_phrase(info: dict[str, Any]) -> str:
     cause = {"output_limit": "reached its output limit without answering",
              "timeout": "timed out", "crash": "crashed",
              "declared_timeout": "timed out at its declared timeout_s",
-             "harness_incident": "hit the harness backstop"}.get(str(info.get("cause")), "failed")
+             "harness_incident": "hit the harness backstop",
+             "step_timeout": "ran over its own time limit"}.get(str(info.get("cause")), "failed")
     sessions = info.get("sessions")
     return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
 

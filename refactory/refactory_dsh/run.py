@@ -479,6 +479,12 @@ def run_node(
     is_retryable = node_type not in ("gate", "GateNode")
     started = copy.deepcopy(ctx.facts)
     facts_snapshot = copy.deepcopy(ctx.facts) if is_retryable else None
+    from refactory_dsh.node_retry import snapshot_outputs
+
+    # A step with a fallback's declared files before its visit, put back if it falls back.
+    before_visit = (snapshot_outputs(directory, declarations(directory, node_id).get("writes"))
+                    if is_retryable and declarations(directory, node_id).get("falls_back")
+                    else {})
 
     def _write_facts() -> None:
         _write_changes(directory, started, ctx.facts)
@@ -506,16 +512,19 @@ def run_node(
             # Optional nodes (named in a fork's optional_targets), and a step with a
             # fallback that genuinely failed (`falls_back`), are recorded as missing
             # instead of failing the run.
-            from refactory_dsh.node_retry import drop_outputs, falls_back_on, record_spent
+            from refactory_dsh.node_retry import falls_back_on, record_spent, restore_outputs
 
             decl = declarations(directory, node_id)
             fell = bool(decl.get("falls_back")) and falls_back_on(retry_exc)
             if fell:
-                # Its fallback answers alone: nothing the failed step left half-made is
-                # graded (the walker drops the same, `Executor._missing_optional`).
-                drop_outputs(directory, decl.get("writes"))
+                # Its outputs as its visit found them: its fallback sees what it saw, and
+                # nothing it left half-made is graded (`Executor._missing_optional`).
+                restore_outputs(directory, before_visit)
                 for fact in decl.get("produces") or ():
-                    ctx.facts.pop(fact, None)
+                    if fact in started:
+                        ctx.facts[fact] = started[fact]
+                    else:
+                        ctx.facts.pop(fact, None)
             _write_facts()
             if decl.get("optional") or fell:
                 reviews_dir = directory / "reviews"

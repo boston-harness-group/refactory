@@ -536,12 +536,13 @@ def test_a_failed_agent_s_partial_answer_is_never_graded(runtime, tmp_path):
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-@pytest.mark.parametrize("call, kind", [("crash_ops:snippet_timeout_on_first", "timeout"),
+@pytest.mark.parametrize("call, kind", [("crash_ops:snippet_timeout_on_first", "RuntimeError"),
                                         ("crash_ops:sandbox_down_on_first", "harness_incident")])
 def test_a_code_step_s_wall_or_sandbox_never_falls_back(runtime, call, kind, tmp_path):
-    """A code step past its fixed wall (`SnippetTimeout`) is a timeout, and a sandbox that
-    did not start (`SandboxUnavailable`) the harness's: item 0 fails so, as with no
-    fallback, and the fallback is never asked."""
+    """A code step past its own wall (`SnippetTimeout`: its code's fault, recorded as the
+    pipeline's, never a harness timeout) and a sandbox that did not start
+    (`SandboxUnavailable`, the harness's) both fail item 0 as with no fallback, and the
+    fallback is never asked."""
     graph = _with_fallback(_pass_graph(Node("solve", "op", call=call, writes=("answer.txt",))))
     dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
     scores, _run = _both(runtime, graph, tmp_path, dsh)
@@ -553,7 +554,7 @@ def _errors() -> dict[str, BaseException]:
     from refactory_dsh.budgets import BudgetExhausted
     from refactory_dsh.nn.executor import OpOutcomeUnknown, OpTimeoutError
     from refactory_dsh.node_retry import RetriesExhausted
-    from refactory_dsh.snippet import SandboxUnavailable, SnippetError, SnippetTimeout
+    from refactory_dsh.snippet import NoSandbox, SandboxUnavailable, SnippetError, SnippetTimeout
 
     return {
         "raises": ValueError("bad input"),
@@ -576,24 +577,31 @@ def _errors() -> dict[str, BaseException]:
         "killed": RuntimeError("model completion failed (exit -9)"),
         "subprocess": subprocess.TimeoutExpired(["pytest"], 10),
         "budget": BudgetExhausted("the run's budget is spent"),
+        "snippet wall text": RuntimeError("solve: SnippetTimeout: the code ran over its 10 s limit"),
+        "no sandbox": NoSandbox("code nodes cannot run here: no user namespaces"),
+        "auth": CompletionFailed("model completion failed: authentication_error", kind="setup"),
+        "model name": CompletionFailed("model completion failed: model not found", kind="setup"),
+        "permission": CompletionFailed("model completion failed: permission_error", kind="setup"),
+        "prompt too long": CompletionFailed("model completion failed: prompt is too long",
+                                            kind="setup"),
     }
 
 
-GENUINE = {"raises", "crash spent", "output limit", "code error"}
+GENUINE = {"raises", "crash spent", "output limit", "code error", "prompt too long"}
 
 
 @pytest.mark.parametrize("name", sorted(_errors()))
 def test_only_a_genuine_failure_falls_back(name):
-    """The step's own failures (it raised, crashed past its retries, hit its output limit,
-    its code raised) fall back; time and harness failures of every kind never do."""
+    """The step's own failures (it raised, crashed past its retries, hit its output limit
+    or a prompt too long, its code raised) fall back; time, harness and configuration
+    failures of every kind never do."""
     from refactory_dsh.node_retry import falls_back_on
 
     assert falls_back_on(_errors()[name]) is (name in GENUINE)
 
 
 @pytest.mark.parametrize("text, kind", [
-    ("solve: SnippetTimeout: the code ran over its 10 s limit", "timeout"),
-    ("solve exited with code 1\nSnippetTimeout: the code ran over its 10 s limit", "timeout"),
+    ("solve: SnippetTimeout: the code ran over its 10 s limit", "RuntimeError"),
     ("solve: SandboxUnavailable: the sandbox did not start within 60 s", "harness_incident"),
     ("solve exited with code 1\nSandboxUnavailable: code nodes cannot run here", "harness_incident"),
     ("check: ValueError: the reply said 'SnippetTimeout: the code ran over its 1 s limit'",
@@ -601,7 +609,8 @@ def test_only_a_genuine_failure_falls_back(name):
 ])
 def test_a_code_step_s_wall_and_sandbox_read_from_a_record_s_text(text, kind):
     """How the walker (``<node>: Class: ``) and the spine's runner stderr (``Class: ``)
-    carry them into an item record, anchored at a line's start."""
+    carry them into an item record, anchored at a line's start: an unstarted sandbox is
+    the harness's; a code step's own wall stays the pipeline's (a target)."""
     from refactory_dsh.items import error_kind
 
     assert error_kind(RuntimeError(text)) == kind
@@ -678,3 +687,67 @@ def test_a_visit_s_missing_record_says_only_its_own_cause(tmp_path):
     assert missing_steps(tmp_path)["solve"]["cause"] == "failed"
     clear_spent(tmp_path, "solve")
     assert missing_steps(tmp_path) == {}
+
+
+def test_a_step_s_own_time_limit_is_its_own_cause_never_a_harness_timeout(tmp_path):
+    """An optional op's own subprocess limit, or a code step's wall, records
+    ``step_timeout``: the step's fault, never the harness ``timeout`` a request leaves out
+    (`optim.base.harness_timeout`); a model's inactivity is still ``timeout``."""
+    from refactory_dsh.model import InactivityTimeout
+    from refactory_dsh.node_retry import missing_cause
+    from refactory_dsh.optim.base import harness_timeout
+    from refactory_dsh.snippet import SnippetTimeout
+
+    assert missing_cause(subprocess.TimeoutExpired(["pytest"], 10)) == "step_timeout"
+    assert missing_cause(SnippetTimeout("the code ran over its 10 s limit")) == "step_timeout"
+    assert missing_cause(InactivityTimeout(["dsh"], 600)) == "timeout"
+    record = {"passed": False, "error_kind": None,
+              "missing_steps": {"solve": {"cause": "step_timeout"}}}
+    assert not harness_timeout(record)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_optional_op_s_own_timeout_is_recorded_as_its_own(runtime, tmp_path):
+    """On both runtimes an optional branch op whose own subprocess times out is missing
+    with cause ``step_timeout``."""
+    graph = Graph()
+    graph.add(_data("fork", "pick"))
+    graph.add(Node("fork", "fork", targets=("a", "b"), optional_targets=("a",)))
+    graph.add(Node("a", "op", call="crash_ops:own_timeout", writes=("a.txt",)))
+    graph.add(Node("b", "op", call="crash_ops:right_b", writes=("b.txt",)))
+    graph.add(Node("join", "join", sources=("a", "b")))
+    graph.add(Node("pick", "op", call="crash_ops:pick", reads=("a.txt", "b.txt"),
+                   writes=("item_result.json",)))
+    graph.add(Node("report", "op", call="loop_ops:noop"))
+    for source, target in [("fork", "join"), ("a", "join"), ("b", "join"), ("join", "pick"),
+                           ("data", "report")]:
+        graph.connect(source, target)
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    _scores, run = _both(runtime, graph, tmp_path, dsh)
+    from refactory_dsh.items import missing_steps
+
+    assert missing_steps(_pass(run, "0"))["a"]["cause"] == "step_timeout"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_fall_back_puts_back_what_the_step_only_rewrote(runtime, tmp_path):
+    """draft writes answer.txt; solve reads it, rewrites it and raises on item 0: its
+    fallback sees draft's answer as it was (a code fallback that keeps it), not nothing."""
+    graph = Graph()
+    graph.add(_data("draft", "score"))
+    graph.add(Node("draft", "op", call="crash_ops:draft_right", writes=("answer.txt",)))
+    graph.add(Node("solve", "op", call="crash_ops:rewrite_unless_first", reads=("answer.txt",),
+                   writes=("answer.txt",)))
+    graph.add(Node("score", "op", call="crash_ops:score", reads=("answer.txt",),
+                   writes=("item_result.json",)))
+    graph.add(Node("report", "op", call="loop_ops:noop"))
+    graph.connect("draft", "solve")
+    graph.connect("solve", "score")
+    graph.connect("data", "report")
+    state = nn_edits.apply({"op": "fallback", "step": "solve", "kind": "op",
+                            "call": "crash_ops:keep_answer"}, {"graph": graph.to_state()})
+    assert validate_state(state) == [], validate_state(state)
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    scores, run = _both(runtime, Graph.from_state(state["graph"]), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert (_pass(run, "0") / "kept.txt").read_text() == "right\n"

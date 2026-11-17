@@ -130,3 +130,43 @@ def sandbox_down_on_first(ctx: Any) -> dict[str, Any]:
         raise SandboxUnavailable("the sandbox did not start within 60 s")
     ctx.write_text("answer.txt", "right\n")
     return {}
+
+
+def own_timeout(ctx: Any) -> dict[str, Any]:
+    """An op whose own subprocess runs over its limit on item ``0``."""
+    import subprocess
+
+    if _first_item(ctx):
+        raise subprocess.TimeoutExpired(["slow-tool"], 1)
+    ctx.write_text("a.txt", "right\n")
+    return {}
+
+
+def right_b(ctx: Any) -> dict[str, Any]:
+    ctx.write_text("b.txt", "right\n")
+    return {}
+
+
+def draft_right(ctx: Any) -> dict[str, Any]:
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def rewrite_unless_first(ctx: Any) -> dict[str, Any]:
+    """Reads the draft and rewrites it; on item ``0`` it rewrites it badly, then raises."""
+    draft = ctx.read_text("answer.txt")
+    if _first_item(ctx):
+        ctx.write_text("answer.txt", "garbled\n")
+        raise ValueError("item 0 breaks the solver after rewriting")
+    ctx.write_text("answer.txt", draft)
+    return {}
+
+
+def keep_answer(ctx: Any) -> dict[str, Any]:
+    """A fallback that keeps the draft it is given (and notes what it saw in kept.txt)."""
+    from pathlib import Path
+
+    draft = ctx.read_text("answer.txt") if ctx.exists("answer.txt") else "(not written)\n"
+    (Path(ctx.workdir) / "kept.txt").write_text(draft)
+    ctx.write_text("answer.txt", draft)
+    return {}

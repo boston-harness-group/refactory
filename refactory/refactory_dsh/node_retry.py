@@ -104,9 +104,19 @@ def leaves_no_answer(error: BaseException) -> bool:
 def missing_cause(error: BaseException) -> str | None:
     """Why a session's failure left its step without an answer, by the error's type, when
     it ended for time: ``harness_incident`` (`model.HarnessBackstop`), ``declared_timeout``
-    (`model.DeclaredTimeout`) or ``timeout`` (`failure_kind`); else None."""
-    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
+    (`model.DeclaredTimeout`), ``step_timeout`` (the step's own limit: an op's own
+    `subprocess.TimeoutExpired`, a code step's `snippet.SnippetTimeout` -- its fault, never
+    a harness timeout) or ``timeout`` (`failure_kind`); else None."""
+    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop, InactivityTimeout
+    from refactory_dsh.snippet import SnippetTimeout
 
+    if isinstance(error, SnippetTimeout) or (
+            isinstance(error, subprocess.TimeoutExpired)
+            and not isinstance(error, InactivityTimeout)) or str(error).startswith(
+                "TimeoutExpired: "):
+        # The last: the walker's op child cannot rebuild a `TimeoutExpired` from its
+        # message, so it reaches the parent as a RuntimeError naming it first.
+        return "step_timeout"
     if isinstance(error, HarnessBackstop):
         return "harness_incident"
     if isinstance(error, DeclaredTimeout):
@@ -117,7 +127,7 @@ def missing_cause(error: BaseException) -> str | None:
 #: The causes and error kinds that are a step running out of time or the harness failing,
 #: never the step failing: what `missing_cause` and `items.error_kind` say for one. A
 #: fallback never answers one (`falls_back_on`).
-TIMEOUT_KINDS = frozenset({"timeout", "declared_timeout", "harness_incident"})
+TIMEOUT_KINDS = frozenset({"timeout", "declared_timeout", "harness_incident", "step_timeout"})
 
 
 def falls_back_on(error: BaseException) -> bool:
@@ -130,34 +140,60 @@ def falls_back_on(error: BaseException) -> bool:
     as an op's own `subprocess.TimeoutExpired`), an op past its per-op timeout
     (`OpTimeoutError`) or whose child vanished (`OpOutcomeUnknown`), an interrupted model
     call (`items.interrupted_cause`: a wire that kept failing, a killed or cancelled
-    session), nor the run's budget or a build-loop stop, which end the run as before. The
-    output limit is the model's own failure, so it does fall back."""
+    session), a request the provider refuses for its key, permission or model name
+    (``setup``: configuration, the fallback would be refused alike), nor the run's budget
+    or a build-loop stop, which end the run as before. A code step past its own wall
+    (`SnippetTimeout`) is its code's fault but still time, so it never falls back either.
+    The output limit and a prompt too long are the model's or the step's own failure, so
+    they do."""
     from refactory_dsh.budgets import BudgetExhausted
     from refactory_dsh.items import error_kind, interrupted_cause
     from refactory_dsh.model import CompletionFailed
+    from refactory_dsh.items import SNIPPET_TIMEOUT_LINE
     from refactory_dsh.nn.executor import OpOutcomeUnknown, OpTimeoutError
     from refactory_dsh.run import BuildLoopStop
+    from refactory_dsh.snippet import SnippetTimeout
 
     if isinstance(error, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
         return False
-    if isinstance(error, CompletionFailed) and error.kind == "transport":
+    if isinstance(error, CompletionFailed) and (
+            error.kind == "transport"
+            or (error.kind == "setup" and "prompt is too long" not in str(error).lower())):
+        return False
+    if isinstance(error, SnippetTimeout) or SNIPPET_TIMEOUT_LINE.search(str(error)):
         return False
     if failure_kind(error) == "timeout" or interrupted_cause(str(error)) is not None:
         return False
     return error_kind(error) not in TIMEOUT_KINDS
 
 
-def drop_outputs(workdir: Path, writes: Any) -> None:
-    """Delete what a step that fell back left of its declared files (`falls_back_on`), so
-    only its fallback's answer, or none, is graded -- never the failed step's partial one."""
-    import shutil
+#: A declared output a step's visit found absent (`snapshot_outputs`).
+_ABSENT = object()
 
+
+def snapshot_outputs(workdir: Path, writes: Any) -> dict[str, Any]:
+    """What a step with a fallback's declared files hold before its visit, so a fall back
+    restores them (`restore_outputs`). A directory is left as it is."""
+    found: dict[str, Any] = {}
     for name in writes or ():
         path = Path(workdir) / str(name)
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, ignore_errors=True)
-        else:
+        if path.is_dir():
+            continue
+        found[str(name)] = path.read_bytes() if path.is_file() else _ABSENT
+    return found
+
+
+def restore_outputs(workdir: Path, snapshot: dict[str, Any]) -> None:
+    """Put a failed step's declared files back as its visit found them (`snapshot_outputs`)
+    before its fallback runs: one it made goes, one it only rewrote is as it was, so its
+    fallback sees what it saw and nothing half-made is graded."""
+    for name, content in snapshot.items():
+        path = Path(workdir) / name
+        if content is _ABSENT:
             path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
 
 
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
