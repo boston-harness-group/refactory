@@ -381,7 +381,8 @@ def test_an_attempt_that_changed_the_target_is_refused_not_retried(tmp_path, mon
 
 def test_a_retry_session_may_run_past_the_routes_envelope(monkeypatch, tmp_path):
     """A retry's longer limit is its session's limit even above the route's envelope,
-    which a node's own bound only ever lowers."""
+    which a node's own bound only ever lowers, on a backend that reports no activity.
+    On one that does, there is no route envelope: a declared wall stands as declared."""
     seen = []
 
     def capture(self, cmd, run_dir, stop_at=None, budget_s=None, task=None, target_workdir=None):
@@ -390,10 +391,15 @@ def test_a_retry_session_may_run_past_the_routes_envelope(monkeypatch, tmp_path)
 
     monkeypatch.setenv("REFACTORY_MODEL_SCRATCH", str(tmp_path))
     monkeypatch.setattr(DshModelClient, "_run_completion", capture)
-    client = DshModelClient(provider="p", model="m").for_node("reviewer")
+    client = DshModelClient(worker_backend="codex", model="m").for_node("reviewer")
     client.with_wall(10 ** 6).complete("hello", workdir=tmp_path)
     client.with_retry_wall(10 ** 6).complete("hello", workdir=tmp_path)
     assert seen[0] < 10 ** 6 and seen[1] == 10 ** 6
+    seen.clear()
+    client = DshModelClient(provider="p", model="m").for_node("reviewer")
+    client.with_wall(10 ** 6).complete("hello", workdir=tmp_path)
+    client.with_retry_wall(10 ** 6).complete("hello", workdir=tmp_path)
+    assert seen == [10 ** 6, 10 ** 6]
 
 
 # ── the declaration and the shared-state rule ─────────────────────────────────────

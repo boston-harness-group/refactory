@@ -251,8 +251,9 @@ def _make_route_client():
 #: solve node now carries the data pass's crash retry and ``missing_on_crash``. Then
 #: ``use_theorem`` and ``use_sketch`` were removed (the theorem states the answer).
 #: Then format_prompt declared which outputs carry its knob (``knob_outputs``), lowered
-#: with its knobs and facts; its prompts are unchanged.
-BASELINE_SNAPSHOT_SHA256 = "5283073c4516f42c652df1403adeaca30ae362e3f4250f51e43bf1e0a225249a"
+#: with its knobs and facts; its prompts are unchanged. Then the solve node lost its
+#: 1800 s wall (``timeout`` null): its session ends on inactivity only.
+BASELINE_SNAPSHOT_SHA256 = "884d48130c13028dbcef59bd6979b49deb9b4ed5f7bf90de28fbed9c167df741"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -402,10 +403,10 @@ def test_baseline_prompts_match_skillopt():
 
 
 def test_all_agent_nodes_have_route_settings():
-    """Every agent node in every block has tool_policy='none', timeout_s=SOLVE_TIMEOUT_S,
+    """Every agent node in every block has tool_policy='none', no timeout_s (no wall),
     and SYSTEM_PROMPT with {{skill_section}}."""
     from refactory_packages.livemath.blocks import BLOCK_NAMES
-    from refactory_packages.livemath.mode import SOLVE_TIMEOUT_S, SYSTEM_PROMPT, Solver
+    from refactory_packages.livemath.mode import SYSTEM_PROMPT, Solver
 
     for name in BLOCK_NAMES:
         mode = Solver(block=name)
@@ -415,7 +416,7 @@ def test_all_agent_nodes_have_route_settings():
                 continue
             assert node.tool_policy == "none", (
                 f"{name}/{node_id}: tool_policy is {node.tool_policy!r}")
-            assert node.timeout_s == SOLVE_TIMEOUT_S, (
+            assert node.timeout_s is None, (
                 f"{name}/{node_id}: timeout_s is {node.timeout_s}")
             assert node.system_prompt_template == SYSTEM_PROMPT, (
                 f"{name}/{node_id}: system_prompt_template differs")

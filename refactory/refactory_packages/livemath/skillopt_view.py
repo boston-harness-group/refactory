@@ -43,7 +43,7 @@ def task_type(metadata: dict) -> str:
 
 #: The exceptions a model call raises when it runs out of time
 #: (``refactory_dsh.model.CompletionTimeout`` and the subprocess timeouts it wraps).
-TIMEOUT_ERRORS = ("CompletionTimeout", "TimeoutExpired", "InactivityTimeout")
+TIMEOUT_ERRORS = ("CompletionTimeout", "TimeoutExpired", "InactivityTimeout", "HarnessBackstop")
 
 # A failed pass's error text: "<node>: <ExceptionType>: <message>"
 # (refactory_dsh/nn/executor.py ``_walk_branch``).
@@ -54,9 +54,13 @@ def task_timeout_s(solve_timeout_s: int | None = None) -> int:
     """SkillOpt's task timeout for an exec timeout (rollout.py:308-313).
 
     The adapter passes ``task_timeout=exec_timeout`` (adapter.py:125), so it is
-    ``max(exec_timeout, exec_timeout + 60)``.
+    ``max(exec_timeout, exec_timeout + 60)``. The solve node declares no wall, so its
+    exec timeout is the harness backstop, as arm A's is when it runs inactivity-only.
     """
-    exec_timeout = int(Solver.solve_timeout_s if solve_timeout_s is None else solve_timeout_s)
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
+
+    declared = Solver.solve_timeout_s if solve_timeout_s is None else solve_timeout_s
+    exec_timeout = int(declared if declared is not None else DEFAULT_BACKSTOP_S)
     return max(exec_timeout, exec_timeout + 60)
 
 

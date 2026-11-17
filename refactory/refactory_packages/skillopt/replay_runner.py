@@ -130,20 +130,23 @@ def load_a_config(a_out_dir: Path) -> dict[str, Any]:
 def unsupported_a_settings(a_out_dir: Path) -> list[str]:
     """A's settings arm B cannot be configured to match, as readable lines.
 
-    A's ``exec_timeout`` is checked against the LiveMath solver's own
-    ``solve_timeout_s`` rather than set from it: B's default is meant to be
-    A's (livemath/mode.py ``SOLVE_TIMEOUT_S``), and a recording run with
-    another value times items out at a different point.
+    A's ``exec_timeout`` is checked against the LiveMath solver's own wall rather than
+    set from it. B's solver has none (livemath/mode.py ``Solver.solve_timeout_s``): its
+    sessions end on inactivity, with the harness backstop as a guard. A wall in A below
+    that backstop stops slow items B lets finish, so the runs are not comparable.
     """
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
     from refactory_packages.livemath.mode import Solver
 
     with open(a_out_dir / "config.json") as f:
         raw = json.load(f)
     problems: list[str] = []
-    if "exec_timeout" in raw and int(raw["exec_timeout"]) != int(Solver.solve_timeout_s):
+    wall = Solver.solve_timeout_s if Solver.solve_timeout_s is not None else DEFAULT_BACKSTOP_S
+    if "exec_timeout" in raw and int(raw["exec_timeout"]) < int(wall):
         problems.append(
-            f"A ran with exec_timeout={raw['exec_timeout']!r}; arm B's LiveMath solver "
-            f"times out at {Solver.solve_timeout_s}s, so the two runs are not comparable"
+            f"A ran with exec_timeout={raw['exec_timeout']!r}, a wall below arm B's "
+            f"{wall}s (B's LiveMath solver ends on inactivity, with that harness backstop), "
+            "so the two runs are not comparable"
         )
     for key, required in A_CONFIG_REQUIRED.items():
         if key in raw and raw[key] != required:

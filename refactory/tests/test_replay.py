@@ -2015,12 +2015,14 @@ def test_late_answer_times_the_call_out_and_is_withheld(tmp_path):
         matcher.lookup("s", "p", attempts=5)
     # B's walker records it as it records a live timeout ("<node>: <type>: <msg>"),
     # and LiveMath renders that as SkillOpt's task timeout.
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
     from refactory_packages.livemath.skillopt_view import error_fail_reason
 
     event = exc_info.value
+    # B's solver has no wall, so its exec timeout is the harness backstop.
     assert error_fail_reason({
         "error_kind": "RuntimeError", "error_text": f"solve: {type(event).__name__}: {event}",
-    }) == "task-timeout-1860s"
+    }) == f"task-timeout-{DEFAULT_BACKSTOP_S + 60}s"
     assert matcher.lookup("s", "p", attempts=5) == "second"
     assert matcher.first_divergence is None
     assert [entry["line"] for entry in matcher.late_answers()] == [1]
@@ -2113,15 +2115,18 @@ def test_events_are_conceded_by_the_replay_runner_alone():
     assert users == ["skillopt/replay_runner.py"]
 
 
-def test_run_replay_refuses_a_different_exec_timeout(tmp_path):
-    """A's exec_timeout cross-checks B's LiveMath solve timeout (livemath/mode.py)."""
-    from refactory_packages.livemath.mode import Solver
+def test_run_replay_refuses_an_exec_timeout_below_the_backstop(tmp_path):
+    """B's LiveMath solver has no wall (livemath/mode.py), so A is comparable only when
+    its exec_timeout is no wall below B's harness backstop: 1800, A's earlier wall, is."""
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
     from refactory_packages.skillopt.replay_runner import unsupported_a_settings
 
-    (tmp_path / "config.json").write_text(json.dumps({"exec_timeout": Solver.solve_timeout_s}))
-    assert unsupported_a_settings(tmp_path) == []
-    (tmp_path / "config.json").write_text(json.dumps({"exec_timeout": 300}))
-    assert any("exec_timeout=300" in line for line in unsupported_a_settings(tmp_path))
+    for fine in (DEFAULT_BACKSTOP_S, DEFAULT_BACKSTOP_S * 2):
+        (tmp_path / "config.json").write_text(json.dumps({"exec_timeout": fine}))
+        assert unsupported_a_settings(tmp_path) == []
+    for wall in (300, 1800, DEFAULT_BACKSTOP_S - 1):
+        (tmp_path / "config.json").write_text(json.dumps({"exec_timeout": wall}))
+        assert any(f"exec_timeout={wall}" in line for line in unsupported_a_settings(tmp_path))
 
 
 def test_a_fault_in_the_replay_is_kept_for_the_report(tmp_path):

@@ -477,18 +477,14 @@ def test_the_model_client_reports_a_timeout_instead_of_hanging(monkeypatch):
         DshModelClient(timeout_s=1).complete("hello")
 
 
-def test_a_node_session_runs_under_the_whole_dispatch_envelope(monkeypatch):
-    """A dispatched node's session deadline is the envelope the spine reserved.
-
-    One completion's `timeout_s` cannot bound a tool-using agent session doing a
-    node's work: a deadline kill is never retried, so the session gets the whole
-    `attempts`-plus-overhead envelope `workers.lower_workflow` reserves — the same
-    wall both layers compute, so neither can end the node before the other (#307).
+def test_a_node_session_runs_under_the_harness_backstop_not_a_wall(monkeypatch):
+    """A dispatched node's session has no wall: its only deadline is the harness backstop,
+    absolute across attempts, and reaching it is a harness incident, not a timeout.
     A plain completion with no node keeps the per-completion deadline.
     """
     import subprocess
 
-    from refactory_dsh.model import DshModelClient, node_session_budget_s
+    from refactory_dsh.model import DshModelClient, HarnessBackstop
 
     seen: dict[str, object] = {}
 
@@ -497,13 +493,13 @@ def test_a_node_session_runs_under_the_whole_dispatch_envelope(monkeypatch):
         raise subprocess.TimeoutExpired(cmd="dsh", timeout=budget_s or 1)
 
     monkeypatch.setattr(DshModelClient, "_run_completion", explode)
-    node = DshModelClient(timeout_s=1, attempts=3).for_node("research_director")
-    budget = node_session_budget_s(3, 1)
-    with pytest.raises(RuntimeError, match=f"timed out after {budget}s"):
+    node = DshModelClient(timeout_s=1, attempts=3, backstop_s=77).for_node("research_director")
+    with pytest.raises(HarnessBackstop, match="hit the harness backstop after 77s"):
         node.complete("hello")
-    # The wall is absolute and shared across attempts, not per-completion.
+    # The deadline is absolute and shared across attempts, and the per-completion
+    # timeout_s does not bound it.
     assert seen["stop_at"] is not None
-    assert seen["budget_s"] == budget
+    assert seen["budget_s"] == 77
 
     seen.clear()
     with pytest.raises(RuntimeError, match="timed out after 1s"):
@@ -1021,13 +1017,13 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
     runtimes, and so is the optimizer's: the walker (`GraphExecutor`, via for_node and
     with_tool_policy), the spine (`workers.lower_workflow` writes the policy and the
     node's attempts into the worker spec that `worker_node` rebuilds its client from),
-    and `text_only`. On a native backend each retries; the spine's envelope reserves
-    every attempt."""
+    and `text_only`. On a native backend each retries; the spine's envelope outlasts
+    the harness backstop, the session's only deadline."""
     import json
 
     from refactory_dsh import workers
     from refactory_dsh.ir import AgentNode, AgentRole, Workflow
-    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S, NODE_DISPATCH_OVERHEAD_S, DshModelClient
     from refactory_dsh.optim.random_optimizer import text_only
 
     native = DshModelClient(worker_backend="claude_code")
@@ -1046,7 +1042,7 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
         rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")  # as worker_node does
         assert (rebuilt._tool_policy == "none") is (policy == "none")
         assert rebuilt.retry_attempts() == attempts
-        assert node.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+        assert node.command_timeout_s == DEFAULT_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
     # The walker: the executor hands an agent node the for_node client with the node's
     # tool policy applied.
@@ -1082,31 +1078,32 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
 
 @pytest.mark.parametrize("run_route, node_route, attempts", [
     # A dsh run with one node routed to claude_code (tools): that node's native session
-    # makes one attempt and gets one completion's time limit (it used to inherit dsh's 3).
+    # makes one attempt (it used to inherit dsh's 3).
     ({"worker_backend": "dsh", "provider": "p", "model": "m"},
      {"worker_backend": "claude_code"}, 1),
     # A claude_code run with one node routed to dsh (tools): that node retries as a dsh
-    # run's nodes do, with the time limit for every attempt (it used to be held to 1).
+    # run's nodes do (it used to be held to 1).
     ({"worker_backend": "claude_code"},
      {"worker_backend": "dsh", "provider": "p", "model": "m"}, 3),
 ])
 def test_a_mixed_route_node_gets_its_own_routes_attempts_and_time_limit(
         tmp_path, run_route, node_route, attempts):
-    """The attempt count and the spine's time limit follow the node's own route, not
-    the run's default: on the spine (the lower_workflow spec, rebuilt as worker_node
-    does) and on the walker (the for_node client)."""
+    """The attempt count follows the node's own route, not the run's default: on the
+    spine (the lower_workflow spec, rebuilt as worker_node does) and on the walker (the
+    for_node client). Both routes report activity, so neither has a wall: the spine's
+    time limit outlasts the harness backstop."""
     import json
 
     from refactory_dsh import workers
     from refactory_dsh.ir import AgentNode, AgentRole, Workflow
-    from refactory_dsh.model import DEFAULT_TIMEOUT_S, DshModelClient, node_session_budget_s
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S, NODE_DISPATCH_OVERHEAD_S, DshModelClient
 
     run = DshModelClient(**run_route, node_routes={"answer": node_route})
     node = AgentNode(id="answer", role=AgentRole.BUILDER, prompt_template="q",
                      writes={"answer.txt"})
     graph = Workflow(name="g", nodes={"answer": node}, edges=[], start_node="answer")
     lowered = workers.lower_workflow(graph, tmp_path, run.context()).nodes["answer"]
-    assert lowered.command_timeout_s == node_session_budget_s(attempts, DEFAULT_TIMEOUT_S)
+    assert lowered.command_timeout_s == DEFAULT_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     spec = json.loads(Path(lowered.dispatch_command.rsplit(" ", 1)[1].strip("'")).read_text())
     rebuilt = DshModelClient(**spec["model_context"]).for_node("answer", role="builder")
     rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")

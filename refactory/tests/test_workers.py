@@ -95,22 +95,24 @@ def test_lowered_bridge_preserves_edges_and_declared_outputs(tmp_path):
 
 def test_lowered_node_timeout_covers_the_declared_completion_budget(tmp_path):
     from refactory_dsh.ir import AgentNode, AgentRole, Workflow
-    from refactory_dsh.model import DEFAULT_TIMEOUT_S
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S, DEFAULT_TIMEOUT_S
 
     def graph(timeout=None):
         return Workflow(name='tiny', nodes={'build': AgentNode(id='build', role=AgentRole.BUILDER,
                     prompt_template='write result.txt', writes={'result.txt'}, timeout=timeout)},
                         edges=[], start_node='build')
 
-    # An unset node timeout derives from the route's declared budget, so the
-    # spine's node envelope outlasts the retries the model client may take
-    # instead of dying at the host shell's default clamp (#289).
+    # An unset node timeout on a backend that reports activity is no wall: the session
+    # ends on inactivity or at the harness backstop, and the spine's node envelope
+    # outlasts that backstop rather than dying at the host shell's default clamp (#289).
     dsh = workers.lower_workflow(graph(), tmp_path / 'dsh', DshModelClient().context())
-    attempts = DshModelClient().context()['attempts']
-    assert dsh.nodes['build'].command_timeout_s == attempts * DEFAULT_TIMEOUT_S + 600
+    assert dsh.nodes['build'].command_timeout_s == DEFAULT_BACKSTOP_S + 600
+    claude = workers.lower_workflow(graph(), tmp_path / 'claude',
+                                    DshModelClient(worker_backend='claude_code', model='m').context())
+    assert claude.nodes['build'].command_timeout_s == DEFAULT_BACKSTOP_S + 600
 
-    # A native backend reports a single attempt, so its envelope is one
-    # completion plus overhead.
+    # Codex reports no activity, so its route's budget stays its envelope: a single
+    # attempt, one completion plus overhead.
     codex = workers.lower_workflow(graph(), tmp_path / 'codex',
                                    DshModelClient(worker_backend='codex', model='m').context())
     assert codex.nodes['build'].command_timeout_s == DEFAULT_TIMEOUT_S + 600

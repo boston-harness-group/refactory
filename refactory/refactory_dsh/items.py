@@ -433,7 +433,9 @@ ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
 def error_kind(error: BaseException) -> str:
-    """A failed item's ``error_kind``: ``"timeout"`` for a timeout, else the class name.
+    """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
+    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    ``"timeout"`` for a timeout, else the class name.
 
     A node that timed out reaches the record as text -- the walker's
     ``"<node>: CompletionTimeout: model completion timed out ..."``, the spine's
@@ -443,6 +445,10 @@ def error_kind(error: BaseException) -> str:
     """
     import subprocess
 
+    from refactory_dsh.model import HARNESS_BACKSTOP_TEXT
+
+    if HARNESS_BACKSTOP_TEXT in str(error):
+        return "harness_incident"
     if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
         return "timeout"
     return type(error).__name__
