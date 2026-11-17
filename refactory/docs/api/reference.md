@@ -1110,10 +1110,13 @@ The per-item half of a data node, from the command line.
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True) -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
+| function | `update_record_file` | `(path: 'Path', change: 'Callable[[Any], Any]', empty: 'Callable[[], Any]') -> 'Any'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
+| function | `write_whole` | `(path: 'Path', text: 'str') -> 'None'` |
 
 - **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
@@ -1143,8 +1146,11 @@ The per-item half of a data node, from the command line.
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
-- **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar, under
+- **`record_lock`** — Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
 - **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
+- **`update_record_file`** — Read, change and rewrite the JSON record file ``path`` under an exclusive lock
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.
+- **`write_whole`** — Replace ``path`` with ``text`` whole: write a temporary file in the same folder,
