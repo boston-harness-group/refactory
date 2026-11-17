@@ -770,8 +770,10 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
 
     ``tried`` entries (oldest first): ``{"id", "parent", "round", "kind", "structural",
     "edits", "score", "exit_ok", "evaluated", "fixed", "broken", "shared", "same_seed",
-    "gate", "integrity"}`` -- train records and the gate's word only, as the proposal
-    request's history and change ledger show them; never a validation score.
+    "gate", "integrity", "effect"}`` -- train records and the gate's word only, as the
+    proposal request's history and change ledger show them; never a validation score.
+    A structural change's ``effect`` (`optim.edit_effect`) says how it moved the items
+    it changed, under its line.
     ``refused`` entries (oldest first): ``{"round", "attempt", "kind", "structural",
     "edits", "reasons"}``. Within ``chars``: past it, the entries listed last are cut --
     the refusals first, then the oldest evaluated -- and the cut is said."""
@@ -824,11 +826,17 @@ def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool) -> s
         elif entry.get("same_seed") is False:
             outcome += "; fixed/broken n/a (its parent was not scored with the same seed)"
     gate = entry.get("gate")
+    from .edit_effect import effect_lines
+
+    # How a structural change moved the items it changed (`optim.edit_effect`), so a
+    # note can say the mechanism rather than guess it.
+    how = effect_lines(entry.get("effect") or {})
     return (f"- `{entry.get('id')}` (round {entry.get('round')}, from `{entry.get('parent')}`; "
             f"{_change_text(entry)}): {entry.get('edits')} -- {outcome}"
             + (f" -- gate: {gate or 'not gated'}" if gated else "")
             + (" -- the pipeline now" if entry.get("id") == current and not gated else "")
-            + (f" -- integrity: {entry['integrity']}" if entry.get("integrity") else ""))
+            + (f" -- integrity: {entry['integrity']}" if entry.get("integrity") else "")
+            + "".join(f"\n  {line}" for line in how))
 
 
 def _refused_line(entry: Mapping[str, Any]) -> str:

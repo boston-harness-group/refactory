@@ -1813,6 +1813,19 @@ runs with when it works in such a workspace (`E-new-node-tools` otherwise, unles
 allows tools for new nodes). A step that uses tools in the run directory is not run
 beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
 
+**How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
+that an edit moved items, not how. For a child that ran steps its parent did not, the
+records say it (`optim.edit_effect`): for its broken and its fixed items, which new steps
+ran on them, what each new gate answered, which step ran more than once and -- where the
+mode's Task reads a reply as an answer (`Task.reply_correct`, found by
+`task.reply_judge`) -- on how many the first reply was already right and then changed to a
+wrong one, or was never right. It is computed from the records, with no model call, and
+it is generic: steps are compared by name, verdicts are the gates' own, and only the Task
+reads a reply. "What the last edit changed" shows it under each child's counts (a rejected
+child too), and memory's "What was tried this epoch" under each structural change. On the
+stopped S1-s45 run the loop broke 8 items; on 5, the solver's first reply was right before
+the judge sent it back.
+
 **The request.** Under "Structural operators", one line and one example per operator,
 with this graph's ids; then compositions built only from them -- several attempts and a
 choice (`parallelize` copies, an `insert` judge after the join, an `insert` `select` op),

@@ -1,0 +1,122 @@
+"""How a structural edit moved the items it changed (`optim.edit_effect`), from the item
+records alone: the new steps that ran, their gates' verdicts, the steps that ran again,
+and -- where the Task reads a reply as an answer -- whether the first reply was already
+right. Shown in the next proposer request and given to the memory call."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from refactory_dsh.optim.base import _edit_change_lines
+from refactory_dsh.optim.edit_effect import edit_effect, effect_lines
+from refactory_dsh.optim.memory import tried_lines
+from refactory_dsh.task import Task, reply_judge
+from refactory_packages.livemath.tasks import LiveMathTask
+
+REAL = json.loads((Path(__file__).parent / "fixtures" / "edit_effect" / "s1_s45_loop.json")
+                  .read_text())
+
+
+def _judge():
+    return LiveMathTask.__new__(LiveMathTask).reply_correct
+
+
+def test_the_real_s1_s45_loop_broke_five_items_whose_first_solve_was_right():
+    """The audit's finding, computed: of the 8 items the loop broke, the solver's first
+    reply was right on 5 before the judge sent it back, and wrong on its last."""
+    effect = edit_effect(REAL["parent"], REAL["child"], _judge())
+    broken = effect["broken"]
+    assert broken["items"] == 8
+    assert broken["new"] == {"solve_check": 8, "solve_check_judge": 8}
+    assert broken["said"]["solve_check"]["reloop"] == 8
+    assert broken["reran"]["solve"] == 8
+    assert broken["first_right"]["solve"] == 5 and broken["then_changed"]["solve"] == 5
+    assert broken["never_right"]["solve"] == 3
+    text = "\n".join(effect_lines(effect))
+    assert "How the edit moved its 8 broken item(s) (parent right, child wrong)" in text
+    assert "gate solve_check said reloop on 8" in text
+    assert ("solve's first reply was already right on 5, and changed to a wrong one on 5 of "
+            "those; never right on 3") in text
+
+
+def _rec(item, passed, replies, gates=()):
+    return {"id": item, "passed": passed, "label": "B",
+            "metadata": {"choices": [{"label": "A", "text": "a"}, {"label": "B", "text": "b"}],
+                         "correct_choice": {"label": "B", "text": "b"}},
+            "exchanges": [{"node": node, "response": text} for node, text in replies],
+            "steps": [{"node": gate, "kind": "gate", "verdict": verdict}
+                      for gate, verdict in gates]}
+
+
+def test_without_a_reading_it_says_the_steps_and_verdicts_and_no_first_reply():
+    parent = [_rec("i1", True, [("solve", "<answer>B</answer>")])]
+    child = [_rec("i1", False, [("solve", "<answer>B</answer>"), ("judge", "reloop"),
+                                ("solve", "<answer>A</answer>")], [("check", "reloop")])]
+    effect = edit_effect(parent, child)
+    assert effect["broken"]["new"] == {"judge": 1, "check": 1}
+    assert effect["broken"]["reran"] == {"solve": 1} and effect["broken"]["first_right"] == {}
+    assert "first reply" not in "\n".join(effect_lines(effect))
+    with_reading = edit_effect(parent, child, _judge())
+    assert with_reading["broken"]["then_changed"] == {"solve": 1}
+
+
+def test_an_edit_that_added_no_step_says_nothing():
+    """A text edit moves items too, but the records cannot say how: no effect, no line."""
+    parent = [_rec("i1", True, [("solve", "<answer>B</answer>")])]
+    child = [_rec("i1", False, [("solve", "<answer>A</answer>")])]
+    assert edit_effect(parent, child, _judge()) == {} and effect_lines({}) == []
+
+
+def test_the_request_and_memory_say_it_beside_the_items_counts():
+    effect = edit_effect(REAL["parent"], REAL["child"], _judge())
+    pair = {"child": "44548d72f753", "parent": "7691424216b6", "edit": [],
+            "child_records": REAL["child"], "parent_records": REAL["parent"], "effect": effect}
+    request = "\n".join(_edit_change_lines([pair]))
+    assert "8 broken (parent right, child wrong)" in request
+    assert "How the edit moved its 8 broken item(s)" in request
+    entry = {"id": "44548d72f753", "parent": "7691424216b6", "round": 4, "kind": "loop",
+             "structural": True, "edits": "loop solve", "score": 0.5, "exit_ok": True,
+             "evaluated": True, "fixed": 1, "broken": 8, "shared": 35, "effect": effect}
+    memory = "\n".join(tried_lines([entry], [], round_=4, current=None, gated=True))
+    assert "first reply was already right on 5" in memory
+
+
+def test_a_task_without_a_reading_gives_no_judge_and_livemath_reads_its_replies():
+    assert Task().reply_correct("anything", {}) is None
+    judge = _judge()
+    meta = REAL["child"][0]["metadata"]
+    right = meta["correct_choice"]["label"]
+    assert judge(f"<answer>{right}</answer>", meta) is True
+    assert judge("no choice named here at all", {"choices": [], "correct_choice": {}}) is None
+    from refactory_packages.livemath.mode import Solver
+
+    found = reply_judge(Solver().state_dict())
+    assert found is not None and found(f"<answer>{right}</answer>", meta) is True
+
+
+def test_the_loop_gives_the_request_and_memory_each_structural_childs_effect(
+        tmp_path, monkeypatch):
+    """A round's child, its records and its parent's: the request's pair and memory's
+    tried entry carry how it moved its items, read with the mode's Task."""
+    import dataclasses
+
+    from refactory_dsh.loop import Loop
+    from refactory_dsh.optim.base import Candidate
+    from test_val_gate import _gated, _level
+
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    loop, _proposer, _report = _gated(tmp_path, monkeypatch, [[(5, 4)], []], epochs=2,
+                                      batch_size=1)
+    loop.config = dataclasses.replace(loop.config, val_gate=False)
+    by_level = {_level(c): c for c in loop.population}
+    child, parent = by_level[4], by_level[5]
+    loop._train_item_records[child.id] = REAL["child"]
+    loop._train_item_records[parent.id] = REAL["parent"]
+    monkeypatch.setattr(Loop, "_reply_judge", lambda self: _judge())
+    (pair,) = loop._edit_pairs(loop.leaderboard())
+    assert pair["effect"]["broken"]["then_changed"] == {"solve": 5}
+    monkeypatch.setattr(Candidate, "is_structural", lambda self: True)
+    round_ = (loop.proposals.get(child.id) or {}).get("epoch")
+    (entry,) = loop._tried_in_round(round_)[0]
+    assert entry["effect"]["broken"]["first_right"] == {"solve": 5}

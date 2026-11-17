@@ -124,6 +124,14 @@ class Task:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
+    def reply_correct(self, reply: str, metadata: Mapping[str, Any]) -> bool | None:
+        """Whether ``reply``, taken as the item's answer, is what this Task would grade
+        correct (``metadata``: the item's record metadata); ``None`` when a reply cannot be
+        read as an answer. The optimizer reads a step's replies with it -- was a step's
+        first reply already right before a judge sent it back? -- and never edits by it.
+        Default: no reading."""
+        return None
+
 
 #: The Tasks a bare name can resolve to.
 TASKS: dict[str, type[Task]] = {}
@@ -295,6 +303,40 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         return out
 
     return read
+
+
+def reply_judge(state: dict[str, Any]) -> Any:
+    """How a step's reply is read as an item's answer for the graph's Tasks
+    (`Task.reply_correct`): a function ``(reply, metadata) -> bool | None``, the first
+    Task with a reading deciding; ``None`` when none has one or none can be loaded."""
+    from refactory_dsh.nn.graph import Graph
+
+    try:
+        graph = Graph.from_state(state.get("graph") or {})
+    except Exception:  # noqa: BLE001 - a graph that cannot be built reads nothing
+        return None
+    tasks = []
+    for ref in sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref}):
+        try:
+            task = load_task(ref)
+        except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
+            continue
+        if type(task).reply_correct is not Task.reply_correct:
+            tasks.append(task)
+    if not tasks:
+        return None
+
+    def judge(reply: str, metadata: Mapping[str, Any]) -> bool | None:
+        for task in tasks:
+            try:
+                verdict = task.reply_correct(reply, metadata)
+            except Exception:  # noqa: BLE001 - a reply that cannot be read says nothing
+                continue
+            if verdict is not None:
+                return bool(verdict)
+        return None
+
+    return judge
 
 
 def node_item(item: dict[str, Any], task: Task | None) -> dict[str, Any]:
