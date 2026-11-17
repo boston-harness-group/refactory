@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from .graph import Graph, Node
 from .operators import TASK_MEANING
@@ -608,8 +608,9 @@ def _add_chain(nodes: Sequence[dict[str, Any]], position: dict[str, Any]) -> lis
     return steps
 
 
-def _add_detached(nodes: Sequence[dict[str, Any]]) -> list[dict]:
-    steps = [{"op": "add_node", "node": node, "position": {"detached": True}} for node in nodes]
+def _add_detached(nodes: Sequence[dict[str, Any]], exact: Collection[str] = ()) -> list[dict]:
+    steps = [{"op": "add_node", "node": node, "position": {"detached": True},
+              **({"_exact": True} if node["id"] in exact else {})} for node in nodes]
     for first, second in zip(nodes, nodes[1:]):
         steps.append({"op": "add_edge", "source": first["id"], "target": second["id"],
                       "condition": None})
@@ -989,7 +990,11 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
     if spec.get("id") is not None and spec["id"] in graph.nodes:
         raise _Refused(f"node {spec['id']!r} already exists")
     if edit.get("takes_over") is not None:
-        _take_over_plan(graph, state, edit["takes_over"], side, anchor)
+        target = _take_over_plan(graph, state, edit["takes_over"], side, anchor)[0]
+        if spec["kind"] == "agent" and spec.get("tools") is not True and len(target.writes) > 1:
+            raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
+                           "step without tools writes only its reply; take it over with a "
+                           "code step, or with 'tools': true")
     return None
 
 
@@ -1011,23 +1016,93 @@ def _downstream(graph: Graph, start: str) -> set[str]:
     return out
 
 
+def _successors(graph: Graph, node_id: str, back: set[tuple[str, str]]) -> list[str]:
+    """The steps that run next after ``node_id``: its edges (no reloop back), a fork's
+    branches and a data pass's first step."""
+    node = graph.nodes.get(node_id)
+    if node is None:
+        return []
+    out = [e.target for e in graph.out_edges(node_id) if (node_id, e.target) not in back]
+    if node.kind == "fork":
+        out += list(node.targets)
+    if node.kind == "data" and node.subgraph_entry:
+        out.append(node.subgraph_entry)
+    return out
+
+
+def _runs_first_on_every_path(graph: Graph, target_id: str, before: Sequence[str]) -> bool:
+    """Whether ``target_id`` has run whenever a step placed after each of ``before`` runs:
+    no step of ``before`` can be reached once ``target_id`` is taken out. A fork runs every
+    branch, so a join is reached only when all its branches are; a route runs one, so a
+    step is reached when any step before it is. A sibling fork branch, a branch a route
+    skips and a step after the place have not run first; a branch of a fork whose join
+    the place follows has."""
+    from .loops import loop_edges
+
+    if not before:
+        return False
+    back = {(source, target) for source, target, _c in loop_edges(graph)}
+    following = {n: _successors(graph, n, back) for n in graph.nodes}
+    entered = {t for targets in following.values() for t in targets}
+    reached = {n for n in graph.nodes if n not in entered and n != target_id}
+    changed = True
+    while changed:
+        changed = False
+        for node_id in list(reached):
+            for nxt in following[node_id]:
+                if nxt == target_id or nxt in reached:
+                    continue
+                node = graph.nodes.get(nxt)
+                if node is not None and node.kind == "join" and not all(
+                        source in reached for source in node.sources):
+                    continue
+                reached.add(nxt)
+                changed = True
+    return all(step == target_id or step not in reached for step in before)
+
+
+def _code_text(node: Node, state: Mapping[str, Any]) -> str | None:
+    """A code step's code (its own, or the knob bound to it); None when the step's
+    callable is not code this module can read."""
+    from refactory_dsh.snippet import is_code_node
+
+    if not is_code_node(node):
+        return None
+    for field_name, knob in node.field_bindings:
+        if field_name == "code":
+            return str(((state.get("knobs") or {}).get(knob) or {}).get("value") or "")
+    return str(node.code or "")
+
+
 def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
-                    anchor: Node) -> tuple[Node, dict[tuple[str, str], str], set[str]]:
+                    anchor: Node
+                    ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str]]:
     """What ``insert``'s 'takes_over' does: the step it takes over, the new name of each of
     that step's outputs (``(kind, name) -> new name``: ``<step>.txt`` and ``<step>`` when
-    free), and the steps that read on under the new names -- every step that does not run
-    after the new one. Refused when the step does not run before the new one on every
-    path, has no outputs, or a frozen text would have to change."""
+    free), the steps that read on under the new names -- every step that does not run
+    after the new one -- and the new text of each knob they read that names a renamed
+    fact. Refused when the step does not run before the new one on every path to it, has
+    no outputs, or a reader's reading cannot be renamed: a frozen knob, a knob a step
+    after the new one reads too (it must keep the old name), or the fact named in a
+    step's code or feedback keys, which no renaming reaches."""
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
     if target.kind not in ("agent", "op") or not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
     following = [e.target for e in graph.out_edges(anchor.id)] if side == "after" else [anchor.id]
-    after = _downstream(graph, following[0]) if following else set()
-    if target_id in after:
-        raise _Refused(f"{target_id!r} does not run before the new step; 'takes_over' names a "
-                       "step the new one comes after")
+    before = [anchor.id] if side == "after" else [e.source for e in graph.in_edges(anchor.id)]
+    if side == "before":
+        before += [n.id for n in graph.nodes.values()
+                   if (n.kind == "fork" and anchor.id in n.targets)
+                   or (n.kind == "data" and n.subgraph_entry == anchor.id)]
+    if not _runs_first_on_every_path(graph, target_id, before):
+        raise _Refused(f"{target_id!r} does not run before the new step on every path to it; "
+                       "'takes_over' names a step every run passes before the new one (not a "
+                       "step after it, on a sibling branch or on a branch a route can skip)")
+    after: set[str] = set()
+    for start in following:
+        after |= _downstream(graph, start)
     made = {("file", n) for node in graph.nodes.values() for n in node.writes}
     made |= {("fact", n) for node in graph.nodes.values() for n in node.produces}
     names: dict[tuple[str, str], str] = {}
@@ -1038,16 +1113,37 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             names[(kind, name)] = new
             made.add((kind, new))
     readers = {n for n in graph.nodes if n not in after and n != target_id}
-    frozen = {name for name, entry in (state.get("knobs") or {}).items()
-              if (entry.get("spec") or {}).get("frozen")}
-    for node_id in readers:
+    facts = {old for (kind, old) in names if kind == "fact"}
+    knobs = state.get("knobs") or {}
+    frozen = {name for name, entry in knobs.items() if (entry.get("spec") or {}).get("frozen")}
+    later_knobs = {k for n in after if n in graph.nodes
+                   for k in (*graph.nodes[n].knobs, *(k for _f, k in graph.nodes[n].field_bindings))}
+    texts: dict[str, str] = {}
+    for node_id in sorted(readers):
         node = graph.nodes[node_id]
-        for _field, knob in node.field_bindings:
-            text = str((state.get("knobs") or {}).get(knob, {}).get("value") or "")
-            if knob in frozen and _renamed_slots(text, names) != text:
+        for knob in dict.fromkeys((*node.knobs, *(k for _f, k in node.field_bindings))):
+            text = str((knobs.get(knob) or {}).get("value") or "")
+            renamed = _renamed_slots(text, names)
+            if renamed == text:
+                continue
+            if knob in frozen:
                 raise _Refused(f"{node_id!r}'s frozen {knob!r} reads {target_id!r}'s output by "
                                "name; it cannot be changed to read it under its new name")
-    return target, names, readers
+            if knob in later_knobs:
+                raise _Refused(f"{node_id!r} and a step after the new one both read {knob!r}, "
+                               f"which names {target_id!r}'s output: renamed, the later step "
+                               "would read the old output; give one of them its own text first")
+            texts[knob] = renamed
+        named = sorted(facts & set(node.feedback_keys))
+        code = _code_text(node, state)
+        for fact in sorted(facts & set(node.inputs)):
+            if code is None or re.search(rf"\b{re.escape(fact)}\b", code):
+                named.append(fact)
+        if named:
+            raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
+                           "in its code or feedback keys, which 'takes_over' cannot rename; take "
+                           "over a step no such step reads, or change that step first")
+    return target, names, readers, texts
 
 
 def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
@@ -1123,25 +1219,21 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                         **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
                            if plan is not None else {}))
     if plan is not None:
-        target, names, readers = plan
+        target, names, readers, texts = plan
         # The step taken over writes under new names, and every step before the new one
         # (the new one too) reads them there; the steps after it read the new step's.
         build.add(_respec(build.state, target.id, {
             **target.to_state(),
             "writes": [names[("file", n)] for n in target.writes],
             "produces": [names[("fact", n)] for n in target.produces]}))
-        knobs = state.get("knobs") or {}
         for reader in sorted(readers):
             node = build.graph.nodes[reader]
             before = node.to_state()
             after = _renamed_refs(before, names)
             if after != before:
                 build.add(_respec(build.state, reader, after))
-            for _field, knob in node.field_bindings:
-                text = str((knobs.get(knob) or {}).get("value") or "")
-                if _renamed_slots(text, names) != text:
-                    build.add([{"op": "set_knob", "name": knob,
-                                "value": _renamed_slots(text, names)}])
+        for knob, text in sorted(texts.items()):
+            build.add([{"op": "set_knob", "name": knob, "value": text}])
         nodes = [_renamed_refs(n, names) for n in nodes]
     head, _end = _chain(nodes)
     if side == "before":
@@ -1412,8 +1504,10 @@ def _clone_agent(node: Node, state: Mapping[str, Any], copy_id: str
     limits and tools, so it is sent byte for byte what ``node`` is sent, with outputs of its
     own (``<copy_id>.txt``, ``<copy_id>``). A text bound to one of ``node``'s knobs is bound
     to a knob of the copy's own (`<copy_id>__...`) holding the same value, frozen when
-    ``node``'s is; a knob ``node`` shares with other steps stays shared. Returns the
-    primitive steps declaring those knobs, and the copy's node state."""
+    ``node``'s is -- also when ``node`` shares it with other steps, so tuning the copy never
+    tunes them. A text ``node`` holds in its declaration stays so in the copy: the copy has
+    no knob ``node`` lacks (its add_node is ``_exact``). Returns the primitive steps
+    declaring those knobs, and the copy's node state."""
     knobs = state.get("knobs") or {}
     copy = node.to_state()
     copy["id"] = copy_id
@@ -1484,6 +1578,7 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
     first, last = graph.nodes[ids[0]], graph.nodes[ids[-1]]
     fork, join = _fork_join_ids(graph, first.id)
     copies: list[list[dict]] = []
+    exact: set[str] = set()
     if len(ids) == 1:
         taken = [fork, join]
         there = set(avail.get(first.id, set()))
@@ -1493,6 +1588,7 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
             knob_steps, node = _clone_agent(first, state, copy_id)
             build.add(knob_steps)
             copies.append([node])
+            exact.add(copy_id)
     heads = [ids[0], *(_chain(n)[0] for n in copies)] if copies else list(ids)
     ends = [ids[-1], *(_chain(n)[1] for n in copies)] if copies else list(ids)
     # The new fork stands where the first step stood in an enclosing fork, and the new
@@ -1511,7 +1607,7 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
         {"op": "add_edge", "source": fork, "target": join, "condition": None},
     ])
     for nodes in copies:
-        build.add(_add_detached(nodes))
+        build.add(_add_detached(nodes, exact=exact))
         build.add([{"op": "add_edge", "source": nodes[-1]["id"], "target": join,
                     "condition": None}])
     _place_all(build, [f for nodes in copies for f in _new_facts(nodes)], after=join)
@@ -2341,6 +2437,64 @@ def _resolved_texts(edit: dict, state: dict) -> dict:
     return out
 
 
+def _outputs_read(state: Mapping[str, Any], node_id: str) -> dict[str, set[tuple[str, str]]]:
+    """Which of ``node_id``'s outputs each other step takes in (`validate.consumed`: a
+    ``{{slot}}`` in a prompt or a bound or fills-facts knob, an input, a read)."""
+    from .validate import consumed
+
+    graph = _edits()._graph(state)
+    node = graph.nodes.get(node_id)
+    if node is None:
+        return {}
+    outputs = {("fact", n) for n in node.produces} | {("file", n) for n in node.writes}
+    values = {name: entry.get("value") for name, entry in (state.get("knobs") or {}).items()}
+    out: dict[str, set[tuple[str, str]]] = {}
+    for other in graph.nodes.values():
+        if other.id != node_id and (taken := consumed(other, values) & outputs):
+            out[other.id] = taken
+    return out
+
+
+def unread_new_steps(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    """The steps ``after`` adds to ``before`` whose outputs no step takes in. A step with
+    no step after it (the end of a data pass or of the run) is not one: what it leaves is
+    the Task's or the run's result."""
+    old = set(((before.get("graph") or {}).get("nodes") or {}))
+    nodes = (after.get("graph") or {}).get("nodes") or {}
+    graph = _edits()._graph(after)
+    return [node_id for node_id in sorted(set(nodes) - old)
+            if nodes[node_id].get("kind") in ("agent", "op")
+            and (nodes[node_id].get("produces") or nodes[node_id].get("writes"))
+            and graph.out_edges(node_id)
+            and not _outputs_read(after, node_id)]
+
+
+def unread_by_bundle(parent: Mapping[str, Any], states: Sequence[Mapping[str, Any]],
+                     edits: Sequence[Mapping[str, Any]]) -> str | None:
+    """Why a bundle's edits leave a step it adds with no reader, when an edit of the same
+    bundle removed the last one: ``states[i]`` is the state after ``edits[i]``. A step
+    added without a reader is not refused here (a Task may read its file); one whose
+    reader a later edit removed is, naming that edit and what it took out."""
+    if not states:
+        return None
+    for node_id in unread_new_steps(parent, states[-1]):
+        last = max((i for i, state in enumerate(states[:-1]) if _outputs_read(state, node_id)),
+                   default=None)
+        if last is None:
+            continue
+        removed = last + 1
+        lost = sorted(set().union(*_outputs_read(states[last], node_id).values()))
+        what = ", ".join("{{" + name + "}}" if kind == "fact" else name for kind, name in lost)
+        readers = ", ".join(sorted(_outputs_read(states[last], node_id)))
+        edit = edits[removed]
+        named = " ".join(str(edit.get(k)) for k in ("op", "name", "step", "id") if edit.get(k))
+        how = " value" if edit.get("op") == "set_knob" and "value" in edit else ""
+        return (f"edit {removed + 1} ({named}{how}) removes {what}, the only read of the "
+                f"output of new step {node_id!r} (by {readers}); patch the text so it keeps "
+                f"{what}, or keep the slot")
+    return None
+
+
 def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | None:
     """Why an operator's result would fail items at run time: a step it kept now runs, on
     some path, without an input it had on every path before -- one still made elsewhere in
@@ -2410,9 +2564,9 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
             if extra:
                 return (f"a new step does not take {', '.join(repr(k) for k in extra)}; it "
                         f"would be ignored. A step's fields: {', '.join(STEP_FIELDS)}")
-        if "tools" in spec and spec["tools"] is not True:
-            return ("'tools' is true (the step gets tools, in a workspace of its own) or left "
-                    f"out; {spec['tools']!r} would be ignored")
+        if "tools" in spec and spec["tools"] is not True and spec["tools"] is not False:
+            return ("'tools' is true (the step gets tools, in a workspace of its own) or false "
+                    f"(none, as when left out); {spec['tools']!r} would be ignored")
     return None
 
 

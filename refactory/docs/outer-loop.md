@@ -1799,13 +1799,24 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 - `insert` takes `takes_over: <step>`: the new step writes that earlier step's outputs, so
   what read them (what is scored) reads the new step's, and the step's own go under new
   names (`<step>.txt`, `<step>`) for the steps before the new one. "Several attempts and
-  a choice" uses it, so the chosen attempt is what is graded.
+  a choice" uses it, so the chosen attempt is what is graded. The step taken over must
+  have run whenever the new one runs (a fork runs every branch, a route one), so a step on
+  a sibling branch or a route's skipped branch is refused. Also refused: a frozen knob, or
+  a knob a later step shares, that names its output; a step that names it in its code or
+  feedback keys; an agent without tools taking over a step that writes two files; and,
+  with the run's protected and grading nodes, rewiring one (`E-protected`).
 - A `parallelize` copy is the step itself under a new id (`core_ops._clone_agent`): the
   same prompt, system prompt, role, limits and tools, each bound text in a knob of the
-  copy's own with the same value, frozen where the original's is. It is sent byte for
-  byte what the step is sent, on both runtimes, so it takes no `sees`.
+  copy's own with the same value, frozen where the original's is, and no knob the step
+  lacks. It is sent byte for byte what the step is sent, on both runtimes, so it takes no
+  `sees`.
+- A step a bundle adds keeps the reader the bundle gave it: an edit of the same bundle
+  that removes its last reader (a whole `set_knob` value dropping its `{{slot}}`) is
+  refused `E-unread`, naming that edit; a new step whose output reaches no step is said in
+  the candidate's "As built" (a step ending its pass or the run is not: the Task reads it).
 - A field an operator would ignore is refused, naming the fields it takes
-  (`core_ops._unknown_fields`). That covers a role or timeout on `insert`, a tool list,
+  (`core_ops._unknown_fields`). That covers a role or timeout on `insert`, a tool list
+  (`tools` is true or false),
   and a field no step takes inside `new`, `into` or a route's `to`. `insert` lists
   `system`, which it takes.
 - An operator after which a kept step would run, on some path, without an input it had on

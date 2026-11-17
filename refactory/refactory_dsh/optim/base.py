@@ -4566,6 +4566,19 @@ class Optimizer:
         if violation:
             return [f"E-protected: {violation}" + _protected_culprit(applied, parent.state,
                                                                       prefixes, protected)]
+        # A grading node is never rewired by an edit either (V17's grader side).
+        for grader in graders:
+            old = nn_edits._graph(parent.state).nodes.get(grader)
+            new = nn_edits._graph(state).nodes.get(grader)
+            if old is not None and (new is None or new.to_state() != old.to_state()):
+                return [f"E-protected: node {grader!r} grades, and the edit changes its "
+                        "declaration"]
+        # A step the bundle adds keeps the reader the bundle gave it (finding 16).
+        from refactory_dsh.nn.core_ops import unread_by_bundle
+
+        unread = unread_by_bundle(parent.state, prefixes, applied)
+        if unread:
+            return [f"E-unread: {unread}"]
 
         # A bundle that changes nothing at all is refused below as one no-op.
         dead = (_dead_edit(applied, parent.state, state)

@@ -1059,6 +1059,20 @@ def _rendered_copy(state: dict[str, Any], node_id: str, limit: int = 100_000) ->
     return json.loads(body)
 
 
+def _downstream_ids(graph: Any, start: str) -> set[str]:
+    """``start`` and every step its edges lead to (no reloop back)."""
+    from refactory_dsh.nn.loops import loop_edges
+
+    back = {(a, b) for a, b, _c in loop_edges(graph)}
+    out, queue = {start}, [start]
+    while queue:
+        for edge in graph.out_edges(queue.pop()):
+            if (edge.source, edge.target) not in back and edge.target not in out:
+                out.add(edge.target)
+                queue.append(edge.target)
+    return out
+
+
 class EditGenerator:
     """Random structure edits: every primitive and macro, valid-looking and malformed."""
 
@@ -1408,6 +1422,13 @@ class EditGenerator:
             spec["kind"] = rng.choice(("gate", "fork", 7))  # malformed: refused
         return spec
 
+    def _stray(self, edit: dict[str, Any]) -> dict[str, Any]:
+        """Now and then a field the operator would ignore (refused, `core_ops._unknown_fields`)."""
+        if self.rng.random() < 0.08:
+            edit = {**edit, **self.rng.choice(({"role": "judge"}, {"timeout_s": 60},
+                                               {"tools": ["Bash"]}))}
+        return edit
+
     def core_op(self, state: dict[str, Any], op: str, target: str) -> dict[str, Any]:
         rng, graph = self.rng, _graph_of(state)
         ids = sorted(graph.nodes)
@@ -1420,8 +1441,17 @@ class EditGenerator:
             side = rng.choice(("after", "after", "before"))
             if rng.random() < 0.2:
                 return {"op": "insert", side: target}  # all defaults: a copy of the neighbour
-            return {"op": "insert", side: target, **self.step_spec(state, kinds=(
+            edit = {"op": "insert", side: target, **self.step_spec(state, kinds=(
                 "agent", "agent", "code", "op"))}
+            outputs = [n for n, node in graph.nodes.items()
+                       if node.kind in ("agent", "op") and (node.writes or node.produces)]
+            if outputs and rng.random() < 0.5:
+                # Take over a step's outputs: mostly one before the new step, now and then
+                # (refused) one that is not.
+                before = [n for n in outputs if n != target and target in _downstream_ids(graph, n)]
+                edit["takes_over"] = rng.choice(before if before and rng.random() < 0.7
+                                                else outputs)
+            return self._stray(edit)
         if op == "remove":
             if gates and rng.random() < 0.4:
                 gate = rng.choice(gates)
@@ -1454,9 +1484,15 @@ class EditGenerator:
                                   "other": self.step_spec(state, sees=False)}
             if rng.random() < 0.3 and len(ids) > 2:
                 to["skip"] = rng.choice(ids)
+            if rng.random() < 0.5 and succ:
+                # A route straight to a later step: refused when a step it skips made an
+                # input a later step reads (`core_ops.lost_inputs`).
+                later = sorted(_downstream_ids(graph, succ[0]) - {succ[0], target})
+                if later:
+                    to = {"long": succ[0], "short": rng.choice(later)}
             judge = rng.choice(("agent", "agent", "code") if self.code_nodes else ("agent",))
-            return {"op": "route", "after": target, "judge": judge,
-                    **({"to": to} if rng.random() < 0.7 else {})}
+            return self._stray({"op": "route", "after": target, "judge": judge,
+                                **({"to": to} if rng.random() < 0.7 else {})})
         if op == "loop" and rng.random() < 0.6:
             judge = rng.choice(("agent", "agent", "code", fg.PROCEED) if self.code_nodes
                                else ("agent", fg.PROCEED))
@@ -1495,6 +1531,26 @@ class Finding:
     violations: list[Violation]
 
 
+#: The core operators' own checks, by what their refusal says (`path_of`).
+PATH_MARKS = (("would be ignored", "ignored field refused"),
+              ("would run without", "lost input refused"),
+              ("on every path to it", "takes_over: target not first"),
+              ("both read", "takes_over: shared knob"),
+              ("in its code or feedback keys", "takes_over: code reads"),
+              ("writes only its reply", "takes_over: agent and two files"))
+
+
+def path_of(edit: Any, outcome: Any) -> str | None:
+    """Which core-operator check an edit reached: a refusal by its words, or an accepted
+    'takes_over'."""
+    if isinstance(outcome, list):
+        text = " ".join(map(str, outcome))
+        return next((label for mark, label in PATH_MARKS if mark in text), None)
+    if isinstance(edit, dict) and edit.get("takes_over") is not None:
+        return "takes_over accepted"
+    return None
+
+
 @dataclass
 class Stats:
     tried: int = 0
@@ -1510,6 +1566,8 @@ class Stats:
     compound_refused: Counter = field(default_factory=Counter)
     #: Compound refusals that named the edit that failed (``[edit k of n``).
     compound_named: int = 0
+    #: How often the core operators' own checks were reached (`path_of`).
+    paths: Counter = field(default_factory=Counter)
 
     def summary(self) -> dict[str, Any]:
         observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
@@ -1524,6 +1582,7 @@ class Stats:
                 "compound": {"tried": self.compound_tried, "accepted": self.compound_accepted,
                              "refused": dict(sorted(self.compound_refused.items())),
                              "refusals_naming_the_edit": self.compound_named},
+                "paths": dict(sorted(self.paths.items())),
                 "findings": len(self.findings)}
 
 
@@ -1590,6 +1649,8 @@ class Fuzzer:
                 if wrong:
                     self._record(seed, applier, [*accepted, edit], wrong, minimize=False)
                     return
+            if path := path_of(edit, outcome):
+                self.stats.paths[path] += 1
             if isinstance(outcome, list):
                 code = reason_code(outcome[0]) if outcome else "?"
                 self.stats.refused[code] += 1

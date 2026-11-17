@@ -198,3 +198,202 @@ def test_the_lost_input_rule_holds_on_any_graph():
     with pytest.raises(nn_edits.EditError, match="would run without"):
         nn_edits.apply({"op": "route", "after": "intake", "judge": "agent", "text": "x",
                         "to": {"long": "draft", "short": "finalize"}}, state)
+
+
+# ── review: what 'takes_over' may rewire ───────────────────────────────────
+
+
+def _fuzz(name: str) -> dict:
+    return sf.Applier(sf.seeds()[name]).seed_state
+
+
+def test_a_step_on_a_sibling_branch_cannot_be_taken_over():
+    """right_a runs beside left, not before it: the new step would never see it."""
+    reason = nn_edits.precheck({"op": "insert", "after": "left", "kind": "code", "id": "pick",
+                                "takes_over": "right_a"}, _fuzz("fuzz_fork_join"))
+    assert reason and "on every path to it" in reason
+
+
+def test_a_branch_of_a_fork_whose_join_comes_first_can_be():
+    state = _fuzz("fuzz_fork_join")
+    after_join = {"op": "insert", "after": "merge", "kind": "code", "id": "pick",
+                  "takes_over": "right_a"}
+    assert nn_edits.precheck(after_join, state) is None
+
+
+def test_a_knob_an_earlier_and_a_later_step_share_is_refused():
+    """review reads {{draft}} through a knob finalize reads too: renamed, finalize would
+    read the new step's output under the old name only if the knob kept it."""
+    state = _fuzz("fuzz_draft_review")
+    graph = Graph.from_state(state["graph"])
+    shared = next((k for k in graph.nodes["review"].knobs if k in graph.nodes["finalize"].knobs),
+                  None)
+    if shared is None:
+        shared = "shared_text"
+        state = nn_edits.apply({"op": "add_knob", "name": shared,
+                                "spec": {"default": "Check {{draft}}.", "kind": "str"}}, state)
+        for node_id in ("review", "finalize"):
+            node = state["graph"]["nodes"][node_id]
+            node["knobs"] = [*node.get("knobs", []), shared]
+    state["knobs"][shared]["value"] = "Check {{draft}}."
+    reason = nn_edits.precheck({"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                                "takes_over": "draft"}, state)
+    assert reason and "both read" in reason and repr(shared) in reason
+
+
+def test_a_fact_a_reader_names_in_its_code_is_refused():
+    state = nn_edits.apply({"op": "insert", "after": "draft", "kind": "code", "id": "count",
+                            "sees": ["draft"],
+                            "text": "def main(inp):\n    return {'count': len(inp['draft'])}\n"},
+                           _fuzz("fuzz_draft_review"))
+    reason = nn_edits.precheck({"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                                "takes_over": "draft"}, state)
+    assert reason and "in its code or feedback keys" in reason and "'count'" in reason
+
+
+def test_a_protected_reader_or_target_comes_back_e_protected():
+    state = _fuzz("fuzz_draft_review")
+    take = {"op": "insert", "after": "review", "kind": "code", "id": "pick", "takes_over": "draft"}
+    with pytest.raises(nn_edits.EditError) as reader:
+        nn_edits.apply(take, state, protected=("review",))
+    assert reader.value.code == "E-protected" and "'review'" in str(reader.value)
+    with pytest.raises(nn_edits.EditError) as target:
+        nn_edits.apply(take, state, protected=("draft",))
+    assert target.value.code == "E-protected" and "'draft'" in str(target.value)
+
+
+def test_a_grading_reader_is_never_rewired():
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    state = _fuzz("fuzz_draft_review")
+    seed = Candidate.from_state(state)
+    refused = Optimizer().attempt(
+        Proposal(edit={"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                       "takes_over": "draft"}),
+        seed, (), True, (), graders=("review",))
+    assert isinstance(refused, list) and refused[0].startswith("E-protected"), refused
+    assert "'review' grades" in refused[0]
+
+
+def test_an_agent_cannot_take_over_a_step_writing_two_files():
+    reason = nn_edits.precheck({"op": "insert", "after": "plot", "kind": "agent", "text": "x",
+                                "takes_over": "plot"}, _fuzz("fuzz_file_output"))
+    graph = Graph.from_state(_fuzz("fuzz_file_output")["graph"])
+    if len(graph.nodes["plot"].writes) < 2:
+        pytest.skip("fuzz_file_output's plot writes one file")
+    assert reason and "writes only its reply" in reason
+
+
+def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
+    s4 = _mode("livemath/skill_graph").state_dict()
+    nodes = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1},
+                           s4)["graph"]["nodes"]
+    own = [k.replace("decide__", "") for k in nodes["decide"]["knobs"]]
+    copy = [k.replace("decide_copy1__", "") for k in nodes["decide_copy1"]["knobs"]]
+    assert own == copy and "decide_copy1__task" not in nodes["decide_copy1"]["knobs"]
+
+
+@pytest.mark.parametrize("tools,refused", [(True, False), (False, False), (["Bash"], True),
+                                           ("yes", True)])
+def test_tools_is_true_or_false(tools, refused):
+    edit = {"op": "insert", "after": "solve", "kind": "agent", "text": "x", "tools": tools}
+    reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
+    assert bool(reason and "'tools' is true" in reason) == refused, reason
+
+
+# ── finding 16: a bundle keeps the reader it gave a new step ────────────────
+
+
+S4_BUNDLE = [{"op": "branch", "fork": "step_fork", "kind": "agent", "id": "independent",
+              "text": "Solve it yourself.", "sees": ["task"]},
+             {"op": "set_knob", "name": "independent__system_prompt", "value": "You are careful."}]
+
+
+def _s4_attempt(*more: dict):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    return Optimizer().attempt(Proposal(edits=[*S4_BUNDLE, *more]), seed, mode.invariants(),
+                               True, (), protected=mode.edit_protected())
+
+
+def test_a_whole_value_that_drops_the_new_step_s_slot_is_refused():
+    """S4-s43's kept 192548858db6: decide's prompt held independent's reply on 0 of 33."""
+    refused = _s4_attempt({"op": "set_knob", "name": "decide_task", "value": "Decide now."})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    assert ("edit 3 (set_knob decide_task value) removes {{independent}}, the only read of "
+            "the output of new step 'independent' (by decide_prompt)") in refused[0]
+
+
+def _reaches(tmp_path, monkeypatch):
+    patched = _s4_attempt({"op": "set_knob", "name": "decide_task",
+                           "patch": [{"kind": "append", "content": "Weigh the independent answer."}]})
+    assert not isinstance(patched, list), patched
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    mode = SkillGraph()
+    mode.load_state_dict(patched.state)
+    return mode, patched.state
+
+
+def test_with_a_patch_the_new_step_reaches_decide_on_the_walker(tmp_path, monkeypatch):
+    mode, _state = _reaches(tmp_path, monkeypatch)
+    model = _StepModel({"independent": "INDEPENDENT-REPLY"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    decide = [prompt for node, prompt, _s in model.log if node == "decide"]
+    assert decide and all("INDEPENDENT-REPLY" in prompt for prompt in decide)
+
+
+@needs_spine
+def test_with_a_patch_the_new_step_reaches_decide_on_the_spine(tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _reaches(tmp_path, monkeypatch)
+    _patch_task(monkeypatch)
+    # The candidate's knob values, as the DSH runtime hands them to its ops
+    # (`dsh_runtime`: ``--knobs``); the test drain takes them from the environment.
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path,
+                  agent_responses={"independent": "INDEPENDENT-REPLY"}, mode_state=state) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        decide = [e["prompt"] for e in record["exchanges"] if e["node"] == "decide"]
+        assert decide and all("INDEPENDENT-REPLY" in p for p in decide), record["id"]
+
+
+def test_as_built_says_a_new_step_no_step_reads():
+    """The S4 bundle applied edit by edit (no attempt check): independent's output reaches
+    no step, and the candidate's As built says so; with the slot kept, it does not."""
+    from refactory_dsh.nn import pipeline_view
+
+    parent = _mode("livemath/skill_graph").state_dict()
+    state = parent
+    for edit in [*S4_BUNDLE, {"op": "set_knob", "name": "decide_task", "value": "Decide now."}]:
+        state = nn_edits.apply(edit, state)
+    line = "! new step independent: its output reaches no step"
+    assert line in pipeline_view.changed_lines(parent, state)
+    kept = parent
+    for edit in S4_BUNDLE:
+        kept = nn_edits.apply(edit, kept)
+    assert line not in pipeline_view.changed_lines(parent, kept)
+
+
+def test_a_frozen_knob_naming_the_target_s_output_is_refused():
+    state = _fuzz("fuzz_draft_review")
+    knob = next(k for k in Graph.from_state(state["graph"]).nodes["review"].knobs
+                if "{{draft}}" in str(state["knobs"][k]["value"]))
+    state["knobs"][knob]["spec"] = {**state["knobs"][knob].get("spec", {}), "frozen": True}
+    reason = nn_edits.precheck({"op": "insert", "after": "review", "kind": "code", "id": "pick",
+                                "takes_over": "draft"}, state)
+    assert reason and f"frozen {knob!r}" in reason
+
+
+def test_a_new_step_ending_the_pass_leaves_its_output_to_the_task():
+    """The choice step taking over solve ends the pass; the Task reads what it writes."""
+    from refactory_dsh.nn import pipeline_view
+
+    parent = _mode("livemath/solver").state_dict()
+    _mode_, chosen = _solver(*CHOICE)
+    assert not [line for line in pipeline_view.changed_lines(parent, chosen)
+                if "reaches no step" in line]
