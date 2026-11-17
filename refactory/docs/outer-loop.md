@@ -1867,14 +1867,20 @@ A step's prompt re-embeds the task's input and the earlier steps' replies, and t
 instructions recur in every item, so an item shown as each step's prompt plus its reply
 grew with the square of its steps (61% of an S4 analyst batch was repeated text). Now the
 input appears once per item; a step says by name what its prompt took from what is already
-shown (`Sees: the input, compare's reply`) and shows only the rest of its prompt, its own
-instructions, then its full reply, each fenced with headings demoted; and across the items
-of one request an instruction shown for an earlier item is said as "same as item X, step
-Y" (`evidence.dedup`) when that is shorter. Nothing is lost: every reply and every distinct
-instruction text appears once in the request. The proposer's items say, per step, what its prompt
-took by name (`Sees:`) and only the part of its prompt its settings do not hold (`Also in its
-prompt`: a reason a judge sent it back with, say); its instructions are under "Each step's
-settings" (`base.ITEM_FORM`, the legend beside the items). Two renderings of the same
+shown (`Sees: the input, compare's reply`) and only the part of its prompt the request does
+not show elsewhere (`Also in its prompt`: a reason a judge sent it back with, say), then its
+full reply, each fenced with headings demoted. A step's instructions are its settings,
+under "Each step's settings", in every call that shows items: the proposer's, the
+analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
+settings as shown, clipping and table cells included, `analysts.shown_settled`). Across the
+items of one request a text shown for an earlier item is said as "same as item X, step Y"
+(`evidence.dedup`) when that is shorter. Nothing is lost: every reply and every distinct
+text appears once in the request. With its labelled choices shown, an item's expected
+answer is its label (its choice line says the text), and the table of every item gives the
+whole text only for an item not shown in full. An item's error is said once, under "Errors,
+by cause", which a full item points to. The repeat guard reads inside fences too
+(`request_sizes.repeated_sentences(fenced=True)`, the settings section counted once), so a
+step's instructions in its settings and again in an item fail it. Two renderings of the same
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
 "What the last edit changed" shows the parent's item whole and the child's verdict and

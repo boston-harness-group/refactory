@@ -41,10 +41,12 @@ def settled_lines(texts: Iterable[Any]) -> frozenset[str]:
                      for line in text.splitlines() if line.strip())
 #: How an item rendered here reads, said once for every call that shows items.
 TRACE_FORM = ("its input once, then each step in the order the steps ran -- what its prompt "
-              "took from the input or an earlier step's reply, said by name (`Sees:`), the "
-              "rest of its prompt (its own instructions; one shown for an earlier item is "
-              "said as `same as`), and its reply -- the expected answer, the prediction, the "
-              "score and the grader's feedback")
+              "took from the input or an earlier step's reply, said by name (`Sees:`), any "
+              "part of its prompt the request does not show elsewhere (`" + "Also in its "
+              "prompt (not in its settings)" + "`: a reason a judge sent it back with, say; "
+              "its own instructions are its settings, under the pipeline's \"Each step's "
+              "settings\"), and its reply -- the expected answer, the prediction, the score "
+              "and the grader's feedback")
 _WHOLE = 10 ** 9
 
 
@@ -149,7 +151,8 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
                 omissions: list[dict[str, Any]] | None = None,
                 heading: str = "###", missing: Sequence[str] = (), label: str = "",
                 show_input: bool = True, show_expected: bool = True,
-                settled: Collection[str] | None = None) -> str:
+                settled: Collection[str] | None = None, expected_label: str = "",
+                errors_said: Mapping[str, str] | None = None) -> str:
     """One item: its verdict, what was expected and what it gave, the grader's reason, the
     task's input once, then each step -- with ``prompts``, what it saw by name and the rest
     of its prompt -- and its reply, every text fenced. ``prompt_chars``/``reply_chars``
@@ -160,10 +163,17 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     step's prompt took ("Sees: the input"). With ``settled`` (the lines of the texts the
     request shows elsewhere, each step's settings: `settled_lines`), each step says what it
     saw by name and only the part of its prompt that is in neither (a judge's reason on a
-    re-run, say), as `ALSO`; its instructions are left to where they are shown."""
+    re-run, say), as `ALSO`; its instructions are left to where they are shown. With
+    ``expected_label`` (the label of the expected answer's choice), the expected answer is
+    only that label when the item's choices are shown here, since its choice line says
+    the rest. ``errors_said`` maps an error text the request lists elsewhere to where:
+    the item's error is said as that."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, Mapping)]
     item = record.get("id")
+    key = next((k for k in input_keys if meta.get(k)), None)
+    if expected_label and choices and show_input and key is not None:
+        expected = expected_label
 
     def cut(value: Any, step: str, limit: int) -> str:
         return clip(value, limit, item=item, step=step, omissions=omissions)
@@ -183,9 +193,10 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
         lines.append(f"Grader: {cut(record['fail_reason'], 'grader', reply_chars)}")
     lines += list(missing)
     if record.get("error_text"):
-        lines.append(f"Error: {cut(record['error_text'], 'error', reply_chars)}")
+        said = (errors_said or {}).get(str(record["error_text"]))
+        lines.append(f"Error: {said}" if said else
+                     f"Error: {cut(record['error_text'], 'error', reply_chars)}")
     seen = _Seen()
-    key = next((k for k in input_keys if meta.get(k)), None)
     if key is not None:
         if show_input:
             text = cut(meta[key], "input", reply_chars)
@@ -215,7 +226,7 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     return "\n".join(lines)
 
 
-_REST_BLOCK = re.compile(rf"(?ms)^{REST}:\n(`{{3,}})\n(.*?)\n\1$")
+_REST_BLOCK = re.compile(rf"(?ms)^({re.escape(REST)}|{re.escape(ALSO)}):\n(`{{3,}})\n(.*?)\n\2$")
 _ITEM = re.compile(r"(?m)^#+ Item (.+?) — ")
 _STEP = re.compile(r"(?m)^#+ Step `([^`]+)`")
 
@@ -226,9 +237,10 @@ DEDUP_LINE = 40
 
 
 def dedup(blocks: Sequence[str]) -> list[str]:
-    """The items of one request, each instruction text (a step's rest of its prompt) that
-    an earlier item showed said as "same as item X, step Y" instead of again; and in one
-    that differs, each long line an earlier instruction showed said as where it was."""
+    """The items of one request, each text of a step's prompt it shows (`REST`, or `ALSO`:
+    a reason a judge gave, the same in two rollouts of an item) that an earlier item
+    showed said as "same as item X, step Y" instead of again; and in one that differs,
+    each long line an earlier one showed said as where it was."""
     first: dict[str, str] = {}
     lines_at: dict[str, str] = {}
     out = []
@@ -236,16 +248,17 @@ def dedup(blocks: Sequence[str]) -> list[str]:
         item = (_ITEM.search(block) or [None, "?"])[1]
 
         def swap(match: re.Match[str], block: str = block, item: str = item) -> str:
-            body = _norm(match.group(2))
+            name, fence, text = match.group(1), match.group(2), match.group(3)
+            body = _norm(text)
             steps = _STEP.findall(block[:match.start()])
             where = f"item {item}, step {steps[-1] if steps else '?'}"
             if body in first:
-                said = f"{REST}: same as {first[body]}."
+                said = f"{name}: same as {first[body]}."
                 # Only when saying so is shorter than the text itself.
                 return said if len(said) < len(match.group(0)) else match.group(0)
             first[body] = where
             kept, last = [], None
-            for line in match.group(2).splitlines():
+            for line in text.splitlines():
                 key = _norm(line)
                 seen = lines_at.get(key) if len(key) >= DEDUP_LINE else None
                 if seen is None:
@@ -256,7 +269,7 @@ def dedup(blocks: Sequence[str]) -> list[str]:
                 elif seen != last:
                     kept.append(f"[a line of {seen}'s instructions, as shown there]")
                     last = seen
-            return f"{REST}:\n{match.group(1)}\n" + "\n".join(kept) + f"\n{match.group(1)}"
+            return f"{name}:\n{fence}\n" + "\n".join(kept) + f"\n{fence}"
 
         out.append(_REST_BLOCK.sub(swap, block))
     return out

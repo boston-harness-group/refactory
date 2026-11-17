@@ -341,8 +341,9 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
         for item in _tasks(prompt):
             entry = next(e for e in entries if e["id"] == item)
             if entry["category"] != "stable_success":
-                assert memory._trace(entry, "prev", False) in prompt, "both traces whole"
-                assert memory._trace(entry, "curr", False) in prompt
+                assert memory._trace(entry, "prev", False, request._settled) in prompt, \
+                    "both traces whole"
+                assert memory._trace(entry, "curr", False, request._settled) in prompt
             else:
                 assert "BEFORE-" + item not in prompt, "stable successes without traces"
     read = [item for prompt in compares for item in _tasks(prompt)]

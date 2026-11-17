@@ -396,6 +396,39 @@ def _op_rows(text: str, heading: str) -> list[str]:
             if line.startswith("| ") and not line.startswith("| op |")]
 
 
+def _settings_once(text: str) -> str:
+    """``text`` with its settings section said once: each distinct line of it kept, so
+    two knobs' exact texts sharing a sentence (each an edit target in its own right) are
+    one source, and anything else saying it again is a repeat."""
+    out, inside, seen, fence = [], False, set(), None
+    for line in text.splitlines():
+        found = re.match(r"^(`{3,})", line)
+        if found and (fence is None or found.group(1) == fence):
+            fence = None if fence else found.group(1)
+        elif fence is None and line.startswith("## "):
+            inside = line.startswith(KNOB_TEXTS)
+        key = " ".join(line.split())
+        if inside and key:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(line)
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_no_long_sentence_is_said_twice_even_inside_fences(kind, requests):
+    """The guard below reads outside fences; this one reads inside them too, which is where
+    a step's instructions repeat: once in "Each step's settings" and again inside an item's
+    prompt (indented under the model client's wrapper). Every call kind that shows items
+    renders them with its settings said once (`base.settled_for`), so none does."""
+    from refactory_dsh.tools.request_sizes import repeated_sentences
+
+    for text, _records in requests[kind]:
+        repeats = repeated_sentences(_settings_once(text), fenced=True)
+        assert repeats == [], (kind, repeats[:3])
+
+
 @pytest.mark.parametrize("kind", ["analyst_failure", "analyst_success"])
 def test_an_analyst_names_only_operations_the_proposer_is_shown(kind, requests):
     for (text, _records), (proposal, _r) in zip(requests[kind], requests["proposal"]):

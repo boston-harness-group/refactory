@@ -57,14 +57,15 @@ def _shown(text: str) -> list[str]:
 
 def test_a_failed_item_is_shown_in_full():
     """The question and choices, each step's output in the record's order, the
-    expected label and text, the prediction and the reason."""
+    expected label (its choice line says its text, once), the prediction and the
+    reason."""
     text = _render([_record("i1")])
     section = text[text.index("## Trajectories of the candidate being edited"):]
     for expected in ("Input (question):", "Which statement holds in i1?",
                      "C. Every bounded sequence has a convergent subsequence",
-                     "Expected: C — Every bounded sequence has a convergent subsequence",
-                     "Given: A", "Grader: MCQ=0: predicted 'A' but expected 'C'"):
+                     "Expected: C; Given: A", "Grader: MCQ=0: predicted 'A' but expected 'C'"):
         assert expected in section, expected
+    assert section.count("Every bounded sequence has a convergent subsequence") == 1
     steps = [section.index(f"Step `{node}`") for node in ("compare", "precision", "decide")]
     assert steps == sorted(steps)
 
@@ -130,9 +131,14 @@ def test_a_set_that_fits_is_shown_whole_in_the_proposal_call():
     assert _shown(text) == [f"w{i:02d}" for i in range(12)] + ["e1", "e2"] + [f"p{i}" for i in range(5)]
     assert "19 train item(s): 5 passed, 12 answered wrong, 2 failed with an error" in text
     assert text.count("12 answered wrong") == 1, "the counts are said once"
-    assert "### Item e1 — failed with an error" in text and "Error: CompletionTimeout: timed out" in text
+    assert "### Item e1 — failed with an error" in text
+    # Its error is said once, under "Errors, by cause"; the item points there.
+    item = text.split("### Item e1 — failed with an error", 1)[1].split("### Item ", 1)[0]
+    assert 'Error: cause 1 under "Errors, by cause" above' in item, item
+    assert text.count("CompletionTimeout: timed out") == 1
     assert f"Every item. {base.ITEM_FORM}" in text and long in text and "chars omitted" not in text
-    assert "### Item e2 — failed with an error" in text and "Error: RuntimeError: decide crashed" in text
+    assert "### Item e2 — failed with an error" in text
+    assert text.count("RuntimeError: decide crashed") == 1 and "Error: cause 2 under" in text
 
 
 def test_an_item_is_shown_whole_and_only_a_text_too_large_to_send_is_cut():
@@ -730,3 +736,36 @@ def test_a_reader_reply_that_is_not_valid_json_is_a_failed_group_not_an_empty_on
         ProposalContext(nodes=NODES, item_records=_sized_records()), 1, [])
     section = _section(client.proposals[0])
     assert "could not be read: ValueError: the answer's JSON object is not valid JSON" in section
+
+
+LONG_CHOICE = ("Every bounded sequence in a complete metric space has a subsequence that is "
+               "Cauchy, and it converges whenever the space is also totally bounded")
+
+
+def _long_choice(record: dict[str, Any]) -> dict[str, Any]:
+    """``record`` with its expected choice's text long (a formula, as LiveMath's are)."""
+    record = {**record, "label_text": LONG_CHOICE, "metadata": dict(record["metadata"])}
+    record["metadata"]["choices"] = [
+        {**c, "text": LONG_CHOICE} if c["label"] == "C" else c
+        for c in record["metadata"]["choices"]]
+    return record
+
+
+def test_an_items_expected_choice_text_is_said_once_with_its_choices():
+    """With its choices shown, an item's expected answer is its label (its choice line says
+    the text); the table of every item gives only the label for an item shown in full, and
+    the whole text for one that is not."""
+    records = [_long_choice(_record(f"w{i:02d}")) for i in range(30)] + [
+        _long_choice(_record(f"p{i}", passed=True)) for i in range(10)]
+    text = "\n".join(base._trajectories(records, budget=20000))
+    table = text.split("### Every item", 1)[1].split("### Some items in full", 1)[0]
+    shown = [line.split()[2] for line in text.splitlines() if line.startswith("### Item ")]
+    assert shown and "Expected: C; Given: A" in text
+    for item in shown:
+        block = text.split(f"### Item {item} ", 1)[1].split("\n### Item ", 1)[0]
+        assert block.count(LONG_CHOICE) == 1, item  # its choice line only
+        row = next(r for r in table.splitlines() if r.startswith(f"| {item} |"))
+        assert LONG_CHOICE not in row and "| C |" in row, row
+    hidden = next(r["id"] for r in records if r["id"] not in shown)
+    row = next(r for r in table.splitlines() if r.startswith(f"| {hidden} |"))
+    assert LONG_CHOICE[:60] in row, row
