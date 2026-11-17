@@ -413,6 +413,30 @@ def test_framing_is_not_taken_for_a_piece_of_a_reply_that_uses_its_words():
             assert line not in decide, (line, decide)
 
 
+@pytest.mark.parametrize("reply_line", ["## Question", "Question", "Independent",
+                                        "## Independent"])
+def test_a_reply_line_that_is_a_bare_heading_or_word_is_no_item_data(reply_line):
+    """A reply with a line that is only a heading or one word says nothing a framing line
+    holding that word carries from the item: the framing stays out of "Also"."""
+    framing = ["- User: ## Question", "## Question", "## Independent"]
+
+    def record(item: str) -> dict:
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "exchanges": [{"node": "compare", "prompt": f"Q {item}",
+                               "response": f"{reply_line}\nB, because {item} is bounded."},
+                              {"node": "decide",
+                               "prompt": "\n".join([*framing, f"Q {item}"]),
+                               "response": f"D {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")]).render()
+    for item in ("r1", "r2"):
+        decide = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")[2]
+        for line in framing:
+            assert line not in decide, (reply_line, line, decide)
+
+
 def test_with_one_item_no_line_is_taken_for_framing():
     """Framing is told from an item's own text only across two or more items; with one,
     every line not in the settings or templates is shown."""

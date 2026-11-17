@@ -715,14 +715,19 @@ TAIL_MIN_WORDS = 3
 ITEM_DATA_MIN = 8
 
 
+def _bare_label(line: str) -> bool:
+    """Whether a line of an item's data is only a heading or one word ("## Question",
+    "Independent"): a reply using it says nothing that a framing line holding the same
+    word ("- User: ## Question") carries from that item."""
+    return line.startswith("#") or len(line.split()) == 1
+
+
 def _data_lines(value: Any) -> set[str]:
     """Every line of ``value``'s strings (nested in lists and dicts too), normalised, of at
-    least `ITEM_DATA_MIN` characters: an item's input, a step's reply or what its ops and
-    code gates gave (the record's ``steps``), which a prompt line holding one carries from
-    that item. A string that is JSON (a judge's reply) counts by its own strings too, so a
-    reason extracted from one is matched in the prompt that quotes it. An op visit's
-    output counts only as the one line it is written as: its facts are often the framed
-    prompt itself, whose framing would then never be told from an item's text."""
+    least `ITEM_DATA_MIN` characters and not a bare heading or word (`_bare_label`): an
+    item's input, a step's reply or a code gate's reason, which a prompt line holding one
+    carries from that item. A string that is JSON (a judge's reply) counts by its own
+    strings too, so a reason extracted from one is matched in the prompt that quotes it."""
     from .evidence import _norm
 
     out: set[str] = set()
@@ -734,7 +739,8 @@ def _data_lines(value: Any) -> set[str]:
         elif isinstance(current, (list, tuple)):
             stack += list(current)
         elif isinstance(current, str):
-            out |= {n for line in current.splitlines() if len(n := _norm(line)) >= ITEM_DATA_MIN}
+            out |= {n for line in current.splitlines()
+                    if len(n := _norm(line)) >= ITEM_DATA_MIN and not _bare_label(n)}
             text = current.strip()
             if text[:1] in ("{", "[", '"'):
                 try:
@@ -1039,6 +1045,8 @@ class ProposalContext:
             # The line inside a reason or a reply, or its tail after a short label
             # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
             # ("- User: ## Question") from matching a reply that happens to use it.
+            if _bare_label(line):
+                return False  # a heading or one word is no piece of a reason
             words = line.split(" ")
             for start in range(len(words)):
                 label, tail = " ".join(words[:start]), " ".join(words[start:])
