@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, ClassVar
+from typing import Any, Callable, ClassVar, Mapping
 
 from refactory_dsh.paths import SOURCE_CLI_ENTRY, dsh_command, dsh_root, node_bin, venv_bin
 import importlib.metadata
@@ -65,15 +65,29 @@ class CompletionFailed(RuntimeError):
 
 
 class HarnessBackstop(RuntimeError):
-    """A node's model session was still active at the harness backstop (`DEFAULT_BACKSTOP_S`).
+    """A node's model session was still streaming at the harness backstop
+    (`DEFAULT_BACKSTOP_S`): a model frame came within the inactivity limit before it.
 
     A harness incident, not the method's failure: not a ``CompletionTimeout``, so no
     timeout retry replays it, and its item is recorded with ``error_kind``
-    ``harness_incident``."""
+    ``harness_incident``. A session whose model had gone quiet by then, kept alive only
+    by a running tool, is an inactivity timeout instead (`CompletionTimeout`)."""
+
+
+class DeclaredTimeout(RuntimeError):
+    """A node's model session reached the wall its node declares (`Node.timeout_s`, or a
+    declared retry's longer wall).
+
+    The pipeline's own limit, so its failure is the pipeline's: its item is recorded with
+    ``error_kind`` ``declared_timeout`` (`items.error_kind`). A retry on timeout the node
+    declares still answers it (`node_retry.failure_kind`): the wall and its retry are
+    both the graph's choice. Its message starts with
+    `DECLARED_TIMEOUT_TEXT`, which is how the spine's worker error names it."""
 
 
 class InactivityTimeout(subprocess.TimeoutExpired):
-    """The session showed no model output and ran no tool command for ``inactive_s``."""
+    """The session's model streamed nothing for ``inactive_s`` (and, in a tool session, no
+    tool command it started was still running)."""
 
     def __init__(self, cmd: Any, inactive_s: float) -> None:
         super().__init__(cmd, inactive_s)
@@ -266,14 +280,19 @@ DEFAULT_TIMEOUT_S = 1800
 #: How long a node's model session may show no sign of life before it is stopped (seconds).
 #:
 #: This is the one limit that ends a node's model session: a session that keeps working
-#: runs as long as it needs. A session is alive while its model streams (every frame,
-#: thinking included, touches the session's activity file: `activity_path`), while the
-#: worker receipt is rewritten (each request and finished response), or while a tool
-#: command it started is still running (a process started after the last of those,
-#: beneath the session). A builder busy on a 6-minute test run is alive; a silent one is
-#: stopped after this long. Overridable via ``REFACTORY_MODEL_INACTIVITY_S``, or per
-#: client with ``inactivity_s``; 0 turns it off. Applies to node sessions on the
+#: runs as long as it needs. Activity is the model's stream: every frame, thinking
+#: included, touches the session's activity file (`activity_path`), and the worker
+#: receipt is rewritten at each request and finished response. In a session with tools,
+#: a tool command it started that is still running (a process started after the last
+#: frame, beneath the session) also counts, so a builder busy on a 6-minute test run is
+#: alive; a session with no tools (``tool_policy`` none) has only its stream. A silent
+#: session is stopped after this long. Overridable via ``REFACTORY_MODEL_INACTIVITY_S``,
+#: or per client with ``inactivity_s``; 0 turns it off. Applies to node sessions on the
 #: backends that report activity (`ACTIVITY_BACKENDS`).
+#:
+#: 600 s is far above a live session's gaps: a lab probe of a long thinking call
+#: (`tools.thinking_probe`) saw at most 4.4 s between frames on the raw stream and 5.8 s
+#: in a refactory session of 53 minutes.
 DEFAULT_INACTIVITY_S = int(os.environ.get("REFACTORY_MODEL_INACTIVITY_S", "600"))
 
 #: The worker backends whose sessions report activity, so inactivity alone ends them.
@@ -284,13 +303,19 @@ ACTIVITY_BACKENDS = ("dsh", "claude_code")
 #:
 #: Not a limit on the method. A node with no declared ``timeout_s`` has no wall; this
 #: only stops a session that is still active after this long, so a harness fault cannot
-#: hold a run forever. A session it stops is a harness incident (`HarnessBackstop`;
-#: its item's ``error_kind`` is ``harness_incident``), never a timeout of the method.
+#: hold a run forever. A session it stops whose model still streamed within the
+#: inactivity limit is a harness incident (`HarnessBackstop`; its item's ``error_kind`` is
+#: ``harness_incident``), never a timeout of the method. One whose model had gone quiet,
+#: kept alive only by a running tool (a background job, a loop), timed out on inactivity.
 #: Overridable via ``REFACTORY_MODEL_BACKSTOP_S``, or per client with ``backstop_s``.
 DEFAULT_BACKSTOP_S = int(os.environ.get("REFACTORY_MODEL_BACKSTOP_S", "14400"))
 
 #: What a session the harness backstop stopped says, on every runtime (`items.error_kind`).
 HARNESS_BACKSTOP_TEXT = "hit the harness backstop"
+
+#: What a session stopped at its node's declared wall says first (`DeclaredTimeout`), on
+#: every runtime (`items.error_kind`).
+DECLARED_TIMEOUT_TEXT = "model session timed out at its node's declared timeout_s"
 
 #: How often a session's activity is looked at (capped at a quarter of the limit).
 ACTIVITY_POLL_S = 2.0
@@ -992,6 +1017,18 @@ class DshModelClient:
         client._node_wall_exact = True
         return client
 
+    def with_step_route(self, route: Mapping[str, str] | None) -> DshModelClient:
+        """A copy whose calls take a step's own model, effort and output cap (`Node.route`)
+        over the route `for_node` resolved; the fields it does not set stay as they are."""
+        from refactory_dsh.nn.graph import route_declaration
+        from refactory_dsh.workers import validate_route
+
+        client = copy.copy(self)
+        for key, value in (route_declaration(route) or {}).items():
+            setattr(client, "_" + key, value)
+        validate_route(client.route())
+        return client
+
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
         if policy not in ("", "none"):
@@ -1346,8 +1383,9 @@ class DshModelClient:
         # harness backstop, a guard and never the method's limit. The deadline is
         # absolute across attempts: a transport retry spends what remains of it, and a
         # deadline is never retried. ``at_backstop`` says the deadline in force is the
-        # backstop, so a session stopped there is a harness incident (`HarnessBackstop`),
-        # not a timeout.
+        # backstop, so a session stopped there while its model streams is a harness
+        # incident (`HarnessBackstop`), not a timeout. A deadline at the node's declared
+        # wall is the pipeline's own limit (`DeclaredTimeout`).
         #
         # Any other call (a CEO turn, a console call, a Codex node) keeps the plain
         # completion deadline ``timeout_s``. ``cap_s`` is the longest one attempt may run;
@@ -1366,7 +1404,8 @@ class DshModelClient:
             total_s = wall
             if wall < cap_s or getattr(self, "_node_wall_exact", False):
                 cap_s = wall
-        stop_at = time.monotonic() + total_s if total_s is not None else None
+        started = time.monotonic()
+        stop_at = started + total_s if total_s is not None else None
         delays = (retry_delays(self._attempts, self._retry_window_s) if self._backoff_s is None
                   else [self._backoff_s * 2 ** index for index in range(self._attempts - 1)])
         #: The outage this call is waiting out, if any (`_wait_for_network`), and how long
@@ -1404,19 +1443,37 @@ class DshModelClient:
                                    summary=f"{who}: timed out, and its runtime did not finish shutting "
                                            "down; child cleanup unconfirmed")
                     detail = f"; {unconfirmed}" if unconfirmed else ""
-                    if at_backstop and not isinstance(exc, InactivityTimeout):
-                        # Still active at the harness guard: the harness's incident.
-                        incident = HarnessBackstop(
-                            f"model session {HARNESS_BACKSTOP_TEXT} after {budget_s}s "
+                    # The call's own time up to its deadline, across attempts: a transport
+                    # retry's ``budget_s`` is only what was left of it.
+                    elapsed_s = int(round(min(time.monotonic(), attempt_stop) - started))
+                    quiet_s = getattr(exc, "stream_quiet_s", None)
+                    inactivity_s = self._inactivity_limit()
+                    error: RuntimeError
+                    if (at_backstop and not isinstance(exc, InactivityTimeout) and inactivity_s
+                            and quiet_s is not None and quiet_s >= inactivity_s):
+                        # At the harness guard, but the model had gone quiet: only a running
+                        # tool kept the session alive. That is inactivity, not an incident.
+                        error = CompletionTimeout(
+                            f"model completion timed out after {int(quiet_s)}s of inactivity "
+                            f"(no model output; a tool command was still running at the "
+                            f"{elapsed_s}s harness backstop); requested runtime shutdown; the "
+                            f"client does not replay a deadline{detail}")
+                    elif at_backstop and not isinstance(exc, InactivityTimeout):
+                        # Still streaming at the harness guard: the harness's incident.
+                        error = HarnessBackstop(
+                            f"model session {HARNESS_BACKSTOP_TEXT} after {elapsed_s}s "
                             "(REFACTORY_MODEL_BACKSTOP_S) while still active; a harness incident, "
                             f"not the method's failure; requested runtime shutdown{detail}")
-                        incident.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
-                        raise incident from exc
-                    if isinstance(exc, InactivityTimeout):
+                    elif isinstance(exc, InactivityTimeout):
                         error = CompletionTimeout(
                             f"model completion timed out after {int(exc.inactive_s)}s of inactivity "
                             "(no model output and no running tool command); requested runtime "
                             f"shutdown; the client does not replay a deadline{detail}")
+                    elif wall is not None and stop_at is not None and attempt_stop >= stop_at:
+                        # The node's own wall: the pipeline's limit, not the harness's.
+                        error = DeclaredTimeout(
+                            f"{DECLARED_TIMEOUT_TEXT} ({wall}s) after {elapsed_s}s; requested "
+                            f"runtime shutdown; the client does not replay a deadline{detail}")
                     else:
                         # A tool-using completion may already have changed its workdir.
                         # A deadline is not a transport failure: replaying the prompt can
@@ -1676,19 +1733,27 @@ class DshModelClient:
         limit = self._inactivity_s if self._inactivity_s is not None else DEFAULT_INACTIVITY_S
         return max(0, limit)
 
-    def _last_activity(self, pid: int, started_epoch: float, now: float) -> float:
-        """When (monotonic) the session last showed life: model output, or a tool running."""
+    def _last_frame(self, started_epoch: float) -> float:
+        """When (epoch seconds) the session's model last streamed, or ``started_epoch``:
+        the receipt (each request, each finished response) and the activity file (every
+        streamed frame, thinking included: `worker_observer.mjs`)."""
         receipt = getattr(self, "_worker_receipt", None)
         written = started_epoch
         if receipt is not None:
-            # The receipt (each request, each finished response) and the activity file
-            # (every streamed frame, thinking included: `worker_observer.mjs`).
             for path in (receipt, activity_path(receipt)):
                 try:
                     written = max(written, path.stat().st_mtime)
                 except OSError:
                     pass
-        if tool_command_running_since(pid, written):
+        return written
+
+    def _last_activity(self, pid: int, started_epoch: float, now: float) -> float:
+        """When (monotonic) the session last showed life: its model's last frame
+        (`_last_frame`), or ``now`` while a tool command it started after that frame is
+        still running. A session with no tools (``tool_policy`` none) has only its
+        stream: a process beneath it is no sign of the model's life."""
+        written = self._last_frame(started_epoch)
+        if getattr(self, "_tool_policy", "") != "none" and tool_command_running_since(pid, written):
             return now
         return now - max(0.0, time.time() - written)
 
@@ -1728,10 +1793,10 @@ class DshModelClient:
                     # shutdown request: DSH escalates a second signal to immediate exit.
                     start_new_session=os.name == "posix",
                 )
+                started_epoch = time.time()
                 try:
                     deadline = stop_at if stop_at is not None else time.monotonic() + self._timeout_s
                     last_activity = time.monotonic()
-                    started_epoch = time.time()
                     next_look = last_activity
                     look_every = min(ACTIVITY_POLL_S, inactivity_s / 4) if inactivity_s else 0.0
                     while True:
@@ -1759,6 +1824,13 @@ class DshModelClient:
                             if time.monotonic() >= deadline:
                                 raise
                 except BaseException as error:
+                    if isinstance(error, subprocess.TimeoutExpired) and not isinstance(
+                            error, InactivityTimeout):
+                        # How long the model had streamed nothing when the deadline came,
+                        # whatever tools ran: at the backstop that tells a streaming
+                        # session (an incident) from a quiet one (`_complete`).
+                        error.stream_quiet_s = max(  # type: ignore[attr-defined]
+                            0.0, time.time() - self._last_frame(started_epoch))
                     # Direct interruption or the fork's cooperative event both use the
                     # runtime-owned cleanup before propagating failure.
                     try:

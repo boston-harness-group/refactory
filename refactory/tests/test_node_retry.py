@@ -6,6 +6,12 @@ each dispatched agent node runs (`python -m refactory_dsh.worker_node <spec>`), 
 envelope `workers.lower_workflow` reserves. The runtime tests here drive the real model
 client against a scripted `dsh` that answers call by call, so a timeout is a real
 deadline, not a raised string.
+
+A timeout is a session gone silent past the inactivity limit (1 s here, for production's
+600 s): a scripted step that sleeps streams nothing, and one that is ``active`` streams a
+frame every 0.2 s, as the worker observer records it (`model.activity_path`). A session
+that reaches its node's declared wall is the pipeline's own limit (`model.DeclaredTimeout`)
+and is not retried.
 """
 from __future__ import annotations
 
@@ -30,7 +36,7 @@ from refactory_dsh.node_retry import (RETRY_EVENT, RetriesExhausted, attempt_wal
 RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 REPORT = "reviews/report.md"
 
-FAKE_DSH = '''import json, sys, time, pathlib
+FAKE_DSH = '''import json, os, sys, time, pathlib
 plans = json.loads(pathlib.Path({plan!r}).read_text())
 prompt = sys.stdin.read()
 import signal
@@ -50,6 +56,11 @@ for name, text in step.get("write", {{}}).items():
     target.write_text(text)
 if step.get("ignore_term"):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+activity = pathlib.Path(os.environ["REFACTORY_WORKER_RECEIPT"]).with_suffix(".activity")
+end = time.time() + step.get("active", 0)
+while time.time() < end:
+    activity.touch()
+    time.sleep(0.2)
 time.sleep(step.get("sleep", 0))
 if "exit" in step:
     print(step.get("stderr", ""), file=sys.stderr)
@@ -80,7 +91,7 @@ class Scripted:
 
     def client(self, **extra) -> DshModelClient:
         return DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(self.cli),
-                              attempts=1, timeout_s=60, **extra)
+                              attempts=1, timeout_s=60, **{"inactivity_s": 1, **extra})
 
 
 def _node(**fields) -> Node:
@@ -152,10 +163,10 @@ RUNTIMES = ["walker", "spine"]
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_session_that_times_out_once_is_retried_with_the_longer_limit(tmp_path, runtime):
-    # The first session writes part of its report and runs past its 2 s wall; the retry
-    # takes 3 s, which only the doubled 4 s limit allows, and answers.
+    # The first session writes part of its report and goes silent; the retry streams for
+    # 3 s, which only the doubled 4 s limit allows, and answers.
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 30, "write": {REPORT: "half a report"}},
-                                      {"sleep": 3, "answer": "the whole report"}])
+                                      {"active": 3, "answer": "the whole report"}])
     workdir = tmp_path / "run"
     ok, error = _run(runtime, workdir, _graph(_node()), dsh.client())
     assert ok, error
@@ -175,18 +186,19 @@ def test_a_session_that_times_out_once_is_retried_with_the_longer_limit(tmp_path
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_node_that_times_out_twice_stops_with_the_reason(tmp_path, runtime):
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 30}])
-    ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=1)), dsh.client())
+    ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=3)), dsh.client())
     assert not ok
-    # The time each session actually ran: its limit, and a moment to shut down.
-    assert re.search(r"reviewer timed out twice \(after [12]s, then [23]s\)", error), error
+    # The time each silent session actually ran: the inactivity limit, and a moment to
+    # shut down.
+    assert re.search(r"reviewer timed out twice \(after [12]s, then [12]s\)", error), error
     assert dsh.calls == 2
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_without_a_rule_a_timeout_is_not_retried(tmp_path, runtime):
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 30}, {"answer": "late"}])
-    ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=1, retry=None)), dsh.client())
-    assert not ok and "model completion timed out after 1s" in error
+    ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=3, retry=None)), dsh.client())
+    assert not ok and "model completion timed out after 1s of inactivity" in error
     assert dsh.calls == 1
     assert _retried(tmp_path / "run") == []
 
@@ -216,7 +228,7 @@ def _review_fork(verifier: Node) -> Graph:
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_optional_node_that_times_out_twice_is_missing_and_says_why(tmp_path, runtime):
     verifier = Node("verifier", "agent", prompt_template="Verify.", writes=("reviews/verification.md",),
-                    timeout_s=1, retry=RULE, outputs_only=True)
+                    timeout_s=3, retry=RULE, outputs_only=True)
     workdir = tmp_path / "run"
     if runtime == "walker":
         from refactory_dsh.nn.executor import Executor, RunContext
@@ -239,6 +251,72 @@ def test_an_optional_node_that_times_out_twice_is_missing_and_says_why(tmp_path,
         calls = dsh.calls
     assert calls == 2
     assert "verifier timed out twice" in (workdir / "reviews/verifier-missing.txt").read_text()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_declared_wall_is_the_pipelines_limit_and_its_declared_retry_answers_it(tmp_path, runtime):
+    """A session still streaming at its node's declared 2 s wall stops there as a
+    `DeclaredTimeout`, recorded ``declared_timeout`` from either runtime's text
+    (`items.error_kind`): the pipeline's own limit. The retry on timeout the node declares
+    is the graph's choice too, so it answers the wall: with every attempt still streaming
+    at its wall, the node is tried once more and then fails as ``declared_timeout``."""
+    from refactory_dsh.items import error_kind
+
+    dsh = Scripted(tmp_path / "dsh", [{"active": 30}, {"active": 30}, {"answer": "late"}])
+    ok, error = _run(runtime, tmp_path / "run", _graph(_node(timeout_s=2)), dsh.client())
+    assert not ok
+    assert "declared timeout_s" in error
+    assert error_kind(RuntimeError(error)) == "declared_timeout"
+    assert dsh.calls == 1 + int(RULE["times"]) and len(_retried(tmp_path / "run")) == int(RULE["times"])
+
+
+def _missing_verifier(runtime: str, tmp_path: Path, verifier: Node, plan: list[dict],
+                      **client) -> dict:
+    """Run ``verifier`` as the optional branch of `_review_fork` on ``runtime``; return its
+    ``items.missing_steps`` entry."""
+    from refactory_dsh.items import missing_steps
+
+    workdir = tmp_path / "run"
+    if runtime == "walker":
+        from refactory_dsh.nn.executor import Executor, RunContext
+
+        dsh = Scripted(tmp_path / "dsh", {"Verify.": plan, "": [{"answer": "fine"}]})
+        workdir.mkdir()
+        ctx = RunContext(workdir, knobs={}, facts={}, task={})
+        ctx.model = dsh.client(**client)
+        result = Executor(_review_fork(verifier), ctx).run(start="fork")
+        assert result.exit_ok, result.error
+    else:
+        dsh = Scripted(tmp_path / "dsh", plan)
+        graph = _review_fork(verifier)
+        graph.start = "verifier"
+        done, _ = _dispatch(workdir, graph, dsh.client(**client).context())
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout.strip().splitlines()[-1])["status"] == "missing"
+    return missing_steps(workdir)["verifier"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_optional_branch_says_how_it_ended_for_time(tmp_path, runtime):
+    """An optional branch missing because it ended for time says how, so a reader (and
+    #684's harness-timeout reading) tells the harness's ending from the pipeline's: its
+    declared wall is ``declared_timeout``, the harness backstop ``harness_incident``,
+    and silence ``timeout``. Any other failure stays ``failed``."""
+    def verifier(**fields) -> Node:
+        return Node("verifier", "agent", prompt_template="Verify.",
+                    writes=("reviews/verification.md",), outputs_only=True, **fields)
+
+    walled = _missing_verifier(runtime, tmp_path / "wall", verifier(timeout_s=2), [{"active": 30}])
+    assert walled["cause"] == "declared_timeout", walled
+    stopped = _missing_verifier(runtime, tmp_path / "backstop", verifier(), [{"active": 30}],
+                                backstop_s=3)
+    assert stopped["cause"] == "harness_incident", stopped
+    assert "hit the harness backstop after 3s" in stopped["error"]
+    silent = _missing_verifier(runtime, tmp_path / "silent", verifier(), [{"sleep": 30}])
+    assert silent["cause"] == "timeout", silent
+    failed = _missing_verifier(runtime, tmp_path / "failed", verifier(),
+                               [{"exit": 1, "stderr": "dsh: the key was refused"}])
+    assert failed["cause"] == "failed", failed
 
 
 def test_the_qa_judge_and_overwatch_read_that_the_verifier_is_missing(tmp_path):
@@ -291,13 +369,14 @@ def test_the_run_wall_shortens_the_retry(tmp_path, runtime):
     workdir.mkdir()
     budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=40))
     budget.resume()
-    dsh = Scripted(tmp_path / "dsh", [{"sleep": 60}, {"answer": "in time"}])
-    # A 2 s wall, then 50 s: the retry gets what is left of the run's 40 s instead.
-    ok, error = _run(runtime, workdir, _graph(_node(retry={**RULE, "timeout_factor": 10}, timeout_s=5)),
+    # Streams for 4 s, then goes silent: it times out after about 5 s.
+    dsh = Scripted(tmp_path / "dsh", [{"active": 4, "sleep": 60}, {"answer": "in time"}])
+    # An 8 s wall, then 80 s: the retry gets what is left of the run's 40 s instead.
+    ok, error = _run(runtime, workdir, _graph(_node(retry={**RULE, "timeout_factor": 10}, timeout_s=8)),
                      dsh.client(), budget=budget)
     assert ok, error
     [event] = _retried(workdir)
-    assert 30 <= event["wall_s"] <= 35
+    assert 26 <= event["wall_s"] <= 35
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
@@ -561,9 +640,9 @@ def test_a_builder_that_times_out_twice_stops_with_the_retry_spent_error_naming_
         from tests_support import git_repo
         workdir.mkdir()
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
-    ok, error = _run(runtime, workdir, _graph(_builder_node(timeout_s=1)), dsh.client())
+    ok, error = _run(runtime, workdir, _graph(_builder_node(timeout_s=3)), dsh.client())
     assert not ok
-    assert re.search(r"emit timed out twice \(after [12]s, then [23]s\)", error), error
+    assert re.search(r"emit timed out twice \(after [12]s, then [12]s\)", error), error
     assert dsh.calls == 2
 
 
@@ -596,13 +675,14 @@ def test_retry_cannot_outrun_the_run_wall(tmp_path, runtime, monkeypatch):
         from refactory_dsh import worktree
         from tests_support import git_repo
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
-    # Budget of 10 s, started after the test's own setup: the first attempt's 4 s wall
-    # leaves at most 6 s, below the 8 s the retry wants, so the retry is not started. The
-    # 6 s margin is the run's start-up before that wall begins, which a loaded machine
-    # (or a slow process spawn, as on macOS) can stretch past 2 s.
-    budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=10))
+    # Budget of 30 s, started after the test's own setup: whenever the first attempt goes
+    # silent, less than 30 s is left, below the 40 s the retry wants and below the shortest
+    # retry worth starting (`MIN_RETRY_WALL_S`), so the retry is not started. The run's
+    # start-up (slow on a loaded machine, or on macOS) has nearly all of the 30 s to spend
+    # before the budget itself runs out.
+    budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=30))
     budget.resume()
-    ok, error = _run(runtime, workdir, _graph(_builder_node(timeout_s=4)), dsh.client(), budget=budget)
+    ok, error = _run(runtime, workdir, _graph(_builder_node(timeout_s=20)), dsh.client(), budget=budget)
     assert not ok
     assert "its declared retry was not started" in error
     assert dsh.calls == 1 and _retried(workdir) == []
@@ -666,6 +746,12 @@ def test_only_a_timeout_is_a_timeout():
     assert failure_kind(subprocess.TimeoutExpired("dsh", 1)) == "timeout"
     assert failure_kind(RuntimeError("model completion failed (exit 1): timed out reading")) is None
     assert failure_kind(BudgetExhausted("elapsed-time budget exhausted")) is None
+    # A declared wall is the pipeline's own limit; a retry on timeout the node declares
+    # answers it (both are the graph's choice). The backstop is the harness's guard: no
+    # retry answers it.
+    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
+    assert failure_kind(DeclaredTimeout("model session timed out at its node's declared timeout_s")) == "timeout"
+    assert failure_kind(HarnessBackstop("model session hit the harness backstop after 9s")) is None
 
 
 def test_status_shows_the_retries(tmp_path):
@@ -691,7 +777,7 @@ def test_a_session_that_ignores_its_shutdown_is_not_retried(tmp_path, monkeypatc
 
     monkeypatch.setattr(owned_process, "SHUTDOWN_GRACE_S", 1)
     dsh = Scripted(tmp_path / "dsh", [{"sleep": 30, "ignore_term": True}, {"answer": "fine"}])
-    ok, error = _run("walker", tmp_path / "run", _graph(_node(timeout_s=1)), dsh.client())
+    ok, error = _run("walker", tmp_path / "run", _graph(_node(timeout_s=3)), dsh.client())
     assert not ok and "did not finish shutdown" in error
     assert dsh.calls == 1 and _retried(tmp_path / "run") == []
 
@@ -754,7 +840,7 @@ def test_each_retry_prepares_a_fresh_workspace_and_collects_its_outputs(tmp_path
         from tests_support import git_repo
         workdir.mkdir()
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
-    ok, error = _run(runtime, workdir, _graph(_node(workspace=kind, timeout_s=1)), dsh.client())
+    ok, error = _run(runtime, workdir, _graph(_node(workspace=kind, timeout_s=3)), dsh.client())
     assert ok, error
     assert dsh.calls == 2
     assert (workdir / REPORT).read_text() == "collected whole report"
@@ -777,3 +863,17 @@ def test_workspace_preparation_is_reserved_for_every_retry_attempt(tmp_path, kin
                                      lowering.node_declarations(state))
     assert lowered.nodes[node.id].command_timeout_s == (
         30 + NODE_DISPATCH_OVERHEAD_S + 2 * preparation_budget_s(node.workspace))
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_optional_branch_whose_declared_retry_is_spent_at_its_wall_is_declared_timeout(
+        tmp_path, runtime):
+    """An optional verifier that reaches its declared wall on every attempt (its retry
+    answers the first, the second is spent) is missing as ``declared_timeout``, the
+    pipeline's limit (`node_retry._cause`), never ``timeout``, which #684 reads as the
+    harness's."""
+    verifier = Node("verifier", "agent", prompt_template="Verify.",
+                    writes=("reviews/verification.md",), outputs_only=True, timeout_s=2,
+                    retry=RULE)
+    info = _missing_verifier(runtime, tmp_path, verifier, [{"active": 30}, {"active": 30}])
+    assert info["cause"] == "declared_timeout", info

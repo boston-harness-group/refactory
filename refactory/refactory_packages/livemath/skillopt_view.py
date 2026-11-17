@@ -42,8 +42,14 @@ def task_type(metadata: dict) -> str:
 
 
 #: The exceptions a model call raises when it runs out of time
-#: (``refactory_dsh.model.CompletionTimeout`` and the subprocess timeouts it wraps).
-TIMEOUT_ERRORS = ("CompletionTimeout", "TimeoutExpired", "InactivityTimeout", "HarnessBackstop")
+#: (``refactory_dsh.model.CompletionTimeout`` and the subprocess timeouts it wraps, the
+#: harness backstop and a node's declared wall).
+TIMEOUT_ERRORS = ("CompletionTimeout", "TimeoutExpired", "InactivityTimeout", "HarnessBackstop",
+                  "DeclaredTimeout")
+
+#: The ``error_kind`` values (`refactory_dsh.items.error_kind`) of a pass that ran out of
+#: time, which is how a spine record, with no exception type in its text, says it.
+TIMEOUT_KINDS = ("timeout", "harness_incident", "declared_timeout")
 
 # A failed pass's error text: "<node>: <ExceptionType>: <message>"
 # (refactory_dsh/nn/executor.py ``_walk_branch``).
@@ -75,7 +81,7 @@ def error_fail_reason(record: dict[str, Any]) -> str:
     text = str(record.get("error_text") or "")
     match = _NODE_ERROR.match(text)
     kind, message = (match.group(1), match.group(2)) if match else ("", text)
-    if record.get("error_kind") == "timeout" or kind in TIMEOUT_ERRORS:
+    if record.get("error_kind") in TIMEOUT_KINDS or kind in TIMEOUT_ERRORS:
         return f"task-timeout-{task_timeout_s()}s"
     return f"error: {message or 'no response'}"
 

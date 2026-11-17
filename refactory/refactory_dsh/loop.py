@@ -72,6 +72,7 @@ from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
 from refactory_dsh.paths import project_root
+from refactory_dsh.workers import StepRoutes
 
 #: The append-only record of everything a run did. Resume replays it.
 JOURNAL = run_history.JOURNAL
@@ -131,13 +132,15 @@ def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
 
 
-def _timed_out(record: Mapping[str, Any]) -> bool:
-    """Whether an item record says the item ran out of time (its error kind, or its error
-    or failure text)."""
-    if str(record.get("error_kind") or "").lower() == "timeout":
-        return True
-    text = f"{record.get('error_text') or ''} {record.get('fail_reason') or ''}".lower()
-    return "timed out" in text or "timeout" in text
+def _new_steps(parent: Any, child: Any) -> set[str]:
+    """The child graph's steps its parent's graph lacks (none without a parent)."""
+    if parent is None:
+        return set()
+
+    def nodes(candidate: Any) -> set[str]:
+        return set(((candidate.state.get("graph") or {}).get("nodes") or {}))
+
+    return nodes(child) - nodes(parent)
 
 
 class LoopError(RuntimeError):
@@ -755,6 +758,8 @@ class Loop(OuterLoop):
         self.optimizer.max_edits = MAX_EDITS_PER_PROPOSAL
         # Whether edits may add code nodes, and what their code may never contain.
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
+        # The routes a step may choose its own model, effort and cap from (`Node.route`).
+        self.optimizer.step_routes = StepRoutes.of(model)
         self.optimizer.grader_secrets = self._grader_secrets
         # A new or changed code node is dry-run on its parent's recorded item inputs
         # (`optim.checks.code_dry_run`), found in the parent's run directory.
@@ -1493,6 +1498,7 @@ class Loop(OuterLoop):
             return
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
+        sampler.step_routes = self.optimizer.step_routes
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]
@@ -5370,27 +5376,25 @@ class Loop(OuterLoop):
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
             new_node_tools=bool(self.config.allow_new_node_tools),
+            step_routes=(self.optimizer.step_routes.offered()
+                         if getattr(self.optimizer, "step_routes", None) is not None else {}),
             time_facts=self._time_facts(board),
         )
 
     def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
-        """Time in numbers for the request (`optim.base.time_lines`): how long one model step
-        may run (the inner model's limit), and for the candidate being edited how long its
+        """Time in numbers for the request (`optim.base.time_lines`): for the candidate
+        being edited, how long its
         train items took each, from each item's own record (`items.item_duration`): median,
-        90th percentile and longest. Also how many of its train items timed out. Never its
-        wall time over its items: that is set by its slowest item."""
+        90th percentile and longest, over the items the harness did not time out (those
+        are said once, in "Item results"). Never its wall time over its items: that is set by
+        its slowest item."""
         facts: dict[str, Any] = {}
-        limit = getattr(self.model, "timeout_s", None)
-        if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
-            facts["step_limit_s"] = int(limit)
         _owner, records = self._train_records_owner(board)
         if not records:
             return facts
-        # A repeated item has a record per run: items are counted once, runs each time.
-        facts["items"] = len({record.get("id", index) for index, record in enumerate(records)})
-        facts["runs"] = len(records)
-        facts["timeouts"] = sum(1 for record in records if _timed_out(record))
-        facts.update(item_time_spread(records))
+        from refactory_dsh.optim.base import harness_timeout
+
+        facts.update(item_time_spread([r for r in records if not harness_timeout(r)]))
         return facts
 
     def _request_order(self, board: list[Candidate]) -> list[Candidate]:
@@ -5463,11 +5467,18 @@ class Loop(OuterLoop):
             parent_records, same = (self._records_like(parent.id, child.id) if parent
                                     else ([], None))
             record = self.proposals.get(child.id) or {}
+            child_records = list(self._train_item_records.get(child.id, []))
+            from refactory_dsh.optim.edit_effect import edit_effect
+
+            effect = edit_effect(parent_records, child_records, self._reply_judge(),
+                                 new_steps=_new_steps(parent, child))
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
-                "child_records": list(self._train_item_records.get(child.id, [])),
+                "child_records": child_records,
                 "parent_records": parent_records, "same_seed": same,
+                # How a structural edit moved the items it changed (`optim.edit_effect`).
+                **({"effect": effect} if effect else {}),
                 # What the proposal predicted and said, for the prediction check, and
                 # what the system did beside its edits (the core operators' wiring).
                 **{key: record[key] for key in ("prediction", "addresses", "flow_change")
@@ -5481,6 +5492,26 @@ class Loop(OuterLoop):
                                       if parent else ())),
             })
         return pairs
+
+    def _rescore_spread(self, candidate_id: str) -> float | None:
+        """How far ``candidate_id``'s train score (its items' mean) moved between the
+        epochs it was scored in this run; ``None`` before a second score."""
+        scores = []
+        for records in (self._records_by_epoch.get(candidate_id) or {}).values():
+            values = [float(r["score"]) for r in records
+                      if isinstance(r.get("score"), (int, float))]
+            if values:
+                scores.append(sum(values) / len(values))
+        return round(max(scores) - min(scores), 3) if len(scores) > 1 else None
+
+    def _reply_judge(self) -> Any:
+        """How a step's reply is read as an item's answer, from the mode's Tasks
+        (`task.reply_judge`); ``None`` when no Task reads replies. Looked up once."""
+        if not hasattr(self, "_reply_judge_found"):
+            from refactory_dsh.task import reply_judge
+
+            self._reply_judge_found = reply_judge(self.mode.state_dict())
+        return self._reply_judge_found
 
     def _last_round(self, children: Sequence[Candidate]) -> list[Candidate]:
         """The children proposed in the epoch of the last of them (population order),
@@ -5536,7 +5567,7 @@ class Loop(OuterLoop):
         """The optimizer's own reasoning about recent candidates -- the line from the
         seed to the edited candidate, and the latest refused children -- beside what
         happened to each. Train scores, train item errors and gate decisions only."""
-        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, item_errors
+        from refactory_dsh.optim.base import REASONING_ENTRIES, edit_change, pipeline_item_errors
 
         by_id = {c.id: c for c in self.population}
         line: list[Candidate] = []
@@ -5583,7 +5614,7 @@ class Loop(OuterLoop):
                 "same_seed": same,
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
-                "errors": item_errors(records), "items": len(records),
+                "errors": pipeline_item_errors(records), "items": len(records),
             })
         return entries
 
@@ -5791,8 +5822,14 @@ class Loop(OuterLoop):
             "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
 
         tried, refused = self._tried_in_round(epoch - 1)
+        gated = bool(self.selection_mode())
+        # The tally of each kind tried against the noise (`memory.kind_tally_lines`): one
+        # source for this call and, with the note it writes, the proposer's request.
+        tally = memory.kind_tally_lines(tried, val_items=len(self._manifest_val_ids()),
+                                        spread=self._rescore_spread(prev.id), gated=gated)
+        self._pending_tally = tally
         tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1, current=current.id,
-                                         gated=bool(self.selection_mode()))
+                                         gated=gated, tally=tally)
         objective = self._objective()
 
         # The request: one call when it fits the room whole, else split into comparison
@@ -5865,10 +5902,17 @@ class Loop(OuterLoop):
                                  parent_records=parent_records, child_records=child_records,
                                  gate=self._gate_decision(candidate.id), same_seed=same,
                                  integrity=self._integrity_of(candidate.id))
+            from refactory_dsh.optim.edit_effect import edit_effect
+
+            effect = (edit_effect(parent_records, child_records, self._reply_judge(),
+                                  new_steps=_new_steps(by_id.get(candidate.parent or ""),
+                                                       candidate))
+                      if candidate.is_structural() else {})
             tried.append({**entry, "structural": candidate.is_structural(),
                           "edits": memory.edits_text(candidate.own_edits()),
                           "score": candidate.score, "exit_ok": candidate.exit_ok,
-                          "evaluated": candidate.evaluated})
+                          "evaluated": candidate.evaluated,
+                          **({"effect": effect} if effect else {})})
         refused = []
         for rejection in self._round_refusals.get(round_) or ():
             steps = Proposal(edit=rejection.edit).steps
@@ -5886,7 +5930,9 @@ class Loop(OuterLoop):
         if note:
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
-                            "curr": record.get("curr")}
+                            "curr": record.get("curr"),
+                            **({"tally": list(self._pending_tally)}
+                               if getattr(self, "_pending_tally", None) else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
             self._memory = {**self._memory, "not_updated": {

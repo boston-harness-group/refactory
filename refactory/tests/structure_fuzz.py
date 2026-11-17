@@ -78,11 +78,12 @@ from refactory_dsh.optim.base import (
 
 import structure_fuzz_graphs as fg
 from refactory_dsh import snippet as snippet_calls
+from refactory_dsh.workers import StepRoutes
 
 HERE = Path(__file__).resolve().parent
 CORPUS = HERE / "fixtures" / "structure_fuzz"
 INVARIANTS = ("lowering", "walker", "spine", "grader", "slots", "required", "knobs", "dataflow",
-              "forks", "protected", "tools", "code")
+              "forks", "protected", "tools", "code", "route")
 #: Checks that run the real code (lowering, the walker, the spine) and look at what it
 #: did; the rest are spec checks, a second statement of the rules beside the validator.
 OBSERVED = ("lowering", "walker", "spine", "grader", "slots", "required")
@@ -96,6 +97,18 @@ GRADER_RECORDS = GRADER_FILES  # the runtime's grading files (`items.GRADER_FILE
 SLOT = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 #: A walk restarts from its seed once its graph has this many nodes.
 MAX_NODES = 28
+#: The routes the harness's run names (`workers.StepRoutes`): its own on ``m-big``, and one
+#: node route (for no node of any seed) naming a smaller model, a low effort and a cap. A
+#: new step may choose among those values, never the run's own model.
+ROUTE_BASE = {"worker_backend": "dsh", "provider": "p", "model": "m-big"}
+ROUTE_MAPS = {"elsewhere": {"model": "m-small", "effort": "low", "max_completion_tokens": "900"}}
+#: What a step may set, said again here as a spec beside `StepRoutes.refusal`.
+ROUTE_ALLOWED = {"model": {"m-small"}, "effort": {"low"}, "max_completion_tokens": {"900"}}
+#: Routes the generator gives new agent steps: allowed, outside the run's, the run's own,
+#: and malformed.
+ROUTE_CHOICES = ({"model": "m-small"}, {"effort": "low", "max_completion_tokens": "900"},
+                 {"model": "m-small", "effort": "low"}, {"model": "m-other"}, {"model": "m-big"},
+                 {"max_completion_tokens": 5}, {"temperature": "1"}, "m-small")
 #: Verdict labels the generator puts on gate edges; `fg.proceed` answers ``proceed``.
 CONDITIONS = ("proceed", "reloop", "reject")
 #: How the walker says a gate's verdict has no edge (`nn.executor.route_verdict`).
@@ -173,6 +186,7 @@ class Applier:
         self.protected = tuple(mode.edit_protected())
         self.graders = tuple(mode.grader_nodes())
         self.optimizer = Optimizer()
+        self.optimizer.step_routes = StepRoutes(ROUTE_BASE, node_routes=ROUTE_MAPS)
         # The harness's walker answers every gate (`_verdicts`), so edits may add gates a
         # person or an agent answers here; the outer loop's candidates run headless and
         # refuse them (``E-gate-kind``, `optim.checks`), which its own tests check.
@@ -219,13 +233,20 @@ ANSWERS = {"compare": "compare notes", "precision": "precision notes",
 class ScriptedModel:
     """A model client that answers by node id (`test_livemath_blocks._NodeScriptedModel`)."""
 
-    def __init__(self, answers: dict[str, str], node: str = "", log: list | None = None):
+    def __init__(self, answers: dict[str, str], node: str = "", log: list | None = None,
+                 routes: list | None = None, route: dict | None = None):
         self.answers = answers
         self.node = node
         self.log = log if log is not None else []
+        #: Each call's node and the step route it ran on (`with_step_route`).
+        self.routes = routes if routes is not None else []
+        self.route_now = route
 
     def for_node(self, node_id: str, role: str = "") -> "ScriptedModel":
-        return ScriptedModel(self.answers, node_id, self.log)
+        return ScriptedModel(self.answers, node_id, self.log, self.routes)
+
+    def with_step_route(self, route: dict) -> "ScriptedModel":
+        return ScriptedModel(self.answers, self.node, self.log, self.routes, dict(route))
 
     def with_tool_policy(self, policy: str) -> "ScriptedModel":
         return self
@@ -244,6 +265,7 @@ class ScriptedModel:
 
     def complete(self, prompt: str, *, system: str = "", **_: Any) -> str:
         self.log.append((self.node, prompt, system))
+        self.routes.append((self.node, self.route_now))
         return self.answers.get(self.node, "<answer>B</answer>")
 
 
@@ -840,6 +862,7 @@ def check_walker(seed: Seed, state: dict[str, Any], workdir: Path) -> tuple[list
     side, side_files = _grader_side_writes(seed, state)
     seen = check_grader(grader_secrets(seed, state), hidden, workdir, model, grader_side=side,
                         grader_files=side_files) + check_slots(state, model)
+    seen += check_routes_ran(state, model)
     if not result.exit_ok and failed_only_at_marked_code(graph, state, result):
         # Code that passes V18 and fails at run time on purpose (it raises, or returns an
         # undeclared fact or file): the runtime refused it, which is the point.
@@ -1015,11 +1038,36 @@ def check_tools(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Viola
                           or node.workspace.get("of") == "base"))]
 
 
+def check_route(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Violation]:
+    """Spec check: a step route the edits set uses only the values the harness's run names
+    for a step (`ROUTE_ALLOWED`), never the run's own."""
+    seed = _graph_of(seed_state)
+    out = []
+    for node in _graph_of(state).nodes.values():
+        before = seed.nodes.get(node.id)
+        if not node.route or (before is not None and before.route == node.route):
+            continue
+        bad = sorted(k for k, v in node.route.items() if v not in ROUTE_ALLOWED.get(k, ()))
+        if bad:
+            out.append(Violation("route", f"step {node.id} runs on {node.route}, outside the "
+                                          f"run's routes ({bad})"))
+    return out
+
+
+def check_routes_ran(state: dict[str, Any], model: "ScriptedModel") -> list[Violation]:
+    """Each model call the walker made ran on its step's own route, and only there."""
+    graph = _graph_of(state)
+    return [Violation("route", f"agent {node} ran on {ran}, not its route "
+                               f"{graph.nodes[node].route if node in graph.nodes else None}")
+            for node, ran in model.routes
+            if (graph.nodes[node].route if node in graph.nodes else None) != ran]
+
+
 def check_static(seed_state: dict[str, Any], state: dict[str, Any],
                  protected: tuple[str, ...]) -> list[Violation]:
     return [*check_lowering(state), *check_knobs(state), *check_dataflow(state),
             *check_forks(state), *check_protected(seed_state, state, protected),
-            *check_tools(seed_state, state), *check_code(state)]
+            *check_tools(seed_state, state), *check_code(state), *check_route(seed_state, state)]
 
 
 def check_state(applier: Applier, state: dict[str, Any], *, walker: bool = True,
@@ -1059,11 +1107,26 @@ def _rendered_copy(state: dict[str, Any], node_id: str, limit: int = 100_000) ->
     return json.loads(body)
 
 
+def _downstream_ids(graph: Any, start: str) -> set[str]:
+    """``start`` and every step its edges lead to (no reloop back)."""
+    from refactory_dsh.nn.loops import loop_edges
+
+    back = {(a, b) for a, b, _c in loop_edges(graph)}
+    out, queue = {start}, [start]
+    while queue:
+        for edge in graph.out_edges(queue.pop()):
+            if (edge.source, edge.target) not in back and edge.target not in out:
+                out.add(edge.target)
+                queue.append(edge.target)
+    return out
+
+
 class EditGenerator:
     """Random structure edits: every primitive and macro, valid-looking and malformed."""
 
     def __init__(self, rng: random.Random, *, code_nodes: bool = CODE_NODES) -> None:
         self.rng = rng
+        self.route_rng = random.Random(f"route:{rng.getstate()[1][:4]}")
         self.counter = 0
         #: Whether new code nodes are drawn (only where this machine can run them).
         self.code_nodes = code_nodes and CODE_NODES
@@ -1401,12 +1464,23 @@ class EditGenerator:
                                        f"Use {{{{{rng.choice(self._facts(graph))}}}}} here."))
         if kind == "op":
             spec["call"] = rng.choice((nn_edits.core_ops_calls()["collect"], fg.STEP))
+        # Drawn from a stream of its own, so the main stream (and every finding a seed
+        # reproduces) is what it was before step routes.
+        if kind == "agent" and self.route_rng.random() < 0.2:
+            spec["route"] = self.route_rng.choice(ROUTE_CHOICES)
         if sees and rng.random() < 0.25:
             pool = ["task", *sorted(graph.nodes)]
             spec["sees"] = rng.sample(pool, k=min(len(pool), rng.choice((1, 1, 2))))
         if rng.random() < 0.05:
             spec["kind"] = rng.choice(("gate", "fork", 7))  # malformed: refused
         return spec
+
+    def _stray(self, edit: dict[str, Any]) -> dict[str, Any]:
+        """Now and then a field the operator would ignore (refused, `core_ops._unknown_fields`)."""
+        if self.rng.random() < 0.08:
+            edit = {**edit, **self.rng.choice(({"role": "judge"}, {"timeout_s": 60},
+                                               {"tools": ["Bash"]}))}
+        return edit
 
     def core_op(self, state: dict[str, Any], op: str, target: str) -> dict[str, Any]:
         rng, graph = self.rng, _graph_of(state)
@@ -1420,8 +1494,17 @@ class EditGenerator:
             side = rng.choice(("after", "after", "before"))
             if rng.random() < 0.2:
                 return {"op": "insert", side: target}  # all defaults: a copy of the neighbour
-            return {"op": "insert", side: target, **self.step_spec(state, kinds=(
+            edit = {"op": "insert", side: target, **self.step_spec(state, kinds=(
                 "agent", "agent", "code", "op"))}
+            outputs = [n for n, node in graph.nodes.items()
+                       if node.kind in ("agent", "op") and (node.writes or node.produces)]
+            if outputs and rng.random() < 0.5:
+                # Take over a step's outputs: mostly one before the new step, now and then
+                # (refused) one that is not.
+                before = [n for n in outputs if n != target and target in _downstream_ids(graph, n)]
+                edit["takes_over"] = rng.choice(before if before and rng.random() < 0.7
+                                                else outputs)
+            return self._stray(edit)
         if op == "remove":
             if gates and rng.random() < 0.4:
                 gate = rng.choice(gates)
@@ -1454,9 +1537,15 @@ class EditGenerator:
                                   "other": self.step_spec(state, sees=False)}
             if rng.random() < 0.3 and len(ids) > 2:
                 to["skip"] = rng.choice(ids)
+            if rng.random() < 0.5 and succ:
+                # A route straight to a later step: refused when a step it skips made an
+                # input a later step reads (`core_ops.lost_inputs`).
+                later = sorted(_downstream_ids(graph, succ[0]) - {succ[0], target})
+                if later:
+                    to = {"long": succ[0], "short": rng.choice(later)}
             judge = rng.choice(("agent", "agent", "code") if self.code_nodes else ("agent",))
-            return {"op": "route", "after": target, "judge": judge,
-                    **({"to": to} if rng.random() < 0.7 else {})}
+            return self._stray({"op": "route", "after": target, "judge": judge,
+                                **({"to": to} if rng.random() < 0.7 else {})})
         if op == "loop" and rng.random() < 0.6:
             judge = rng.choice(("agent", "agent", "code", fg.PROCEED) if self.code_nodes
                                else ("agent", fg.PROCEED))
@@ -1495,6 +1584,26 @@ class Finding:
     violations: list[Violation]
 
 
+#: The core operators' own checks, by what their refusal says (`path_of`).
+PATH_MARKS = (("would be ignored", "ignored field refused"),
+              ("would run without", "lost input refused"),
+              ("on every path to it", "takes_over: target not first"),
+              ("both read", "takes_over: shared knob"),
+              ("in its code or feedback keys", "takes_over: code reads"),
+              ("writes only its reply", "takes_over: agent and two files"))
+
+
+def path_of(edit: Any, outcome: Any) -> str | None:
+    """Which core-operator check an edit reached: a refusal by its words, or an accepted
+    'takes_over'."""
+    if isinstance(outcome, list):
+        text = " ".join(map(str, outcome))
+        return next((label for mark, label in PATH_MARKS if mark in text), None)
+    if isinstance(edit, dict) and edit.get("takes_over") is not None:
+        return "takes_over accepted"
+    return None
+
+
 @dataclass
 class Stats:
     tried: int = 0
@@ -1510,6 +1619,8 @@ class Stats:
     compound_refused: Counter = field(default_factory=Counter)
     #: Compound refusals that named the edit that failed (``[edit k of n``).
     compound_named: int = 0
+    #: How often the core operators' own checks were reached (`path_of`).
+    paths: Counter = field(default_factory=Counter)
 
     def summary(self) -> dict[str, Any]:
         observed = {k: v for k, v in self.violations.items() if k in OBSERVED or k == "attempt"}
@@ -1524,6 +1635,7 @@ class Stats:
                 "compound": {"tried": self.compound_tried, "accepted": self.compound_accepted,
                              "refused": dict(sorted(self.compound_refused.items())),
                              "refusals_naming_the_edit": self.compound_named},
+                "paths": dict(sorted(self.paths.items())),
                 "findings": len(self.findings)}
 
 
@@ -1590,6 +1702,8 @@ class Fuzzer:
                 if wrong:
                     self._record(seed, applier, [*accepted, edit], wrong, minimize=False)
                     return
+            if path := path_of(edit, outcome):
+                self.stats.paths[path] += 1
             if isinstance(outcome, list):
                 code = reason_code(outcome[0]) if outcome else "?"
                 self.stats.refused[code] += 1

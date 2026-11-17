@@ -168,6 +168,26 @@ def _lowering_refusal(parent_state: dict[str, Any], state: dict[str, Any]) -> st
     return None
 
 
+def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str, Any],
+                         routes: Any) -> list[str]:
+    """``E-route`` for each agent step whose own route (`Node.route`) the proposal sets or
+    changes to a model, effort or cap that no route of the run uses, or that the step runs
+    on already (`workers.StepRoutes.refusal`); every one when the run has no routes to
+    choose from (a scripted model)."""
+    before = (parent_state.get("graph") or {}).get("nodes") or {}
+    reasons = []
+    for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
+        declared = node.get("route")
+        if not declared or (before.get(node_id) or {}).get("route") == declared:
+            continue
+        reason = (routes.refusal(node_id, str(node.get("role") or "ceo"), declared)
+                  if routes is not None else
+                  f"step {node_id!r} sets a route of its own, and this run has none to choose from")
+        if reason:
+            reasons.append(f"E-route: {reason}")
+    return reasons
+
+
 def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                     allowed: bool) -> list[str]:
     """``E-new-node-tools`` for each agent node the search added that would run with tools.
@@ -1071,11 +1091,12 @@ class ProposalContext:
     #: Whether a new step may use tools in this run (``LoopConfig.allow_new_node_tools``);
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
-    #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
-    #: model step may run), ``per_item_median_s``/``per_item_p90_s``/``per_item_max_s`` (the
-    #: edited candidate's items' own times, `loop.item_time_spread`), ``items`` (distinct
-    #: train items), ``runs`` (their runs, counting repeats) and ``timeouts`` (runs that
-    #: timed out); empty says nothing.
+    #: What a new agent step may choose for its own route, field by field
+    #: (`workers.StepRoutes.offered`); empty offers no route, and the request says none.
+    step_routes: dict[str, list[str]] = field(default_factory=dict)
+    #: Time, in numbers, for "Time per item" (`time_lines`): ``per_item_median_s``/
+    #: ``per_item_p90_s``/``per_item_max_s`` (the edited candidate's items' own times,
+    #: `loop.item_time_spread`); empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
@@ -1225,7 +1246,8 @@ class ProposalContext:
             "## The operations you may use",
             *operation_lines(self.catalogue, self.node_states, self.edges,
                              protected=self.protected,
-                             knob_values={k.get("name"): k.get("value") for k in self.knobs}),
+                             knob_values={k.get("name"): k.get("value") for k in self.knobs},
+                             step_routes=self.step_routes),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1327,7 +1349,8 @@ def _fence(text: str) -> str:
 def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                     node_states: Sequence[dict[str, Any]] = (),
                     edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
-                    knob_values: Mapping[str, Any] | None = None) -> list[str]:
+                    knob_values: Mapping[str, Any] | None = None,
+                    step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     """The operations a request offers, each said once: the written-out operations in a
     table (fields and description), then the core operators, one line and one example each
     (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
@@ -1340,7 +1363,7 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                       _edit_fields(c.get("fields") or ()), c.get("description")]
                      for c in written])] if written else []
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
-                                  knob_values=knob_values)
+                                  knob_values=knob_values, step_routes=step_routes)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -1780,9 +1803,8 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "- **crashes**: when the worker or product fails (not the model's own output), an "
         "agent step in the per-item pass that is safe to rerun (no tools, its own report "
         "files only, or a workspace) is run again in a fresh session, up to 2 more times; "
-        "if every session crashes it has no answer, as above. A timeout and a failure of the "
-        "connection to the model are not retried and still fail the item. Retried sessions "
-        "count toward the item's time and cost.",
+        "if every session crashes it has no answer, as above. An item that times out is a "
+        f"{HARNESS_TIMEOUT}.",
     ]
     if {"parallel", "parallelize"} & ops:
         lines.append(
@@ -2224,12 +2246,14 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
 
 def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
-                   knob_values: Mapping[str, Any] | None = None) -> list[str]:
+                   knob_values: Mapping[str, Any] | None = None,
+                   step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     """"Structural operators": what the system wires for every one, then each core operator
     the run permits in one line -- its fields and its catalogue description (its
     `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
-    example, its ids taken from this graph where it has them. Nothing when the run
-    permits none."""
+    example, its ids taken from this graph where it has them. When the run has routes to
+    choose from (``step_routes``), one line says the ``route`` field and its values; without,
+    no operator lists it. Nothing when the run permits none."""
     from refactory_dsh.nn import core_ops
 
     ops = {op.get("op") for op in catalogue}
@@ -2254,8 +2278,12 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
             name, ids, node_states, edges, protected, state)
         entry = by_op.get(name) or {}
         description = str(entry.get("description") or f"{spec['line']}.")
-        lines.append(f"- `{name}` ({_core_fields(entry.get('fields') or spec['fields'])}): "
+        fields = [f for f in entry.get("fields") or spec["fields"]
+                  if step_routes or f != core_ops.ROUTE_FIELD]
+        lines.append(f"- `{name}` ({_core_fields(fields)}): "
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
+    if step_routes:
+        lines.append(core_ops.route_field_line(step_routes))
     return lines
 
 
@@ -2286,25 +2314,32 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     if {"parallelize", "insert"} <= ops:
         join = core_ops.parallel_join_id(graph, step)
         copies = [f"{step}_copy{n}" for n in (1, 2)]
-        stems = [str(anchor[0]["writes"][0]).rsplit(".", 1)[0], *copies]
+        # The choice takes over the step's outputs, so what read them (what is scored)
+        # reads the chosen attempt; the step's own reply is then `<step>.txt`.
+        stems = [step, *copies]
         choose = f"{step}_choose"
         out.append(("Several attempts and a choice", [
             {"op": "parallelize", "steps": [step], "copies": 2},
             {"op": "insert", "after": join, "kind": "agent", "id": choose,
              "text": "<compare the attempts against the task>; start your answer with the "
                      f"best one's name: {', '.join(stems)}"},
-            {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call()}]))
+            {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call(),
+             "takes_over": step}]))
     if "loop" in ops:
         out.append(("Check and send back", [
             {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
+        span = {"op": "loop", "step": anchor[1], "back_to": step, "judge": "agent",
+                "text": "<what to check in the result>"}
+        if anchor[1] not in protected and nn_edits.precheck(span, dict(state)) is None:
+            out.append(("Check a later step and send the work back to an earlier one", [span]))
     fork = next((str(n.get("id")) for n in node_states if n.get("kind") == "fork"), None)
     if fork and "branch" in ops:
         out.append(("An independent attempt that sees only the task", [
             {"op": "branch", "fork": fork, "kind": "agent", "text": "<solve it your own way>",
              "sees": ["task"]}]))
     elif "parallelize" in ops:
-        out.append(("An independent attempt that sees only the task", [
-            {"op": "parallelize", "steps": [step], "copies": 1, "sees": ["task"]}]))
+        out.append(("Another attempt beside it, sent exactly what it is sent", [
+            {"op": "parallelize", "steps": [step], "copies": 1}]))
     if code_nodes and "insert" in ops:
         sim = f"{step}_sim"
         out.append(("A simulation step, then an analysis of its results", [
@@ -2336,31 +2371,19 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
 
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
-    """"Time per item", in numbers, so time is reasoned about from them: how long one model
-    step may run (the run's limit; a step's own ``timeout_s`` overrides it), how long the
+    """"Time per item", in numbers, so time is reasoned about from them: how long the
     edited candidate's train items took each (median, 90th percentile, longest: from each
-    item's own record), and how many of them hit the limit. Nothing when none is known."""
+    item's own record). Nothing when it is not known. A model step has no time limit to
+    state (a session ends on inactivity), and an item that timed out is said once, in
+    "Item results" (`HARNESS_TIMEOUT`), not here."""
     facts = dict(facts or {})
-    limit = facts.get("step_limit_s")
-    items, timeouts = int(facts.get("items") or 0), int(facts.get("timeouts") or 0)
-    runs = int(facts.get("runs") or items)
-    counted = f"{items} items" if runs == items else f"{runs} runs of {items} items"
     median = facts.get("per_item_median_s")
-    if not (limit or median is not None or items):
+    if median is None:
         return []
-    parts = []
-    if limit:
-        parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
-                     "step; a step's own `timeout_s` overrides it); a step past its limit fails "
-                     "that item, as a timeout.")
-    if median is not None:
-        parts.append(f"The candidate you edit took {median} s per item at the median on its "
-                     f"train evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
-                     f"{facts.get('per_item_max_s')} s the longest; each item's own time).")
-    if items:
-        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out"
-                     + (f" (hit the {int(limit)} s limit)." if limit and timeouts else "."))
-    return ["## Time per item", " ".join(parts), ""]
+    return ["## Time per item",
+            f"The candidate you edit took {median} s per item at the median on its train "
+            f"evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
+            f"{facts.get('per_item_max_s')} s the longest; each item's own time).", ""]
 
 
 def _cost_note(parsimony: float | None) -> list[str]:
@@ -2646,6 +2669,44 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+#: How a request says, once, an item the harness timed out: the run's own limit on a
+#: model call or an item ended it, whatever that limit is (`harness_timeout`).
+HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a target"
+
+#: The ``error_kind`` (and ``missing_steps`` cause) values a harness ending sets: a model
+#: call the client ended (``timeout``: inactivity, the item deadline) and the backstop
+#: (``harness_incident``). A wall a step declares (``timeout_s``; ``declared_timeout``) is
+#: the pipeline's design, an ordinary failure the optimizer sees.
+HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
+
+
+def harness_timeout(record: Mapping[str, Any]) -> bool:
+    """Whether the harness ended the item for time, from structured fields only: its
+    ``error_kind`` is ``timeout`` (`items.error_kind`: a model call the client ended, or
+    the item deadline), or a step of it has no answer because it timed out. Never from
+    an error's text: an op that quotes a reply saying "timed out", a code step's own
+    ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
+    what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
+    as the pipeline's failure."""
+    if record.get("passed"):
+        return False
+    if str(record.get("error_kind") or "") in HARNESS_TIMEOUT_KINDS:
+        return True
+    return any(isinstance(info, Mapping) and info.get("cause") in HARNESS_TIMEOUT_KINDS
+               for info in (record.get("missing_steps") or {}).values())
+
+
+def _pipeline_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The records a request reads as the pipeline's doing: all but harness timeouts."""
+    return [r for r in records if not harness_timeout(r)]
+
+
+def pipeline_item_errors(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A candidate's item errors (`item_errors`) as every request section says them: a
+    harness timeout is none of them ("Item results" lists it once)."""
+    return item_errors(_pipeline_items(records))
+
+
 #: How the optimizer is told why a step gave no answer (`items.missing_steps` causes).
 NO_ANSWER_CAUSES = {
     "output_limit": "ran out of output without answering",
@@ -2685,24 +2746,33 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     answered wrong and an item whose completion failed (a model call that stopped
     at its output token limit, a timeout) cost the same. The loop already hands the
     proposer these records (``item_records``); this is where it reads them. Train
-    records only, as ``OuterLoop.item_records`` enforces.
+    records only, as ``OuterLoop.item_records`` enforces. A harness timeout is listed
+    once (`HARNESS_TIMEOUT`) and counted nowhere else.
     """
+    timed_out = [r for r in records if harness_timeout(r)]
+    scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
+    total = len(records)
+    records = _pipeline_items(records)
     errored = [r for r in records if r.get("error_text")]
     passed = [r for r in records if not r.get("error_text") and r.get("passed")]
     unanswered = [r for r in records if not r.get("error_text") and not r.get("passed")
                   and r.get("missing_steps")]
     wrong = [r for r in records if not r.get("error_text") and not r.get("passed")
              and not r.get("missing_steps")]
-    scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
     mean = f", mean score {fmt_score(sum(scores) / len(scores))}" if scores else ""
     lines = [
         "## Item results of the candidate being edited",
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
         f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output or "
                       "crashed), " if unanswered else "")
-        + f"{len(errored)} failed with an error{mean}. An error is the item's run failing "
-        "(its cause is below), not a wrong answer.",
+        + f"{len(errored)} failed with an error{'' if timed_out else mean}. An error is the "
+        "item's run failing (its cause is below), not a wrong answer.",
     ]
+    if timed_out:
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
+        lines.append(f"{len(ids)} more ({', '.join(ids)}), each a {HARNESS_TIMEOUT}"
+                     + (f"; mean score over all {total}:{mean.removeprefix(', mean score')}."
+                        if mean else "."))
     if unanswered:
         rows = [[r.get("id"), step, NO_ANSWER_CAUSES.get(str(info.get("cause")), info.get("cause")),
                  info.get("sessions")]
@@ -2878,9 +2948,10 @@ def _item_block(record: dict[str, Any], budget: int,
 
 def _ordered_items(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Every train item once (its first repeat): wrong, then failed with an error,
-    then passed, each group by id."""
+    then passed, each group by id. A harness timeout is not among them: "Item results"
+    lists it once, and no item read as the pipeline's doing is one (`harness_timeout`)."""
     first: dict[str, dict[str, Any]] = {}
-    for record in records:
+    for record in _pipeline_items(records):
         item = str(record.get("id", ""))
         held = first.get(item)
         if held is None or int(record.get("repeat") or 1) < int(held.get("repeat") or 1):
@@ -3090,7 +3161,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     groups = trajectory_groups(records, budget)
     # Numbered over the records "Errors, by cause" numbers its rows over (`_item_evidence`),
     # so an item's "cause N" is that table's row N.
-    refs = error_refs(records)
+    refs = error_refs(_pipeline_items(records))
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
         return header + [f"Every item. {ITEM_FORM}",
@@ -3620,7 +3691,10 @@ def edit_change(parent_records: Sequence[dict[str, Any]] | None,
     largest score changes either way among the rest. Uses only each record's
     ``passed`` and ``score``."""
     parent, child = _by_item(parent_records), _by_item(child_records)
-    shared = sorted(set(parent) & set(child))
+    both = sorted(set(parent) & set(child))
+    # An item the harness timed out on either side moved for no reason of the edit's.
+    timed_out = [i for i in both if harness_timeout(parent[i]) or harness_timeout(child[i])]
+    shared = [i for i in both if i not in timed_out]
     fixed = [i for i in shared if not parent[i].get("passed") and child[i].get("passed")]
     broken = [i for i in shared if parent[i].get("passed") and not child[i].get("passed")]
     moved = []
@@ -3633,7 +3707,7 @@ def edit_change(parent_records: Sequence[dict[str, Any]] | None,
     up = [item for delta, item in sorted(moved, reverse=True) if delta > 0][:EDIT_CHANGE_GRADED]
     down = [item for delta, item in sorted(moved) if delta < 0][:EDIT_CHANGE_GRADED]
     return {"shared": len(shared), "fixed": fixed, "broken": broken, "up": up, "down": down,
-            "deltas": {item: round(delta, 6) for delta, item in moved}}
+            "deltas": {item: round(delta, 6) for delta, item in moved}, "timed_out": timed_out}
 
 
 #: How much of each long field of an edit (a value, a patch, a node) a listing of a
@@ -4024,7 +4098,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
             lines.append("Parent and child were scored in different epochs, with different "
                          "seeds: some changes below may be run-to-run noise.")
         child_records = list(pair.get("child_records") or ())
-        lines += _item_error_lines(item_errors(child_records), len(child_records))
+        lines += _item_error_lines(pipeline_item_errors(child_records), len(child_records))
         if not pair.get("parent"):
             lines.append("This candidate has no parent (it is the seed), so there is nothing "
                          "to compare.")
@@ -4036,7 +4110,13 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
         lines.append(f"On {change['shared']} shared train item(s): {len(change['fixed'])} fixed "
                      f"(parent wrong, child right), {len(change['broken'])} broken (parent right, "
                      f"child wrong); largest score rises {change['up'] or 'none'}, largest drops "
-                     f"{change['down'] or 'none'}.")
+                     f"{change['down'] or 'none'}."
+                     + (f" Left out: {len(change['timed_out'])} item(s) the harness timed out "
+                        "on one side." if change.get("timed_out") else ""))
+        if pair.get("effect"):
+            from .edit_effect import effect_lines
+
+            lines += effect_lines(pair["effect"])
         if pair.get("prediction"):
             checked = prediction_check(pair["prediction"], pair.get("parent_records"),
                                        pair.get("child_records"), pair.get("steps") or ())
@@ -4203,6 +4283,9 @@ class Optimizer:
     #: otherwise is refused with ``E-code-nodes``. The loop sets it from
     #: ``allow_code_nodes``.
     allow_code_nodes: bool = True
+    #: What a step may choose its own route from (`workers.StepRoutes`); one outside it is
+    #: refused with ``E-route``. The loop sets it from its model; None offers nothing.
+    step_routes: Any = None
     #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
     #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
     sandbox: tuple[bool, str] | None = None
@@ -4563,6 +4646,19 @@ class Optimizer:
         if violation:
             return [f"E-protected: {violation}" + _protected_culprit(applied, parent.state,
                                                                       prefixes, protected)]
+        # A grading node is never rewired by an edit either (V17's grader side).
+        for grader in graders:
+            old = nn_edits._graph(parent.state).nodes.get(grader)
+            new = nn_edits._graph(state).nodes.get(grader)
+            if old is not None and (new is None or new.to_state() != old.to_state()):
+                return [f"E-protected: node {grader!r} grades, and the edit changes its "
+                        "declaration"]
+        # A step the bundle adds keeps the reader the bundle gave it (finding 16).
+        from refactory_dsh.nn.core_ops import unread_by_bundle
+
+        unread = unread_by_bundle(parent.state, prefixes, applied)
+        if unread:
+            return [f"E-unread: {unread}"]
 
         # A bundle that changes nothing at all is refused below as one no-op.
         dead = (_dead_edit(applied, parent.state, state)
@@ -4590,6 +4686,9 @@ class Optimizer:
                                  allow_new_node_tools)
         if tooled:
             return tooled
+        routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))
+        if routed:
+            return routed
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
                                     bool(getattr(self, "allow_code_nodes", True)),
                                     getattr(self, "sandbox", None))

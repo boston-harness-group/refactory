@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,20 @@ _FAKE_SDK = textwrap.dedent("""\
             yield { type: 'system', subtype: 'background_tasks_changed', tasks: [] }
             yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session', tools }
             yield { type: 'result', subtype: 'success', is_error: false, result: 'FINAL PINEAPPLE', modelUsage: usage }
+          } else if (process.env.FAKE_SDK_THINK) {
+            // One long thinking turn (FAKE_SDK_THINK seconds) with no message between its
+            // start and its answer but the deltas, which the SDK streams only when asked
+            // for partial messages, as the real one does.
+            const end = Date.now() + Number(process.env.FAKE_SDK_THINK) * 1000
+            while (Date.now() < end) {
+              await new Promise(resolve => setTimeout(resolve, 500))
+              if (options.includePartialMessages) {
+                yield { type: 'stream_event', session_id: 'fake-session', parent_tool_use_id: null,
+                        event: { type: 'content_block_delta', index: 0,
+                                 delta: { type: 'thinking_delta', thinking: 'hmm' } } }
+              }
+            }
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'PINEAPPLE', modelUsage: usage }
           } else if (process.env.FAKE_SDK_COMPACT) {
             // A long step whose conversation outgrows the window. As the real CLI does, it
             // compacts (FAKE_SDK_COMPACT times) and carries on to its answer only when
@@ -366,6 +381,26 @@ def test_a_silent_background_task_and_cli_end_the_step_with_its_last_answer(tmp_
     assert receipt["state"] == "completed"
     assert receipt["background_tasks_abandoned"] == 1
     assert receipt["background_stream_stopped"] is True
+
+
+def test_a_long_thinking_turn_is_activity_through_the_adapter(tmp_path, fake_sdk, monkeypatch):
+    """A Claude Code node thinking for 8 s with no message but its stream's deltas, under
+    a 3 s inactivity limit, runs to its answer: the adapter asks the SDK for partial
+    messages (``includePartialMessages``), relays each as activity
+    (``refactory/worker-activity``), and the worker observer touches the session's
+    activity file (`model.activity_path`). With either link gone the session reads as
+    silent and is stopped on inactivity. The node has no tools, so the Claude Code
+    process beneath it is no sign of life (`DshModelClient._last_activity`)."""
+    monkeypatch.setenv("FAKE_SDK_THINK", "8")
+    workdir = tmp_path / "run"
+    client = _client(tmp_path, inactivity_s=3).with_tool_policy("none")
+    started = time.monotonic()
+    answer = client.complete("Think hard", workdir=workdir)
+    assert answer.strip() == "PINEAPPLE"
+    assert time.monotonic() - started >= 8
+    assert _receipt(workdir)["state"] == "completed"
+    [activity] = (workdir / ".refactory" / "workers").glob("worker-*.activity")
+    assert activity.exists()
 
 
 def test_the_adapter_releases_the_prompt_only_when_no_background_task_runs():

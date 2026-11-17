@@ -238,7 +238,8 @@ def _check_new_node_texts(node_state: Mapping[str, Any]) -> None:
                 "is never closed with '}}'", code="E-node-text")
 
 
-def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[Node, dict[str, Any]]:
+def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any], *,
+                  exact: bool = False) -> tuple[Node, dict[str, Any]]:
     """The new node with knobs of its own, and the knobs to declare for it.
 
     A new node may not bind a knob another node binds: it would silently run that
@@ -250,7 +251,8 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
     later round can ``set_knob`` either. A new code node (`refactory_dsh.snippet`) gets
     its own ``<id>__code`` knob holding its code, so one edit adds the node and its code,
     and a later ``set_knob`` rewrites the code alone. A field the node already binds
-    keeps its binding.
+    keeps its binding. With ``exact`` (an exact copy of a step, `core_ops._clone_agent`)
+    no knob is added: the copy has the knobs of the step it copies, each its own.
     """
     owners = {knob: owner.id for owner in graph.nodes.values()
               for _field, knob in owner.field_bindings}
@@ -267,6 +269,8 @@ def _own_bindings(node: Node, graph: Graph, state: Mapping[str, Any]) -> tuple[N
                 code="E-binding")
     from refactory_dsh.snippet import is_code_node
 
+    if exact:
+        return node, {}
     if node.kind == "agent":
         wanted = [("system_prompt_template", "system_prompt", node.system_prompt_template,
                    "system prompt"),
@@ -312,7 +316,7 @@ def _add_node(state: State, edit: dict) -> State:
     graph = _graph(state)
     if node.id in graph.nodes:
         raise EditError(f"node {node.id!r} already exists")
-    node, own_knobs = _own_bindings(node, graph, state)
+    node, own_knobs = _own_bindings(node, graph, state, exact=edit.get("_exact") is True)
 
     if kind == "start":
         previous = graph.start
@@ -1276,9 +1280,14 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     run -- first gets a no-op step after it (`LOOP_END_CALL`, as an ``insert_after``
     adds it, so a pass's exit moves to it): the gate's ``proceed`` edge leads there, and
     the pass still ends at a step that is not a gate (V12)."""
-    graph = _graph(state)
-    target = edit["target"]
-    gate = dict(edit["gate"])
+    return _loop_steps(_graph(state), edit["target"], dict(edit["gate"]))
+
+
+def _loop_steps(graph: Graph, target: str, gate: dict, back_to: str | None = None
+               ) -> list[dict]:
+    """The steps `_expand_loop` makes: ``gate`` after ``target``, its ``proceed`` edge to
+    what came next, and its ``reloop`` edge to ``back_to`` -- ``target`` itself unless an
+    earlier step is named (the one-line ``loop``'s ``back_to``, `core_ops`)."""
     successor = _sole_out_edge(graph, target)
     steps: list[dict] = []
     onward = successor.target if successor is not None else None
@@ -1294,7 +1303,8 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     steps.append({"op": "remove_edge", "source": successor.source,
                   "target": successor.target, "condition": successor.condition})
     steps.append({"op": "add_edge", "source": target, "target": gate["id"], "condition": None})
-    steps.append({"op": "add_edge", "source": gate["id"], "target": target, "condition": "reloop"})
+    steps.append({"op": "add_edge", "source": gate["id"], "target": back_to or target,
+                  "condition": "reloop"})
     steps.append({"op": "add_edge", "source": gate["id"], "target": onward,
                   "condition": "proceed"})
     return steps
@@ -1721,6 +1731,12 @@ def apply(
         out = dict(state)
         for step in steps:
             out = apply(step, out, edit_reports=edit_reports)
+        from . import core_ops
+
+        if name in core_ops.CORE_OPS:
+            lost = core_ops.lost_inputs(state, out)
+            if lost:
+                raise EditError(lost, code="E-precondition")
         return out
     assert spec.apply is not None
     out = spec.apply(dict(state), edit)

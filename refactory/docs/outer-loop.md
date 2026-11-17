@@ -1782,7 +1782,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 
 | operator | one line | what the system does |
 |---|---|---|
-| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output is wired as **Wiring** below says; before a fork's branch, it takes the branch's place |
+| `insert` | `{"op": "insert", "after": "<step>", "kind": "agent", "text": "..."}` (or `"before"`; `"takes_over": "<earlier step>"`) | a fresh id; the new step sees what the step it sits after sees plus that step's outputs (before a step: what that step sees); its output is wired as **Wiring** below says; before a fork's branch, it takes the branch's place |
 | `remove` | `{"op": "remove", "step": "<step>"}`; on a gate, `"keep": "<verdict>"` | predecessors to successor; a fork's branch leaves the fork's targets and the join's sources, and a fork left with one branch is folded away; an operator's own helper steps (its collect step, a loop's judge) go too, so do the slots it put in other steps' prompts and the knobs only it read; refused with the exact reader when a step still needs what only it makes. On a gate, the kept verdict's path stays and steps only the others reached go |
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
@@ -1792,6 +1792,40 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
 | `merge` | `{"op": "merge", "steps": ["A", "B"], "text": "..."}` | one step with A's inputs and B's outputs; refused when another step reads what A makes |
+
+**What a core operator holds to.** From the 2026-11-17 expressibility audit
+(`audit/easy-dsl-gaps.md` on the lab):
+
+- `insert` takes `takes_over: <step>`: the new step writes that earlier step's outputs, so
+  what read them (what is scored) reads the new step's, and the step's own go under new
+  names (`<step>.txt`, `<step>`) for the steps before the new one. "Several attempts and
+  a choice" uses it, so the chosen attempt is what is graded. The step taken over must
+  have run whenever the new one runs (a fork runs every branch, a route one), so a step on
+  a sibling branch or a route's skipped branch is refused. Also refused: a frozen knob, or
+  a knob a later step shares, that names its output; a step that names it in its code or
+  feedback keys; an agent without tools taking over a step that writes two files; and,
+  with the run's protected and grading nodes, rewiring one (`E-protected`).
+- A `parallelize` copy is the step itself under a new id (`core_ops._clone_agent`): the
+  same prompt, system prompt, role, limits and tools, each bound text in a knob of the
+  copy's own with the same value, frozen where the original's is, and no knob the step
+  lacks. It is sent byte for byte what the step is sent, on both runtimes, so it takes no
+  `sees`.
+- A step a bundle adds keeps the reader the bundle gave it: an edit of the same bundle
+  that removes its last reader (a whole `set_knob` value dropping its `{{slot}}`) is
+  refused `E-unread`, naming that edit; a new step whose output reaches no step is said in
+  the candidate's "As built" (a step ending its pass or the run is not: the Task reads it).
+- A field an operator would ignore is refused, naming the fields it takes
+  (`core_ops._unknown_fields`). That covers a role or timeout on `insert`, a tool list
+  (`tools` is true or false),
+  and a field no step takes inside `new`, `into` or a route's `to`. `insert` lists
+  `system`, which it takes.
+- An operator after which a kept step would run, on some path, without an input it had on
+  every path before is refused (`core_ops.lost_inputs`). An example is a route that skips
+  the steps making what a later step reads. An agent's prompt is read: a `{{slot}}`
+  inside `{% if name %}` is optional there, as the validator holds it (V15). An op or a
+  gate is code that cannot be read, so it keeps every read and input it has, since it may
+  need what it declares optional; only the slots of the knobs it fills honour their
+  guards. A step whose inputs cannot be read is said, never skipped.
 
 **Wiring.** Facts reach a model step as `{{slots}}` in its own prompt knob, files through
 a `collect` step in front of it (so a missing or binary file is said, not a crash); a
@@ -1813,6 +1847,35 @@ runs with when it works in such a workspace (`E-new-node-tools` otherwise, unles
 allows tools for new nodes). A step that uses tools in the run directory is not run
 beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
 
+**Each kind tried, against the noise.** A kind tried once with a small result read as a
+run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,
+after one branch, "DON'T add more parallel analysis branches". Yet one of S1's 17
+validation items is 0.059 of the validation mean, so a single try is inside the noise
+either way. The memory call now gets, per kind tried, the tries and each one's train
+fixed/broken counts and the gate's word, with the noise they sit in: one validation item's
+share (`1/|val|`, from the split) and, when the run re-scored the parent, how far its train
+score moved (`memory.kind_tally_lines`). The counts are said there once; the tried entries
+keep their edits and score. `MEMORY_SYSTEM` says a kind tried once inside that noise is no
+evidence against the kind: the note says what went wrong in that try, from how it moved its
+items, never "avoid" it. The untested-kinds rule stands. The proposer sees the same tally,
+kept with the note it was written from, beside the note (`memory.request_lines`).
+
+**How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
+that an edit moved items, not how. For a child whose graph has steps its parent's lacks,
+the records say it (`optim.edit_effect`): for its broken and its fixed items, which of
+those new steps ran on them, what each new gate answered (an item counted under each
+verdict it got at least once), which step the child called more often than the parent did
+on the same item and -- where the mode's Task reads a reply as an answer
+(`Task.reply_correct`, found by `task.reply_judge`) -- of those, on how many the first
+reply was already right and then changed to a wrong one, or was never right. A reply the
+Task cannot read, a reading that fails, a Task that reads no reply and an item whose
+parent run failed are each said, never dropped. It is computed from the records, with no
+model call, and it is generic: steps are compared by name, verdicts are the gates' own,
+and only the Task reads a reply. "What the last edit changed" shows it under each child's counts (a rejected
+child too), and memory's "What was tried this epoch" under each structural change. On the
+stopped S1-s45 run the loop broke 8 items; on 5, the solver's first reply was right before
+the judge sent it back.
+
 **The request.** Under "Structural operators", one line and one example per operator,
 with this graph's ids; then compositions built only from them -- several attempts and a
 choice (`parallelize` copies, an `insert` judge after the join, an `insert` `select` op),
@@ -1827,14 +1890,24 @@ citing steps and items by id), `flow_change` (which step sees what) and a checka
 proposal record). "What the last edit changed" puts each child's prediction beside a
 mechanical check: what happened to the items it names (fixed, broken, score up or down,
 unchanged) and the steps it names (how many items a step's reply changed on, or that it is
-new or gone). Two facts are said in numbers: "Time per item" (how long one model step may
-run; how long the edited candidate's train items took each -- median, 90th percentile and
+new or gone). Two facts are said in numbers: "Time per item" (how long the edited
+candidate's train items took each -- median, 90th percentile and
 longest, from each item record's own `duration_s`, which both runtimes stamp from the
-item's pass starting (`items.item_duration`) -- and how many of its items hit the limit;
+item's pass starting (`items.item_duration`), over the items the harness did not time out;
 never its wall time over its items, which its slowest item sets), and cost: with no cost
 term (parsimony 0),
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
+
+**A harness timeout is not a target.** An item the harness ended for time
+(`base.harness_timeout`: an `error_kind`, or a step's `missing_steps` cause, of `timeout`
+-- a session ended on inactivity, the item deadline -- or `harness_incident`, the
+backstop; never read from an error's text) still scores what it scored, 0, but no request reads it as the
+pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
+error row, no item shown in full, no time and no analyst's batch, and the analysts are told
+not to propose changes aimed at timeouts or retries for them. A wall a step declares
+(`timeout_s`, `declared_timeout`) is the pipeline's design and an ordinary failure. "How nodes compose" says it
+in one sentence. The SkillOpt port's own requests are SkillOpt's and unchanged.
 
 **The request's order.** The proposal request (`ProposalContext.render`) gives the right
 things in the right order, each once: what the score measures; the pipeline, once, as the
@@ -2065,6 +2138,7 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | node field: `retry` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: a timeout or retry setting as a knob* | - |
 | node field: `outputs_only` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: not a configure setting* | - |
 | node field: `workspace` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: the workspace kind* | - |
+| node field: `route` | `add_node`, `insert`, `branch`, `merge`, `split`, `parallelize`, `route` | `split` | - |
 | node field: `tool_policy` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: tools are not a configure setting* | - |
 | node field: `field_bindings` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *deferred: binding a new setting on an existing step* | - |
 | node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |

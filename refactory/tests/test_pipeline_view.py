@@ -319,7 +319,8 @@ class _Reading:
     another at its depth follows it; a block's first line follows its header; a route's or
     loop's labelled ways follow the gate; what comes after a block follows the tails of its
     ways (a way ending in ``-> end`` has none); ``-> X (above)`` goes to X; a loop line
-    sends back to its step; a fallback line lists its edges. Steps the view folds into
+    sends back to its step (``loop(back_to … step``: to back_to, judging step, which it
+    follows); a fallback line lists its edges. Steps the view folds into
     another line (folded ops, judges, joins, no-op steps) may stand between two read
     steps. Read from the lines (keys, depths, the route/loop/fallback text), never from the
     drawer's own records."""
@@ -342,12 +343,29 @@ class _Reading:
                 for target in re.findall(r"(\w+)(?: \[[^\]]*\])?",
                                          line.text.split("edges -> ", 1)[1]):
                     self._follow({source}, target)
-            if line.reader == "loop" and "loop(" in line.text:
+            if line.reader == "loop" and line.text.startswith("loop("):
+                # loop(sent, ...) or loop(sent … judged, ...): the gate sends back to
+                # ``sent`` and judges ``judged``, the step its line follows.
                 gate = line.key
-                for e in self.graph.out_edges(gate):
-                    if (gate, e.target) in view.back and f"loop({view._shown_from(e.target)}" \
-                            in line.text:
-                        self.covered.add((gate, e.target))
+                head = line.text[len("loop("):].split(", judge ", 1)[0]
+                sent, _, judged = head.partition(" … ")
+                said = set(sent.split(", "))
+                back = {e.target: view._shown_from(e.target) for e in self.graph.out_edges(gate)
+                        if (gate, e.target) in view.back}
+                for target, shown in back.items():
+                    if shown in said:
+                        self.covered.add((gate, target))
+                self.wrong |= {(gate, name) for name in said - set(back.values())}
+                steps = lambda names: all(  # noqa: E731 - read here only
+                    n in self.graph.nodes and self.graph.nodes[n].kind in ("agent", "op")
+                    for n in names)
+                names = judged.split(", ") if judged else []
+                if names and (len(said) != 1 or said & set(names) or not steps(said | set(names))):
+                    # A span names one step sent back to and other steps judged.
+                    self.wrong.add((gate, line.text.split(", judge ", 1)[0]))
+                for name in names:
+                    if not self._leads_to(name, gate):
+                        self.wrong.add((name, gate))
 
     def _path(self, a: str, b: str) -> list[tuple[str, str]] | None:
         """The edges from ``a`` to ``b`` through folded steps only (forward edges)."""
@@ -371,6 +389,26 @@ class _Reading:
                         seen.add(t)
                         todo.append((t, [*path, (node, t)]))
         return None
+
+    def _leads_to(self, a: str, gate: str) -> bool:
+        """Whether ``a`` leads to ``gate`` along forward edges (and to a join that waits for
+        it) through folded steps and loop gates (a loop's gate belongs to the step before it): what a loop line's
+        judged step says."""
+        loops = {key for key, node in self.graph.nodes.items() if node.kind == "gate"
+                 and any((key, e.target) in self.view.back for e in self.graph.out_edges(key))}
+        todo, seen = [a], {a}
+        while todo:
+            node = todo.pop()
+            joins = [key for key, n in self.graph.nodes.items()
+                     if n.kind == "join" and node in n.sources]  # waited for, edge or not
+            for target in [e.target for e in self.graph.out_edges(node)
+                           if (node, e.target) not in self.view.back] + joins:
+                if target == gate:
+                    return True
+                if target not in seen and (self.view._hidden(target) or target in loops):
+                    seen.add(target)
+                    todo.append(target)
+        return False
 
     def _follow(self, tails: set[str], b: str) -> None:
         for t in tails:
@@ -521,6 +559,81 @@ def test_the_lines_read_as_exactly_the_graph_s_edges_on_seeds_and_random_edits(s
         assert unread == set(), (seed, sorted(unread), pv.render(current))
 
 
+def test_a_loop_keeps_the_plain_form_unless_it_sends_back_over_other_steps():
+    """A send-back to a fork (its whole block, the gate after the join) or to several
+    places reads as before; a gate's span never names a fork, a gate or the step it sends
+    back to."""
+    gate_loop = _seed("fuzz_gate_loop")
+    forked = nn_edits.apply({"op": "parallelize", "steps": ["work"], "copies": 2}, gate_loop)
+    line = _lines(forked)["review"]
+    assert line.startswith("loop(work_fork, judge "), line
+    lean = pv.render(_mode("lean_pack/prover").state_dict())
+    assert "loop(attempt … verify, judge " in lean
+
+
+def _bare(nodes: list[dict], edges: list[tuple]) -> dict:
+    """A bare graph from ``a``: agents that write one file each, gates on a stub judge."""
+    return {"graph": {"start": "a", "nodes": {n["id"]: n for n in nodes},
+                      "edges": [{"source": s, "target": t, "condition": c} for s, t, c in edges]},
+            "knobs": {}}
+
+
+def test_a_span_judges_steps_never_a_fork_or_a_route_gate():
+    """A gate right after a join judges the branches' last steps, not the fork; a gate a
+    route's label leads to keeps the plain form, its route gate being no step."""
+    agent = lambda i: {"id": i, "kind": "agent", "prompt_template": "x",  # noqa: E731
+                       "writes": [f"{i}.txt"]}
+    gate = lambda i: {"id": i, "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}  # noqa: E731
+    after_join = _bare(
+        [agent("a"), {"id": "f", "kind": "fork", "targets": ["b", "c"]}, agent("b"), agent("c"),
+         {"id": "j", "kind": "join", "sources": ["b", "c"]}, gate("g"), agent("z")],
+        [("a", "f", None), ("f", "j", None), ("b", "j", None), ("c", "j", None),
+         ("j", "g", None), ("g", "a", "reloop"), ("g", "z", "proceed")])
+    assert _lines(after_join)["g"].startswith("loop(a … b, c, judge ")
+    # A branch end the join waits for by its sources alone (no edge to it) is judged too.
+    edges = after_join["graph"]["edges"]
+    after_join["graph"]["edges"] = [e for e in edges if (e["source"], e["target"]) != ("c", "j")]
+    assert _lines(after_join)["g"].startswith("loop(a … b, c, judge ")
+    after_route = _bare(
+        [agent("a"), gate("r"), gate("g"), agent("x"), agent("z")],
+        [("a", "r", None), ("r", "g", "proceed"), ("r", "x", "other"), ("x", "z", None),
+         ("g", "a", "reloop"), ("g", "z", "done")])
+    assert _lines(after_route)["g"].startswith("loop(a, judge ")
+
+
+def test_every_registered_mode_s_loop_lines_read_as_its_edges():
+    """In every mode whose view has loop lines (the written-out loops of design, create,
+    lean, annealing, ...), what each loop line says -- where it sends back, what it judges
+    -- is the graph's edges, spans included."""
+    from refactory_dsh import registry as reg
+
+    checked: set[str] = set()
+    for package, modes in reg.catalogue(Path(".")).items():
+        for mode in modes:
+            name = f"{package}/{mode.get('name')}"
+            try:
+                state = reg.resolve(Path("."), name)[1]().state_dict()
+            except Exception:  # noqa: BLE001 - a mode that needs its own setup is not ours
+                continue
+            if not any(line.reader == "loop" for line in pv.view_lines(state)):
+                continue
+            checked.add(name)
+            gates = {line.key for line in pv.view_lines(state) if line.reader == "loop"}
+            wrong, unread = _reading_problems(state)
+            # Only what loop lines say is held here; the rest of a mode's reading is the
+            # seeds' and shapes' tests' to hold.
+            assert {p for p in wrong | unread if gates & set(p)} == set(), (name, wrong, unread)
+    assert {"default_pack/create", "lean_pack/prover"} <= checked, checked
+
+
+def test_the_random_draws_include_loops_that_send_back_to_an_earlier_step():
+    """The draws above cover ``loop``'s ``back_to`` (`core_ops.sample`): on several seeds a
+    drawn loop's line reads ``loop(back_to … step``."""
+    spans = {seed for seed in sf.seeds() for state in _draws(seed)
+             if re.search(r"(?m)^\s*loop\(\w+ … \w+, judge ", pv.render(state))}
+    assert len(spans) >= 3, spans
+
+
 def test_the_lines_read_as_exactly_the_graph_s_edges_on_the_shapes():
     for name, state in _shapes().items():
         assert validate_state(state) == [] or name == "two passes", name
@@ -655,6 +768,51 @@ def test_a_loop_line_round_trips_its_step_and_cap():
     again = {"op": "loop", "step": step, "judge": "agent", "text": "Check it.",
              "max_iterations": int(cap)}
     assert _lines(nn_edits.apply(again, s1))["solve_check"] == line
+
+
+def test_a_back_to_loop_line_round_trips_its_handles():
+    """``loop(back_to … step, ...)`` read back as an edit rebuilds the same line."""
+    s4 = _mode("livemath/skill_graph").state_dict()
+    edit = {"op": "loop", "step": "decide", "back_to": "compare", "judge": "agent",
+            "text": "Check it.", "max_iterations": 2}
+    line = _lines(nn_edits.apply(edit, s4))["decide_check"]
+    found = re.match(r"loop\((\w+) … (\w+), judge (\w+) .*, max (\d) -> (\d) runs", line)
+    assert found, line
+    back_to, step, _judge, cap, runs = found.groups()
+    assert (back_to, step, int(cap), int(runs)) == ("compare", "decide", 2, 3)
+    again = {"op": "loop", "step": step, "back_to": back_to, "judge": "agent",
+             "text": "Check it.", "max_iterations": int(cap)}
+    assert _lines(nn_edits.apply(again, s4))["decide_check"] == line
+
+
+def test_the_lines_read_as_exactly_the_graph_s_edges_with_back_to_loops(monkeypatch):
+    """Soundness and completeness hold for loops sending back over a span: across a fork
+    (S4), inside a pass (S1 with a step inserted before solve), nested inside another
+    loop's span, and a reading that names the wrong handle is caught."""
+    s4 = _mode("livemath/skill_graph").state_dict()
+    s1 = nn_edits.apply({"op": "insert", "before": "solve", "kind": "agent", "id": "plan"},
+                        _mode("livemath/solver").state_dict())
+    nested = nn_edits.apply({"op": "loop", "step": "precision"}, s4)
+    states = {
+        "s4": nn_edits.apply({"op": "loop", "step": "decide", "back_to": "compare"}, s4),
+        "s1": nn_edits.apply({"op": "loop", "step": "solve", "back_to": "plan"}, s1),
+        "nested": nn_edits.apply({"op": "loop", "step": "decide", "back_to": "compare"},
+                                 nested),
+    }
+    for name, state in states.items():
+        assert validate_state(state) == [], name
+        wrong, unread = _reading_problems(state)
+        assert wrong == set() and unread == set(), (name, wrong, unread, pv.render(state))
+    # The reader is not lenient: a line naming another step to send back to, or another
+    # judged step, reads as edges the graph lacks.
+    for swap in (("loop(compare … decide", "loop(decide … compare"),
+                 ("loop(compare … decide", "loop(precision … decide")):
+        real = pv._View.loop
+        with monkeypatch.context() as patch:
+            patch.setattr(pv._View, "loop",
+                          lambda self, gate, real=real, swap=swap: real(self, gate).replace(*swap))
+            wrong, _unread = _reading_problems(states["s4"])
+        assert wrong, swap
 
 
 def test_a_route_line_round_trips_its_handles_and_its_ways_rejoin():
@@ -1044,6 +1202,12 @@ def test_the_legend_s_forms_are_what_the_readers_draw():
         line = _lines(looped)["solve_check"]
         found = re.match(r"loop\((\w+), judge .*, max (\d+) -> (\d+) runs", line)
         assert found and (int(found.group(2)), int(found.group(3))) == (cap, cap + 1), line
+    s4 = _mode("livemath/skill_graph").state_dict()
+    back = _lines(nn_edits.apply({"op": "loop", "step": "decide", "back_to": "compare",
+                                  "max_iterations": 3}, s4))["decide_check"]
+    form = pv.FORMS["loop back"].split(", judge")[0].replace("back_to", "compare").replace(
+        "step", "decide")
+    assert back.startswith(form + ", judge ") and "max 3 -> 4 runs" in back, back
     text = pv.render(_seed("fuzz_fork_join"))
     assert re.search(r"(?m)^parallel \w+ \{$", text) and re.search(r"(?m)^\} -> \w+$", text)
     routed = pv.render(nn_edits.apply({"op": "route", "after": "draft", "judge": "agent",

@@ -96,6 +96,16 @@ def test_quick_tier_every_accepted_edit_is_sound():
     assert not stats.findings, _report(stats)
 
 
+def test_the_core_operators_own_checks_are_reached_and_sound():
+    """'takes_over' (taken and refused), a field an operator would ignore and a route that
+    loses an input are drawn and reached, and every edit accepted on the way is sound."""
+    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1000)
+    assert not stats.findings, _report(stats)
+    for path in ("ignored field refused", "lost input refused", "takes_over accepted",
+                 "takes_over: target not first"):
+        assert stats.paths[path] > 0, (path, dict(stats.paths))
+
+
 def test_the_compound_generator_mixes_every_kind_of_edit():
     """Lists of 2-4 edits, now and then one too many; text edits as values and patches;
     node copies followed by their own prompt knob; structure edits; malformed ones."""
@@ -280,7 +290,7 @@ def test_mutation_spine_without_distinct_gate_verdicts_is_caught(monkeypatch):
 
 
 def test_mutation_knobs_without_own_system_prompts_is_caught(monkeypatch):
-    monkeypatch.setattr(edits_mod, "_own_bindings", lambda node, graph, state: (node, {}))
+    monkeypatch.setattr(edits_mod, "_own_bindings", lambda node, graph, state, **_: (node, {}))
     _finds("knobs", seeds=("fuzz_dataflow", "livemath_skill_graph"))
 
 
@@ -316,6 +326,16 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
     monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, allowed: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
+
+
+def test_mutation_route_without_the_run_s_routes_is_caught(monkeypatch):
+    monkeypatch.setattr(base_mod, "_step_route_refusals", lambda parent, state, routes: [])
+    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"))
+
+
+def test_mutation_walker_ignoring_a_step_s_route_is_caught(monkeypatch):
+    monkeypatch.setattr(sf.ScriptedModel, "with_step_route", lambda self, route: self)
+    _finds("route", seeds=("fuzz_draft_review", "fuzz_fork_join"), walker=True, edits=400)
 
 
 @pytest.mark.skipif(not __import__("refactory_dsh.snippet").snippet.available()[0],

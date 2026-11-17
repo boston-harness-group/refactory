@@ -104,6 +104,12 @@ export interface WorkflowNode {
    */
   workspace?: AgentWorkspace
   /**
+   * `AgentNode`: the step's own model, effort and output cap (Python's `Node.route`).
+   * Python's lowering puts it on the step's worker model context; the spine checks its
+   * shape and that the step is dispatched (`validateGraph`), and does not otherwise read it.
+   */
+  route?: Record<string, string>
+  /**
    * `AgentNode`: optional tool policy. When `'none'`, the model receives no
    * tools and the runtime captures its text reply as the node's single declared
    * output. Absent preserves existing tool-enabled behavior.
