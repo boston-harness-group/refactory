@@ -182,6 +182,35 @@ def test_back_to_outside_the_judged_step_s_fork_branch_is_refused():
                       "step after the fork's join to re-run the whole fork)")
 
 
+def test_back_to_inside_a_branch_from_after_the_join_is_refused():
+    """With one branch, its head is on every path past the join: the branch rule refuses
+    it, since a send-back from after the join re-runs the fork whole."""
+    import copy
+
+    state = copy.deepcopy(sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
+    graph = state["graph"]
+    graph["nodes"]["split"]["targets"] = ["left"]
+    graph["nodes"]["merge"]["sources"] = ["left"]
+    for gone in ("right_a", "right_b"):
+        del graph["nodes"][gone]
+    graph["edges"] = [e for e in graph["edges"] if not {e["source"], e["target"]}
+                      & {"right_a", "right_b"}]
+    graph["nodes"]["decide"]["reads"] = ["left.txt"]
+    graph["nodes"]["decide"]["prompt_template"] = "Decide."
+    assert validate_state(state) == []
+    assert _refused({"op": "loop", "step": "decide", "back_to": "left"}, state) == (
+        "'back_to' 'left' is inside a branch of fork 'split' and 'decide' is not; a send-back "
+        "from after the join re-runs the whole fork, so it names a step before 'split'")
+
+
+def test_the_written_out_loop_refuses_back_to():
+    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    edit = {"op": "loop", "target": "review", "back_to": "draft",
+            "gate": {"id": "g", "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}}
+    assert _refused(edit, state) == ("'back_to' goes with the one-line loop ('step' and "
+                                     "'judge'); written out, the gate sends back to 'target'")
+
+
 def test_back_to_an_op_is_refused_naming_the_model_step_to_use():
     """The runtimes hand a reloop's reason only to an agent's prompt (the spine's
     ``feedback[target]``, the walker's ``with_feedback``), so an op could only lose it."""

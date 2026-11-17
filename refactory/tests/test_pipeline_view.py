@@ -356,8 +356,15 @@ class _Reading:
                     if shown in said:
                         self.covered.add((gate, target))
                 self.wrong |= {(gate, name) for name in said - set(back.values())}
-                for name in judged.split(", ") if judged else ():
-                    if name not in self.graph.nodes or self._path(name, gate) is None:
+                steps = lambda names: all(  # noqa: E731 - read here only
+                    n in self.graph.nodes and self.graph.nodes[n].kind in ("agent", "op")
+                    for n in names)
+                names = judged.split(", ") if judged else []
+                if names and (len(said) != 1 or said & set(names) or not steps(said | set(names))):
+                    # A span names one step sent back to and other steps judged.
+                    self.wrong.add((gate, line.text.split(", judge ", 1)[0]))
+                for name in names:
+                    if not self._leads_to(name, gate):
                         self.wrong.add((name, gate))
 
     def _path(self, a: str, b: str) -> list[tuple[str, str]] | None:
@@ -382,6 +389,26 @@ class _Reading:
                         seen.add(t)
                         todo.append((t, [*path, (node, t)]))
         return None
+
+    def _leads_to(self, a: str, gate: str) -> bool:
+        """Whether ``a`` leads to ``gate`` along forward edges through folded steps and
+        loop gates (a loop's gate belongs to the step before it): what a loop line's
+        judged step says."""
+        loops = {key for key, node in self.graph.nodes.items() if node.kind == "gate"
+                 and any((key, e.target) in self.view.back for e in self.graph.out_edges(key))}
+        todo, seen = [a], {a}
+        while todo:
+            node = todo.pop()
+            for e in self.graph.out_edges(node):
+                if (node, e.target) in self.view.back:
+                    continue
+                if e.target == gate:
+                    return True
+                if e.target not in seen and (
+                        self.view._hidden(e.target) or e.target in loops):
+                    seen.add(e.target)
+                    todo.append(e.target)
+        return False
 
     def _follow(self, tails: set[str], b: str) -> None:
         for t in tails:
@@ -530,6 +557,69 @@ def test_the_lines_read_as_exactly_the_graph_s_edges_on_seeds_and_random_edits(s
         wrong, unread = _reading_problems(current)
         assert wrong == set(), (seed, sorted(wrong), pv.render(current))
         assert unread == set(), (seed, sorted(unread), pv.render(current))
+
+
+def test_a_loop_keeps_the_plain_form_unless_it_sends_back_over_other_steps():
+    """A send-back to a fork (its whole block, the gate after the join) or to several
+    places reads as before; a gate's span never names a fork, a gate or the step it sends
+    back to."""
+    gate_loop = _seed("fuzz_gate_loop")
+    forked = nn_edits.apply({"op": "parallelize", "steps": ["work"], "copies": 2}, gate_loop)
+    line = _lines(forked)["review"]
+    assert line.startswith("loop(work_fork, judge "), line
+    lean = pv.render(_mode("lean_pack/prover").state_dict())
+    assert "loop(attempt … verify, judge " in lean
+
+
+def _bare(nodes: list[dict], edges: list[tuple]) -> dict:
+    """A bare graph from ``a``: agents that write one file each, gates on a stub judge."""
+    return {"graph": {"start": "a", "nodes": {n["id"]: n for n in nodes},
+                      "edges": [{"source": s, "target": t, "condition": c} for s, t, c in edges]},
+            "knobs": {}}
+
+
+def test_a_span_judges_steps_never_a_fork_or_a_route_gate():
+    """A gate right after a join judges the branches' last steps, not the fork; a gate a
+    route's label leads to keeps the plain form, its route gate being no step."""
+    agent = lambda i: {"id": i, "kind": "agent", "prompt_template": "x",  # noqa: E731
+                       "writes": [f"{i}.txt"]}
+    gate = lambda i: {"id": i, "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}  # noqa: E731
+    after_join = _bare(
+        [agent("a"), {"id": "f", "kind": "fork", "targets": ["b", "c"]}, agent("b"), agent("c"),
+         {"id": "j", "kind": "join", "sources": ["b", "c"]}, gate("g"), agent("z")],
+        [("a", "f", None), ("f", "j", None), ("b", "j", None), ("c", "j", None),
+         ("j", "g", None), ("g", "a", "reloop"), ("g", "z", "proceed")])
+    assert _lines(after_join)["g"].startswith("loop(a … b, c, judge ")
+    after_route = _bare(
+        [agent("a"), gate("r"), gate("g"), agent("x"), agent("z")],
+        [("a", "r", None), ("r", "g", "proceed"), ("r", "x", "other"), ("x", "z", None),
+         ("g", "a", "reloop"), ("g", "z", "done")])
+    assert _lines(after_route)["g"].startswith("loop(a, judge ")
+
+
+def test_every_registered_mode_s_loop_lines_read_as_its_edges():
+    """In every mode whose view has loop lines (the written-out loops of design, create,
+    lean, annealing, ...), what each loop line says -- where it sends back, what it judges
+    -- is the graph's edges, spans included."""
+    from refactory_dsh import registry as reg
+
+    checked: set[str] = set()
+    for package, modes in reg.catalogue(Path(".")).items():
+        for mode in modes:
+            name = f"{package}/{mode.get('name')}"
+            try:
+                state = reg.resolve(Path("."), name)[1]().state_dict()
+            except Exception:  # noqa: BLE001 - a mode that needs its own setup is not ours
+                continue
+            if not any(line.reader == "loop" for line in pv.view_lines(state)):
+                continue
+            checked.add(name)
+            gates = {line.key for line in pv.view_lines(state) if line.reader == "loop"}
+            wrong, unread = _reading_problems(state)
+            # Only what loop lines say is held here; the rest of a mode's reading is the
+            # seeds' and shapes' tests' to hold.
+            assert {p for p in wrong | unread if gates & set(p)} == set(), (name, wrong, unread)
+    assert {"default_pack/create", "lean_pack/prover"} <= checked, checked
 
 
 def test_the_random_draws_include_loops_that_send_back_to_an_earlier_step():

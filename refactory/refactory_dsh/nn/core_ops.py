@@ -1693,6 +1693,11 @@ def _back_to(graph: Graph, edit: dict, node: Node) -> Node:
                                f"'back_to' {target.id!r} is not; a loop in a branch sends "
                                "back only within it (judge a step after the fork's join to "
                                "re-run the whole fork)")
+            if target.id in branch and node.id not in branch:
+                raise _Refused(f"'back_to' {target.id!r} is inside a branch of fork "
+                               f"{fork.id!r} and {node.id!r} is not; a send-back from after "
+                               "the join re-runs the whole fork, so it names a step before "
+                               f"{fork.id!r}")
     if target.kind != "agent":
         nearest = _agents_after(graph, flow, target.id, node.id)
         raise _Refused(f"'back_to' {target.id!r} is {'code' if _is_code(target) else 'an op'}, "
@@ -2358,6 +2363,11 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
     def pre_loop(edit: dict, state: dict) -> str | None:
         if not is_one_line_loop(edit):
+            if "back_to" in edit:
+                # Written out, the gate's reloop goes to 'target'; a 'back_to' there would
+                # be ignored, so it is refused rather than dropped.
+                return ("'back_to' goes with the one-line loop ('step' and 'judge'); "
+                        "written out, the gate sends back to 'target'")
             if "max_iterations" in edit:
                 # The written-out form's cap is its gate's own field; a top-level one
                 # would be ignored there, so it is refused rather than dropped.

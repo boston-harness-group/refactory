@@ -279,10 +279,17 @@ class _View:
                       if (gate_id, e.target) in self.back)
         cap = node.bound("max_iterations", self.values)
         knob = node.bound_knob("max_iterations")
-        sent = ", ".join(dict.fromkeys(self._shown_from(t) for t in back))
-        judged = ", ".join(sorted(self._shown_before(gate_id)))
-        return LOOP_LINE.format(step=sent if judged in ("", sent)
-                                else LOOP_SPAN.format(back_to=sent, step=judged),
+        shown = list(dict.fromkeys(self._shown_from(t) for t in back))
+        sent = ", ".join(shown)
+        judged = sorted(self._shown_before(gate_id))
+        # The span form only for one send-back to a step, judging steps other than it; a
+        # send-back to a fork (its whole block), to several places, or past a route or
+        # another gate keeps the plain form.
+        span = (len(shown) == 1 and judged and shown[0] not in judged
+                and self.graph.nodes[shown[0]].kind in ("agent", "op")
+                and all(self.graph.nodes[n].kind in ("agent", "op") for n in judged))
+        return LOOP_LINE.format(step=LOOP_SPAN.format(back_to=sent, step=", ".join(judged))
+                                if span else sent,
                                 judge=self.judge(gate_id),
                                 cap=f"{cap}{'*' if knob in self.frozen else ''}",
                                 runs=cap + 1, knob=f", knob {knob}" if knob else "",
@@ -359,10 +366,13 @@ class _View:
 
     def _shown_before(self, node_id: str) -> set[str]:
         """The drawn steps right before ``node_id``, through hidden steps and loop gates;
-        a send-back into it is not before it."""
+        a send-back into it is not before it, nor is a fork's own edge to its join (the
+        join comes after the branches)."""
         out: set[str] = set()
         sources = {e.source for e in self.graph.in_edges(node_id)
-                   if (e.source, node_id) not in self.back} | {
+                   if (e.source, node_id) not in self.back
+                   and not (self.graph.nodes[e.source].kind == "fork"
+                            and self.graph.nodes[e.source].targets)} | {
             n for n, node in self.graph.nodes.items()
             if node.kind == "fork" and node_id in node.targets}
         for source in sources:
