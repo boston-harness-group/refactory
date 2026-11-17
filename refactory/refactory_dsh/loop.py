@@ -114,6 +114,23 @@ OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
 
+def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
+    ``per_item_p90_s``, ``per_item_max_s`` and ``timed_items`` (how many records had a
+    duration); empty when none did. One slow item moves the longest, never the median."""
+    durations = sorted(float(r["duration_s"]) for r in records
+                       if isinstance(r.get("duration_s"), (int, float))
+                       and not isinstance(r.get("duration_s"), bool))
+    if not durations:
+        return {}
+    middle = len(durations) // 2
+    median = (durations[middle] if len(durations) % 2
+              else (durations[middle - 1] + durations[middle]) / 2)
+    p90 = durations[min(len(durations) - 1, max(0, -(-len(durations) * 9 // 10) - 1))]
+    return {"per_item_median_s": round(median), "per_item_p90_s": round(p90),
+            "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
+
+
 def _timed_out(record: Mapping[str, Any]) -> bool:
     """Whether an item record says the item ran out of time (its error kind, or its error
     or failure text)."""
@@ -122,20 +139,6 @@ def _timed_out(record: Mapping[str, Any]) -> bool:
     text = f"{record.get('error_text') or ''} {record.get('fail_reason') or ''}".lower()
     return "timed out" in text or "timeout" in text
 
-
-def _data_parallelism(state: Mapping[str, Any]) -> int:
-    """How many items the state's data pass runs at once (1 without one)."""
-    from refactory_dsh.nn.graph import Graph
-
-    try:
-        graph = Graph.from_state(dict(state.get("graph") or {}))
-        knobs = {name: (entry or {}).get("value")
-                 for name, entry in (state.get("knobs") or {}).items()}
-        found = [node.effective_parallelism(knobs) for node in graph.nodes.values()
-                 if node.kind == "data"]
-    except Exception:  # noqa: BLE001 - a state that does not read says 1
-        return 1
-    return max(found) if found else 1
 
 class LoopError(RuntimeError):
     """The run cannot proceed. Always names what is wrong with the mode."""
@@ -173,7 +176,6 @@ INTERRUPTION_CAP = 3
 #: The exit status of a run stopped by an interrupted evaluation (`EvaluationInterrupted`):
 #: ``EX_TEMPFAIL``, safe to ``--resume``, unlike a refused configuration (2).
 EXIT_INTERRUPTED = 75
-
 
 
 def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
@@ -5368,30 +5370,22 @@ class Loop(OuterLoop):
 
     def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
         """Time in numbers for the request (`optim.base.time_lines`): how long one model step
-        may run (the inner model's limit), and for the candidate being edited its typical
-        time per item -- its train evaluation's wall time x the items it runs at once /
-        its items -- and how many of its train items timed out."""
+        may run (the inner model's limit), and for the candidate being edited how long its
+        train items took each, from each item's own record (`items.item_duration`): median,
+        90th percentile and longest. Also how many of its train items timed out. Never its
+        wall time over its items: that is set by its slowest item."""
         facts: dict[str, Any] = {}
         limit = getattr(self.model, "timeout_s", None)
         if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
             facts["step_limit_s"] = int(limit)
-        owner, records = self._train_records_owner(board)
+        _owner, records = self._train_records_owner(board)
         if not records:
             return facts
         # A repeated item has a record per run: items are counted once, runs each time.
         facts["items"] = len({record.get("id", index) for index, record in enumerate(records)})
         facts["runs"] = len(records)
         facts["timeouts"] = sum(1 for record in records if _timed_out(record))
-        # The same candidate the records are of, so its time and its timeouts agree.
-        edited = next((c for c in self.population if c.id == owner), None)
-        if edited is not None and edited.duration_s:
-            parallel = _data_parallelism(edited.state)
-            per_item = round(float(edited.duration_s) * parallel / len(records))
-            # Whole seconds, and none under one: a measured wall time, said only where it
-            # carries information rather than noise.
-            if per_item >= 1:
-                facts["parallelism"] = parallel
-                facts["per_item_s"] = per_item
+        facts.update(item_time_spread(records))
         return facts
 
     def _request_order(self, board: list[Candidate]) -> list[Candidate]:

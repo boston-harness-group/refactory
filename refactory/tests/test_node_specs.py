@@ -310,6 +310,9 @@ def test_catalogue_rows_say_which_fields_take_a_node():
     assert "into: one or two steps, each like {kind, text, sees}" in rows["split"]
     for name in ("split", "loop"):
         assert "node object" not in rows[name] and "written out" not in rows[name], rows[name]
+    assert rows["loop"].startswith("- `loop` (step, judge, text, sees, max_iterations, id): ")
+    assert rows["split"].startswith("- `split` (step, into: one or two steps, each like "
+                                    "{kind, text, sees}): ")
     assert "full node object" not in rows["bypass"]
 
 

@@ -1072,9 +1072,10 @@ class ProposalContext:
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
     #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
-    #: model step may run), ``per_item_s`` (the edited candidate's typical time per item),
-    #: ``items`` (distinct train items), ``runs`` (their runs, counting repeats),
-    #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
+    #: model step may run), ``per_item_median_s``/``per_item_p90_s``/``per_item_max_s`` (the
+    #: edited candidate's items' own times, `loop.item_time_spread`), ``items`` (distinct
+    #: train items), ``runs`` (their runs, counting repeats) and ``timeouts`` (runs that
+    #: timed out); empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
@@ -2336,29 +2337,29 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
     """"Time per item", in numbers, so time is reasoned about from them: how long one model
-    step may run (the run's limit; a step's own ``timeout_s`` overrides it), the edited
-    candidate's typical time per item, and how many of its items timed out. Nothing when
-    none is known."""
+    step may run (the run's limit; a step's own ``timeout_s`` overrides it), how long the
+    edited candidate's train items took each (median, 90th percentile, longest: from each
+    item's own record), and how many of them hit the limit. Nothing when none is known."""
     facts = dict(facts or {})
-    limit, per_item = facts.get("step_limit_s"), facts.get("per_item_s")
+    limit = facts.get("step_limit_s")
     items, timeouts = int(facts.get("items") or 0), int(facts.get("timeouts") or 0)
     runs = int(facts.get("runs") or items)
     counted = f"{items} items" if runs == items else f"{runs} runs of {items} items"
-    if not (limit or per_item or items):
+    median = facts.get("per_item_median_s")
+    if not (limit or median is not None or items):
         return []
     parts = []
     if limit:
         parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
                      "step; a step's own `timeout_s` overrides it); a step past its limit fails "
                      "that item, as a timeout.")
-    if per_item:
-        parallel = int(facts.get("parallelism") or 1)
-        parts.append(f"The candidate you edit took about {float(per_item):.0f} s per item on "
-                     "its train evaluation (its wall time"
-                     + (f" x {parallel} items at once" if parallel > 1 else "")
-                     + (f" / {items} items)." if runs == items else f" / {runs} runs)."))
+    if median is not None:
+        parts.append(f"The candidate you edit took {median} s per item at the median on its "
+                     f"train evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
+                     f"{facts.get('per_item_max_s')} s the longest; each item's own time).")
     if items:
-        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out.")
+        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out"
+                     + (f" (hit the {int(limit)} s limit)." if limit and timeouts else "."))
     return ["## Time per item", " ".join(parts), ""]
 
 
@@ -3165,11 +3166,17 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     return lines + examples
 
 
+#: The fields of a core operator's older written-out form (`core_ops`: 'target' and a
+#: 'gate' or 'into' node objects). An edit may still carry them, but its line does not
+#: offer them: each core operator is described by its one-line form only.
+WRITTEN_OUT_FIELDS = ("target", "gate")
+
+
 def _core_fields(fields: Sequence[str]) -> str:
-    """A core operator's fields: its one-line form, never a node object (``into`` is one or
-    two short steps, as its example shows)."""
+    """A core operator's fields as its line offers them: its one-line form, never a node
+    object (``into`` is one or two short steps, as its example shows)."""
     return ", ".join("into: one or two steps, each like {kind, text, sees}" if name == "into"
-                     else name for name in fields)
+                     else name for name in fields if name not in WRITTEN_OUT_FIELDS)
 
 
 def _edit_fields(fields: Sequence[str]) -> str:

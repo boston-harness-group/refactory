@@ -469,6 +469,7 @@ The optimizer loop, named like one.
 | class | `LoopError` | `` |
 | function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'str'` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
+| function | `item_time_spread` | `(records: 'Sequence[Mapping[str, Any]]') -> 'dict[str, Any]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
@@ -480,6 +481,7 @@ The optimizer loop, named like one.
 - **`LoopError`** — The run cannot proceed. Always names what is wrong with the mode.
 - **`default_selection`** — The ``selection`` a ``val_gate`` run gets when it names none: ``single`` for the
 - **`gap_standard_error`** — The standard error of a gap between two scores, for information only.
+- **`item_time_spread`** — How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
 - **`run`** — Build a loop and run it to its bound.
@@ -1090,6 +1092,7 @@ The per-item half of a data node, from the command line.
 | function | `gate_visit` | `(node: 'str', verdict: 'Any') -> 'dict[str, Any]'` |
 | function | `interrupted_cause` | `(text: 'str \| None') -> 'str \| None'` |
 | function | `interrupted_item` | `(record: 'dict[str, Any]') -> 'str \| None'` |
+| function | `item_duration` | `(pass_dir: 'Path \| None') -> 'float \| None'` |
 | function | `items_of` | `(node: 'Node', workdir: 'Path') -> 'list[dict[str, Any]]'` |
 | function | `live_dir` | `(workdir: 'Path', node_id: 'str') -> 'Path'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
@@ -1124,6 +1127,7 @@ The per-item half of a data node, from the command line.
 - **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None
 - **`interrupted_item`** — Why an item record's outcome is unknown, or None when it is the item's own result.
+- **`item_duration`** — Seconds from the item's pass starting (`ITEM_STARTED`) to now, its record being
 - **`items_of`** — The data node's items, loaded the one way both runtimes load them.
 - **`live_dir`** — The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``).
 - **`make_item_record`** — Build a per-item record for one evaluated item.

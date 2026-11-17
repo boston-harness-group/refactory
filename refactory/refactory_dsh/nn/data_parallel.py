@@ -359,7 +359,8 @@ def run_data_concurrent(
                     live.unlink(missing_ok=True)
                 (pass_dir / TIMED_OUT).write_text(phase)
                 record = make_item_record(item_id, None, error=exc,
-                                          exchanges=list(child._item_exchanges), **fields)  # noqa: SLF001
+                                          exchanges=list(child._item_exchanges),  # noqa: SLF001
+                                          pass_dir=pass_dir, **fields)
                 if record is not None:
                     record["error_kind"] = "timeout"
                 result.failed = finished = True

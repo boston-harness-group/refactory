@@ -578,6 +578,20 @@ def fork_branch_b(ctx: Any) -> dict[str, Any]:
     return {}
 
 
+#: How long :func:`fork_branch_b_slow_on_1` spends on item ``1``, in seconds.
+SLOW_ON_1_S = 1.5
+
+
+def fork_branch_b_slow_on_1(ctx: Any) -> dict[str, Any]:
+    """Branch b that takes `SLOW_ON_1_S` seconds on item ``1`` and is :func:`fork_branch_b`
+    otherwise: one item's own time stands out from the others'."""
+    import time
+
+    if _current_id(ctx) == "1":
+        time.sleep(SLOW_ON_1_S)
+    return fork_branch_b(ctx)
+
+
 def fork_branch_b_fail_on_0(ctx: Any) -> dict[str, Any]:
     """Branch b that raises ``ValueError`` on item ``0`` and is :func:`fork_branch_b` otherwise."""
     if _current_id(ctx) == "0":

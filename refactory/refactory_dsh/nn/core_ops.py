@@ -2119,7 +2119,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "loop": {
         "reads_as": ('loop',),
-        "fields": ("step", "judge", "text", "sees", "max_iterations", "id"),
+        "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
@@ -2145,7 +2145,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "split": {
         "reads_as": ('step',),
-        "fields": ("step", "into"),
+        "fields": ("step", "into", "target"),
         "line": "replace a step by two new steps run in turn ('into' two), or by one ('into' "
                 "one: replace); the last takes over its outputs",
         "example": {"op": "split", "step": "<step>",

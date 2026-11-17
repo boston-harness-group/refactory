@@ -1828,8 +1828,11 @@ proposal record). "What the last edit changed" puts each child's prediction besi
 mechanical check: what happened to the items it names (fixed, broken, score up or down,
 unchanged) and the steps it names (how many items a step's reply changed on, or that it is
 new or gone). Two facts are said in numbers: "Time per item" (how long one model step may
-run, the edited candidate's typical time per item -- its train wall time x items at once /
-items -- and how many of its items timed out), and cost: with no cost term (parsimony 0),
+run; how long the edited candidate's train items took each -- median, 90th percentile and
+longest, from each item record's own `duration_s`, which both runtimes stamp from the
+item's pass starting (`items.item_duration`) -- and how many of its items hit the limit;
+never its wall time over its items, which its slowest item sets), and cost: with no cost
+term (parsimony 0),
 that cost is not a reason for or against a change; with one, a "cost per item" column of
 each candidate's measured model cost over its train items.
 
