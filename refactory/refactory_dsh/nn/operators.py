@@ -159,43 +159,88 @@ def select(ctx: Any) -> dict[str, Any]:
 
 
 #: A line that starts a list item: a bullet, or a number or letter then ``.`` or ``)``.
-LIST_ITEM = re.compile(r"^\s*(?:[-*+\u2022]|\(?(?:\d+|[A-Za-z])[.)])\s+\S")
-#: A code fence around the whole list (```json ... ```).
-FENCED = re.compile(r"^```[\w-]*[ \t]*\n(.*?)\n?```$", re.DOTALL)
+LIST_ITEM = re.compile(r"^(?P<indent>\s*)(?:[-*+\u2022]|\(?(?:\d+|[A-Za-z])[.)])\s+\S")
+#: A code fence (``` or ~~~, with a language or none) and what it holds.
+FENCE = re.compile(r"^(```|~~~)[\w-]*[ \t]*\n(.*?)\n?\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def _json_array(text: str) -> list[Any] | None:
+    """The first JSON array in ``text`` that parses and is not empty, or None."""
+    import json
+
+    decoder = json.JSONDecoder()
+    for found in re.finditer(r"\[", text):
+        try:
+            value, _end = decoder.raw_decode(text, found.end() - 1)
+        except ValueError:
+            continue
+        if isinstance(value, list) and value:
+            return value
+    return None
+
+
+def _list_items(lines: Sequence[str]) -> list[str] | None:
+    """The items of a markdown, numbered or lettered list in ``lines`` (two or more at the
+    outermost indent), or None: lines before the first are an introduction; an indented
+    line, a nested item among them, stays with its item; a blank line followed by text that
+    is neither an item nor indented ends the list (what follows is an outro)."""
+    marks = [(i, len(m.group("indent"))) for i, line in enumerate(lines)
+             if (m := LIST_ITEM.match(line))]
+    if not marks:
+        return None
+    top = min(indent for _i, indent in marks)
+    if sum(indent == top for _i, indent in marks) < 2:
+        return None
+    items: list[str] = []
+    blank = False
+    for line in lines:
+        mark = LIST_ITEM.match(line)
+        if mark and len(mark.group("indent")) == top:
+            items.append(line.strip())
+        elif not items:
+            continue
+        elif not line.strip():
+            blank = True
+            continue
+        elif blank and len(line) - len(line.lstrip()) <= top:
+            break
+        else:
+            # A nested item keeps its indent under its parent; a wrapped line does not.
+            items[-1] += "\n" + (line[top:].rstrip() if mark else line.strip())
+        blank = False
+    return items
 
 
 def list_elements(raw: Any) -> list[str]:
-    """The elements of a list, as text. A code fence around it is taken off. A JSON array
-    gives its items (an item that is not text as compact JSON); other JSON (an object) is
-    one element. Text with two or more lines that start a list item (``-``, ``*``, ``1.``,
-    ``2)``, ``A)``, ``b.``) gives one element per item, its following lines kept with it and
-    lines before the first item left out (an introduction). Any other text gives one
-    element per non-empty line."""
+    """The elements of a list, as text. When the text holds one code fence (``` or ~~~),
+    what it holds is the list. Text that is JSON: an array gives its items (an item that is
+    not text as compact JSON), anything else is one element. Else two or more list items
+    (``-``, ``*``, ``1.``, ``2)``, ``A)``) at the outermost indent give one element per item
+    (`_list_items`); else the first JSON array in the text that parses gives its items;
+    else each non-empty line is one element."""
     import json
 
     if isinstance(raw, list):
         items: list[Any] = raw
     else:
         text = str(raw if raw is not None else "").strip()
-        fenced = FENCED.match(text)
-        if fenced:
-            text = fenced.group(1).strip()
+        fences = FENCE.findall(text)
+        if len(fences) == 1:
+            text = fences[0][1].strip()
+        lines = [line.rstrip() for line in text.splitlines()]
         try:
             parsed = json.loads(text)
         except ValueError:
             parsed = None
-        lines = [line.rstrip() for line in text.splitlines()]
+        listed = None if parsed is not None else _list_items(lines)
+        if parsed is None and listed is None:
+            parsed = _json_array(text)
         if isinstance(parsed, list):
             items = parsed
         elif parsed is not None:
             items = [text]
-        elif sum(bool(LIST_ITEM.match(line)) for line in lines) >= 2:
-            items = []
-            for line in lines:
-                if LIST_ITEM.match(line):
-                    items.append(line.strip())
-                elif items and line.strip():
-                    items[-1] += "\n" + line.strip()
+        elif listed is not None:
+            items = listed
         else:
             items = [line.strip() for line in lines if line.strip()]
     return [item if isinstance(item, str) else json.dumps(item, separators=(",", ":"))

@@ -186,8 +186,15 @@ def test_the_elements_of_a_list():
     an introduction, lettered options, numbered steps, an object, prose."""
     assert list_elements('["A: x", "B: y"]') == ["A: x", "B: y"]
     assert list_elements('[{"label": "A"}, 2]') == ['{"label":"A"}', "2"]
-    assert list_elements('Here they are:\n```json\n["a", "b", "c"]\n```') == [
-        "Here they are:", '```json', '["a", "b", "c"]', "```"]  # a fence inside prose
+    assert list_elements('Here they are:\n```json\n["a", "b", "c"]\n```\nHope that helps.'
+                         ) == ["a", "b", "c"]  # the one fence in the text
+    assert list_elements("~~~\n1. x\n2. y\n~~~") == ["1. x", "2. y"]
+    assert list_elements('Sure, the options are ["a", "b"] as you asked.') == ["a", "b"]
+    assert list_elements("- first\n  - its detail\n  - another\n- second\n\nThat is all.") == [
+        "- first\n  - its detail\n  - another", "- second"]  # nested kept, outro left out
+    assert list_elements("- see [1]\n- and [2]") == ["- see [1]", "- and [2]"]
+    assert list_elements("1. a\n2. b\n   more of b\n\n   still b\n3. c") == [
+        "1. a", "2. b\nmore of b\nstill b", "3. c"]
     assert list_elements('```json\n[\n  "a",\n  "b",\n  "c"\n]\n```') == ["a", "b", "c"]
     assert list_elements("The claims:\n- the series diverges, since its terms\n  do not tend "
                          "to zero\n- it converges\n* by comparison") == [
@@ -329,12 +336,41 @@ def test_a_list_longer_than_max_runs_the_first_max_and_says_so(runtime, tmp_path
     assert all("ran 3 of 4 elements (max 3)" in p for p in combines)
     for record in records:
         assert "missing_steps" not in record
-        # The elements step's visit in the record says it (on the walker; the spine's visit
-        # records were seen to drop steps under heavy test load, so its count is checked in
-        # the combine's prompt above).
-        assert runtime == "spine" or any(
-            "ran 3 of 4 elements (max 3)" in str(step.get("output"))
-            for step in record["steps"]), record["steps"]
+    if runtime == "walker":
+        _every_visit_and_call_recorded(records)
+
+
+def _every_visit_and_call_recorded(records: list[dict], runs: int = 3) -> None:
+    """Each item's record holds the elements step's visit ("ran K of N elements (max K)")
+    and every model call: each run and the combine."""
+    for record in records:
+        assert any(f"ran {runs} of" in str(step.get("output")) and f"(max {runs})" in
+                   str(step.get("output")) for step in record["steps"]), record["steps"]
+        called = sorted(e["node"] for e in record.get("exchanges") or ()
+                        if e["node"].startswith("options_map_"))
+        assert called == sorted([*(f"options_map_{i}" for i in range(1, runs + 1)),
+                                 "options_map_combine"]), called
+
+
+@needs_spine
+@pytest.mark.xfail(strict=True, reason="item-record-lock")
+def test_spine_records_every_visit_and_call_of_a_map(tmp_path):
+    """The spine's parallel runs write the item's exchanges without a lock, so visits and
+    calls are lost (fixed on branch item-record-lock, which flips this)."""
+    # Eight runs at once on every item, five items at once: many writers per record.
+    eight = OPTIONS.replace("for c in item['choices']]", "for c in item['choices'] * 2]")
+    state = nn_edits.apply({"op": "insert", "before": "solve", "kind": "code", "id": "options",
+                            "sees": ["current_item.json"], "text": eight},
+                           _state("livemath/solver"))
+    state = nn_edits.apply({"op": "map", "after": "options", "over": "options", "text": CHECK,
+                            "max": 8, "combine": {"kind": "agent", "text": WEIGH}}, state)
+    state = nn_edits.configure(state, "data_parallelism", "5")
+    # The loss is a race: three runs, so the test fails on it reliably even under load.
+    for attempt in range(3):
+        records, _dsh = _dispatched("livemath/solver", state, {
+            WEIGH: ["<answer>B</answer>"], CHECK: ["a verdict"], "": ["<answer>B</answer>"]},
+            tmp_path / f"attempt{attempt}")
+        _every_visit_and_call_recorded(records, 8)
 
 
 def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True
@@ -426,6 +462,17 @@ def test_an_edit_to_one_part_of_a_map_is_refused():
                         "options_map_5")):
         assert _refused(edit, state) == reason.format(part), edit
     assert nn_edits.precheck({"op": "insert", "after": "options_map_combine"}, state) is None
+    combine = ("'options_map_combine' is the combine of the map 'options_map'; a step goes "
+               "after it (insert after, loop, route), or remove it to take the map out; change "
+               "what it does with its own knobs")
+    for edit in ({"op": "insert", "before": "options_map_combine"},
+                 {"op": "split", "step": "options_map_combine"},
+                 {"op": "rewire", "step": "options_map_combine", "sees": ["task"]},
+                 {"op": "parallelize", "steps": ["options_map_combine"], "copies": 1}):
+        assert _refused(edit, state) == combine, edit
+    assert _refused({"op": "loop", "target": "options_map", "gate": {
+        "id": "g", "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}},
+        state).startswith("'options_map' is part of the map")
 
 
 # ── a map run again, short lists, removal, the knob's slots ────────────────
@@ -584,3 +631,84 @@ def test_a_loop_s_hint_never_names_a_map_s_run():
     reason = nn_edits.precheck({"op": "loop", "step": "decide", "back_to": "options",
                                 "judge": "agent"}, _s4())
     assert reason.endswith("act on it: options_map_combine"), reason
+
+
+def test_every_core_operator_aimed_at_a_map_is_refused_or_leaves_it_removable():
+    """Drawn as the fuzz draws them, every core operator aimed at the map's parts, its
+    combine and the steps around it: refused, or the map still comes out whole by its
+    elements step -- or says plainly which later step would lose its input, or which loop's
+    gate to remove first."""
+    import random
+
+    import structure_fuzz as sf
+    from refactory_dsh.nn import core_ops
+
+    state = _s4()
+    graph = _graph(state)
+    targets = sorted(n for n in graph.nodes if n.startswith("options") or n in (
+        "compare", "prepare"))
+    generator = sf.EditGenerator(random.Random("map-parts"))
+    taken = 0
+    for op in core_ops.CORE_OPS:
+        for target in targets:
+            for _ in range(3):
+                edit = generator.core_op(state, op, target)
+                if nn_edits.precheck(edit, state) is not None:
+                    continue
+                try:
+                    after = nn_edits.apply(edit, state)
+                except nn_edits.EditError:
+                    continue
+                if validate_state(after) or "options_map" not in after["graph"]["nodes"]:
+                    continue
+                taken += 1
+                reason = nn_edits.precheck({"op": "remove", "step": "options_map"}, after)
+                if reason is not None:
+                    # Said plainly: a later step reading its output, or a loop's gate to
+                    # remove first.
+                    assert ("leaves steps without an input only it makes" in reason
+                            or "remove that loop's gate first" in reason), (edit, reason)
+                    continue
+                removed = nn_edits.apply({"op": "remove", "step": "options_map"}, after)
+                assert validate_state(removed) == [], edit
+                assert not set(removed["graph"]["nodes"]) & set(_maps_nodes(after)), edit
+    assert taken >= 20, taken
+
+
+def _maps_nodes(state: dict) -> list[str]:
+    from refactory_dsh.nn.core_ops import _maps
+
+    return _maps(_graph(state), state)["options_map"]["nodes"]
+
+
+@pytest.mark.parametrize("kind", ["code", "agent"])
+def test_removing_a_map_a_later_step_reads_says_which_step_loses_its_input(kind):
+    """A later step given the combine's output (a code step's input, or a slot in an
+    agent's own prompt) is said by name; its slot is never taken out of its prompt."""
+    state = nn_edits.apply({"op": "insert", "after": "options_map_combine", "kind": kind,
+                            "id": "uses_it", "text": "Use {{options_map_combine}}."}
+                           if kind == "agent" else
+                           {"op": "insert", "after": "options_map_combine", "kind": kind,
+                            "id": "uses_it", "sees": ["options_map_combine"]}, _s4())
+    reason = nn_edits.precheck({"op": "remove", "step": "options_map"}, state)
+    assert reason.startswith("removing map 'options_map' leaves steps without an input only "
+                             "it makes: 'uses_it' needs "), reason
+    assert "options_map_combine" in reason and "set_knob" not in reason
+
+
+def test_remove_takes_out_the_slot_and_heading_wherever_they_were_moved():
+    """The optimizer moved the combine's section to the top of decide_task, and wrote the
+    slot inline once more: removing the map leaves decide_task as it was before the map."""
+    state = _s4()
+    task = state["knobs"]["decide_task"]["value"]
+    section = "## Options map combine\n{{options_map_combine}}"
+    assert section in task
+    moved = section + "\n\n" + task.replace(section, "").rstrip() + \
+        " Mind {{options_map_combine}}."
+    state = nn_edits.apply({"op": "set_knob", "name": "decide_task", "value": moved}, state)
+    removed = nn_edits.apply({"op": "remove", "step": "options_map"}, state)
+    before = nn_edits.apply({"op": "insert", "before": "compare", "kind": "code",
+                             "id": "options", "sees": ["current_item.json"], "text": OPTIONS},
+                            _state("livemath/skill_graph"))
+    assert removed["knobs"]["decide_task"]["value"] == \
+        before["knobs"]["decide_task"]["value"] + " Mind."
