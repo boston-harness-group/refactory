@@ -4037,6 +4037,10 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                      f"(parent wrong, child right), {len(change['broken'])} broken (parent right, "
                      f"child wrong); largest score rises {change['up'] or 'none'}, largest drops "
                      f"{change['down'] or 'none'}.")
+        if pair.get("effect"):
+            from .edit_effect import effect_lines
+
+            lines += effect_lines(pair["effect"])
         if pair.get("prediction"):
             checked = prediction_check(pair["prediction"], pair.get("parent_records"),
                                        pair.get("child_records"), pair.get("steps") or ())

@@ -1813,6 +1813,35 @@ runs with when it works in such a workspace (`E-new-node-tools` otherwise, unles
 allows tools for new nodes). A step that uses tools in the run directory is not run
 beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
 
+**Each kind tried, against the noise.** A kind tried once with a small result read as a
+run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,
+after one branch, "DON'T add more parallel analysis branches". Yet one of S1's 17
+validation items is 0.059 of the validation mean, so a single try is inside the noise
+either way. The memory call now gets, per kind tried, the tries and each one's train
+fixed/broken counts and the gate's word, with the noise they sit in: one validation item's
+share (`1/|val|`, from the split) and, when the run re-scored the parent, how far its train
+score moved (`memory.kind_tally_lines`). The counts are said there once; the tried entries
+keep their edits and score. `MEMORY_SYSTEM` says a kind tried once inside that noise is no
+evidence against the kind: the note says what went wrong in that try, from how it moved its
+items, never "avoid" it. The untested-kinds rule stands. The proposer sees the same tally,
+kept with the note it was written from, beside the note (`memory.request_lines`).
+
+**How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
+that an edit moved items, not how. For a child whose graph has steps its parent's lacks,
+the records say it (`optim.edit_effect`): for its broken and its fixed items, which of
+those new steps ran on them, what each new gate answered (an item counted under each
+verdict it got at least once), which step the child called more often than the parent did
+on the same item and -- where the mode's Task reads a reply as an answer
+(`Task.reply_correct`, found by `task.reply_judge`) -- of those, on how many the first
+reply was already right and then changed to a wrong one, or was never right. A reply the
+Task cannot read, a reading that fails, a Task that reads no reply and an item whose
+parent run failed are each said, never dropped. It is computed from the records, with no
+model call, and it is generic: steps are compared by name, verdicts are the gates' own,
+and only the Task reads a reply. "What the last edit changed" shows it under each child's counts (a rejected
+child too), and memory's "What was tried this epoch" under each structural change. On the
+stopped S1-s45 run the loop broke 8 items; on 5, the solver's first reply was right before
+the judge sent it back.
+
 **The request.** Under "Structural operators", one line and one example per operator,
 with this graph's ids; then compositions built only from them -- several attempts and a
 choice (`parallelize` copies, an `insert` judge after the join, an `insert` `select` op),
