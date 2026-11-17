@@ -141,7 +141,6 @@ The edit algebra: every structural change is typed data.
 | function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]') -> 'list[str]'` |
 | function | `enabled` | `(preset: 'str' = 'broad') -> 'list[str]'` |
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
-| function | `loop_steps` | `(graph: 'Graph', target: 'str', gate: 'dict', back_to: 'str \| None' = None) -> 'list[dict]'` |
 | function | `names` | `() -> 'list[str]'` |
 | function | `precheck` | `(edit: 'dict', state: 'Mapping[str, Any]') -> 'str \| None'` |
 | function | `protected_violation` | `(before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', protected: 'Iterable[str]') -> 'str \| None'` |
@@ -158,7 +157,6 @@ The edit algebra: every structural change is typed data.
 - **`core_ops_calls`** — The plain ops a core operator's step may name by callable.
 - **`core_wiring_notes`** — What a core operator wired beside the steps it names (`core_ops.wiring_notes`).
 - **`enabled`** — The operations a preset allows. An unknown preset is an error.
-- **`loop_steps`** — The steps `_expand_loop` makes: ``gate`` after ``target``, its ``proceed`` edge to
 - **`precheck`** — The reason ``edit`` cannot be applied, for the checks that need no state.
 - **`protected_violation`** — Why ``after`` removes, rewires or replaces a protected node of ``before``, or None.
 - **`random_edit`** — A random edit from the enabled set, or ``None`` if none can be built.
