@@ -808,12 +808,33 @@ def test_what_the_last_edit_changed_shows_the_wiring_and_the_prediction_check():
 
 
 def test_time_per_item_is_said_in_numbers():
-    lines = base_mod.time_lines({"step_limit_s": 1800, "per_item_s": 412.3, "items": 20,
-                                 "timeouts": 2, "parallelism": 4})
+    lines = base_mod.time_lines({"step_limit_s": 1800, "per_item_median_s": 120,
+                                 "per_item_p90_s": 300, "per_item_max_s": 1831, "items": 20,
+                                 "timeouts": 2})
     text = " ".join(lines)
-    assert "up to 1800 s" in text and "about 412 s per item" in text
-    assert "x 4 items at once / 20 items" in text and "2 of its 20 train items timed out" in text
+    assert "up to 1800 s" in text and "120 s per item at the median" in text
+    assert "300 s at the 90th percentile, 1831 s the longest" in text
+    assert "2 of its 20 train items timed out (hit the 1800 s limit)" in text
+    assert "wall time" not in text and "at once" not in text
     assert base_mod.time_lines({}) == []
+
+
+def test_one_timeout_moves_the_longest_never_the_median():
+    """S1-s42's figure was its wall time x 12 at once / 35 items: 628 s, set by one item that
+    ran into the 1800 s limit. Each item's own time gives the same median with it or
+    without it."""
+    from refactory_dsh.loop import item_time_spread
+
+    usual = [{"id": str(i), "duration_s": 100.0 + i} for i in range(34)]
+    without = item_time_spread(usual)
+    with_timeout = item_time_spread([*usual, {"id": "slow", "duration_s": 1831.0,
+                                              "error_kind": "timeout"}])
+    assert with_timeout["per_item_median_s"] - without["per_item_median_s"] <= 1
+    assert with_timeout["per_item_max_s"] == 1831 and without["per_item_max_s"] == 133
+    assert item_time_spread([{"id": "a"}]) == {}
+    # The 90th percentile is the 9th of 10, not the longest.
+    spread = item_time_spread([{"id": str(i), "duration_s": float(i)} for i in range(1, 11)])
+    assert (spread["per_item_p90_s"], spread["per_item_max_s"]) == (9, 10)
 
 
 def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_one():
@@ -828,14 +849,15 @@ def test_cost_is_plainly_no_reason_without_a_cost_term_and_shown_per_item_with_o
 
 
 def test_repeated_items_are_counted_once_and_their_runs_each_time():
-    lines = " ".join(base_mod.time_lines({"per_item_s": 30, "items": 4, "runs": 8,
+    lines = " ".join(base_mod.time_lines({"per_item_median_s": 30, "per_item_p90_s": 40,
+                                          "per_item_max_s": 50, "items": 4, "runs": 8,
                                           "timeouts": 3}))
-    assert "/ 8 runs)" in lines and "3 of its 8 runs of 4 train items timed out" in lines
+    assert "3 of its 8 runs of 4 train items timed out" in lines
 
 
 def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
     """With no parent selected, the records stand for the latest candidate's parent; its
-    time per item is that candidate's too, not the leaderboard best's."""
+    items' times are that candidate's too, not the leaderboard best's."""
     from types import SimpleNamespace
 
     from refactory_dsh.loop import Loop
@@ -846,26 +868,26 @@ def test_the_time_facts_are_of_one_candidate_when_no_parent_was_selected():
     child = SimpleNamespace(id="c", parent="p", duration_s=None, state=state)
     loop = SimpleNamespace(model=SimpleNamespace(timeout_s=600), strategy_decision={},
                            _editing_parent=None, population=[best, bred_from, child],
-                           _train_item_records={"p": [{"id": "a"}, {"id": "b", "repeat": 1},
+                           _train_item_records={"p": [{"id": "a", "duration_s": 10.0},
+                                                      {"id": "b", "repeat": 1,
+                                                       "duration_s": 12.0},
                                                       {"id": "b", "repeat": 2,
-                                                       "error_kind": "timeout"}],
-                                                "best": [{"id": "x"}]})
+                                                       "error_kind": "timeout",
+                                                       "duration_s": 600.0}],
+                                                "best": [{"id": "x", "duration_s": 999.0}]})
     loop._train_records_owner = lambda board: Loop._train_records_owner(loop, board)
     facts = Loop._time_facts(loop, [best])
     assert facts["items"] == 2 and facts["runs"] == 3 and facts["timeouts"] == 1
-    assert facts["per_item_s"] == round(40.0 / 3)
+    assert (facts["per_item_median_s"], facts["per_item_max_s"]) == (12, 600)
+    assert "per_item_s" not in facts
 
 
-def test_the_loop_counts_timeouts_and_reads_the_items_at_once_from_the_state():
-    from refactory_dsh.loop import _data_parallelism, _timed_out
+def test_the_loop_counts_timeouts():
+    from refactory_dsh.loop import _timed_out
 
     assert _timed_out({"error_kind": "timeout"})
     assert _timed_out({"error_text": "solve: TimeoutExpired: timed out after 1800 s"})
     assert not _timed_out({"error_text": "ValueError: no", "fail_reason": "wrong answer"})
-    state = sf.Applier(sf.seeds()["fuzz_data_pass"]).seed_state
-    assert _data_parallelism(state) == 2
-    assert _data_parallelism(_parallel(state, 3)) == 3
-    assert _data_parallelism(sf.seeds()["fuzz_dataflow"].state()) == 1
 
 
 # ── a macro on a state an earlier edit of a bundle left with an unreadable cycle ──

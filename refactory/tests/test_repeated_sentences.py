@@ -38,3 +38,11 @@ def test_fenced_text_and_short_repeats_are_not_checked_by_decision():
     assert repeated_sentences(f"```\n{LONG}.\n```\n{LONG}.") == []
     short = "| solve | the step that answers |\n| check | the step that answers |"
     assert repeated_sentences(short) == []
+
+
+def test_with_fenced_a_sentence_in_a_fence_and_an_indented_fence_is_found():
+    """A step's instructions in its settings' fence and again inside an item's prompt,
+    indented under the model client's wrapper, are the same sentence with ``fenced``."""
+    text = f"```\n{LONG}.\n```\n\n```\n- User: ## Your Task\n  {LONG}.\n```\n"
+    assert repeated_sentences(text, fenced=True) == [LONG]
+    assert repeated_sentences(text) == []

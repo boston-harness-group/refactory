@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import ANY
 
 import pytest
+from tests_support import untimed
 
 from refactory_dsh import items, lowering, nn
 from refactory_dsh import task as task_module
@@ -282,8 +283,8 @@ def test_driving_the_commands_produces_the_walkers_facts(tmp_path):
     assert [record.get("steps") for record in result.facts["item_scores"]] == [
         [{"node": "work", "kind": "op", "output": ANY, "digest": ANY, "empty": False}]] * 2
 
-    assert json.loads((driven / "facts.json").read_text())["item_scores"] == (
-        result.facts["item_scores"]
+    assert untimed(json.loads((driven / "facts.json").read_text())["item_scores"]) == (
+        untimed(result.facts["item_scores"])
     )
     assert json.loads((driven / CURRENT_ITEM).read_text()) == json.loads(
         (walked / CURRENT_ITEM).read_text()
@@ -364,8 +365,8 @@ def test_both_runtimes_iterate_the_part_the_run_directory_names(tmp_path):
             _drive(node, driven, index)
 
         assert ids == expected
-        assert json.loads((driven / "facts.json").read_text())["item_scores"] == (
-            result.facts["item_scores"]
+        assert untimed(json.loads((driven / "facts.json").read_text())["item_scores"]) == (
+            untimed(result.facts["item_scores"])
         ), "the runtimes disagree about the part they iterated"
 
 
@@ -637,7 +638,7 @@ def test_failure_records_match_between_runtimes(tmp_path):
         _drive(node, driven, index)
 
     driven_facts = json.loads((driven / "facts.json").read_text())
-    assert driven_facts["item_scores"] == result.facts["item_scores"]
+    assert untimed(driven_facts["item_scores"]) == untimed(result.facts["item_scores"])
 
 
 def test_csv_no_id_column_gets_index_ids_on_spine(tmp_path):
@@ -1276,7 +1277,10 @@ def test_both_runtimes_keep_each_op_and_gate_visit_of_an_item_apart_from_its_mod
                         {"id": node_id, "type": kind})}):
                     refactory_dsh.run.run_node(target, workdir=pass_dir, node_id=node_id)
         items.command_end(node, driven, index)
-    assert json.loads((driven / "facts.json").read_text())["item_scores"] == records
+    driven_records = json.loads((driven / "facts.json").read_text())["item_scores"]
+    # Each item's own time is on both; its value is each run's own.
+    assert all("duration_s" in r for r in [*driven_records, *records])
+    assert untimed(driven_records) == untimed(records)
 
 
 def test_no_visit_is_kept_outside_a_data_pass(tmp_path, monkeypatch):
@@ -1301,3 +1305,16 @@ def test_an_op_visit_says_what_it_gave_and_whether_it_was_empty(tmp_path):
     assert items.op_visit(tmp_path, "op", 0)["empty"] is True, "no facts returned"
     wrote = items.op_visit(tmp_path, "op", {}, ["out.txt"])
     assert wrote["empty"] is False and "out.txt: found it" in wrote["output"], "a file it wrote"
+
+
+def test_a_pass_that_begins_again_counts_its_time_from_then(tmp_path):
+    """A resumed or retried item's pass begins again: its time starts over, so it never
+    counts the time the run was stopped; the spine's end reuses the pass's stamp."""
+    from refactory_dsh.items import ITEM_STARTED, item_duration, prepare_pass_dir
+
+    pass_dir = prepare_pass_dir(tmp_path, "data", "i1", 0)
+    (pass_dir / ITEM_STARTED).write_text("1000.000\n")
+    assert prepare_pass_dir(tmp_path, "data", "i1", 0, starting=False) == pass_dir
+    assert item_duration(pass_dir) > 10 ** 6
+    prepare_pass_dir(tmp_path, "data", "i1", 0)
+    assert item_duration(pass_dir) < 60

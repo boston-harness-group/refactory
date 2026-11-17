@@ -369,6 +369,10 @@ def test_per_item_deadline_covers_setup_and_verify(tmp_path, monkeypatch, parall
         ("slow_verify", "timeout", False),
         ("slow_walk", None, True),
     ]
+    # A timed-out item says how long it ran too: at least the deadline it outlasted.
+    times = {r["id"]: r.get("duration_s") for r in result.facts["item_scores"]}
+    assert times["slow_setup"] >= 1.0 and times["slow_verify"] >= 1.0, times
+    assert times["slow_walk"] >= 2.0, times
 
 
 def test_per_item_deadline_holds_on_a_pool_thread(tmp_path, monkeypatch):
@@ -562,8 +566,11 @@ def test_loop_knob_reaches_the_evaluated_graph(tmp_path, monkeypatch):
     assert serial.count["calls"] == parallel.count["calls"] == _LOOP_ITEMS
     assert serial.count["max"] == 1
     assert parallel.count["max"] == 4
+    from tests_support import untimed
+
     for name in ("item_records.json", "facts.json"):
-        assert json.loads((serial_trial / name).read_text()) == json.loads((parallel_trial / name).read_text())
+        assert untimed(json.loads((serial_trial / name).read_text())) == \
+            untimed(json.loads((parallel_trial / name).read_text()))
 
 
 # ── M5: halts, gate stops and budget stops keep the sequential semantics ──
@@ -1552,6 +1559,36 @@ def test_fork_inside_data_two_runtimes(tmp_path, parallelism, branch_b):
 
 
 @_needs_spine
+@_needs_spine
+def test_each_item_records_its_own_time_on_both_runtimes(tmp_path):
+    """[both runtimes] Every item's record says how long that item took (``duration_s``,
+    from its pass starting), on the walker and the spine alike: the slow item stands out,
+    the others do not."""
+    from loop_ops import SLOW_ON_1_S
+
+    graph = _fork_graph(branch_b="loop_ops:fork_branch_b_slow_on_1")
+    walker = _walker(graph, tmp_path / "walker", model=_SimpleFakeModel())
+    assert walker.exit_ok, walker.error
+    spine_run = tmp_path / "spine"
+    assert _spine(graph, spine_run, tmp_path) == (0, "done")
+    for records in (walker.facts["item_scores"], _spine_facts(spine_run)["item_scores"]):
+        times = {str(r["id"]): r["duration_s"] for r in records}
+        assert set(times) == {"0", "1", "2"}, records
+        assert times["1"] >= SLOW_ON_1_S, times
+        assert max(times["0"], times["2"]) < times["1"], times
+
+
+def test_each_item_records_its_own_time_on_the_walker(tmp_path):
+    """The walker half of the test above, which runs without the spine's workspace."""
+    from loop_ops import SLOW_ON_1_S
+
+    graph = _fork_graph(branch_b="loop_ops:fork_branch_b_slow_on_1")
+    walker = _walker(graph, tmp_path / "walker", model=_SimpleFakeModel())
+    assert walker.exit_ok, walker.error
+    times = {str(r["id"]): r["duration_s"] for r in walker.facts["item_scores"]}
+    assert times["1"] >= SLOW_ON_1_S and max(times["0"], times["2"]) < times["1"], times
+
+
 def test_fork_inside_data_resume_spine(tmp_path):
     """[spine] Killed inside item 1's fork, resumed from the checkpoint: item 0 is not re-run.
 

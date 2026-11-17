@@ -331,8 +331,20 @@ def _shown(side: str, same: bool) -> dict[str, Any]:
             {"label": after, "heading": "#####", "show_input": False, "show_expected": False})
 
 
-def _trace(entry: Mapping[str, Any], side: str, same: bool) -> str:
-    return item_text(entry[side], **_shown(side, same))
+def _trace(entry: Mapping[str, Any], side: str, same: bool,
+           settled: frozenset[str] | None = None) -> str:
+    return item_text(entry[side], **_shown(side, same), settled=settled)
+
+
+def _settled(prev: Mapping[str, Any], curr: Mapping[str, Any],
+             entries: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+    """The lines a trace's step does not repeat (`analysts.shown_settled`): what the request
+    shows of both pipelines (each step's settings as shown), over both sides' records."""
+    from .analysts import shown_settled
+
+    return shown_settled(f"{prev.get('pipeline') or ''}\n{curr.get('pipeline') or ''}",
+                         [e[side] for e in entries for side in ("prev", "curr")
+                          if isinstance(e.get(side), Mapping)])
 
 
 def _side_line(label: str, record: Mapping[str, Any]) -> str:
@@ -364,13 +376,15 @@ def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
     head, tail = _frame(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
                         changes=changes, previous_note=previous_note, entries=entries,
                         tried=tried, objective=objective)
-    wholes = {(e["id"], side): _trace(e, side, same) for e in shown for side in ("prev", "curr")}
+    settled = _settled(prev, curr, entries)
+    wholes = {(e["id"], side): _trace(e, side, same, settled)
+              for e in shown for side in ("prev", "curr")}
     blank = _comparison(entries, {key: "" for key in wholes}, same)
     fixed = len(system) + len(head) + len(blank) + len(tail)
     cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
     texts = {key: (text if cap is None else fit_item(
         next(e for e in shown if e["id"] == key[0])[key[1]], cap, ROOM_NAME,
-        **_shown(key[1], same)))
+        **_shown(key[1], same), settled=settled))
         for key, text in wholes.items()}
     clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
     if cap is None:  # clipped traces keep the one length `item_cap` chose
@@ -569,6 +583,7 @@ class MemoryRequest:
         self.entries, self.tried, self.objective = list(entries), list(tried), objective
         self.same = self.prev.get("id") == self.curr.get("id")
         self._texts: dict[tuple[str, str], str] = {}
+        self._settled = _settled(self.prev, self.curr, self.entries)
 
     def __call__(self, room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
         return build_prompt(epoch=self.epoch, mode_name=self.mode_name, prev=self.prev,
@@ -579,7 +594,7 @@ class MemoryRequest:
     def _whole(self, entry: Mapping[str, Any], side: str) -> str:
         key = (str(entry["id"]), side)
         if key not in self._texts:
-            self._texts[key] = _trace(entry, side, self.same)
+            self._texts[key] = _trace(entry, side, self.same, self._settled)
         return self._texts[key]
 
     def parts(self, room: int = MEMORY_ROOM) -> list[list[Mapping[str, Any]]] | None:
@@ -657,7 +672,8 @@ class MemoryRequest:
         cap = item_cap([len(text) for text in wholes.values()], max(0, room - fixed))
         by_id = {str(e["id"]): e for e in traced}
         texts = {key: (text if cap is None else fit_item(by_id[key[0]][key[1]], cap, ROOM_NAME,
-                                                         **_shown(key[1], self.same)))
+                                                         **_shown(key[1], self.same),
+                                                         settled=self._settled))
                  for key, text in wholes.items()}
         clipped = [(wholes[key], texts[key]) for key in wholes if texts[key] != wholes[key]]
         return self._compare_text(part, index, total, texts), {

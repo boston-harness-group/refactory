@@ -1265,7 +1265,7 @@ class Executor:
                             exchanges=list(self._item_exchanges),
                             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
                             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
-                            metadata=metadata,
+                            metadata=metadata, pass_dir=_pass_dir,
                         )
                         if record is not None:
                             record["error_kind"] = "timeout"

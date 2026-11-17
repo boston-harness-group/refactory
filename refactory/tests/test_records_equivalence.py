@@ -155,7 +155,8 @@ def test_records_equivalence(tmp_path):
 
     # Both must have the same record keys.
     expected_keys = {"id", "passed", "score", "exchanges", "steps", "prediction", "label",
-                     "label_text", "fail_reason", "error_kind", "error_text", "metadata"}
+                     "label_text", "fail_reason", "error_kind", "error_text", "metadata",
+                     "duration_s"}
     for record in walker_result.item_records:
         assert set(record.keys()) == expected_keys, f"walker unexpected keys: {set(record.keys())}"
     for record in spine_records:
@@ -179,6 +180,8 @@ def test_records_equivalence(tmp_path):
         assert w["fail_reason"] == s["fail_reason"], f"{item_id}: fail_reason differs"
         assert w["prediction"] == s["prediction"], f"{item_id}: prediction differs"
         assert w["steps"] == s["steps"], f"{item_id}: the body op's visit differs"
+        # Each item's own time, from its pass starting, on both (its value is the run's).
+        assert all(isinstance(r["duration_s"], float) and r["duration_s"] >= 0 for r in (w, s))
         # Exchanges: both should be lists; for this graph (no agent nodes), both empty.
         assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
         assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
@@ -649,7 +652,8 @@ def test_both_runtimes_full_records(tmp_path):
 
         # ── Compare records ──
         expected_keys = {"id", "passed", "score", "exchanges", "prediction", "label",
-                         "label_text", "fail_reason", "error_kind", "error_text", "metadata"}
+                         "label_text", "fail_reason", "error_kind", "error_text", "metadata",
+                         "duration_s"}
 
         # ``steps`` (the op's visit) only where the op ran to the end: not error_item.
         for record in walker_result.item_records:
@@ -690,6 +694,7 @@ def test_both_runtimes_full_records(tmp_path):
                 f"{item_id}: prediction differs: walker={w['prediction']!r}, spine={s['prediction']!r}"
             )
             assert w["error_kind"] == s["error_kind"], f"{item_id}: error_kind differs"
+            assert "duration_s" in w and "duration_s" in s, f"{item_id}: an item's own time"
             assert isinstance(w["exchanges"], list), f"{item_id}: walker exchanges not a list"
             assert isinstance(s["exchanges"], list), f"{item_id}: spine exchanges not a list"
             # Each op visit the same on both runtimes (the spine's runner, the walker).

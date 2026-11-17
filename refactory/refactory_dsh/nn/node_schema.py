@@ -79,6 +79,56 @@ def field_meanings() -> dict[str, str]:
     return meanings
 
 
+#: The fields that apply to every node kind: the only ones whose ``#:`` comment names no
+#: kind. A field missing from here whose comment lost its kind prefix would otherwise
+#: widen to every kind unnoticed, so `field_kinds` refuses either mismatch.
+EVERY_KIND_FIELDS = frozenset({
+    "id", "kind", "knobs", "reads", "writes", "produces", "notes", "blocking",
+    "score_effect", "resource_role", "field_bindings",
+})
+
+
+@lru_cache(maxsize=1)
+def field_kinds() -> dict[str, tuple[str, ...]]:
+    """The node kinds each field applies to, as its ``#:`` comment opens (an ``agent``
+    field's comment starts with the kind in backticks and a colon; ``op`` or ``gate``
+    likewise); a field whose comment names none applies to every kind. The
+    schema's kinds column is these, of the kinds the validator accepts the field on: the
+    validator accepts a field a kind ignores, and the column must not say it applies."""
+    kinds: dict[str, tuple[str, ...]] = {}
+    pending: list[str] = []
+    for line in inspect.getsource(Node).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#:"):
+            pending.append(stripped[2:].strip())
+            continue
+        match = re.match(r"^\s+(\w+):\s", line)
+        if match and pending:
+            lead = re.match(r"^((?:`\w+`(?:,? or |, )?)+)[^:]*:", " ".join(pending))
+            named = tuple(k for k in re.findall(r"`(\w+)`", lead.group(1)) if k in NODE_KINDS) \
+                if lead else ()
+            name = match.group(1)
+            if bool(named) == (name in EVERY_KIND_FIELDS):
+                raise ValueError(
+                    f"Node.{name}: its #: comment names {list(named) or 'no kind'}, but "
+                    f"EVERY_KIND_FIELDS {'lists' if name in EVERY_KIND_FIELDS else 'omits'} "
+                    "it; open the comment with the kinds it applies to, or list it there")
+            kinds[name] = named or tuple(NODE_KINDS)
+        pending = []
+    missing = [f.name for f in _fields() if f.name not in kinds]
+    if missing:
+        raise ValueError(f"Node fields without a #: comment saying their kinds: {missing}")
+    return kinds
+
+
+def _example(entry: dict[str, Any], kind: str) -> dict[str, Any]:
+    """A minimal example with only the fields of its kind (`field_kinds`): ``to_state``
+    lists every field, and an agent's fields on an op would say the op takes them."""
+    applies = field_kinds()
+    return {name: value for name, value in entry["example"].items()
+            if name in entry.get("set", ()) or kind in applies.get(name, NODE_KINDS)}
+
+
 def _minimal(kind: str, gate_kind: str = "fn") -> dict[str, Any]:
     """The fewest fields a ``kind`` node needs: start from id and kind and add each
     field the validator's refusal names, until it accepts the node."""
@@ -133,7 +183,7 @@ def node_schema() -> dict[str, dict[str, Any]]:
             (optional if _accepts({**minimal, **_sample(field)}) else refused).append(field.name)
         schema[name] = {
             "required": required, "optional": optional, "refused": refused,
-            "example": Node(**minimal).to_state(),
+            "example": Node(**minimal).to_state(), "set": list(minimal),
         }
     return schema
 
@@ -162,9 +212,11 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
     hidden = () if person_gates else tuple(f"gate ({kind})" for kind in ANSWERED_GATES)
     schema = {name: entry for name, entry in node_schema().items() if name not in hidden}
     rows = []
+    applies = field_kinds()
     for field in _fields():
         kinds = [name for name, entry in schema.items()
-                 if field.name in entry["required"] or field.name in entry["optional"]]
+                 if (field.name in entry["optional"] or field.name in entry.get("set", ()))
+                 and name.split(" ", 1)[0] in applies.get(field.name, NODE_KINDS)]
         default = ("(required)" if field.default is dataclasses.MISSING
                    and field.default_factory is dataclasses.MISSING  # type: ignore[misc]
                    else json.dumps(field.default if field.default is not dataclasses.MISSING
@@ -196,7 +248,8 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
         lines += [
             f"`{name}`: required {', '.join(entry['required'])}; refused "
             f"{', '.join(entry['refused']) or 'nothing'}. Minimal example:",
-            "`" + json.dumps(entry["example"], separators=(",", ":")) + "`",
+            "`" + json.dumps(_example(entry, name.split(" ", 1)[0]),
+                             separators=(",", ":")) + "`",
         ]
     return lines
 

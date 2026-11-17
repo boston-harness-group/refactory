@@ -39,11 +39,12 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from . import evidence
 from .base import (
-    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected,
+    TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected, shown_label,
     _ordered_items, _outcome, _table, NO_ANSWER_CAUSES,
 )
 
@@ -167,11 +168,12 @@ def packer(ctx: Any, pipeline: str, failures: Sequence[dict[str, Any]],
 
     texts: dict[int, str] = {}
     most = {"failure": len(failures), "success": len(successes)}
+    settled = shown_settled(pipeline, ctx.item_records)
 
     def fits(kind: str, group: Sequence[dict[str, Any]]) -> bool:
         for record in group:
             if id(record) not in texts:
-                texts[id(record)] = item_text(record)
+                texts[id(record)] = item_text(record, settled=settled)
         head, tail = _analyst_frame(ctx, kind, most[kind], most[kind], len(group), pipeline)
         # The items as the request joins them: an instruction an earlier item showed is
         # said once (`evidence.dedup`).
@@ -184,14 +186,27 @@ def packer(ctx: Any, pipeline: str, failures: Sequence[dict[str, Any]],
 # ── what an analyst reads ──────────────────────────────────────────────────
 
 
+def shown_settled(pipeline: str, records: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+    """The lines an item's step does not repeat in a request that shows ``pipeline`` (the
+    pipeline view and each step's settings as shown, clipping included) and ``records``
+    (`base.settled_for`): a step's instructions are said once, in the settings. A short
+    setting is a cell of the settings table, so each table cell counts as a line too."""
+    from .base import settled_for
+
+    cells = [cell.strip().replace("\\|", "|") for line in pipeline.splitlines()
+             if line.startswith("|") for cell in re.split(r"(?<!\\)\|", line)[1:-1]]
+    return settled_for([{"value": pipeline}, *({"value": cell} for cell in cells)], (),
+                       records)
+
+
 def item_text(record: dict[str, Any], input_chars: int | None = None,
               output_chars: int | None = None, **shown: Any) -> str:
     """One train item's trace (`optim.evidence.render_item`): the input once, each step's
     own instructions (what its prompt took from the input or earlier replies said by
     name) and its reply in the order they ran, the expected answer, the prediction, the
     score and the grader's feedback. ``input_chars``/``output_chars`` clip a step's own
-    instructions/replies head and tail; ``shown`` passes ``label``, ``show_input`` and
-    ``show_expected`` on (`evidence.render_item`)."""
+    instructions/replies head and tail; ``shown`` passes ``label``, ``show_input``,
+    ``show_expected`` and ``settled`` (`shown_settled`) on (`evidence.render_item`)."""
     from . import evidence
 
     big = 10 ** 9
@@ -202,8 +217,8 @@ def item_text(record: dict[str, Any], input_chars: int | None = None,
                if isinstance(info, dict)]
     return evidence.render_item(
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
-        expected=_expected(record), metadata=metadata_text(record),
-        choices=_choice_lines(meta.get("choices")), prompts=True,
+        expected=_expected(record), expected_label=shown_label(record),
+        metadata=metadata_text(record), choices=_choice_lines(meta.get("choices")), prompts=True,
         prompt_chars=input_chars or big, reply_chars=output_chars or big, missing=missing,
         **shown)
 
@@ -465,12 +480,13 @@ def analyst_batch(ctx: Any, kind: str, index: int, total: int,
     longest items to one length (`item_cap`), step inputs first (`fit_item`), the cut
     counted. SkillOpt never clips."""
     head, tail = _analyst_frame(ctx, kind, index, total, len(group), pipeline)
-    wholes = [item_text(record) for record in group]
+    settled = shown_settled(pipeline, ctx.item_records)
+    wholes = [item_text(record, settled=settled) for record in group]
     separators = 2 * max(0, len(group) - 1)
     cap = item_cap([len(text) for text in wholes],
                    room - len(system(kind)) - len(head) - len(tail) - separators)
     # `fit_item` keeps an item no longer than the cap whole.
-    blocks = [text if cap is None else fit_item(record, cap)
+    blocks = [text if cap is None else fit_item(record, cap, settled=settled)
               for record, text in zip(group, wholes)]
     clipped = [(whole, block) for whole, block in zip(wholes, blocks) if block != whole]
     from .evidence import dedup

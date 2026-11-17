@@ -39,6 +39,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,10 @@ _MAX_ID_BYTES = 200
 #: directory as a pass, so a write through one of its read-through links is
 #: detached first (:func:`detach_read_through`), on either runtime.
 PASS_MARKER = ".refactory/pass.json"
+#: When an item's pass started (seconds since the epoch), stamped once as the pass is
+#: prepared, on both runtimes (`prepare_pass_dir`): its record's ``duration_s`` is
+#: measured from it (`make_item_record`).
+ITEM_STARTED = ".refactory/item_started"
 
 #: The record of a finished item, beside its ``.done`` marker. A resumed walker
 #: reads the scores of the items it skips from here.
@@ -159,6 +164,8 @@ def prepare_pass_dir(
     item_id: str,
     index: int,
     declared_reads: tuple[str, ...] | list[str] = (),
+    *,
+    starting: bool = True,
 ) -> Path:
     """Create and return the pass directory for one item.
 
@@ -170,6 +177,10 @@ def prepare_pass_dir(
       *run_dir* and not yet in the pass, so subgraph nodes read them in place.
       A write to one of them is detached from the run first
       (:func:`detach_read_through`), so a pass cannot change a run-level input.
+    * With ``starting`` (the item's pass begins, a resumed or retried one included),
+      stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
+      attempt's and never counts the time a run spent stopped; the spine's ``end``
+      reuses the directory with ``starting`` False.
     """
     run_dir = Path(run_dir)
     pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
@@ -188,6 +199,10 @@ def prepare_pass_dir(
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.symlink_to(src.resolve())
 
+    started = pass_dir / ITEM_STARTED
+    if starting or not started.exists():
+        started.parent.mkdir(parents=True, exist_ok=True)
+        started.write_text(f"{time.time():.3f}\n")
     marker = pass_dir / PASS_MARKER
     if not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +453,18 @@ def error_kind(error: BaseException) -> str:
 NO_ANSWER = "no answer: "
 
 
+def item_duration(pass_dir: Path | None) -> float | None:
+    """Seconds from the item's pass starting (`ITEM_STARTED`) to now, its record being
+    made; ``None`` without a stamp."""
+    if pass_dir is None:
+        return None
+    try:
+        started = float((Path(pass_dir) / ITEM_STARTED).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return round(max(0.0, time.time() - started), 1)
+
+
 def make_item_record(
     item_id: str,
     verdict: VerifyResult | None,
@@ -461,6 +488,9 @@ def make_item_record(
     code-gate visits handed in the same list (``kind`` ``op``/``gate``: `op_visit`,
     `gate_visit`) go under ``steps`` instead, in run order; no visits, no ``steps``.
 
+    With ``pass_dir``, the record says how long the item took, ``duration_s``, from its
+    pass starting (`item_duration`), so an item's time is its own on both runtimes.
+
     **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
     **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
     "error_text", "error_kind"}``.
@@ -479,6 +509,8 @@ def make_item_record(
         "label_text": label_text,
         "fail_reason": fail_reason,
         "metadata": dict(metadata or {}),
+        **({"duration_s": duration} if (duration := item_duration(pass_dir)) is not None
+           else {}),
     }
     if error is not None and pass_dir is not None and outputs_of is not None:
         unanswered = no_answer(pass_dir, str(error), outputs_of)
@@ -987,7 +1019,8 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
-            record = make_item_record(str(item.get("id") or index), None, error=exc)
+            record = make_item_record(str(item.get("id") or index), None, error=exc,
+                                      pass_dir=pass_dir)
             if record is not None and SCORES_FACT in node.produces:
                 _write_facts(workdir, SCORES_FACT, [record])
             # Do NOT increment failed here: the subsequent `end --failed`
@@ -1055,7 +1088,7 @@ def command_end(
     item_id = str(item.get("id") or index)
 
     # Compute the pass directory (idempotent — reuses the one command_begin created).
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False)
 
     # F4 parity: when the caller says the item's subgraph failed, skip verify
     # and write a failure record directly, as the walker does.
@@ -1129,7 +1162,7 @@ def command_end(
             exchanges=exchanges,
             label=str(instance.metadata.get("label", "")) if instance.metadata.get("label") is not None else None,
             label_text=str(instance.metadata.get("label_text", "")) if instance.metadata.get("label_text") is not None else None,
-            metadata=metadata,
+            metadata=metadata, pass_dir=pass_dir,
         )
         if record is not None and SCORES_FACT in node.produces:
             _write_facts(workdir, SCORES_FACT, [record])

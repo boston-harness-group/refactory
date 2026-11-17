@@ -12,10 +12,20 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from typing import Iterator
 
 from refactory_dsh import dsh_profile
 from refactory_dsh.design_ops import SIZER_MARK
+
+
+def untimed(value: Any) -> Any:
+    """``value`` (item records, facts) without each item's own time (``duration_s``, from
+    its pass starting: `items.item_duration`), which is each run's own, so two runs of the
+    same items compare equal on everything else."""
+    if isinstance(value, dict):
+        return {k: untimed(v) for k, v in value.items() if k != "duration_s"}
+    return [untimed(v) for v in value] if isinstance(value, list) else value
 
 
 def _profile(home: Path, name: str, bundles: list[str]) -> Path:

@@ -175,7 +175,8 @@ def test_an_analyst_reads_every_steps_input_and_output_of_a_multi_node_graph():
     AutoresearchOptimizer(client).propose(_ctx(records), 1, [])
     failure = client.of((analysts.FAILURE_SYSTEM,))[0]
     for text in ("QUESTION t1", "#### Step `draft` (1 of 2)",
-                 "Rest of its prompt:\n```\nDRAFT-IN t1\n```", "Reply:\n```\nDRAFT-OUT t1\n```",
+                 "Also in its prompt (not in its settings):\n```\nDRAFT-IN t1\n```",
+                 "Reply:\n```\nDRAFT-OUT t1\n```",
                  "#### Step `final` (2 of 2)", "FINAL-IN t1", "FINAL-OUT t1",
                  "Expected: GOLD t1; Given: PRED t1", "Grader: GRADER t1",
                  "### Item t1 — answered wrong (score 0)"):
@@ -888,15 +889,23 @@ def _long(item: str, chars: int, passed: bool = False) -> dict[str, Any]:
                                                f"{item}-{n} " + "O" * each) for n in range(4)})
 
 
+def _whole(record: dict, ctx, pipeline: str | None = None) -> str:
+    """An item whole, as an analyst request with ``ctx``'s items and ``pipeline`` (the
+    request's own when not given) renders it: its steps' settings said once."""
+    pipeline = analysts.pipeline_text(ctx) if pipeline is None else pipeline
+    return analysts.item_text(record, settled=analysts.shown_settled(pipeline, ctx.item_records))
+
+
 def test_a_small_batch_of_long_traces_is_not_clipped():
     """Three four-step items of about 120000 characters each: 360000 together fit the
     call's room, so none is clipped (an equal fixed share per item would have cut them)."""
     assert analysts.ANALYST_ROOM == 400000
     group = [_long(f"f{i}", 120000) for i in range(3)]
-    prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
+    ctx = _ctx(group)
+    prompt, clip = analysts.analyst_batch(ctx, "failure", 1, 1, group, "PIPE")
     assert clip == {"items": 0, "chars": 0}
     assert "chars omitted" not in prompt
-    assert all(analysts.item_text(record) in prompt for record in group)
+    assert all(_whole(record, ctx, "PIPE") in prompt for record in group)
     assert len(prompt) <= analysts.ANALYST_ROOM
 
 
@@ -904,18 +913,19 @@ def test_a_batch_over_the_room_has_its_longest_items_clipped_to_one_length():
     shorts = [_long(f"s{i}", 5000) for i in range(6)]
     longs = [_long("f6", 300000), _long("f7", 400000)]
     group = shorts + longs
-    prompt, clip = analysts.analyst_batch(_ctx(group), "failure", 1, 1, group, "PIPE")
+    ctx = _ctx(group)
+    prompt, clip = analysts.analyst_batch(ctx, "failure", 1, 1, group, "PIPE")
     assert len(prompt) <= analysts.ANALYST_ROOM
     blocks = {item: prompt.split(f"### Item {item} ")[1].split("\n\n### Item ")[0]
               .split("\n\n## Answer")[0] for item in ("s0", "f6", "f7")}
     assert "chars omitted" not in blocks["s0"], "the short items stay whole"
-    assert all(analysts.item_text(r) in prompt for r in shorts)
+    assert all(_whole(r, ctx, "PIPE") in prompt for r in shorts)
     assert "chars omitted" in blocks["f6"] and "chars omitted" in blocks["f7"]
     # Both long items are cut to the same length (within one clipped text's rounding),
     # and together they use the room the short ones leave.
     assert abs(len(blocks["f6"]) - len(blocks["f7"])) <= 200
     assert len(prompt) > analysts.ANALYST_ROOM - 2000
-    wholes = {r["id"]: len(analysts.item_text(r)) for r in longs}
+    wholes = {r["id"]: len(_whole(r, ctx, "PIPE")) for r in longs}
     assert clip["items"] == 2
     left_out = sum(wholes.values()) - sum(len(prompt.split(f"### Item {i} ")[1]
                                               .split("\n\n### Item ")[0]
@@ -936,7 +946,8 @@ def test_clipped_items_and_characters_are_journaled_and_reported():
     group = [_long("f0", 600000)] + [_rec(f"f{i}", False) for i in range(1, 8)]
     client = Client()
     optimizer = AutoresearchOptimizer(client)
-    optimizer.propose(_ctx(group), 1, [])
+    ctx = _ctx(group)
+    optimizer.propose(ctx, 1, [])
     entry = analysts.journal_entry(optimizer.last_analysis)
     (batch,) = [b for b in entry["batches"] if b["clipped"]]
     assert batch["items"] == ["f0"], "the long item alone"
@@ -945,7 +956,7 @@ def test_clipped_items_and_characters_are_journaled_and_reported():
     for prompt in client.of((analysts.FAILURE_SYSTEM,)):
         if _items(prompt) != ["f0"]:
             assert "chars omitted" not in prompt
-            assert all(analysts.item_text(r) in prompt for r in group if r["id"] in _items(prompt))
+            assert all(_whole(r, ctx) in prompt for r in group if r["id"] in _items(prompt))
     assert entry["clipped_items"] == batch["clipped"] == 1
     assert entry["clipped_chars"] == batch["clipped_chars"] > 100000
     from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
@@ -969,7 +980,8 @@ def test_long_traces_are_split_across_batches_whole_never_cut(tmp_path):
     client = Client()
     optimizer = AutoresearchOptimizer(client)
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
-    optimizer.propose(_ctx(group), 1, [])
+    ctx = _ctx(group)
+    optimizer.propose(ctx, 1, [])
     prompts = client.of((analysts.FAILURE_SYSTEM,))
     assert len(prompts) > 1, "more than one call"
     for prompt in prompts:
@@ -977,7 +989,7 @@ def test_long_traces_are_split_across_batches_whole_never_cut(tmp_path):
         assert len(analysts.FAILURE_SYSTEM) + len(prompt) <= analysts.ANALYST_ROOM
     read = [item for prompt in prompts for item in _items(prompt)]
     assert sorted(read) == sorted(r["id"] for r in group), "every item exactly once"
-    assert all(analysts.item_text(r) in next(p for p in prompts if r["id"] in _items(p))
+    assert all(_whole(r, ctx) in next(p for p in prompts if r["id"] in _items(p))
                for r in group), "whole"
     batches = optimizer.last_analysis["batches"]
     assert [b["index"] for b in batches] == list(range(1, len(prompts) + 1))
@@ -1410,3 +1422,34 @@ def test_a_long_setting_is_clipped_once_and_says_its_true_omitted_count():
     marks = __import__("re").findall(r"\[\.\.\. (\d+) characters omitted \.\.\.\]", shown)
     assert marks == ["4006"], marks
     assert f"{len(text)} characters)" in shown
+
+
+def test_an_items_expected_choice_text_is_said_once_in_an_analyst_request():
+    """An analyst's item shows its choices with its input, so its expected answer is the
+    label alone and the choice's long text appears once."""
+    text = ("Every bounded sequence in a complete metric space has a subsequence that is "
+            "Cauchy, and it converges whenever the space is also totally bounded")
+    record = {**_rec("t1", False), "label": "C", "label_text": text,
+              "metadata": {"question": "QUESTION t1",
+                           "choices": [{"label": "A", "text": "None"},
+                                       {"label": "C", "text": text}]}}
+    client = Client()
+    AutoresearchOptimizer(client).propose(_ctx([record, _rec("t2", True)]), 1, [])
+    failure = client.of((analysts.FAILURE_SYSTEM,))[0]
+    assert "Expected: C; Given: PRED t1" in failure
+    assert failure.count(text) == 1 and f"C. {text}" in failure
+
+
+def test_an_analysts_item_does_not_repeat_a_steps_own_settings():
+    """A step's instructions are its settings, shown once in the pipeline: the item says
+    only what else its prompt held (`base.settled_for`), as the proposer's items do."""
+    steps = {"draft": ("BOUND-VALUE\nDRAFT-IN t1", "DRAFT-OUT t1"),
+             "final": ("FINAL-IN t1", "FINAL-OUT t1")}
+    client = Client()
+    AutoresearchOptimizer(client).propose(_ctx([_rec("t1", False, steps=steps),
+                                                _rec("t2", True)]), 1, [])
+    failure = client.of((analysts.FAILURE_SYSTEM,))[0]
+    item = failure.split("### Item t1", 1)[1]
+    assert "BOUND-VALUE" in failure.split("### Item t1", 1)[0], "in the settings"
+    assert "BOUND-VALUE" not in item
+    assert "Also in its prompt (not in its settings):\n```\nDRAFT-IN t1\n```" in item

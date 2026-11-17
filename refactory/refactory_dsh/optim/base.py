@@ -797,6 +797,78 @@ def _whole_texts(value: Any) -> set[str]:
     return out
 
 
+def settled_for(knobs: Iterable[Mapping[str, Any]], node_states: Iterable[Mapping[str, Any]],
+                records: Iterable[Mapping[str, Any]]) -> frozenset[str]:
+    """What an item's step does not repeat of its prompt (`ITEM_FORM`), in every request that
+    shows items (the proposer's, the analysts', memory's): ``knobs`` and ``node_states``
+    are the settings and nodes the request shows, ``records`` its items. It is text that
+    comes from no item: the lines of every setting's text ("Each step's
+    settings"), of the nodes' own prompt templates (each node in full, in the
+    reference), and the framing the step's ops put around its inputs (the model
+    client's wrapper, their headings). Framing is a line in every one of the step's
+    prompts, over two or more items, that holds nothing from any item's own data
+    (its input, a step's reply, or a code gate's reason; as whole words), nor a piece of
+    a code gate's reason or of a reply (a reason spread over several prompt lines).
+
+    Never a line just because it recurs: a judge's reason that is not in every one
+    of the step's prompts, or a choice text (part of an item's input) said the same
+    way in two items, is each item's own evidence and is shown."""
+    from .evidence import _norm, settled_lines
+
+    texts = [k.get("value") for k in knobs]
+    texts += [n.get(field) for n in node_states
+              for field in ("prompt_template", "system_prompt_template")]
+    records = list(records)
+    every: dict[str, set[str]] = {}
+    items: dict[str, set[str]] = {}
+    data: set[str] = set()
+    # Reasons and replies whole: a prompt line may carry a piece of one (a gate's
+    # reason is stored as one line, and reaches a prompt over several). Never an op's
+    # output, which is often the framed prompt itself.
+    said: set[str] = set()
+    for record in records:
+        # Of the record's steps, only a code gate's reason is item data: an op's
+        # output is often the framed prompt itself, and a visit's node id is no item's.
+        reasons = [step.get("reason") for step in record.get("steps") or ()
+                   if isinstance(step, Mapping) and step.get("kind") == "gate"]
+        data |= _data_lines(record.get("metadata")) | _data_lines(reasons)
+        said |= _whole_texts(reasons)
+        for exchange in record.get("exchanges") or ():
+            node = str(exchange.get("node"))
+            lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
+                     if line.strip()}
+            every[node] = lines if node not in every else every[node] & lines
+            items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
+            data |= _data_lines(exchange.get("response"), free=True)
+            said |= _whole_texts(exchange.get("response"))
+
+    def carried(line: str) -> bool:
+        if any(_holds(line, datum) for datum in data):
+            return True
+        # The line inside a reason or a reply, or its tail after a short label
+        # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
+        # ("- User: ## Question") from matching a reply that happens to use it.
+        if line in said:
+            return True  # a whole reason or reply, however short ("## Reloop")
+        if _bare_label(line):
+            return False  # a heading or one word is no piece of a reason
+        words = line.split(" ")
+        for start in range(len(words)):
+            label, tail = " ".join(words[:start]), " ".join(words[start:])
+            if len(label) > TAIL_LABEL_MAX:
+                return False
+            if len(tail) < ITEM_DATA_MIN or (start and len(tail) < TAIL_MIN
+                                            and len(words) - start < TAIL_MIN_WORDS):
+                return False
+            if any(tail in text for text in said):
+                return True
+        return False
+
+    framing = {line for node, lines in every.items() if len(items[node]) > 1
+               for line in lines if not carried(line)}
+    return settled_lines(texts) | framing
+
+
 @dataclass
 class ProposalContext:
     """The gradient: everything the optimizer is allowed to know.
@@ -1000,81 +1072,20 @@ class ProposalContext:
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
     #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
-    #: model step may run), ``per_item_s`` (the edited candidate's typical time per item),
-    #: ``items`` (distinct train items), ``runs`` (their runs, counting repeats),
-    #: ``timeouts`` (runs that timed out) and ``parallelism``; empty says nothing.
+    #: model step may run), ``per_item_median_s``/``per_item_p90_s``/``per_item_max_s`` (the
+    #: edited candidate's items' own times, `loop.item_time_spread`), ``items`` (distinct
+    #: train items), ``runs`` (their runs, counting repeats) and ``timeouts`` (runs that
+    #: timed out); empty says nothing.
     time_facts: dict[str, Any] = field(default_factory=dict)
 
     def _settled(self) -> frozenset[str]:
-        """What an item's step does not repeat of its prompt (`ITEM_FORM`): text that
-        comes from no item. That is the lines of every setting's text ("Each step's
-        settings"), of the nodes' own prompt templates (each node in full, in the
-        reference), and the framing the step's ops put around its inputs (the model
-        client's wrapper, their headings). Framing is a line in every one of the step's
-        prompts, over two or more items, that holds nothing from any item's own data
-        (its input, a step's reply, or a code gate's reason; as whole words), nor a piece of
-        a code gate's reason or of a reply (a reason spread over several prompt lines).
-
-        Never a line just because it recurs: a judge's reason that is not in every one
-        of the step's prompts, or a choice text (part of an item's input) said the same
-        way in two items, is each item's own evidence and is shown."""
-        from .evidence import _norm, settled_lines
-
-        texts = [k.get("value") for k in self.knobs]
-        texts += [n.get(field) for n in self.node_states
-                  for field in ("prompt_template", "system_prompt_template")]
-        records = [*self.item_records,
-                   *(r for pair in self.edit_pairs or ()
-                     for side in ("parent_records", "child_records")
-                     for r in pair.get(side) or ())]
-        every: dict[str, set[str]] = {}
-        items: dict[str, set[str]] = {}
-        data: set[str] = set()
-        # Reasons and replies whole: a prompt line may carry a piece of one (a gate's
-        # reason is stored as one line, and reaches a prompt over several). Never an op's
-        # output, which is often the framed prompt itself.
-        said: set[str] = set()
-        for record in records:
-            # Of the record's steps, only a code gate's reason is item data: an op's
-            # output is often the framed prompt itself, and a visit's node id is no item's.
-            reasons = [step.get("reason") for step in record.get("steps") or ()
-                       if isinstance(step, Mapping) and step.get("kind") == "gate"]
-            data |= _data_lines(record.get("metadata")) | _data_lines(reasons)
-            said |= _whole_texts(reasons)
-            for exchange in record.get("exchanges") or ():
-                node = str(exchange.get("node"))
-                lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
-                         if line.strip()}
-                every[node] = lines if node not in every else every[node] & lines
-                items.setdefault(node, set()).add(str(record.get("id")).split("#")[0])
-                data |= _data_lines(exchange.get("response"), free=True)
-                said |= _whole_texts(exchange.get("response"))
-
-        def carried(line: str) -> bool:
-            if any(_holds(line, datum) for datum in data):
-                return True
-            # The line inside a reason or a reply, or its tail after a short label
-            # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
-            # ("- User: ## Question") from matching a reply that happens to use it.
-            if line in said:
-                return True  # a whole reason or reply, however short ("## Reloop")
-            if _bare_label(line):
-                return False  # a heading or one word is no piece of a reason
-            words = line.split(" ")
-            for start in range(len(words)):
-                label, tail = " ".join(words[:start]), " ".join(words[start:])
-                if len(label) > TAIL_LABEL_MAX:
-                    return False
-                if len(tail) < ITEM_DATA_MIN or (start and len(tail) < TAIL_MIN
-                                                and len(words) - start < TAIL_MIN_WORDS):
-                    return False
-                if any(tail in text for text in said):
-                    return True
-            return False
-
-        framing = {line for node, lines in every.items() if len(items[node]) > 1
-                   for line in lines if not carried(line)}
-        return settled_lines(texts) | framing
+        """The lines an item's step does not repeat (`settled_for`) over this request's
+        items, the edited candidate's children included."""
+        return settled_for(self.knobs, self.node_states,
+                           [*self.item_records,
+                            *(r for pair in self.edit_pairs or ()
+                              for side in ("parent_records", "child_records")
+                              for r in pair.get(side) or ())])
 
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
@@ -2243,7 +2254,7 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
             name, ids, node_states, edges, protected, state)
         entry = by_op.get(name) or {}
         description = str(entry.get("description") or f"{spec['line']}.")
-        lines.append(f"- `{name}` ({_edit_fields(entry.get('fields') or spec['fields'])}): "
+        lines.append(f"- `{name}` ({_core_fields(entry.get('fields') or spec['fields'])}): "
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     return lines
 
@@ -2326,29 +2337,29 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
     """"Time per item", in numbers, so time is reasoned about from them: how long one model
-    step may run (the run's limit; a step's own ``timeout_s`` overrides it), the edited
-    candidate's typical time per item, and how many of its items timed out. Nothing when
-    none is known."""
+    step may run (the run's limit; a step's own ``timeout_s`` overrides it), how long the
+    edited candidate's train items took each (median, 90th percentile, longest: from each
+    item's own record), and how many of them hit the limit. Nothing when none is known."""
     facts = dict(facts or {})
-    limit, per_item = facts.get("step_limit_s"), facts.get("per_item_s")
+    limit = facts.get("step_limit_s")
     items, timeouts = int(facts.get("items") or 0), int(facts.get("timeouts") or 0)
     runs = int(facts.get("runs") or items)
     counted = f"{items} items" if runs == items else f"{runs} runs of {items} items"
-    if not (limit or per_item or items):
+    median = facts.get("per_item_median_s")
+    if not (limit or median is not None or items):
         return []
     parts = []
     if limit:
         parts.append(f"One model step may run for up to {int(limit)} s (the run's limit per "
                      "step; a step's own `timeout_s` overrides it); a step past its limit fails "
                      "that item, as a timeout.")
-    if per_item:
-        parallel = int(facts.get("parallelism") or 1)
-        parts.append(f"The candidate you edit took about {float(per_item):.0f} s per item on "
-                     "its train evaluation (its wall time"
-                     + (f" x {parallel} items at once" if parallel > 1 else "")
-                     + (f" / {items} items)." if runs == items else f" / {runs} runs)."))
+    if median is not None:
+        parts.append(f"The candidate you edit took {median} s per item at the median on its "
+                     f"train evaluation ({facts.get('per_item_p90_s')} s at the 90th percentile, "
+                     f"{facts.get('per_item_max_s')} s the longest; each item's own time).")
     if items:
-        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out.")
+        parts.append(f"{timeouts} of its {counted.replace('items', 'train items')} timed out"
+                     + (f" (hit the {int(limit)} s limit)." if limit and timeouts else "."))
     return ["## Time per item", " ".join(parts), ""]
 
 
@@ -2644,6 +2655,29 @@ NO_ANSWER_CAUSES = {
 }
 
 
+#: Where "Item results" lists an error's cause, for an item shown in full to point to.
+ERROR_CAUSE_REF = 'cause {n} under "Errors, by cause" above'
+
+
+def _error_causes(records: Sequence[dict[str, Any]]) -> list[tuple[str, list[str]]]:
+    """Each error text the items failed with (clipped), with the items that failed with it,
+    most items first: the rows of "Errors, by cause"."""
+    causes: dict[str, list[str]] = {}
+    for record in records:
+        if record.get("error_text"):
+            causes.setdefault(_clip(record["error_text"]), []).append(str(record.get("id", "")))
+    return sorted(causes.items(), key=lambda kv: -len(kv[1]))
+
+
+def error_refs(records: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """For each error text "Errors, by cause" shows whole, where it is (`ERROR_CAUSE_REF`):
+    an item shown in full says its error there rather than again."""
+    return {cause: ERROR_CAUSE_REF.format(n=number)
+            for number, (cause, _ids) in enumerate(_error_causes(records)[:ITEM_EVIDENCE_ROWS], 1)
+            if cause == str(next(r["error_text"] for r in records
+                                 if r.get("error_text") and _clip(r["error_text"]) == cause))}
+
+
 def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     """How the candidate being edited did item by item, on its train part.
 
@@ -2684,10 +2718,7 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         if len(rows) > ITEM_EVIDENCE_ROWS:
             lines.append(f"({len(rows) - ITEM_EVIDENCE_ROWS} more not shown)")
     if errored:
-        causes: dict[str, list[str]] = {}
-        for record in errored:
-            causes.setdefault(_clip(record["error_text"]), []).append(str(record.get("id", "")))
-        ranked = sorted(causes.items(), key=lambda kv: -len(kv[1]))
+        ranked = _error_causes(records)
         lines += [
             "",
             "Errors, by cause:",
@@ -2771,7 +2802,8 @@ def _fenced(text: str) -> list[str]:
 
 def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
                 omissions: list[dict[str, Any]] | None = None,
-                settled: Collection[str] | None = None) -> str:
+                settled: Collection[str] | None = None,
+                errors_said: Mapping[str, str] | None = None) -> str:
     """One train item (`optim.evidence.render_item`, as every call that reads items shows
     one): its verdict, what was expected and what it gave, the grader's reason, its input
     once, then each step's reply, each fenced (headings demoted) so nothing in them reads
@@ -2789,9 +2821,11 @@ def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
     meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
     return evidence.render_item(
         record, input_keys=TRAJECTORY_INPUT_KEYS, outcome=_outcome(record),
-        expected=_expected(record), metadata=metadata_text(record),
-        choices=_choice_lines(meta.get("choices")), prompts=False,
-        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions, settled=settled)
+        expected=_expected(record), expected_label=shown_label(record),
+        metadata=metadata_text(record), choices=_choice_lines(meta.get("choices")),
+        prompts=False,
+        prompt_chars=text_chars, reply_chars=text_chars, omissions=omissions, settled=settled,
+        errors_said=errors_said)
 
 
 def _outcome(record: dict[str, Any]) -> str:
@@ -2799,8 +2833,29 @@ def _outcome(record: dict[str, Any]) -> str:
             "failed with an error" if record.get("error_text") else "answered wrong")
 
 
-def _expected(record: dict[str, Any]) -> str:
+def shown_label(record: dict[str, Any]) -> str:
+    """The expected answer's label when one of the item's choices is that label with the
+    expected text (or the record has no text for it), so the choice line shown with the
+    item says the rest; else empty, and the expected answer is said whole."""
     label, label_text = record.get("label"), record.get("label_text")
+    if label in (None, ""):
+        return ""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    choices = meta.get("choices") if isinstance(meta.get("choices"), list) else []
+    for index, choice in enumerate(choices):
+        own, text = ((choice.get("label", chr(ord("A") + index)), choice.get("text", ""))
+                     if isinstance(choice, dict) else (chr(ord("A") + index), choice))
+        if str(own) == str(label) and (label_text in (None, "") or str(text) == str(label_text)):
+            return str(label)
+    return ""
+
+
+def _expected(record: dict[str, Any], *, label_only: bool = False) -> str:
+    """The expected answer: its label and its text; with ``label_only``, only the label
+    when a choice shown with the item says the text (`shown_label`)."""
+    label, label_text = record.get("label"), record.get("label_text")
+    if label_only and shown_label(record):
+        return str(label)
     return " — ".join(str(part) for part in (label, label_text) if part not in (None, ""))
 
 
@@ -3013,7 +3068,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   analysed: Sequence[dict[str, Any]] | None = None,
                   omissions: list[dict[str, Any]] | None = None,
                   settled: Collection[str] | None = None) -> list[str]:
-    """Every train item of the candidate being edited, each as `ITEM_FORM` says.
+    """Every train item of the candidate being edited, each as `ITEM_FORM` says; an item's
+    error is said where "Item results" lists its cause (`error_refs`).
 
     When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
     smaller ``budget``), every item is shown in full here. When not, readers went through
@@ -3032,12 +3088,15 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     header = ["## Trajectories of the candidate being edited",
               f"The {len(items)} train item(s) counted under \"Item results\"."]
     groups = trajectory_groups(records, budget)
+    # Numbered over the records "Errors, by cause" numbers its rows over (`_item_evidence`),
+    # so an item's "cause N" is that table's row N.
+    refs = error_refs(records)
     whole = [_trajectory(r) for r in items]
     if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
         return header + [f"Every item. {ITEM_FORM}",
                          *(line for r in items
                            for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions,
-                                                        settled)))]
+                                                        settled, refs)))]
     if analysed is not None:
         # The analysts' findings are their own section, before this one; the items they
         # cite are shown in full first (``_cited_items``).
@@ -3096,14 +3155,19 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"{', '.join(str(i) for i in failure.get('items') or ())} -- could "
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
-    lines += ["", "### Every item",
-              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error"],
-                     [[r.get("id"), _outcome(r), _clip(_expected(r), _TABLE_CELL_CHARS),
-                       _clip(r.get("prediction"), _TABLE_CELL_CHARS),
-                       _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
-                       _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
     failing, passing, cited = _shown_items(items, findings)
     chosen = [*failing, *passing]
+    # An item shown in full below says its expected choice's text there (its choice
+    # line): the table gives only the label for it.
+    full = {id(r) for r in chosen}
+    lines += ["", "### Every item",
+              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error"],
+                     [[r.get("id"), _outcome(r),
+                       _clip(_expected(r, label_only=id(r) in full), _TABLE_CELL_CHARS),
+                       _clip(r.get("prediction"), _TABLE_CELL_CHARS),
+                       _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
+                       "(below)" if id(r) in full and r.get("error_text") else
+                       _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
     if not chosen:
         return lines
     examples = ["", "### Some items in full",
@@ -3115,8 +3179,21 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     for record in chosen:
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
-        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled)]
+        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled, refs)]
     return lines + examples
+
+
+#: The fields of a core operator's older written-out form (`core_ops`: 'target' and a
+#: 'gate' or 'into' node objects). An edit may still carry them, but its line does not
+#: offer them: each core operator is described by its one-line form only.
+WRITTEN_OUT_FIELDS = ("target", "gate")
+
+
+def _core_fields(fields: Sequence[str]) -> str:
+    """A core operator's fields as its line offers them: its one-line form, never a node
+    object (``into`` is one or two short steps, as its example shows)."""
+    return ", ".join("into: one or two steps, each like {kind, text, sees}" if name == "into"
+                     else name for name in fields if name not in WRITTEN_OUT_FIELDS)
 
 
 def _edit_fields(fields: Sequence[str]) -> str:

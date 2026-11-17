@@ -61,7 +61,8 @@ def repeated_share(text: str) -> float:
 REPEAT_SENTENCE = 100
 
 
-def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE) -> list[str]:
+def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE, *,
+                       fenced: bool = False) -> list[str]:
     """Each sentence of ``shortest``+ characters that ``text`` says more than once, read
     outside code fences and with table and list formatting taken off (a table cell and a
     list item that say the same thing are the same sentence; backticks and bold do not
@@ -69,12 +70,15 @@ def repeated_sentences(text: str, shortest: int = REPEAT_SENTENCE) -> list[str]:
     counted too, so a long sentence is caught whole and a long clause inside two
     different sentences is caught alone.
 
-    Not checked, by decision: text inside fences (knob texts quoted whole, the pipeline
-    view, examples -- the block and view-once guards in ``test_request_guardrails`` hold
-    those), and anything shorter than ``shortest`` (step names, short table cells and
-    labels repeat by design)."""
+    With ``fenced``, text inside fences counts too: a step's instructions quoted in its
+    settings and again inside an item's prompt are the same sentence, wherever each is
+    fenced and however indented. Without it (the default), fenced text is not checked.
+    Anything shorter than ``shortest`` is never checked (step names, short table cells
+    and labels repeat by design)."""
     plain = []
-    for line in _outside_fences(text):
+    for line in (text.splitlines() if fenced else _outside_fences(text)):
+        if fenced and re.match(r"^\s*`{3,}", line):
+            continue  # a fence line itself
         line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)  # a list item's marker
         plain += [cell.strip() for cell in re.split(r"(?<!\\)\|", line)]  # table cells
     counts: dict[str, int] = collections.Counter()

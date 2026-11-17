@@ -300,7 +300,7 @@ class Node:
     call: str = ""
     #: `gate` with gate_kind ``fn``: the ``module:function`` that returns the verdict (V8).
     evaluator: str = ""
-    #: Who answers this gate: ``fn`` (the default), ``user`` or ``agent``.
+    #: `gate`: who answers it: ``fn`` (the default), ``user`` or ``agent``.
     gate_kind: str = "fn"
     #: The parameters (knobs) the node consumes; template ``{{name}}`` values come from these.
     knobs: tuple[str, ...] = ()
@@ -317,14 +317,15 @@ class Node:
     produces: tuple[str, ...] = ()
     #: `agent`: the user prompt, with ``{{knob}}`` and ``{{fact}}`` filled in.
     prompt_template: str = ""
-    #: Optional system-prompt template for agent nodes, rendered with knobs/facts.
+    #: `agent`: an optional system-prompt template, rendered with knobs/facts.
     #: Distinct from notes and the user prompt.
     system_prompt_template: str = ""
     #: `agent`: the worker role, which picks the model route (``role_routes``).
     role: str = "ceo"
     #: `agent`: tools the model may use.
     tools: tuple[str, ...] = ()
-    #: How many times a gate's retry edge may send control back to this node.
+    #: `gate`: how many times its reloop edge may send work back, counted at the gate on
+    #: both runtimes (the walker's ``_count_retry``, the spine's ``reloopCap``).
     max_iterations: int = 1
     #: `gate`: what a reloop past ``max_iterations`` does instead: ``continue`` takes the
     #: gate's ``proceed`` edge with the last attempt's output, ``fail_item`` fails only the
