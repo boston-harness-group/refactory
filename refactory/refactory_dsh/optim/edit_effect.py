@@ -119,7 +119,7 @@ def _group(ids: Sequence[str], parent: Mapping[str, Mapping[str, Any]],
 
 
 def _says_something(group: Mapping[str, Any]) -> bool:
-    return bool(group["new"] or group["said"] or group["reran"])
+    return bool(group["new"] or group["said"] or group["reran"] or group["parent_failed"])
 
 
 def edit_effect(parent_records: Sequence[Mapping[str, Any]] | None,
@@ -185,6 +185,10 @@ def effect_lines(effect: Mapping[str, Any]) -> list[str]:
                              f"called {step} more than once, so its first reply is not known")
             readable = runs - group["unread_runs"].get(step, 0)
             if not readable:
+                continue
+            if group["unread"].get(step, 0) == readable and effect.get("reads_replies"):
+                parts.append(f"{step}'s first reply was not readable as an answer on any of "
+                             f"those {readable}")
                 continue
             if not effect.get("reads_replies"):
                 parts.append(f"whether {step}'s first reply was right is not known: the task "

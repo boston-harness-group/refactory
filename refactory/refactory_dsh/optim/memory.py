@@ -802,9 +802,13 @@ def kind_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0,
                          + (f", gate: {entry.get('gate') or 'not gated'}" if gated else ""))
         lines.append(f"- {kind}: {len(entries)} tr{'y' if len(entries) == 1 else 'ies'}: "
                      + "; ".join(tries))
-    lines.append("A kind tried once whose result is inside that noise is no evidence against "
-                 "the kind; what went wrong is that try's own (see how it moved its items).")
     return lines
+
+
+#: What the proposer is told beside the tally; the memory call has it in MEMORY_SYSTEM.
+TALLY_NOISE_RULE = ("A kind tried once whose result is inside that noise is no evidence "
+                    "against the kind; what went wrong is that try's own (see how it moved "
+                    "its items).")
 
 
 def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
@@ -1005,7 +1009,8 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
     if text and tally:
         lines.append("The note was written from this tally of the epoch's tries, so the note "
                      "can be weighed against it:")
-    return [*lines, *(tally if text else []), *([text] if text else [])]
+    return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
+            *([text] if text else [])]
 
 
 # ── the journal and the report ──────────────────────────────────────────────

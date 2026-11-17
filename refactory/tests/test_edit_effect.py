@@ -166,8 +166,11 @@ def test_memory_gets_each_kind_s_tries_and_the_noise_they_sit_in(name, fixed, br
     assert (f"- loop: 1 try: `{entry['id']}` fixed {fixed} / broken {broken} of 35 train "
             "items, gate: rejected") in text
     assert text.count(f"fixed {fixed} / broken {broken}") == 1
-    assert "is no evidence against the kind" in text and "first reply was already right" in text
+    assert "first reply was already right" in text
+    # The noise rule is the memory call's, once: in its system prompt, not again here.
     assert "never" in memory_mod.MEMORY_SYSTEM and "inside the noise" in memory_mod.MEMORY_SYSTEM
+    request = memory_mod.MEMORY_SYSTEM + "\n" + text
+    assert request.count("no evidence") == 1, "the memory request repeats the noise rule"
 
 
 def test_the_proposer_sees_the_same_tally_once_beside_the_note():
@@ -180,6 +183,7 @@ def test_the_proposer_sees_the_same_tally_once_beside_the_note():
     assert note.index(memory_mod.TALLY_HEADING) < note.index("NOTE-TEXT")
     assert text.count(memory_mod.TALLY_HEADING) == 1
     assert text.count(f"`{entry['id']}` fixed 1 / broken 8") == 1
+    assert text.count(memory_mod.TALLY_NOISE_RULE) == 1
 
 
 # ── what the line may claim, on any graph ──────────────────────────────────
@@ -200,7 +204,8 @@ def test_new_is_the_child_graph_s_steps_and_a_failed_parent_item_is_left_out():
     parent = [_meta_rec("i1", False, [], error="CompletionTimeout: timed out")]
     child = [_rec("i1", True, [("solve", "<answer>B</answer>")])]
     effect = edit_effect(parent, child, _judge(), new_steps={"other"})
-    assert effect == {}, effect
+    assert effect["fixed"]["parent_failed"] == 1 and effect["fixed"]["new"] == {}
+    assert "1 left out: the parent's run of the item failed" in "\n".join(effect_lines(effect))
 
 
 def test_a_rerun_is_more_calls_than_the_parent_made_on_the_item():
@@ -241,7 +246,7 @@ def test_an_unreadable_first_reply_and_a_failing_reading_are_said():
     parent = [_rec("i1", True, [("solve", "<answer>B</answer>")])]
     child = [_rec("i1", False, [("solve", "nothing"), ("j", "r"), ("solve", "<answer>A</answer>")])]
     effect = edit_effect(parent, child, _judge(), new_steps={"j"})
-    assert "not readable as an answer on 1" in "\n".join(effect_lines(effect))
+    assert "not readable as an answer on any of those 1" in "\n".join(effect_lines(effect))
 
     def broken_reading(reply, meta):
         raise ValueError("bad reading")
@@ -311,3 +316,11 @@ def test_a_fixed_item_whose_parent_failed_is_counted_apart():
     assert (group["items"], group["parent_failed"], group["new"]) == (2, 1, {"j": 1})
     assert "1 left out: the parent's run of the item failed" in "\n".join(
         effect_lines({"fixed": group, "reads_replies": True}))
+
+
+def test_a_rerun_whose_first_replies_are_all_unreadable_says_only_that():
+    parent = [_rec("i1", True, [("solve", "<answer>B</answer>")])]
+    child = [_rec("i1", False, [("solve", "nothing"), ("j", "r"), ("solve", "still nothing")])]
+    text = "\n".join(effect_lines(edit_effect(parent, child, _judge(), new_steps={"j"})))
+    assert "solve's first reply was not readable as an answer on any of those 1" in text
+    assert "right on 0" not in text
