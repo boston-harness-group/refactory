@@ -89,18 +89,43 @@ def test_a_sealed_step_is_a_candidate_with_no_run_switch():
         {"graph": {"nodes": {"x": {"kind": "agent", "tool_policy": None, "tools": ["bash"]}}}})
 
 
-@pytest.fixture(params=["scoped", "unscoped"])
-def seal_path(request, monkeypatch):
+#: A stand-in for a systemd-run that expands variables in the command it is given, as
+#: GitHub's runners' does: ``${...}`` anywhere in an argument, and ``$NAME`` as a whole
+#: argument, each becoming the variable's value or nothing.
+EXPANDING_SYSTEMD_RUN = """\
+import os, re, sys
+args = sys.argv[1:]
+args = args[args.index("--") + 1:]
+def value(name):
+    return os.environ.get(name, "") if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) else ""
+def expand(arg):
+    whole = re.fullmatch(r"\\$([A-Za-z_][A-Za-z0-9_]*)", arg)
+    if whole:
+        return value(whole.group(1))
+    return re.sub(r"\\$\\{([^}]*)\\}", lambda match: value(match.group(1)), arg)
+args = [expand(arg) for arg in args]
+os.execv(args[0], args)
+"""
+
+
+@pytest.fixture(params=["scoped", "unscoped", "expanding"])
+def seal_path(request, monkeypatch, tmp_path_factory):
     """Each Linux path a sealed command can take: in a capped systemd user scope (where
-    this machine's user manager makes one) and without one (per-process limits only,
-    as on a CI runner with no user manager). macOS has one path."""
+    this machine's user manager makes one), without one (per-process limits only, as on
+    a CI runner with no user manager), and through a systemd-run that expands ``$NAME``
+    in its arguments. macOS has one path."""
     if not sys.platform.startswith("linux"):
-        if request.param == "unscoped":
-            pytest.skip("macOS has no scope")
+        if request.param != "scoped":
+            pytest.skip("macOS has one path")
         return request.param
     monkeypatch.setattr(seal, "_SCOPE", [])
     if request.param == "unscoped":
         monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
+    elif request.param == "expanding":
+        fake = tmp_path_factory.mktemp("fake-systemd") / "systemd-run"
+        fake.write_text(f"#!{sys.executable}\n" + EXPANDING_SYSTEMD_RUN)
+        fake.chmod(0o755)
+        monkeypatch.setattr(seal, "_SCOPE", [(str(fake), "--user", "--scope", "--")])
     elif not seal.linux_scope():
         pytest.skip("no systemd user scope here")
     return request.param
@@ -156,6 +181,8 @@ EOF"""
 
 
 def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path, seal_path):
+    if seal_path == "expanding":
+        pytest.skip("these probes' own ${...} would be expanded; the hostile step covers this path")
     _sealable()
     run, place = _layout(tmp_path)
     home = os.path.expanduser("~")
@@ -899,3 +926,13 @@ def test_each_layer_closes_inherited_descriptors(tmp_path, seal_path):
                                pass_fds=(gold.fileno(),))
     assert outer.returncode == 0 and "GOLD" not in outer.stdout, outer
     assert inner.returncode == 0 and inner.stdout.split() == ["ran"], inner
+
+
+@LINUX
+def test_the_linux_runner_passes_no_shell_code_through_its_arguments(tmp_path):
+    """Nothing the runner hands systemd-run holds a '$' (its scripts are files), and an
+    argument that would is refused rather than passed on."""
+    _run, place = _layout(tmp_path)
+    assert not any("$" in argument for argument in place.runner)
+    with pytest.raises(seal.SealError, match="no '\\$'"):
+        seal.linux_arguments("/w/$HOME", seal.LINUX_READS, seal.LINUX_LIMITS)

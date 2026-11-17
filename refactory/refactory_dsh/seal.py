@@ -82,9 +82,9 @@ SCOPE_LIMITS = ("MemoryMax=8G", "MemorySwapMax=0", "TasksMax=256")
 #: (128 processes, 8 GiB of address space each).
 LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
 
-#: Closes every descriptor above stderr, then checks that none is left (a command that
-#: would start with one does not start), then runs its arguments. The last step before
-#: the command, inside every namespace the command runs in.
+#: macOS: closes every descriptor above stderr, then checks that none is left (a command
+#: that would start with one does not start), then runs its arguments. Linux runs the
+#: same step from a file (``seal_close.sh``), since nothing on macOS rewrites arguments.
 _CLOSE = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
           '[ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-" 2>/dev/null; done; '
           'for fd in /dev/fd/*; do n="${fd##*/}"; '
@@ -92,14 +92,13 @@ _CLOSE = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
           'echo "refactory-seal: descriptor $n is still open" >&2; exit 97; fi; done; '
           'exec "$@"')
 
-#: Sets the limits, then runs the command (after DSH's profile arguments and ``--``) in
-#: the workspace with that environment, through :data:`_CLOSE`; ``$run`` is what runs
-#: it (Linux: the nested, unprivileged user namespace).
-_EXEC = (f'ulimit {LIMITS} $limits || {{ echo "refactory-seal: cannot set limits" >&2; exit 97; }}; '
+#: macOS: sets the limits, then runs the command (after DSH's profile arguments and
+#: ``--``) in the workspace with that environment, through :data:`_CLOSE`.
+_EXEC = (f'ulimit {LIMITS} || {{ echo "refactory-seal: cannot set limits" >&2; exit 97; }}; '
          'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
          '[ "$1" = "--" ] || { echo "refactory-seal: no command" >&2; exit 97; }; shift; '
          'cd "$ws" || exit 97; '
-         f'exec $run /bin/bash -c \'{_CLOSE}\' refactory-seal '
+         f'exec /bin/bash -c \'{_CLOSE}\' refactory-seal '
          f'/usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="{PATH}" '
          f'LANG={snippet.LOCALE} LC_ALL={snippet.LOCALE} "$@"')
 
@@ -112,58 +111,28 @@ LINUX_ETC = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/p
              "/etc/group", "/etc/nsswitch.conf", "/etc/localtime", "/etc/ssl", "/etc/alternatives",
              "/etc/ca-certificates")
 #: What of ``/usr/local`` a sealed Linux command may read (its programs and libraries,
-#: CUDA's included); everything else there is covered (`linux_shell`).
+#: CUDA's included); everything else there is covered (``seal_linux.sh``).
 LOCAL_KEPT = ("bin", "sbin", "lib", "lib64", "libexec", "include", "cuda", "cuda-*")
 
-def linux_shell(reads: tuple[str, ...], limits: str) -> str:
-    """The shell that builds the new root inside the new namespaces (Linux), where it is
-    root of its own user namespace, from ``reads``, with ``limits``. Arguments: the
-    workspace, the caller's uid and gid, then whatever DSH appends. Any step that fails
-    stops it: nothing runs half sealed."""
-    return (
-        'ws="$1"; uid="$2"; gid="$3"; shift 3; '
-        'fail() { echo "refactory-seal: $1" >&2; exit 97; }; '
-        'exec 3<"$ws" || fail "cannot open the workspace"; '
-        # One more user namespace (the unprivileged one the command runs in) and none after
-        # it: the command cannot become root of a namespace of its own.
-        'echo 1 > /proc/sys/user/max_user_namespaces || fail "cannot limit user namespaces"; '
-        'mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"; '
-        'r=/tmp/root; mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r" '
-        '|| fail "cannot make the new root"; '
-        # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along
-        # with flags of its own, then made read only.
-        'mkdir -p "$r/etc" || fail "cannot make /etc"; '
-        f'for d in {" ".join(reads)}; do '
-        'if [ -L "$d" ]; then cp -P "$d" "$r$d" || fail "cannot link $d"; '
-        'elif [ -e "$d" ]; then { if [ -d "$d" ]; then mkdir -p "$r$d"; else touch "$r$d"; fi; } '
-        '&& mount -n --bind "$d" "$r$d" '
-        '&& mount -n -o remount,bind,ro "$r$d" || fail "cannot bind $d"; fi; done; '
-        # /usr/local keeps only its programs and libraries (:data:`LOCAL_KEPT`), as on macOS:
-        # its etc, share, src, var and the rest are each covered by an empty, read-only mount.
-        'for e in "$r"/usr/local/* "$r"/usr/local/.[!.]*; do '
-        '{ [ -e "$e" ] && [ ! -L "$e" ]; } || continue; case "${e##*/}" in '
-        f'{"|".join(LOCAL_KEPT)}) continue;; esac; '
-        'if [ -d "$e" ]; then mount -n -t tmpfs -o ro,size=4k,mode=0555 seal "$e"; '
-        'else mount -n --bind /dev/null "$e" && mount -n -o remount,bind,ro "$e"; fi '
-        '|| fail "cannot cover $e"; done; '
-        'mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"; '
-        'for n in null zero random urandom; do touch "$r/dev/$n" '
-        '&& mount -n --bind "/dev/$n" "$r/dev/$n" || fail "cannot bind /dev/$n"; done; '
-        'ln -s /proc/self/fd "$r/dev/fd" && ln -s /proc/self/fd/0 "$r/dev/stdin" '
-        '&& ln -s /proc/self/fd/1 "$r/dev/stdout" && ln -s /proc/self/fd/2 "$r/dev/stderr" '
-        '|| fail "cannot link /dev/fd"; '
-        'mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"; '
-        'mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
-        'exec 3<&-; '
-        'cd "$r" && mkdir .old && pivot_root . .old || fail "cannot pivot to the new root"; '
-        'cd / && umount -n -l /.old && rmdir /.old || fail "cannot detach the old root"; '
-        # The new root itself (/, /tmp, the folders above the workspace) is read only, as
-        # macOS's is: the workspace is the one place a sealed command writes.
-        'mount -n -o remount,bind,ro / || fail "cannot make the new root read only"; '
-        'run="/usr/bin/unshare --user --mount --map-user=$uid --map-group=$gid --"; '
-        f'limits="{limits}"; '
-        + _EXEC
-    )
+#: The Linux runner's two steps, run from files (never inline code: systemd-run expands
+#: ``$NAME`` in the arguments it is given): building the new root and starting the
+#: command (``seal_linux.sh``), and the command's last step, which closes and checks its
+#: descriptors (``seal_close.sh``).
+LINUX_SCRIPT = Path(__file__).with_name("seal_linux.sh")
+CLOSE_SCRIPT = Path(__file__).with_name("seal_close.sh")
+
+
+def linux_arguments(ws: str, reads: tuple[str, ...], limits: str) -> list[str]:
+    """What follows ``bash`` in the Linux runner: the script and its arguments, none of
+    which holds a ``$`` (`seal_linux.sh` says what each is)."""
+    arguments = [str(LINUX_SCRIPT), "refactory-seal", ws, str(os.getuid()), str(os.getgid()),
+                 f"{LIMITS} {limits}", str(CLOSE_SCRIPT), ":".join(reads), ":".join(LOCAL_KEPT),
+                 PATH, snippet.LOCALE]
+    expanded = [argument for argument in arguments if "$" in argument or "\n" in argument]
+    if expanded or any(":" in path for path in reads):
+        raise SealError(f"a sealed runner's arguments hold no '$', newline or ':' in a path: {expanded}")
+    return arguments
+
 
 #: What a sealed macOS command may read besides its workspace: the system's programs and
 #: libraries, the command-line tools, Homebrew's programs and libraries (never its or
@@ -189,7 +158,7 @@ MAC_SYSCTLS = ('(sysctl-name-prefix "hw.") (sysctl-name-prefix "kern.os") '
 
 #: The shim that runs the command inside the profile sandbox-exec applies (macOS).
 #: Arguments: the workspace, then whatever DSH appends.
-_MAC_SHIM = 'ws="$1"; shift; run=; limits=; ' + _EXEC
+_MAC_SHIM = 'ws="$1"; shift; ' + _EXEC
 
 
 class SealError(RuntimeError):
@@ -254,9 +223,9 @@ def runner_command(workspace: Path) -> list[str]:
     reaper = str(Path(__file__).with_name("seal_reaper.py"))
     return [sys.executable, "-I", reaper, "--exec", *scope,
             shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
-            "--mount-proc", "--", snippet.BASH, "-c",
-            linux_shell(LINUX_READS + LINUX_ETC, LINUX_LIMITS if scope else LINUX_LIMITS_UNSCOPED),
-            "refactory-seal", ws, str(os.getuid()), str(os.getgid())]
+            "--mount-proc", "--", snippet.BASH,
+            *linux_arguments(ws, LINUX_READS + LINUX_ETC,
+                             LINUX_LIMITS if scope else LINUX_LIMITS_UNSCOPED)]
 
 
 def _scope_prefix() -> list[str]:
@@ -264,9 +233,18 @@ def _scope_prefix() -> list[str]:
     runtime = f"/run/user/{os.getuid()}"
     if not systemd_run or not os.path.isdir(runtime):
         return []
+    # Where systemd-run can be told not to expand $NAME in the command, it is told so;
+    # the runner's arguments hold no '$' either way (`linux_arguments`).
+    try:
+        usage = subprocess.run([systemd_run, "--help"], capture_output=True, text=True,
+                               timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    expand = ["--expand-environment=no"] if "--expand-environment" in usage else []
     return ["/usr/bin/env", f"XDG_RUNTIME_DIR={runtime}",
             f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus", systemd_run, "--user",
-            "--scope", "--quiet", "--collect", *(f"--property={p}" for p in SCOPE_LIMITS), "--"]
+            "--scope", "--quiet", "--collect", *expand,
+            *(f"--property={p}" for p in SCOPE_LIMITS), "--"]
 
 
 #: The scope prefix once a probe found one (`linux_scope`); a failed probe is not kept.
