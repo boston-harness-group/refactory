@@ -93,8 +93,8 @@ neither can run, code is not run.
    The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
 2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
    the pass's first step runs.
-3. **Retries**: a crashed call is retried 3 times (4 sessions); SkillOpt's wrapper makes
-   5 attempts.
+3. **Retries**: a crashed call gets a data pass's default 2 fresh sessions (3 in all);
+   SkillOpt's wrapper makes 5 attempts.
 4. **Tools**: none on the solve call. SkillOpt sends no tool schemas, but its CLI calls
    carried Claude Code's default tools, which `dontAsk` refused (74% of so-s42's target
    calls tried one).

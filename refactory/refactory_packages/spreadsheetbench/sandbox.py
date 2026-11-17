@@ -148,22 +148,24 @@ out, tmp, hidden = sys.argv[1:4]
 for d in (out, tmp):
     open(os.path.join(d, "probe"), "w").write("x")
 try:
-    os.listdir(hidden)
+    open(os.path.join(hidden, "secret")).read()
 except OSError:
     pass
 else:
-    sys.exit("a hidden directory can be read")
+    sys.exit("a file in a hidden directory can be read")
 """
 
 
 @lru_cache(maxsize=None)
 def _probe(python: str) -> tuple[bool, str]:
     """The sandbox runs ``python``, which can write both writable directories and cannot
-    list a hidden one."""
+    read a file in a hidden one (on Linux a hidden directory is an empty tmpfs: it lists,
+    empty)."""
     with tempfile.TemporaryDirectory(prefix="sb-probe-") as work:
         out, tmp, hidden = (Path(work) / name for name in ("out", "tmp", "hidden"))
         for d in (out, tmp, hidden):
             d.mkdir()
+        (hidden / "secret").write_text("x")
         command = wrapper([str(hidden)])(
             [python, "-I", "-c", _PROBE, str(out), str(tmp), str(hidden)], str(out), str(tmp))
         try:

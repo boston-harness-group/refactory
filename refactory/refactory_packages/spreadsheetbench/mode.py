@@ -31,8 +31,8 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
    from reading the answer (none of so-s42's generated code mentions the golden
    file, ``listdir`` or ``glob``; port spec §3).
 6. *Tools*: none on the solve call (above).
-7. *Retries*: a crashed solve call is retried 3 times (4 sessions), the most a graph
-   may declare; SkillOpt's wrapper makes 5 attempts per turn.
+7. *Retries*: a crashed solve call gets the data pass's default 2 fresh sessions (3 in
+   all); SkillOpt's wrapper makes 5 attempts per turn.
 """
 from __future__ import annotations
 
@@ -103,8 +103,7 @@ class Solver(nn.Mode):
                       notes="flatten the conversation into the History: prompt"))
         g.add(nn.Node("solve", "agent", prompt_template="{{solver_prompt}}",
                       system_prompt_template=SYSTEM_PROMPT, writes=("reply.txt",),
-                      tool_policy="none", role="solver",
-                      retry={"on": ["crash"], "times": 3}, outputs_only=True,
+                      tool_policy="none", role="solver", outputs_only=True,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
         g.add(nn.Node("run_turn", "op", call=f"{OPS}:run_turn",
