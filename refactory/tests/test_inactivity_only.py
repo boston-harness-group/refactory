@@ -161,3 +161,20 @@ def test_the_backstop_and_inactivity_travel_to_the_worker():
         assert node.observes_activity() is observed, backend
         assert (node._inactivity_limit() > 0) is observed, backend
     assert json.loads(json.dumps(client.context()))["backstop_s"] == 99
+
+
+def test_a_harness_incident_is_read_from_anchored_signals_only():
+    """The type, or a line starting with a runtime's own prefix, makes an item a harness
+    incident; the phrase quoted mid-line (a model's own text) does not."""
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.model import HarnessBackstop
+
+    assert error_kind(HarnessBackstop("model session hit the harness backstop after 9s")) == "harness_incident"
+    assert error_kind(RuntimeError("solve: HarnessBackstop: model session hit the harness backstop")) \
+        == "harness_incident"
+    assert error_kind(RuntimeError("solve exited with code 1\nworker: model session hit the harness "
+                                   "backstop after 9s")) == "harness_incident"
+    assert error_kind(RuntimeError("solve: ValueError: the answer says it hit the harness backstop")) \
+        == "RuntimeError"
+    assert error_kind(RuntimeError("solve: CompletionTimeout: model completion timed out after 5s of "
+                                   "inactivity")) == "timeout"

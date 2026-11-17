@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -432,6 +433,14 @@ COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 ERROR_TEXT_CHARS = 4096 + 512 + 1
 
 
+#: How a session the harness backstop stopped (`model.HarnessBackstop`) reaches an item
+#: record as text, anchored at a line's start: the walker's ``"<node>: HarnessBackstop: "``
+#: and the spine worker's stderr ``"worker: model session hit the harness backstop"``.
+HARNESS_BACKSTOP_LINE = re.compile(
+    r"^(?:[A-Za-z0-9_.-]+: HarnessBackstop: |worker: model session hit the harness backstop)",
+    re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
     backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
@@ -445,9 +454,9 @@ def error_kind(error: BaseException) -> str:
     """
     import subprocess
 
-    from refactory_dsh.model import HARNESS_BACKSTOP_TEXT
+    from refactory_dsh.model import HarnessBackstop
 
-    if HARNESS_BACKSTOP_TEXT in str(error):
+    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
         return "harness_incident"
     if isinstance(error, subprocess.TimeoutExpired) or COMPLETION_TIMEOUT_TEXT in str(error):
         return "timeout"
