@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, ClassVar
+from typing import Any, Callable, ClassVar, Mapping
 
 from refactory_dsh.paths import SOURCE_CLI_ENTRY, dsh_command, dsh_root, node_bin, venv_bin
 import importlib.metadata
@@ -956,6 +956,18 @@ class DshModelClient:
         longer limit (`node_retry.deliver`), which may exceed the route's envelope."""
         client = self.with_wall(seconds)
         client._node_wall_exact = True
+        return client
+
+    def with_step_route(self, route: Mapping[str, str] | None) -> DshModelClient:
+        """A copy whose calls take a step's own model, effort and output cap (`Node.route`)
+        over the route `for_node` resolved; the fields it does not set stay as they are."""
+        from refactory_dsh.nn.graph import route_declaration
+        from refactory_dsh.workers import validate_route
+
+        client = copy.copy(self)
+        for key, value in (route_declaration(route) or {}).items():
+            setattr(client, "_" + key, value)
+        validate_route(client.route())
         return client
 
     def with_tool_policy(self, policy: str) -> DshModelClient:

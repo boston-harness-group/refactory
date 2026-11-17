@@ -72,6 +72,7 @@ from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
 from refactory_dsh.paths import project_root
+from refactory_dsh.workers import StepRoutes
 
 #: The append-only record of everything a run did. Resume replays it.
 JOURNAL = run_history.JOURNAL
@@ -766,6 +767,8 @@ class Loop(OuterLoop):
         self.optimizer.max_edits = MAX_EDITS_PER_PROPOSAL
         # Whether edits may add code nodes, and what their code may never contain.
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
+        # The routes a step may choose its own model, effort and cap from (`Node.route`).
+        self.optimizer.step_routes = StepRoutes.of(model)
         self.optimizer.grader_secrets = self._grader_secrets
         # A new or changed code node is dry-run on its parent's recorded item inputs
         # (`optim.checks.code_dry_run`), found in the parent's run directory.
@@ -1504,6 +1507,7 @@ class Loop(OuterLoop):
             return
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
+        sampler.step_routes = self.optimizer.step_routes
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]
@@ -5376,6 +5380,8 @@ class Loop(OuterLoop):
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
             new_node_tools=bool(self.config.allow_new_node_tools),
+            step_routes=(self.optimizer.step_routes.offered()
+                         if getattr(self.optimizer, "step_routes", None) is not None else {}),
             time_facts=self._time_facts(board),
         )
 

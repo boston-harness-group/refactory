@@ -2038,6 +2038,13 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
+        if node.route is not None:
+            # The step's own model, effort and output cap, as the spine's worker gets them
+            # (`workers.lower_workflow`); a client that cannot take them is refused.
+            if not callable(getattr(client, "with_step_route", None)):
+                raise ValueError(f"agent node {node.id!r} declares a route, which the model "
+                                 "client cannot take")
+            client = client.with_step_route(node.route)
         # ── no-tools enforcement ──────────────────────────────────────────
         tool_policy = node.tool_policy or ""
         if callable(getattr(client, "with_tool_policy", None)):
