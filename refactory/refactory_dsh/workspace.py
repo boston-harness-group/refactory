@@ -936,8 +936,14 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     dispatch finds its workspace as it left it, so it can fix what was named. Any other
     write the node declares is its final response, unless the agent wrote it.
     ``files``: each declared write found in the workspace is copied to the run directory.
+    A sealed workspace is collected after every process its commands left is ended.
     """
     from refactory_dsh.agent_delivery import _path
+
+    if workspace.runner:
+        from refactory_dsh.seal_reaper import reap
+
+        reap(str(workspace.path))
 
     workdir = Path(workdir).resolve()
     summary: dict[str, Any] = {"collect": workspace.collect, "path": str(workspace.path)}

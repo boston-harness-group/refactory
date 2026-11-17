@@ -141,6 +141,12 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     _sealable()
     run, place = _layout(tmp_path)
     home = os.path.expanduser("~")
+    # A real file of the person's home: ~/.zshrc where there is one, else the first
+    # readable file there (the CI runner's own dotfiles).
+    home_files = [os.path.join(home, ".zshrc")] + sorted(
+        os.path.join(home, name) for name in os.listdir(home))
+    home_file = next((path for path in home_files if os.path.isfile(path)
+                      and os.access(path, os.R_OK) and os.path.getsize(path) > 0), "")
     probes = {
         "input": "cat input.txt",
         "grader": f"cat {run / 'grader.json'}",
@@ -149,6 +155,7 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
         "other item, relative": "cat ../../../../items/b/answer.txt",
         "run listing": f"ls {run}",
         "home listing": f"ls -A {home}",
+        "home file": f"cat {shlex.quote(home_file)}" if home_file else "true",
         "link out": f"ln -s {run / 'grader.json'} out-link && cat out-link",
         "write outside": f"echo x > {run / 'written.txt'} && echo WROTE",
         "network": "exec 3<>/dev/tcp/1.1.1.1/53 && echo CONNECTED",
@@ -169,7 +176,8 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     out = {name: _sealed(place, script) for name, script in probes.items()}
     assert out["input"].stdout == "THE-INPUT"
     assert out["write inside"].stdout == "made\n"
-    for name in ("grader", "gold", "other item", "other item, relative", "link out"):
+    for name in ("grader", "gold", "other item", "other item, relative", "link out",
+                 *(("home file",) if home_file else ())):
         assert out[name].returncode != 0 and out[name].stdout == "", (name, out[name])
     assert not any(secret in result.stdout + result.stderr for result in out.values()
                    for secret in ("GOLD-OUTSIDE", "GOLD-IN-RUN", "OTHER-ITEM", "LEAKED-ENV"))
@@ -199,15 +207,48 @@ def test_a_sealed_command_gets_no_descriptor_but_its_own(tmp_path):
     assert "GOLD-OUTSIDE" not in result.stdout
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"),
-                    reason="macOS has no PID namespace: a detached process outlives its command")
-def test_a_detached_process_ends_with_its_command(tmp_path):
+DETACH = {
+    "background": "(sleep 3; echo late > late-bg.txt) & true",
+    "setsid": "perl -MPOSIX -e 'fork and exit; POSIX::setsid(); sleep 3; "
+              "open(F, \">late-setsid.txt\"); print F 1' & true",
+}
+
+
+@pytest.mark.parametrize("how", sorted(DETACH))
+def test_a_process_a_command_leaves_ends_with_it(tmp_path, how):
+    """Linux: the PID namespace dies with the command. macOS: the reaper ends every
+    process in the command's sandbox, a detached one included, and collecting the
+    workspace does so again (`seal_reaper`)."""
     _sealable()
     _run, place = _layout(tmp_path)
-    _sealed(place, "(setsid sh -c 'sleep 3; echo late > late.txt' &) ; true")
+    _sealed(place, DETACH[how])
     import time
     time.sleep(5)
-    assert not (place.path / "late.txt").exists()
+    assert not list(place.path.glob("late-*.txt")), how
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the reaper is macOS's PID namespace")
+def test_collecting_a_sealed_workspace_ends_what_its_runner_could_not(tmp_path):
+    """A runner killed outright cannot reap; collect does, and only this step's sandbox."""
+    _sealable()
+    from refactory_dsh import seal_reaper
+    _run, place = _layout(tmp_path)
+    (tmp_path / "other").mkdir()
+    _o, other = _layout(tmp_path / "other")
+    argv = [*place.runner, "--", "bash", "-c", "sleep 30"]
+    others = [*other.runner, "--", "bash", "-c", "sleep 30"]
+    mine = subprocess.Popen(argv[4:], cwd=place.path)  # sandbox-exec onward: no reaper
+    theirs = subprocess.Popen(others[4:], cwd=other.path)
+    try:
+        import time
+        time.sleep(1)
+        assert seal_reaper.sealed_pids(str(place.path)), "the sealed process is found"
+        workspace.collect(place, _run, [])
+        assert mine.wait(timeout=5) == -9
+        assert theirs.poll() is None, "another step's sealed process is left alone"
+    finally:
+        theirs.kill()
+        mine.kill()
 
 
 def test_a_seal_that_cannot_be_set_up_runs_nothing(tmp_path):
@@ -380,3 +421,34 @@ def test_the_contract_points_a_sealed_step_at_its_own_copies():
     assert execution["outputs"] == ["/w/scratch-1/answer.txt"]
     assert "workdir" not in execution and "python" not in execution
     assert "there is no network" in prompt and '"workdir"' not in prompt
+
+
+@pytest.mark.parametrize("runner", ["fails", "does not seal"])
+def test_where_the_seal_cannot_be_made_the_step_is_refused_never_run_unsealed(
+        tmp_path, monkeypatch, runner):
+    """A machine whose namespaces (or Seatbelt) are unavailable gets a runner that fails;
+    one that starts but does not seal runs the probe's command with full access. Either
+    way the probe says the seal is unavailable, and a sealed step is refused: there is
+    no write-only fallback."""
+    fake = tmp_path / "fake-runner"
+    body = ("echo 'unshare: unshare failed: Operation not permitted' >&2; exit 1"
+            if runner == "fails" else
+            'while [ "$1" != "--" ]; do shift; done; shift; exec "$@"')
+    fake.write_text(f"#!/bin/sh\n{body}\n")
+    fake.chmod(0o755)
+    if sys.platform == "darwin":
+        monkeypatch.setattr(seal.snippet, "SANDBOX_EXEC", str(fake))
+        monkeypatch.setattr(seal, "_MAC_SHIM", 'while [ "$1" != "--" ]; do shift; done; shift; exec "$@"')
+    else:
+        monkeypatch.setattr(seal.shutil, "which", lambda name: str(fake))
+    seal.available.cache_clear()
+    try:
+        ok, why = seal.available()
+        assert not ok, why
+        run = tmp_path / "run"
+        run.mkdir()
+        with pytest.raises(workspace.WorkspaceError, match="the seal cannot run here"):
+            workspace.prepare(run, "probe", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",))
+    finally:
+        seal.available.cache_clear()

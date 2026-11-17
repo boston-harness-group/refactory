@@ -25,8 +25,9 @@ It is the code step's sandbox (`snippet`) with a writable workspace and a shell:
 - **macOS**: Seatbelt, deny by default (:func:`mac_profile`): reads of the system's
   programs and libraries (not Homebrew's or ``/usr/local``'s data), reads and writes of
   the workspace, starting processes from what it may read, no other process's
-  information, only named system settings, and nothing on the network. Processes a
-  command detaches can outlive it, still sealed (macOS has no PID namespace).
+  information, only named system settings, and nothing on the network. macOS has no
+  PID namespace, so the runner ends every process left in the command's sandbox when
+  the command ends (`seal_reaper`), and collecting the workspace does so again.
 
 DSH's in-process tools (read, write, edit, glob, grep, web) run outside any runner, so a
 sealed step may list only tools whose effects run through it: the shell. A runner that
@@ -173,8 +174,10 @@ def runner_command(workspace: Path) -> list[str]:
     sealed step (``runnerCommand``)."""
     if sys.platform == "darwin":
         ws = _check(workspace, MAC_READS)
-        return [snippet.SANDBOX_EXEC, "-p", mac_profile(workspace), "/bin/sh", "-c", _MAC_SHIM,
-                "refactory-seal", ws]
+        # The reaper runs sandbox-exec, then ends whatever the command left behind.
+        reaper = str(Path(__file__).with_name("seal_reaper.py"))
+        return [sys.executable, "-I", reaper, ws, snippet.SANDBOX_EXEC, "-p", mac_profile(workspace),
+                "/bin/sh", "-c", _MAC_SHIM, "refactory-seal", ws]
     if not sys.platform.startswith("linux"):
         raise SealError(f"no sealed workspace on {sys.platform}")
     ws = _check(workspace, LINUX_READS)
