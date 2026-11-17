@@ -19,7 +19,7 @@ from refactory_dsh import lowering, workers
 from refactory_dsh.design import BUILDER_RETRY, BUILDER_TIMEOUT_S, DesignMode
 from refactory_dsh.fast import DesignFastMode
 from refactory_dsh.model import (DEFAULT_INACTIVITY_S, NODE_DISPATCH_OVERHEAD_S, CompletionTimeout,
-                                 DshModelClient)
+                                 DeclaredTimeout, DshModelClient)
 from refactory_dsh.node_retry import RETRY_EVENT, deliver, node_allowance_s
 
 #: What the scripted session does, by the first word of its prompt.
@@ -90,8 +90,9 @@ def test_a_silent_builder_is_stopped_at_the_inactivity_limit(tmp_path):
 
 def test_the_hard_maximum_still_stops_an_endlessly_busy_builder(tmp_path):
     elapsed, result = _complete(_client(tmp_path, inactivity_s=2, wall=5), tmp_path, "busy 60")
-    assert isinstance(result, CompletionTimeout), result
-    assert "timed out after 5s" in str(result) and "inactivity" not in str(result)
+    # The wall the node declares: the graph's own limit (`DeclaredTimeout`), not retried.
+    assert isinstance(result, DeclaredTimeout), result
+    assert "declared timeout_s (5s) after 5s" in str(result) and "inactivity" not in str(result)
     assert 4 < elapsed < 15
 
 

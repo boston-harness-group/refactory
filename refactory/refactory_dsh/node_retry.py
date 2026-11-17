@@ -9,7 +9,10 @@ dispatched agent node runs (`worker_node.execute`). The spine reserves the node'
 envelope for it when it lowers the graph (`workers.lower_workflow`, with
 :func:`node_allowance_s`), so the retry runs inside the one command the spine started.
 
-A retry on ``timeout`` needs the node's own `timeout_s`, which each retry's limit
+A retry on ``timeout`` answers a session that went silent past the inactivity limit (or
+ran out of a per-completion limit), never one that reached the node's own declared wall
+(`model.DeclaredTimeout`, the pipeline's limit) or the harness backstop
+(`model.HarnessBackstop`). It needs the node's own `timeout_s`, which each retry's limit
 multiplies. A retry on ``crash`` runs under the node's limit, or the route's when it has
 none. A retry after the output limit tells the model its last attempt ran out of room
 (`OUTPUT_LIMIT_NOTE`).
@@ -97,11 +100,32 @@ def leaves_no_answer(error: BaseException) -> bool:
     return isinstance(error, RetriesExhausted) or failure_kind(error) == "output_limit"
 
 
+def missing_cause(error: BaseException) -> str | None:
+    """Why a session's failure left its step without an answer, by the error's type, when
+    it ended for time: ``harness_incident`` (`model.HarnessBackstop`), ``declared_timeout``
+    (`model.DeclaredTimeout`) or ``timeout`` (`failure_kind`); else None."""
+    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
+
+    if isinstance(error, HarnessBackstop):
+        return "harness_incident"
+    if isinstance(error, DeclaredTimeout):
+        return "declared_timeout"
+    return "timeout" if failure_kind(error) == "timeout" else None
+
+
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
-    """Record why a step left without an answer has none (`MISSING_DIR`)."""
-    if not leaves_no_answer(error):
+    """Record why a step left without an answer has none (`MISSING_DIR`): its retries
+    were spent, it ran out of output, or (an optional branch) it ended for time
+    (`missing_cause`). Any other failure records nothing, and its step's cause reads
+    ``failed`` (`items.missing_steps`)."""
+    if isinstance(error, RetriesExhausted):
+        cause: str | None = error.cause
+    elif failure_kind(error) == "output_limit":
+        cause = "output_limit"
+    else:
+        cause = missing_cause(error)
+    if cause is None:
         return
-    cause = error.cause if isinstance(error, RetriesExhausted) else "output_limit"
     target = Path(workdir) / MISSING_DIR / f"{node}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"cause": cause, "sessions": getattr(error, "sessions", None),
@@ -117,8 +141,10 @@ def clear_spent(workdir: Path, node: str) -> None:
 def failure_kind(error: BaseException) -> str | None:
     """The `nn.graph.RETRY_ON` failure ``error`` is, or None when it is none of them.
 
-    A timeout is the model client's deadline (`model.CompletionTimeout`), or a timeout
-    another client reports the same way. A crash is a session the worker or product
+    A timeout is the model client's deadline (`model.CompletionTimeout`: inactivity, or
+    a per-completion limit), or a timeout another client reports the same way. A session
+    stopped at its node's declared wall (`model.DeclaredTimeout`, the pipeline's own
+    limit) or at the harness backstop (`model.HarnessBackstop`) is not one. A crash is a session the worker or product
     failed (`model.CompletionFailed` of kind ``worker``: an invalid result, a worker
     error). ``output_limit`` is the model using its whole output allowance without
     answering: the model's own failure on the question, retried only when a step opts in.

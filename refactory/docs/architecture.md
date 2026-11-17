@@ -487,8 +487,10 @@ outer-loop evaluations):
 
 - **Declared node recovery.** An agent node may declare
   `retry={"on": ["timeout"], "times": 1, "timeout_factor": 2}`: a session that
-  times out is run once more, in a fresh session with twice its `timeout_s`
-  (which a retry requires). The rule
+  times out on inactivity is run once more, in a fresh session with twice its
+  `timeout_s` (which a retry requires). A session that reaches its own `timeout_s`
+  is the graph's limit, not retried, and its item's `error_kind` is
+  `declared_timeout`; one stopped at the harness backstop is a `harness_incident`. The rule
   is the graph's, never a CEO's judgment, so a headless run recovers as a
   supervised one does. Both runtimes run it through `node_retry.deliver`: the
   walker from `_visit_agent`, the spine from the worker every dispatched agent

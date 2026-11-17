@@ -494,7 +494,8 @@ def test_a_node_session_runs_under_the_harness_backstop_not_a_wall(monkeypatch):
 
     monkeypatch.setattr(DshModelClient, "_run_completion", explode)
     node = DshModelClient(timeout_s=1, attempts=3, backstop_s=77).for_node("research_director")
-    with pytest.raises(HarnessBackstop, match="hit the harness backstop after 77s"):
+    # The message says how long the call really ran: this stub's timeout comes at once.
+    with pytest.raises(HarnessBackstop, match="hit the harness backstop after 0s"):
         node.complete("hello")
     # The deadline is absolute and shared across attempts, and the per-completion
     # timeout_s does not bound it.
