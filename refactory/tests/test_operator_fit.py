@@ -495,11 +495,10 @@ def test_max_iterations_is_refused_on_the_written_out_loop():
     for cap in (2, 9):
         reason = nn_edits.precheck({**written, "max_iterations": cap}, state)
         assert reason and "'max_iterations' goes with the one-line loop" in reason, cap
-    # The help names it in the one-line form's sentence, before the written-out form.
+    # The help names it in the one-line form, the only form it describes.
     loop = next(op for op in nn_edits.catalogue("broad") if op["op"] == "loop")
     text = json.dumps(loop)
-    assert "'max_iterations'" in text
-    assert text.index("'max_iterations'") < text.index("Or, written out"), text
+    assert "'max_iterations'" in text and "written out" not in text, text
 
 
 

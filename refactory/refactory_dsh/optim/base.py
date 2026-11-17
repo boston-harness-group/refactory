@@ -2253,7 +2253,7 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
             name, ids, node_states, edges, protected, state)
         entry = by_op.get(name) or {}
         description = str(entry.get("description") or f"{spec['line']}.")
-        lines.append(f"- `{name}` ({_edit_fields(entry.get('fields') or spec['fields'])}): "
+        lines.append(f"- `{name}` ({_core_fields(entry.get('fields') or spec['fields'])}): "
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     return lines
 
@@ -3163,6 +3163,13 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
             examples += ["", "(A success, for contrast.)"]
         examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled, refs)]
     return lines + examples
+
+
+def _core_fields(fields: Sequence[str]) -> str:
+    """A core operator's fields: its one-line form, never a node object (``into`` is one or
+    two short steps, as its example shows)."""
+    return ", ".join("into: one or two steps, each like {kind, text, sees}" if name == "into"
+                     else name for name in fields)
 
 
 def _edit_fields(fields: Sequence[str]) -> str:

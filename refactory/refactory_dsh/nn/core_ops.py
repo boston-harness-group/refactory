@@ -2119,7 +2119,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "loop": {
         "reads_as": ('loop',),
-        "fields": ("step", "judge", "text", "sees", "max_iterations", "id", "target", "gate"),
+        "fields": ("step", "judge", "text", "sees", "max_iterations", "id"),
         "line": "a judge after a step that can send it back with its reason: 'judge' agent "
                 "(text = what to check; its answer starts with proceed or reloop, then why), "
                 "code (text = Python returning {'verdict': 'proceed' or 'reloop', 'reason': "
@@ -2145,7 +2145,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "split": {
         "reads_as": ('step',),
-        "fields": ("step", "into", "target"),
+        "fields": ("step", "into"),
         "line": "replace a step by two new steps run in turn ('into' two), or by one ('into' "
                 "one: replace); the last takes over its outputs",
         "example": {"op": "split", "step": "<step>",
@@ -2246,14 +2246,13 @@ def register(macro, macros: Mapping[str, Any]) -> None:
             return steps + _settle_optional(state, steps)
         return _guarded_expand(_expand_split_line)(edit, state)
 
-    macro("loop", OPERATORS["loop"]["line"] + ". Or, written out: 'target' and a 'gate' node "
-          "object; " + old_loop.description[0].lower() + old_loop.description[1:],
-          OPERATORS["loop"]["fields"], *_pointed(pre_loop, expand_loop),
-          reads_as=OPERATORS["loop"]["reads_as"])
-    macro("split", OPERATORS["split"]["line"] + ". Or, written out: 'target' and 'into' two "
-          "node objects (" + old_split.description[0].lower() + old_split.description[1:] + ")",
-          OPERATORS["split"]["fields"], *_pointed(pre_split, expand_split),
-          reads_as=OPERATORS["split"]["reads_as"])
+    # Each core operator says only its one-line form, as the lead promises; a proposal
+    # written out the older way ('target' and a 'gate' or 'into' node objects) is still
+    # taken, but not described.
+    macro("loop", OPERATORS["loop"]["line"] + ".", OPERATORS["loop"]["fields"],
+          *_pointed(pre_loop, expand_loop), reads_as=OPERATORS["loop"]["reads_as"])
+    macro("split", OPERATORS["split"]["line"] + ".", OPERATORS["split"]["fields"],
+          *_pointed(pre_split, expand_split), reads_as=OPERATORS["split"]["reads_as"])
 
 
 # ── what an operator did, for the candidate ───────────────────────────────

@@ -305,8 +305,11 @@ def test_catalogue_rows_say_which_fields_take_a_node():
              if line.startswith(f"- `{name}` (")}
     assert "node: a full node object (see the node schemas below)" in rows["insert_after"]
     assert "node: a full node object" in rows["add_node"]
-    assert "into: a list of two full node objects" in rows["split"]
-    assert "gate: a full node object" in rows["loop"]
+    # A core operator's line is its one-line form only: no node object, no written-out
+    # form (the lead says "the system does the wiring").
+    assert "into: one or two steps, each like {kind, text, sees}" in rows["split"]
+    for name in ("split", "loop"):
+        assert "node object" not in rows[name] and "written out" not in rows[name], rows[name]
     assert "full node object" not in rows["bypass"]
 
 
@@ -436,3 +439,24 @@ def test_a_new_agents_task_text_is_a_knob_the_next_round_can_move(tmp_path):
         n: e["value"] for n, e in moved["knobs"].items()}) == "RECHECK {{compare_prompt}}"
     gone = nn_edits.apply({"op": "remove_node", "id": "verify"}, moved)
     assert not [k for k in gone["knobs"] if k.startswith("verify__")]
+
+
+def test_the_schemas_kinds_column_names_only_kinds_a_field_applies_to():
+    """The kinds column is what the validator accepts a field on, limited to the kinds the
+    field's own comment says it applies to: a field a kind accepts but ignores (a
+    gate_kind on an op) is not offered for it. max_iterations is the gate's, as both
+    runtimes count it (the walker's ``_count_retry``, the spine's ``reloopCap``)."""
+    from refactory_dsh.nn import node_schema
+
+    text = "\n".join(node_schema.render_schema())
+    rows = {line.split(" | ")[0][2:]: line.split(" | ") for line in text.splitlines()
+            if line.startswith("| ") and not line.startswith("| field")}
+    gates = "gate (fn), gate (user), gate (agent)"
+    assert rows["gate_kind"][3] == gates and rows["max_iterations"][3] == gates
+    assert "counted at the gate" in rows["max_iterations"][4]
+    assert rows["evaluator"][3] == "gate (fn)" and rows["prompt_template"][3] == "agent"
+    assert rows["subgraph_entry"][3] == "data" and rows["call"][3] == "op"
+    applies = node_schema.field_kinds()
+    for name, cells in rows.items():
+        named = {k.split(" ")[0] for k in cells[3].split(", ")} if cells[3] != "all" else None
+        assert named is None or named <= set(applies[name]), (name, cells[3])
