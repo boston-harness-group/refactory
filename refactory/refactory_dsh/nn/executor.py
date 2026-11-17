@@ -1643,7 +1643,13 @@ class Executor:
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
-        from refactory_dsh.node_retry import record_spent
+        from refactory_dsh.node_retry import drop_outputs, record_spent
+
+        if fell:
+            # Its fallback answers alone: nothing the failed step left half-made is graded.
+            drop_outputs(self.ctx.workdir, node.writes)
+            for fact in node.produces:
+                self.ctx.facts.pop(fact, None)
 
         # Why it has no answer, when its type says (`node_retry.record_spent`): a spent
         # retry, the output limit, or an optional branch that ended for time.
@@ -1651,8 +1657,10 @@ class Executor:
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
-        """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``."""
-        if not self.enable_recovery or node.kind != "op":
+        """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``, and for a
+        step with a fallback always, as the spine's runner retries every op once
+        (`run.run_node`): its fallback answers after the same two attempts on both."""
+        if not (self.enable_recovery or self.graph.falls_back(node.id)) or node.kind != "op":
             return self._visit(node)
 
         from refactory_dsh.budgets import BudgetExhausted
@@ -1984,6 +1992,12 @@ class Executor:
             raise
         self._outcome = "completed"
         self._next_after_completion = result[0]
+        if node.kind in ("op", "agent"):
+            from refactory_dsh.node_retry import clear_spent
+
+            # A step that answered is not missing, whatever an earlier visit left: a
+            # fallback gate reads only this visit (`run.run_node` clears it on the spine).
+            clear_spent(self.ctx.workdir, node.id)
         if node.kind != "gate":  # a gate is recorded with its verdict
             self.record.complete(node)
         emit(self.ctx.workdir, "node_completed", node_id=node.id, state="completed", summary=render(node.notes, self.ctx))

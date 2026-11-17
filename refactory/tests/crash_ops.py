@@ -68,3 +68,65 @@ def right_unless_first(ctx: Any) -> dict[str, Any]:
         raise ValueError("item 0 breaks the solver")
     ctx.write_text("answer.txt", "right\n")
     return {}
+
+
+def _first_item(ctx: Any) -> bool:
+    return str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0"
+
+
+def _tries(ctx: Any) -> int:
+    """How many times this op has run in the item's pass, this run included (a file of
+    its own in the pass directory, which both runtimes run it in)."""
+    from pathlib import Path
+
+    counter = Path(ctx.workdir) / f".{ctx.node_id}-tries"
+    tries = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(tries))
+    return tries
+
+
+def right_from_second_try(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its first run raises (the runner's one op retry
+    answers it)."""
+    if _first_item(ctx) and _tries(ctx) < 2:
+        raise ValueError("item 0 breaks the solver once")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def right_from_third_try(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its first visit (two runs, with the op retry)
+    raises, so its fallback answers, and a gate's reloop back to it finds it working."""
+    if _first_item(ctx) and _tries(ctx) < 3:
+        raise ValueError("item 0 breaks the solver on its first visit")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def partial_unless_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` it writes a partial answer, then raises."""
+    if _first_item(ctx):
+        ctx.write_text("answer.txt", "partial\n")
+        raise ValueError("item 0 breaks the solver half way")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def snippet_timeout_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` it runs over a code step's wall."""
+    from refactory_dsh.snippet import SnippetTimeout
+
+    if _first_item(ctx):
+        raise SnippetTimeout("the code ran over its 10 s limit")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def sandbox_down_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` the sandbox does not start."""
+    from refactory_dsh.snippet import SandboxUnavailable
+
+    if _first_item(ctx):
+        raise SandboxUnavailable("the sandbox did not start within 60 s")
+    ctx.write_text("answer.txt", "right\n")
+    return {}

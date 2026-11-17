@@ -265,10 +265,21 @@ def main() -> int:
             # pass only when its retries are spent or it ran out of output without
             # answering (`missing_on_crash`); a step with a fallback on a genuine failure,
             # never a timeout (`falls_back`).
+            fell = bool(spec.get('falls_back')) and falls_back_on(error)
             if spec.get('optional') or (spec.get('missing_on_crash')
-                                        and leaves_no_answer(error)) or (
-                    spec.get('falls_back') and falls_back_on(error)):
+                                        and leaves_no_answer(error)) or fell:
                 node_id = spec.get('node_id', 'unknown')
+                if fell:
+                    # Its fallback answers alone: nothing the failed step left half-made
+                    # is graded (the walker drops the same, `Executor._missing_optional`).
+                    from refactory_dsh.node_retry import drop_outputs
+                    from refactory_dsh.run import declarations, update_facts
+                    drop_outputs(workdir, spec.get('writes'))
+                    produces = spec.get('produces')
+                    if produces is None:
+                        produces = declarations(workdir, node_id)['produces']
+                    if produces:
+                        update_facts(workdir, {}, tuple(produces))
                 reviews_dir = workdir / 'reviews'
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f'{node_id}-missing.txt').write_text(

@@ -2683,9 +2683,9 @@ HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
 def harness_timeout(record: Mapping[str, Any]) -> bool:
     """Whether the harness ended the item for time, from structured fields only: its
     ``error_kind`` is ``timeout`` (`items.error_kind`: a model call the client ended, or
-    the item deadline), or a step of it has no answer because it timed out. Never from
-    an error's text: an op that quotes a reply saying "timed out", a code step's own
-    ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
+    the item deadline, or a code step past every snippet's fixed wall), or a step of it
+    has no answer because it timed out. Never from an error's text: an op that quotes a
+    reply saying "timed out" and an op's own ``TimeoutExpired`` are the pipeline's. The item still scores
     what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
     as the pipeline's failure."""
     if record.get("passed"):

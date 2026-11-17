@@ -478,7 +478,8 @@ uv run python -m pytest refactory/tests/test_equivalence.py -q --run-integration
 When `enable_recovery` is `True` (the default for all walker authoring runs and
 outer-loop evaluations):
 
-- **FnNode-only retry.** An op node (`kind="op"`) that raises gets one retry.
+- **FnNode-only retry.** An op node (`kind="op"`) that raises gets one retry (a
+  step with a fallback gets it with recovery off too, as on the spine).
   Gates (`kind="gate"`) are timed but never retried (their reloop mechanism via
   `max_iterations` is the graph-level retry). An agent node is retried only by
   its retry rule (`Node.retry`, or a data pass's default, below), on both runtimes;

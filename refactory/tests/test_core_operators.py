@@ -905,11 +905,12 @@ def test_a_harness_timeout_is_read_from_structured_fields_only():
     ("walker", "timeout"),
     ("spine", "timeout"),
     ("inactivity", "timeout"),
-    # The pipeline's own: a quoted reply, a code step's subprocess limit, a snippet limit.
+    # A code step past the fixed wall every snippet gets is the harness's limit too.
+    ("snippet", "timeout"),
+    # The pipeline's own: a quoted reply, an op's own subprocess limit.
     ("quoted", "RuntimeError"),
     ("quoted prefix", "RuntimeError"),
     ("expired", "TimeoutExpired"),
-    ("snippet", "SnippetTimeout"),
 ])
 def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, kind):
     import subprocess
@@ -930,7 +931,7 @@ def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, ki
                                        "timed out after 1800s'"),
         "quoted prefix": lambda: RuntimeError('check: ValueError: got "x: CompletionTimeout: y"'),
         "expired": lambda: subprocess.TimeoutExpired(["pytest"], 10),
-        "snippet": lambda: SnippetTimeout("code step ran past its 30 s limit"),
+        "snippet": lambda: SnippetTimeout("the code ran over its 10 s limit"),
     }[error]
     assert error_kind(made()) == kind
 

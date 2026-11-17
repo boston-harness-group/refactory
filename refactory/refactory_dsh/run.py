@@ -503,18 +503,27 @@ def run_node(
         try:
             produced = resolve(target)(ctx)
         except Exception as retry_exc:
-            _write_facts()
             # Optional nodes (named in a fork's optional_targets), and a step with a
             # fallback that genuinely failed (`falls_back`), are recorded as missing
             # instead of failing the run.
-            from refactory_dsh.node_retry import falls_back_on
+            from refactory_dsh.node_retry import drop_outputs, falls_back_on, record_spent
 
             decl = declarations(directory, node_id)
-            if decl.get("optional") or (decl.get("falls_back") and falls_back_on(retry_exc)):
+            fell = bool(decl.get("falls_back")) and falls_back_on(retry_exc)
+            if fell:
+                # Its fallback answers alone: nothing the failed step left half-made is
+                # graded (the walker drops the same, `Executor._missing_optional`).
+                drop_outputs(directory, decl.get("writes"))
+                for fact in decl.get("produces") or ():
+                    ctx.facts.pop(fact, None)
+            _write_facts()
+            if decl.get("optional") or fell:
                 reviews_dir = directory / "reviews"
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f"{node_id}-missing.txt").write_text(
                     f"{type(retry_exc).__name__}: {retry_exc}\n")
+                # Why it has no answer, when its type says, as the walker records it.
+                record_spent(directory, node_id, retry_exc)
                 # dm-232: settle the pending delivery marker at the point
                 # the branch is recorded missing, so it never goes stale.
                 try:
@@ -534,6 +543,12 @@ def run_node(
             ctx.set_fact(key, value)
     ctx._check_produces()  # noqa: SLF001
     _write_facts()
+    if is_retryable:
+        from refactory_dsh.node_retry import clear_spent
+
+        # A step that answered is not missing, whatever an earlier visit left: a fallback
+        # gate reads only this visit (the walker clears it in `Executor._visit`).
+        clear_spent(directory, node_id)
     record_visit(directory, node_id, produced, gate=not is_retryable)
     if not is_retryable:
         # A reloop to a step that cannot see what the gate read hands it those files.

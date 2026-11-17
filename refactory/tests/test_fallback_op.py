@@ -34,7 +34,8 @@ from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import pipeline_view as pv
 from refactory_dsh.nn.graph import FALLBACK_GATE_CALL
 from refactory_dsh.nn.validate import validate_state
-from test_crashed_step_retry import (FAKE_DSH, PASS_RETRY_TIMES, WORKER_CRASH, Scripted,
+from test_crashed_step_retry import (FAKE_DSH, OUTPUT_LIMIT, PASS_RETRY_TIMES, WORKER_CRASH,
+                                     Scripted,
                                      _data, _keys, _pass, _solver, _spine, _walker, needs_spine)
 from test_livemath_blocks import DRAIN_AGENT, FIXTURE_DIR, NODE, PYTHON_BIN, REPO_ROOT, _patch_task
 from test_livemath_skill_graph import LABEL_B
@@ -400,17 +401,26 @@ RIGHT = [(str(i), True, 1.0, None) for i in range(4)]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-@pytest.mark.parametrize("failure", [WORKER_CRASH, "dsh: TRANSPORT: 500 Internal Server Error"])
-def test_a_failed_agent_falls_back_on_both_runtimes(runtime, failure, tmp_path):
-    """Item 0's solve fails every session -- crashes (retries spent) or a transport failure
-    (not retried, which with no fallback fails the item) -- and the fallback answers it."""
-    plan = {SIMPLE: ["right"], "": [failure] * (SESSIONS if failure == WORKER_CRASH else 1)
-            + ["right"]}
+def test_a_crashed_agent_falls_back_on_both_runtimes(runtime, tmp_path):
+    """Item 0's solve crashes every session (its retries spent): the fallback answers it."""
+    plan = {SIMPLE: ["right"], "": [WORKER_CRASH] * SESSIONS + ["right"]}
     dsh = Scripted(tmp_path / "dsh", plan)
     scores, run = _both(runtime, _with_fallback(_pass_graph()), tmp_path, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls(SIMPLE) == 1
     assert (_pass(run, "0") / "reviews/solve-missing.txt").exists()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_transport_failure_fails_its_item_and_never_falls_back(runtime, tmp_path):
+    """A wire that kept failing is the harness's fault, not the step's: item 0 fails as it
+    would with no fallback, and the fallback is never asked."""
+    plan = {SIMPLE: ["right"], "": ["dsh: TRANSPORT: 500 Internal Server Error", "right"]}
+    dsh = Scripted(tmp_path / "dsh", plan)
+    scores, run = _both(runtime, _with_fallback(_pass_graph()), tmp_path, dsh)
+    assert [k[:3] for k in _keys(scores)] == [("0", False, 0.0), *(k[:3] for k in RIGHT[1:])]
+    assert dsh.calls(SIMPLE) == 0
+    assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
@@ -434,3 +444,237 @@ def test_a_declared_timeout_fails_its_item_and_never_falls_back(runtime, tmp_pat
     scores, _run = _both(runtime, graph, tmp_path, dsh)
     assert _keys(scores) == [("0", False, 0.0, "declared_timeout"), *RIGHT[1:]]
     assert dsh.calls(SIMPLE) == 0
+
+
+# ── review fixes: a stale record, harness failures, the op retry, partial outputs ──
+
+
+def _looped_op(call: str) -> Graph:
+    """data -> [solve (an op) -> solve_failed (fallback: solve_fallback, answering
+    ``wrong``) -> check (reloop solve, at most 3 runs | proceed score)] -> report."""
+    graph = Graph()
+    graph.add(_data("solve", "score"))
+    graph.add(Node("solve", "op", call=call, writes=("answer.txt",)))
+    graph.add(Node("check", "gate", evaluator="crash_ops:check", reads=("answer.txt",),
+                   max_iterations=3))
+    graph.add(Node("score", "op", call="crash_ops:score", reads=("answer.txt",),
+                   writes=("item_result.json",)))
+    graph.add(Node("report", "op", call="loop_ops:noop"))
+    graph.connect("solve", "check")
+    graph.connect("check", "solve", condition="reloop")
+    graph.connect("check", "score", condition="proceed")
+    graph.connect("data", "report")
+    return _with_fallback(graph)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_step_that_answers_on_a_later_visit_is_not_answered_by_its_fallback(runtime,
+                                                                               tmp_path):
+    """Item 0's solve fails its first visit (both runs), so its fallback answers ``wrong``;
+    the checker sends it back, and solve now answers ``right``: the fallback gate reads only
+    this visit, so the right answer stands (1.0, not the fallback's 0.25)."""
+    dsh = Scripted(tmp_path / "dsh", {SIMPLE: ["wrong"], "": ["right"]})
+    scores, run = _both(runtime, _looped_op("crash_ops:right_from_third_try"), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls(SIMPLE) == 1
+    assert (_pass(run, "0") / ".solve-tries").read_text() == "3"
+    assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_step_with_a_fallback_gets_the_same_op_retry_on_both_runtimes(runtime, tmp_path):
+    """An op that fails once is answered by the runner's one retry, on both runtimes (the
+    walker with recovery off too): the fallback is never asked."""
+    graph = _with_fallback(_pass_graph(Node("solve", "op", call="crash_ops:right_from_second_try",
+                                            writes=("answer.txt",))))
+    dsh = Scripted(tmp_path / "dsh", {"": ["wrong"]})
+    scores, run = _both(runtime, graph, tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert dsh.calls() == 0
+    assert (_pass(run, "0") / ".solve-tries").read_text() == "2"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_failed_step_s_partial_answer_is_never_graded(runtime, tmp_path):
+    """Item 0's solve writes half an answer and raises; its fallback runs out of output in
+    its one session: the item has no answer (0.0), not the partial one (0.25)."""
+    graph = _with_fallback(_pass_graph(Node("solve", "op", call="crash_ops:partial_unless_first",
+                                            writes=("answer.txt",))))
+    dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT]})
+    scores, run = _both(runtime, graph, tmp_path, dsh)
+    assert [k[:3] for k in _keys(scores)] == [("0", False, 0.0), *(k[:3] for k in RIGHT[1:])]
+    assert dsh.calls() == 1
+    assert not (_pass(run, "0") / "answer.txt").exists()
+
+
+WRITING_DSH = FAKE_DSH.replace('if step.startswith("dsh:"):',
+                               'if step.startswith("write:"):\n'
+                               '    pathlib.Path("answer.txt").write_text("partial\\n")\n'
+                               '    step = step[6:]\n'
+                               'if step.startswith("dsh:"):')
+
+
+class _Writing(Scripted):
+    """`Scripted`, where an answer ``write:<answer>`` first writes a partial ``answer.txt``
+    where the session runs (a tool session that wrote, then crashed)."""
+
+    def __init__(self, root: Path, plan: dict[str, list[str]]):
+        super().__init__(root, plan)
+        (root / "fake_dsh.py").write_text(WRITING_DSH.format(root=str(root)))
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_failed_agent_s_partial_answer_is_never_graded(runtime, tmp_path):
+    """Item 0's solve (an agent) writes half an answer and crashes in every session; its
+    fallback runs out of output: the item has no answer (0.0), not the partial one."""
+    dsh = _Writing(tmp_path / "dsh", {SIMPLE: [OUTPUT_LIMIT],
+                                      "": [f"write:{WORKER_CRASH}"] * SESSIONS + ["right"]})
+    scores, run = _both(runtime, _with_fallback(_pass_graph()), tmp_path, dsh)
+    assert [k[:3] for k in _keys(scores)] == [("0", False, 0.0), *(k[:3] for k in RIGHT[1:])]
+    assert dsh.calls(SIMPLE) == 1
+    assert not (_pass(run, "0") / "answer.txt").exists()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("call, kind", [("crash_ops:snippet_timeout_on_first", "timeout"),
+                                        ("crash_ops:sandbox_down_on_first", "harness_incident")])
+def test_a_code_step_s_wall_or_sandbox_never_falls_back(runtime, call, kind, tmp_path):
+    """A code step past its fixed wall (`SnippetTimeout`) is a timeout, and a sandbox that
+    did not start (`SandboxUnavailable`) the harness's: item 0 fails so, as with no
+    fallback, and the fallback is never asked."""
+    graph = _with_fallback(_pass_graph(Node("solve", "op", call=call, writes=("answer.txt",))))
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    scores, _run = _both(runtime, graph, tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, kind), *RIGHT[1:]]
+    assert dsh.calls() == 0
+
+
+def _errors() -> dict[str, BaseException]:
+    from refactory_dsh.budgets import BudgetExhausted
+    from refactory_dsh.nn.executor import OpOutcomeUnknown, OpTimeoutError
+    from refactory_dsh.node_retry import RetriesExhausted
+    from refactory_dsh.snippet import SandboxUnavailable, SnippetError, SnippetTimeout
+
+    return {
+        "raises": ValueError("bad input"),
+        "crash spent": RetriesExhausted("solve crashed 3 times", kind="crash"),
+        "output limit": CompletionFailed("model completion failed: output limit",
+                                         kind="output_limit"),
+        "code error": SnippetError("the code raised: KeyError"),
+        "inactivity": TIMEOUTS["timeout"],
+        "backstop": TIMEOUTS["harness_incident"],
+        "declared wall": TIMEOUTS["declared_timeout"],
+        "timeout spent": RetriesExhausted("solve timed out twice", kind="timeout"),
+        "declared spent": RetriesExhausted("solve timed out twice", kind="timeout",
+                                           cause="declared_timeout"),
+        "snippet wall": SnippetTimeout("the code ran over its 10 s limit"),
+        "sandbox": SandboxUnavailable("the sandbox did not start within 60 s"),
+        "op timeout": OpTimeoutError("solve", 3600),
+        "op outcome": OpOutcomeUnknown("child exited before reporting its outcome"),
+        "transport": CompletionFailed("model completion failed: 503", kind="transport"),
+        "transport text": RuntimeError("model completion failed on the wire after 5 tries"),
+        "killed": RuntimeError("model completion failed (exit -9)"),
+        "subprocess": subprocess.TimeoutExpired(["pytest"], 10),
+        "budget": BudgetExhausted("the run's budget is spent"),
+    }
+
+
+GENUINE = {"raises", "crash spent", "output limit", "code error"}
+
+
+@pytest.mark.parametrize("name", sorted(_errors()))
+def test_only_a_genuine_failure_falls_back(name):
+    """The step's own failures (it raised, crashed past its retries, hit its output limit,
+    its code raised) fall back; time and harness failures of every kind never do."""
+    from refactory_dsh.node_retry import falls_back_on
+
+    assert falls_back_on(_errors()[name]) is (name in GENUINE)
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("solve: SnippetTimeout: the code ran over its 10 s limit", "timeout"),
+    ("solve exited with code 1\nSnippetTimeout: the code ran over its 10 s limit", "timeout"),
+    ("solve: SandboxUnavailable: the sandbox did not start within 60 s", "harness_incident"),
+    ("solve exited with code 1\nSandboxUnavailable: code nodes cannot run here", "harness_incident"),
+    ("check: ValueError: the reply said 'SnippetTimeout: the code ran over its 1 s limit'",
+     "RuntimeError"),
+])
+def test_a_code_step_s_wall_and_sandbox_read_from_a_record_s_text(text, kind):
+    """How the walker (``<node>: Class: ``) and the spine's runner stderr (``Class: ``)
+    carry them into an item record, anchored at a line's start."""
+    from refactory_dsh.items import error_kind
+
+    assert error_kind(RuntimeError(text)) == kind
+
+
+@pytest.mark.parametrize("name, fallback, step", [("livemath/solver", S1_FALLBACK, "solve"),
+                                                  ("livemath/skill_graph", S4_FALLBACK,
+                                                   "decide")])
+def test_insert_after_a_step_with_a_fallback_goes_where_its_ways_rejoin(name, fallback, step):
+    """The step keeps its fallback, and the new step runs after whichever answered;
+    inserting before the fallback gate is the same edit."""
+    with_fallback = nn_edits.apply(fallback, _state(name))
+    onward = {e.condition: e.target for e in _graph(with_fallback).out_edges(f"{step}_failed")}
+    state = nn_edits.apply({"op": "insert", "after": step, "kind": "code"}, with_fallback)
+    assert validate_state(state) == []
+    graph = _graph(state)
+    new = f"{step}_next"
+    assert graph.falls_back(step) and graph.fallback_gate(step) == f"{step}_failed"
+    assert {(e.target, e.condition) for e in graph.out_edges(f"{step}_failed")} == {
+        (new, "proceed"), (f"{step}_fallback", "fallback")}
+    assert [e.target for e in graph.out_edges(f"{step}_fallback")] == [new]
+    assert [e.target for e in graph.out_edges(new)] == [onward["proceed"]]
+    assert not graph.falls_back(new)
+    assert nn_edits.apply({"op": "insert", "before": f"{step}_failed", "kind": "code"},
+                          with_fallback) == state
+
+
+@pytest.mark.parametrize("name, fallback, step", [("livemath/solver", S1_FALLBACK, "solve"),
+                                                  ("livemath/skill_graph", S4_FALLBACK,
+                                                   "decide")])
+def test_removing_a_fallback_restores_the_graph_exactly(name, fallback, step):
+    """Removing the fallback step, or its gate, takes the whole fallback out."""
+    original = _state(name)
+    with_fallback = nn_edits.apply(fallback, original)
+    for removed in (f"{step}_fallback", f"{step}_failed"):
+        assert nn_edits.apply({"op": "remove", "step": removed}, with_fallback) == original
+    assert _refused({"op": "remove", "step": f"{step}_failed", "keep": "fallback"},
+                    with_fallback) == (
+        f"'{step}_failed' is the fallback gate of '{step}'; remove it (or the fallback step) "
+        f"to take the fallback out, or remove '{step}' itself")
+
+
+def test_removing_the_step_takes_its_fallback_with_it():
+    """The fallback never moves to the step before: removing the step it answers for
+    removes it as with no fallback."""
+    import structure_fuzz as sf
+
+    seed = sf.Applier(sf.seeds()["fuzz_data_pass"]).seed_state
+    graph = _graph(seed)
+    tried = 0
+    for step in sorted(graph.nodes):
+        edit = {"op": "fallback", "step": step}
+        if nn_edits.precheck(edit, seed) is not None:
+            continue
+        state = nn_edits.apply(edit, seed)
+        plain = {"op": "remove", "step": step}
+        if nn_edits.precheck(plain, seed) is not None:
+            continue
+        tried += 1
+        assert nn_edits.apply(plain, state) == nn_edits.apply(plain, seed), step
+    assert tried
+
+
+def test_a_visit_s_missing_record_says_only_its_own_cause(tmp_path):
+    """A step that crashed past its retries on one visit and raised on the next reads
+    ``failed`` for the latest, not the earlier ``crash``; answering clears both."""
+    from refactory_dsh.items import missing_steps
+    from refactory_dsh.nn.fork import _record_missing
+    from refactory_dsh.node_retry import RetriesExhausted, clear_spent, record_spent
+
+    for error in (RetriesExhausted("solve crashed 3 times", kind="crash"), ValueError("bad")):
+        _record_missing(tmp_path, "solve", f"{type(error).__name__}: {error}")
+        record_spent(tmp_path, "solve", error)
+    assert missing_steps(tmp_path)["solve"]["cause"] == "failed"
+    clear_spent(tmp_path, "solve")
+    assert missing_steps(tmp_path) == {}

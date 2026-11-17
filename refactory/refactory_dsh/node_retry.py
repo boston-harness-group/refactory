@@ -114,47 +114,78 @@ def missing_cause(error: BaseException) -> str | None:
     return "timeout" if failure_kind(error) == "timeout" else None
 
 
-#: The causes and error kinds that are a step running out of time, never its failing:
-#: what `missing_cause` and `items.error_kind` say for a timeout. A fallback never
-#: answers one (`falls_back_on`).
+#: The causes and error kinds that are a step running out of time or the harness failing,
+#: never the step failing: what `missing_cause` and `items.error_kind` say for one. A
+#: fallback never answers one (`falls_back_on`).
 TIMEOUT_KINDS = frozenset({"timeout", "declared_timeout", "harness_incident"})
 
 
 def falls_back_on(error: BaseException) -> bool:
     """Whether ``error`` is a genuine failure of a step with a fallback (`nn.graph.Graph.
-    falls_back`), which leaves it missing so its fallback answers: not a timeout of any
-    kind (`items.error_kind`, `TIMEOUT_KINDS`, which a spent retry carries as its cause),
-    nor the run's budget or a build-loop stop, which end the run as before."""
+    falls_back`), which leaves it missing so its fallback answers. Never a failure of time
+    or of the harness, on either runtime: any timeout (`items.error_kind` in
+    `TIMEOUT_KINDS`: a model call the client ended, the backstop, a declared wall, a code
+    step's `snippet.WALL_S` (`SnippetTimeout`), an unstarted sandbox (`SandboxUnavailable`),
+    and a spent retry carrying one of them as its cause; or a `failure_kind` timeout such
+    as an op's own `subprocess.TimeoutExpired`), an op past its per-op timeout
+    (`OpTimeoutError`) or whose child vanished (`OpOutcomeUnknown`), an interrupted model
+    call (`items.interrupted_cause`: a wire that kept failing, a killed or cancelled
+    session), nor the run's budget or a build-loop stop, which end the run as before. The
+    output limit is the model's own failure, so it does fall back."""
     from refactory_dsh.budgets import BudgetExhausted
-    from refactory_dsh.items import error_kind
+    from refactory_dsh.items import error_kind, interrupted_cause
+    from refactory_dsh.model import CompletionFailed
+    from refactory_dsh.nn.executor import OpOutcomeUnknown, OpTimeoutError
     from refactory_dsh.run import BuildLoopStop
 
-    if isinstance(error, (BudgetExhausted, BuildLoopStop)):
+    if isinstance(error, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
+        return False
+    if isinstance(error, CompletionFailed) and error.kind == "transport":
+        return False
+    if failure_kind(error) == "timeout" or interrupted_cause(str(error)) is not None:
         return False
     return error_kind(error) not in TIMEOUT_KINDS
+
+
+def drop_outputs(workdir: Path, writes: Any) -> None:
+    """Delete what a step that fell back left of its declared files (`falls_back_on`), so
+    only its fallback's answer, or none, is graded -- never the failed step's partial one."""
+    import shutil
+
+    for name in writes or ():
+        path = Path(workdir) / str(name)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
     """Record why a step left without an answer has none (`MISSING_DIR`): its retries
     were spent, it ran out of output, or (an optional branch) it ended for time
-    (`missing_cause`). Any other failure records nothing, and its step's cause reads
-    ``failed`` (`items.missing_steps`)."""
+    (`missing_cause`). Any other failure records nothing (an earlier visit's record goes),
+    and its step's cause reads ``failed`` (`items.missing_steps`)."""
     if isinstance(error, RetriesExhausted):
         cause: str | None = error.cause
     elif failure_kind(error) == "output_limit":
         cause = "output_limit"
     else:
         cause = missing_cause(error)
-    if cause is None:
-        return
     target = Path(workdir) / MISSING_DIR / f"{node}.json"
+    if cause is None:
+        # Only this visit's cause counts: an earlier visit's record must not outlive it.
+        target.unlink(missing_ok=True)
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"cause": cause, "sessions": getattr(error, "sessions", None),
                                   "error": str(error)[:2000]}) + "\n")
 
 
 def clear_spent(workdir: Path, node: str) -> None:
-    """A step that answered after it went missing (a gate sent it back) is not missing."""
+    """A step that answered after it went missing (a gate sent it back) is not missing: so
+    a fallback gate reads only its latest visit (`nn.operators.step_failed`). Every step
+    that answers clears it, agent, op or code, on both runtimes (`deliver`,
+    `nn.executor.Executor._visit`, `run.run_node`)."""
     (Path(workdir) / "reviews" / f"{node}-missing.txt").unlink(missing_ok=True)
     (Path(workdir) / MISSING_DIR / f"{node}.json").unlink(missing_ok=True)
 
