@@ -1479,8 +1479,8 @@ state is promised, on any graph shape:
   workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
   workspace over 4 GiB is not collected, and each output is opened one name at a time
   relative to its folder's descriptor without following a link, so nothing it leaves or
-  swaps in makes collection read outside the workspace. A file or folder it `reads` is
-  copied in (a folder without its links); one the run directory lacks is refused.
+  swaps in makes collection read outside the workspace. Each file it `reads` is copied
+  in; a folder, the run directory itself, or a file the run directory lacks is refused.
   DSH's in-process tools (file, web) run outside the runner, so they are never listed.
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does

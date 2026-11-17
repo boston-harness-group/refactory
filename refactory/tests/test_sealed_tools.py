@@ -694,11 +694,14 @@ def test_where_user_namespaces_work_the_seal_runs_in_its_own_pid_namespace(tmp_p
 @LINUX
 def test_each_bind_is_read_only_even_where_its_owner_could_write(tmp_path, monkeypatch):
     """A folder the user owns, bound in like a system folder: readable, never writable.
-    (Outside /tmp, which the runner covers while it builds the new root.)"""
+    (In the home directory: the runner covers /tmp while it builds the new root.)"""
     import tempfile
 
     _sealable()
-    bound = Path(tempfile.mkdtemp(prefix=".seal-bound-", dir=ROOT))
+    home = Path.home().resolve()
+    if home == Path("/tmp") or home.is_relative_to("/tmp"):
+        pytest.skip("the home directory is under /tmp, which the runner covers")
+    bound = Path(tempfile.mkdtemp(prefix=".seal-bound-", dir=home))
     try:
         (bound / "lib.txt").write_text("LIB")
         monkeypatch.setattr(seal, "LINUX_READS", (*seal.LINUX_READS, str(bound)))
@@ -818,17 +821,42 @@ def test_a_sealed_workspace_over_its_cap_is_not_collected(tmp_path, monkeypatch)
     assert not (run / "answer.txt").exists()
 
 
-def test_a_read_the_run_lacks_is_refused_and_a_folder_is_copied_without_its_links(tmp_path):
+@pytest.mark.parametrize("name", [".", "", "items", "items/a", "missing.txt"])
+def test_a_read_that_is_not_a_file_of_the_run_is_refused(tmp_path, name):
+    """A sealed step reads files, one by one: never the run directory, a folder (it could
+    hold another item's answer) or a file the run lacks, and nothing is left behind."""
     _sealable()
     run = tmp_path / "run"
-    (run / "notes").mkdir(parents=True)
-    (run / "notes" / "a.txt").write_text("A")
-    (run / "grader.json").write_text("GOLD")
-    (run / "notes" / "gold-link").symlink_to(run / "grader.json")
-    with pytest.raises(workspace.WorkspaceError, match="does not have"):
+    (run / "items" / "a").mkdir(parents=True)
+    (run / "items" / "a" / "input.txt").write_text("IN")
+    (run / "items" / "b").mkdir()
+    (run / "items" / "b" / "answer.txt").write_text("OTHER-ITEM")
+    with pytest.raises(workspace.WorkspaceError, match="not a file|does not have"):
         workspace.prepare(run, "probe", "scratch", route={"worker_backend": "dsh"},
-                          tools=("bash",), reads=("missing.txt",))
+                          tools=("bash",), reads=(name,))
+    copied = [path for path in (run / ".refactory").rglob("*") if path.is_file()]
+    assert not any("OTHER-ITEM" in path.read_text(errors="replace") for path in copied)
     place = workspace.prepare(run, "probe2", "scratch", route={"worker_backend": "dsh"},
-                              tools=("bash",), reads=("notes",))
-    assert sorted(os.listdir(place.path / "notes")) == ["a.txt"]
-    assert _sealed(place, "cat notes/a.txt").stdout == "A"
+                              tools=("bash",), reads=("items/a/input.txt",))
+    assert _sealed(place, "cat items/a/input.txt").stdout == "IN"
+
+
+@LINUX
+def test_a_failed_scope_probe_is_tried_again_and_warns(monkeypatch, capsys):
+    calls = []
+    real = subprocess.run
+
+    def flaky(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(argv, 20)
+        return subprocess.CompletedProcess(argv, 0, stdout=f"{8 << 30}\n", stderr="")
+
+    monkeypatch.setattr(seal, "_SCOPE", [])
+    monkeypatch.setattr(seal, "_scope_prefix", lambda: ["/usr/bin/env", "--"])
+    monkeypatch.setattr(seal.subprocess, "run", flaky)
+    assert seal.linux_scope() == ()
+    assert "without a capped systemd user scope" in capsys.readouterr().err
+    assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2
+    assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2, "kept once found"
+    monkeypatch.setattr(seal.subprocess, "run", real)

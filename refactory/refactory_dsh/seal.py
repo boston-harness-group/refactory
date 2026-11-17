@@ -260,23 +260,37 @@ def _scope_prefix() -> list[str]:
             "--scope", "--quiet", "--collect", *(f"--property={p}" for p in SCOPE_LIMITS), "--"]
 
 
-@functools.lru_cache(maxsize=1)
+#: The scope prefix once a probe found one (`linux_scope`); a failed probe is not kept.
+_SCOPE: list[tuple[str, ...]] = []
+
+
 def linux_scope() -> tuple[str, ...]:
     """What puts a sealed Linux command in a systemd user scope capped at
     :data:`SCOPE_LIMITS`, or ``()`` where there is no user manager to make one (the
-    command then gets :data:`LINUX_LIMITS_UNSCOPED`). Probed once per process: the
-    probe must find its own memory cap."""
+    command then gets :data:`LINUX_LIMITS_UNSCOPED`, with a warning each time). A probe
+    that finds its own memory cap is kept for the process; a failed one is tried again
+    next time, so one slow probe does not drop every later step to the fallback."""
+    if _SCOPE:
+        return _SCOPE[0]
     prefix = _scope_prefix()
-    if not prefix:
-        return ()
-    try:
-        probe = subprocess.run(
-            [*prefix, "/bin/sh", "-c",
-             'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max"'],
-            capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        return ()
-    return tuple(prefix) if probe.returncode == 0 and probe.stdout.strip() == str(8 << 30) else ()
+    found: tuple[str, ...] = ()
+    if prefix:
+        try:
+            probe = subprocess.run(
+                [*prefix, "/bin/sh", "-c",
+                 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max"'],
+                capture_output=True, text=True, timeout=20)
+            if probe.returncode == 0 and probe.stdout.strip() == str(8 << 30):
+                found = tuple(prefix)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if found:
+        _SCOPE.append(found)
+    else:
+        print("refactory: warning: a sealed step's command runs without a capped systemd user "
+              f"scope here, under per-process limits only ({LINUX_LIMITS_UNSCOPED})",
+              file=sys.stderr)
+    return found
 
 
 def run(workspace: Path, command: list[str], *, timeout_s: float = 60) -> subprocess.CompletedProcess:

@@ -374,16 +374,19 @@ def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
 
 
 def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: Any) -> None:
-    """Make ``workspace`` sealed: copy in the files and folders the node reads (by their
-    names, inside the run directory only; one the run directory lacks is refused), keep
-    its temporary files inside it, and set its runner."""
+    """Make ``workspace`` sealed: copy in the files the node reads (by their names, inside
+    the run directory only; a folder, the run directory itself, or a file the run
+    directory lacks is refused), keep its temporary files inside it, and set its runner."""
     from refactory_dsh import seal
 
     workdir = Path(workdir).resolve()
     for name in reads or ():
         source = (workdir / name).resolve()
         target = (workspace.path / name).resolve()
-        if not source.is_relative_to(workdir) or not target.is_relative_to(workspace.path.resolve()):
+        ws_root = workspace.path.resolve()
+        if (not str(name).strip() or source == workdir or not source.is_relative_to(workdir)
+                or ws_root.is_relative_to(source) or target == ws_root
+                or not target.is_relative_to(ws_root)):
             raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is not a file "
                                  "of the run directory")
         try:
@@ -396,18 +399,17 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
                                  "it reads, so it does not run without one") from None
         try:
             mode = os.fstat(fd).st_mode
+            if not stat.S_ISREG(mode):
+                # A folder could hold other items' answers: a read names one file an
+                # upstream step writes.
+                raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is not "
+                                     "a file; a sealed step reads files an upstream step writes, "
+                                     "one by one, never a folder")
             target.parent.mkdir(parents=True, exist_ok=True)
-            if stat.S_ISDIR(mode):
-                # A folder is copied whole, leaving out links, as an output folder is.
-                _copy_dir_beneath(fd, target)
-            elif stat.S_ISREG(mode):
-                made = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-                with os.fdopen(made, "wb") as copy:
-                    while chunk := os.read(fd, 1 << 20):
-                        copy.write(chunk)
-            else:
-                raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is "
-                                     "neither a file nor a folder")
+            made = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(made, "wb") as copy:
+                while chunk := os.read(fd, 1 << 20):
+                    copy.write(chunk)
         finally:
             os.close(fd)
     workspace.tools = tools
