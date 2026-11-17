@@ -380,6 +380,39 @@ def test_a_piece_of_a_reply_quoted_in_every_prompt_is_shown():
         assert "Feedback: the answer ignores the boundary case" in block, block
 
 
+def test_framing_is_not_taken_for_a_piece_of_a_reply_that_uses_its_words():
+    """The framing lines the real S4 runs put in every prompt stay framing although the
+    replies use their words: a tail counts only after a short label and only when long
+    enough, a datum only as whole words, and of a record's steps only a code gate's
+    reason is item data (not a visit's node id). A real label still counts."""
+    framing = ["- User: ## Question", "## Question", "## Independent",
+               "## Option Comparison Notes", "## Files from earlier steps (independent_inputs)",
+               "Before answering, read the notes and then weigh the hypotheses"]
+    reason = "misses the boundary case at zero"
+
+    def record(item: str) -> dict:
+        prompt = "\n".join(["History:", *framing, f"Q {item}", f"Feedback: {reason}",
+                             "Answer the latest user request."])
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"},
+                "steps": [{"node": "independent_inputs", "kind": "op", "output": "x"},
+                          {"node": "check", "kind": "gate", "verdict": "reloop",
+                           "reason": reason}],
+                "exchanges": [{"node": "compare", "prompt": f"Q {item}",
+                               "response": f"## Option C\nThe Question is subtle. {item}\n"
+                                           "Independent of the bound, B holds; then weigh "
+                                           "the hypotheses."},
+                              {"node": "decide", "prompt": prompt, "response": f"D {item}"}]}
+
+    text = ProposalContext(item_records=[record("r1"), record("r2")]).render()
+    for item in ("r1", "r2"):
+        decide = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0] \
+            .split("#### Step ")[2]
+        assert f"Feedback: {reason}" in decide, decide
+        for line in framing:
+            assert line not in decide, (line, decide)
+
+
 def test_with_one_item_no_line_is_taken_for_framing():
     """Framing is told from an item's own text only across two or more items; with one,
     every line not in the settings or templates is shown."""

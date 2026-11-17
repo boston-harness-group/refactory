@@ -703,6 +703,13 @@ class Candidate:
         return d
 
 
+#: A prompt line's tail counts as a piece of a reason or a reply (`_settled`) only after a
+#: label of at most this many characters ("Sent back because:"), and only when the tail
+#: is at least `TAIL_MIN` characters or `TAIL_MIN_WORDS` words: a framing line's last
+#: word ("- User: ## Question") is not a piece of a reply that happens to use it.
+TAIL_LABEL_MAX = 24
+TAIL_MIN = 20
+TAIL_MIN_WORDS = 3
 #: The shortest piece of an item's data (`_data_lines`) that marks a prompt line as
 #: carrying it; a shorter one ("A", "yes") would match framing by chance.
 ITEM_DATA_MIN = 8
@@ -735,6 +742,19 @@ def _data_lines(value: Any) -> set[str]:
                 except json.JSONDecodeError:
                     pass
     return out
+
+
+def _holds(line: str, datum: str) -> bool:
+    """Whether ``datum`` is in ``line`` as whole words: a reply's heading "## Option C" is
+    not in the op's heading "## Option Comparison Notes"."""
+    start = line.find(datum)
+    while start != -1:
+        end = start + len(datum)
+        if (start == 0 or not line[start - 1].isalnum()) and \
+                (end == len(line) or not line[end].isalnum()):
+            return True
+        start = line.find(datum, start + 1)
+    return False
 
 
 def _whole_texts(value: Any) -> set[str]:
@@ -975,7 +995,7 @@ class ProposalContext:
         reference), and the framing the step's ops put around its inputs (the model
         client's wrapper, their headings). Framing is a line in every one of the step's
         prompts, over two or more items, that holds nothing from any item's own data
-        (its input, a step's reply, or what its ops and code gates gave), nor a piece of
+        (its input, a step's reply, or a code gate's reason; as whole words), nor a piece of
         a code gate's reason or of a reply (a reason spread over several prompt lines).
 
         Never a line just because it recurs: a judge's reason that is not in every one
@@ -998,9 +1018,12 @@ class ProposalContext:
         # output, which is often the framed prompt itself.
         said: set[str] = set()
         for record in records:
-            data |= _data_lines(record.get("metadata")) | _data_lines(record.get("steps"))
-            said |= _whole_texts([step.get("reason") for step in record.get("steps") or ()
-                                  if isinstance(step, Mapping) and step.get("kind") == "gate"])
+            # Of the record's steps, only a code gate's reason is item data: an op's
+            # output is often the framed prompt itself, and a visit's node id is no item's.
+            reasons = [step.get("reason") for step in record.get("steps") or ()
+                       if isinstance(step, Mapping) and step.get("kind") == "gate"]
+            data |= _data_lines(record.get("metadata")) | _data_lines(reasons)
+            said |= _whole_texts(reasons)
             for exchange in record.get("exchanges") or ():
                 node = str(exchange.get("node"))
                 lines = {_norm(line) for line in str(exchange.get("prompt") or "").splitlines()
@@ -1011,14 +1034,18 @@ class ProposalContext:
                 said |= _whole_texts(exchange.get("response"))
 
         def carried(line: str) -> bool:
-            if any(datum in line for datum in data):
+            if any(_holds(line, datum) for datum in data):
                 return True
-            # The line, or its tail after a label ("Feedback: ..."), inside a reason or a
-            # reply: a piece of it.
+            # The line inside a reason or a reply, or its tail after a short label
+            # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
+            # ("- User: ## Question") from matching a reply that happens to use it.
             words = line.split(" ")
             for start in range(len(words)):
-                tail = " ".join(words[start:])
-                if len(tail) < ITEM_DATA_MIN:
+                label, tail = " ".join(words[:start]), " ".join(words[start:])
+                if len(label) > TAIL_LABEL_MAX:
+                    return False
+                if len(tail) < ITEM_DATA_MIN or (start and len(tail) < TAIL_MIN
+                                                and len(words) - start < TAIL_MIN_WORDS):
                     return False
                 if any(tail in text for text in said):
                     return True
