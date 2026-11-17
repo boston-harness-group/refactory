@@ -1418,7 +1418,8 @@ class _LiveSignatureClient(FakeClient):
     ``DshModelClient.complete`` takes, so any extra keyword an optimizer call
     sends fails here as it failed live (#493 G30)."""
 
-    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):  # type: ignore[no-untyped-def]
+    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False,  # type: ignore[no-untyped-def]
+                 seal=None):
         return super().complete(prompt, system=system)
 
 
