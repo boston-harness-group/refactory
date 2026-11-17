@@ -11,9 +11,12 @@ each cut is in the request's own record (``ProposalContext.omissions``) for the 
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate, ProposalContext, base
@@ -306,6 +309,43 @@ def test_a_line_carrying_an_items_reply_is_shown_even_in_every_prompt_of_a_step(
     for item in ("r1", "r2"):
         block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
         assert f"Prior verdict: {verdict}" in block.split("#### Step ")[2], block
+
+
+def _fix_only_records(source: str) -> list[dict]:
+    """Two items where a fix step runs only after a judge, so every one of its prompts
+    carries the judge's reason: from a code gate or an op (the record's ``steps``, as
+    `items.gate_visit` and `items.op_visit` write them) or from a model judge's JSON
+    reply."""
+    reason = "misses the boundary case at zero"
+    visit = {"code gate": {"node": "check", "kind": "gate", "verdict": "reloop",
+                           "reason": reason},
+             "op": {"node": "check", "kind": "op", "output": f"reason={json.dumps(reason)}; "
+                                                              'verdict="reloop"'}}.get(source)
+
+    def record(item: str) -> dict:
+        exchanges = [{"node": "solve", "prompt": f"Q {item}", "response": f"ANS {item}"}]
+        if source == "model judge JSON":
+            exchanges.append({"node": "judge", "prompt": f"ANS {item}",
+                              "response": json.dumps({"verdict": "reloop", "reason": reason})})
+        exchanges.append({"node": "fix", "prompt": f"ANS {item}\nFeedback: {reason}",
+                          "response": f"FIX {item}"})
+        return {"id": item, "passed": False, "score": 0.0, "prediction": "A",
+                "metadata": {"question": f"Q {item}"}, "exchanges": exchanges,
+                **({"steps": [visit]} if visit else {})}
+
+    return [record("r1"), record("r2")]
+
+
+@pytest.mark.parametrize("source", ["code gate", "op", "model judge JSON"])
+def test_a_judge_reason_reaching_a_step_that_only_runs_after_it_is_shown(source):
+    """The reason is in every one of the fix step's prompts, and is still each item's
+    evidence: a code gate's reason and an op's facts (under the record's ``steps``) and
+    the ``reason`` of a model judge's JSON reply all count as item data."""
+    knobs = [{"name": "fix__task", "kind": "str", "value": "Fix it.", "frozen": False}]
+    text = ProposalContext(item_records=_fix_only_records(source), knobs=knobs).render()
+    for item in ("r1", "r2"):
+        block = text.split(f"### Item {item}", 1)[1].split("### Item ", 1)[0]
+        assert "Feedback: misses the boundary case at zero" in block, block
 
 
 def test_with_one_item_no_line_is_taken_for_framing():
