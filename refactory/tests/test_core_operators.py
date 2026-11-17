@@ -521,7 +521,7 @@ def test_a_new_tool_step_outside_a_fresh_workspace_is_still_refused():
     state = sf.Applier(sf.seeds()["fuzz_tool_step"]).seed_state
     after = nn_edits.apply({"op": "parallelize", "steps": ["gather"], "copies": 1}, state)
     after["graph"]["nodes"]["gather_copy1"].pop("workspace")
-    assert base_mod._new_node_tools(state, after, False)
+    assert base_mod._new_node_tools(state, after)
 
 
 def test_a_tool_step_working_in_the_run_directory_is_not_copied_beside_itself():
@@ -703,13 +703,11 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
         assert all(edit["op"] in core_ops.CORE_OPS for edit in bundle), title
         json.loads(json.dumps(bundle))
         applier = sf.Applier(sf.seeds()[seed])
-        applier.optimizer.allow_new_node_tools = True
         parent = Candidate.from_state(applier.seed_state)
         proposal = Proposal(edits=tuple(bundle), parent=parent.id)
         out = applier.optimizer.attempt(proposal, parent, applier.invariants, True, (),
                                         [parent.id], seed_state=applier.seed_state,
-                                        protected=applier.protected, graders=applier.graders,
-                                        allow_new_node_tools=True)
+                                        protected=applier.protected, graders=applier.graders)
         assert isinstance(out, Candidate), (seed, title, out)
 
 

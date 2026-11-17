@@ -500,6 +500,7 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 provider_config: dict[str, Any] | None = None, *,
                 workspace_root: Path | None = None, tool_home: Path | None = None,
                 system_prompt: str = "", tool_policy: str = "",
+                seal: dict[str, Any] | None = None,
                 session_store: Path | None = None) -> None:
     """Compose installed DSH services, never a parallel agent wire protocol.
 
@@ -510,6 +511,8 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     is inserted that injects it as a system-prompt section.
     ``session_store`` is where this process keeps its DSH sessions (`session_store_rows`);
     None keeps DSH's shared store.
+    ``seal`` (``tools``, ``runner``) seals the agent (`refactory_dsh.seal`): DSH's local
+    sandbox provider runs each command under ``runner``, and the agent has ``tools`` only.
     """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
@@ -532,6 +535,15 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 {'id': 'tool-bash', 'config': {
                     'enableRunInBackground': False, 'promoteOnTimeout': False}},
             ])
+    if seal is not None:
+        from refactory_dsh.seal import FAILURE
+        if workspace_root is None or route.get('worker_backend', 'dsh') != 'dsh':
+            raise ValueError('a sealed agent runs on the dsh worker backend, confined to its workspace')
+        rows.append({'id': 'sandbox', 'config': {'runnerCommand': list(seal['runner']),
+                                                 'runnerFailureSignatures': [FAILURE.strip()]}})
+        plugin = Path(__file__).with_name('tools_plugin.mjs')
+        rows.append({'insert': [{'id': 'refactory-tools', 'name': str(plugin),
+                                 'config': {'allow': list(seal['tools'])}}]})
     # ── no-tools enforcement ─────────────────────────────────────────────
     if tool_policy == "none" and route.get('worker_backend', 'dsh') == 'dsh':
         plugin = Path(__file__).with_name('no_tools_plugin.mjs')
@@ -621,7 +633,10 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         selected = selected.with_tool_policy(getattr(node, "tool_policy", None) or "")
         if node.tool_policy == "none" and node.tools:
             raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
-        if node.tools:
+        from refactory_dsh.workspace import is_sealed
+        if node.tools and not is_sealed({'kind': 'agent', 'tools': list(node.tools),
+                                         'tool_policy': node.tool_policy,
+                                         'workspace': getattr(node, 'workspace', None)}):
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)
         selected_context = selected.context()
@@ -650,6 +665,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             payload['system_prompt'] = node.system_prompt
         if getattr(node, 'tool_policy', None):
             payload['tool_policy'] = node.tool_policy
+        if node.tools:
+            payload['tools'] = list(node.tools)
         if is_optional:
             payload['optional'] = True
         retry = getattr(node, 'retry', None)

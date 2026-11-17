@@ -378,10 +378,6 @@ class LoopConfig:
     #: epoch's minibatch (as SkillOpt rolls out its current candidate on each step's
     #: batch). Val and test are unaffected. Each epoch's ids are journaled.
     train_minibatch: int = 0
-    #: Whether an agent node an edit adds may run with tools. Off by default: a new
-    #: agent node runs with ``tool_policy: none``, and one that asks for tools is
-    #: refused (``E-new-node-tools``).
-    allow_new_node_tools: bool = False
     #: Whether an edit may add a code node: an op or a gate whose Python the optimizer
     #: writes, run sandboxed (`refactory_dsh.snippet`). On by default; it takes effect
     #: only where the run permits structural edits, and a machine that cannot sandbox
@@ -972,6 +968,13 @@ class Loop(OuterLoop):
             sandbox = snippet.available()
         return bool(sandbox[0])
 
+    def _tools_offered(self) -> bool:
+        """Whether the request shows a tool step: a new step's tools run sealed only where
+        the seal runs (`seal.available`)."""
+        from refactory_dsh import seal
+
+        return bool(seal.available()[0])
+
     def _sandbox_answer(self) -> tuple[bool, str] | None:
         """The machine's sandbox answer for one request (`snippet.available`), taken once
         so the offer and the refusals agree; ``None`` when the run allows no code nodes."""
@@ -1516,7 +1519,6 @@ class Loop(OuterLoop):
                 proposal, seed, self.invariants, True, self.config.frozen, self._tried(),
                 seed_state=self._original_seed_state, protected=self.protected,
                 graders=self.graders,
-                allow_new_node_tools=self.config.allow_new_node_tools,
             )
             if isinstance(outcome, Candidate):
                 self.population.append(outcome)
@@ -5364,7 +5366,7 @@ class Loop(OuterLoop):
             population_parents=(self.selection_mode() == "pool" and self._population_policy()),
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
-            new_node_tools=bool(self.config.allow_new_node_tools),
+            new_node_tools=self._tools_offered(),
             time_facts=self._time_facts(board),
         )
 

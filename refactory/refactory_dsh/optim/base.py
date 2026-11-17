@@ -168,20 +168,21 @@ def _lowering_refusal(parent_state: dict[str, Any], state: dict[str, Any]) -> st
     return None
 
 
-def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
-                    allowed: bool) -> list[str]:
-    """``E-new-node-tools`` for each agent node the search added that would run with tools.
+def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any]) -> list[str]:
+    """``E-new-node-tools`` for each agent node the search added that would run with tools
+    outside a sealed workspace.
 
-    A node an edit adds gets ``tool_policy: none`` by default (`nn.edits`): with tools
-    it could read anything in the run directory or beyond it. Asking for tools
-    (``tool_policy: null`` or a ``tools`` list) needs the run to allow it
-    (``LoopConfig.allow_new_node_tools``), except for the tools a step of the seed already
-    runs with, in a fresh workspace of the new node's own (a copy of a tool step, as the
-    core operators make one). A node whose id the seed has is held to the seed's own policy
+    A node an edit adds gets ``tool_policy: none`` by default (`nn.edits`). With a
+    ``tools`` list from `workspace.SEALED_TOOLS` in a ``scratch`` workspace it runs them
+    sealed (`workspace.sealed`): it sees only the files it reads, no other item, no grader
+    file, no network. A copy of a step of the seed that uses tools keeps them in a fresh
+    workspace of its own. Any other new node with tools could read anything in the run
+    directory or beyond it. A node whose id the seed has is held to the seed's own policy
     instead (`_tool_policy_escalated`).
     """
-    if allowed:
-        return []
+    from refactory_dsh import seal
+    from refactory_dsh.workspace import is_sealed
+
     seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
     # The tools a step of the seed already runs with: a copy of such a step may keep them
     # when it works in a fresh workspace of its own (the user's decision, recorded in
@@ -193,14 +194,21 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
         if node_id in seed_nodes or node.get("kind") != "agent":
             continue
+        if node.get("tool_policy") == "none" and not node.get("tools"):
+            continue
+        if is_sealed(node):
+            sealable, why = seal.available()
+            if not sealable:
+                reasons.append(f"E-new-node-tools: new agent node {node_id!r} runs its tools "
+                               f"sealed, and the seal cannot run on this machine: {why}")
+            continue
         if (node.get("tool_policy"), tuple(node.get("tools") or ())) in seed_tools \
                 and _fresh_workspace(node):
             continue
-        if node.get("tool_policy") != "none" or node.get("tools"):
-            reasons.append(
-                f"E-new-node-tools: new agent node {node_id!r} would run with tools; a node "
-                "an edit adds runs without tools (omit tool_policy, or set it to 'none') "
-                "unless the run allows tools for new nodes (allow_new_node_tools)")
+        reasons.append(
+            f"E-new-node-tools: new agent node {node_id!r} would run with tools outside a sealed "
+            "workspace; list them in 'tools' (a 'scratch' workspace, no tool_policy), or "
+            "give it none")
     return reasons
 
 
@@ -1068,7 +1076,7 @@ class ProposalContext:
     #: ``REFUSED_SHOWN``), shown under "Why your last proposals were refused" so a retry
     #: fixes the proposal it wrote rather than writing one from scratch.
     refused: list[dict[str, Any]] = field(default_factory=list)
-    #: Whether a new step may use tools in this run (``LoopConfig.allow_new_node_tools``);
+    #: Whether a new step's tools can run sealed on this machine (`workspace.sealed_available`);
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
     #: Time, in numbers, for "Time per item" (`time_lines`): ``step_limit_s`` (how long one
@@ -1716,7 +1724,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
         "validator's rules (listed below) allow:",
         "- **agent**: one model call. Its prompt fills each `{{name}}` from a fact (or knob) "
         "produced upstream; its reply is written to its first `writes` file and, when it "
-        "declares `produces`, also becomes that fact. A new agent runs without tools, so it "
+        "declares `produces`, also becomes that fact. A new agent without `tools` "
         "sees only its prompt and the files it lists in `reads` (pasted in after the prompt): "
         "hand it anything else as `{{facts}}`. "
         f"A file's text becomes a fact through {reader}, or when the agent that writes the "
@@ -1974,7 +1982,8 @@ def _view_lead() -> str:
         "words: `sees` lists a step's "
         "inputs as `\"sees\"` names them, `name@maker` (`@run`: no step makes it); a plain "
         "op that only assembles a model step's input is folded in as `name (via op: its "
-        "inputs)`; an agent with tools sees the run dir (or its own workspace); `told` is "
+        "inputs)`; an agent with tools sees the run dir, its own workspace, or a sealed one "
+        "(its inputs only); `told` is "
         "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
         "an op with several outputs, for all of them), or a code step's code; `->` what it "
         "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
@@ -2330,7 +2339,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
                      "if ok else 'reloop', 'reason': 'residual ' + str(residual)}\n"}]))
     if tools and "insert" in ops:
         out.append(("A tool step before reasoning", [
-            {"op": "insert", "before": step, "kind": "agent", "tools": True,
+            {"op": "insert", "before": step, "kind": "agent", "tools": ["bash"],
              "text": "<use your tools to gather what the next step needs>"}]))
     removable = _removable_step(node_states, edges, protected, state) if "remove" in ops else None
     if removable is not None:
@@ -4463,7 +4472,6 @@ class Optimizer:
         seen: Sequence[str] | None = None,
         seed_state: dict[str, Any] | None = None,
         protected: Sequence[str] = (),
-        allow_new_node_tools: bool = False,
         graders: Sequence[str] = (),
         record: bool = True,
         check_hints: bool = True,
@@ -4477,8 +4485,7 @@ class Optimizer:
 
         ``protected`` is the mode's ``protected_nodes()``: an edit that removes,
         rewires or replaces one is refused with ``E-protected``. An agent node the
-        search added may run with tools only with ``allow_new_node_tools``
-        (``E-new-node-tools``). ``graders`` is the mode's ``grader_nodes()``: with the
+        search added may run with tools only sealed (``E-new-node-tools``). ``graders`` is the mode's ``grader_nodes()``: with the
         protected nodes, the only nodes besides the data nodes that may consume
         grader-derived data (V17).
 
@@ -4496,7 +4503,7 @@ class Optimizer:
             return checked_hint(reason, lambda edit: self.attempt(
                 Proposal(edit=edit), parent, invariants, resolve_calls, frozen, seen,
                 seed_state=seed_state, protected=protected,
-                allow_new_node_tools=allow_new_node_tools, graders=graders, record=False,
+                graders=graders, record=False,
                 check_hints=False, dry_run_code=False))
         refusal = proposal_refusal(proposal, max_edits=self.max_edits, parent_state=parent.state)
         if refusal:
@@ -4602,8 +4609,7 @@ class Optimizer:
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
         if escalation:
             return escalation
-        tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state,
-                                 allow_new_node_tools)
+        tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state)
         if tooled:
             return tooled
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,

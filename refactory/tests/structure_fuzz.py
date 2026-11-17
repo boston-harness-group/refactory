@@ -71,6 +71,7 @@ from refactory_dsh.nn.executor import execute
 from refactory_dsh.nn.graph import Graph
 from refactory_dsh.nn.operators import FILE_TEXT_CALL
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
+from refactory_dsh.workspace import SEALED_TOOLS
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, _dead_edit, _grader_side_knobs, candidate_id, _node_spec,
     proposal_refusal, reason_code,
@@ -108,6 +109,13 @@ SCRIPTED_LABEL = "verdict 'proceed' is not one of"
 CODE_NODES = snippet_calls.available()[0]
 #: The node kinds `EditGenerator.new_node` draws a fresh node from, without code nodes.
 PLAIN_NODE_KINDS = ("op", "op", "agent", "agent", "gate", "fork", "join", "data")
+#: A new agent asking for its tools sealed, and the ways of asking for tools that are not
+#: sealed: a tool outside the sealed set, no scratch workspace, or a tool policy besides.
+SEALED_ASK = {"tool_policy": None, "tools": ["bash"], "workspace": {"kind": "scratch"}}
+UNSEALED_ASKS = ({"tool_policy": None, "tools": ["read"], "workspace": {"kind": "scratch"}},
+                 {"tool_policy": None, "tools": ["bash"]},
+                 {"tool_policy": None, "tools": ["bash", "web_fetch"],
+                  "workspace": {"kind": "scratch"}})
 #: The node kinds `EditGenerator.new_node` draws a fresh node from on this machine.
 NODE_KINDS_TO_GENERATE = PLAIN_NODE_KINDS + (("code", "code_gate") if CODE_NODES else ())
 #: The line every generated code meant to fail at run time carries.
@@ -1000,16 +1008,24 @@ def check_spine(seed: Seed, state: dict[str, Any], walker: Any, tmp: Path) -> li
 
 
 def check_tools(seed_state: dict[str, Any], state: dict[str, Any]) -> list[Violation]:
-    """Spec check: an agent node the edits added runs without tools (the harness never
-    allows tools for new nodes), except a copy of a seed step that uses tools, with the
-    same tools, in a fresh workspace of its own (scratch, or a clone of the base)."""
+    """Spec check: an agent node the edits added runs without tools, or sealed (a tools
+    list from the sealed set, no other tool policy, in a scratch workspace), or as a copy
+    of a seed step that uses tools, with the same tools, in a fresh workspace of its own
+    (scratch, or a clone of the base)."""
     seed = _graph_of(seed_state)
     tooled = {(n.tool_policy, tuple(n.tools)) for n in seed.nodes.values()
               if n.kind == "agent" and (n.tool_policy != "none" or n.tools)}
+
+    def sealed(node: Any) -> bool:
+        return (bool(node.tools) and set(node.tools) <= set(SEALED_TOOLS)
+                and node.tool_policy is None and bool(node.workspace)
+                and node.workspace["kind"] == "scratch")
+
     return [Violation("tools", f"new agent {node.id} runs with tools")
             for node in _graph_of(state).nodes.values()
             if node.kind == "agent" and node.id not in seed.nodes
             and (node.tool_policy != "none" or node.tools)
+            and not sealed(node)
             and not ((node.tool_policy, tuple(node.tools)) in tooled and node.workspace
                      and (node.workspace["kind"] == "scratch"
                           or node.workspace.get("of") == "base"))]
@@ -1149,9 +1165,11 @@ class EditGenerator:
                     "writes": [f"{new_id}.txt"], "produces": [f"{new_id}_fact"]}
         if kind == "agent":
             # Most new agents omit tool_policy (the edit layer gives them 'none'); some
-            # say 'none'; a few ask for tools, which the attempt path refuses. Some read
-            # a file, the item's included: what an agent added to cheat would read.
-            policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},))
+            # say 'none'; a few ask for tools, which the attempt path refuses unless they
+            # run sealed; a few run sealed. Some read a file, the item's included: what an
+            # agent added to cheat would read.
+            policy = rng.choice(({},) * 5 + ({"tool_policy": "none"},) * 3 + ({"tool_policy": None},)
+                                + (SEALED_ASK, SEALED_ASK, *UNSEALED_ASKS))
             return {"id": new_id, "kind": "agent", "role": "solver", **policy,
                     "reads": rng.sample(files, k=min(len(files), rng.choice((0, 0, 1)))),
                     "prompt_template": self._agent_prompt(graph),

@@ -24,10 +24,12 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
 import structure_fuzz as sf
+from refactory_dsh import seal
 from refactory_dsh.nn import edits as edits_mod
 from refactory_dsh.optim import base as base_mod
 from test_livemath_blocks import needs_spine
@@ -324,7 +326,7 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 
 
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
-    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, allowed: [])
+    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
@@ -454,7 +456,7 @@ def test_node_item_hides_grader_fields():
     assert node_item(item, Task()) == item
 
 
-def test_a_new_agent_runs_without_tools_unless_the_run_allows_them():
+def test_a_new_agent_runs_without_tools_unless_they_run_sealed():
     applier = sf.Applier(sf.seeds()["fuzz_dataflow"])
     parent = sf.Candidate.from_state(applier.seed_state)
     node = {"id": "probe", "kind": "agent", "prompt_template": "Look.", "writes": ["probe.txt"]}
@@ -464,10 +466,22 @@ def test_a_new_agent_runs_without_tools_unless_the_run_allows_them():
     asking = {**node, "tool_policy": None}
     refused = applier.attempt(parent, {"op": "insert_after", "target": "load", "node": asking}, set())
     assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
-    allowed = base_mod.Optimizer().attempt(
-        base_mod.Proposal(edit={"op": "insert_after", "target": "load", "node": asking}),
-        parent, applier.invariants, True, seed_state=applier.seed_state, allow_new_node_tools=True)
-    assert isinstance(allowed, base_mod.Candidate), allowed
+    # A tools list outside a scratch workspace, or naming a tool outside the sealed set,
+    # is refused the same way; the sealed form is a candidate wherever the seal runs.
+    for unsealed in ({**asking, "tools": ["bash"]},
+                     {**asking, "tools": ["read"], "workspace": {"kind": "scratch"}}):
+        refused = applier.attempt(parent, {"op": "insert_after", "target": "load",
+                                           "node": unsealed}, set())
+        assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
+    sealed = {**asking, "tools": ["bash"], "workspace": {"kind": "scratch"}}
+    with mock.patch.object(seal, "available", return_value=(True, "")):
+        allowed = applier.attempt(parent, {"op": "insert_after", "target": "load",
+                                           "node": sealed}, set())
+    assert isinstance(allowed, sf.Candidate), allowed
+    with mock.patch.object(seal, "available", return_value=(False, "no unshare")):
+        refused = applier.attempt(parent, {"op": "insert_after", "target": "load",
+                                           "node": sealed}, set())
+    assert isinstance(refused, list) and "no unshare" in refused[0], refused
 
 
 def test_v6_lets_an_op_read_an_optional_file_and_v15_holds_an_agent_to_every_path():

@@ -59,6 +59,22 @@ from refactory_dsh.nn.graph import workspace_declaration
 #: Where a run keeps its workspaces, one directory per node.
 ROOT = Path(".refactory") / "workspaces"
 
+#: The tools a step an edit adds may list (`Node.tools`): those whose every effect runs
+#: through the seal (`refactory_dsh.seal`). DSH's file and web tools run in its own
+#: process, outside any runner, so they are not among them.
+SEALED_TOOLS = ("bash",)
+
+
+def is_sealed(node: Any) -> bool:
+    """Whether an agent node (a `Node` or its state) runs sealed: a ``tools`` list from
+    `SEALED_TOOLS`, no other tool policy, in a ``scratch`` workspace."""
+    get = node.get if isinstance(node, dict) else lambda key: getattr(node, key, None)
+    tools = list(get("tools") or ())
+    declared = workspace_declaration(get("workspace"))
+    return (get("kind") == "agent" and bool(tools) and set(tools) <= set(SEALED_TOOLS)
+            and get("tool_policy") is None and declared is not None
+            and declared["kind"] == "scratch")
+
 #: Refactory's own directory inside a workspace: the agent's HOME and the files of its
 #: session live there, inside the folder the sandbox lets it write, and none of it is
 #: ever collected (git is told to ignore it too).
@@ -166,13 +182,20 @@ class Workspace:
     generate_owned: dict[str, str] = field(default_factory=dict)
     #: Files in ``generate_owned`` the agent then changed, which it is told about.
     prepared_edits: tuple[str, ...] = ()
+    #: A sealed step's tools (`is_sealed`), and the runner each of its commands runs
+    #: under (`seal.runner_command`); empty for any other workspace.
+    tools: tuple[str, ...] = ()
+    runner: tuple[str, ...] = ()
 
     def describe(self) -> dict[str, Any]:
         """The workspace as the execution contract and the receipt record it."""
         return {
             "kind": self.kind, **({"of": self.of} if self.of else {}), "collect": self.collect,
             "path": str(self.path), **({"base": self.base} if self.base else {}),
-            "sandbox": self.confine and f"workspace-write ({self.confine})" or f"not confined: {self.unconfined}",
+            **({"sealed": True, "tools": list(self.tools)} if self.runner else {}),
+            "sandbox": ("sealed: its files only, no network" if self.runner
+                        else self.confine and f"workspace-write ({self.confine})"
+                        or f"not confined: {self.unconfined}"),
             **({"synced": self.synced} if self.synced else {}),
             **({"prepared": self.prepared} if self.prepared else {}),
             **({"problems": list(self.problems)} if self.problems else {}),
@@ -224,7 +247,7 @@ def _slug(node: str) -> str:
 def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any] | None = None,
                facts: dict[str, Any] | None = None, route: dict[str, Any] | None = None,
                runtime_root: Path | None = None, budget: Any = None,
-               fresh: bool = False) -> Iterator[Workspace | None]:
+               fresh: bool = False, tools: Any = (), reads: Any = ()) -> Iterator[Workspace | None]:
     """Prepare ``node``'s workspace for one dispatch and hold it until the block ends.
 
     Yields None when the node declares none, and the caller dispatches as before. The
@@ -255,17 +278,19 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                     else:
                         entry.unlink()
             yield prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
-                          runtime_root=runtime_root, budget=budget)
+                          runtime_root=runtime_root, budget=budget, tools=tools, reads=reads)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any] | None = None,
             facts: dict[str, Any] | None = None, route: dict[str, Any] | None = None,
-            runtime_root: Path | None = None, budget: Any = None) -> Workspace | None:
+            runtime_root: Path | None = None, budget: Any = None, tools: Any = (),
+            reads: Any = ()) -> Workspace | None:
     """``node``'s workspace, made ready for a dispatch; None when it declares none.
 
-    A scratch folder is made afresh. A clone is prepared by the product's preparer: once
+    A scratch folder is made afresh. With ``tools`` the node runs sealed (`is_sealed`):
+    its ``reads`` are copied in, and each command runs under the seal (`seal`). A clone is prepared by the product's preparer: once
     per run, then brought to the run's last attempt (or kept at its base) on each later
     dispatch. Raises `WorkspaceError` when it cannot be.
     """
@@ -281,7 +306,11 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
             f"agent node {node!r} works in a workspace, and a workspace on the openshell backend is "
             "experimental: it has had no live run. Set "
             f"{OPENSHELL_OPT_IN[0]}={OPENSHELL_OPT_IN[1]} to use it anyway, or route the node to dsh")
-    confine, unconfined = confinement(route, runtime_root)
+    tools = tuple(tools or ())
+    if tools:
+        _check_sealed(node, declared, tools, route)
+    # A sealed step's commands run under refactory's runner, never DSH's (`seal`).
+    confine, unconfined = ("seal", "") if tools else confinement(route, runtime_root)
     if not confine and _needs_confinement(route) and not _opted_in(UNCONFINED_OPT_IN):
         # Its shell would run with full access to the person's files and DSH home while the
         # prompt asks it to install and run things: refused, unless the person chose that.
@@ -312,6 +341,8 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
         if workspace.problems:
             _warn(f"preparing agent node {node!r}'s workspace reported: " + "; ".join(workspace.problems))
     workspace.confine, workspace.unconfined = confine, unconfined
+    if tools:
+        _seal(workspace, workdir, tools, reads)
     workspace.env["BASH_ENV"] = str(_tool_env(root))
     previous = _json(root / "collected.json")
     workspace.normalised = tuple(previous.get("normalised") or ())
@@ -321,6 +352,45 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
         _warn(f"agent node {node!r} works in {workspace.path} without DSH's workspace-write policy "
               f"({workspace.unconfined}); its tools keep the access a node has without a workspace")
     return workspace
+
+
+def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
+                  route: dict[str, Any]) -> None:
+    """Refuse a sealed step that cannot run sealed here: never run it with less."""
+    from refactory_dsh import seal
+
+    outside = [tool for tool in tools if tool not in SEALED_TOOLS]
+    if outside or declared["kind"] != "scratch":
+        raise WorkspaceError(
+            f"agent node {node!r} lists tools {list(tools)}: a step runs only tools from "
+            f"{', '.join(SEALED_TOOLS)}, sealed in a 'scratch' workspace")
+    if (route.get("worker_backend") or "dsh") != "dsh" or (route.get("permission_mode") or "skip") != "skip":
+        raise WorkspaceError(
+            f"agent node {node!r} runs its tools sealed, which only the dsh worker backend in "
+            f"'skip' permission mode can do; this route is {route.get('worker_backend')!r} "
+            f"({route.get('permission_mode') or 'skip'})")
+    ok, why = seal.available()
+    if not ok:
+        raise WorkspaceError(f"agent node {node!r} runs its tools sealed, and the seal cannot run "
+                             f"here: {why}")
+
+
+def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: Any) -> None:
+    """Make ``workspace`` sealed: copy in the files the node reads (by their names, inside
+    the run directory only), keep its temporary files inside it, and set its runner."""
+    from refactory_dsh import seal
+
+    for name in reads or ():
+        source = (workdir / name).resolve()
+        target = (workspace.path / name).resolve()
+        if not source.is_relative_to(workdir) or not target.is_relative_to(workspace.path.resolve()):
+            raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is not a file "
+                                 "of the run directory")
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+    workspace.tools = tools
+    workspace.runner = tuple(seal.runner_command(workspace.path, hide=(str(workdir),)))
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:
@@ -503,7 +573,7 @@ def ask(workspace: Workspace, client: Any, prompt: str, *, workdir: Path, system
     except (TypeError, ValueError):  # pragma: no cover - a builtin
         parameters = {}
     if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
-        parameters.update(dict.fromkeys(("cwd", "env", "confine", "system")))
+        parameters.update(dict.fromkeys(("cwd", "env", "confine", "system", "seal")))
     if "cwd" not in parameters:
         raise WorkspaceError(
             f"agent node {workspace.node!r} works in a workspace, and its model client cannot run an "
@@ -515,6 +585,12 @@ def ask(workspace: Workspace, client: Any, prompt: str, *, workdir: Path, system
         kwargs["env"] = agent_env(workspace, route)
     if "confine" in parameters:
         kwargs["confine"] = bool(workspace.confine)
+    if workspace.runner:
+        if "seal" not in parameters:
+            raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed, and its "
+                                 "model client cannot seal them: its complete() takes no seal")
+        kwargs["confine"] = True
+        kwargs["seal"] = {"tools": list(workspace.tools), "runner": list(workspace.runner)}
     return str(client.complete(prompt, **kwargs))
 
 
