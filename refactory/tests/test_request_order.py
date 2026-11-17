@@ -531,6 +531,15 @@ def test_every_line_of_a_reason_headed_by_a_heading_reaches_the_fix_step(source)
         _shown_at_fix(records, line)
 
 
+@pytest.mark.parametrize("reply", ["# Reloop", "## Reloop"])
+@pytest.mark.parametrize("form", ["{r}", "Feedback:\n{r}"])
+def test_a_judge_reply_that_is_only_a_short_heading_reaches_the_fix_step(reply, form):
+    """A judge's whole reply, however short, is that item's reason: a fix step quoting it
+    shows it, though a short heading inside a longer reply is a bare label."""
+    _shown_at_fix([_probe_record(i, form.format(r=reply), reply=reply) for i in ("r1", "r2")],
+                  reply)
+
+
 @pytest.mark.parametrize("reply_line", ["## Question", "Question", "Independent",
                                         "## Independent", "## Option Comparison Notes"])
 def test_a_reply_line_that_is_a_short_heading_leaves_framing_hidden(reply_line):

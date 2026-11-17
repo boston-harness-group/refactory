@@ -1056,6 +1056,8 @@ class ProposalContext:
             # The line inside a reason or a reply, or its tail after a short label
             # ("Feedback: ..."): a piece of one. The bounds keep a framing line's last word
             # ("- User: ## Question") from matching a reply that happens to use it.
+            if line in said:
+                return True  # a whole reason or reply, however short ("## Reloop")
             if _bare_label(line):
                 return False  # a heading or one word is no piece of a reason
             words = line.split(" ")
