@@ -45,7 +45,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 import structlog
 
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
-from refactory_dsh.optim.base import RunStopped, proposal_refusal, summarise_reasons
+from refactory_dsh.optim.base import RunStopped, fmt_score, proposal_refusal, summarise_reasons
 
 log = structlog.get_logger()
 
@@ -546,6 +546,13 @@ class Run:
         """
         return self.part_scores(candidate, "val")
 
+    def shared_val_scores(self, candidate_id: str, other_id: str
+                          ) -> tuple[float, float, list[str]] | None:
+        """Candidate ``candidate_id``'s and ``other_id``'s val scores over the items both were scored on,
+        with the items a harness incident left out of either (`Loop.shared_item_scores`);
+        ``None`` when their val scores already cover the same items."""
+        return self._loop.shared_item_scores(candidate_id, other_id, "val")  # noqa: SLF001
+
     def part_scores(self, candidate: Candidate, part: str) -> list[dict[str, Any]]:
         """Score-only view of a candidate's ``'val'`` or ``'test'`` occasions, oldest first.
 
@@ -1031,7 +1038,8 @@ class ValidationGate:
         """
         incumbent = self.current_score if against is None else self.score(run, against)[0]
         score, cached = self.score(run, candidate)
-        accepted = score > incumbent
+        accepted = self.beats(run, candidate, score,
+                              self.current_id if against is None else against.id, incumbent)
         best = False
         if accepted:
             self.current_id, self.current_score = candidate.id, score
@@ -1061,7 +1069,7 @@ class ValidationGate:
                 error = exc
                 break
         better = [(index, candidate, score) for index, (candidate, score) in enumerate(scored)
-                  if score > incumbent]
+                  if self.beats(run, candidate, score, self.current_id, incumbent)]
         winner = None
         if better:
             def train(candidate: Candidate) -> float:
@@ -1076,6 +1084,22 @@ class ValidationGate:
         if error is not None:
             raise RoundStopped(accepted, rejected, error)
         return accepted, rejected
+
+    def beats(self, run: Run, candidate: Candidate, score: float, incumbent_id: str | None,
+              incumbent: float) -> bool:
+        """Whether ``candidate`` (val ``score``) strictly beats the incumbent. When a
+        harness incident left an item out of either's val score, both are compared on
+        the items both were scored on (`Run.shared_val_scores`), and the log says so; an
+        item the harness kept from one candidate is never another's win or loss."""
+        if incumbent_id is not None and incumbent_id != candidate.id:
+            shared = run.shared_val_scores(candidate.id, incumbent_id)
+            if shared is not None:
+                mine, theirs, left_out = shared
+                run.log(f"val gate: {candidate.id} vs {incumbent_id} compared on the items "
+                        f"both were scored on ({fmt_score(mine)} vs {fmt_score(theirs)}); "
+                        f"left out of both, a harness incident: {', '.join(left_out)}")
+                return mine > theirs
+        return score > incumbent
 
     def carry(self, candidate: Candidate, *, remember: bool = False) -> None:
         """Make ``candidate`` current at the current score, without a rollout.

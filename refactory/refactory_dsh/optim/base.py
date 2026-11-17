@@ -2687,7 +2687,8 @@ def harness_timeout(record: Mapping[str, Any]) -> bool:
     an error's text: an op that quotes a reply saying "timed out", a code step's own
     ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
     what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
-    as the pipeline's failure."""
+    as the pipeline's failure. One the backstop stopped and that a rerun did not recover
+    is not scored at all (``not_scored``) and is listed on its own line."""
     if record.get("passed"):
         return False
     if str(record.get("error_kind") or "") in HARNESS_TIMEOUT_KINDS:
@@ -2749,9 +2750,12 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     records only, as ``OuterLoop.item_records`` enforces. A harness timeout is listed
     once (`HARNESS_TIMEOUT`) and counted nowhere else.
     """
-    timed_out = [r for r in records if harness_timeout(r)]
+    # An item a harness incident kept from an outcome, run again and still one, is left
+    # out of the score (`loop.Loop._settle_incidents`): said once, on its own line.
+    incidents = [r for r in records if r.get("not_scored")]
+    timed_out = [r for r in records if harness_timeout(r) and not r.get("not_scored")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
-    total = len(records)
+    total = len(records) - len(incidents)
     records = _pipeline_items(records)
     errored = [r for r in records if r.get("error_text")]
     passed = [r for r in records if not r.get("error_text") and r.get("passed")]
@@ -2768,6 +2772,10 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         + f"{len(errored)} failed with an error{'' if timed_out else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
+    if incidents:
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in incidents))
+        lines.append(f"{len(ids)} item(s) ({', '.join(ids)}) had a harness incident and are "
+                     "not scored: not caused by the pipeline's design; not a target.")
     if timed_out:
         ids = list(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
         lines.append(f"{len(ids)} more ({', '.join(ids)}), each a {HARNESS_TIMEOUT}"

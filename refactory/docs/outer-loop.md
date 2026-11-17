@@ -286,6 +286,32 @@ may say "429") never decides it.
 - **Out of scope.** An interrupted evaluation runs again from its start. Resuming inside
   forks, loops and per-item passes is separate work.
 
+## A harness incident is rerun, then left out of the score
+
+An item the harness backstop stopped while its model still streamed (`model.HarnessBackstop`;
+`items.harness_incident`: `error_kind` `harness_incident`, or no answer because a step hit
+it) has no outcome of the candidate's, and is never its wrong answer. After the trial, the
+loop runs each such item again, alone, on the same candidate, part and rollout seed, in
+`<trial>/incident_reruns/<n>`, up to `INCIDENT_RERUNS` (2, as many as an interrupted
+evaluation's in-run retries) times (`Loop._settle_incidents`). A rerun's record takes the
+item's place in the records and in `item_scores`, so an item a rerun answers is scored as
+any item. One still an incident after them keeps its record with `score: null` and
+`not_scored: "harness_incident"`, and leaves `item_scores`; the mode's `score()` is run
+again on those facts, so the item is in neither numerator nor denominator, on every mode,
+strategy and runtime (every train, re-score, memory, val, test and holdout rollout goes
+through `_measure`). A trial whose every item is one fails ("every item was a harness
+incident"). A trial that did not finish is left as it is.
+
+It is said wherever a score is: the journal and progress line (`harness_incident`: rerun,
+recovered, or NOT SCORED), `report.json` `harness_incidents` (each evaluation's items,
+those recovered and those not scored) and a line in `report.md`, and the request's "Item
+results" ("N item(s) (...) had a harness incident and are not scored"; listed once, read
+as no failure, as a harness timeout below). The seed cache does not replay an evaluation
+with one. **A val comparison** of two candidates (`ValidationGate.beats`, under `judge`
+and `judge_round`) uses the items both were scored on when either left one out, and logs
+it; when a score is not its items' mean it cannot be recomputed and the scores compare as
+they are. The post-training test deltas (`FinalEvaluation`) do not yet do this.
+
 ## Train minibatches (`train_minibatch: N`)
 
 By default every candidate is scored on the whole train part. With
@@ -1902,7 +1928,8 @@ each candidate's measured model cost over its train items.
 **A harness timeout is not a target.** An item the harness ended for time
 (`base.harness_timeout`: an `error_kind`, or a step's `missing_steps` cause, of `timeout`
 -- a session ended on inactivity, the item deadline -- or `harness_incident`, the
-backstop; never read from an error's text) still scores what it scored, 0, but no request reads it as the
+backstop, which is rerun and then not scored at all (see "A harness incident is rerun");
+never read from an error's text) still scores what it scored, 0, but no request reads it as the
 pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
 error row, no item shown in full, no time and no analyst's batch, and the analysts are told
 not to propose changes aimed at timeouts or retries for them. A wall a step declares

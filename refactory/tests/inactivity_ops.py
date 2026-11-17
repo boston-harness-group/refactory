@@ -26,3 +26,21 @@ class TwoItemTask(Task):
             return VerifyResult(passed=False, score=0.0, details="no answer")
         right = answer.read_text().strip() == "right"
         return VerifyResult(passed=right, score=1.0 if right else 0.0)
+
+
+class SplitAnswerTask(Task):
+    """The toy split's train, val and test ids (`test_skillopt`), each passed when its
+    pass kept the answer ``right`` (``final.txt``): `test_harness_incidents`'s Task, by a
+    reference a spine worker can import."""
+
+    name = "split_answer_task"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        ids = ([f"t{i}" for i in range(1, 9)] + [f"v{i}" for i in range(1, 5)]
+               + [f"x{i}" for i in range(1, 4)])
+        return [TaskInstance(id=item, metadata={}) for item in ids]
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        final = Path(workspace) / "final.txt"
+        right = final.exists() and final.read_text().strip() == "right"
+        return VerifyResult(passed=right, score=1.0 if right else 0.0)

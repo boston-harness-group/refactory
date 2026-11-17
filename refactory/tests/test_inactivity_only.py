@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from refactory_dsh import nn
+from refactory_dsh.items import harness_incident
 from refactory_dsh.model import DshModelClient, activity_path
 from refactory_dsh.nn.executor import CURRENT_ITEM, execute
 from test_crashed_step_retry import RUNTIMES, _sessions, _spine
@@ -133,6 +134,7 @@ def test_the_backstop_fires_only_past_its_value_and_is_a_harness_incident(tmp_pa
 
     record, elapsed, run = _run(runtime, "active 60", tmp_path / "past", backstop_s=10)
     assert record["passed"] is False and record["error_kind"] == "harness_incident", record
+    assert harness_incident(record), "the loop reruns it, then leaves it out of the score"
     assert "hit the harness backstop after 10s" in record["error_text"]
     assert "timed out" not in record["error_text"]
     assert 10 <= elapsed < 45
@@ -194,7 +196,9 @@ def test_the_backstop_reports_the_calls_whole_time_after_a_transport_retry(tmp_p
 
 def test_the_backstop_is_no_interruption():
     """A session the backstop stopped did not die with the run's processes: its item is a
-    ``harness_incident``, not an interrupted one that would rerun the evaluation for hours."""
+    ``harness_incident``, not an interrupted one that would rerun the whole evaluation:
+    the loop runs that item alone again, then leaves it out of the score
+    (`loop.Loop._settle_incidents`)."""
     from refactory_dsh.items import interrupted_item
 
     for error in ("solve: HarnessBackstop: model session hit the harness backstop after 14400s",

@@ -1,0 +1,214 @@
+"""An item the harness backstop stopped is the harness's failure, never a wrong answer.
+
+A session still streaming at the harness backstop (`model.HarnessBackstop`) leaves its
+item with no outcome of the candidate's (`items.harness_incident`). The loop runs that
+item again, alone, on the same candidate, part and seed, up to `INCIDENT_RERUNS` times
+(`Loop._settle_incidents`); a rerun that answers is scored as any item. One still an
+incident after them is left out of the score -- numerator and denominator -- and said in
+the report, the progress line and the optimizer's request. A val comparison of two
+candidates uses the items both were scored on (`ValidationGate.beats`).
+
+The runs are the real loop and walker (and the spine where built) over a scripted ``dsh``
+reached through the real model client, whose backstop is 2 s here (14400 s in
+production). Each test fails when the behaviour it names is reverted.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from refactory_dsh import nn
+from refactory_dsh.events import render
+from refactory_dsh.items import harness_incident
+from refactory_dsh.loop import INCIDENT_RERUNS, Loop
+from refactory_dsh.model import DshModelClient
+from refactory_dsh.optim.base import _item_evidence
+
+from test_interrupted_evaluation import _loop as _interrupted_loop, quick_retries  # noqa: F401
+from test_skillopt import TRAIN_IDS, VAL_IDS, _patch_mode
+from test_val_gate import _journal_events, _level
+
+#: A scripted ``dsh``: the first plan key whose ``&``-separated parts are all in the call's
+#: folder or prompt decides: ``ACTIVE`` streams (touches the session's activity file) for
+#: 30 s, past the 2 s backstop; anything else is the answer.
+FAKE_DSH = '''import json, os, pathlib, sys, time
+root = pathlib.Path({root!r})
+plan = json.loads((root / "plan.json").read_text())
+seen = os.getcwd() + "\\n" + sys.stdin.read()
+step = next(value for key, value in plan.items() if all(part in seen for part in key.split("&")))
+if step == "ACTIVE":
+    activity = pathlib.Path(os.environ["REFACTORY_WORKER_RECEIPT"]).with_suffix(".activity")
+    end = time.time() + 30
+    while time.time() < end:
+        activity.touch()
+        time.sleep(0.2)
+print(step)
+'''
+
+
+class Dsh:
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self.root = root
+        script = root / "fake_dsh.py"
+        script.write_text(FAKE_DSH.format(root=str(root)))
+        self.cli = root / "dsh"
+        self.cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{script}" "$@"\n')
+        self.cli.chmod(0o755)
+
+    def plan(self, plan: dict[str, str]) -> None:
+        (self.root / "plan.json").write_text(json.dumps(plan))
+
+    def client(self) -> DshModelClient:
+        return DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(self.cli),
+                              attempts=1, timeout_s=60, inactivity_s=5, backstop_s=2)
+
+
+class Probe(nn.Mode):
+    """Per item: one agent step at the candidate's ``level`` (no declared wall, so its
+    session ends on inactivity or at the backstop), then an op that keeps its answer."""
+
+    name = "incident_probe"
+
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {"level": nn.Knob(default=5, kind="int", lo=0, hi=9, description="a level")}
+
+    def build(self) -> nn.Graph:
+        graph = nn.Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="keep",
+                          task_ref="inactivity_ops:SplitAnswerTask", writes=("current_item.json",),
+                          produces=("item_scores",), parallelism=4))
+        graph.add(nn.Node("solve", "agent", prompt_template="Answer at level {{level}}.",
+                          writes=("answer.txt",), tool_policy="none", role="solver",
+                          knobs=("level",)))
+        graph.add(nn.Node("keep", "op", call="loop_ops:keep_answer", reads=("answer.txt",),
+                          writes=("final.txt",)))
+        graph.connect("solve", "keep")
+        graph.add(nn.Node("finish", "op", call="loop_ops:write_best",
+                          writes=("best.json",), produces=("best",)))
+        graph.connect("data", "finish")
+        return graph
+
+    def score(self, run: nn.RunResult) -> float:
+        scores = [entry["score"] for entry in run.facts.get("item_scores", [])]
+        return sum(scores) / len(scores) if scores else 0.0
+
+
+#: The loop's handling sits above the evaluator, on records both runtimes make alike
+#: (the spine's incident record: `test_inactivity_only`); a full outer loop on the spine
+#: needs a DSH profile, so these run the walker.
+RUNTIMES = ["walker"]
+
+
+def _run(tmp_path: Path, dsh: Dsh, plan: list[list[tuple[int, int]]], evaluator: str) -> Loop:
+    with _patch_mode(Probe):
+        loop = _interrupted_loop(tmp_path, dsh, plan, evaluator=evaluator)  # type: ignore[arg-type]
+        loop.run()
+    return loop
+
+
+def _seed(loop: Loop):  # type: ignore[no-untyped-def]
+    return next(c for c in loop.population if _level(c) == 5)
+
+
+def _incidents(loop: Loop, part: str) -> list[dict[str, Any]]:
+    return [e for e in _journal_events(loop, "harness_incident") if e["part"] == part]
+
+
+@pytest.mark.parametrize("evaluator", RUNTIMES)
+def test_an_incident_a_rerun_answers_is_scored_as_any_item(tmp_path, evaluator):
+    """t2 hits the backstop in the seed's train run; run again alone, it answers right: it
+    is scored like the rest (the train score is 1.0 over all 8), and the journal says it
+    was recovered."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/t2_&level 5.&incident_reruns": "right", "/t2_&level 5.": "ACTIVE",
+              "level": "right"})
+    loop = _run(tmp_path, dsh, [[]], evaluator)
+    seed = _seed(loop)
+    assert seed.raw_score == pytest.approx(1.0)
+    entry = _incidents(loop, "train")[0]
+    assert entry["id"] == seed.id and entry["workdir"] == f"runs/{seed.id}"
+    assert entry["items"] == ["t2"] and entry["recovered"] == ["t2"] and entry["not_scored"] == []
+    assert entry["reran"] == 1
+    records = loop._train_item_records[seed.id]
+    assert len(records) == len(TRAIN_IDS) and not any(map(harness_incident, records))
+    [t2] = [r for r in records if r["id"] == "t2"]
+    assert t2["passed"] is True and t2["incident_reruns"] == 1
+
+
+@pytest.mark.parametrize("evaluator", RUNTIMES)
+def test_an_incident_every_rerun_repeats_is_left_out_of_the_score_and_said(tmp_path, evaluator):
+    """t2 hits the backstop every time: after `INCIDENT_RERUNS` reruns it is left out of
+    the score (t1 wrong, six right: 6/7, not 6/8), kept as a record with no score, and
+    listed in report.json, report.md, the progress line and the optimizer's request."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/t2_&level 5.": "ACTIVE", "/t1_&level 5.": "wrong", "level": "right"})
+    loop = _run(tmp_path, dsh, [[]], evaluator)
+    seed = _seed(loop)
+    assert seed.exit_ok and seed.raw_score == pytest.approx(6 / 7)
+    entry = _incidents(loop, "train")[0]
+    assert entry["id"] == seed.id and entry["workdir"] == f"runs/{seed.id}"
+    assert entry["not_scored"] == ["t2"] and entry["reran"] == INCIDENT_RERUNS
+    reruns = sorted(p.name for p in (loop.root / "runs" / seed.id / "incident_reruns").iterdir())
+    assert reruns == [str(n) for n in range(1, INCIDENT_RERUNS + 1)]
+    records = loop._train_item_records[seed.id]
+    [t2] = [r for r in records if r["id"] == "t2"]
+    assert t2["score"] is None and t2["not_scored"] == "harness_incident"
+    assert [e["id"] for e in seed.facts["item_scores"]].count("t2") == 0
+
+    report = json.loads((loop.root / "report.json").read_text())
+    assert any(e["candidate"] == seed.id and e["not_scored"] == ["t2"]
+               for e in report["harness_incidents"])
+    assert "had a harness incident and are not scored" in (loop.root / "report.md").read_text()
+    progress = [json.loads(line) for line in
+                (loop.root / "progress.jsonl").read_text().splitlines()]
+    shown = next(r for r in progress if r["step"] == "harness_incident"
+                 and r.get("outcome") == "not_scored" and r["part"] == "train")
+    assert "NOT SCORED: t2" in render(shown)
+
+    lines = "\n".join(_item_evidence(records))
+    assert lines.count("t2") == 1
+    assert "1 item(s) (t2) had a harness incident and are not scored" in lines
+    assert "7 train item(s)" in lines and "mean score 0.857" in lines
+
+
+@pytest.mark.parametrize("evaluator", RUNTIMES)
+def test_a_val_comparison_leaves_out_an_item_either_candidate_could_not_be_scored_on(
+        tmp_path, evaluator):
+    """The seed's val v2 is a harness incident every time (left out: 2 of 3); the child
+    answers v2 right (3 of 4), but is no better on v1, v3, v4. Compared on those, the
+    child ties and is rejected; on its raw val score it would have been accepted."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/v2_&level 5.": "ACTIVE", "/v1_&level": "wrong", "level": "right"})
+    loop = _run(tmp_path, dsh, [[(5, 6)], []], evaluator)
+    seed = _seed(loop)
+    child = next(c for c in loop.population if _level(c) == 6)
+    gate = loop._gate()
+    assert gate.cache[seed.id] == pytest.approx(2 / 3)
+    assert gate.cache[child.id] == pytest.approx(3 / 4)
+    assert child.id not in loop._gate_accepted, "the child won only on the incident item"
+    assert gate.current_id == seed.id
+    assert loop.shared_item_scores(child.id, seed.id) == (
+        pytest.approx(2 / 3), pytest.approx(2 / 3), ["v2"])
+    [entry] = [e for e in _incidents(loop, "val") if e["id"] == seed.id]
+    assert entry["not_scored"] == ["v2"] and len(VAL_IDS) == 4
+
+
+def test_edit_effect_reads_no_harness_incident_as_a_broken_item():
+    """A child's item the backstop stopped is not one the edit broke: `edit_effect`
+    leaves it out, as `edit_change` does, while a real broken item is still read."""
+    from refactory_dsh.optim.edit_effect import edit_effect
+
+    parent = [{"id": "a", "passed": True, "score": 1.0}, {"id": "b", "passed": True, "score": 1.0}]
+    ran = [{"node": "check", "prompt": "", "response": "x"}]
+    child = [{"id": "a", "passed": False, "score": None, "error_kind": "harness_incident",
+              "error_text": "solve: HarnessBackstop: model session hit the harness backstop",
+              "not_scored": "harness_incident", "exchanges": ran},
+             {"id": "b", "passed": False, "score": 0.0, "exchanges": ran}]
+    effect = edit_effect(parent, child, new_steps={"check"})
+    assert effect["broken"]["items"] == 1 and effect["broken"]["new"] == {"check": 1}

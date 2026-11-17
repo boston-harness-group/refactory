@@ -626,8 +626,9 @@ def make_item_record(
 #: A model timeout, a wrong or empty answer, an output limit and a product's own failure
 #: are none of these: they are the candidate's failed answers. Nor is a session the
 #: harness backstop stopped (`model.HarnessBackstop`): its process did not die, it kept
-#: streaming for hours, which a rerun of the evaluation would most likely repeat at hours
-#: per try; its item is recorded as a ``harness_incident`` (`error_kind`) instead. Known gap: the spine's own
+#: streaming for hours, which a rerun of the whole evaluation would most likely repeat at
+#: hours per try; its item is recorded as a ``harness_incident`` (`error_kind`) instead,
+#: and the loop runs that item alone again (`harness_incident`). Known gap: the spine's own
 #: worker or op process killed with no stderr reads ``exited with code null``, which
 #: names no signal, so it is not recognised there (docs/outer-loop.md).
 INTERRUPTED_MARKERS: tuple[tuple[str, str], ...] = (
@@ -665,6 +666,27 @@ def interrupted_item(record: dict[str, Any]) -> str | None:
     texts = [info.get("error") for info in (record.get("missing_steps") or {}).values()
              if isinstance(info, dict)]
     return next((cause for cause in map(interrupted_cause, texts) if cause), None)
+
+
+#: What an item record says when the harness, not the candidate, kept it from an
+#: outcome and it is left out of the score (`harness_incident`): its ``not_scored``.
+NOT_SCORED_INCIDENT = "harness_incident"
+
+
+def harness_incident(record: dict[str, Any]) -> bool:
+    """Whether an item record is a harness incident: the harness backstop
+    (`model.HarnessBackstop`) stopped its session, so the item has no outcome of the
+    candidate's. Its ``error_kind`` says so, or it has no answer because a step it went
+    without hit the backstop (``missing_steps`` cause ``harness_incident``). An item the
+    Task graded is its result, whatever a fork's other branch did. The loop runs such an
+    item again and, still an incident, leaves it out of the score
+    (`loop.INCIDENT_RERUNS`)."""
+    if record.get("error_kind") == "harness_incident":
+        return True
+    if not str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        return False
+    return any(isinstance(info, dict) and info.get("cause") == "harness_incident"
+               for info in (record.get("missing_steps") or {}).values())
 
 
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:

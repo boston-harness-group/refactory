@@ -176,6 +176,17 @@ INTERRUPTED_RETRY_WAITS_S: tuple[float, ...] = (120.0, 300.0)
 #: from the journal, so a resume keeps the count.
 INTERRUPTION_CAP = 3
 
+#: How many times the loop runs an item again, on the same candidate and part, when the
+#: harness backstop stopped it (`items.harness_incident`): as many as an interrupted
+#: evaluation's in-run retries. Still an incident after them, the item is left out of
+#: the evaluation's score -- its numerator and its denominator -- and said wherever the
+#: score is shown (`Loop._settle_incidents`). An incident is the harness's failure,
+#: never the candidate's wrong answer.
+INCIDENT_RERUNS = len(INTERRUPTED_RETRY_WAITS_S)
+
+#: Where a trial's incident reruns run, one numbered folder per rerun, inside the trial.
+INCIDENT_RERUN_DIR = "incident_reruns"
+
 #: The exit status of a run stopped by an interrupted evaluation (`EvaluationInterrupted`):
 #: ``EX_TEMPFAIL``, safe to ``--resume``, unlike a refused configuration (2).
 EXIT_INTERRUPTED = 75
@@ -860,6 +871,8 @@ class Loop(OuterLoop):
         #: scores).  Keyed by (candidate_id, part_name).  This data never reaches
         #: optimizer-facing APIs.
         self._part_results: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        #: Each trial's harness incidents (`_settle_incidents`), for the report.
+        self._harness_incidents: list[dict[str, Any]] = []
         #: Loop-private per-candidate, per-part occasion counters.
         self._occasion_counters: dict[str, dict[str, int]] = {}
         #: How many evaluations the journal records per evaluation folder (relative to
@@ -2221,6 +2234,15 @@ class Loop(OuterLoop):
             # A rollout a time or token budget refused or cut: no score of the
             # candidate's (``ValidationGate.val_score`` skips it).
             **({"budget_stopped": True} if measurements.get("budget_stopped") else {}),
+            # Items the harness backstop kept from an outcome, left out of the score
+            # (`_settle_incidents`), and each scored item's score, so a val comparison
+            # of two candidates can use the items both were scored on
+            # (`shared_item_scores`). Neither is shown to a strategy (`Run.part_scores`).
+            **({"harness_incidents": measurements["harness_incidents"]}
+               if measurements.get("harness_incidents") else {}),
+            "item_scores": [[str(r.get("id")), float(r["score"])] for r in result.item_records or ()
+                            if isinstance(r.get("score"), (int, float))
+                            and not isinstance(r.get("score"), bool)],
         }
         with self._state_lock:
             self._part_results.setdefault(candidate.id, {}).setdefault(part, []).append(
@@ -2317,6 +2339,10 @@ class Loop(OuterLoop):
                     budget_exhausted_after_trial = True
             # Post-trial item-ownership verification (works with both evaluators).
             self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
+            incidents, budget_hit = self._settle_incidents(
+                candidate, trial_dir, part, seed, result, eval_kwargs,
+                rerun=not budget_exhausted_after_trial)
+            budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
             missing = [path for path in required if not (trial_dir / path).exists()]
             valid_score = isinstance(result.score, (int, float)) and math.isfinite(result.score)
             if missing or not valid_score:
@@ -2327,7 +2353,8 @@ class Loop(OuterLoop):
                      "model_calls": result.model_calls, "required_contract": {"passed": result.exit_ok, "missing_artifacts": missing},
                      "tokens": after.get("known_tokens", 0) - before.get("known_tokens", 0) if after.get("token_status") in ("measured", "estimated") else None,
                      "cost": after["estimated_cost_usd"] - (before.get("estimated_cost_usd") or 0) if after.get("estimated_cost_usd") is not None else None,
-                     "workdir": str(trial_dir)}
+                     "workdir": str(trial_dir),
+                     **({"harness_incidents": incidents} if incidents else {})}
             trial["workers"] = []
             for receipt_path in sorted(trial_dir.glob("**/.refactory/workers/*.json")):
                 try:
@@ -2362,6 +2389,9 @@ class Loop(OuterLoop):
                    "interpretation": "observed sample mean; improvement is not a statistical proof"}
         if budget_cut and not complete:
             summary["budget_stopped"] = True
+        incident_ids = list(dict.fromkeys(i for t in trials for i in t.get("harness_incidents") or ()))
+        if incident_ids:
+            summary["harness_incidents"] = incident_ids
         last.score = float(summary["mean"] or 0) if complete else 0.0
         last.exit_ok = complete
         last.duration_s = sum(t["duration_s"] for t in trials)
@@ -2374,6 +2404,136 @@ class Loop(OuterLoop):
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
         self._write_traces(candidate, workdir, part, seed, all_item_records)
         return last, summary
+
+    def _settle_incidents(
+        self, candidate: Candidate, trial_dir: Path, part: str, seed: int | None,
+        result: Any, eval_kwargs: dict[str, Any], *, rerun: bool = True,
+    ) -> tuple[list[str], bool]:
+        """Run a trial's harness-incident items again, then leave out of its score those
+        still incidents; ``(the ids left out, whether a budget stopped a rerun)``.
+
+        An item the harness backstop stopped (`items.harness_incident`) has no outcome of
+        the candidate's. Each is run again on the same candidate, part and rollout seed,
+        alone, in ``<trial>/incident_reruns/<n>``, up to `INCIDENT_RERUNS` times; a rerun's
+        record takes the item's place in the trial's records and in its ``item_scores``
+        fact. An item still an incident after them keeps its record, with ``score``
+        ``None`` and ``not_scored: "harness_incident"``, and leaves ``item_scores``, so
+        the mode's own ``score()`` -- run again here on the trial's facts -- counts it in
+        neither numerator nor denominator, on every mode and runtime. Each step is
+        journaled (``harness_incident``) and shown. A trial that did not finish is left as
+        it is: its score is no measurement either way. With no item left to score the
+        trial fails ("every item was a harness incident")."""
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.items import NOT_SCORED_INCIDENT, SCORES_FACT, harness_incident
+
+        records = list(result.item_records or ())
+        ids = list(dict.fromkeys(str(r.get("id")) for r in records if harness_incident(r)))
+        if not ids or not result.exit_ok:
+            return [], False
+        first = list(ids)
+        facts = dict(result.facts or {})
+        declared = isinstance(facts.get(SCORES_FACT), list)
+        fact_entries = list(facts.get(SCORES_FACT) or [])
+        budget_hit = False
+        reran = 0
+        while ids and rerun and reran < INCIDENT_RERUNS:
+            reran += 1
+            rerun_dir = trial_dir / INCIDENT_RERUN_DIR / str(reran)
+            if rerun_dir.exists():
+                shutil.rmtree(rerun_dir)
+            rerun_dir.mkdir(parents=True)
+            self._carry_ledger(rerun_dir)
+            task_module.write_subset(rerun_dir, part, self.config.holdout, seed=seed)
+            (rerun_dir / task_module.MANIFEST).write_text(json.dumps({part: ids}, indent=2))
+            self._progress("harness_incident", candidate=candidate.id, part=part, items=ids,
+                           outcome="rerun", attempt=reran, of=INCIDENT_RERUNS)
+            try:
+                if self.budget:
+                    final = part == task_module.HOLDOUT or getattr(self, "_final_scoring", False)
+                    self.budget.checkpoint(("final_validation" if final else "work")
+                                           if self._owns_resource_budget else None)
+                with self.budget.retain_validation_reserve() if self.budget else nullcontext():
+                    again = self.evaluator.evaluate(
+                        self.mode_class(state=candidate.state), candidate.state, rerun_dir,
+                        **eval_kwargs)
+            except BudgetExhausted as exc:
+                self.bound = str(exc)
+                budget_hit = True
+                break
+            fresh = {str(r.get("id")): r for r in again.item_records or () if str(r.get("id")) in ids}
+            fresh_facts = {str(e.get("id")): e for e in (again.facts or {}).get(SCORES_FACT) or ()
+                           if isinstance(e, dict) and str(e.get("id")) in fresh}
+            records = [{**fresh[str(r.get("id"))], "incident_reruns": reran}
+                       if str(r.get("id")) in fresh else r for r in records]
+            fact_entries = [fresh_facts.get(str(e.get("id")), e) if isinstance(e, dict) else e
+                            for e in fact_entries]
+            ids = [i for i in ids if i not in fresh or harness_incident(fresh[i])]
+        left_out = set(ids)
+        if left_out:
+            records = [{**r, "score": None, "not_scored": NOT_SCORED_INCIDENT,
+                        "incident_reruns": reran}
+                       if str(r.get("id")) in left_out else r for r in records]
+            fact_entries = [e for e in fact_entries
+                            if not (isinstance(e, dict) and str(e.get("id")) in left_out)]
+        if declared:
+            facts[SCORES_FACT] = fact_entries
+        result.facts = facts
+        result.item_records = records
+        if declared and not fact_entries:
+            result.exit_ok = False
+            result.error = (f"every item was a harness incident ({', '.join(ids)}); "
+                            "nothing was scored")
+        elif declared:
+            try:
+                result.score = float(self.mode_class(state=candidate.state).score(result))
+            except Exception as exc:
+                result.exit_ok = False
+                result.error = f"score() raised {type(exc).__name__}: {exc}"
+        if records:
+            (trial_dir / "item_records.json").write_text(
+                json.dumps(records, indent=2, default=str))
+        fields = {"part": part, "items": first, "reran": reran,
+                  "recovered": [i for i in first if i not in left_out], "not_scored": ids}
+        with self._state_lock:
+            self._harness_incidents.append({"candidate": candidate.id, **fields,
+                                            "workdir": self._relative(trial_dir)})
+            self._journal("harness_incident", id=candidate.id,
+                          workdir=self._relative(trial_dir), **fields)
+        self._progress("harness_incident", candidate=candidate.id, part=part, items=first,
+                       outcome="not_scored" if ids else "recovered", not_scored=ids,
+                       reran=reran)
+        return ids, budget_hit
+
+    def shared_item_scores(self, a_id: str, b_id: str, part: str = "val"
+                           ) -> tuple[float, float, list[str]] | None:
+        """Two candidates' scores on ``part`` over the same items, when a harness incident
+        left an item out of either's first rollout (`_settle_incidents`): each one's mean
+        over the items neither left out, and the items left out. ``None`` when neither
+        left one out (their scores already cover the same items), when either has no
+        finished rollout, or when a score is not its items' mean (another metric cannot
+        be recomputed on fewer items): the scores compare as they are."""
+        def first(cid: str) -> dict[str, Any] | None:
+            done = [o for o in self._part_results.get(cid, {}).get(part, [])
+                    if not o.get("budget_stopped")]
+            return done[0] if done and done[0].get("score") is not None else None
+
+        a, b = first(a_id), first(b_id)
+        if a is None or b is None:
+            return None
+        left_out = set(a.get("harness_incidents") or ()) | set(b.get("harness_incidents") or ())
+        if not left_out:
+            return None
+        means = []
+        for occasion in (a, b):
+            pairs = [(str(i), float(x)) for i, x in occasion.get("item_scores") or ()]
+            if not pairs or not math.isclose(sum(x for _, x in pairs) / len(pairs),
+                                             float(occasion["score"]), rel_tol=1e-9, abs_tol=1e-9):
+                return None
+            kept = [x for i, x in pairs if i not in left_out]
+            if not kept:
+                return None
+            means.append(sum(kept) / len(kept))
+        return means[0], means[1], sorted(left_out)
 
     def _write_traces(self, candidate: Candidate, workdir: Path, part: str,
                       seed: int | None, records: Sequence[dict[str, Any]] | None) -> None:
@@ -2466,11 +2626,13 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
-        # A cached item that died with its run's processes is no result to replay
-        # (`items.interrupted_item`): the part is measured here instead.
-        from refactory_dsh.items import interrupted_item
-        died = any(interrupted_item(record) for trial in trials
-                   for record in trial.get("item_records") or ())
+        # A cached item that died with its run's processes, or that the harness backstop
+        # stopped, is no result to replay (`items.interrupted_item`,
+        # `items.harness_incident`): the part is measured here instead.
+        from refactory_dsh.items import harness_incident, interrupted_item
+        cached_records = [record for trial in trials for record in trial.get("item_records") or ()]
+        killed = any(interrupted_item(record) for record in cached_records)
+        died = killed or any(harness_incident(record) for record in cached_records)
         if (set(entry.get("items") or ()) != expected_ids or other_seed
                 or len(trials) != self.config.repeats or died):
             # The cache's own candidate on a part it covers, measured on other items
@@ -2483,7 +2645,8 @@ class Loop(OuterLoop):
                               else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
                               else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
                               if len(trials) != self.config.repeats
-                              else "cached items died with their run's processes")
+                              else "cached items died with their run's processes" if killed
+                              else "cached items hit the harness backstop")
                     self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
                                   cached_items=len(entry.get("items") or ()), items=len(expected_ids))
             return None
@@ -4724,6 +4887,9 @@ class Loop(OuterLoop):
                if self._memory_passes else {}),
             "selection": self._selection_report(),
             **({"integrity": self._integrity_report(best)} if self._integrity_on() else {}),
+            # Every evaluation that had an item the harness backstop stopped: the items,
+            # those a rerun recovered, and those left out of its score (`_settle_incidents`).
+            "harness_incidents": list(self._harness_incidents),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -5138,6 +5304,7 @@ class Loop(OuterLoop):
             f" (raw {payload['seed_raw_score']} → {payload['raw_best_score']}). "
             f"The compared score is the raw one minus "
             f"{payload['scoring']['parsimony']} per node of the candidate's graph.",
+            *_incident_lines(payload.get("harness_incidents") or []),
             *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
                f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
               if (payload.get("seed_results") or {}).get("parts_reused") else []),
@@ -6795,6 +6962,11 @@ class Loop(OuterLoop):
                 cid = record.get("id")
                 if cid is not None:
                     self._train_item_records[cid] = list(record.get("records") or [])
+            elif event == "harness_incident":
+                self._harness_incidents.append(
+                    {"candidate": record.get("id"),
+                     **{k: record.get(k) for k in ("part", "items", "reran", "recovered",
+                                                   "not_scored", "workdir")}})
             elif event == "part_result":
                 cid = record.get("id")
                 part_name = record.get("part")
@@ -6989,6 +7161,19 @@ def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
             "The kinds of change each proposal's answer said it weighed, and why it chose "
             "its own.", "",
             *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
+
+
+def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:
+    """The report's say on harness incidents (`Loop._settle_incidents`): one line per
+    evaluation that left an item out of its score, after a line saying what that means."""
+    left = [entry for entry in incidents if entry.get("not_scored")]
+    if not left:
+        return []
+    return ["", f"**{sum(len(e['not_scored']) for e in left)} item(s) had a harness incident "
+                "and are not scored**: the harness backstop stopped them, again on every "
+                "rerun, so they count in no score below, not as wrong answers.",
+            *(f"- {e.get('candidate')} {e.get('part')}: {', '.join(map(str, e['not_scored']))} "
+              f"(rerun {e.get('reran', 0)} time(s))" for e in left)]
 
 
 def _holdout_line(audit: dict[str, Any]) -> str:
