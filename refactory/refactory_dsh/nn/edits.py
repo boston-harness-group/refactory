@@ -1721,6 +1721,12 @@ def apply(
         out = dict(state)
         for step in steps:
             out = apply(step, out, edit_reports=edit_reports)
+        from . import core_ops
+
+        if name in core_ops.CORE_OPS:
+            lost = core_ops.lost_inputs(state, out)
+            if lost:
+                raise EditError(lost, code="E-precondition")
         return out
     assert spec.apply is not None
     out = spec.apply(dict(state), edit)
