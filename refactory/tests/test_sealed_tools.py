@@ -20,17 +20,18 @@ import sys
 from pathlib import Path
 
 import pytest
-
 import structure_fuzz as sf
 from refactory_dsh import lowering, seal, workers, workspace
 from refactory_dsh.model import DshModelClient
-from refactory_dsh.nn import Graph, Node
+from refactory_dsh.nn import Graph, Node, pipeline_view
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn.executor import Executor, RunContext
-from refactory_dsh.nn import pipeline_view
 from refactory_dsh.optim import base as base_mod
 
-REQUIRED = os.environ.get("REFACTORY_REQUIRE_CODE_SANDBOX") == "1"
+#: CI runs the seal on both platforms (Linux with user namespaces allowed, macOS with
+#: Seatbelt): there a seal that cannot run fails these tests instead of skipping them.
+REQUIRED = (os.environ.get("REFACTORY_REQUIRE_CODE_SANDBOX") == "1"
+            or os.environ.get("GITHUB_ACTIONS") == "true")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -106,13 +107,34 @@ def _layout(tmp_path: Path) -> tuple[Path, workspace.Workspace]:
     return run, place
 
 
-def _sealed(place: workspace.Workspace, script: str) -> subprocess.CompletedProcess:
+def _sealed(place: workspace.Workspace, script: str, **options) -> subprocess.CompletedProcess:
     """``script`` run as DSH runs a sealed step's command: the runner, its bwrap-style
     profile arguments, ``--``, then ``bash -c``."""
     argv = [*place.runner, "--ro-bind", "/", "/", "--bind", str(place.path), str(place.path),
             "--", "bash", "-c", script]
     return subprocess.run(argv, cwd=place.path, capture_output=True, text=True, timeout=60,
-                          env={**os.environ, "REFACTORY_SECRET_PROBE": "LEAKED-ENV"})
+                          env={**os.environ, "REFACTORY_SECRET_PROBE": "LEAKED-ENV"}, **options)
+
+
+#: Prints the arguments and environment of the step's parent process (the DSH process,
+#: here the test) where the platform lets a process read another's: Linux through
+#: /proc, macOS through sysctl(KERN_PROCARGS2).
+PARENT_ENV = r"""python3 - "$PPID" <<'EOF'
+import ctypes, os, sys
+pid = int(sys.argv[1])
+for path in (f"/proc/{pid}/environ", f"/proc/{pid}/cmdline", "/proc/1/environ"):
+    try:
+        print(open(path, "rb").read().decode(errors="replace"))
+    except OSError:
+        pass
+if sys.platform == "darwin":
+    libc = ctypes.CDLL(None)
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    size = ctypes.c_size_t(1 << 20)
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+        print(buf.raw[:size.value].decode(errors="replace"))
+EOF"""
 
 
 def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
@@ -132,6 +154,16 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
         "network": "exec 3<>/dev/tcp/1.1.1.1/53 && echo CONNECTED",
         "loopback": "exec 3<>/dev/tcp/127.0.0.1/22 && echo CONNECTED",
         "environment": "env",
+        "parent environment": PARENT_ENV,
+        "every process": "cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n'",
+        "unmount": f"for m in /usr /etc /tmp /proc {home} {run} /; do umount -l $m 2>/dev/null; "
+                   f"umount $m 2>/dev/null; done; cat {run / 'grader.json'}",
+        "remount": f"mount -o remount,rw /usr 2>/dev/null; touch /usr/x /etc/x /x 2>/dev/null "
+                   "&& echo WROTE; ls /usr/x /etc/x /x 2>/dev/null",
+        "terminals": "for t in /dev/tty* /dev/pts/*; do [ -e \"$t\" ] && exec 9<\"$t\" "
+                     "&& echo OPENED $t; done 2>/dev/null; true",
+        "homebrew data": "ls /opt/homebrew/etc /opt/homebrew/var /usr/local/etc /usr/local/var "
+                         "2>/dev/null | head -1",
         "write inside": "echo made > made.txt && cat made.txt",
     }
     out = {name: _sealed(place, script) for name, script in probes.items()}
@@ -150,6 +182,32 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
         assert "CONNECTED" not in out[name].stdout, name
     assert "REFACTORY_" not in out["environment"].stdout
     assert f"HOME={place.path.resolve()}" in out["environment"].stdout
+    for name in ("parent environment", "every process"):
+        assert "LEAKED-ENV" not in out[name].stdout and "REFACTORY_" not in out[name].stdout, name
+    assert out["unmount"].stdout == "", out["unmount"]
+    assert "WROTE" not in out["remount"].stdout and out["remount"].stdout == ""
+    assert "OPENED" not in out["terminals"].stdout, out["terminals"].stdout
+    assert out["homebrew data"].stdout == ""
+
+
+def test_a_sealed_command_gets_no_descriptor_but_its_own(tmp_path):
+    _sealable()
+    _run, place = _layout(tmp_path)
+    with open(tmp_path / "bench" / "gold.json", "rb") as gold:
+        result = _sealed(place, f"cat /dev/fd/{gold.fileno()} <&- 2>/dev/null; true",
+                         pass_fds=(gold.fileno(),))
+    assert "GOLD-OUTSIDE" not in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="macOS has no PID namespace: a detached process outlives its command")
+def test_a_detached_process_ends_with_its_command(tmp_path):
+    _sealable()
+    _run, place = _layout(tmp_path)
+    _sealed(place, "(setsid sh -c 'sleep 3; echo late > late.txt' &) ; true")
+    import time
+    time.sleep(5)
+    assert not (place.path / "late.txt").exists()
 
 
 def test_a_seal_that_cannot_be_set_up_runs_nothing(tmp_path):
@@ -206,6 +264,7 @@ def test_the_patch_mounts_the_runner_and_the_tools_plugin_admits_only_the_listed
     assert observed["sandbox"] == {"runnerCommand": ["/bin/echo", "runner"],
                                    "runnerFailureSignatures": [seal.FAILURE.strip()]}
     assert observed["offered"] == ["bash"]
+    assert observed["requests"] == 4, observed
     assert observed["hostile_executions"] == 0 and observed["bash_executions"] == 1
 
 

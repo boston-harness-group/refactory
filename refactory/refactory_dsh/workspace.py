@@ -55,14 +55,10 @@ from typing import Any, Iterator
 from refactory_dsh import git_exe
 from refactory_dsh.emitted_paths import unprintable_refusal
 from refactory_dsh.nn.graph import workspace_declaration
+from refactory_dsh.seal import SEALED_TOOLS
 
 #: Where a run keeps its workspaces, one directory per node.
 ROOT = Path(".refactory") / "workspaces"
-
-#: The tools a step an edit adds may list (`Node.tools`): those whose every effect runs
-#: through the seal (`refactory_dsh.seal`). DSH's file and web tools run in its own
-#: process, outside any runner, so they are not among them.
-SEALED_TOOLS = ("bash",)
 
 
 def is_sealed(node: Any) -> bool:
@@ -380,6 +376,7 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
     the run directory only), keep its temporary files inside it, and set its runner."""
     from refactory_dsh import seal
 
+    workdir = Path(workdir).resolve()
     for name in reads or ():
         source = (workdir / name).resolve()
         target = (workspace.path / name).resolve()
@@ -388,9 +385,13 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
                                  "of the run directory")
         if source.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            # Opened without following a link, so a link swapped in after the check is
+            # refused rather than copied from wherever it points.
+            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as given, open(target, "wb") as copy:
+                shutil.copyfileobj(given, copy)
     workspace.tools = tools
-    workspace.runner = tuple(seal.runner_command(workspace.path, hide=(str(workdir),)))
+    workspace.runner = tuple(seal.runner_command(workspace.path))
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:

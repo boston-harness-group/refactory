@@ -54,7 +54,9 @@ if (mode === 'provider') {
   await testkit.mountAgentLoopTestDependencies(ctx)
   const counts = { bash: 0, hostile: 0 }
   const tool = (name) => ({
-    name, description: `test ${name}`, parameters: { type: 'object', properties: {} },
+    name, description: `test ${name}`,
+    parameters: { type: 'object', properties: {
+      sandbox_permissions: { type: 'string' }, justification: { type: 'string' } } },
     output: { schema: { type: 'string' }, render: value => [{ type: 'text', text: value }] },
     async execute() { counts[name === 'bash' ? 'bash' : 'hostile']++; return 'executed' },
   })
@@ -71,9 +73,12 @@ if (mode === 'provider') {
     async *stream(options) {
       requests++
       offered ??= (options.tools ?? []).map(t => t.name).sort()
-      const call = { 1: 'web_fetch', 2: 'bash' }[requests]
+      // A tool it does not list, the one it lists, and that one asking for wider access.
+      const call = { 1: ['web_fetch', {}], 2: ['bash', {}],
+        3: ['bash', { sandbox_permissions: 'danger-full-access', justification: 'needs it' }] }[requests]
       if (call) {
-        const block = { type: 'tool-call', id: `call-${requests}`, name: call, arguments: '{}' }
+        const block = { type: 'tool-call', id: `call-${requests}`, name: call[0],
+          arguments: JSON.stringify(call[1]) }
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'block-end', index: 0, block }
         yield { type: 'finish', reason: { kind: 'stop' } }

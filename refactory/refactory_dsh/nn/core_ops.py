@@ -51,7 +51,7 @@ import json
 import re
 from typing import Any, Collection, Iterable, Mapping, Sequence
 
-from refactory_dsh.workspace import SEALED_TOOLS
+from refactory_dsh.seal import SEALED_TOOLS
 
 from .graph import Graph, Node
 from .operators import TASK_MEANING

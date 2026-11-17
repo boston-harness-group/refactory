@@ -1465,11 +1465,13 @@ state is promised, on any graph shape:
   `scratch` workspace; any other ask for tools is refused `E-new-node-tools`. A sealed
   step's workspace holds copies of the files it reads, and every command it runs goes
   through `seal.runner_command`, set as DSH's local sandbox provider's `runnerCommand`:
-  Linux user, network, mount and PID namespaces with every data root hidden
-  (`snippet.HIDDEN_ROOTS`, the home and run directories) and the workspace bound back, or
-  a deny-by-default Seatbelt profile on macOS. It reads nothing outside its workspace and
-  the system's programs (no other item, no grader file, no gold answer), writes only its
-  workspace, has no network, and starts with an environment of its own (no credential).
+  on Linux, user, network, mount and PID namespaces around a new root built from an
+  allow-list (`seal.LINUX_READS` read only, the workspace read and write), the command
+  running unprivileged in a nested user namespace so no mount can be undone; on macOS, a
+  deny-by-default Seatbelt profile. It reads nothing outside its workspace and the
+  system's programs (no other item, no grader file, no gold answer, no other process's
+  environment), writes only its workspace, has no network, and starts with an
+  environment of its own (no credential).
   DSH's in-process tools (file, web) run outside the runner, so they are never listed.
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does

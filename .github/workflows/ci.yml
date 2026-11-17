@@ -260,5 +260,6 @@ jobs:
           uv run python -m pytest -q -rs -n 3
           refactory/tests/test_code_nodes_macos.py
           refactory/tests/test_code_nodes.py
+          refactory/tests/test_sealed_tools.py
           refactory/tests/test_core_operators.py
           refactory/tests/test_bound_settings.py
