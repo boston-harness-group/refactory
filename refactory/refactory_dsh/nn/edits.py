@@ -1276,10 +1276,10 @@ def _expand_loop(edit: dict, state: State) -> list[dict]:
     run -- first gets a no-op step after it (`LOOP_END_CALL`, as an ``insert_after``
     adds it, so a pass's exit moves to it): the gate's ``proceed`` edge leads there, and
     the pass still ends at a step that is not a gate (V12)."""
-    return loop_steps(_graph(state), edit["target"], dict(edit["gate"]))
+    return _loop_steps(_graph(state), edit["target"], dict(edit["gate"]))
 
 
-def loop_steps(graph: Graph, target: str, gate: dict, back_to: str | None = None
+def _loop_steps(graph: Graph, target: str, gate: dict, back_to: str | None = None
                ) -> list[dict]:
     """The steps `_expand_loop` makes: ``gate`` after ``target``, its ``proceed`` edge to
     what came next, and its ``reloop`` edge to ``back_to`` -- ``target`` itself unless an

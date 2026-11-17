@@ -1815,12 +1815,12 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
                             settings_from=node if node.kind == "agent" else None)
         gate = _gate_state(gate_id, judge, "", seen, label="proceed",
                            reads=[f"{judge_id}.txt"], iterations=True, cap=cap)
-        steps += edits.loop_steps(graph, node.id, gate, back)
+        steps += edits._loop_steps(graph, node.id, gate, back)
         steps += _add_chain(nodes, {"before": gate_id})
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen, label="proceed",
                            iterations=True, cap=cap)
-        steps += edits.loop_steps(graph, node.id, gate, back)
+        steps += edits._loop_steps(graph, node.id, gate, back)
     return steps
 
 
