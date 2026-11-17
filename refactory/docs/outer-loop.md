@@ -1471,9 +1471,16 @@ state is promised, on any graph shape:
   mount can be undone; on macOS, a deny-by-default Seatbelt profile. It reads nothing
   outside its workspace and the system's programs (no other item, no grader file, no gold
   answer, no other process's environment), writes only its workspace, has no network, and
-  starts with an environment of its own (no credential). Its outputs are collected one
-  name at a time, each opened relative to its folder's descriptor without following a
-  link, so nothing it leaves or swaps in makes collection read outside the workspace.
+  starts with an environment of its own (no credential) and, on Linux, an empty session
+  keyring of its own. On Linux each command runs in a systemd user scope capped at 8 GiB
+  of memory and 256 processes where the person's user manager can make one, else with
+  128 processes and 8 GiB of address space per process; it dies with the DSH process
+  that started it. Before its outputs are collected, every process still sealed in its
+  workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
+  workspace over 4 GiB is not collected, and each output is opened one name at a time
+  relative to its folder's descriptor without following a link, so nothing it leaves or
+  swaps in makes collection read outside the workspace. A file or folder it `reads` is
+  copied in (a folder without its links); one the run directory lacks is refused.
   DSH's in-process tools (file, web) run outside the runner, so they are never listed.
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does

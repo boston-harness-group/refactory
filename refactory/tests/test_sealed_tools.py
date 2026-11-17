@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import structure_fuzz as sf
-from refactory_dsh import lowering, seal, workers, workspace
+from refactory_dsh import lowering, seal, seal_reaper, workers, workspace
 from refactory_dsh.model import DshModelClient
 from refactory_dsh.nn import Graph, Node, pipeline_view
 from refactory_dsh.nn import edits as nn_edits
@@ -169,8 +170,9 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
                    "&& echo WROTE; ls /usr/x /etc/x /x 2>/dev/null",
         "terminals": "for t in /dev/tty* /dev/pts/*; do [ -e \"$t\" ] && exec 9<\"$t\" "
                      "&& echo OPENED $t; done 2>/dev/null; true",
-        "homebrew data": "for d in /opt/homebrew /opt/homebrew/etc /opt/homebrew/var /usr/local "
-                         "/usr/local/etc /usr/local/var; do ls -A $d 2>/dev/null; done | head -1",
+        "homebrew data": "for d in /opt/homebrew/etc /opt/homebrew/var /opt/homebrew/share "
+                         "/usr/local/etc /usr/local/var /usr/local/share /usr/local/src; "
+                         "do ls -A $d 2>/dev/null; done | head -1",
         "system secrets": "cat /etc/shadow /etc/sudoers /etc/hostname /etc/hosts 2>/dev/null | head -1",
         "limits": "ulimit -t; ulimit -f",
         "settings": "python3 -c 'import os; print(os.cpu_count())'",
@@ -198,9 +200,7 @@ def test_a_sealed_command_sees_its_inputs_and_nothing_else(tmp_path):
     assert out["unmount"].stdout == "", out["unmount"]
     assert "WROTE" not in out["remount"].stdout and out["remount"].stdout == ""
     assert "OPENED" not in out["terminals"].stdout, out["terminals"].stdout
-    if sys.platform == "darwin":
-        # On Linux /usr/local lies inside /usr, which every sealed command reads.
-        assert out["homebrew data"].stdout == ""
+    assert out["homebrew data"].stdout == ""
     assert out["system secrets"].stdout == ""
     assert out["limits"].stdout.split() == ["3600", "4194304"], out["limits"]
     assert out["settings"].stdout.strip().isdigit(), out["settings"]
@@ -362,7 +362,8 @@ def bash(script):
     done = subprocess.run([*runner, '--ro-bind', '/', '/', '--', 'bash', '-c', script],
                           cwd=cwd, capture_output=True, text=True, timeout=60)
     return done.stdout.strip() or 'DENIED'
-answer = {'tools': allow, 'input': bash('cat input.txt'),
+policy = [row['config']['mode'] for row in patch if row.get('id') == 'sandbox-policy']
+answer = {'tools': allow, 'policy': policy, 'input': bash('cat input.txt'),
           'grader': bash('cat {grader}'), 'other': bash('cat {other}')}
 bash('echo ' + json.dumps(json.dumps(answer)) + ' > answer.txt')
 """
@@ -397,7 +398,9 @@ def test_a_sealed_step_runs_sealed_on_both_runtimes_and_its_output_is_collected(
         assert spec["tools"] == ["bash"]
         worker_node.execute(spec, run)
     answer = json.loads((run / "answer.txt").read_text())
-    assert answer == {"tools": ["bash"], "input": "THE-INPUT", "grader": "DENIED", "other": "DENIED"}
+    # DSH's own sandbox policy for the step is workspace-write, never full access.
+    assert answer == {"tools": ["bash"], "policy": ["workspace-write"], "input": "THE-INPUT",
+                      "grader": "DENIED", "other": "DENIED"}
 
 
 @pytest.mark.parametrize("runtime", ["walker", "spine"])
@@ -662,3 +665,170 @@ def test_collection_reads_no_link_a_still_running_process_swaps_in(tmp_path):
         swapper.kill()
         swapper.wait()
     assert outcomes["copied"] and outcomes["refused"], outcomes
+
+
+# ── Linux: the namespace, binds, limits and processes ─────────────────────────
+
+LINUX = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux's namespaces")
+
+
+@LINUX
+def test_where_user_namespaces_work_the_seal_runs_in_its_own_pid_namespace(tmp_path):
+    """Not a skip where the machine can make namespaces: a runner that lost one of them
+    (the PID namespace, say) fails here instead of turning every seal test into a skip."""
+    if subprocess.run(["unshare", "-Urnm", "true"], capture_output=True).returncode != 0:
+        pytest.skip("this machine makes no user namespaces")
+    seal.available.cache_clear()
+    try:
+        assert seal.available() == (True, "")
+    finally:
+        seal.available.cache_clear()
+    _run, place = _layout(tmp_path)
+    result = _sealed(place, "ls /proc | grep -c '^[0-9]*$'; readlink /proc/self/ns/pid; "
+                            "readlink /proc/1/exe")
+    count, pid_ns, init = result.stdout.split()
+    assert int(count) < 10, result.stdout
+    assert pid_ns != os.readlink("/proc/self/ns/pid")
+
+
+@LINUX
+def test_each_bind_is_read_only_even_where_its_owner_could_write(tmp_path, monkeypatch):
+    """A folder the user owns, bound in like a system folder: readable, never writable.
+    (Outside /tmp, which the runner covers while it builds the new root.)"""
+    import tempfile
+
+    _sealable()
+    bound = Path(tempfile.mkdtemp(prefix=".seal-bound-", dir=ROOT))
+    try:
+        (bound / "lib.txt").write_text("LIB")
+        monkeypatch.setattr(seal, "LINUX_READS", (*seal.LINUX_READS, str(bound)))
+        _run, place = _layout(tmp_path)
+        result = _sealed(place, f"cat {bound}/lib.txt; echo x > {bound}/new.txt && echo WROTE; "
+                                f"echo x >> {bound}/lib.txt && echo APPENDED")
+        assert result.stdout.split() == ["LIB"], result
+        assert not (bound / "new.txt").exists() and (bound / "lib.txt").read_text() == "LIB"
+    finally:
+        shutil.rmtree(bound)
+
+
+@LINUX
+def test_a_sealed_command_is_capped_as_a_whole_or_each_process_tightly(tmp_path):
+    _sealable()
+    _run, place = _layout(tmp_path)
+    argv = [*place.runner, "--", "bash", "-c", "cat /proc/self/cgroup; ulimit -u; ulimit -v; sleep 30"]
+    command = subprocess.Popen(argv, cwd=place.path, stdout=subprocess.PIPE, text=True)
+    try:
+        cgroup = command.stdout.readline().strip().removeprefix("0::")
+        limits = [command.stdout.readline().strip(), command.stdout.readline().strip()]
+        if seal.linux_scope():
+            assert Path(f"/sys/fs/cgroup{cgroup}/memory.max").read_text().strip() == str(8 << 30)
+            assert Path(f"/sys/fs/cgroup{cgroup}/pids.max").read_text().strip() == "256"
+            assert limits == ["512", "unlimited"]
+        else:
+            assert limits == ["128", "8388608"]
+    finally:
+        command.kill()
+        command.wait()
+    # Where the person's user manager can make a scope, the seal uses one.
+    prefix = seal._scope_prefix()
+    if prefix and subprocess.run([*prefix, "true"], capture_output=True).returncode == 0:
+        assert seal.linux_scope()
+
+
+@LINUX
+def test_a_sealed_command_has_a_session_keyring_of_its_own(tmp_path):
+    if not shutil.which("keyctl"):
+        pytest.skip("no keyctl here")
+    _sealable()
+    _run, place = _layout(tmp_path)
+    mine = subprocess.run(["keyctl", "show", "@s"], capture_output=True, text=True).stdout
+    theirs = _sealed(place, "keyctl show @s").stdout
+    assert theirs.splitlines()[1:2] and theirs.splitlines()[1].split()[0] != mine.splitlines()[1].split()[0]
+    assert len(theirs.splitlines()) == 2, theirs  # the keyring alone, empty
+
+
+def _ticker(place: workspace.Workspace) -> list[str]:
+    """The runner argv for a command that writes ``tick`` into the workspace every 0.2 s,
+    from a process it detaches."""
+    return [*place.runner, "--ro-bind", "/", "/", "--", "bash", "-c",
+            "(setsid bash -c 'while true; do date +%s%N > tick; sleep 0.2; done' &); sleep 600"]
+
+
+def _ticks_stopped(path: Path) -> bool:
+    before = path.read_text()
+    import time
+    time.sleep(1.0)
+    return path.read_text() == before
+
+
+@LINUX
+def test_a_runner_dies_with_the_process_that_started_it(tmp_path):
+    """DSH killed outright: the runner it started, and everything sealed, die with it."""
+    _sealable()
+    _run, place = _layout(tmp_path)
+    parent = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time\n"
+                               "subprocess.Popen(sys.argv[1:])\n"
+                               "time.sleep(600)", *_ticker(place)], cwd=place.path)
+    tick = place.path / "tick"
+    import time
+    for _ in range(100):
+        if tick.exists():
+            break
+        time.sleep(0.1)
+    assert tick.exists()
+    parent.kill()
+    parent.wait()
+    time.sleep(0.5)
+    assert _ticks_stopped(tick)
+    assert not seal_reaper._linux_runner_pids(str(place.path))
+
+
+@LINUX
+def test_collect_ends_every_sealed_process_before_it_reads_the_workspace(tmp_path):
+    """A runner still going when its step is collected (DSH alive, the command not ended):
+    collection kills it and its namespace, and the workspace stops changing."""
+    _sealable()
+    run, place = _layout(tmp_path)
+    runner = subprocess.Popen(_ticker(place), cwd=place.path)
+    sealed_at = str(place.path)
+    tick = place.path / "tick"
+    import time
+    try:
+        for _ in range(100):
+            if tick.exists():
+                break
+            time.sleep(0.1)
+        assert tick.exists()
+        assert not _ticks_stopped(tick), "the writer runs before collection"
+        workspace.collect(place, run, ["tick"])
+        assert _ticks_stopped(place.path / "tick")
+        assert runner.wait(timeout=5) is not None
+        assert not seal_reaper._linux_runner_pids(sealed_at)
+    finally:
+        runner.kill()
+
+
+def test_a_sealed_workspace_over_its_cap_is_not_collected(tmp_path, monkeypatch):
+    _sealable()
+    run, place = _layout(tmp_path)
+    (place.path / "answer.txt").write_bytes(b"x" * 8192)
+    monkeypatch.setattr(workspace, "SEALED_WORKSPACE_MAX_BYTES", 4096)
+    with pytest.raises(workspace.WorkspaceError, match="over the"):
+        workspace.collect(place, run, ["answer.txt"])
+    assert not (run / "answer.txt").exists()
+
+
+def test_a_read_the_run_lacks_is_refused_and_a_folder_is_copied_without_its_links(tmp_path):
+    _sealable()
+    run = tmp_path / "run"
+    (run / "notes").mkdir(parents=True)
+    (run / "notes" / "a.txt").write_text("A")
+    (run / "grader.json").write_text("GOLD")
+    (run / "notes" / "gold-link").symlink_to(run / "grader.json")
+    with pytest.raises(workspace.WorkspaceError, match="does not have"):
+        workspace.prepare(run, "probe", "scratch", route={"worker_backend": "dsh"},
+                          tools=("bash",), reads=("missing.txt",))
+    place = workspace.prepare(run, "probe2", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",), reads=("notes",))
+    assert sorted(os.listdir(place.path / "notes")) == ["a.txt"]
+    assert _sealed(place, "cat notes/a.txt").stdout == "A"

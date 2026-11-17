@@ -9,7 +9,11 @@ front of the command (its ``runnerCommand``). What the command can then see:
 - the operating system's own programs and libraries, read only;
 - nothing else: no other item's directory, no run directory, no project, no home
   directory, no grader file or gold answer wherever the run keeps them, no network;
-- limits on its CPU time, file size and, on Linux, processes and memory (:data:`LIMITS`);
+- limits on its CPU time, file size and, on Linux, processes and memory (:data:`LIMITS`;
+  a capped systemd user scope where one can be made, :func:`linux_scope`);
+- on Linux, a fresh session keyring, and death with the DSH process that started it
+  (`seal_reaper.exec_runner`); /usr/local only as far as its programs and libraries
+  (:data:`LOCAL_KEPT`);
 - an environment of its own (`PATH`, its workspace as HOME and TMPDIR, the locale) and
   no inherited descriptor: nothing of the DSH process's, so no credential or run
   variable; no other process's arguments or environment either.
@@ -64,12 +68,19 @@ FAILURE = "refactory-seal: "
 #: credential, no run variable), only these, with HOME and TMPDIR its workspace.
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-#: A sealed command's limits, as ``ulimit`` takes them: CPU seconds, the largest file
-#: (KiB), and on Linux its processes (counted in its own user namespace) and address
-#: space (KiB). macOS counts processes per user, not per sandbox, and does not enforce
-#: an address-space limit, so neither is set there.
+#: A sealed command's limits, as ``ulimit`` takes them: CPU seconds and the largest file
+#: (KiB). macOS counts processes per user, not per sandbox, and does not enforce an
+#: address-space limit, so it gets only these.
 LIMITS = "-t 3600 -f 4194304"
-LINUX_LIMITS = "-u 512 -v 33554432"
+#: Linux, where each command runs in a systemd user scope (:func:`linux_scope`): the
+#: scope caps the memory and processes of the command and everything it starts
+#: together (:data:`SCOPE_LIMITS`), so the processes (counted in the command's own user
+#: namespace) need only a loose per-process bound.
+LINUX_LIMITS = "-u 512"
+SCOPE_LIMITS = ("MemoryMax=8G", "MemorySwapMax=0", "TasksMax=256")
+#: Linux without a user scope: no cap on the whole, so each process gets a tight one
+#: (128 processes, 8 GiB of address space each).
+LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
 
 #: Sets the limits, closes every descriptor above stderr, then runs the command (after
 #: DSH's profile arguments and ``--``) in the workspace with that environment; ``$run``
@@ -91,46 +102,59 @@ LINUX_READS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 LINUX_ETC = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/passwd",
              "/etc/group", "/etc/nsswitch.conf", "/etc/localtime", "/etc/ssl", "/etc/alternatives",
              "/etc/ca-certificates")
+#: What of ``/usr/local`` a sealed Linux command may read (its programs and libraries,
+#: CUDA's included); everything else there is covered (`linux_shell`).
+LOCAL_KEPT = ("bin", "sbin", "lib", "lib64", "libexec", "include", "cuda", "cuda-*")
 
-#: The shell that builds the new root inside the new namespaces (Linux), where it is
-#: root of its own user namespace. Arguments: the workspace, the caller's uid and gid,
-#: then whatever DSH appends. Any step that fails stops it: nothing runs half sealed.
-_SHELL = (
-    'ws="$1"; uid="$2"; gid="$3"; shift 3; '
-    'fail() { echo "refactory-seal: $1" >&2; exit 97; }; '
-    'exec 3<"$ws" || fail "cannot open the workspace"; '
-    # One more user namespace (the unprivileged one the command runs in) and none after
-    # it: the command cannot become root of a namespace of its own.
-    'echo 1 > /proc/sys/user/max_user_namespaces || fail "cannot limit user namespaces"; '
-    'mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"; '
-    'r=/tmp/root; mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r" '
-    '|| fail "cannot make the new root"; '
-    # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along
-    # with flags of its own, then made read only.
-    'mkdir -p "$r/etc" || fail "cannot make /etc"; '
-    f'for d in {" ".join(LINUX_READS + LINUX_ETC)}; do '
-    'if [ -L "$d" ]; then cp -P "$d" "$r$d" || fail "cannot link $d"; '
-    'elif [ -e "$d" ]; then { if [ -d "$d" ]; then mkdir -p "$r$d"; else touch "$r$d"; fi; } '
-    '&& mount -n --bind "$d" "$r$d" '
-    '&& mount -n -o remount,bind,ro "$r$d" || fail "cannot bind $d"; fi; done; '
-    'mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"; '
-    'for n in null zero random urandom; do touch "$r/dev/$n" '
-    '&& mount -n --bind "/dev/$n" "$r/dev/$n" || fail "cannot bind /dev/$n"; done; '
-    'ln -s /proc/self/fd "$r/dev/fd" && ln -s /proc/self/fd/0 "$r/dev/stdin" '
-    '&& ln -s /proc/self/fd/1 "$r/dev/stdout" && ln -s /proc/self/fd/2 "$r/dev/stderr" '
-    '|| fail "cannot link /dev/fd"; '
-    'mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"; '
-    'mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
-    'exec 3<&-; '
-    'cd "$r" && mkdir .old && pivot_root . .old || fail "cannot pivot to the new root"; '
-    'cd / && umount -n -l /.old && rmdir /.old || fail "cannot detach the old root"; '
-    # The new root itself (/, /tmp, the folders above the workspace) is read only, as
-    # macOS's is: the workspace is the one place a sealed command writes.
-    'mount -n -o remount,bind,ro / || fail "cannot make the new root read only"; '
-    'run="/usr/bin/unshare --user --mount --map-user=$uid --map-group=$gid --"; '
-    f'limits="{LINUX_LIMITS}"; '
-    + _EXEC
-)
+def linux_shell(reads: tuple[str, ...], limits: str) -> str:
+    """The shell that builds the new root inside the new namespaces (Linux), where it is
+    root of its own user namespace, from ``reads``, with ``limits``. Arguments: the
+    workspace, the caller's uid and gid, then whatever DSH appends. Any step that fails
+    stops it: nothing runs half sealed."""
+    return (
+        'ws="$1"; uid="$2"; gid="$3"; shift 3; '
+        'fail() { echo "refactory-seal: $1" >&2; exit 97; }; '
+        'exec 3<"$ws" || fail "cannot open the workspace"; '
+        # One more user namespace (the unprivileged one the command runs in) and none after
+        # it: the command cannot become root of a namespace of its own.
+        'echo 1 > /proc/sys/user/max_user_namespaces || fail "cannot limit user namespaces"; '
+        'mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"; '
+        'r=/tmp/root; mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r" '
+        '|| fail "cannot make the new root"; '
+        # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along
+        # with flags of its own, then made read only.
+        'mkdir -p "$r/etc" || fail "cannot make /etc"; '
+        f'for d in {" ".join(reads)}; do '
+        'if [ -L "$d" ]; then cp -P "$d" "$r$d" || fail "cannot link $d"; '
+        'elif [ -e "$d" ]; then { if [ -d "$d" ]; then mkdir -p "$r$d"; else touch "$r$d"; fi; } '
+        '&& mount -n --bind "$d" "$r$d" '
+        '&& mount -n -o remount,bind,ro "$r$d" || fail "cannot bind $d"; fi; done; '
+        # /usr/local keeps only its programs and libraries (:data:`LOCAL_KEPT`), as on macOS:
+        # its etc, share, src, var and the rest are each covered by an empty, read-only mount.
+        'for e in "$r"/usr/local/* "$r"/usr/local/.[!.]*; do '
+        '{ [ -e "$e" ] && [ ! -L "$e" ]; } || continue; case "${e##*/}" in '
+        f'{"|".join(LOCAL_KEPT)}) continue;; esac; '
+        'if [ -d "$e" ]; then mount -n -t tmpfs -o ro,size=4k,mode=0555 seal "$e"; '
+        'else mount -n --bind /dev/null "$e" && mount -n -o remount,bind,ro "$e"; fi '
+        '|| fail "cannot cover $e"; done; '
+        'mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"; '
+        'for n in null zero random urandom; do touch "$r/dev/$n" '
+        '&& mount -n --bind "/dev/$n" "$r/dev/$n" || fail "cannot bind /dev/$n"; done; '
+        'ln -s /proc/self/fd "$r/dev/fd" && ln -s /proc/self/fd/0 "$r/dev/stdin" '
+        '&& ln -s /proc/self/fd/1 "$r/dev/stdout" && ln -s /proc/self/fd/2 "$r/dev/stderr" '
+        '|| fail "cannot link /dev/fd"; '
+        'mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"; '
+        'mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws" || fail "cannot bind the workspace"; '
+        'exec 3<&-; '
+        'cd "$r" && mkdir .old && pivot_root . .old || fail "cannot pivot to the new root"; '
+        'cd / && umount -n -l /.old && rmdir /.old || fail "cannot detach the old root"; '
+        # The new root itself (/, /tmp, the folders above the workspace) is read only, as
+        # macOS's is: the workspace is the one place a sealed command writes.
+        'mount -n -o remount,bind,ro / || fail "cannot make the new root read only"; '
+        'run="/usr/bin/unshare --user --mount --map-user=$uid --map-group=$gid --"; '
+        f'limits="{limits}"; '
+        + _EXEC
+    )
 
 #: What a sealed macOS command may read besides its workspace: the system's programs and
 #: libraries, the command-line tools, Homebrew's programs and libraries (never its or
@@ -216,9 +240,43 @@ def runner_command(workspace: Path) -> list[str]:
         # Root here is root inside, which reads what only root may (/etc/shadow and the
         # like): a sealed step runs as an ordinary user, or not at all.
         raise SealError("a sealed step does not run as root")
-    return [shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
-            "--mount-proc", "--", snippet.BASH, "-c", _SHELL, "refactory-seal", ws,
-            str(os.getuid()), str(os.getgid())]
+    scope = linux_scope()
+    # Started through the reaper's --exec: a fresh session keyring, and killed with DSH.
+    reaper = str(Path(__file__).with_name("seal_reaper.py"))
+    return [sys.executable, "-I", reaper, "--exec", *scope,
+            shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
+            "--mount-proc", "--", snippet.BASH, "-c",
+            linux_shell(LINUX_READS + LINUX_ETC, LINUX_LIMITS if scope else LINUX_LIMITS_UNSCOPED),
+            "refactory-seal", ws, str(os.getuid()), str(os.getgid())]
+
+
+def _scope_prefix() -> list[str]:
+    systemd_run = shutil.which("systemd-run")
+    runtime = f"/run/user/{os.getuid()}"
+    if not systemd_run or not os.path.isdir(runtime):
+        return []
+    return ["/usr/bin/env", f"XDG_RUNTIME_DIR={runtime}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus", systemd_run, "--user",
+            "--scope", "--quiet", "--collect", *(f"--property={p}" for p in SCOPE_LIMITS), "--"]
+
+
+@functools.lru_cache(maxsize=1)
+def linux_scope() -> tuple[str, ...]:
+    """What puts a sealed Linux command in a systemd user scope capped at
+    :data:`SCOPE_LIMITS`, or ``()`` where there is no user manager to make one (the
+    command then gets :data:`LINUX_LIMITS_UNSCOPED`). Probed once per process: the
+    probe must find its own memory cap."""
+    prefix = _scope_prefix()
+    if not prefix:
+        return ()
+    try:
+        probe = subprocess.run(
+            [*prefix, "/bin/sh", "-c",
+             'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max"'],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    return tuple(prefix) if probe.returncode == 0 and probe.stdout.strip() == str(8 << 30) else ()
 
 
 def run(workspace: Path, command: list[str], *, timeout_s: float = 60) -> subprocess.CompletedProcess:

@@ -2502,8 +2502,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call'); it "
                 "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
-                + "; 'tools' (an agent) lists tools from " + ", ".join(SEALED_TOOLS)
-                + ", run sealed: only the files it sees, no network"
+                + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
+                + "; runs sealed: only the files it sees, no network"
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",

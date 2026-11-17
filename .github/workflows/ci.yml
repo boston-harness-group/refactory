@@ -196,6 +196,8 @@ jobs:
       - name: Python suite (shard ${{ matrix.shard }}/4)
         env:
           REFACTORY_REQUIRE_MIGRATION_TESTS: "1"
+          # The sealed-step tests fail, never skip, where the seal cannot run.
+          REFACTORY_REQUIRE_CODE_SANDBOX: "1"
         run: >-
           uv run python -m pytest refactory/tests -q -rfEs -n 4 --timeout=900
           --shard ${{ matrix.shard }}/4 --junitxml=python-suite-shard${{ matrix.shard }}.xml

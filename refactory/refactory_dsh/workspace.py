@@ -374,8 +374,9 @@ def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
 
 
 def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: Any) -> None:
-    """Make ``workspace`` sealed: copy in the files the node reads (by their names, inside
-    the run directory only), keep its temporary files inside it, and set its runner."""
+    """Make ``workspace`` sealed: copy in the files and folders the node reads (by their
+    names, inside the run directory only; one the run directory lacks is refused), keep
+    its temporary files inside it, and set its runner."""
     from refactory_dsh import seal
 
     workdir = Path(workdir).resolve()
@@ -385,14 +386,30 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
         if not source.is_relative_to(workdir) or not target.is_relative_to(workspace.path.resolve()):
             raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is not a file "
                                  "of the run directory")
-        if source.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
+        try:
             # Opened without following a link, so a link swapped in after the check is
             # refused rather than copied from wherever it points.
-            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-            made = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-            with os.fdopen(fd, "rb") as given, os.fdopen(made, "wb") as copy:
-                shutil.copyfileobj(given, copy)
+            fd = os.open(source, _NOFOLLOW)
+        except FileNotFoundError:
+            raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which the run "
+                                 "directory does not have; a sealed step sees only the files "
+                                 "it reads, so it does not run without one") from None
+        try:
+            mode = os.fstat(fd).st_mode
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if stat.S_ISDIR(mode):
+                # A folder is copied whole, leaving out links, as an output folder is.
+                _copy_dir_beneath(fd, target)
+            elif stat.S_ISREG(mode):
+                made = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                with os.fdopen(made, "wb") as copy:
+                    while chunk := os.read(fd, 1 << 20):
+                        copy.write(chunk)
+            else:
+                raise WorkspaceError(f"agent node {workspace.node!r} reads {name!r}, which is "
+                                     "neither a file nor a folder")
+        finally:
+            os.close(fd)
     workspace.tools = tools
     workspace.runner = tuple(seal.runner_command(workspace.path))
 
@@ -953,6 +970,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         moved = workspace.path.with_name(workspace.path.name + ".collected")
         os.rename(workspace.path, moved)
         workspace.path = moved
+        size = _tree_bytes(workspace.path)
+        if size > SEALED_WORKSPACE_MAX_BYTES:
+            raise WorkspaceError(f"agent node {workspace.node!r} left {size >> 20} MiB in its sealed "
+                                 f"workspace, over the {SEALED_WORKSPACE_MAX_BYTES >> 30} GiB a "
+                                 "sealed step may leave; nothing of it was collected")
 
     workdir = Path(workdir).resolve()
     summary: dict[str, Any] = {"collect": workspace.collect, "path": str(workspace.path)}
@@ -1034,6 +1056,25 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         summary["copied"] = copied
     _write_json(workspace.root / "collected.json", summary)
     return summary
+
+
+#: The most a sealed step may leave in its workspace (copied inputs included); beyond it
+#: nothing is collected.
+SEALED_WORKSPACE_MAX_BYTES = 4 << 30
+
+
+def _tree_bytes(path: Path) -> int:
+    """The bytes of every file under ``path``, links not followed."""
+    total = 0
+    for folder, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                found = os.lstat(os.path.join(folder, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(found.st_mode):
+                total += max(found.st_size, found.st_blocks * 512)
+    return total
 
 
 class _Linked(Exception):
