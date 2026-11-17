@@ -863,3 +863,17 @@ def test_workspace_preparation_is_reserved_for_every_retry_attempt(tmp_path, kin
                                      lowering.node_declarations(state))
     assert lowered.nodes[node.id].command_timeout_s == (
         30 + NODE_DISPATCH_OVERHEAD_S + 2 * preparation_budget_s(node.workspace))
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_optional_branch_whose_declared_retry_is_spent_at_its_wall_is_declared_timeout(
+        tmp_path, runtime):
+    """An optional verifier that reaches its declared wall on every attempt (its retry
+    answers the first, the second is spent) is missing as ``declared_timeout``, the
+    pipeline's limit (`node_retry._cause`), never ``timeout``, which #684 reads as the
+    harness's."""
+    verifier = Node("verifier", "agent", prompt_template="Verify.",
+                    writes=("reviews/verification.md",), outputs_only=True, timeout_s=2,
+                    retry=RULE)
+    info = _missing_verifier(runtime, tmp_path, verifier, [{"active": 30}, {"active": 30}])
+    assert info["cause"] == "declared_timeout", info

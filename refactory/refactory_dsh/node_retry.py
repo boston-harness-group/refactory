@@ -9,9 +9,10 @@ dispatched agent node runs (`worker_node.execute`). The spine reserves the node'
 envelope for it when it lowers the graph (`workers.lower_workflow`, with
 :func:`node_allowance_s`), so the retry runs inside the one command the spine started.
 
-A retry on ``timeout`` answers a session that went silent past the inactivity limit (or
-ran out of a per-completion limit), never one that reached the node's own declared wall
-(`model.DeclaredTimeout`, the pipeline's limit) or the harness backstop
+A retry on ``timeout`` answers a session that went silent past the inactivity limit, ran
+out of a per-completion limit, or reached the node's own declared wall
+(`model.DeclaredTimeout`: the wall and its retry are both the graph's choice; its item is
+still recorded ``declared_timeout``), never one the harness backstop stopped
 (`model.HarnessBackstop`). It needs the node's own `timeout_s`, which each retry's limit
 multiplies. A retry on ``crash`` runs under the node's limit, or the route's when it has
 none. A retry after the output limit tells the model its last attempt ran out of room

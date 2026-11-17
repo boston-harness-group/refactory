@@ -24,9 +24,10 @@ from refactory_dsh.design_ops import (CORRECTIONS_PICKED, EARLY_ASKS_JUDGE_MARK,
 
 OPS = "refactory_dsh.design_ops"
 
-#: The timeout recovery rule (`Node.retry`): a session that times out on inactivity is
-#: run once more, fresh, with twice its `timeout_s`. One that reaches its `timeout_s` is
-#: the graph's own limit (`model.DeclaredTimeout`) and is not retried. Remote-factory's CEO did this by judgment; here it
+#: The timeout recovery rule (`Node.retry`): a session that times out, on inactivity or
+#: at its `timeout_s` (the graph's own limit, `model.DeclaredTimeout`, recorded
+#: ``declared_timeout``), is run once more, fresh, with twice its `timeout_s`.
+#: Remote-factory's CEO did this by judgment; here it
 #: is the graph's rule, on both runtimes. Both the verifier and the builder declare it.
 #: The verifier uses `outputs_only`; the builder uses its workspace, which provides the
 #: same isolation: each attempt gets a fresh workspace via `workspace.dispatched(fresh=True)`.
@@ -34,7 +35,7 @@ TIMEOUT_RETRY = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 
 #: The builder's hard maximum: the most wall time one of its model sessions may take (the
 #: `builder_timeout_s` knob overrides it for a run). A session that reaches it is the
-#: graph's own limit (`model.DeclaredTimeout`) and is not retried; what normally stops a
+#: graph's own limit (`model.DeclaredTimeout`), retried once under `TIMEOUT_RETRY`; what normally stops a
 #: stuck builder is the model client's inactivity limit (`model.DEFAULT_INACTIVITY_S`, 600 s
 #: without model output or a running tool command). It was a plain 1800 s wall, which killed
 #: a builder that was busy on 5-7 minute test runs (trialR-fix-B, 2026-10-31). 4 h is more
