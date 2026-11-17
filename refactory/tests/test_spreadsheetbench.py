@@ -145,7 +145,8 @@ def test_no_code_and_exec_error_texts():
 def _require_sandbox(python: str) -> None:
     ok, why = sandbox.available(python)
     if not ok:
-        if os.environ.get("REFACTORY_REQUIRE_CODE_SANDBOX"):
+        # CI (Linux with user namespaces allowed, macOS with Seatbelt) must run it.
+        if os.environ.get("REFACTORY_REQUIRE_CODE_SANDBOX") or os.environ.get("CI"):
             pytest.fail(f"the sandbox must run here: {why}")
         pytest.skip(f"the model-code sandbox cannot run here: {why}")
 
@@ -182,6 +183,7 @@ def test_hostile_code_sees_neither_the_answer_nor_secrets(tmp_path, monkeypatch,
     (run / "facts.json").write_text("{}")
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
+    sibling = Path(__import__("tempfile").mkdtemp(prefix="sb-sibling-"))
     (home / ".ssh" / "id_test").write_text("SECRET")
     monkeypatch.setenv("HOME", str(home))
     work = Path(__import__("tempfile").mkdtemp(prefix="sb-item-"))
@@ -190,7 +192,7 @@ def test_hostile_code_sees_neither_the_answer_nor_secrets(tmp_path, monkeypatch,
         (work / "out").mkdir()
         source = make_workbook(work / "in" / "1_a_init.xlsx", [{"title": "S", "cells": {"A1": 1}}])
         code = f"""
-import json, socket, openpyxl, pandas
+import json, os, socket, openpyxl, pandas
 seen = {{}}
 for name, path in [("gold", {str(gold)!r}), ("run", {str(run / 'facts.json')!r}),
                    ("secret", {str(home / '.ssh' / 'id_test')!r})]:
@@ -198,7 +200,23 @@ for name, path in [("gold", {str(gold)!r}), ("run", {str(run / 'facts.json')!r})
         seen[name] = open(path, "rb").read()[:20].decode("latin-1")
     except Exception as e:
         seen[name] = "blocked"
-for name, path in [("write_run", {str(run / 'x')!r}), ("write_home", {str(home / 'x')!r})]:
+# Undo the hiding: unmount it (Linux), or reach the parent's view through /proc.
+try:
+    import ctypes
+    ctypes.CDLL(None, use_errno=True).umount2({str(tmp_path / 'data')!r}.encode(), 2)
+except Exception:
+    pass
+try:
+    seen["gold_after_umount"] = open({str(gold)!r}, "rb").read()[:20].decode("latin-1")
+except Exception:
+    seen["gold_after_umount"] = "blocked"
+try:
+    via = "/proc/%d/root" % os.getppid() + {str(gold)!r}
+    seen["gold_via_proc"] = open(via, "rb").read()[:20].decode("latin-1")
+except Exception:
+    seen["gold_via_proc"] = "blocked"
+for name, path in [("write_run", {str(run / 'x')!r}), ("write_home", {str(home / 'x')!r}),
+                   ("write_sibling", {str(sibling / 'x')!r})]:
     try:
         open(path, "w").write("x"); seen[name] = "wrote"
     except Exception:
@@ -220,10 +238,31 @@ wb.save(OUTPUT_PATH)
 
         seen = json.loads(openpyxl.load_workbook(work / "out" / "1_pred.xlsx").active["B1"].value)
         assert seen == {"gold": "blocked", "run": "blocked", "secret": "blocked",
-                        "write_run": "blocked", "write_home": "blocked", "net": "blocked"}
+                        "gold_after_umount": "blocked", "gold_via_proc": "blocked",
+                        "write_run": "blocked", "write_home": "blocked",
+                        "write_sibling": "blocked", "net": "blocked"}
         assert not (run / "x").exists() and not (home / "x").exists()
+        assert not (sibling / "x").exists()
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(sibling, ignore_errors=True)
+
+
+def test_the_run_and_the_loop_root_are_hidden_from_a_concurrent_pass(tmp_path):
+    """A concurrent pass works through ``.refactory/live/<node>/<item>``; the run is found
+    from the real pass, and every candidate's records under the loop root are hidden."""
+    from refactory_dsh.history import RUN_FILE
+    from refactory_dsh.items import prepare_pass_dir
+
+    root = tmp_path / "loop"
+    (root / RUN_FILE).parent.mkdir(parents=True)
+    (root / RUN_FILE).write_text("{}")
+    run = root / "runs" / "cand1"
+    pass_dir = prepare_pass_dir(run, "data", "t1", 0, task_ref=sb_mode.TASK)
+    alias = run / ".refactory" / "live" / "data" / "t1"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(pass_dir)
+    assert ops._run_roots(alias) == [str(run.resolve()), str(root.resolve())]
 
 
 def test_sandbox_refuses_to_hide_what_the_code_needs(tmp_path):
@@ -425,6 +464,15 @@ def test_graph_caps_reloops_at_skillopts_turns():
     assert sb_mode.MAX_TURNS == 30
 
 
+def test_code_that_removes_its_output_loses_the_prediction(tmp_path, sb_env):
+    """SkillOpt's prediction is one file the code writes in place: a later run that
+    deletes it leaves none, so the item ends with its last code run once more."""
+    remove = "```python\nimport os\nos.remove(OUTPUT_PATH)\n```"
+    result, _ = _walk(tmp_path, "train", [_good(41), remove], gold_feedback=True, max_turns=2)
+    (record,) = result.item_records
+    assert record["fail_reason"].startswith("exec-error: FileNotFoundError")
+
+
 def test_an_item_with_no_case_scores_zero_without_a_call(tmp_path, sb_env):
     """test 42930: its golden file names another item, so there is no case."""
     result, prompts = _walk(tmp_path, "test", [_good(1)])
@@ -441,13 +489,14 @@ def test_an_empty_last_reply_fails_the_item_whatever_ran_before(tmp_path, sb_env
 
 
 def _ctx(workdir: Path, **knobs: Any) -> RunContext:
-    ctx = RunContext(workdir, knobs={"item_budget_s": 3600, "max_turns": 30, **knobs},
-                     enforce_writes=False)
-    return ctx
+    return RunContext(workdir, knobs={"max_turns": 30, **knobs}, enforce_writes=False)
 
 
-def test_turn_gate_stops_with_ten_seconds_left(tmp_path):
-    ctx = _ctx(tmp_path, item_budget_s=100)
+def test_turn_gate_stops_with_ten_seconds_left_before_the_backstop(tmp_path, monkeypatch):
+    from refactory_dsh import model
+
+    monkeypatch.setattr(model, "DEFAULT_BACKSTOP_S", 100)
+    ctx = _ctx(tmp_path)
     ctx.write_json("turn.json", {"start": time.time() - 91, "turn": 1, "status": "exec_error"})
     assert str(ops.turn_gate(ctx)) == "proceed"
     ctx.write_json("turn.json", {"start": time.time() - 80, "turn": 1, "status": "exec_error"})
@@ -456,25 +505,36 @@ def test_turn_gate_stops_with_ten_seconds_left(tmp_path):
     assert str(ops.turn_gate(ctx)) == "proceed"
 
 
-def test_an_item_past_its_budget_scores_zero(tmp_path, sb_data):
-    """The item's turn loop ran past the budget: finalize says task-timeout, and verify
-    scores it 0 even with a right prediction (rollout.py:983-1011)."""
+def test_an_item_past_the_backstop_is_a_harness_incident(tmp_path, sb_data, monkeypatch):
+    """No item budget: an item whose turns ran past the harness backstop is the harness's
+    fault (``error_kind`` ``harness_incident``), not a score of 0."""
+    from refactory_dsh import model
+    from refactory_dsh.items import error_kind
+
+    monkeypatch.setattr(model, "DEFAULT_BACKSTOP_S", 60)
     task = tasks.SpreadsheetBenchTask()
     t1 = task.instances()[0]
-    ctx = _ctx(tmp_path, item_budget_s=60)
-    ctx.write_json("current_item.json", {"id": "t1", **{k: v for k, v in t1.metadata.items()
-                                                        if k not in task.grader_fields}})
+    ctx = _ctx(tmp_path)
+    ctx.write_json("current_item.json", task_module.node_item({"id": "t1", **t1.metadata}, task))
     ctx.write_json("turn.json", {"start": time.time() - 61, "turn": 1, "status": "ran",
                                  "code": "pass"})
     ctx.write_json("history.json", [{"role": "user", "content": "u"}])
     shutil.copyfile(t1.metadata["gold_path"], tmp_path / tasks.PRED)
-    ops.finalize(ctx)
-    assert json.loads((tmp_path / tasks.FINAL).read_text())["fail_reason"] == "task-timeout-60s"
-    verdict = task.verify(t1, tmp_path)
-    assert (verdict.passed, verdict.score, verdict.details) == (False, 0.0, "task-timeout-60s")
-    ctx.write_json("turn.json", {"start": time.time(), "turn": 1, "status": "ran", "code": "pass"})
+    with pytest.raises(ops.ItemBackstop) as raised:
+        ops.finalize(ctx)
+    assert error_kind(raised.value) == "harness_incident"
+    # A long item inside the backstop is graded as any other.
+    ctx.write_json("turn.json", {"start": time.time() - 59, "turn": 1, "status": "ran",
+                                 "code": "pass"})
     ops.finalize(ctx)
     assert task.verify(t1, tmp_path).passed
+
+
+def test_the_solve_call_has_no_wall():
+    """It ends on inactivity, or at the harness backstop (`refactory_dsh.model`)."""
+    solve = sb_mode.Solver().graph().nodes["solve"]
+    assert solve.timeout_s is None
+    assert "item_budget_s" not in sb_mode.Solver().values()
 
 
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
@@ -490,17 +550,6 @@ def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
     ops.finalize(ctx)
     assert json.loads((tmp_path / tasks.FINAL).read_text())["fail_reason"] == ""
     assert task.verify(t1, tmp_path).passed
-
-
-def test_item_budget_is_one_shared_setting(monkeypatch):
-    """SB_ITEM_BUDGET_S, read by the mode and by the lab's SkillOpt wrapper alike; 3600 s
-    unless set (SkillOpt ships 600)."""
-    monkeypatch.delenv(sb_mode.ITEM_BUDGET_ENV, raising=False)
-    assert sb_mode.item_budget_s() == 3600 != sb_mode.SKILLOPT_ITEM_BUDGET_S
-    monkeypatch.setenv(sb_mode.ITEM_BUDGET_ENV, "600")
-    solver = sb_mode.Solver()
-    assert solver.values()["item_budget_s"] == 600
-    assert solver.graph().nodes["solve"].timeout_s == 600
 
 
 # ── train-only gold feedback, in the library ────────────────────────────────
@@ -532,6 +581,27 @@ def test_the_outer_loop_refuses_gold_feedback_off_train(tmp_path):
     with pytest.raises(OuterLoopError, match="train evaluations only"):
         run.evaluate_many([EvalRequest(candidate=loop.population[0], part="test",
                                        gold_feedback=True)])
+
+
+def test_evaluate_many_passes_gold_feedback_to_the_train_run(tmp_path, monkeypatch):
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.outerloop import EvalRequest, Run
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(
+        epochs=1, batch_size=1, optimizer="random", seed=3, runs_root=tmp_path / "run",
+        max_evaluations=4), project=Path("."))
+    loop.init()
+    asked: list[bool] = []
+    original = loop._evaluate  # noqa: SLF001
+
+    def spy(candidate, **kwargs):  # type: ignore[no-untyped-def]
+        asked.append(kwargs.get("gold_feedback"))
+        return original(candidate, **kwargs)
+
+    monkeypatch.setattr(loop, "_evaluate", spy)
+    Run(_loop=loop).evaluate_many([EvalRequest(candidate=loop.population[0], part="train",
+                                               gold_feedback=True)])
+    assert asked == [True]
 
 
 def _pass_ctx(tmp_path: Path, part: str, flag: bool) -> RunContext:
@@ -595,6 +665,35 @@ def test_v17_holds_a_train_feedback_node_to_its_shape():
     graph.nodes["gold_check"] = replace(graph.nodes["gold_check"], reads=("turn.json",))
     (issue,) = _issues(graph, solver.protected_nodes())
     assert "declares reads" in issue.message
+
+
+@pytest.mark.parametrize("change,says", [
+    ({"kind": "gate", "call": "", "evaluator": "refactory_dsh.feedback:train_feedback"}, None),
+    ({"produces": ("train_feedback", "other")}, "produces 2 facts"),
+    ({"writes": ("x.json",)}, "declares reads, writes"),
+])
+def test_v17_holds_every_part_of_a_train_feedback_nodes_shape(change, says):
+    from dataclasses import replace
+
+    solver = sb_mode.Solver()
+    graph = solver.graph()
+    graph.nodes["gold_check"] = replace(graph.nodes["gold_check"], **change)
+    messages = [i.message for i in _issues(graph, solver.protected_nodes())]
+    if says is None:
+        # A gate calls nothing: it is no channel, and its fact is no longer produced.
+        assert not any("train-feedback" in m for m in messages)
+    else:
+        assert any(says in m for m in messages), messages
+
+
+def test_v17_refuses_a_train_feedback_node_outside_a_pass():
+    graph = sb_mode.Solver().graph()
+    graph.add(nn.Node("loose", "op", call="refactory_dsh.feedback:train_feedback",
+                      produces=("loose_feedback",)))
+    graph.connect("data", "loose")
+    (issue,) = [i for i in _issues(graph, ("data", "gold_check", "finalize", "loose"))
+                if i.node == "loose"]
+    assert "outside every data pass" in issue.message
 
 
 def test_v17_still_refuses_grade_consumers():

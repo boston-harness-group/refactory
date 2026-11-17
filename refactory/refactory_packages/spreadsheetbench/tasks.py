@@ -27,7 +27,6 @@ import hashlib
 import json
 import os
 import shutil
-import time
 from pathlib import Path
 from typing import Any
 
@@ -94,8 +93,7 @@ class SpreadsheetBenchTask(Task):
     """SpreadsheetBench Verified 400, graded as SkillOpt's runs graded it.
 
     ``grader``: ``recalc`` (default; the lab's ``SB_GRADER``) or ``cached``
-    (`recalc.grader`). ``item_budget_s``: the item budget a pass is held to (`ops`);
-    `verify` only reads what `ops.finalize` concluded.
+    (`recalc.grader`). `verify` reads what `ops.finalize` concluded.
     """
 
     name = "spreadsheetbench"
@@ -169,7 +167,7 @@ class SpreadsheetBenchTask(Task):
 
     def verify(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
                seed: int | None = None) -> VerifyResult:
-        """rollout.py:779-863 and :983-1011: the item's fail reason, or its grade.
+        """rollout.py:779-863: the item's fail reason, or its grade.
 
         ``prediction`` is SkillOpt's post-execution verification block (the analysts'
         ``[POST-EXECUTION VERIFICATION]``), ``details`` the fail reason."""
@@ -183,7 +181,6 @@ class SpreadsheetBenchTask(Task):
             return VerifyResult(passed=False, score=0.0, details=reason)
         pred = Path(workspace) / PRED
         ape = meta.get("answer_position_eval", "")
-        started = time.time()
         try:
             ev = self._grade(instance, pred)
         except Exception as e:  # noqa: BLE001 - rollout.py:820-823
@@ -195,13 +192,6 @@ class SpreadsheetBenchTask(Task):
             verification = (f"## Eval Result (case {meta.get('case_no') or 1}): "
                             f"{'PASS' if ev['ok'] else 'FAIL'}\n"
                             f"{ev.get('reason', '')}\n\n{report}")
-        # The item budget covers grading too (rollout.py:983-1011): a pass whose grading
-        # takes it past the budget is a timeout, as SkillOpt's batch runner records it.
-        budget = float(final.get("item_budget_s") or 0)
-        spent = float(final.get("elapsed_s") or 0) + (time.time() - started)
-        if budget and spent > budget:
-            return VerifyResult(passed=False, score=0.0,
-                                details=f"task-timeout-{int(budget)}s", prediction=verification)
         return VerifyResult(
             passed=bool(ev["ok"]), score=1.0 if ev["ok"] else 0.0,
             details="" if ev["ok"] else f"eval-mismatch: {str(ev.get('reason', ''))[:200]}",

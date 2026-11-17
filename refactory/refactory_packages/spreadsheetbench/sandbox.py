@@ -9,17 +9,23 @@ stricter, and that can only lower a score that came from reading the answer:
 - the code sees a fresh directory outside the run and the dataset, holding a copy of
   the item's input (``in/``), its output directory (``out/``, also ``HOME``) and an
   empty working directory (``cwd/``);
-- the dataset directory, the run directory and the user's secrets (the lab wrapper's
-  list, plus refactory's own directory) are hidden;
-- there is no network; everything outside the work directory and the runner's
-  temporary directory is read-only.
+- the dataset directory, the run, the outer loop's root (every candidate's records)
+  and the user's secrets (the lab wrapper's list, plus refactory's own directory) are
+  hidden;
+- there is no network; of the places a user can write (the home directory, ``/tmp``,
+  ``/var/tmp``, ``/dev/shm``), only the output directory and the runner's temporary
+  directory are writable.
 
-Linux: user, mount and network namespaces (``unshare -rnm``), empty read-only tmpfs over
-hidden directories and ``/dev/null`` over hidden files, ``$HOME`` remounted read-only,
-the work directory bound back writable -- the lab's ``sandbox-exec.sh``. macOS: Seatbelt
-(``sandbox-exec``) allowing by default and denying the network, reads and writes of the
-hidden paths, and every write outside the two writable directories. Where neither can
-run, code is not run: there is no unsandboxed fallback (`available`).
+Linux, after the lab's ``sandbox-exec.sh``: in user, mount and network namespaces
+(``unshare -rnm``), empty read-only tmpfs over hidden directories and ``/dev/null`` over
+hidden files, the writable directories bound to themselves, then the home directory and
+the temporary roots remounted read-only around them. The code itself then runs in a
+further user, mount and PID namespace with a fresh ``/proc``: the mounts above are locked
+there, so it cannot undo them, and it sees no process outside its own (no
+``/proc/<pid>/root`` into an unhidden view). macOS: Seatbelt (``sandbox-exec``) allowing
+by default and denying the network, reads and writes of the hidden paths, and every write
+outside the two writable directories. Where neither can run, code is not run: there is
+no unsandboxed fallback (`available`).
 """
 from __future__ import annotations
 
@@ -41,28 +47,34 @@ HOME_SECRETS = (".claude", ".claude.json", ".config", ".ssh", ".aws", ".huggingf
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
-# sandbox-exec.sh, with the run directory's read-only bind replaced by $HOME's, since
-# the code's own directory is outside the run: hide each path, make home read-only,
-# bind the writable directories back, then exec the command.
-_LINUX_SCRIPT = r"""
-set -e
-RO=$1; shift
-WRITABLE=""
-while [ "$#" -gt 0 ] && [ "$1" != -- ]; do WRITABLE="$WRITABLE $1"; shift; done
-shift
-while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
-  if [ -d "$1" ]; then mount -n -t tmpfs -o ro,size=16k,mode=000 sbhide "$1"
-  elif [ -e "$1" ]; then mount -n --bind /dev/null "$1"; fi
-  shift
-done
-shift
-if [ -n "$RO" ] && [ -d "$RO" ]; then
-  mount -n --rbind "$RO" "$RO"
-  mount -n -o remount,bind,ro "$RO"
-fi
-for w in $WRITABLE; do mount -n --bind "$w" "$w"; done
-exec "$@"
-"""
+#: Where a user can write, made read-only around the writable directories on Linux.
+TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+# sandbox-exec.sh's order: hide, bind the writable directories to themselves, then make
+# the roots read-only around them (a bind keeps the flags it is made with, so binding
+# after the read-only remount would make the writable ones read-only too). Then a
+# nested user, mount and PID namespace locks those mounts and shows a fresh /proc.
+def _linux_script(read_only: list[str]) -> str:
+    """The setup script, with the read-only roots written into it (quoted)."""
+    import shlex
+
+    roots = " ".join(shlex.quote(r) for r in read_only)
+    return ("set -e\n"
+            'W1=$1; W2=$2; shift 2\n'
+            'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do\n'
+            '  if [ -d "$1" ]; then mount -n -t tmpfs -o ro,size=16k,mode=000 sbhide "$1"\n'
+            '  elif [ -e "$1" ]; then mount -n --bind /dev/null "$1"; fi\n'
+            "  shift\n"
+            "done\n"
+            "shift\n"
+            'mount -n --bind "$W1" "$W1"\n'
+            'mount -n --bind "$W2" "$W2"\n'
+            f"for r in {roots}; do\n"
+            '  [ -d "$r" ] || continue\n'
+            '  mount -n --rbind "$r" "$r"\n'
+            '  mount -n -o remount,bind,ro "$r"\n'
+            "done\n"
+            'exec unshare -U -r -m -p -f --mount-proc -- "$@"\n')
 
 
 class SandboxError(RuntimeError):
@@ -123,16 +135,37 @@ def wrapper(hidden: Iterable[str]):
         if sys.platform == "darwin":
             return [SANDBOX_EXEC, "-p", seatbelt_profile(writable, hidden), *command]
         unshare = shutil.which("unshare") or "unshare"
-        return [unshare, "-rnm", "--", "/bin/sh", "-c", _LINUX_SCRIPT, "sh",
-                str(Path.home()), *writable, "--", *hidden, "--", *command]
+        read_only = [str(Path.home()), *TEMP_ROOTS]
+        return [unshare, "-rnm", "--", "/bin/sh", "-c", _linux_script(read_only), "sh",
+                *writable, *hidden, "--", *command]
 
     return wrap
 
 
+_PROBE = """
+import os, sys
+out, tmp, hidden = sys.argv[1:4]
+for d in (out, tmp):
+    open(os.path.join(d, "probe"), "w").write("x")
+try:
+    os.listdir(hidden)
+except OSError:
+    pass
+else:
+    sys.exit("a hidden directory can be read")
+"""
+
+
 @lru_cache(maxsize=None)
 def _probe(python: str) -> tuple[bool, str]:
+    """The sandbox runs ``python``, which can write both writable directories and cannot
+    list a hidden one."""
     with tempfile.TemporaryDirectory(prefix="sb-probe-") as work:
-        command = wrapper([])([python, "-I", "-c", "pass"], work, work)
+        out, tmp, hidden = (Path(work) / name for name in ("out", "tmp", "hidden"))
+        for d in (out, tmp, hidden):
+            d.mkdir()
+        command = wrapper([str(hidden)])(
+            [python, "-I", "-c", _PROBE, str(out), str(tmp), str(hidden)], str(out), str(tmp))
         try:
             proc = subprocess.run(command, capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.SubprocessError) as exc:

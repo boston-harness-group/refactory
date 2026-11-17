@@ -1,7 +1,7 @@
 """SpreadsheetBench solver mode: SkillOpt's ``multi`` codegen agent as a graph.
 
 SkillOpt's SpreadsheetBench config (configs/spreadsheetbench/default.yaml) runs mode
-``multi``: up to 30 model calls per item inside an item budget, each reply's first
+``multi``: up to 30 model calls per item, each reply's first
 fenced block run against the input, an execution error sent back as the next user
 message, and -- in training rollouts only -- a wrong output told which cells are wrong
 (`ops`, `refactory_dsh.feedback`). Each call is one ``claude -p`` whose prompt is the
@@ -16,15 +16,13 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
 
 **Deviations from SkillOpt as shipped**, each recorded where it is decided:
 
-1. *Item budget* (``item_budget_s``): 3600 s by default, SkillOpt's is 600 s
-   (``exec_timeout``). One setting, ``SB_ITEM_BUDGET_S``, read by this mode and by the
-   lab's SkillOpt wrapper alike, so every compared approach gets the same budget.
-   Late calls are not killed: a call that starts inside the budget runs to its end
-   (the solve node's timeout is the whole budget), and the item is then scored 0 if
-   it ran past the budget (`ops`), so a score matches SkillOpt's rule but wall time
-   and cost can exceed it.
-2. *Per-call cap*: none beyond the budget, as the lab's runs set it
-   (``SB_LLM_CALL_CAP=task``; SkillOpt ships 120 s).
+1. *No item budget, no per-call wall*: SkillOpt gives an item 600 s (``exec_timeout``)
+   and each call 120 s. Here a solve call ends on inactivity only
+   (``REFACTORY_MODEL_INACTIVITY_S``: nothing streamed and no command running), and the
+   one limit is the harness backstop (``REFACTORY_MODEL_BACKSTOP_S``, 4 h by default),
+   for each call and for each item's turn loop. An item past it is a harness incident
+   (its record's ``error_kind`` is ``harness_incident``), never a score of 0. The lab's
+   SkillOpt wrapper is to run with the same backstop as its item limit.
 3. *Interpreter*: a pinned environment with SkillOpt's versions (`interpreter`), with
    pandas installed in it rather than added through ``PYTHONPATH``.
 4. *Grader*: ``recalc`` by default (`recalc`); ``SB_GRADER=cached`` is SkillOpt's.
@@ -39,7 +37,6 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
 from __future__ import annotations
 
 import copy
-import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,17 +47,6 @@ from . import skillopt_port as port
 
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
-
-#: The item budget every compared approach gets, in seconds: ``SB_ITEM_BUDGET_S``,
-#: shared with the lab's SkillOpt wrapper, else 3600 (SkillOpt ships 600).
-ITEM_BUDGET_ENV = "SB_ITEM_BUDGET_S"
-DEFAULT_ITEM_BUDGET_S = 3600
-SKILLOPT_ITEM_BUDGET_S = 600
-
-
-def item_budget_s() -> int:
-    return int(os.environ.get(ITEM_BUDGET_ENV, "").strip() or DEFAULT_ITEM_BUDGET_S)
-
 
 #: SkillOpt's ``max_turns`` (configs/spreadsheetbench/default.yaml:31).
 MAX_TURNS = 30
@@ -88,8 +74,6 @@ class Solver(nn.Mode):
                                         description="concurrent items (SkillOpt's workers)"),
             "max_turns": nn.Knob(MAX_TURNS, "int", lo=1, hi=MAX_TURNS, frozen=True,
                                  description="model calls per item"),
-            "item_budget_s": nn.Knob(item_budget_s(), "int", lo=60, frozen=True,
-                                     description="wall budget per item, in seconds"),
             "turn_pause_s": nn.Knob(3, "int", lo=0, hi=3, frozen=True,
                                     description="cooldown after each model call"),
             SYSTEM_PROMPT_KNOB: nn.Knob(SYSTEM_PROMPT, "str", frozen=True,
@@ -119,7 +103,7 @@ class Solver(nn.Mode):
                       notes="flatten the conversation into the History: prompt"))
         g.add(nn.Node("solve", "agent", prompt_template="{{solver_prompt}}",
                       system_prompt_template=SYSTEM_PROMPT, writes=("reply.txt",),
-                      tool_policy="none", role="solver", timeout_s=item_budget_s(),
+                      tool_policy="none", role="solver",
                       retry={"on": ["crash"], "times": 3}, outputs_only=True,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
@@ -136,12 +120,12 @@ class Solver(nn.Mode):
                       writes=("history.json", "turn.json"), produces=("turn_status",),
                       notes="a clean run ends the item unless train feedback says it is wrong"))
         g.add(nn.Node("turn_gate", "gate", evaluator=f"{OPS}:turn_gate", reads=("turn.json",),
-                      knobs=("max_turns", "item_budget_s"), writes=("turn.json",),
+                      knobs=("max_turns",), writes=("turn.json",),
                       max_iterations=MAX_TURNS - 1, on_exhausted="continue",
                       notes="another turn while turns and budget remain"))
         g.add(nn.Node("finalize", "op", call=f"{OPS}:finalize",
                       reads=("current_item.json", "turn.json", "history.json", "code.py"),
-                      knobs=("item_budget_s", "max_turns"),
+                      knobs=("max_turns",),
                       writes=("final.json", "conversation.json", "pred.xlsx"),
                       produces=("finished",),
                       notes="the item's outcome before grading"))

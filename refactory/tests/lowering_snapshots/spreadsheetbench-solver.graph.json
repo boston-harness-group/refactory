@@ -163,7 +163,7 @@
       "prompt_template": "{{solver_prompt}}",
       "system_prompt": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
       "tools": [],
-      "timeout": 3600,
+      "timeout": null,
       "max_iterations": 1,
       "post_checks": [],
       "retry": {
@@ -254,7 +254,6 @@
     "max_completion_tokens": 0.0,
     "data_parallelism": 24.0,
     "max_turns": 30.0,
-    "item_budget_s": 3600.0,
     "turn_pause_s": 3.0,
     "solve__system_prompt": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}"
   },
@@ -301,17 +300,6 @@
       "values": [],
       "frozen": true,
       "description": "model calls per item",
-      "required": false
-    },
-    "item_budget_s": {
-      "default": 3600,
-      "kind": "int",
-      "lo": 60,
-      "hi": null,
-      "enum": [],
-      "values": [],
-      "frozen": true,
-      "description": "wall budget per item, in seconds",
       "required": false
     },
     "turn_pause_s": {

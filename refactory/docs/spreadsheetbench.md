@@ -45,9 +45,10 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
   SkillOpt's runner. An error is the next user message.
 - `gold_check` is the train-only gold feedback node (below); `next_turn` ends the item on
   a clean run, unless that node says the output is wrong.
-- `turn_gate` loops while turns (30) and the item budget (more than 10 s) remain.
+- `turn_gate` loops while turns (30) remain and more than 10 s remain before the harness
+  backstop.
 - `finalize` fails an empty last code block, runs the last code once more when there is
-  no prediction, and scores an item past its budget 0.
+  no prediction, and records an item past the backstop as a harness incident.
 
 The grader (`recalc.evaluate`) is SkillOpt's cell comparison on cached values, then, when
 the prediction's answer cells hold formulas, the same comparison on a LibreOffice-
@@ -74,21 +75,24 @@ The SkillOpt strategy asks for it on its train rollout only.
 A pinned interpreter with SkillOpt's versions (Python 3.12, openpyxl 3.1.5, pandas 2.3.3,
 numpy 2.5.4 and pandas' own dependencies), built once with
 `python -m refactory_packages.spreadsheetbench.interpreter` or named by `SB_PYTHON`. The
-code runs in a fresh directory holding a copy of the input, with no network, the dataset,
-the run and the home directory's secrets hidden, and nothing writable but its output
-directory and its temporary directory: Linux user, mount and network namespaces, macOS
-Seatbelt. Where neither can run, code is not run.
+code runs in a fresh directory holding a copy of the input, with no network; the dataset,
+the run, the outer loop's root and the home directory's secrets hidden; and, of the places
+a user can write (home, `/tmp`, `/var/tmp`, `/dev/shm`), only its output and temporary
+directories writable. Linux: user, mount and network namespaces set up as the lab's
+`sandbox-exec.sh` does, then a nested user, mount and PID namespace, so the code cannot
+undo the hiding or reach another process's view of the files. macOS: Seatbelt. Where
+neither can run, code is not run.
 
 ## Differences from SkillOpt as shipped
 
-1. **Item budget**: `SB_ITEM_BUDGET_S`, 3600 s by default (SkillOpt: 600 s). One setting
-   for the port and for the lab's SkillOpt wrapper, so every compared approach gets the
-   same budget. The loop stops when 10 s or less are left and an item past the budget
-   scores 0, as in SkillOpt. **Late calls are not killed**: a call that starts inside the
-   budget runs to its end, so wall time and cost can exceed the budget though the score
-   follows SkillOpt's rule.
-2. **Per-call cap**: none beyond the budget (the lab's `SB_LLM_CALL_CAP=task`; SkillOpt
-   ships 120 s).
+1. **No item budget and no per-call wall** (SkillOpt: 600 s per item, 120 s per call).
+   A solve call ends on inactivity only (`REFACTORY_MODEL_INACTIVITY_S`: nothing
+   streamed and no command running); the one limit is the harness backstop
+   (`REFACTORY_MODEL_BACKSTOP_S`, 4 h), for each call and for each item's turn loop. An
+   item past it is a harness incident (`error_kind` `harness_incident`), never a score.
+   The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
+2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
+   the pass's first step runs.
 3. **Retries**: a crashed call is retried 3 times (4 sessions); SkillOpt's wrapper makes
    5 attempts.
 4. **Tools**: none on the solve call. SkillOpt sends no tool schemas, but its CLI calls
@@ -96,12 +100,15 @@ Seatbelt. Where neither can run, code is not run.
    calls tried one).
 5. **Interpreter**: pandas installed in the pinned environment, not added through
    `PYTHONPATH`; `PYTHONPATH` and `PYTHONHOME` are not passed to model code.
+   `INPUT_PATH` names a copy of the input and the code runs in an empty working
+   directory (SkillOpt's inherits the trainer's), so paths in tracebacks differ.
 6. **Sandbox**: model code cannot read the golden file, which in SkillOpt's runs sat
-   readable beside the input. Stricter, so it can only lower a score that came from
-   reading the answer.
+   readable beside the input (the lab's sandbox hid secrets only). Stricter, so it can
+   only lower a score that came from reading the answer.
 7. **Grader**: `recalc` by default.
 8. **Analysts' view**: a feedback message after the last model call (a loop that ended on
-   turns or budget) is not in the conversation the analysts see.
+   turns or the backstop) is not in the conversation the analysts see; `n_turns` counts
+   model calls; each message is shown stripped, as the History framing sends it.
 
 ## Parity checks
 

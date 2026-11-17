@@ -9,13 +9,12 @@ model call so the call is an agent node (`mode.Solver`)::
                   |          +----------------------- reloop -------------------------+
                   +-- skip --> finalize <------------------ proceed -------------------+
 
-The item budget (SkillOpt's ``exec_timeout``, the ``item_budget_s`` knob) is kept the
-way the port spec's interim says: `prepare` records the item's start, `turn_gate` stops
-the loop when 10 s or less of it are left (codegen_agent.py:704-711), and `finalize`
-(then `tasks.SpreadsheetBenchTask.verify`, which counts grading too) scores an item past
-the budget 0 as SkillOpt's batch runner does (rollout.py:983-1011). A model call that
-starts inside the budget is not cut short at its end: the solve node's own timeout is the
-whole budget, so a late call costs time but never changes a score.
+There is no item budget (SkillOpt's 600 s ``exec_timeout``): calls end on inactivity,
+and the one limit is the harness backstop (`item_limit_s`, ``REFACTORY_MODEL_BACKSTOP_S``).
+SkillOpt's check is kept against it: `prepare` records the item's start, `turn_gate`
+starts no turn with 10 s or less of it left (codegen_agent.py:704-711), and `finalize`
+fails an item past it as a harness incident (`refactory_dsh.model.HARNESS_BACKSTOP_TEXT`,
+recorded as ``error_kind`` ``harness_incident``), never as a score of 0.
 """
 from __future__ import annotations
 
@@ -43,10 +42,21 @@ CONVERSATION = "conversation.json"
 SYSTEM_FILE = "target_system_prompt.txt"
 USER_FILE = "target_user_prompt.txt"
 PREVIEW_FILE = "spreadsheet_preview.txt"
-#: codegen_agent.py:707-710: no new turn with this little of the item budget left.
+#: codegen_agent.py:707-710: no new turn with this little time left (here, before the backstop).
 LAST_TURN_MARGIN_S = 10
 #: executor.py's default per-run limit (codegen_agent.py:729-734, rollout.py:799-800).
 RUN_TIMEOUT_S = 120
+
+
+class ItemBackstop(RuntimeError):
+    """An item's turn loop ran past the harness backstop: the harness's fault."""
+
+
+def item_limit_s() -> float:
+    """The most an item's turn loop may take: the harness backstop."""
+    from refactory_dsh import model
+
+    return float(model.DEFAULT_BACKSTOP_S)
 
 
 def _item(ctx: Any) -> dict[str, Any]:
@@ -103,16 +113,12 @@ def frame(ctx: Any) -> dict[str, Any]:
 def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
     """Run ``code`` as SkillOpt's executor does, in a fresh confined directory holding a
     copy of the input and of the prediction so far; the prediction comes back after."""
-    from refactory_dsh.items import PASS_MARKER
-
     from . import interpreter, sandbox
 
     python = interpreter.interpreter()
     sandbox.require(python)
     workdir = Path(ctx.workdir)
-    # The run the pass belongs to (``<run>/passes/<node>/<item>``), else the directory.
-    run_dir = workdir.parents[2] if (workdir / PASS_MARKER).exists() else workdir
-    hidden = sandbox.hidden_paths([str(run_dir), *_data_roots()])
+    hidden = sandbox.hidden_paths([*_run_roots(workdir), *_data_roots()])
     pred_name = f"{item.get('case_no') or 1}_pred.xlsx"
     with tempfile.TemporaryDirectory(prefix="sb-item-") as work:
         root = Path(work)
@@ -129,10 +135,30 @@ def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
         ok, err = port.run_generated_code(
             code, str(input_path), str(output_path), RUN_TIMEOUT_S,
             python=python, wrap=sandbox.wrapper(hidden), cwd=str(root / "cwd"))
+        ctx._note_write(PRED)  # noqa: SLF001 - a declared write, copied in place
         if output_path.exists():
-            ctx._note_write(PRED)  # noqa: SLF001 - a declared write, copied in place
             shutil.copyfile(output_path, ctx._writable(PRED))  # noqa: SLF001
+        else:
+            # The code removed it: SkillOpt's file would be gone too.
+            ctx._writable(PRED).unlink(missing_ok=True)  # noqa: SLF001
     return ok, err
+
+
+def _run_roots(workdir: Path) -> list[str]:
+    """The run the pass belongs to and, above it, the outer loop's root (every
+    candidate's records): what model code must not see. A concurrent pass works through
+    an alias (``.refactory/live/<node>/<item>``), so the pass is resolved first."""
+    from refactory_dsh.history import JOURNAL, RUN_FILE
+    from refactory_dsh.items import PASS_MARKER
+
+    real = workdir.resolve()
+    # ``<run>/passes/<node>/<item>``, else the directory itself.
+    run = real.parents[2] if (real / PASS_MARKER).exists() else real
+    roots = [str(run)]
+    for parent in run.parents:
+        if (parent / RUN_FILE).exists() or (parent / JOURNAL).exists():
+            roots.append(str(parent))
+    return roots
 
 
 def _data_roots() -> list[str]:
@@ -193,29 +219,31 @@ def next_turn(ctx: Any) -> dict[str, Any]:
 
 def turn_gate(ctx: Any) -> Any:
     """Gate: another turn unless the item is done, the turns are spent, or 10 s or less
-    of the item budget are left (codegen_agent.py:703-711)."""
+    are left before the harness backstop (codegen_agent.py:703-711)."""
     turn = ctx.read_json(TURN, {}) or {}
     if turn.get("done"):
         return "proceed"
     if int(turn.get("turn", 0)) >= int(ctx.knob("max_turns", 30)):
         return Verdict("proceed", "the turns are spent")
-    remaining = float(turn.get("start", 0)) + float(ctx.knob("item_budget_s", 0)) - time.time()
+    remaining = float(turn.get("start", 0)) + item_limit_s() - time.time()
     if remaining <= LAST_TURN_MARGIN_S:
         turn["stop"] = "budget"
         ctx.write_json(TURN, turn)
-        return Verdict("proceed", f"{max(remaining, 0):.0f} s of the item budget left")
+        return Verdict("proceed", f"{max(remaining, 0):.0f} s left before the harness backstop")
     return Verdict("reloop", f"turn {turn.get('turn')} ended {turn.get('status')}")
 
 
 def finalize(ctx: Any) -> dict[str, Any]:
-    """The item's outcome before grading (rollout.py:779-812, :983-1011): an empty last
-    code block fails; a missing prediction gets one more run of the last code; an item
-    past its budget is a timeout. Writes `tasks.FINAL` and SkillOpt's
-    ``conversation.json`` (the history after the first user message)."""
+    """The item's outcome before grading (rollout.py:779-812): an empty last code block
+    fails; a missing prediction gets one more run of the last code. Writes `tasks.FINAL`
+    and SkillOpt's ``conversation.json`` (the history after the first user message). An
+    item past the harness backstop raises `ItemBackstop`: a harness incident, not a
+    score."""
+    from refactory_dsh.model import HARNESS_BACKSTOP_TEXT
+
     item = _item(ctx)
     turn = ctx.read_json(TURN, {}) or {}
     history = ctx.read_json(HISTORY, []) or []
-    budget = float(ctx.knob("item_budget_s", 0))
     code = str(turn.get("code") or "")
     fail_reason = ""
     calls = int(turn.get("turn", 0))
@@ -235,9 +263,10 @@ def finalize(ctx: Any) -> dict[str, Any]:
         elif not ctx.exists(PRED):
             fail_reason = "output-not-found"
     elapsed = time.time() - float(turn.get("start") or time.time())
-    if budget and elapsed > budget:
-        fail_reason = f"task-timeout-{int(budget)}s"
     ctx.write_json(CONVERSATION, history[1:])
     ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns,
-                           "elapsed_s": round(elapsed, 3), "item_budget_s": budget})
+                           "elapsed_s": round(elapsed, 3)})
+    if elapsed > item_limit_s():
+        raise ItemBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "
+                           f"({elapsed:.0f} s of {item_limit_s():.0f} s)")
     return {"finished": True}
