@@ -218,3 +218,39 @@ def test_both_lowerings_carry_the_declaration_as_the_graph_states_it(name, op_id
     # An op that declares none lowers as before.
     assert not {"knob_outputs", "knobs", "produces"} & set(
         lowering.to_workflow(state).to_dict()["nodes"]["finish"])
+
+
+@pytest.mark.parametrize("name,op_id,edit", [
+    ("livemath/skill_graph", "prepare",
+     {"op": "branch", "fork": "step_fork", "kind": "agent", "sees": ["task"]}),
+    ("livemath/solver", "format_prompt",
+     {"op": "insert", "after": "solve", "kind": "agent", "sees": ["task"]}),
+])
+def test_task_that_gives_nothing_is_refused_naming_the_op_to_declare(name, op_id, edit):
+    """With only an undeclared multi-output op to build it from, "task" is empty: the edit
+    is refused with the op to declare knob_outputs on, and no step that sees nothing is
+    built."""
+    state = _undeclared(_state(name), op_id)
+    with pytest.raises(nn_edits.EditError) as refused:
+        nn_edits.apply(edit, state)
+    reason = str(refused.value)
+    assert '"task" gives nothing before this step' in reason, reason
+    # Only the op whose declaration would help is named (not notes_prompts, whose
+    # outputs carry compare's notes whatever it declares).
+    assert f"Op {op_id} reads a knob and does not declare" in reason, reason
+    assert f"declare knob_outputs ({{output: [knobs]}}) on {op_id}." in reason, reason
+    # Declared, the same edit applies.
+    assert nn_edits.apply(edit, _state(name))
+
+
+def test_task_that_gives_nothing_without_an_undeclared_op_says_to_name_inputs():
+    graph = Graph()
+    graph.add(nn.Node("solve", "agent", prompt_template="Go.", writes=("a.txt",),
+                      produces=("a",), tool_policy="none"))
+    graph.add(nn.Node("check", "agent", prompt_template="{{a}}", writes=("b.txt",),
+                      tool_policy="none"))
+    graph.connect("solve", "check")
+    graph.start = "solve"
+    state = {"graph": graph.to_state(), "knobs": {}}
+    reason = nn_edits.precheck({"op": "rewire", "step": "check", "sees": ["task"]}, state)
+    assert reason and "gives nothing" in reason and "knob_outputs" not in reason, reason

@@ -261,6 +261,35 @@ def _readable(graph: Graph, state: Mapping[str, Any], names: set[tuple[str, str]
             if not (kind == "fact" and name in knobs)}
 
 
+def _no_task(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]]) -> str:
+    """Why ``"task"`` gives nothing before a step, naming each op that does not declare
+    which outputs carry its knobs and whose declaring none of them would give the step
+    something (so all its outputs count as carrying its knobs only for want of it)."""
+    from dataclasses import replace
+
+    from .operators import task_inputs
+
+    values = _knob_values(state)
+    undeclared = []
+    for node in graph.nodes.values():
+        if node.kind != "op" or node.knob_outputs is not None or not node.knobs:
+            continue
+        trial = graph.copy()
+        trial.nodes[node.id] = replace(node, knob_outputs={
+            out: () for out in [*node.writes, *node.produces]})
+        if task_inputs(trial, values) & there:
+            undeclared.append(node.id)
+    why = ("\"task\" gives nothing before this step: no fact or file there is free of a "
+           "step's output and of a knob's text, so the step would see nothing")
+    if undeclared:
+        ops = ", ".join(sorted(undeclared))
+        return (f"{why}. Op {ops} reads a knob and does not declare which of its outputs "
+                "carry it, so every output counts as carrying it; the mode can declare "
+                f"knob_outputs ({{output: [knobs]}}) on {ops}. Until then, name the facts or "
+                "steps the new step sees")
+    return f"{why}; name the facts or steps it sees"
+
+
 #: How many of the names a new step could see a refusal lists.
 SEES_NAMES_SHOWN = 24
 
@@ -280,7 +309,10 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
         chosen = set()
         for name in sees:
             if name == TASK:
-                chosen |= _task_inputs(graph, state) & there
+                task = _task_inputs(graph, state) & there
+                if not task:
+                    raise _Refused(_no_task(graph, state, there))
+                chosen |= task
             elif name in graph.nodes:
                 made = _outputs(graph.nodes[name]) & there
                 if not made:
