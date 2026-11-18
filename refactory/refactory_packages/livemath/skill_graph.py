@@ -219,7 +219,7 @@ def _question(ctx: Any) -> str:
     return str(ctx.facts.get("user_prompt") or "")
 
 
-@nn.by_declaration
+@nn.by_declaration(files=(NOTES["compare"][0],))
 @nn.fills_facts
 def notes_prompts(ctx: Any) -> dict[str, Any]:
     """precision's and hypotheses' framed prompts: the question and compare's notes.
@@ -227,7 +227,7 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
     It reads its one declared file (compare's notes, ``compare_notes.txt`` as built) and
     sets its two declared facts in order (precision's, then hypotheses'), whatever they
     are named (`nn.by_declaration`): an edit may rename them."""
-    reads, facts = _declared(ctx, [NOTES["compare"][0]],
+    reads, facts = _declared(ctx, notes_prompts.declared_files,
                              ["precision_prompt", "hypotheses_prompt"])
     notes = ctx.read_text(reads[0] or NOTES["compare"][0])
     return {
@@ -243,7 +243,7 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
 NO_NOTES = "(This step gave no notes: its session did not answer.)"
 
 
-@nn.by_declaration
+@nn.by_declaration(files=tuple(NOTES[s][0] for s in ("compare", "precision", "hypotheses")))
 @nn.fills_facts
 def decide_prompt(ctx: Any) -> dict[str, Any]:
     """decide's framed prompt: the question and all three steps' notes.
@@ -253,7 +253,7 @@ def decide_prompt(ctx: Any) -> dict[str, Any]:
     precision and hypotheses run as a fork; one that did not answer is shown as
     `NO_NOTES`. With neither, there is nothing to decide from, and the missing notes are
     the error (the item then has no answer, `items.no_answer`)."""
-    reads, facts = _declared(ctx, [NOTES[s][0] for s in ("compare", "precision", "hypotheses")],
+    reads, facts = _declared(ctx, decide_prompt.declared_files,
                              ["decide_prompt"])
     fork = [name for name in reads[1:] if name]
     if not any(ctx.exists(name) for name in fork):

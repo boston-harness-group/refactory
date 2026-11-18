@@ -1130,6 +1130,25 @@ def _by_declaration(node: Node) -> bool:
     return _marked(node, "by_declaration")
 
 
+def _lost_by_role(node: Node, name: str, names: Mapping[tuple[str, str], str]) -> bool:
+    """Whether ``node``'s callable, which finds each role's file among its reads by
+    `nn.declared_files` (a ``files`` given to `nn.by_declaration`), would lose ``name``
+    once its reads are renamed: it reads fewer files than it was built for (an edit took
+    one out), so it matches them by their built names, and the new name is none of them.
+    The check resolves the reads exactly as the run does."""
+    from .executor import declared_files
+    from .resolve import resolve
+
+    try:
+        roles = getattr(resolve(node.call or node.evaluator), "declared_files", None)
+    except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
+        return False
+    if roles is None:
+        return False
+    renamed = [names.get(("file", read), read) for read in node.reads]
+    return names[("file", name)] not in declared_files(renamed, roles)
+
+
 def _names_itself(node: Node, code: str | None, name: str) -> bool:
     """Whether ``node`` may name ``name`` itself (its code says it, or its callable is not
     marked `nn.by_declaration`): renaming its declaration does not reach it."""
@@ -1218,7 +1237,8 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             # One whose names matter (`nn.names_matter`: select matches a label against
             # them) would act differently on a renamed read.
             named += [name for name in sorted(files & {*node.reads, *node.required_reads})
-                      if _names_itself(node, code, name) or _marked(node, "names_matter")]
+                      if _names_itself(node, code, name) or _marked(node, "names_matter")
+                      or _lost_by_role(node, name, names)]
         if named:
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "

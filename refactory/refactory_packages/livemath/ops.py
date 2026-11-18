@@ -81,20 +81,14 @@ def unwrap_claude_backend_prompt(prompt: str) -> str:
 
 def declared_io(ctx: Any, files: Sequence[str], facts: Sequence[str]
               ) -> tuple[list[str | None], list[str]]:
-    """The files this op reads, one per role in ``files`` (the names it was built with),
-    and the facts it sets, one per role in ``facts``, as its node declares them
-    (`nn.by_declaration`), so an edit may rename them: the declared reads in order when
-    the node declares one per role, else each role's built name when declared and None
-    when not (an edit took the step that wrote it out); the declared facts in order. A
-    context with no declaration gets the built names."""
-    reads = list(getattr(ctx, "declared_reads", ()) or ())
+    """The files this op reads, one per role in ``files`` (the names it was built with,
+    `nn.declared_files`: what an edit's check resolves too), and the facts it sets, one
+    per role in ``facts``, as its node declares them (`nn.by_declaration`), so an edit may
+    rename them."""
+    from refactory_dsh.nn import declared_files
+
     made = list(getattr(ctx, "_declared_facts", ()) or ())
-    if not reads:
-        chosen: list[str | None] = list(files)
-    elif len(reads) == len(files):
-        chosen = list(reads)
-    else:
-        chosen = [name if name in reads else None for name in files]
+    chosen = declared_files(getattr(ctx, "declared_reads", ()) or (), files)
     return chosen, made if len(made) == len(facts) else list(facts)
 
 

@@ -140,6 +140,40 @@ def test_select_whose_names_matter_refuses_a_renamed_read():
         reason
 
 
+def test_a_renamed_read_an_op_would_match_by_its_built_name_is_refused():
+    """With precision taken out, decide_prompt reads two of its three notes and finds
+    them by their built names (`nn.declared_files`); hypotheses' notes renamed would be
+    found by none, so the check -- resolving the reads as the run does -- refuses it. A
+    take over decide_prompt does not read under a renamed name is still taken."""
+    state = nn_edits.apply({"op": "remove", "step": "precision"}, _applier().seed_state)
+    assert state["graph"]["nodes"]["decide_prompt"]["reads"] == [
+        "compare_notes.txt", "hypotheses_notes.txt"]
+    for target in ("hypotheses", "compare"):
+        reason = nn_edits.precheck({"op": "insert", "after": "decide", "kind": "code",
+                                    "takes_over": target}, state)
+        assert reason and "'decide_prompt' reads" in reason, (target, reason)
+    assert nn_edits.precheck({"op": "insert", "after": "hypotheses", "kind": "code",
+                              "takes_over": "hypotheses"}, state) is None
+
+
+def test_renames_is_the_edit_layer_s_own_field():
+    """The optimizer is never shown ``renames`` and a proposal that writes it is refused."""
+    from refactory_dsh.nn.node_schema import render_schema
+    from refactory_dsh.optim import Proposal
+    from refactory_dsh.optim.base import proposal_refusal
+
+    assert "renames" not in "\n".join(render_schema())
+    node = {"id": "c", "kind": "op", "call": "refactory_dsh.snippet:run", "produces": ["c"],
+            "code": "def main(inp):\n    return {'facts': {'x': 1}}\n",
+            "renames": {"facts": {"x": "c"}}}
+    refused = proposal_refusal(Proposal(edit={"op": "insert_after", "target": "compare",
+                                              "node": node}))
+    assert refused and refused[0].startswith("E-node") and "'renames'" in refused[0], refused
+    node.pop("renames")
+    assert proposal_refusal(Proposal(edit={"op": "insert_after", "target": "compare",
+                                           "node": node})) == []
+
+
 def test_an_op_working_from_its_declaration_is_renamed_not_refused():
     """The same shape with ops marked `nn.by_declaration` (the fuzz seeds' step) is taken."""
     state = _applier("fuzz_draft_review").seed_state

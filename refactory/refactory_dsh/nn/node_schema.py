@@ -40,14 +40,22 @@ _CONSTRAINED: dict[str, dict[str, Any]] = {
     "required_reads": {"required_reads": ("in.txt",), "reads": ("in.txt",)},
     "knob_outputs": {"knob_outputs": {"out.txt": ("k",)}, "writes": ("out.txt",),
                      "knobs": ("k",)},
-    "renames": {"renames": {"facts": {"made": "out"}}, "produces": ("out",),
-                "call": "refactory_dsh.snippet:run",
-                "code": "def main(inp):\n    return {'facts': {'made': 1}}\n"},
 }
+
+
+#: Node fields only the edit layer sets, never a proposal (`optim.base.proposal_refusal`
+#: refuses them): left out of the schemas the optimizer reads. ``renames`` records what
+#: a code step's run stores its returned outputs under, set by the core operators that
+#: give its outputs new names (`core_ops._output_renames`).
+INTERNAL_FIELDS = frozenset({"renames"})
 
 
 def _fields() -> list[dataclasses.Field]:
     return list(dataclasses.fields(Node))
+
+
+def _public_fields() -> list[dataclasses.Field]:
+    return [field for field in _fields() if field.name not in INTERNAL_FIELDS]
 
 
 def _sample(field: dataclasses.Field) -> dict[str, Any]:
@@ -180,7 +188,7 @@ def node_schema() -> dict[str, dict[str, Any]]:
             continue
         required = [name for name in minimal if name != "gate_kind" or gate_kind != "fn"]
         optional, refused = [], []
-        for field in _fields():
+        for field in _public_fields():
             if field.name in minimal:
                 continue
             (optional if _accepts({**minimal, **_sample(field)}) else refused).append(field.name)
@@ -222,7 +230,7 @@ def render_schema(*, person_gates: bool = True) -> list[str]:
     schema = {name: entry for name, entry in node_schema().items() if name not in hidden}
     rows = []
     applies = field_kinds()
-    for field in _fields():
+    for field in _public_fields():
         if field.name in SAID_ELSEWHERE:
             continue
         kinds = [name for name, entry in schema.items()

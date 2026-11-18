@@ -27,7 +27,7 @@ import traceback as traceback_mod
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 from .graph import PROCEED, Edge, Graph, Node, op_io
 from .loops import loop_edges
@@ -432,15 +432,37 @@ def fills_facts(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-def by_declaration(fn: Callable[..., Any]) -> Callable[..., Any]:
+def by_declaration(fn: Callable[..., Any] | None = None, *,
+                   files: Sequence[str] | None = None) -> Any:
     """Mark an op or gate callable that opens the files its node declares and writes and
     sets its declared outputs, under the declared names (``ctx.declared_reads``, its
     declared writes and facts), never a name of its own choosing. An edit may then rename
     that node's files and outputs (``insert``'s 'takes_over', `core_ops._take_over_plan`);
     a callable without the mark is taken to open or return them by name. (A fact it reads
-    is held to its ``inputs`` either way.)"""
-    fn.by_declaration = True  # type: ignore[attr-defined]
-    return fn
+    is held to its ``inputs`` either way.)
+
+    ``files`` names the files it was built to read, one per role, when it finds each
+    role's file by `declared_files` (so an edit's check resolves them as its run does)."""
+    def mark(target: Callable[..., Any]) -> Callable[..., Any]:
+        target.by_declaration = True  # type: ignore[attr-defined]
+        if files is not None:
+            target.declared_files = tuple(files)  # type: ignore[attr-defined]
+        return target
+    return mark(fn) if fn is not None else mark
+
+
+def declared_files(reads: Sequence[str], files: Sequence[str]) -> list[str | None]:
+    """Each role's file among a node's declared ``reads``, for a callable built to read
+    ``files`` (one per role, `by_declaration`): the reads in order when there is one per
+    role (an edit may have renamed them), else each role's built name when it is among
+    them and None when not (an edit took out the step that wrote it). No reads at all (a
+    context with no declaration): the built names."""
+    reads = list(reads)
+    if not reads:
+        return list(files)
+    if len(reads) == len(files):
+        return list(reads)
+    return [name if name in reads else None for name in files]
 
 
 def names_matter(fn: Callable[..., Any]) -> Callable[..., Any]:

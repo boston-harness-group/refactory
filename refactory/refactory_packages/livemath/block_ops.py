@@ -64,11 +64,11 @@ def self_check_message(question: str, draft: str) -> str:
             f"{SELF_CHECK_INSTRUCTION}\n\n{SELF_CHECK_FORMAT}")
 
 
-@nn.by_declaration
+@nn.by_declaration(files=("draft_answer.txt",))
 def verify_prompt(ctx: Any) -> dict[str, Any]:
     """The verify node's framed prompt: question and the draft (its one declared read,
     ``draft_answer.txt`` as built), as its one declared fact."""
-    reads, facts = _declared(ctx, ["draft_answer.txt"], ["verify_prompt"])
+    reads, facts = _declared(ctx, verify_prompt.declared_files, ["verify_prompt"])
     message = verify_message(_question(ctx), ctx.read_text(reads[0] or "draft_answer.txt"))
     return {facts[0]: claude_backend_prompt(message)}
 
@@ -78,14 +78,14 @@ def verify_prompt(ctx: Any) -> dict[str, Any]:
 NO_ATTEMPT = "(This attempt gave no answer: its session did not answer.)"
 
 
-@nn.by_declaration
+@nn.by_declaration(files=("attempt_a.txt", "attempt_b.txt"))
 def judge_prompt(ctx: Any) -> dict[str, Any]:
     """The judge node's framed prompt: question and both fork branches' answers (its two
     declared reads, in order), as its one declared fact.
 
     A branch that did not answer is shown as `NO_ATTEMPT`; with neither there is nothing
     to judge, and the missing attempts are the error (the item has no answer)."""
-    reads, facts = _declared(ctx, ["attempt_a.txt", "attempt_b.txt"], ["judge_prompt"])
+    reads, facts = _declared(ctx, judge_prompt.declared_files, ["judge_prompt"])
     names = [name for name in reads if name]
     if not any(ctx.exists(name) for name in names):
         raise FileNotFoundError(f"neither attempt was written: {', '.join(names)}")
@@ -95,10 +95,10 @@ def judge_prompt(ctx: Any) -> dict[str, Any]:
     return {facts[0]: claude_backend_prompt(message)}
 
 
-@nn.by_declaration
+@nn.by_declaration(files=("draft_answer.txt",))
 def self_check_prompt(ctx: Any) -> dict[str, Any]:
     """The self-check node's framed prompt: question, choices and the draft (its one
     declared read), as its one declared fact."""
-    reads, facts = _declared(ctx, ["draft_answer.txt"], ["self_check_prompt"])
+    reads, facts = _declared(ctx, self_check_prompt.declared_files, ["self_check_prompt"])
     message = self_check_message(_question(ctx), ctx.read_text(reads[0] or "draft_answer.txt"))
     return {facts[0]: claude_backend_prompt(message)}
