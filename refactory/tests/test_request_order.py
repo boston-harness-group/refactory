@@ -4,7 +4,7 @@ The score, then the pipeline once (the view), what this run has tried, what the 
 found, the edits it may make, the items, and the reference last, before the answer's form.
 Item evidence is chosen rather than cut: a few items in full -- the failures the findings
 cite and passing items beside them, marked as successes -- each step's output fenced with
-its headings demoted, so nothing in an item reads as a section. A text that still has to be
+its heading lines escaped, so nothing in an item reads as a section. A text that still has to be
 cut says so in place ("[… N chars omitted]", never a path: the proposer has no tools), and
 each cut is in the request's own record (``ProposalContext.omissions``) for the run's trace.
 """
@@ -102,9 +102,11 @@ def test_no_heading_from_an_item_reads_as_a_section():
     headings = _sections(text)
     assert not any(h.startswith(("# Summary", "## Option A")) for h in headings), headings
     assert sum(1 for h in headings if h == "## Answer") == 1
-    # Each step output sits in a fence, its headings demoted below the request's levels.
+    # Each step output sits in a fence, its heading lines escaped: no level reads as one
+    # of the request's.
     item = text.split("### Item f3", 1)[1].split("### Item", 1)[0]
-    assert "\n```\n##### Option A\n" in item and "\n#### Summary\n" in item
+    assert "\n```\n\\## Option A\n" in item and "\n\\# Summary\n" in item
+    assert "\n## Option A\n" not in text and "\n#### Option A\n" not in text
 
 
 def test_a_few_items_are_shown_in_full_failures_the_findings_cite_first_then_successes():

@@ -9,8 +9,8 @@ item. Here an item is shown with:
 - the task's input once;
 - for each step, what its prompt took from what is already shown (the input, an earlier
   step's reply) said by name -- ``sees: the input, compare's reply`` -- and only the rest
-  of its prompt (its own instructions), then its full reply, each fenced with headings
-  demoted so nothing in it reads as a section of the request;
+  of its prompt (its own instructions), then its full reply, each fenced with its heading
+  lines escaped (`escape_headings`) so nothing in it reads as a section of the request;
 - and, across the items of one request, an instruction text shown in an earlier item said
   as "same as item X" (`dedup`), so each distinct instruction appears once.
 
@@ -65,13 +65,36 @@ def _fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _demoted(text: str) -> str:
-    return re.sub(r"(?m)^(#{1,3})(?=\s)", lambda m: "#" * (len(m.group(1)) + 3), text)
+#: A line Markdown reads as a heading (`#` to `######` then a space or the line's end,
+#: indented at most three spaces).
+_HEADING = re.compile(r"(?m)^([ \t]{0,3})(#{1,6})(?=[ \t]|$)")
+#: A line Markdown reads as a code fence's start or end.
+_FENCE_LINE = re.compile(r"(?m)^([ \t]{0,3})(`{3,}|~{3,})")
+
+
+def escape_headings(text: str) -> str:
+    """``text`` with each heading line's ``#`` run escaped (``\\##``), so a model's or a
+    skill's own "## Answer" can never read as one of the request's headings, at any level.
+    The words are unchanged; only the marker that would make the line a heading is
+    escaped, as Markdown itself escapes it."""
+    return _HEADING.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
+
+
+def inline_quote(text: Any) -> str:
+    """A model's or a skill's text embedded among the request's own lines, unfenced (a
+    finding, a memory note, a reviewer's example): its heading lines escaped
+    (`escape_headings`) and a line that would open or close a code fence escaped too, so
+    it can neither start a section of the request nor swallow the request's next lines
+    into a fence. The words are unchanged."""
+    text = escape_headings("" if text is None else str(text))
+    return _FENCE_LINE.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
 
 
 def fenced(text: str) -> list[str]:
-    """``text`` (headings demoted) in a code fence longer than any run of backticks in it."""
-    body = _demoted(text)
+    """``text`` in a code fence longer than any run of backticks in it, its heading lines
+    escaped (`escape_headings`): a quoted step output, trace or prompt, whose own headings
+    cannot read as the request's at any level."""
+    body = escape_headings(text)
     fence = _fence(body)
     return [fence, body, fence]
 

@@ -736,10 +736,16 @@ optimizer, at no extra compute (train records only):
   batch), or the edited candidate itself when it has none yet, are compared with their
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
-  rises and drops among the rest. Every changed item is shown whole, parent beside
-  child: the parent's trajectory, then the child's verdict and each step's reply, a reply
-  the same as the parent's said so and the input not repeated; size is never a reason to
-  leave one out (only a single text over `ITEM_TEXT_MAX` is cut, and said). It also
+  rises and drops among the rest. Every changed item is named, with each side's answer
+  and the steps whose reply changed, are new or are gone (`_moved_line`). Up to
+  `EDIT_ITEMS_WHOLE` (4) of them show how the edit moved them (`_moved_block`): each
+  side's verdict, the steps with the same reply named, and each changed, new or gone
+  step's reply whole, the parent's beside the child's. They are picked one per child and
+  per kind in turn (broken, fixed, score dropped, score rose), each that fits
+  `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget with the ones before it:
+  items are chosen, never cut (only a single text over `ITEM_TEXT_MAX` is, and said). A
+  trace "Trajectories" shows whole, or a reply this section already showed (a sibling's
+  same parent), is named by where it is, never repeated. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -2014,7 +2020,7 @@ cited and same-kind ones first), or, with no success findings, one per kind of f
 shown, each marked as a success. Without findings, one failure per kind of failure (its
 outcome and declared kind) and a success beside each kind. Each
 item gives its verdict, what was expected and what it gave, the grader's reason, then its
-input and each step's output, each fenced with its headings demoted, so nothing in an item
+input and each step's output, each fenced with its heading lines escaped, so nothing in an item
 reads as a section of the request. Only a single text too large to send whole
 (`ITEM_TEXT_MAX`, 60k characters) is cut, and it says so in place,
 "[… N chars omitted]", never a path (the proposer has no tools); each cut (item, step,
@@ -2029,7 +2035,7 @@ grew with the square of its steps (61% of an S4 analyst batch was repeated text)
 input appears once per item; a step says by name what its prompt took from what is already
 shown (`Sees: the input, compare's reply`) and only the part of its prompt the request does
 not show elsewhere (`Also in its prompt`: a reason a judge sent it back with, say), then its
-full reply, each fenced with headings demoted. A step's instructions are its settings,
+full reply, each fenced with its heading lines escaped. A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
 analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
 settings as shown, clipping and table cells included, `analysts.shown_settled`). Across the
@@ -2043,8 +2049,13 @@ by cause", which a full item points to. The repeat guard reads inside fences too
 step's instructions in its settings and again in an item fail it. Two renderings of the same
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
-"What the last edit changed" shows the parent's item whole and the child's verdict and
-replies beside it, a reply the child kept said as "same as the parent's". Generic: lines of
+"What the last edit changed" shows only the steps an edit moved, a reply the child kept
+named, and names a trace shown elsewhere by where it is. Every quoted text -- a step's
+output, a trace, a finding, the memory note, a reviewer's note, a knob text an analyst
+reads -- has its heading lines escaped (`evidence.escape_headings`: `\## Answer`), so no
+heading in it reads as the request's at any level; a text quoted unfenced has its fence
+lines escaped too (`evidence.inline_quote`). The proposer's knob texts stay byte-exact
+in their fences, since a patch quotes them. Generic: lines of
 text are compared, with no knowledge of the task or the pipeline.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per

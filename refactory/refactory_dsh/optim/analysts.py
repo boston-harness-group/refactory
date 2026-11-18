@@ -791,9 +791,12 @@ def finding_line(rank: int, entry: Mapping[str, Any], cap: int | None = None) ->
     if roles:
         action = f" -- steps: {roles}{action}"
     quotes = [f'"{_cut(q, cap)}"' for q in entry.get("evidence") or ()]
-    return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'), cap)} "
-            f"-- where: {_where_text(entry.get('where') or {}, cap)}{action}"
-            + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
+    # The analysts' texts keep their line breaks: each is quoted so a heading or a fence
+    # line in one (a proposed prompt's "## Rules") cannot read as the request's own.
+    return evidence.inline_quote(
+        f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'), cap)} "
+        f"-- where: {_where_text(entry.get('where') or {}, cap)}{action}"
+        + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
 
 
 #: How `steps_text` and the step map name each role of `STEP_ROLES`.

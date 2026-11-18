@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh.optim import base, ProposalContext, analysts, memory
+from refactory_dsh.optim import base, ProposalContext, analysts, evidence, memory
 from refactory_dsh.optim.base import Candidate
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
 from refactory_dsh.outerloop import ValidationGate
@@ -1337,11 +1337,13 @@ FULL = {"source": "failure", "finding": "F" * 900, "change": LONG_CHANGE, "prese
 
 def test_a_finding_is_shown_whole_with_its_line_breaks_quotes_and_both_actions():
     section = "\n".join(analysts.section_lines({"findings": [FULL], "batches": []}))
-    assert "F" * 900 in section and LONG_CHANGE in section, "no 600-character cut"
-    assert "## Rules\n- line one\n- line two\n" in section, "the change keeps its layout"
+    quoted = evidence.inline_quote(LONG_CHANGE)
+    assert "F" * 900 in section and quoted in section, "no 600-character cut"
+    assert "\\## Rules\n- line one\n- line two\n" in section, "the change keeps its layout"
+    assert "\n## Rules" not in section, "its heading is quoted, never one of the request's"
     assert "S" * 400 in section
     assert all(f"QUOTE-{k} " + "q" * 300 in section for k in range(6)), "every quote, whole"
-    assert f"-- change: {LONG_CHANGE} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
+    assert f"-- change: {quoted} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
     success = {**FULL, "source": "success"}
     assert "-- keep: KEEP-TOO -- change: " in analysts.finding_line(1, success)
     assert "[cut:" not in section

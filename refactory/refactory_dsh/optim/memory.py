@@ -64,6 +64,7 @@ import random
 from typing import Any, Mapping, Sequence
 
 from . import evidence
+from .evidence import inline_quote
 from .analysts import ANALYST_ROOM, TEXT_FLOOR, fit_item, item_cap, item_text
 from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table, fmt_score
 
@@ -972,7 +973,7 @@ def context_block(memory: Mapping[str, Any] | None) -> str:
             "This is optimizer-side memory distilled from earlier epochs of this run. Use it "
             "to improve how you analyse, merge and rank findings. Prefer it when the current "
             "evidence is ambiguous, but do not force it if the current traces clearly "
-            f"contradict it.{_stale_text(memory)}\n\n{text}\n\n")
+            f"contradict it.{_stale_text(memory)}\n\n{inline_quote(text)}\n\n")
 
 
 def _stale_text(memory: Mapping[str, Any] | None) -> str:
@@ -1010,7 +1011,7 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
         lines.append("The note was written from this tally of the epoch's tries, so the note "
                      "can be weighed against it:")
     return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
-            *([text] if text else [])]
+            *([inline_quote(text)] if text else [])]
 
 
 # ── the journal and the report ──────────────────────────────────────────────
