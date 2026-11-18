@@ -6194,13 +6194,14 @@ class Loop(OuterLoop):
                                          if not note else {})}, note)
 
     def _objective(self) -> str:
-        """What the score measures (`optim.base.objective_text`), from this run's
-        settings, as every optimizer request says it."""
-        from refactory_dsh.optim.base import objective_text
+        """What the score measures and the compute policy
+        (`optim.base.objective_with_policy`), from this run's settings, as every
+        optimizer request says it."""
+        from refactory_dsh.optim.base import objective_with_policy
 
-        return objective_text(float(self.config.parsimony),
-                              item_mean=bool(self._score_is_item_mean),
-                              gated=bool(self.selection_mode()))
+        return objective_with_policy(float(self.config.parsimony),
+                                     item_mean=bool(self._score_is_item_mean),
+                                     gated=bool(self.selection_mode()))
 
     def _tried_in_round(self, round_: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Every change the optimizer proposed in epoch ``round_``'s proposal round, for

@@ -717,9 +717,10 @@ def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
     from test_operator_fit import _rows, _section
 
     rows = _rows(_section(_mode("livemath/solver").state_dict()))
-    assert "insert" not in rows["solve"][1].split(", "), rows["solve"]
-    assert "'takes_over': solve" in rows["solve"][2], rows["solve"]
-    assert base.OPERATOR_FIT_CHARS == 7700
+    # Insert alone is refused there; with the take-over its refusal names, it applies.
+    assert "insert" not in rows["solve"][1].split("; ")[0].split(", "), rows["solve"]
+    assert "+ takes_over solve: insert" in rows["solve"][1], rows["solve"]
+    assert base.OPERATOR_FIT_CHARS == 8000
 
 
 def test_a_map_run_an_edit_removes_is_refused_not_a_crash():

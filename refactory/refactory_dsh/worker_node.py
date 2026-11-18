@@ -147,7 +147,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # delivery bracket opens, so the contract can name it, and collected into the node's
     # outputs before the bracket closes, so delivery checks what the workspace produced.
     from refactory_dsh import workspace as workspaces
-    from refactory_dsh.agent_delivery import with_feedback
+    from refactory_dsh.agent_delivery import previous_output, with_feedback
     from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
 
@@ -177,7 +177,9 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     if tool_policy == "none":
         _capture_final = True
     output, receipt = deliver(
-        workdir, node, prompt=with_feedback(render(prompt, context), feedback),
+        workdir, node, prompt=with_feedback(render(prompt, context), feedback, previous_output(
+            workdir, spec['writes'], sees_run_dir=tool_policy != 'none' and not spec.get('workspace'))
+            if feedback else ''),
         writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
         capture_final=_capture_final, rule=spec.get('retry'),
         timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),

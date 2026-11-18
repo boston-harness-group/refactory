@@ -297,17 +297,21 @@ def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
     return "\n".join([*view, "", *_settings_lines(ctx.knobs, text_chars, exact=False)]).rstrip()
 
 
-def _changes_text(ctx: Any) -> str:
+def _changes_text(ctx: Any, kind: str = "failure") -> str:
     """The changes the optimizer can make, in the proposer's own lines from the same
-    source (`base.operation_lines`), so a finding names only what the proposer is shown."""
-    from .base import operation_lines
+    source (`base.operation_lines`), so a finding names only what the proposer is shown,
+    and, for a failure analyst (who recommends changes), which operators apply at each
+    step (`base.applicability_lines`)."""
+    from .base import applicability_lines, operation_lines
 
     if not ctx.catalogue:
         return "(not listed)"
-    return "\n".join(operation_lines(
+    return "\n".join([*operation_lines(
         ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
         knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-        step_routes=getattr(ctx, "step_routes", None)))
+        step_routes=getattr(ctx, "step_routes", None)),
+        *(applicability_lines(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
+                              getattr(ctx, "edit_check", None)) if kind == "failure" else ())])
 
 
 def _memory_text(ctx: Any) -> str:
@@ -319,13 +323,13 @@ def _memory_text(ctx: Any) -> str:
 
 
 def _objective_text(ctx: Any) -> str:
-    """"What the score measures" (`base.objective_text`), from the run's settings the
-    request carries; empty when they are not known."""
-    from .base import objective_text
+    """"What the score measures" and the compute policy (`base.objective_with_policy`),
+    from the run's settings the request carries; empty when they are not known."""
+    from .base import objective_with_policy
 
-    text = objective_text(getattr(ctx, "parsimony", None),
-                          item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
-                          gated=bool(getattr(ctx, "selection", "")))
+    text = objective_with_policy(getattr(ctx, "parsimony", None),
+                                 item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
+                                 gated=bool(getattr(ctx, "selection", "")))
     return f"## What the score measures\n{text}\n\n" if text else ""
 
 
@@ -373,6 +377,8 @@ these items keep passing.
 - Say where each pattern comes from: a step (node), an edge, a setting, or the
   pipeline's structure.
 - Patterns must generalise beyond specific items.
+- A pattern says what produced these passes, not a reason to avoid adding or changing
+  steps: "preserve" names what a change must keep, never that the structure stay as is.
 
 You reply with JSON only."""
 
@@ -509,7 +515,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
     return ((f"# Analysing {label} items -- batch {index} of {total}\n\n"
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
-             f"## The changes the optimizer can make\n{_changes_text(ctx)}\n\n"
+             f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}\n\n"
              f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              f"Each item in full: {evidence.TRACE_FORM}.\n\n"),

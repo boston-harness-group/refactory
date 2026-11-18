@@ -497,3 +497,14 @@ def test_a_listing_stays_within_its_text_budget_however_many_steps():
                for t in (n["prompt_template"], n["system_prompt_template"]))
     row = base.compact_edits([split])
     assert len(row) <= len(json.dumps(bare)) + base.HISTORY_EDIT_CHARS + 25 * 20
+
+
+def test_the_bundle_example_never_shows_more_proposals_than_asked_for():
+    """Asked for at most one update, each example answer carries one proposal."""
+    import json as _json
+
+    for asked in (1, 2):
+        text = base.bundle_instructions(4, edits.catalogue("broad"), proposals=asked)
+        shown = [_json.loads(line) for line in text.splitlines() if line.startswith('{"proposals"')]
+        assert shown and all(len(answer["proposals"]) <= asked for answer in shown), asked
+        assert sum(len(answer["proposals"]) for answer in shown) == 2, "both kinds still shown"

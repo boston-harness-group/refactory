@@ -846,7 +846,7 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
         assert "wire what the branches make into the step after the join" in text
-        assert '"step": "compare"' in text  # an example built from this graph's ids
+        assert '"steps": ["compare"]' in text  # an example built from this graph's ids
         assert "compose your own" in text
         # The core operators are listed once, in the single op list, not here again.
         assert "## Structural operators" not in text

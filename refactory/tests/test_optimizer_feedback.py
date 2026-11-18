@@ -1287,3 +1287,19 @@ def test_a_review_that_is_not_valid_json_says_so_with_where(tmp_path):
     (failed,) = [t for t in trace if t["kind"] == "step_review"]
     assert "not valid JSON: Expecting ',' delimiter" in failed["error"], failed["error"]
     assert "unknown verdict" not in failed["error"]
+
+
+def test_a_step_review_says_the_run_s_compute_policy_once(tmp_path):
+    """The step review weighs what an added step contributes: it is told the run's compute
+    policy (`base.compute_policy`), the same sentence the proposer reads, once."""
+    from refactory_dsh.optim import base as base_mod
+
+    for parsimony in (0.0, 0.02):
+        client = _Answering({"proposals": []}, REVIEW)
+        optimizer = AutoresearchOptimizer(client)
+        ctx = ProposalContext(mode_name="m", added_steps=_added(), parsimony=parsimony,
+                              score_is_item_mean=True)
+        optimizer.propose(ctx, 1, [])
+        policy = base_mod.compute_policy(parsimony, item_mean=True)
+        assert policy and client.reviews[0].count(policy) == 1, parsimony
+        assert client.proposals[0].count(policy) == 1

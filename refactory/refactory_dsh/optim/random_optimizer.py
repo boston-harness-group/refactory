@@ -421,6 +421,7 @@ class AutoresearchOptimizer(Optimizer):
         from pathlib import Path
 
         from . import analysts, feedback
+        from .base import compute_policy
 
         cache: dict[str, dict[str, Any]] = self.__dict__.setdefault("_review_cache", {})
         store = (Path(self.trace_path).parent / "step_reviews"
@@ -430,7 +431,9 @@ class AutoresearchOptimizer(Optimizer):
 
         def review(index: int) -> tuple[int, dict[str, Any]]:
             entry = ctx.added_steps[index]
-            prompt = feedback.review_prompt(entry, ctx.mode_name)
+            policy = compute_policy(ctx.parsimony, item_mean=ctx.score_is_item_mean,
+                                    gated=bool(ctx.selection))
+            prompt = feedback.review_prompt(entry, ctx.mode_name, policy=policy)
             key = feedback.review_key(prompt)
             if key in cache:
                 return index, {"review": cache[key]}
@@ -474,7 +477,7 @@ class AutoresearchOptimizer(Optimizer):
                 # Once, at half the length the provider refused, as an analyst is retried;
                 # not at all when the request cannot be made shorter.
                 smaller = feedback.review_prompt(entry, ctx.mode_name,
-                                                 room=max(1, len(prompt) // 2))
+                                                 room=max(1, len(prompt) // 2), policy=policy)
                 if len(smaller) < len(prompt):
                     found, error, _overflow = attempt(smaller, True)
                 else:

@@ -570,7 +570,7 @@ STEP_REVIEW_SYSTEM = ("You review one step of an AI pipeline against what it was
 
 
 def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
-                  room: int = STEP_REVIEW_ROOM) -> str:
+                  room: int = STEP_REVIEW_ROOM, policy: str = "") -> str:
     """The review call for one added step, within ``room`` characters with the system
     prompt (``STEP_REVIEW_SYSTEM``) counted: its input as sent, its output and the next
     step's output on up to ``STEP_REVIEW_ITEMS`` train items, and domain-free
@@ -578,7 +578,10 @@ def review_prompt(entry: Mapping[str, Any], mode_name: str = "",
     texts share the rest (`fit_samples`). When the instructions leave the items less
     than ``STEP_REVIEW_FLOOR`` characters each, the instructions are cut too (head and
     tail, the cut said), so a smaller ``room`` makes a shorter prompt. A decision step
-    (``entry["decision"]``) is asked about instead (`decision_prompt`)."""
+    (``entry["decision"]``) is asked about instead (`decision_prompt`). ``policy`` is the
+    run's compute policy (`base.compute_policy`), said after the step's instructions."""
+    if policy:
+        entry = {**entry, "policy": policy}
     build = decision_prompt if entry.get("decision") else _review_text
     samples = list(entry.get("samples") or ())
     blank = [{**sample, "input": "", "output": "", "next_output": ""} for sample in samples]
@@ -624,6 +627,7 @@ def _review_text(entry: Mapping[str, Any], mode_name: str,
         "item(s), is what the step was given, what it wrote, and what the next step that "
         "reads its output wrote.",
         *_instructions_block(entry),
+        *([str(entry["policy"])] if entry.get("policy") else []),
         "Compare the step's output with what it was given: does it contain facts, checks, "
         "computations or alternatives its inputs lacked? Then look at the next step's "
         "output: does it use what this step wrote? Judge the step's own contribution, not "
@@ -700,6 +704,7 @@ def decision_prompt(entry: Mapping[str, Any], mode_name: str,
         "writes: it makes the pipeline's decision, so repeating the chosen answer is its "
         f"job. Below, on {len(blocks)} train item(s), is what it was given and what it wrote.",
         *_instructions_block(entry),
+        *([str(entry["policy"])] if entry.get("policy") else []),
         "For each item, say what its inputs recommended (the answer or decision the earlier "
         "steps' notes in its prompt point to; \"none\" when they disagree or recommend "
         "nothing) and what the step decided, and whether the two are the same. Judge the "
