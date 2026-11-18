@@ -578,6 +578,18 @@ def fork_branch_b(ctx: Any) -> dict[str, Any]:
     return {}
 
 
+def fork_branch_c(ctx: Any) -> dict[str, Any]:
+    """Branch c: one more op branch beside a and b, writing ``c_out.txt``."""
+    ctx.write_text("c_out.txt", "c")
+    return {}
+
+
+def fork_branch_d(ctx: Any) -> dict[str, Any]:
+    """Branch d: one more op branch beside a and b, writing ``d_out.txt``."""
+    ctx.write_text("d_out.txt", "d")
+    return {}
+
+
 #: How long :func:`fork_branch_b_slow_on_1` spends on item ``1``, in seconds.
 SLOW_ON_1_S = 1.5
 
@@ -826,3 +838,12 @@ def die_if_flagged(ctx: Any) -> None:
     if any((folder / DIE_FLAG).exists() and (folder / DIE_FLAG).read_text().strip() == level
            for folder in here.parents):
         os.kill(os.getpid(), signal.SIGKILL)
+
+
+class ForkBranchTaskTen(ForkBranchTask):
+    """`ForkBranchTask` over ten items, ``0`` to ``9``."""
+
+    name = "fork_branch_task_ten"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        return [TaskInstance(id=str(i), metadata={}) for i in range(10)]

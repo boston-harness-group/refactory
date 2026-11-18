@@ -524,6 +524,7 @@ def validate(
     # V17 nothing outside the grader side consumes grader-derived data.
     issues.extend(grader_issues(graph, knob_values, grader_side=grader_side, graders=graders,
                                 resolve_tasks=resolve_calls))
+    issues.extend(feedback_channel_issues(graph, grader_side=grader_side))
 
     # V7 knobs: consumed ones exist, and declared ones are consumed.
     consumers = graph.knob_consumers()
@@ -1409,6 +1410,46 @@ def grader_issues(graph: Graph, knob_values: Mapping[str, Any], *,
                 "V17", f"consumes grader-derived {names} (the grade, or something made from "
                 "it); only the data nodes and the nodes the mode declares protected or grading "
                 "may read what grading produced", node=node_id))
+    return issues
+
+
+def feedback_channel_issues(graph: Graph, *, grader_side: Iterable[str] = ()) -> list[Issue]:
+    """V17's one exception, held to its shape: a train-feedback node
+    (`refactory_dsh.feedback`) is a protected op inside a data pass that reads and writes
+    nothing and produces exactly one fact. Its fact is not grader-derived (it consumes
+    nothing that is), so the rest of the pass may read it; the op fills it only on a
+    train evaluation with gold feedback on. A channel an edit adds is never protected,
+    so it is refused here. Protection is judged only when the caller gives the mode's
+    grader side, as the outer loop does for every edit (`Mode.grader_scope`): a graph
+    validated alone has no protected nodes to judge against."""
+    from refactory_dsh.feedback import CALL
+
+    side = set(grader_side)
+    in_pass: set[str] = set()
+    for node in graph.nodes.values():
+        if node.kind == "data":
+            in_pass |= graph.data_body(node.id)
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.call != CALL:
+            continue
+        wrong = []
+        if node.kind != "op":
+            wrong.append(f"is a {node.kind}, not an op")
+        # Known limit, kept: with no grader side given (a graph validated on its own,
+        # outside the outer loop) an unprotected channel is not reported here.
+        if side and node_id not in side:
+            wrong.append("is not protected")
+        if node_id not in in_pass:
+            wrong.append("is outside every data pass")
+        if node.reads or node.required_reads or node.writes or node.inputs or node.knobs:
+            wrong.append("declares reads, writes, inputs or knobs")
+        if len(node.produces) != 1:
+            wrong.append(f"produces {len(node.produces)} facts, not one")
+        if wrong:
+            issues.append(Issue("V17", "a train-feedback node (the one way grader-derived data "
+                                       "reaches a pass) " + "; ".join(wrong), node=node_id))
     return issues
 
 

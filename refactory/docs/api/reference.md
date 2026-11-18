@@ -186,6 +186,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
 | function | `fallback_gate_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
+| function | `feedback_channel_issues` | `(graph: 'Graph', *, grader_side: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 | function | `filled_knobs` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'tuple[str, ...]'` |
 | function | `fills_facts` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'bool \| None'` |
 | function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
@@ -223,6 +224,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
 - **`fallback_gate_issues`** — V5 for a fallback gate (`graph.FALLBACK_GATE_CALL`): it reads whether the one step
+- **`feedback_channel_issues`** — V17's one exception, held to its shape: a train-feedback node
 - **`filled_knobs`** — The knobs whose slots an op or gate fills: every knob it reads that is not bound
 - **`fills_facts`** — Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
 - **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
@@ -315,7 +317,7 @@ The two extension points: what proposes, and what runs the search.
 | kind | name | signature |
 |---|---|---|
 | class | `BudgetStopped` | `(message: 'str', *, reason: 'str' = '') -> 'None'` |
-| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None) -> None` |
+| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None, gold_feedback: 'bool' = False) -> None` |
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |
 | class | `OuterLoopError` | `` |
@@ -1110,12 +1112,15 @@ The per-item half of a data node, from the command line.
 | function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
-| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True) -> 'Path'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True, task_ref: 'str' = '') -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
+| function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
+| function | `update_record_file` | `(path: 'Path', change: 'Callable[[Any], Any]', empty: 'Callable[[], Any]') -> 'Any'` |
 | function | `write_source` | `(workdir: 'Path', *, source_path: 'str', source_format: 'str' = 'directory', node_id: 'str' = '*') -> 'Path'` |
+| function | `write_whole` | `(path: 'Path', text: 'str') -> 'None'` |
 
 - **`AllItemsFailedError`** — Raised when every item in a data pass failed (the all-fail rule).
 - **`ItemsError`** — A data node cannot be iterated: named, because the node id alone is not a reason.
@@ -1145,8 +1150,11 @@ The per-item half of a data node, from the command line.
 - **`pass_dir_of`** — Where item *index* of data node *node_id* runs: ``passes/<node>/<id>_<index>``.
 - **`pass_read_through`** — The run-level files a pass reads through: everything its own nodes read.
 - **`prepare_pass_dir`** — Create and return the pass directory for one item.
-- **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+- **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar, under
+- **`record_lock`** — Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
 - **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
+- **`update_record_file`** — Read, change and rewrite the JSON record file ``path`` under an exclusive lock
 - **`write_source`** — Point a data node of this run at a source, before the graph starts.
+- **`write_whole`** — Replace ``path`` with ``text`` whole: write a temporary file in the same folder,
