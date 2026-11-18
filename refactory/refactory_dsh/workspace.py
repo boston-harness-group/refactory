@@ -52,7 +52,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from refactory_dsh import git_exe
 from refactory_dsh.emitted_paths import unprintable_refusal
