@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any
 
 import openpyxl
@@ -149,12 +150,60 @@ def recalculated(pred_path: str) -> str | None:
     return res
 
 
+#: How long a check that LibreOffice works (`soffice_works`) is trusted, in seconds.
+REFERENCE_TTL_S = 300.0
+_reference: dict[str, tuple[bool, float]] = {}
+
+
+def _convert(binary: str, src: str, out: str, timeout_s: float) -> str | None:
+    try:
+        subprocess.run([binary, f"-env:UserInstallation=file://{_profile()}", "--headless", "--calc",
+                        "--convert-to", "xlsx:Calc MS Excel 2007 XML", "--outdir", out, src],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout_s,
+                       check=False)
+    except subprocess.TimeoutExpired:
+        pass
+    res = os.path.join(out, os.path.basename(src))
+    return res if os.path.exists(res) else None
+
+
+def soffice_works() -> bool:
+    """Whether this LibreOffice recalculates a known-good tiny workbook (``=1+1``): when
+    it cannot, the grader is broken (`RecalcFailed`); when it can, a prediction it could
+    not recalculate is that prediction's own fault. Checked again after
+    `REFERENCE_TTL_S`, per binary."""
+    binary = soffice()
+    if binary is None:
+        return False
+    with _lock:
+        held = _reference.get(binary)
+        if held is not None and time.monotonic() - held[1] < REFERENCE_TTL_S:
+            return held[0]
+    work = tempfile.mkdtemp(prefix="reference-", dir=_ensure_root())
+    src = os.path.join(work, "reference.xlsx")
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "=1+1"
+    wb.save(src)
+    ok = _convert(binary, src, os.path.join(work, "out"), 60) is not None
+    shutil.rmtree(work, ignore_errors=True)
+    with _lock:
+        _reference[binary] = (ok, time.monotonic())
+    return ok
+
+
+def _ensure_root() -> str:
+    os.makedirs(_ROOT, exist_ok=True)
+    return _ROOT
+
+
 # lo_grader.py:118-128
 def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_position: str,
              *, choice: str | None = None) -> dict[str, Any]:
     """The grade: cached first; under ``recalc``, a failing prediction whose answer
-    cells hold formulas is graded again on its recalculated copy. Raises `RecalcFailed`
-    when that copy cannot be made: recorded as a harness incident, not a wrong answer."""
+    cells hold formulas is graded again on its recalculated copy. When that copy cannot
+    be made, LibreOffice is tried on a known-good workbook (`soffice_works`): if it works
+    there, the prediction is at fault and keeps its cached (failing) grade, with
+    ``recalc_failed``; if not, the grader is broken: `RecalcFailed`, a harness incident."""
     r = port.evaluate_cached(pred_path, gold_path, instruction_type, answer_position)
     if grader(choice) == "cached":
         return r
@@ -162,6 +211,12 @@ def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_posit
         return r
     rc = recalculated(pred_path)
     if not rc:
+        if soffice_works():
+            # LibreOffice recalculates a known-good workbook, so it is this one it could
+            # not: the model's file, graded as its cached values say (failing).
+            return {**r, "recalc_failed": True,
+                    "reason": f"LibreOffice could not recalculate this workbook; graded on its "
+                              f"cached values: {str(r.get('reason', ''))[:200]}"}
         raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}LibreOffice could not recalculate {pred_path} "
                            f"(cached grade: {str(r.get('reason', ''))[:200]})")
     r2 = port.evaluate_cached(rc, gold_path, instruction_type, answer_position)

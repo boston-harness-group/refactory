@@ -45,7 +45,7 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 import structlog
 
 from refactory_dsh.optim import Candidate, Optimizer, Proposal, Rejection
-from refactory_dsh.optim.base import RunStopped, proposal_refusal, summarise_reasons
+from refactory_dsh.optim.base import RunStopped, fmt_score, proposal_refusal, summarise_reasons
 
 log = structlog.get_logger()
 
@@ -561,6 +561,19 @@ class Run:
         """
         return self.part_scores(candidate, "val")
 
+    def shared_scores(self, candidate_ids: Sequence[str], part: str = "val", *,
+                      latest: bool = False) -> tuple[dict[str, float], list[str]] | None:
+        """The candidates' ``part`` scores over the items all were scored on, with the
+        items a harness incident left out of any (`Loop.shared_scores`); ``None`` when
+        their scores already cover the same items (or cannot be put on them, said once
+        as a warning). Scores only: no records or item ids beyond those left out."""
+        return self._loop.shared_scores(candidate_ids, part, latest=latest)  # noqa: SLF001
+
+    def part_incidents(self, candidate: Candidate, part: str = "val") -> list[str]:
+        """The items a harness incident left out of the candidate's first ``part``
+        rollout's score (`Loop.part_incidents`); empty when none."""
+        return self._loop.part_incidents(candidate.id, part)  # noqa: SLF001
+
     def part_scores(self, candidate: Candidate, part: str) -> list[dict[str, Any]]:
         """Score-only view of a candidate's ``'val'`` or ``'test'`` occasions, oldest first.
 
@@ -1046,11 +1059,14 @@ class ValidationGate:
         """
         incumbent = self.current_score if against is None else self.score(run, against)[0]
         score, cached = self.score(run, candidate)
-        accepted = score > incumbent
+        incumbent_id = self.current_id if against is None else against.id
+        shared = self.shared(run, [candidate.id, incumbent_id])
+        accepted = (shared[candidate.id] > shared[incumbent_id] if shared is not None
+                    else score > incumbent)
         best = False
         if accepted:
             self.current_id, self.current_score = candidate.id, score
-            best = self.offer_best(candidate.id, score)
+            best = self.offer_best(candidate.id, score, run=run)
         return Verdict(accepted=accepted, score=score, cached=cached, incumbent=incumbent, best=best)
 
     def judge_round(self, run: Run, candidates: Sequence[Candidate]) -> tuple[list[Candidate], list[Candidate]]:
@@ -1075,22 +1091,49 @@ class ValidationGate:
             except OuterLoopError as exc:
                 error = exc
                 break
+        # On the items every one of them and the incumbent was scored on, when a harness
+        # incident left one out of any (`shared`): the bar and the ranking alike.
+        shared = self.shared(run, [self.current_id, *(c.id for c, _ in scored)])
+
+        def compared(candidate: Candidate, score: float) -> float:
+            return shared[candidate.id] if shared is not None else score
+
+        bar = shared[self.current_id] if shared is not None else incumbent  # type: ignore[index]
         better = [(index, candidate, score) for index, (candidate, score) in enumerate(scored)
-                  if score > incumbent]
+                  if compared(candidate, score) > bar]
         winner = None
         if better:
             def train(candidate: Candidate) -> float:
                 return float(candidate.score) if candidate.score is not None else float("-inf")
 
             _index, winner, score = max(
-                better, key=lambda entry: (entry[2], train(entry[1]), -entry[0]))
+                better, key=lambda entry: (compared(entry[1], entry[2]), train(entry[1]), -entry[0]))
             self.current_id, self.current_score = winner.id, score
-            self.offer_best(winner.id, score)
+            self.offer_best(winner.id, score, run=run)
         accepted = [winner] if winner is not None else []
         rejected = [candidate for candidate, _score in scored if candidate is not winner]
         if error is not None:
             raise RoundStopped(accepted, rejected, error)
         return accepted, rejected
+
+    @staticmethod
+    def shared(run: Run, ids: Sequence[str | None]) -> dict[str, float] | None:
+        """The candidates' val scores on the items all were scored on, when a harness
+        incident left an item out of any one's (`Run.shared_scores`), and the log says
+        so; ``None`` -- compare the scores as they are -- when none did, an id is missing,
+        or the run keeps no item scores (a stand-in run). An item the harness kept from
+        one candidate is never another's win or loss."""
+        if any(i is None for i in ids) or len(set(ids)) < 2:
+            return None
+        compare = getattr(run, "shared_scores", None)
+        found = compare([str(i) for i in ids], "val") if callable(compare) else None
+        if found is None:
+            return None
+        scores, left_out = found
+        run.log("val gate: compared on the items all were scored on ("
+                + ", ".join(f"{cid} {fmt_score(v)}" for cid, v in scores.items())
+                + f"); left out, a harness incident: {', '.join(left_out)}")
+        return scores
 
     def carry(self, candidate: Candidate, *, remember: bool = False) -> None:
         """Make ``candidate`` current at the current score, without a rollout.
@@ -1102,9 +1145,14 @@ class ValidationGate:
         if remember:
             self.cache[candidate.id] = self.current_score
 
-    def offer_best(self, candidate_id: str, score: float) -> bool:
-        """Make the candidate the best on val if ``score`` beats the best's."""
-        if score > self.best_score:
+    def offer_best(self, candidate_id: str, score: float, *, run: Run | None = None) -> bool:
+        """Make the candidate the best on val if ``score`` beats the best's: with ``run``,
+        on the items both were scored on when a harness incident left one out of either
+        (`shared`)."""
+        shared = (self.shared(run, [candidate_id, self.best_id])
+                  if run is not None and self.best_id is not None else None)
+        if (shared[candidate_id] > shared[self.best_id] if shared is not None  # type: ignore[index]
+                else score > self.best_score):
             self.best_id, self.best_score = candidate_id, score
             return True
         return False
@@ -1214,7 +1262,7 @@ class FinalEvaluation:
                     run.evaluate(final, part="val", seed=seed)
                     score = self._latest_score(run, final, "val")
                     result["final_selection"] = score
-                    promoted = score is not None and gate.offer_best(final.id, score)
+                    promoted = score is not None and gate.offer_best(final.id, score, run=run)
                     self.record(
                         "final_selection_eval", action="promoted" if promoted else "evaluated",
                         score=score, best_score=gate.best_score,
@@ -1271,11 +1319,23 @@ class FinalEvaluation:
             run.log(f"{self.label}: post-training evaluation stopped: {error}")
             save()
             return
+        held = {"best_test": gate.best_id, "final_test": gate.current_id}
         for delta, phase in (("best_test_delta", "best_test"), ("final_test_delta", "final_test")):
-            result[delta] = (
-                result[phase] - (result.get("baseline_test") or 0)
-                if result.get(phase) is not None else None
-            )
+            raw = (result[phase] - (result.get("baseline_test") or 0)
+                   if result.get(phase) is not None else None)
+            # The delta on the items both were scored on when a harness incident left one
+            # out of either test rollout (`Run.shared_scores`, latest rollouts); the raw
+            # delta beside it.
+            shared = (run.shared_scores([held[phase], seed_id], "test", latest=True)
+                      if raw is not None and held[phase] != seed_id
+                      and callable(getattr(run, "shared_scores", None)) else None)
+            if shared is not None:
+                scores, left_out = shared
+                result[delta] = scores[held[phase]] - scores[seed_id]
+                result[f"{delta}_raw"] = raw
+                result[f"{delta}_left_out"] = left_out
+            else:
+                result[delta] = raw
         result["status"] = "done"
         finished("final_done")
 

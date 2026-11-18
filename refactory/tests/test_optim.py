@@ -479,7 +479,7 @@ def test_the_model_client_reports_a_timeout_instead_of_hanging(monkeypatch):
 
 def test_a_node_session_runs_under_the_harness_backstop_not_a_wall(monkeypatch):
     """A dispatched node's session has no wall: its only deadline is the harness backstop,
-    absolute across attempts, and reaching it is a harness incident, not a timeout.
+    absolute across attempts, and reaching it is the model's own failure, not a timeout.
     A plain completion with no node keeps the per-completion deadline.
     """
     import subprocess

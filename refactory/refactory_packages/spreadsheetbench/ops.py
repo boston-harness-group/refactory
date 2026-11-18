@@ -14,9 +14,8 @@ and the one limit is the harness backstop (`item_limit_s`, ``REFACTORY_MODEL_BAC
 SkillOpt's check is kept against it: `prepare` records the item's start, `turn_gate`
 starts no turn with 10 s or less of it left (codegen_agent.py:704-711), and `finalize`
 records an item past it, which the Task's ``verify`` reports as
-`refactory_dsh.model.HarnessBackstop`: recorded as a harness incident (``error_kind``
-``harness_incident``), not as a wrong answer (it still scores 0 until a later change
-reruns such items and leaves them out of the score).
+`refactory_dsh.model.HarnessBackstop`: the model's own failure (``error_kind``
+``backstop``), scored 0 like a wrong answer.
 """
 from __future__ import annotations
 

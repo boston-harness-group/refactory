@@ -741,7 +741,7 @@ def test_skillopt_view_success_and_error_records():
         ("timeout", "item '202601:41' of 'data' timed out after 2000.0s"),
         ("RuntimeError", "solve: CompletionTimeout: model completion timed out after 600s "
                          "of inactivity"),
-        ("harness_incident", "solve: HarnessBackstop: model session hit the harness backstop"),
+        ("backstop", "solve: HarnessBackstop: model session hit the harness backstop"),
     ):
         errored = dict(_VIEW_RECORD, exchanges=[], error_text=error_text, error_kind=error_kind)
         result = rollout_result(errored, {"skill": "S"})

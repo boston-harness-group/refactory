@@ -1244,7 +1244,7 @@ def test_a_final_candidate_that_is_the_seed_reuses_the_seeds_test_score():
             pass
 
     gate = SimpleNamespace(current_id="s", best_id="b", best_score=0.6,
-                           offer_best=lambda cid, score: False)
+                           offer_best=lambda cid, score, **_kw: False)
     final = FinalEvaluation()
     final.run(FakeRun(), gate, seed=7, save=lambda: None)  # type: ignore[arg-type]
     assert sorted(rolled) == ["b", "s"], "the seed once, the best once"

@@ -19,6 +19,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Callable, Collection, Mapping, Sequence
 
+from refactory_dsh.optim.base import harness_timeout
+
 #: How a reply is read as an item's answer: ``(reply, metadata) -> bool | None``.
 ReplyJudge = Callable[[str, Mapping[str, Any]], "bool | None"]
 
@@ -137,7 +139,10 @@ def edit_effect(parent_records: Sequence[Mapping[str, Any]] | None,
     if not new_steps:
         return {}
     parent, child = _by_item(parent_records), _by_item(child_records)
-    shared = [i for i in child if i in parent]
+    # An item the harness timed out or stopped on either side moved for no reason of the
+    # edit's (`base.harness_timeout`), as `base.edit_change` leaves it out.
+    shared = [i for i in child if i in parent
+              and not harness_timeout(parent[i]) and not harness_timeout(child[i])]
     broken = [i for i in shared if parent[i].get("passed") and not child[i].get("passed")]
     fixed = [i for i in shared if not parent[i].get("passed") and child[i].get("passed")]
     read = _Reader(judge)

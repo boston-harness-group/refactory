@@ -57,7 +57,7 @@ DECISIONS: dict[str, str] = {
     "step routes": "approved 2026-11-17: a new agent step may set its own model, effort "
                    "and output cap (`route`), each a value one of the run's routes already "
                    "uses (`workers.StepRoutes`), never one it runs on already; failing fast "
-                   "earns nothing, as parsimony is 0 and a time-out is a harness incident, "
+                   "earns nothing, as parsimony is 0 and a time-out is a harness timeout, "
                    "not a scored failure. A step's role stays its neighbour's",
     "deferred": "left for later on 2026-11-16: timeout_s, retry and on_exhausted as knobs "
                 "(they mostly trade cost and reliability, invite failing fast to game the "

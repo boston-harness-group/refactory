@@ -1249,18 +1249,24 @@ describe('abandonPass primitive (Correction 1)', () => {
 
 describe('spine error_text and stderr tail (Ask 5)', () => {
   it.each([
-    ['a stderr tail', 'work failed for item a', 'work: work failed for item a\nwork failed for item a'],
+    // A command's own stderr, with no harness marker: marked unmarked, so nothing it
+    // printed is read as the harness's typed line (`items.UNMARKED`).
+    ['a stderr tail', 'work failed for item a', 'work: unmarked: work failed for item a\nwork failed for item a'],
     // The node runner's shape (refactory_dsh.run.main): log lines, the error, the marker,
     // then its own account. The first line names the node and the account's error; the
     // stderr tail follows unchanged.
     ['the node runner failure text',
       'loading notes.txt\nSnippetError: verdict gate check: no answer\nits last line: x\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\nits last line: x\n',
       'work: SnippetError: verdict gate check: no answer\nloading notes.txt\n--- refactory failure ---\nSnippetError: verdict gate check: no answer\nits last line: x'],
-    // A dispatched agent's worker: the error line, not the log line after it; a timed-out
-    // model call is a CompletionTimeout, as the walker names it.
+    // A dispatched agent's worker prints its typed line after its marker, last: the
+    // first line names that (`worker_node.main`). Without the marker (a worker that died
+    // first), its last `worker:` line comes back unmarked.
     ['a worker timeout',
-      'worker: model completion timed out after 60s of inactivity\nsession closed\n',
+      'worker: model completion timed out after 60s of inactivity\n--- refactory worker error ---\nCompletionTimeout: model completion timed out after 60s of inactivity\n',
       'work: CompletionTimeout: model completion timed out after 60s of inactivity\nworker: model'],
+    ['a worker with no marker',
+      'worker: model completion timed out after 60s of inactivity\nsession closed\n',
+      'work: unmarked: model completion timed out after 60s of inactivity\nworker: model'],
   ])('spine error_text names the failed node and its error: %s', async (_label, stderrText, expected) => {
     // Ask 5: when a subgraph node's stderr says "work failed for item a",
     // the end --failed command receives that text, after the node's id.

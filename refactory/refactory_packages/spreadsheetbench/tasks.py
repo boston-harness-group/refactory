@@ -33,6 +33,9 @@ from typing import Any
 from refactory_dsh.task import Task, TaskError, TaskInstance, VerifyResult
 
 from . import recalc
+# SandboxFailed, like RecalcFailed, must be known as a harness incident wherever a record
+# is classified (`model.HARNESS_INCIDENT_CLASSES`), the spine's item command included.
+from . import sandbox  # noqa: F401
 from . import skillopt_port as port
 
 MANIFEST = Path(__file__).resolve().parent / "manifest.json"
@@ -181,7 +184,7 @@ class SpreadsheetBenchTask(Task):
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
         if final.get("backstop"):
-            # The harness's fault, not the method's: recorded as a harness incident.
+            # The model kept going for the whole limit: its own failure (``backstop``).
             from refactory_dsh.model import HARNESS_BACKSTOP_TEXT, HarnessBackstop
 
             raise HarnessBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "

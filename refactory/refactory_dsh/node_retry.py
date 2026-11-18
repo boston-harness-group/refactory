@@ -128,16 +128,17 @@ def own_timeout(error: BaseException) -> bool:
 
 def missing_cause(error: BaseException) -> str | None:
     """Why a session's failure left its step without an answer, by the error's type, when
-    it ended for time: ``harness_incident`` (`model.HarnessBackstop`), ``declared_timeout``
-    (`model.DeclaredTimeout`), ``step_timeout`` (the step's own limit: an op's own
-    `subprocess.TimeoutExpired`, a code step's `snippet.SnippetTimeout` -- its fault, never
-    a harness timeout) or ``timeout`` (`failure_kind`); else None."""
+    it ended for time: ``backstop`` (`model.HarnessBackstop`: the model still writing, its
+    own failure), ``declared_timeout`` (`model.DeclaredTimeout`), ``step_timeout`` (the
+    step's own limit: an op's own `subprocess.TimeoutExpired`, a code step's
+    `snippet.SnippetTimeout` -- its fault, never a harness timeout) or ``timeout``
+    (`failure_kind`); else None."""
     from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
 
     if own_timeout(error):
         return "step_timeout"
     if isinstance(error, HarnessBackstop):
-        return "harness_incident"
+        return "backstop"
     if isinstance(error, DeclaredTimeout):
         return "declared_timeout"
     return "timeout" if failure_kind(error) == "timeout" else None
@@ -145,7 +146,8 @@ def missing_cause(error: BaseException) -> str | None:
 
 #: The causes and error kinds that are a step running out of time or the harness failing,
 #: never the step failing: what `missing_cause` and `items.error_kind` say for one. A
-#: fallback never answers one (`falls_back_on`).
+#: fallback never answers one (`falls_back_on`). Not ``backstop``: a session still writing
+#: at the backstop is the model's own failure, like the output limit.
 TIMEOUT_KINDS = frozenset({"timeout", "declared_timeout", "harness_incident", "step_timeout"})
 
 
@@ -153,7 +155,7 @@ def falls_back_on(error: BaseException) -> bool:
     """Whether ``error`` is a genuine failure of a step with a fallback (`nn.graph.Graph.
     falls_back`), which leaves it missing so its fallback answers. Never a failure of time
     or of the harness, on either runtime: any timeout (`items.error_kind` in
-    `TIMEOUT_KINDS`: a model call the client ended, the backstop, a declared wall, a code
+    `TIMEOUT_KINDS`: a model call the client ended, a declared wall, a code
     step's `snippet.WALL_S` (`SnippetTimeout`), an unstarted sandbox (`SandboxUnavailable`),
     and a spent retry carrying one of them as its cause; or a `failure_kind` timeout such
     as an op's own `subprocess.TimeoutExpired`), an op past its per-op timeout
@@ -163,7 +165,8 @@ def falls_back_on(error: BaseException) -> bool:
     (``setup``: configuration, the fallback would be refused alike), nor the run's budget
     or a build-loop stop, which end the run as before. A code step past its own wall
     (`SnippetTimeout`) is its code's fault but still time, so it never falls back either.
-    The output limit and a prompt too long are the model's or the step's own failure, so
+    The output limit, a session still writing at the backstop (`model.HarnessBackstop`,
+    ``backstop``) and a prompt too long are the model's or the step's own failure, so
     they do."""
     from refactory_dsh.budgets import BudgetExhausted
     from refactory_dsh.items import error_kind, interrupted_cause

@@ -2024,7 +2024,7 @@ def test_late_answer_times_the_call_out_and_is_withheld(tmp_path):
         "error_kind": "RuntimeError", "error_text": f"solve: {type(event).__name__}: {event}",
     }) == f"task-timeout-{DEFAULT_BACKSTOP_S + 60}s"
     # A spine record says it by its error_kind alone: the backstop and a declared wall too.
-    for kind in ("harness_incident", "declared_timeout"):
+    for kind in ("backstop", "declared_timeout"):
         assert error_fail_reason({"error_kind": kind, "error_text": "solve: model session ..."}) \
             == f"task-timeout-{DEFAULT_BACKSTOP_S + 60}s"
     assert matcher.lookup("s", "p", attempts=5) == "second"

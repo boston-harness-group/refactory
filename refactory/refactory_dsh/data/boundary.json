@@ -18,6 +18,7 @@
     "refactory_dsh.graph_control",
     "refactory_dsh.harness_check",
     "refactory_dsh.history",
+    "refactory_dsh.incidents",
     "refactory_dsh.install_guard",
     "refactory_dsh.invocations",
     "refactory_dsh.ir",
