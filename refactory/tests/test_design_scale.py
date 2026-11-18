@@ -1303,7 +1303,10 @@ def test_sizer_prompt_investigates_the_checkout(tmp_path):
                    "code read within the time, answer `unknown`.",
                    "Test files, test functions and docs are neither touched functions nor added items",
                    "claim to check against the code, never a footprint",
-                   "is a cross-cutting sign"):
+                   "is a cross-cutting sign only when this change forces a change in that "
+                   "caller's code or its tests",
+                   "a caller that keeps working as written is not one",
+                   "a caller search too broad to finish is: list each sign"):
         assert clause in prompt, clause
     for mark in ("research director", "strategy director", "pitfalls researcher",
                  "Write intent-audit.json as", "Write the design document",

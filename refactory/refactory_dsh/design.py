@@ -404,8 +404,11 @@ SIZER_PROMPT = (
     "- Cite every claim as path:line from code you read.\n\n"
     "## Footprint\n"
     + FOOTPRINT_DEFINITIONS
-    + "A caller in another module that relies on the changed behaviour, or a caller "
-    "search too broad to finish, is a cross-cutting sign: list it in `cross_cutting`.\n\n"
+    + "A caller in another module is a cross-cutting sign only when this change forces a "
+    "change in that caller's code or its tests (its signature, the return shape it reads, "
+    "or a result it asserts on), and its entry says which; a caller that keeps working as "
+    "written is not one, and a caller search too broad to finish is: list each sign in "
+    "`cross_cutting`.\n\n"
     "## Your answer\n"
     "Write `" + SIZING + "` in the run directory as exactly one JSON array holding one "
     "object, and nothing else:\n"
