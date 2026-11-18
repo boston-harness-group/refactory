@@ -215,3 +215,45 @@ def test_a_repair_loss_is_said_beside_the_refusals():
     text = ProposalContext(rejections=["E-knob: no knob 'x'"], repair_losses=[loss]).render()
     refusals = text[text.index("## Why your last proposals were refused"):].split("\n## ", 1)[0]
     assert "`c7` is your refused proposal" in refusals and text.count("`c7` is your") == 1
+
+
+# ── the memory request ─────────────────────────────────────────────────────
+
+
+JUDGE_TEXT = ("You are a careful reviewer of the solver's answer. Check whether the answer "
+              "falls into a maximalist trap, picking the strongest-sounding option without "
+              "checking that each of its claims holds, and send it back with the reason.")
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_the_memory_request_says_a_change_s_text_once(rejected):
+    """A change the memory request shows whole in its changes section ("What changed
+    between them", or "What the rejected change changed") is pointed to from "What was
+    tried this epoch", so the judge's text is said once."""
+    from refactory_dsh.optim import memory
+    from refactory_dsh.tools.request_sizes import repeated_sentences
+
+    edit = {"op": "loop", "step": "solve", "judge": "agent", "max_iterations": 1,
+            "text": JUDGE_TEXT}
+    lineage = {"common": "p", "prev": [], "curr": [{"id": "c", "parent": "p", "edits": [edit],
+                                                     "rationale": "R"}]}
+    section = memory.changes_heading(memory.REJECTED_NOUN if rejected else None)
+    entry = {"id": "c", "parent": "p", "round": 1, "kind": "loop/gate", "structural": True,
+             "edits": memory.edits_text([edit]), "score": 0.5, "exit_ok": True,
+             "evaluated": True, "fixed": 0, "broken": 2, "shared": 4, "gate": "rejected",
+             "change": "loop step=solve", "change_key": "k"}
+    tried = memory.tried_lines([entry], [], round_=1, current="p", gated=True,
+                               tally=memory.change_tally_lines([entry], gated=True),
+                               shown_in={"c": section})
+    rec = {"id": "i", "passed": True, "score": 1.0, "prediction": "A", "exchanges": []}
+    entries, _ = memory.pairs([rec], [{**rec, "passed": False, "score": 0.0}], ["i"])
+    curr = {"id": "c", "pipeline": "C", "rollout": "R",
+            **({"rejected": {"child": "c", "changed": 1, "shown": 1, "broken": 1, "fixed": 0,
+                             "shared": 1, "others": []}} if rejected else {})}
+    text, _ = memory.build_prompt(epoch=2, mode_name="m",
+                                  prev={"id": "p", "pipeline": "P", "rollout": "R"}, curr=curr,
+                                  changes=memory.changes_lines(lineage), previous_note="",
+                                  entries=entries, tried=tried)
+    assert text.count(JUDGE_TEXT) == 1
+    assert f'its edits are under "{section}" above' in text
+    assert not [s for s in repeated_sentences(text) if "maximalist" in s or "reviewer" in s]

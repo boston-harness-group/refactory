@@ -1387,3 +1387,21 @@ def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
     assert "Never from one design, however large its effect." in system
     assert f"- {_tried('s1_s45_loop.json')[0]['change']} (loop/gate): 1 try" in text
     assert "- loop/gate:" not in text
+
+
+def test_without_the_gate_a_change_not_leading_is_compared_but_never_called_rejected(
+        tmp_path, monkeypatch):
+    """Ungated, the train leader is current: 7 scores below 5, so nothing replaced 5. The
+    pass sets 5 against 7 on the items 7 moved -- called the change not kept, since no gate
+    rejected it -- and makes no fresh rollout."""
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []], val_gate=False)
+    (first,) = _events(loop, "optimizer_memory")
+    by_id = {c.id: c for c in loop.population}
+    assert (_level(by_id[first["prev"]]), _level(by_id[first["curr"]])) == (5, 7)
+    assert first["rejected"]["noun"] == memory.NOT_KEPT_NOUN and first["evaluated"] == 0
+    assert not _events(loop, "memory_rollout")
+    prompt = proposer.asked[0]["prompt"]
+    assert "Rejected change" not in prompt and "rejected change" not in prompt
+    assert f"Change not kept `{first['curr']}`" in prompt
+    assert "## The change not kept's pipeline" in prompt
+    assert "without a validation gate the current is the train leader" in prompt

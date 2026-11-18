@@ -6217,7 +6217,8 @@ class Loop(OuterLoop):
         at = "its rollout in the round the change was evaluated in (one train seed for both)"
         return (child, shown, self._with_meta(_by_item(parent_records)),
                 self._with_meta(_by_item(child_records)), at, at,
-                {"child": child.id, "changed": len(changed), "shown": len(shown),
+                {"child": child.id, "noun": memory.REJECTED_NOUN if self.config.val_gate
+                 else memory.NOT_KEPT_NOUN, "changed": len(changed), "shown": len(shown),
                  "broken": len(moved["broken"]), "fixed": len(moved["fixed"]),
                  "shared": moved["shared"], "others": [c for c in others if c != child.id]})
 
@@ -6253,9 +6254,16 @@ class Loop(OuterLoop):
         tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
                                           spread=self._rescore_spread(prev.id), gated=gated)
         self._pending_tally = tally
+        lineage = self._lineage_edits(prev, current)
+        # The candidates whose edits the changes section shows whole (`memory.changes_lines`).
+        section = (memory.changes_heading(rejected.get("noun") if rejected else None)
+                   if not same else None)
+        shown_in = ({str(step.get("id")): section
+                     for step in [*(lineage.get("prev") or ()), *(lineage.get("curr") or ())]}
+                    if section else {})
         tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1,
                                          current=prev.id if rejected else current.id,
-                                         gated=gated, tally=tally)
+                                         gated=gated, tally=tally, shown_in=shown_in)
         objective = self._objective()
 
         # The request: one call when it fits the room whole, else split into comparison
@@ -6265,7 +6273,7 @@ class Loop(OuterLoop):
             prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
             curr={"id": current.id, "pipeline": view[current.id], "rollout": sides[1][3],
                   **({"rejected": dict(rejected)} if rejected else {})},
-            changes=memory.changes_lines(self._lineage_edits(prev, current)),
+            changes=memory.changes_lines(lineage),
             previous_note=previous, entries=entries, tried=tried_lines, objective=objective)
 
         outcome: dict[str, Any] = {}

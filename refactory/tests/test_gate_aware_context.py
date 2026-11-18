@@ -433,7 +433,8 @@ def test_the_latest_rejected_candidate_is_shown_in_full_whatever_its_net():
             *({**entry(f"n{i}", 0, 0, "v", gate="kept"), "epoch": 2} for i in range(2))]
     cut = ProposalContext(reasoning=vast).render()
     cut = cut[cut.index("### Full edits of vast"):].split("\n## ", 1)[0]
-    assert "its middle is cut, the cut said" in cut and "characters omitted" in cut
+    assert "have their middle cut, each cut said in it; none is left out" in cut
+    assert "characters omitted" in cut
     assert len(cut) < REJECTED_EDITS_CHARS + 1200
     none = [entry("y", None, None, "w")]
     assert "### Full edits of" not in ProposalContext(reasoning=none).render()
@@ -456,12 +457,26 @@ def test_the_latest_rejected_change_says_what_went_wrong_in_it():
             *({"id": f"n{i}", "epoch": 2, "gate": "kept", "score": 0.5, "fixed": 0,
                "broken": 0, "edit": [{"op": "set_knob", "name": "k", "value": "v"}]}
               for i in range(2))]
-    text = ProposalContext(reasoning=rows).render()
+    text = ProposalContext(reasoning=rows, added_steps=[{"candidate": "loopy", "step": "j"}]
+                           ).render()
     block = text[text.index("### Full edits of loopy"):].split("\n## ", 1)[0]
     assert "CHECK-CRITERIA" in block
     assert "What went wrong in it (how it moved the items it changed):" in block
     assert "gate solve_check gave" in block and "first reply was already right" in block
     assert 'reviewed under "Did the added steps contribute?"' in block
+    # Pointed to only when that section reviews this candidate's step.
+    other = ProposalContext(reasoning=rows, added_steps=[{"candidate": "else", "step": "j"}]
+                            ).render()
+    other = other[other.index("### Full edits of loopy"):].split("\n## ", 1)[0]
+    assert "Did the added steps contribute?" not in other
+    # A text-only rejected change says what there is: its counts, and that no step-level
+    # account is available.
+    knob = [{**rows[0], "id": "words", "effect": {}, "added": False,
+             "edit": [{"op": "set_knob", "name": "k", "value": "NEW"}]}, *rows[1:]]
+    words = ProposalContext(reasoning=knob).render()
+    words = words[words.index("### Full edits of words"):].split("\n## ", 1)[0]
+    assert ("What went wrong in it: it broke 7 train item(s) and fixed 1 against its parent; "
+            "no step-by-step account") in words
 
 
 #: A child whose structural edit made items fail mechanically (LiveMath B-s42, round 2):

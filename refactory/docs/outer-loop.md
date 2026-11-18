@@ -176,9 +176,11 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   reasoning" shows the full edits of the latest rejected candidate with train counts,
   whatever its net: every text whole (a new step's instructions, a judge's criteria, a
   knob's changed lines), within 20000 characters (`REJECTED_EDITS_CHARS`; past it the
-  middle is cut and said), then what went wrong in it -- how a structural change moved
-  the items it changed (`optim.edit_effect`) -- and, when it added a step, a pointer to
-  that step's review.
+  longest edits have their middle cut, each cut said in it, and no edit is left out),
+  then what went wrong in it -- how a structural change moved the items it changed
+  (`optim.edit_effect`), or for a change that added no step its fixed/broken counts and
+  that no step-level account is available -- and, only when "Did the added steps
+  contribute?" reviews a step of that candidate, a pointer there.
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
@@ -412,8 +414,10 @@ sections at once; this is the default loop's equivalent.
   -- the tuning that makes an existing step use the new one, whatever its lines say --
   and edges between it and those neighbours. Every other edit counts as one more (a
   text tune of a step that does not read the new step is its own change), and two
-  structural edits are two changes. Only one-hop neighbours and the new step's readers
-  qualify, so one change cannot sprawl over the pipeline. However they count, a proposal
+  structural edits are two changes. The readers' tuning folds only into an edit that
+  adds steps (a reorder or rewire folds none), and only for a knob that every step
+  binding it reads the new steps or is new (a shared style or token setting counts on
+  its own). Only one-hop neighbours and the new step's readers qualify, so one change cannot sprawl over the pipeline. However they count, a proposal
   carries at most 12 edits (`MAX_RAW_EDITS_PER_PROPOSAL`, three times the cap), a guard
   against runaway bundles. A limit of one (a caller's `max_edits=1`) still means single
   edits. The request's counting rule (`COUNTING_RULE`) gives the example of a new branch
@@ -906,7 +910,8 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   step` (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
   `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
   several is filed under its most specific structure. Results are grouped by the
-  change itself, never by kind: two loops whose judges check different things are two
+  change itself (a hash of its full edits; the label is display only, and where two
+  changes' labels collide the tally line says where their texts differ), never by kind: two loops whose judges check different things are two
   changes, and the section says a row's result is that change's, not its kind's. A
   tally line comes first for each change tried more than once or only in rows older
   than the table (tried, kept, best train fixed−broken; within 3000 characters, the
@@ -1162,7 +1167,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   it that fixed or broke the most train items (the newest on a tie), on the items that
   child changed (broken first, at most 20), both sides' records from the child's
   evaluation round (one train seed), so the note can say why the tried change failed;
-  the request labels the sides `Incumbent` and `Rejected change`, shows both pipelines
+  the request labels the sides `Incumbent` and `Rejected change` (without the gate, where
+  the current is only the train leader, `Change not kept`, and it says why), shows both pipelines
   and what the rejected change changed, says how many it fixed and broke and that the
   items it left alone are not shown, and names the other rejected changes that moved
   items (under "What was tried this epoch", their traces not shown). The journal's pass
@@ -1196,8 +1202,10 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   newest first -- each candidate evaluated, with its kind as a label (structural or
   knob, and the change kind of the run ledger), what the change was (its edits whole on
   one line: the text it gave a new step or judge -- its instructions, its criteria --
-  and a knob's changed lines against its parent, the free text shortened to fit 1500
-  characters, the wiring whole), where each step it added sits and what it sends back
+  and a knob's changed lines against the value before it, within 1500 characters: past
+  that no edit is dropped -- each keeps its op and names and the longest are cut to one
+  length, the cut said as `[cut: N edits / M chars]` -- and a candidate whose edits the
+  changes section shows whole points there instead of repeating them), where each step it added sits and what it sends back
   (the steps feeding it, each labelled way out such as `reloop -> solve`, its limit),
   its train score, its train fixed/broken counts against its parent and the
   gate's word (with the integrity verdict when the judge is on), then each proposal
@@ -1983,10 +1991,10 @@ validation items is 0.059 of the validation mean, so a single try is inside the 
 either way. The memory call now gets, per kind tried, the tries and each one's train
 fixed/broken counts and the gate's word, with the noise they sit in: one validation item's
 share (`1/|val|`, from the split) and, when the run re-scored the parent, how far its train
-score moved (then `memory.kind_tally_lines`). The counts are said there once; the tried entries
-keep their edits and score. `MEMORY_SYSTEM` says a kind tried once inside that noise is no
-evidence against the kind: the note says what went wrong in that try, from how it moved its
-items, never "avoid" it. The untested-kinds rule stands. The proposer sees the same tally,
+score moved (`memory.kind_tally_lines` then; now `memory.change_tally_lines`, per change,
+below). The counts are said there once; the tried entries keep their edits and score.
+`MEMORY_SYSTEM` then said a kind tried once inside that noise is no evidence against the
+kind (now: lessons per change, below). The proposer sees the same tally,
 kept with the note it was written from, beside the note (`memory.request_lines`).
 
 **Each change tried, not each kind.** The noise rule did not cover a clear single

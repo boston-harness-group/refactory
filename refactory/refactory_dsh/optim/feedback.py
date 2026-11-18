@@ -282,6 +282,70 @@ def change_label(edits: Any, before: Mapping[str, Any] | None = None,
     return _clip(_fold("; ".join(parts) or "(none)"), chars)
 
 
+#: How much of a change's folded text `change_identity` keeps, to tell two changes whose
+#: labels collide apart where they differ.
+CHANGE_TEXT_KEPT = 4000
+
+
+def change_identity(edits: Any, before: Mapping[str, Any] | None = None) -> dict[str, str]:
+    """What tells one change from another: ``key``, a hash of its full edits (what the
+    tallies group by; the label is display only), and ``text``, all the text it set,
+    folded (a knob's changed lines against ``before``), within ``CHANGE_TEXT_KEPT``, so
+    two changes whose labels collide can be shown where they differ (`distinguish`)."""
+    import hashlib
+
+    before = before or {}
+    listed = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    key = hashlib.sha256(json.dumps(listed, sort_keys=True, default=str).encode()).hexdigest()
+    texts = []
+    for edit in listed:
+        if not isinstance(edit, Mapping):
+            continue
+        old, new = before.get(str(edit.get("name"))), edit.get("value")
+        if edit.get("op") == "set_knob" and isinstance(old, str) and isinstance(new, str):
+            texts.append(" ".join(_changed_lines(old, new)))
+        else:
+            texts.append(_all_text(edit))
+    return {"key": key[:16], "text": _fold(" | ".join(t for t in texts if t))[:CHANGE_TEXT_KEPT]}
+
+
+def _all_text(value: Any) -> str:
+    """Every free text in an edit or the steps it carries, in order."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(filter(None, map(_all_text, value)))
+    if not isinstance(value, Mapping):
+        return ""
+    return " ".join(filter(None, (_all_text(value.get(key))
+                                  for key in (*_TEXT_FIELDS, *_STEP_FIELDS))))
+
+
+def _changed_lines(old: str, new: str) -> list[str]:
+    import difflib
+
+    return [line[1:] for line in list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(), lineterm="", n=0))[2:]
+        if line[:1] in "+-" and line[1:].strip()]
+
+
+def distinguish(groups: Sequence[tuple[str, str]]) -> list[str]:
+    """For each ``(label, text)`` group, a suffix telling it from every other group with
+    the same label: ``""`` when its label is unique, else where its text first differs
+    from theirs (``differs at: "…"``, ``CHANGE_TEXT_HEAD`` characters)."""
+    out = []
+    for index, (label, text) in enumerate(groups):
+        others = [t for i, (l, t) in enumerate(groups) if i != index and l == label]
+        if not others:
+            out.append("")
+            continue
+        at = min(next((n for n, (a, b) in enumerate(zip(text, other)) if a != b),
+                      min(len(text), len(other))) for other in others)
+        piece = text[at:at + CHANGE_TEXT_HEAD]
+        out.append(f' -- differs at: "…{piece}…"' if piece else " -- (its text ends there)")
+    return out
+
+
 #: The most new steps `placement_lines` says, per change.
 PLACEMENT_STEPS = 6
 
@@ -350,6 +414,8 @@ def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | Non
         "id": candidate.id, "round": (record or {}).get("epoch"),
         "parent": candidate.parent, "kind": change_kind(edits, candidate.state),
         "change": change_label(edits, knob_values(getattr(parent, "state", None))),
+        **{f"change_{k}": v for k, v in change_identity(
+            edits, knob_values(getattr(parent, "state", None))).items()},
         "touched": touched(edits),
         "fixed": len(change["fixed"]) if shared else None,
         "broken": len(change["broken"]) if shared else None,
@@ -439,6 +505,22 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     return [*lines, table]
 
 
+def group_changes(entries: Sequence[Mapping[str, Any]], chars: int = CHANGE_LABEL_CHARS
+                  ) -> list[tuple[str, list[Mapping[str, Any]]]]:
+    """Entries grouped by the change itself (``change_key``: a hash of its full edits;
+    an entry without one by its label), in first-seen order, each with its display cell
+    (`change_cell`) -- and, where two different changes share a cell, where their texts
+    differ (`distinguish`), so they never read as one."""
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault(str(entry.get("change_key") or change_cell(entry, chars)),
+                          []).append(entry)
+    cells = [(change_cell(group[0], chars), str(group[0].get("change_text") or ""))
+             for group in groups.values()]
+    return [(cell + suffix, group) for (cell, _t), suffix, group
+            in zip(cells, distinguish(cells), groups.values())]
+
+
 def _change_tally(entries: Sequence[Mapping[str, Any]], shown: Sequence[Mapping[str, Any]],
                   gated: bool) -> list[str]:
     """A line per change (by its label) tried more than once, or with a try only in the
@@ -446,10 +528,8 @@ def _change_tally(entries: Sequence[Mapping[str, Any]], shown: Sequence[Mapping[
     and in the table is said there only. Within ``LEDGER_TALLY_CHARS``, the rest
     counted."""
     in_table = {id(entry) for entry in shown}
-    groups: dict[str, list[Mapping[str, Any]]] = {}
-    for entry in entries:
-        groups.setdefault(change_cell(entry, LEDGER_CHANGE_CHARS), []).append(entry)
-    listed = [(cell, group) for cell, group in groups.items()
+    groups = group_changes(entries, LEDGER_CHANGE_CHARS)
+    listed = [(cell, group) for cell, group in groups
               if len(group) > 1 or any(id(e) not in in_table for e in group)]
     if not listed:
         return []

@@ -74,7 +74,10 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     six = by_level[6].id
     (line,) = [l for l in tried.splitlines() if l.startswith(f"- `{six}`")]
     assert f"from `{by_level[7].id}`" in line and "knob change: prompt/setting" in line
-    assert '{"op": "set_knob", "name": "level", "value": 6}' in line
+    # Its edits are whole in the changes section; the tried line points there, said once.
+    assert 'its edits are under "What the rejected change changed" above' in line
+    assert prompt.count('{"op": "set_knob", "name": "level", "value": 6}') == 1
+    assert '"value": 6' in _section(prompt, "## What the rejected change changed")
     assert f"train score {by_level[6].score}" in line
     # Its counts and the gate's word are in the per-change tally, said once there.
     (tally,) = [l for l in tried.splitlines() if f"`{six}`" in l and l is not line
@@ -207,7 +210,7 @@ def test_edits_say_what_each_change_was_its_text_included():
     assert diff.startswith("set_knob a: 9 -> 13 chars; diff: ") and "+TWO" in diff
     assert "\n" not in text and "\n" not in diff, "one line: nothing in it reads as a heading"
     assert memory.edits_text({UNREADABLE_PROPOSAL: "x"}) == "(no readable edit)"
-    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 9000}])) == \
+    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 9000}])) <= \
         memory.TRIED_EDITS_CHARS
 
 
@@ -298,3 +301,21 @@ def test_the_memory_request_is_told_the_objective_and_the_run_keeps_the_cost(
     _, proposer2 = _run(tmp_path / "b", monkeypatch, [[(5, 7)], []], parsimony=0.05)
     assert "size cost of 0.05 per node" in proposer2.asked[0]["prompt"]
     assert "| cost |" in proposer2.contexts[-1].render()
+
+
+def test_no_edit_is_dropped_and_the_cut_is_said():
+    """Past the bound every edit keeps its head (op and what it names) and the cut is said
+    in edits and characters; successive set_knobs of one knob are diffed against the
+    value in between."""
+    many = [{"op": "set_knob", "name": f"k{i}", "value": "V" * 400} for i in range(12)]
+    text = memory.edits_text(many)
+    assert all(f"k{i}" in text for i in range(12)), "no edit vanishes"
+    assert "[cut: 12 edits /" in text and "chars]" in text
+    wide = {"op": "insert_after", "target": "solve",
+            "node": {"id": "check", "kind": "agent", "reads": [f"f{i}.txt" for i in range(400)]}}
+    late = memory.edits_text([wide, {"op": "set_knob", "name": "LATE", "value": "x"}])
+    assert "LATE" in late and "[cut: 1 edits /" in late
+    twice = memory.edits_text([{"op": "set_knob", "name": "a", "value": "one\ntwo"},
+                               {"op": "set_knob", "name": "a", "value": "one\ntwo\nthree"}],
+                              {"a": "one"})
+    assert twice.count("+two") == 1 and "+three" in twice, "the second diffs against the first"

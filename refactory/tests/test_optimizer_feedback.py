@@ -185,6 +185,29 @@ def test_two_loops_with_different_judges_are_two_changes_in_the_tally():
     assert "loop/gate: tried" not in text
 
 
+def test_two_changes_whose_labels_collide_are_tallied_apart_where_they_differ():
+    """Two loops whose judges share a long preamble get one label (60 characters of text);
+    the tally still groups by the full edits and says where each differs."""
+    pre = "You are a careful reviewer of the solver's answer and you check it closely: "
+    loops = [{"op": "loop", "step": "solve", "judge": "agent", "max_iterations": 1,
+              "text": pre + rest} for rest in ("check the units.", "check every claim.")]
+    assert feedback.change_label([loops[0]]) == feedback.change_label([loops[1]])
+    entries = []
+    for index, edit in enumerate([loops[0], loops[0], loops[1], loops[1]]):
+        identity = feedback.change_identity([edit])
+        entries.append({**_entry(index, kind="loop/gate", change=feedback.change_label([edit])),
+                        "change_key": identity["key"], "change_text": identity["text"]})
+    text = "\n".join(feedback.ledger_lines(entries))
+    tally = [line for line in text.splitlines() if line.startswith("- loop")]
+    assert len(tally) == 2 and all("tried 2" in line for line in tally)
+    assert 'differs at: "…the units.' in tally[0] and 'differs at: "…every claim.' in tally[1]
+    from refactory_dsh.optim import memory
+
+    tried = [{**e, "id": e["id"], "evaluated": True} for e in entries]
+    lines = memory.change_tally_lines(tried)
+    assert len([line for line in lines if line.startswith("- loop")]) == 2
+
+
 def test_the_ledger_table_stays_within_its_characters():
     entries = [_entry(i, change="insert step=" + "k" * 400) for i in range(300)]
     lines = feedback.ledger_lines(entries)

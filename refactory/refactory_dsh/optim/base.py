@@ -1245,7 +1245,9 @@ class ProposalContext:
                 homes=homes)]
         if self.reasoning:
             predicted = [str(p.get("child")) for p in self.edit_pairs or () if p.get("prediction")]
-            lines += ["", *_reasoning_lines(self.reasoning, below, predicted, homes)]
+            lines += ["", *_reasoning_lines(
+                self.reasoning, below, predicted, homes,
+                reviewed={str(e.get("candidate")) for e in self.added_steps or ()})]
         lines += _feedback_sections(self)
         if self.prior_runs:
             lines += [
@@ -4210,20 +4212,29 @@ def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS,
 
 def whole_edits(edits: Any, before: Mapping[str, Any] | None = None,
                 homes: Mapping[str, str] | None = None) -> str:
-    """A candidate's own edits as their home section shows them: every text whole, never
-    clipped, with its wiring. A text ``set_knob`` whose earlier value is known (``before``:
-    the parent's values) is shown as its change -- the lines it added and removed, whole --
-    not as the new value's unchanged start; a text a current knob holds (``homes``) is
-    named by that knob, whose text "Each step's settings" shows whole."""
+    """`whole_edit_parts`, one edit after another."""
+    return "\n".join(whole_edit_parts(edits, before, homes)) or "(none)"
+
+
+def whole_edit_parts(edits: Any, before: Mapping[str, Any] | None = None,
+                     homes: Mapping[str, str] | None = None) -> list[str]:
+    """A candidate's own edits as their home section shows them, one text per edit (so a
+    bound can cut each and drop none): every text whole, never clipped, with its wiring.
+    A text ``set_knob`` whose earlier value is known (``before``: the parent's values,
+    then each earlier edit's) is shown as its change -- the lines it added and removed,
+    whole -- not as the new value's unchanged start; a text a current knob holds
+    (``homes``) is named by that knob, whose text "Each step's settings" shows whole."""
     import difflib
 
     homes = homes or {}
     values: dict[str, Any] = dict(before or {})
-    lines: list[str] = []
+    parts: list[str] = []
     steps = list(edits) if isinstance(edits, (list, tuple)) else [edits]
     for index, edit in enumerate(steps, 1):
+        lines: list[str] = []
+        parts.append("")
         if not isinstance(edit, dict):
-            lines.append(f"{index}. {json.dumps(edit, default=str, ensure_ascii=False)}")
+            parts[-1] = f"{index}. {json.dumps(edit, default=str, ensure_ascii=False)}"
             continue
         head = " ".join(f"{key}={json.dumps(edit[key], default=str)}"
                         for key in EDIT_NAMING_FIELDS if key in edit)
@@ -4248,9 +4259,10 @@ def whole_edits(edits: Any, before: Mapping[str, Any] | None = None,
             tail = "; ".join(f"{key}: {json.dumps(value, default=str, ensure_ascii=False)}"
                              for key, value in rest.items())
             lines.append(f"{index}. {head}" + (f" -- {tail}" if tail else ""))
+        parts[-1] = "\n".join(lines)
         if edit.get("op") == "set_knob" and isinstance(name, str):
             values[name] = new
-    return "\n".join(lines) if lines else "(none)"
+    return parts
 
 
 #: How much of one edit "What this run has already tried" shows: a ``set_knob``'s
@@ -4614,7 +4626,8 @@ def _promising(entries: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
 
 def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (),
                      predicted: Sequence[str] = (),
-                     homes: Mapping[str, str] | None = None) -> list[str]:
+                     homes: Mapping[str, str] | None = None,
+                     reviewed: Collection[str] = ()) -> list[str]:
     """'Your earlier reasoning': what the optimizer said about recent candidates,
     beside what happened to them, with each one's item errors (``item_errors``). A
     candidate in ``above`` ("What the last edit changed" shows its edits, its flow change
@@ -4657,12 +4670,18 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
 
         head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate "
                 f"({entry['fixed']} fixed / {entry['broken']} broken)")
-        # How it moved the items it changed (`optim.edit_effect`): the mechanism to fix.
+        # How it moved the items it changed (`optim.edit_effect`): the mechanism to fix. A
+        # change that added no step has no such account; its counts are what there is.
         went = effect_lines(entry.get("effect") or {})
         wrong = ([f"What went wrong in it (how it moved the items it changed): {went[0]}",
-                  *went[1:]] if went else [])
+                  *went[1:]] if went else
+                 [f"What went wrong in it: it broke {entry['broken']} train item(s) and fixed "
+                  f"{entry['fixed']} against its parent; no step-by-step account of how it "
+                  "moved them is available (it added no step that ran on them), so compare "
+                  "its text with the failures shown in this request."])
+        # Pointed to only when that section reviews a step of this very candidate.
         review = ("A step it added is reviewed under \"Did the added steps contribute?\"."
-                  if entry.get("added") else "")
+                  if str(entry.get("id")) in set(reviewed) else "")
         shown = [str(e.get("id")) for e in reasoning_shown(entries)]
         if str(entry.get("id")) in above or str(entry.get("id")) in shown:
             # Its edits are whole in its own block already (`whole_edits`).
@@ -4672,15 +4691,23 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
                       "or combined with edits to other steps; not to be re-proposed "
                       "unchanged.", *wrong, *([review] if review else [])]
         else:
-            text = whole_edits(entry.get("edit"), entry.get("before"), homes)
-            cut = len(text) > REJECTED_EDITS_CHARS
+            parts = whole_edit_parts(entry.get("edit"), entry.get("before"), homes)
+            # Past the bound, the longest edits are cut to one length (each its middle,
+            # said in it); no edit is dropped.
+            from .analysts import item_cap
+
+            cap = item_cap([len(p) for p in parts], REJECTED_EDITS_CHARS, floor=200)
+            shown = [p if cap is None or len(p) <= cap else _clip_middle(p, cap)
+                     for p in parts]
+            cut = sum(1 for p, q in zip(parts, shown) if p != q)
             lines += ["", head,
                       "Every edit whole, a new step's instructions and a judge's criteria "
-                      "included" + (f" (past {REJECTED_EDITS_CHARS} characters its middle is "
-                                    "cut, the cut said)" if cut else "")
+                      "included" + (f" (past {REJECTED_EDITS_CHARS} characters, {cut} of "
+                                    f"its {len(parts)} edits have their middle cut, each "
+                                    "cut said in it; none is left out)" if cut else "")
                       + ", so it can be built on (fix what went wrong in it) or combined "
                       "with edits to other steps; not to be re-proposed unchanged.",
-                      _clip_middle(text, REJECTED_EDITS_CHARS) if cut else text,
+                      "\n".join(shown) if shown else "(none)",
                       *wrong, *([review] if review else [])]
     return lines
 

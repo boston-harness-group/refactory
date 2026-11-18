@@ -95,6 +95,8 @@ PIPELINE_TEXT_CHARS = 20000
 TRIED_CHARS = 16000
 TRIED_EDITS_CHARS = 1500
 TRIED_REASON_CHARS = 300
+#: The most an edit's head (op and names) takes when its edits are cut (`edits_text`).
+TRIED_HEAD_CHARS = 120
 #: What "What was tried this epoch" keeps free for the line saying a cut.
 TRIED_CUT_ROOM = 120
 #: "What was tried this epoch" when the round proposed nothing.
@@ -341,12 +343,30 @@ def _answer(record: Mapping[str, Any]) -> str:
     return "N/A" if value in (None, "") else _clip(value, 300)
 
 
+#: What a pass calls the change it sets against the unchanged incumbent: under the
+#: validation gate it was rejected; without it, it was only not the train leader.
+REJECTED_NOUN, NOT_KEPT_NOUN = "rejected change", "change not kept"
+
+
+def noun(curr: Mapping[str, Any]) -> str:
+    """The name of ``curr`` as a change of the unchanged incumbent (``REJECTED_NOUN`` or,
+    ungated, ``NOT_KEPT_NOUN``)."""
+    return str((curr.get("rejected") or {}).get("noun") or REJECTED_NOUN)
+
+
+def changes_heading(compared: str | None) -> str:
+    """The heading of the section showing what separates the two pipelines: ``compared``
+    is the compared change's noun (`noun`), ``None`` for the current pipeline."""
+    return f"What the {compared} changed" if compared else "What changed between them"
+
+
 def _look(prev: Mapping[str, Any], curr: Mapping[str, Any]) -> bool | tuple[str, str]:
     """How the two sides are labelled: ``True`` for two rollouts of one pipeline,
     ``False`` for the start-of-epoch and current pipelines, or the two labels when
     ``curr`` is a rejected change of the unchanged incumbent (``curr["rejected"]``)."""
     if curr.get("rejected"):
-        return (f"Incumbent `{prev.get('id')}`", f"Rejected change `{curr.get('id')}`")
+        return (f"Incumbent `{prev.get('id')}`",
+                f"{noun(curr)[0].upper()}{noun(curr)[1:]} `{curr.get('id')}`")
     return prev.get("id") == curr.get("id")
 
 
@@ -359,7 +379,7 @@ def _labels(same: bool | tuple[str, str]) -> tuple[str, str]:
 def _what(curr: Mapping[str, Any], same: bool) -> str:
     """What the comparison compares, for its heading."""
     if curr.get("rejected"):
-        return "the rejected change against the incumbent, on the items it changed"
+        return f"the {noun(curr)} against the incumbent, on the items it changed"
     return "two rollouts" if same else "two pipelines"
 
 
@@ -369,17 +389,19 @@ def _sides(prev: Mapping[str, Any], curr: Mapping[str, Any]) -> str:
     rejected = curr.get("rejected")
     if not rejected:
         return f"Start of the epoch: {prev.get('rollout')}. Now: {curr.get('rollout')}."
-    others = list(rejected.get("others") or ())
-    return (f"Nothing this epoch replaced the incumbent; this compares it with the rejected "
-            f"change that moved the most items. Incumbent: {prev.get('rollout')}. Rejected "
-            f"change: {curr.get('rollout')}. It fixed {rejected.get('fixed')} and broke "
+    others, name = list(rejected.get("others") or ()), noun(curr)
+    why = ("" if name == REJECTED_NOUN else " (without a validation gate the current is the "
+           "train leader; this change scored below it on train)")
+    return (f"Nothing this epoch replaced the incumbent; this compares it with the {name} "
+            f"that moved the most items{why}. Incumbent: {prev.get('rollout')}. "
+            f"{name[0].upper()}{name[1:]}: {curr.get('rollout')}. It fixed {rejected.get('fixed')} and broke "
             f"{rejected.get('broken')} of {rejected.get('shared')} shared train items; "
             + (f"the first {rejected.get('shown')} of the {rejected.get('changed')} it changed "
                "are shown, broken first"
                if rejected.get("shown") != rejected.get("changed")
                else f"all {rejected.get('changed')} it changed are shown, broken first")
             + ", and the items it left as they were are not."
-            + (f" The other rejected change(s) that moved items ({', '.join(f'`{c}`' for c in others)}) "
+            + (f" The other {name}(s) that moved items ({', '.join(f'`{c}`' for c in others)}) "
                "are under \"What was tried this epoch\", with their edits and how they moved "
                "their items; their traces are not shown." if others else ""))
 
@@ -504,19 +526,19 @@ def _pipelines_text(*, prev: Mapping[str, Any], curr: Mapping[str, Any], same: b
     elif curr.get("rejected"):
         pipelines = (f"## The pipeline (candidate `{prev.get('id')}`)\n"
                      "Nothing this epoch replaced it; the comparison below sets it against "
-                     f"the rejected change `{curr.get('id')}` on the items that change "
+                     f"the {noun(curr)} `{curr.get('id')}` on the items that change "
                      "moved.\n\n"
                      f"{prev.get('pipeline')}\n\n"
-                     f"## The rejected change's pipeline (candidate `{curr.get('id')}`, not kept)\n"
+                     f"## The {noun(curr)}'s pipeline (candidate `{curr.get('id')}`, not kept)\n"
                      f"{curr.get('pipeline')}\n\n"
-                     "## What the rejected change changed\n"
+                     f"## {changes_heading(noun(curr))}\n"
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
     else:
         pipelines = (f"## The pipeline at the start of this epoch (candidate `{prev.get('id')}`)\n"
                      f"{prev.get('pipeline')}\n\n"
                      f"## The pipeline now (candidate `{curr.get('id')}`)\n"
                      f"{curr.get('pipeline')}\n\n"
-                     "## What changed between them\n"
+                     f"## {changes_heading(None)}\n"
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
     return pipelines
 
@@ -818,35 +840,57 @@ class MemoryRequest:
 def edits_text(edits: Any, before: Mapping[str, Any] | None = None,
                chars: int = TRIED_EDITS_CHARS) -> str:
     """A proposal's edits with what identifies them, within ``chars``: a text
-    ``set_knob`` as old -> new length and its changed lines against ``before`` (the
-    parent's knob values), else its new value; every other edit whole as JSON -- its op,
-    the steps it names, where it sends work back, its limits and the text it gives a new
-    step or judge (its instructions, its criteria) -- the free text shortened to fit
-    (`base.fit_edit_text`), the wiring whole. One line (JSON and the diff separator keep
-    every newline out), so nothing quoted can read as a heading of the request. The
-    memory reads what each change was, not only its kind: a loop whose judge checks one
-    thing is a different change from a loop whose judge checks another."""
-    from .base import DIFF_LINE_SEPARATOR, _text_diff, fit_edit_text
+    ``set_knob`` as old -> new length and its changed lines against the value before it
+    (``before``, the parent's knob values, updated by each earlier ``set_knob`` of the
+    same knob in the proposal), else its new value; every other edit whole as JSON -- its
+    op, the steps it names, where it sends work back, its limits and the text it gives a
+    new step or judge (its instructions, its criteria). One line (JSON and the diff
+    separator keep every newline out), so nothing quoted can read as a heading of the
+    request. Past ``chars`` no edit is dropped: each keeps its head (op and the names
+    it touches) and the longest are cut to one length (`item_cap`), the cut said
+    (``[cut: N edits / M chars]``). The memory reads what each change was, not only its
+    kind: a loop whose judge checks one thing is a different change from a loop whose
+    judge checks another."""
+    from .base import DIFF_LINE_SEPARATOR, _text_diff
+    from .feedback import touched
 
-    before = before or {}
+    values = dict(before or {})
     listed = list(edits) if isinstance(edits, (list, tuple)) else [edits]
-    room = max(1, chars // max(1, len(listed)))
-    parts = []
+    parts, heads = [], []
     for edit in listed:
         if not isinstance(edit, Mapping) or not edit.get("op"):
             parts.append("(no readable edit)")
+            heads.append("")
             continue
         name, new = edit.get("name"), edit.get("value")
-        old = before.get(str(name))
+        old = values.get(str(name))
+        names = ", ".join(touched([edit]))
+        heads.append(_clip(f"[{edit['op']}" + (f" {names}" if names else "") + "]",
+                           TRIED_HEAD_CHARS))
         if edit.get("op") == "set_knob" and isinstance(new, str) and isinstance(old, str):
             diff = _text_diff(old, new)
             parts.append(f"set_knob {name}: {len(old)} -> {len(new)} chars; diff: "
-                         + _clip(" ".join(diff.replace("\n", DIFF_LINE_SEPARATOR).split()),
-                                 room))
+                         + " ".join(diff.replace("\n", DIFF_LINE_SEPARATOR).split()))
         else:
-            parts.append(json.dumps(fit_edit_text(dict(edit), room), default=str,
-                                    ensure_ascii=False))
-    return _clip("; ".join(parts) or "(none)", chars)
+            parts.append(json.dumps(dict(edit), default=str, ensure_ascii=False))
+        if edit.get("op") == "set_knob" and name is not None and "value" in edit:
+            values[str(name)] = new
+    joined = "; ".join(parts) or "(none)"
+    if len(joined) <= chars:
+        return joined
+    marker_room = 40
+    cap = item_cap([len(p) for p in parts], max(0, chars - marker_room - 2 * len(parts)),
+                   floor=0) or 0
+    shown, cut_edits, cut_chars = [], 0, 0
+    for part, head in zip(parts, heads):
+        if len(part) <= cap:
+            shown.append(part)
+            continue
+        keep = max(0, cap - len(head) - 1)
+        shown.append(f"{head} {part[:keep]}…" if head else f"{part[:keep]}…")
+        cut_edits += 1
+        cut_chars += len(part) - keep
+    return "; ".join(shown) + f" [cut: {cut_edits} edits / {cut_chars} chars]"
 
 
 #: The heading of the per-change tally (`change_tally_lines`).
@@ -855,19 +899,17 @@ TALLY_HEADING = "Each change tried this epoch, against the noise"
 
 def change_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0,
                        spread: float | None = None, gated: bool = False) -> list[str]:
-    """Per change tried, grouped by the change itself (`feedback.change_cell`: what its
-    edits did, its kind only as a label), never by kind: how many tries, and each one's
+    """Per change tried, grouped by the change itself (`feedback.group_changes`: by a hash
+    of its full edits, shown by what they did, its kind only as a label, two changes
+    whose labels collide told apart where their texts differ), never by kind: how many tries, and each one's
     fixed/broken train items and the gate's word; then how large a noise one try sits
     in: one validation item's share of the validation part's mean (``1 / val_items``;
     never a validation score) and, when the run re-scored the parent, how far its train
     score moved between re-scores (``spread``). One source for the memory call and the
     proposer request (beside the note). Empty without an evaluated try."""
-    from .feedback import change_cell
+    from .feedback import group_changes
 
-    changes: dict[str, list[Mapping[str, Any]]] = {}
-    for entry in tried:
-        if entry.get("evaluated", True):
-            changes.setdefault(change_cell(entry), []).append(entry)
+    changes = group_changes([entry for entry in tried if entry.get("evaluated", True)])
     if not changes:
         return []
     noise = []
@@ -879,7 +921,7 @@ def change_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0
                      "re-scores")
     lines = [f"{TALLY_HEADING}"
              + (" (" + "; ".join(noise) + ")" if noise else "") + ":"]
-    for cell, entries in changes.items():
+    for cell, entries in changes:
         tries = []
         for entry in entries:
             fixed, broken = entry.get("fixed"), entry.get("broken")
@@ -901,7 +943,8 @@ TALLY_NOISE_RULE = ("Each line is one change: its result is evidence about that 
 
 def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
                 round_: int | None, current: str | None, gated: bool,
-                chars: int = TRIED_CHARS, tally: Sequence[str] = ()) -> list[str]:
+                chars: int = TRIED_CHARS, tally: Sequence[str] = (),
+                shown_in: Mapping[str, str] | None = None) -> list[str]:
     """"What was tried this epoch": every change the optimizer proposed in ``round_`` (the
     proposal round the start-of-epoch pipeline opened, which this epoch evaluated and
     judged), newest first -- the evaluated ones, then the ones refused before they ran.
@@ -932,7 +975,10 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
     # said there, once; each entry says its edits whole, where its new steps sit, and its
     # score.
     lines += list(tally)
-    entries = [_tried_line(entry, current, gated, counted=bool(tally))
+    # A candidate whose edits the request shows whole in its changes section (``shown_in``:
+    # id -> that section's heading) points there, so no text is said twice.
+    entries = [_tried_line(entry, current, gated, counted=bool(tally),
+                           shown_in=(shown_in or {}).get(str(entry.get("id"))))
                for entry in reversed(list(tried))]
     entries += [_refused_line(entry) for entry in reversed(list(refused))]
     used = sum(len(line) + 1 for line in lines)
@@ -959,7 +1005,7 @@ def _change_text(entry: Mapping[str, Any]) -> str:
 
 
 def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool,
-                counted: bool = False) -> str:
+                counted: bool = False, shown_in: str | None = None) -> str:
     fixed, broken = entry.get("fixed"), entry.get("broken")
     if not entry.get("evaluated", True):
         outcome = "not evaluated"
@@ -982,7 +1028,10 @@ def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool,
     # note can name the change and say the mechanism rather than guess it.
     how = [*(entry.get("placed") or ()), *effect_lines(entry.get("effect") or {})]
     return (f"- `{entry.get('id')}` (round {entry.get('round')}, from `{entry.get('parent')}`; "
-            f"{_change_text(entry)}): {entry.get('edits')} -- {outcome}"
+            f"{_change_text(entry)}): "
+            + (f"its edits are under \"{shown_in}\" above" if shown_in
+               else str(entry.get("edits")))
+            + f" -- {outcome}"
             + (f" -- gate: {gate or 'not gated'}" if gated and not counted else "")
             + (" -- the pipeline now" if entry.get("id") == current and not gated else "")
             + (f" -- integrity: {entry['integrity']}" if entry.get("integrity") else "")
@@ -1098,8 +1147,9 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
     lines = ["## Optimizer memory"]
     if text:
         rejected = memory.get("rejected") or {}
-        compared = (f"the unchanged incumbent `{memory.get('prev')}` and its rejected change "
-                    f"`{rejected.get('child')}`, on the train items that change moved"
+        compared = (f"the unchanged incumbent `{memory.get('prev')}` and its "
+                    f"{rejected.get('noun') or REJECTED_NOUN} `{rejected.get('child')}`, on "
+                    "the train items that change moved"
                     if rejected else "the same train items under the pipeline at the start "
                     "of that epoch and after it")
         lines.append(f"Optimizer-side memory written in epoch {memory.get('epoch', '?')} from a "
@@ -1143,7 +1193,8 @@ def report_lines(rep: Mapping[str, Any] | None) -> list[str]:
     rows = []
     for p in rep["passes"]:
         tally = p.get("counts") or {}
-        now = (f"{p.get('curr')} (rejected change, on the items it changed)"
+        now = (f"{p.get('curr')} ({(p.get('rejected') or {}).get('noun') or REJECTED_NOUN}, "
+               "on the items it changed)"
                if p.get("rejected") else p.get("curr"))
         rows.append([p.get("epoch"), p.get("prev"), now,
                      f"{p.get('pairs', 0)} of {len(p.get('sample') or ())}"
