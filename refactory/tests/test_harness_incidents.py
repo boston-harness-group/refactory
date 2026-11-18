@@ -1,16 +1,19 @@
-"""An item the harness backstop stopped is the harness's failure, never a wrong answer.
+"""An item a harness fault kept from an outcome is the harness's failure, never a wrong
+answer; a session still writing at the backstop is the candidate's own.
 
-A session still streaming at the harness backstop (`model.HarnessBackstop`) leaves its
-item with no outcome of the candidate's (`items.harness_incident`). The loop runs that
-item again, alone, on the same candidate, part and seed, up to `INCIDENT_RERUNS` times
+A grader or sandbox that fails (`task.HarnessIncident`) leaves its item with no outcome
+of the candidate's (`items.harness_incident`). The loop runs that item again, alone, on
+the same candidate, part and seed, up to `INCIDENT_RERUNS` times
 (`Loop._settle_incidents`); a rerun that answers is scored as any item. One still an
 incident after them is left out of the score -- numerator and denominator -- and said in
-the report, the progress line and the optimizer's request. A val comparison of two
-candidates uses the items both were scored on (`ValidationGate.beats`).
+the report, the progress line and the optimizer's request. A comparison of candidates
+uses the items all were scored on (`Loop.shared_scores`). A session the backstop stopped
+while its model still wrote (`model.HarnessBackstop`, ``backstop``) is scored 0, not
+rerun, and shown to the optimizer as a failure.
 
-The runs are the real loop and walker (and the spine where built) over a scripted ``dsh``
-reached through the real model client, whose backstop is 2 s here (14400 s in
-production). Each test fails when the behaviour it names is reverted.
+The runs are the real loop and walker over a scripted ``dsh`` reached through the real
+model client, whose backstop is 2 s here (14400 s in production); the grader fails when
+an answer is ``GRADER_DOWN``. Each test fails when the behaviour it names is reverted.
 """
 from __future__ import annotations
 
@@ -35,7 +38,8 @@ from test_val_gate import _journal_events, _level
 
 #: A scripted ``dsh``: the first plan key whose ``&``-separated parts are all in the call's
 #: folder or prompt decides: ``ACTIVE`` streams (touches the session's activity file) for
-#: 30 s, past the 2 s backstop; anything else is the answer.
+#: 30 s, past the 2 s backstop; anything else is the answer (``GRADER_DOWN``: the grader
+#: fails, a harness incident).
 FAKE_DSH = '''import json, os, pathlib, sys, time
 root = pathlib.Path({root!r})
 plan = json.loads((root / "plan.json").read_text())
@@ -123,11 +127,11 @@ def _incidents(loop: Loop, part: str) -> list[dict[str, Any]]:
 
 @pytest.mark.parametrize("evaluator", RUNTIMES)
 def test_an_incident_a_rerun_answers_is_scored_as_any_item(tmp_path, evaluator):
-    """t2 hits the backstop in the seed's train run; run again alone, it answers right: it
+    """t2's grader fails in the seed's train run; run again alone, it answers right: it
     is scored like the rest (the train score is 1.0 over all 8), and the journal says it
     was recovered."""
     dsh = Dsh(tmp_path / "dsh")
-    dsh.plan({"/t2_&level 5.&incident_reruns": "right", "/t2_&level 5.": "ACTIVE",
+    dsh.plan({"/t2_&level 5.&incident_reruns": "right", "/t2_&level 5.": "GRADER_DOWN",
               "level": "right"})
     loop = _run(tmp_path, dsh, [[]], evaluator)
     seed = _seed(loop)
@@ -147,11 +151,11 @@ def test_an_incident_a_rerun_answers_is_scored_as_any_item(tmp_path, evaluator):
 
 @pytest.mark.parametrize("evaluator", RUNTIMES)
 def test_an_incident_every_rerun_repeats_is_left_out_of_the_score_and_said(tmp_path, evaluator):
-    """t2 hits the backstop every time: after `INCIDENT_RERUNS` reruns it is left out of
+    """t2's grader fails every time: after `INCIDENT_RERUNS` reruns it is left out of
     the score (t1 wrong, six right: 6/7, not 6/8), kept as a record with no score, and
     listed in report.json, report.md, the progress line and the optimizer's request."""
     dsh = Dsh(tmp_path / "dsh")
-    dsh.plan({"/t2_&level 5.": "ACTIVE", "/t1_&level 5.": "wrong", "level": "right"})
+    dsh.plan({"/t2_&level 5.": "GRADER_DOWN", "/t1_&level 5.": "wrong", "level": "right"})
     loop = _run(tmp_path, dsh, [[]], evaluator)
     seed = _seed(loop)
     assert seed.exit_ok and seed.raw_score == pytest.approx(6 / 7)
@@ -188,7 +192,7 @@ def test_a_val_comparison_leaves_out_an_item_either_candidate_could_not_be_score
     answers v2 right (3 of 4), but is no better on v1, v3, v4. Compared on those, the
     child ties and is rejected; on its raw val score it would have been accepted."""
     dsh = Dsh(tmp_path / "dsh")
-    dsh.plan({"/v2_&level 5.": "ACTIVE", "/v1_&level": "wrong", "level": "right"})
+    dsh.plan({"/v2_&level 5.": "GRADER_DOWN", "/v1_&level": "wrong", "level": "right"})
     loop = _run(tmp_path, dsh, [[(5, 6)], []], evaluator)
     seed = _seed(loop)
     child = next(c for c in loop.population if _level(c) == 6)
@@ -205,14 +209,14 @@ def test_a_val_comparison_leaves_out_an_item_either_candidate_could_not_be_score
 
 
 def test_edit_effect_reads_no_harness_incident_as_a_broken_item():
-    """A child's item the backstop stopped is not one the edit broke: `edit_effect`
+    """A child's item the harness failed is not one the edit broke: `edit_effect`
     leaves it out, as `edit_change` does, while a real broken item is still read."""
     from refactory_dsh.optim.edit_effect import edit_effect
 
     parent = [{"id": "a", "passed": True, "score": 1.0}, {"id": "b", "passed": True, "score": 1.0}]
     ran = [{"node": "check", "prompt": "", "response": "x"}]
     child = [{"id": "a", "passed": False, "score": None, "error_kind": "harness_incident",
-              "error_text": "solve: HarnessBackstop: model session hit the harness backstop",
+              "error_text": "data: HarnessIncident: the grader's sandbox did not start",
               "not_scored": "harness_incident", "exchanges": ran},
              {"id": "b", "passed": False, "score": 0.0, "exchanges": ran}]
     effect = edit_effect(parent, child, new_steps={"check"})
@@ -225,7 +229,7 @@ def test_the_test_deltas_are_on_the_items_both_were_scored_on(tmp_path, evaluato
     incident every time (left out: 2 of 2 right), the child misses x1 (2 of 3). The best's
     test delta is taken on x1 and x3 (0.5 - 1.0), with the raw delta (2/3 - 1) beside it."""
     dsh = Dsh(tmp_path / "dsh")
-    dsh.plan({"/x2_&level 5.": "ACTIVE", "/v1_&level 5.": "wrong", "/x1_&level 6.": "wrong",
+    dsh.plan({"/x2_&level 5.": "GRADER_DOWN", "/v1_&level 5.": "wrong", "/x1_&level 6.": "wrong",
               "level": "right"})
     loop = _run(tmp_path, dsh, [[(5, 6)], []], evaluator)
     child = next(c for c in loop.population if _level(c) == 6)
@@ -403,7 +407,7 @@ def test_a_mode_with_no_item_scores_keeps_its_incidents_and_says_so(tmp_path):
     """Nothing can take an item out of a score that reads no item_scores: no rerun, the
     record is not marked unscored, and the run warns once."""
     dsh = Dsh(tmp_path / "dsh")
-    dsh.plan({"/t2_&level 5.": "ACTIVE", "level": "right"})
+    dsh.plan({"/t2_&level 5.": "GRADER_DOWN", "level": "right"})
     with _patch_mode(FactlessProbe):
         loop = _interrupted_loop(tmp_path, dsh, [[]], epochs=1)  # type: ignore[arg-type]
         loop.run()
@@ -412,3 +416,24 @@ def test_a_mode_with_no_item_scores_keeps_its_incidents_and_says_so(tmp_path):
     assert t2["error_kind"] == "harness_incident" and "not_scored" not in t2
     assert len(_journal_events(loop, "harness_incident_kept")) == 1
     assert not _journal_events(loop, "harness_incident")
+
+
+@pytest.mark.parametrize("evaluator", RUNTIMES)
+def test_a_session_still_writing_at_the_backstop_is_the_candidates_failure(tmp_path, evaluator):
+    """t2's model is still writing at the backstop: a ``backstop`` failure, scored 0 (7 of
+    8), never rerun or left out, and in the optimizer's request as a failure, not as a
+    harness incident or timeout."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/t2_&level 5.": "ACTIVE", "level": "right"})
+    loop = _run(tmp_path, dsh, [[]], evaluator)
+    seed = _seed(loop)
+    assert seed.raw_score == pytest.approx(7 / 8)
+    assert not _journal_events(loop, "harness_incident")
+    assert not (loop.root / "runs" / seed.id / "incident_reruns").exists()
+    records = loop._train_item_records[seed.id]
+    [t2] = [r for r in records if r["id"] == "t2"]
+    assert t2["error_kind"] == "backstop" and t2["score"] == 0.0 and "not_scored" not in t2
+    assert "still writing" in t2["error_text"] and not harness_incident(t2)
+    lines = "\n".join(_item_evidence(records))
+    assert "harness incident" not in lines and "harness timeout" not in lines
+    assert "1 failed with an error" in lines and "mean score 0.875" in lines

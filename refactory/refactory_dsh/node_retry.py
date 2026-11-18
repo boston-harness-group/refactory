@@ -103,12 +103,12 @@ def leaves_no_answer(error: BaseException) -> bool:
 
 def missing_cause(error: BaseException) -> str | None:
     """Why a session's failure left its step without an answer, by the error's type, when
-    it ended for time: ``harness_incident`` (`model.HarnessBackstop`), ``declared_timeout``
+    it ended for time: ``backstop`` (`model.HarnessBackstop`), ``declared_timeout``
     (`model.DeclaredTimeout`) or ``timeout`` (`failure_kind`); else None."""
     from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
 
     if isinstance(error, HarnessBackstop):
-        return "harness_incident"
+        return "backstop"
     if isinstance(error, DeclaredTimeout):
         return "declared_timeout"
     return "timeout" if failure_kind(error) == "timeout" else None

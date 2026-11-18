@@ -177,7 +177,7 @@ INTERRUPTED_RETRY_WAITS_S: tuple[float, ...] = (120.0, 300.0)
 INTERRUPTION_CAP = 3
 
 #: How many times the loop runs an item again, on the same candidate and part, when the
-#: harness backstop stopped it (`items.harness_incident`): as many as an interrupted
+#: harness failed it (`items.harness_incident`: its grader or sandbox): as many as an interrupted
 #: evaluation's in-run retries. Still an incident after them, the item is left out of
 #: the evaluation's score -- its numerator and its denominator -- and said wherever the
 #: score is shown (`Loop._settle_incidents`). An incident is the harness's failure,
@@ -2234,7 +2234,7 @@ class Loop(OuterLoop):
             # A rollout a time or token budget refused or cut: no score of the
             # candidate's (``ValidationGate.val_score`` skips it).
             **({"budget_stopped": True} if measurements.get("budget_stopped") else {}),
-            # Items the harness backstop kept from an outcome, left out of the score
+            # Items a harness fault kept from an outcome, left out of the score
             # (`_settle_incidents`), and each scored item's score, so a val comparison
             # of two candidates can use the items both were scored on
             # (`shared_scores`): ``[id, score, repeat]``. Neither is shown to a strategy
@@ -2415,7 +2415,7 @@ class Loop(OuterLoop):
         """Run a trial's harness-incident items again, then leave out of its score those
         still incidents; ``(the ids left out, whether a budget stopped a rerun)``.
 
-        An item the harness backstop stopped (`items.harness_incident`) has no outcome of
+        An item a harness fault failed (`items.harness_incident`) has no outcome of
         the candidate's. Each is run again on the same candidate, part and rollout seed,
         alone, in ``<trial>/incident_reruns/<n>``, up to `INCIDENT_RERUNS` times; a rerun's
         record takes the item's place in the trial's records and in its ``item_scores``
@@ -2699,7 +2699,7 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
-        # A cached item that died with its run's processes, or that the harness backstop
+        # A cached item that died with its run's processes, or that a harness fault
         # stopped, is no result to replay (`items.interrupted_item`,
         # `items.harness_incident`): the part is measured here instead.
         from refactory_dsh.items import harness_incident, interrupted_item
@@ -2719,7 +2719,7 @@ class Loop(OuterLoop):
                               else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
                               if len(trials) != self.config.repeats
                               else "cached items died with their run's processes" if killed
-                              else "cached items hit the harness backstop")
+                              else "cached items had a harness incident")
                     self._journal("seed_cache_miss", id=candidate.id, part=part, reason=reason,
                                   cached_items=len(entry.get("items") or ()), items=len(expected_ids))
             return None
@@ -4966,7 +4966,7 @@ class Loop(OuterLoop):
                if self._memory_passes else {}),
             "selection": self._selection_report(),
             **({"integrity": self._integrity_report(best)} if self._integrity_on() else {}),
-            # Every evaluation that had an item the harness backstop stopped: the items,
+            # Every evaluation that had an item a harness fault failed: the items,
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
             "harness_incidents": list(self._harness_incidents),
         }
@@ -7250,7 +7250,7 @@ def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:
         return []
     return ["", f"**{sum(len(set(e['not_scored'])) for e in left)} item(s) in {len(left)} "
                 "evaluation(s) had a harness incident and are not scored**: the harness "
-                "backstop stopped them, again on every rerun, so they count in no score "
+                "failed them (a grader or sandbox), again on every rerun, so they count in no score "
                 "below, not as wrong answers.",
             *(f"- {e.get('candidate')} {e.get('part')}: {', '.join(map(str, e['not_scored']))} "
               f"(rerun {e.get('reran', 0)} time(s))" for e in left)]

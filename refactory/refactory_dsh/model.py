@@ -68,10 +68,12 @@ class HarnessBackstop(RuntimeError):
     """A node's model session was still streaming at the harness backstop
     (`DEFAULT_BACKSTOP_S`): a model frame came within the inactivity limit before it.
 
-    A harness incident, not the method's failure: not a ``CompletionTimeout``, so no
-    timeout retry replays it, and its item is recorded with ``error_kind``
-    ``harness_incident``. A session whose model had gone quiet by then, kept alive only
-    by a running tool, is an inactivity timeout instead (`CompletionTimeout`)."""
+    The model's own failure (`BACKSTOP_DESCRIPTION`), like running out of output: it
+    kept writing for the whole limit. Not a ``CompletionTimeout``, so no timeout retry
+    replays it; its item is recorded with ``error_kind`` ``backstop``, scored 0, not run
+    again and shown to the optimizer as a target. A session whose model had gone quiet by
+    then, kept alive only by a running tool, is an inactivity timeout instead
+    (`CompletionTimeout`)."""
 
 
 class DeclaredTimeout(RuntimeError):
@@ -302,16 +304,19 @@ ACTIVITY_BACKENDS = ("dsh", "claude_code")
 #: The harness guard on one node's model session (seconds): four hours, by default.
 #:
 #: Not a limit on the method. A node with no declared ``timeout_s`` has no wall; this
-#: only stops a session that is still active after this long, so a harness fault cannot
-#: hold a run forever. A session it stops whose model still streamed within the
-#: inactivity limit is a harness incident (`HarnessBackstop`; its item's ``error_kind`` is
-#: ``harness_incident``), never a timeout of the method. One whose model had gone quiet,
+#: only stops a session that is still active after this long, so a session cannot hold a
+#: run forever. A session it stops whose model still streamed within the inactivity limit
+#: failed on its own (`HarnessBackstop`, `BACKSTOP_DESCRIPTION`; its item's ``error_kind``
+#: is ``backstop``, scored 0 and a target). One whose model had gone quiet,
 #: kept alive only by a running tool (a background job, a loop), timed out on inactivity.
 #: Overridable via ``REFACTORY_MODEL_BACKSTOP_S``, or per client with ``backstop_s``.
 DEFAULT_BACKSTOP_S = int(os.environ.get("REFACTORY_MODEL_BACKSTOP_S", "14400"))
 
 #: What a session the harness backstop stopped says, on every runtime (`items.error_kind`).
 HARNESS_BACKSTOP_TEXT = "hit the harness backstop"
+
+#: What reaching the backstop means, in one plain phrase, wherever it is said.
+BACKSTOP_DESCRIPTION = "the model was still writing at the session time limit (4 h by default)"
 
 #: What a session stopped at its node's declared wall says first (`DeclaredTimeout`), on
 #: every runtime (`items.error_kind`).
@@ -1383,8 +1388,8 @@ class DshModelClient:
         # harness backstop, a guard and never the method's limit. The deadline is
         # absolute across attempts: a transport retry spends what remains of it, and a
         # deadline is never retried. ``at_backstop`` says the deadline in force is the
-        # backstop, so a session stopped there while its model streams is a harness
-        # incident (`HarnessBackstop`), not a timeout. A deadline at the node's declared
+        # backstop, so a session stopped there while its model streams failed on its own
+        # (`HarnessBackstop`: it kept writing), not a timeout. A deadline at the node's declared
         # wall is the pipeline's own limit (`DeclaredTimeout`).
         #
         # Any other call (a CEO turn, a console call, a Codex node) keeps the plain
@@ -1459,11 +1464,11 @@ class DshModelClient:
                             f"{elapsed_s}s harness backstop); requested runtime shutdown; the "
                             f"client does not replay a deadline{detail}")
                     elif at_backstop and not isinstance(exc, InactivityTimeout):
-                        # Still streaming at the harness guard: the harness's incident.
+                        # Still streaming at the harness guard: the model kept writing.
                         error = HarnessBackstop(
                             f"model session {HARNESS_BACKSTOP_TEXT} after {elapsed_s}s "
-                            "(REFACTORY_MODEL_BACKSTOP_S) while still active; a harness incident, "
-                            f"not the method's failure; requested runtime shutdown{detail}")
+                            f"(REFACTORY_MODEL_BACKSTOP_S): {BACKSTOP_DESCRIPTION}; requested "
+                            f"runtime shutdown{detail}")
                     elif isinstance(exc, InactivityTimeout):
                         error = CompletionTimeout(
                             f"model completion timed out after {int(exc.inactive_s)}s of inactivity "

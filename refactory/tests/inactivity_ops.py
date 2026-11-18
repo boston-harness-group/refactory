@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from refactory_dsh.task import Task, TaskInstance, VerifyResult
+from refactory_dsh.task import HarnessIncident, Task, TaskInstance, VerifyResult
 
 
 class TwoItemTask(Task):
@@ -31,7 +31,8 @@ class TwoItemTask(Task):
 class SplitAnswerTask(Task):
     """The toy split's train, val and test ids (`test_skillopt`), each passed when its
     pass kept the answer ``right`` (``final.txt``): `test_harness_incidents`'s Task, by a
-    reference a spine worker can import."""
+    reference a spine worker can import. An answer ``GRADER_DOWN`` stands for a grader
+    that failed: a harness incident (`task.HarnessIncident`), not the candidate's."""
 
     name = "split_answer_task"
 
@@ -42,5 +43,8 @@ class SplitAnswerTask(Task):
 
     def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
         final = Path(workspace) / "final.txt"
-        right = final.exists() and final.read_text().strip() == "right"
+        answer = final.read_text().strip() if final.exists() else ""
+        if answer == "GRADER_DOWN":
+            raise HarnessIncident("the grader's sandbox did not start")
+        right = answer == "right"
         return VerifyResult(passed=right, score=1.0 if right else 0.0)

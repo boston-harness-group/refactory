@@ -444,7 +444,8 @@ ERROR_TEXT_CHARS = 4096 + 512 + 1
 #: item (`first_line`). The classifiers below each match that first line's start:
 #:
 #: - `_HARNESS_TIMEOUT_LINE`: a model call the harness ended for time (``timeout``);
-#: - `HARNESS_BACKSTOP_LINE`: the harness backstop (``harness_incident``);
+#: - `HARNESS_BACKSTOP_LINE`: the backstop, the model still writing (``backstop``);
+#: - `HARNESS_INCIDENT_LINE`: a harness fault (`task.HarnessIncident`; ``harness_incident``);
 #: - `DECLARED_TIMEOUT_LINE`: the node's declared wall (``declared_timeout``);
 #: - `DECLARED_TIMEOUT_RETRIED_LINE`, `_HARNESS_TIMEOUT_RETRIED_LINE`: the same two, once
 #:   the node's declared retry is spent (`node_retry.RetriesExhausted`).
@@ -455,6 +456,8 @@ _HARNESS_TIMEOUT_LINE = re.compile(
 
 HARNESS_BACKSTOP_LINE = re.compile(
     rf"(?:{_NODE}(?:HarnessBackstop: )?|worker: )model session {re.escape(HARNESS_BACKSTOP_TEXT)}")
+
+HARNESS_INCIDENT_LINE = re.compile(rf"{_NODE}HarnessIncident: ")
 
 DECLARED_TIMEOUT_LINE = re.compile(
     rf"(?:{_NODE}(?:DeclaredTimeout: )?|worker: ){re.escape(DECLARED_TIMEOUT_TEXT)}")
@@ -468,22 +471,23 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
     rf"\. Last error: (?:{_NODE}CompletionTimeout: )?{re.escape(COMPLETION_TIMEOUT_TEXT)}")
 
 
+#: What a dispatched worker prints, last in its stderr, before the one line that names its
+#: failure (`worker_node.main`): the spine takes that line as the error's first
+#: (`workflow-spine` ``nodeErrorLine``), never a ``worker:`` line of a message that quotes
+#: a reply.
+WORKER_ERROR_MARKER = "--- refactory worker error ---"
+
+
 def first_line(text: Any) -> str:
     """The first line of an error's text: the only one the harness writes itself."""
     return str(text or "").split("\n", 1)[0]
 
 
-#: Whether a session the harness backstop stopped while its model still streamed
-#: (`model.HarnessBackstop`) is the harness's incident -- rerun, then left out of the
-#: score, and no optimizer target -- rather than the candidate's own failure. The one
-#: place that decides it: `error_kind`, `harness_incident` and
-#: `optim.base.HARNESS_TIMEOUT_KINDS` all read it.
-BACKSTOP_IS_HARNESS_INCIDENT = True
-
-
 def error_kind(error: BaseException) -> str:
-    """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
-    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    """A failed item's ``error_kind``: ``"harness_incident"`` for a harness fault
+    (`task.HarnessIncident`: a grader or sandbox failed, not the candidate),
+    ``"backstop"`` for a session still writing at the harness backstop
+    (`model.HarnessBackstop`: the model's own failure, scored like a wrong answer),
     ``"declared_timeout"`` for one stopped at its node's declared wall
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
     else the class name.
@@ -497,10 +501,13 @@ def error_kind(error: BaseException) -> str:
     """
     from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
     from refactory_dsh.node_retry import RetriesExhausted
+    from refactory_dsh.task import HarnessIncident
 
     head = first_line(error)
-    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.match(head):
+    if isinstance(error, HarnessIncident) or HARNESS_INCIDENT_LINE.match(head):
         return "harness_incident"
+    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.match(head):
+        return "backstop"
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.match(head)
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
             or DECLARED_TIMEOUT_RETRIED_LINE.match(head)):
@@ -633,10 +640,10 @@ def make_item_record(
 #:
 #: A model timeout, a wrong or empty answer, an output limit and a product's own failure
 #: are none of these: they are the candidate's failed answers. Nor is a session the
-#: harness backstop stopped (`model.HarnessBackstop`): its process did not die, it kept
-#: streaming for hours, which a rerun of the whole evaluation would most likely repeat at
-#: hours per try; its item is recorded as a ``harness_incident`` (`error_kind`) instead,
-#: and the loop runs that item alone again (`harness_incident`). Known gap: the spine's own
+#: harness backstop stopped (`model.HarnessBackstop`): its process did not die, its model
+#: kept writing for hours, the candidate's own failure (``backstop``). A harness fault
+#: (`task.HarnessIncident`) is no interruption either: the loop runs that item alone
+#: again (`harness_incident`). Known gap: the spine's own
 #: worker or op process killed with no stderr reads ``exited with code null``, which
 #: names no signal, so it is not recognised there (docs/outer-loop.md).
 INTERRUPTED_MARKERS: tuple[tuple[str, str], ...] = (
@@ -682,15 +689,14 @@ NOT_SCORED_INCIDENT = "harness_incident"
 
 
 def harness_incident(record: dict[str, Any]) -> bool:
-    """Whether an item record is a harness incident: the harness backstop
-    (`model.HarnessBackstop`) stopped its session, so the item has no outcome of the
-    candidate's. Its ``error_kind`` says so, or it has no answer because a step it went
-    without hit the backstop (``missing_steps`` cause ``harness_incident``). An item the
-    Task graded is its result, whatever a fork's other branch did. The loop runs such an
+    """Whether an item record is a harness incident: a harness fault
+    (`task.HarnessIncident`: its grader or sandbox failed) kept the item from an outcome
+    of the candidate's. Its ``error_kind`` says so, or it has no answer because a step it
+    went without was stopped by one (``missing_steps`` cause ``harness_incident``). An
+    item the Task graded is its result, whatever a fork's other branch did. A model's own
+    failure -- the backstop included (``backstop``) -- is never one. The loop runs such an
     item again and, still an incident, leaves it out of the score
-    (`loop.INCIDENT_RERUNS`). Never one while `BACKSTOP_IS_HARNESS_INCIDENT` is off."""
-    if not BACKSTOP_IS_HARNESS_INCIDENT:
-        return False
+    (`loop.INCIDENT_RERUNS`)."""
     if record.get("error_kind") == "harness_incident":
         return True
     if not str(record.get("fail_reason") or "").startswith(NO_ANSWER):
@@ -701,7 +707,7 @@ def harness_incident(record: dict[str, Any]) -> bool:
 
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
-    ``crash``, ``timeout``; for an optional branch, ``harness_incident``,
+    ``crash``, ``timeout``; for an optional branch, ``backstop``,
     ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
     `node_retry.missing_cause`), ``sessions`` (how many ran, when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
     write (`nn.fork._record_missing`, `worker_node.main`), and the step's
@@ -739,7 +745,8 @@ def _spent_phrase(info: dict[str, Any]) -> str:
     cause = {"output_limit": "reached its output limit without answering",
              "timeout": "timed out", "crash": "crashed",
              "declared_timeout": "timed out at its declared timeout_s",
-             "harness_incident": "hit the harness backstop"}.get(str(info.get("cause")), "failed")
+             "backstop": "was still writing at the session time limit"}.get(
+                 str(info.get("cause")), "failed")
     sessions = info.get("sessions")
     return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
 

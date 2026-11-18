@@ -49,7 +49,7 @@ TIMEOUT_ERRORS = ("CompletionTimeout", "TimeoutExpired", "InactivityTimeout", "H
 
 #: The ``error_kind`` values (`refactory_dsh.items.error_kind`) of a pass that ran out of
 #: time, which is how a spine record, with no exception type in its text, says it.
-TIMEOUT_KINDS = ("timeout", "harness_incident", "declared_timeout")
+TIMEOUT_KINDS = ("timeout", "backstop", "declared_timeout")
 
 # A failed pass's error text: "<node>: <ExceptionType>: <message>"
 # (refactory_dsh/nn/executor.py ``_walk_branch``).

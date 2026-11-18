@@ -884,9 +884,12 @@ def test_a_harness_timeout_is_read_from_structured_fields_only():
 
     assert harness_timeout({"error_kind": "timeout"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
-    # The backstop is the harness's too; a wall the step declared is the pipeline's.
+    # A harness fault is the harness's too; a wall the step declared, and a session
+    # still writing at the backstop, are the pipeline's.
     assert harness_timeout({"error_kind": "harness_incident"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "harness_incident"}}})
+    assert not harness_timeout({"error_kind": "backstop"})
+    assert not harness_timeout({"missing_steps": {"check": {"cause": "backstop"}}})
     assert not harness_timeout({"error_kind": "declared_timeout"})
     assert not harness_timeout({"missing_steps": {"check": {"cause": "declared_timeout"}}})
     assert not harness_timeout({"passed": True, "error_kind": "timeout"})

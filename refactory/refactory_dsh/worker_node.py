@@ -293,6 +293,12 @@ def main() -> int:
             raise
     except Exception as error:
         print(f'worker: {error}', file=sys.stderr)
+        # The one line the spine names the failure by (`nodeErrorLine`): the error's type
+        # and first line, after the marker, last in stderr -- never a line of the message
+        # above, which may quote a model's reply (`items.first_line`).
+        from refactory_dsh.items import WORKER_ERROR_MARKER, first_line
+        print(WORKER_ERROR_MARKER, file=sys.stderr)
+        print(f'{type(error).__name__}: {first_line(error)}', file=sys.stderr)
         return 1
 
 

@@ -1128,11 +1128,11 @@ The per-item half of a data node, from the command line.
 - **`command_reset`** — Archive prior facts, then invalidate the facts of explicitly redone work.
 - **`data_node`** — The data node the declarations describe, as the graph language's own node.
 - **`detach_read_through`** — Before a write to *name* in a pass directory, cut it loose from the run.
-- **`error_kind`** — A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
+- **`error_kind`** — A failed item's ``error_kind``: ``"harness_incident"`` for a harness fault
 - **`finished_pass_record`** — The record a finished pass kept, or None when it is unfinished or kept none.
 - **`first_line`** — The first line of an error's text: the only one the harness writes itself.
 - **`gate_visit`** — One code-gate visit of an item's pass: the verdict it answered and its reason.
-- **`harness_incident`** — Whether an item record is a harness incident: the harness backstop
+- **`harness_incident`** — Whether an item record is a harness incident: a harness fault
 - **`interrupted_cause`** — Why ``text`` (a failed item's or run's error) is an interruption, or None
 - **`interrupted_item`** — Why an item record's outcome is unknown, or None when it is the item's own result.
 - **`item_duration`** — Seconds from the item's pass starting (`ITEM_STARTED`) to now, its record being

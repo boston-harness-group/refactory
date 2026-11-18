@@ -288,9 +288,13 @@ may say "429") never decides it.
 
 ## A harness incident is rerun, then left out of the score
 
-An item the harness backstop stopped while its model still streamed (`model.HarnessBackstop`;
-`items.harness_incident`: `error_kind` `harness_incident`, or no answer because a step hit
-it) has no outcome of the candidate's, and is never its wrong answer. After the trial, the
+An item whose grader or sandbox failed (`task.HarnessIncident`, raised by a Task's `setup`
+or `verify` or an op; `items.harness_incident`: `error_kind` `harness_incident`, or no
+answer because a step it went without hit one) has no outcome of the candidate's, and is
+never its wrong answer. A session still writing at the 4 h backstop
+(`model.HarnessBackstop`, `error_kind` `backstop`) is not one: the model kept writing, so it
+is the candidate's failure, scored 0, not rerun and a target for the optimizer, like
+running out of output. After the trial, the
 loop runs each such item again, alone, on the same candidate, part and rollout seed, in
 `<trial>/incident_reruns/<n>`, up to `INCIDENT_RERUNS` (2, as many as an interrupted
 evaluation's in-run retries) times (`Loop._settle_incidents`). A rerun's record takes the
@@ -324,11 +328,12 @@ perfect val score needs every val item scored.
 
 **Which line classifies an error.** An item's error crosses a process as text; only its
 first line is written by the harness (the walker's `<node>: <Kind>: ...`, the spine's
-`<node>: ...`, the worker's `worker: ...`). `items.error_kind` reads the backstop, the
-completion timeout, the declared timeout and their retries-spent forms from that line
-only (`items.first_line`), so a model's reply quoted further down never makes an item an
-incident or a timeout. Whether the backstop is a harness incident at all is one constant,
-`items.BACKSTOP_IS_HARNESS_INCIDENT`.
+`<node>: <Kind>: ...` from the worker's own error line, `worker: ...`). `items.error_kind`
+reads a harness incident, the backstop, the completion timeout, the declared timeout and
+their retries-spent forms from that line only (`items.first_line`), so a model's reply
+quoted further down never classifies an item. The spine takes that line from the line its
+worker writes after `--- refactory worker error ---`, last in its stderr, never from a
+`worker:` line a quoted reply could hold (`workflow-spine` `nodeErrorLine`).
 
 ## Train minibatches (`train_minibatch: N`)
 
@@ -1945,8 +1950,9 @@ each candidate's measured model cost over its train items.
 
 **A harness timeout is not a target.** An item the harness ended for time
 (`base.harness_timeout`: an `error_kind`, or a step's `missing_steps` cause, of `timeout`
--- a session ended on inactivity, the item deadline -- or `harness_incident`, the
-backstop, which is rerun and then not scored at all (see "A harness incident is rerun");
+-- a session ended on inactivity, the item deadline -- or `harness_incident`, a harness
+fault, which is rerun and then not scored at all (see "A harness incident is rerun"); a
+session still writing at the backstop, `backstop`, is the model's failure and a target;
 never read from an error's text) still scores what it scored, 0, but no request reads it as the
 pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
 error row, no item shown in full, no time and no analyst's batch, and the analysts are told

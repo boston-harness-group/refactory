@@ -249,6 +249,8 @@ const ITEM_ERROR_TAIL = 4_096
 const ITEM_ERROR_LINE = 512
 /** What a dispatched agent's worker prints before its error (`worker_node.main`). */
 const WORKER_PREFIX = 'worker: '
+/** What a dispatched worker prints before the one line naming its failure (`items.WORKER_ERROR_MARKER`). */
+const WORKER_ERROR_MARKER = '--- refactory worker error ---'
 /** A model call that timed out, as `items.COMPLETION_TIMEOUT_TEXT` reads it. */
 const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
 
@@ -288,9 +290,14 @@ function withoutAccountCopy(stderr: string): string {
  * (`refactory_dsh.run.main`); else a dispatched agent's worker error (a model call that
  * timed out is a `CompletionTimeout`, as the walker names it); else the last line.
  */
-function nodeErrorLine(stderr: string): string {
+export function nodeErrorLine(stderr: string): string {
   const marker = '--- refactory failure ---'
   const lines = (text: string): string[] => text.split('\n').map(line => line.trim()).filter(line => line !== '')
+  // A dispatched worker's own line, `<Kind>: <first line>`, after its marker and last in
+  // its stderr (`worker_node.main`, `items.WORKER_ERROR_MARKER`): the harness's words,
+  // never a `worker:` line of a message above that may quote a model's reply.
+  const all = lines(stderr)
+  if (all.length >= 2 && all.at(-2) === WORKER_ERROR_MARKER) return all.at(-1)!
   const at = stderr.lastIndexOf(marker)
   const account = at === -1 ? [] : lines(stderr.slice(at + marker.length))
   if (account.length > 0) return account[0]!

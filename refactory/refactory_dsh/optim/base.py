@@ -2673,17 +2673,13 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
 #: model call or an item ended it, whatever that limit is (`harness_timeout`).
 HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a target"
 
-#: The ``error_kind`` (and ``missing_steps`` cause) values a harness ending sets: a model
-#: call the client ended (``timeout``: inactivity, the item deadline) and the backstop
-#: (``harness_incident``). A wall a step declares (``timeout_s``; ``declared_timeout``) is
-#: the pipeline's design, an ordinary failure the optimizer sees.
-def _harness_timeout_kinds() -> frozenset[str]:
-    from refactory_dsh.items import BACKSTOP_IS_HARNESS_INCIDENT
-
-    return frozenset({"timeout", *(("harness_incident",) if BACKSTOP_IS_HARNESS_INCIDENT else ())})
-
-
-HARNESS_TIMEOUT_KINDS = _harness_timeout_kinds()
+#: The ``error_kind`` (and ``missing_steps`` cause) values the harness sets on its own
+#: account: a model call the client ended (``timeout``: inactivity, the item deadline)
+#: and a harness fault (``harness_incident``, `task.HarnessIncident`). A wall a step
+#: declares (``timeout_s``; ``declared_timeout``) is the pipeline's design, and a session
+#: still writing at the backstop (``backstop``) the model's own failure: both ordinary
+#: failures the optimizer sees and may target.
+HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
 
 
 def harness_timeout(record: Mapping[str, Any]) -> bool:
@@ -2693,7 +2689,7 @@ def harness_timeout(record: Mapping[str, Any]) -> bool:
     an error's text: an op that quotes a reply saying "timed out", a code step's own
     ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
     what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
-    as the pipeline's failure. One the backstop stopped and that a rerun did not recover
+    as the pipeline's failure. A harness incident a rerun did not recover
     is not scored at all (``not_scored``) and is listed on its own line."""
     if record.get("passed"):
         return False
@@ -2719,6 +2715,7 @@ NO_ANSWER_CAUSES = {
     "output_limit": "ran out of output without answering",
     "crash": "crashed in every session",
     "timeout": "timed out",
+    "backstop": "was still writing at the session time limit (4 h by default)",
     "failed": "failed (optional branch)",
 }
 

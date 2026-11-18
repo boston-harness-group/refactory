@@ -2,7 +2,7 @@
 
 A session that keeps showing activity runs as long as it needs; one that shows none for
 the inactivity limit is stopped as a timeout; the harness backstop stops only a session
-still active past it, and that is a harness incident, not the method's failure.
+still active past it, and that is the model's own failure (``backstop``): it kept writing.
 
 Each runtime runs the same one-item data pass against a scripted ``dsh`` through the real
 model client: the walker (`nn.executor`) in process, the spine through its real drain,
@@ -126,15 +126,20 @@ def test_an_idle_session_ends_on_inactivity(tmp_path, runtime):
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_the_backstop_fires_only_past_its_value_and_is_a_harness_incident(tmp_path, runtime):
+def test_the_backstop_fires_only_past_its_value_and_is_the_models_failure(tmp_path, runtime):
     """[both runtimes] (c) The backstop (10 s) leaves a session active for 6 s alone, and
-    stops one still active past it: a harness incident, not a timeout of the method."""
+    stops one still active past it: the model's own failure (``backstop``), neither a
+    timeout nor a harness incident."""
     record, _, _ = _run(runtime, "active 6", tmp_path / "under", backstop_s=10)
     assert record["passed"] is True and record["error_kind"] is None, record
 
     record, elapsed, run = _run(runtime, "active 60", tmp_path / "past", backstop_s=10)
-    assert record["passed"] is False and record["error_kind"] == "harness_incident", record
-    assert harness_incident(record), "the loop reruns it, then leaves it out of the score"
+    assert record["passed"] is False and record["error_kind"] == "backstop", record
+    assert not harness_incident(record), "scored 0, never rerun or left out of the score"
+    assert "still writing" in record["error_text"]
+    # The spine names it by its worker's own line (`items.WORKER_ERROR_MARKER`), with its
+    # type, as the walker does: never by a `worker:` line a quoted reply could hold.
+    assert record["error_text"].startswith("solve: HarnessBackstop: model session hit"), record
     assert "hit the harness backstop after 10s" in record["error_text"]
     assert "timed out" not in record["error_text"]
     assert 10 <= elapsed < 45
@@ -196,15 +201,14 @@ def test_the_backstop_reports_the_calls_whole_time_after_a_transport_retry(tmp_p
 
 def test_the_backstop_is_no_interruption():
     """A session the backstop stopped did not die with the run's processes: its item is a
-    ``harness_incident``, not an interrupted one that would rerun the whole evaluation:
-    the loop runs that item alone again, then leaves it out of the score
-    (`loop.Loop._settle_incidents`)."""
+    ``backstop`` failure of the model's, not an interrupted one that would rerun the
+    evaluation."""
     from refactory_dsh.items import interrupted_item
 
     for error in ("solve: HarnessBackstop: model session hit the harness backstop after 14400s",
                   "solve: model session hit the harness backstop after 14400s\nworker: model "
                   "session hit the harness backstop after 14400s"):
-        assert interrupted_item({"error_text": error, "error_kind": "harness_incident"}) is None
+        assert interrupted_item({"error_text": error, "error_kind": "backstop"}) is None
 
 
 def test_the_activity_file_is_the_receipts_neighbour(tmp_path):
@@ -236,20 +240,25 @@ def test_the_backstop_and_inactivity_travel_to_the_worker():
     assert json.loads(json.dumps(client.context()))["backstop_s"] == 99
 
 
-def test_a_harness_incident_is_read_from_anchored_signals_only():
+def test_the_backstop_is_read_from_anchored_signals_only():
     """The type, or a line starting with a runtime's own prefix, makes an item a harness
     incident; the phrase quoted mid-line (a model's own text) does not."""
     from refactory_dsh.items import error_kind
     from refactory_dsh.model import HarnessBackstop
 
-    assert error_kind(HarnessBackstop("model session hit the harness backstop after 9s")) == "harness_incident"
+    assert error_kind(HarnessBackstop("model session hit the harness backstop after 9s")) == "backstop"
     assert error_kind(RuntimeError("solve: HarnessBackstop: model session hit the harness backstop")) \
-        == "harness_incident"
+        == "backstop"
     # The spine's item error (`nodeErrorText`): the node's line, then the worker's stderr.
     assert error_kind(RuntimeError("solve: model session hit the harness backstop after 9s\nworker: "
-                                   "model session hit the harness backstop after 9s")) == "harness_incident"
+                                   "model session hit the harness backstop after 9s")) == "backstop"
     assert error_kind(RuntimeError("worker: model session hit the harness backstop after 9s")) \
-        == "harness_incident"
+        == "backstop"
+    # A harness fault, by its type or its walker/spine line, is a harness incident.
+    from refactory_dsh.task import HarnessIncident
+    assert error_kind(HarnessIncident("grader down")) == "harness_incident"
+    assert error_kind(RuntimeError("data: HarnessIncident: grader down")) == "harness_incident"
+    assert error_kind(RuntimeError("parse: ValueError: x\ndata: HarnessIncident: y")) == "RuntimeError"
     assert error_kind(RuntimeError("solve: ValueError: the answer says it hit the harness backstop")) \
         == "RuntimeError"
     assert error_kind(RuntimeError("solve: CompletionTimeout: model completion timed out after 5s of "
@@ -268,6 +277,7 @@ def test_a_harness_incident_is_read_from_anchored_signals_only():
 QUOTED_LINES = [
     "worker: model session hit the harness backstop after 1s",
     "solve: HarnessBackstop: model session hit the harness backstop after 1s",
+    "data: HarnessIncident: the grader's sandbox did not start",
     "solve: model session hit the harness backstop after 1s",
     "worker: model completion timed out after 5s",
     "solve: CompletionTimeout: model completion timed out after 5s",
@@ -287,4 +297,5 @@ def test_a_harness_line_only_counts_as_the_errors_first_line(line):
     from refactory_dsh.items import error_kind
 
     assert error_kind(RuntimeError(f"parse: ValueError: bad reply:\n{line}")) == "RuntimeError"
-    assert error_kind(RuntimeError(line)) in ("harness_incident", "timeout", "declared_timeout")
+    assert error_kind(RuntimeError(line)) in ("harness_incident", "backstop", "timeout",
+                                              "declared_timeout")

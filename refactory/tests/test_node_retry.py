@@ -300,7 +300,7 @@ def _missing_verifier(runtime: str, tmp_path: Path, verifier: Node, plan: list[d
 def test_an_optional_branch_says_how_it_ended_for_time(tmp_path, runtime):
     """An optional branch missing because it ended for time says how, so a reader (and
     #684's harness-timeout reading) tells the harness's ending from the pipeline's: its
-    declared wall is ``declared_timeout``, the harness backstop ``harness_incident``,
+    declared wall is ``declared_timeout``, the harness backstop ``backstop``,
     and silence ``timeout``. Any other failure stays ``failed``."""
     def verifier(**fields) -> Node:
         return Node("verifier", "agent", prompt_template="Verify.",
@@ -310,7 +310,7 @@ def test_an_optional_branch_says_how_it_ended_for_time(tmp_path, runtime):
     assert walled["cause"] == "declared_timeout", walled
     stopped = _missing_verifier(runtime, tmp_path / "backstop", verifier(), [{"active": 30}],
                                 backstop_s=3)
-    assert stopped["cause"] == "harness_incident", stopped
+    assert stopped["cause"] == "backstop", stopped
     assert "hit the harness backstop after 3s" in stopped["error"]
     silent = _missing_verifier(runtime, tmp_path / "silent", verifier(), [{"sleep": 30}])
     assert silent["cause"] == "timeout", silent
