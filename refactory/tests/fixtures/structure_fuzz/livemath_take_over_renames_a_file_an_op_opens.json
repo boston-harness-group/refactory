@@ -26,6 +26,5 @@
   "found": [
     "walker: failed: data: all 5 items failed"
   ],
-  "fixed_by": "takes_over: an op that opens a renamed file by name (notes_prompts, compare_notes.txt) refuses the take over",
-  "refused_with": "E-precondition"
+  "fixed_by": "notes_prompts and decide_prompt read and set what they declare (nn.by_declaration), so the take over renames what they open; an op that opens a renamed file by name refuses it"
 }

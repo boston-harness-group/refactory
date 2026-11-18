@@ -242,6 +242,7 @@ _NODE_FIELDS = frozenset(
         "code",
         "knob_outputs",
         "inputs",
+        "renames",
     }
 )
 
@@ -312,6 +313,33 @@ def _knob_outputs(node: "Node") -> dict[str, tuple[str, ...]]:
             raise GraphError(f"node {node.id!r}: knob_outputs[{output!r}] names a knob twice")
         out[output] = tuple(knobs)
     return out
+
+
+def _renames(node: "Node") -> dict[str, dict[str, str | None]] | None:
+    """``node.renames`` in its canonical form (``facts`` and ``files``, each present only
+    when not empty; None when both are), or a `GraphError`: only an op with code declares
+    it, and each name it records under is one the op declares, once."""
+    value = node.renames
+    if node.kind != "op" or not node.code and not any(f == "code" for f, _k in node.field_bindings):
+        raise GraphError(f"node {node.id!r} is a {node.kind} without code and declares renames; "
+                         "only a code op does")
+    if not isinstance(value, Mapping) or set(value) - {"facts", "files"}:
+        raise GraphError(f"node {node.id!r}: renames is {{'facts': {{...}}, 'files': {{...}}}}")
+    out: dict[str, dict[str, str | None]] = {}
+    for key, declared in (("facts", node.produces), ("files", node.writes)):
+        table = value.get(key) or {}
+        if not isinstance(table, Mapping) or not all(
+                isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in table.items()):
+            raise GraphError(f"node {node.id!r}: renames[{key!r}] maps a returned name to a "
+                             "declared one or None")
+        named = [v for v in table.values() if v is not None]
+        outside = sorted(set(named) - set(declared))
+        if outside or len(set(named)) != len(named):
+            raise GraphError(f"node {node.id!r}: renames[{key!r}] records under {named}; each "
+                             f"must be one of its declared {key} {list(declared)}, once")
+        if table:
+            out[key] = dict(table)
+    return out or None
 
 
 #: The most items a data node runs at once, whether set as ``parallelism`` or by its
@@ -483,6 +511,13 @@ class Node:
     #: carrying it in every output (`operators.carried_knobs`), so a step told to see the
     #: task's own input (``"sees": ["task"]``) never gets another step's instructions.
     knob_outputs: dict[str, tuple[str, ...]] | None = None
+    #: `op` code node: the names its code returns that the run records under another
+    #: name, ``{"facts": {returned: declared}, "files": {returned: declared}}`` (a
+    #: declared name of its own, or None to drop it). Set by edits that give a step's
+    #: outputs new names (a copy of code, ``insert``'s 'takes_over'), so the code stays as
+    #: written -- and stays right when it is rewritten -- on both runtimes
+    #: (`refactory_dsh.snippet.run`, through the node's declaration).
+    renames: dict[str, dict[str, str | None]] | None = None
 
     def __post_init__(self) -> None:
         if self.tool_policy is not None and self.tool_policy != "none":
@@ -610,6 +645,8 @@ class Node:
 
         if self.knob_outputs is not None:
             self.knob_outputs = _knob_outputs(self)
+        if self.renames is not None:
+            self.renames = _renames(self)
 
         # field_bindings: structural validation only (pair shape, knob membership).
         # Domain rules (bindable fields, parallelism on data nodes) are checked
@@ -716,6 +753,8 @@ class Node:
             **({"inputs": list(self.inputs)} if self.inputs else {}),
             **({"knob_outputs": {out: list(knobs) for out, knobs in self.knob_outputs.items()}}
                if self.knob_outputs is not None else {}),
+            **({"renames": {key: dict(table) for key, table in self.renames.items()}}
+               if self.renames else {}),
         }
 
     @classmethod
@@ -774,6 +813,7 @@ class Node:
             code=str(state.get("code") or ""),
             inputs=tuple(state.get("inputs") or ()),
             knob_outputs=state.get("knob_outputs"),
+            renames=state.get("renames"),
         )
 
     def bound_knob(self, field_name: str) -> str:

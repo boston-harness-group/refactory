@@ -311,6 +311,9 @@ elements.fills_facts = True  # type: ignore[attr-defined]
 #: since the executor imports this module.
 for _op in (collect, file_text, select):
     _op.by_declaration = True  # type: ignore[attr-defined]
+#: select matches a label against the names of the files it reads
+#: (`executor.names_matter`).
+select.names_matter = True  # type: ignore[attr-defined]
 
 
 def map_of(graph: Graph, fork_id: str) -> str | None:

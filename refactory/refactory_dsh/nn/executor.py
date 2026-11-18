@@ -433,12 +433,22 @@ def fills_facts(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def by_declaration(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Mark an op or gate callable that reads, writes and sets only what its node
-    declares, under the declared names (``ctx.declared_reads``, its declared writes and
-    facts), never a name of its own choosing. An edit may then rename that node's inputs
-    and outputs (``insert``'s 'takes_over', `core_ops._take_over_plan`); a callable
-    without the mark is taken to open or return them by name."""
+    """Mark an op or gate callable that opens the files its node declares and writes and
+    sets its declared outputs, under the declared names (``ctx.declared_reads``, its
+    declared writes and facts), never a name of its own choosing. An edit may then rename
+    that node's files and outputs (``insert``'s 'takes_over', `core_ops._take_over_plan`);
+    a callable without the mark is taken to open or return them by name. (A fact it reads
+    is held to its ``inputs`` either way.)"""
     fn.by_declaration = True  # type: ignore[attr-defined]
+    return fn
+
+
+def names_matter(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark an op or gate callable whose behaviour depends on the names of the files it
+    reads, not only on what they hold (``select`` matches a label against them): an edit
+    that renames one of its reads would change what it does, so ``insert``'s 'takes_over'
+    refuses to (`core_ops._take_over_plan`)."""
+    fn.names_matter = True  # type: ignore[attr-defined]
     return fn
 
 

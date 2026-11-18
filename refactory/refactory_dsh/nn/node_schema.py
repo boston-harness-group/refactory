@@ -40,6 +40,9 @@ _CONSTRAINED: dict[str, dict[str, Any]] = {
     "required_reads": {"required_reads": ("in.txt",), "reads": ("in.txt",)},
     "knob_outputs": {"knob_outputs": {"out.txt": ("k",)}, "writes": ("out.txt",),
                      "knobs": ("k",)},
+    "renames": {"renames": {"facts": {"made": "out"}}, "produces": ("out",),
+                "call": "refactory_dsh.snippet:run",
+                "code": "def main(inp):\n    return {'facts': {'made': 1}}\n"},
 }
 
 

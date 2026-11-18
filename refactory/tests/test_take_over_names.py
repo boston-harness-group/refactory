@@ -2,33 +2,41 @@
 
 Taking a step over renames its outputs for the steps before the new one. That reaches a
 model step (its files are handed to it, its facts filled, under the names it declares),
-an op or gate whose callable works from its declaration (`nn.by_declaration`), and code
-(its code is wrapped to return under the new names, `core_ops._renamed_code`). It never
-reaches a callable that opens or returns a name of its own: LiveMath S4's notes_prompts
-opens ``compare_notes.txt`` and decide_prompt returns ``decide_prompt`` by name. Such a
-take over is refused, never accepted into a graph that fails every item.
+an op or gate whose callable works from its declaration (`nn.by_declaration`: LiveMath
+S4's notes_prompts and decide_prompt, the block ops), and code: the run records what it
+returns under the new names (`graph.Node.renames`), its code as written, so a later
+rewrite of the code cannot undo the rename. It never reaches a callable that opens or
+returns a name of its own (S4's prepare and extract_answer), nor one whose behaviour
+depends on the names it reads (`nn.names_matter`: select): those are refused.
 
 - **The fuzz walk's finding** on S4: ``parallelize`` after step_join, then a step taking
-  compare over: refused, wherever the new step goes after notes_prompts.
-- **Both runtimes**: what is accepted on S4 next to it -- the step after compare taking
-  it over, and a step after a new fork taking over one of its code branches -- grades
-  every item on the walker and on the spine, with the same facts.
+  compare over -- once accepted into a graph that failed every item -- now builds a graph
+  that runs, wherever the new step goes; on the walker, and on the spine for a step
+  right after step_join.
+- **Renames survive a rewrite**: a code step taken over, and a copy of a code step, run
+  on both runtimes after their code knob is set to plain code returning the old names.
+- **Refusals**: an op that opens or returns names of its own, and select.
+- **Prompts unchanged**: the LiveMath ops now reading their declaration send the same
+  prompts on the walker and the spine (`test_livemath_skill_graph` pins the walker's).
 - **Any graph**: seeded walks over every fuzz seed mixing 'takes_over' with parallelize,
   serialize, branch, loop (and 'back_to'), route, fallback, split and merge, in both
   orders; every state accepted keeps the harness's invariants on the walker.
 """
 from __future__ import annotations
 
+import json
 import random
-import re
+import tempfile
+from pathlib import Path
 
 import pytest
 
 import structure_fuzz as sf
 import structure_fuzz_graphs as fg
+from refactory_dsh.nn import core_ops
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import Candidate
-from test_livemath_blocks import needs_spine
+from test_livemath_blocks import _spine, needs_spine
 
 S4 = "livemath_skill_graph"
 #: The fuzz walk's first edit: two new steps side by side after S4's fork.
@@ -36,6 +44,8 @@ PARALLEL = {"op": "parallelize", "after": "step_join",
             "new": [{"kind": "agent", "text": "Try A."}, {"kind": "code"}]}
 #: The invariants a state the harness accepts keeps (the run ones on the walker).
 CHECKED = ("lowering", "walker", "required", "dataflow", "forks", "knobs")
+#: Code that returns the branch's output under the name it was built with.
+PLAIN_CODE = "def main(inp):\n    return {'facts': {'%s': 'rewritten'}}\n"
 
 
 def _applier(name: str = S4) -> sf.Applier:
@@ -54,27 +64,80 @@ def _refusal(applier: sf.Applier, edits: list[dict]) -> str:
     return " ".join(refusal)
 
 
+def _on_both(applier: sf.Applier, state: dict) -> None:
+    assert sf.spine_eligible(state)
+    assert sf.check_state(applier, state, walker=True, spine=True,
+                          only=(*CHECKED, "spine")) == []
+
+
 # ── the finding ───────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("after", ["step_join", "step_join_join", "step_join_branch1",
                                    "decide_prompt", "decide"])
 @pytest.mark.parametrize("kind", ["agent", "code"])
-def test_s4_taking_compare_over_after_a_new_fork_is_refused(after, kind):
-    """notes_prompts runs before the new step and opens compare_notes.txt by name:
-    renamed for it, its read would find nothing (every item failed on both runtimes)."""
-    reason = _refusal(_applier(), [PARALLEL, {"op": "insert", "after": after, "kind": kind,
-                                              "takes_over": "compare"}])
-    assert re.search(r"'(notes_prompts|decide_prompt)' reads 'compare''s output "
-                     r"'compare_notes.txt'", reason), reason
-    assert "cannot rename" in reason
+def test_s4_taking_compare_over_after_a_new_fork_runs_on_the_walker(after, kind):
+    """notes_prompts and decide_prompt read what they declare: renamed for them, they
+    read compare's own notes, and decide sees the new step's (every item graded)."""
+    applier = _applier()
+    state = _accepted(applier, [PARALLEL, {"op": "insert", "after": after, "kind": kind,
+                                           "takes_over": "compare"}])
+    nodes = state["graph"]["nodes"]
+    assert nodes["compare"]["writes"] == ["compare.txt"]
+    assert nodes["notes_prompts"]["reads"] == ["compare.txt"]
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
 
 
-def test_s4_taking_over_an_op_that_returns_its_outputs_by_name_is_refused():
-    """decide_prompt's callable returns {'decide_prompt': ...}: it cannot be renamed."""
-    reason = _refusal(_applier(), [{"op": "insert", "after": "decide", "kind": "code",
-                                    "takes_over": "decide_prompt"}])
-    assert "'decide_prompt' runs" in reason and "names of its own" in reason, reason
+@needs_spine
+def test_s4_a_step_after_step_join_taking_compare_over_runs_on_both_runtimes():
+    applier = _applier()
+    _on_both(applier, _accepted(applier, [
+        {"op": "insert", "after": "step_join", "kind": "agent", "takes_over": "compare",
+         "text": "Merge the notes above into one set of notes for the final step."}]))
+
+
+def test_s4_taking_decide_prompt_over_runs_on_the_walker():
+    """decide_prompt sets its declared fact, so it can be taken over (renamed)."""
+    applier = _applier()
+    state = _accepted(applier, [{"op": "insert", "after": "decide", "kind": "code",
+                                 "takes_over": "decide_prompt"}])
+    assert state["graph"]["nodes"]["decide_prompt"]["produces"] != ["decide_prompt"]
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
+
+
+# ── refusals ──────────────────────────────────────────────────────────────
+
+
+def test_an_op_that_returns_its_outputs_by_name_cannot_be_taken_over():
+    """S4's prepare returns {'user_prompt': ..., 'compare_prompt': ...} by name."""
+    reason = _refusal(_applier(), [{"op": "insert", "after": "compare", "kind": "code",
+                                    "takes_over": "prepare"}])
+    assert "'prepare' runs" in reason and "names of its own" in reason, reason
+
+
+def test_an_op_that_opens_a_renamed_file_by_name_refuses_it():
+    """S4's extract_answer opens answer.txt by name: decide taken over after it is
+    refused."""
+    reason = nn_edits.precheck({"op": "insert", "after": "extract_answer", "kind": "code",
+                                "takes_over": "decide"}, _applier().seed_state)
+    assert reason and "'extract_answer' reads 'decide''s output 'answer.txt'" in reason, reason
+
+
+def test_select_whose_names_matter_refuses_a_renamed_read():
+    """select matches a judge's label against the names of the files it reads: renamed,
+    a label naming compare_copy1 would match nothing."""
+    applier = _applier()
+    state = _accepted(applier, [
+        {"op": "parallelize", "steps": ["compare"], "copies": 1},
+        {"op": "insert", "after": "compare_join", "kind": "agent", "id": "choose",
+         "text": "Name the better notes: compare or compare_copy1."},
+        {"op": "insert", "after": "choose", "kind": "op", "id": "pick",
+         "call": core_ops.select_call()}])
+    assert "compare_copy1.txt" in state["graph"]["nodes"]["pick"]["reads"]
+    reason = nn_edits.precheck({"op": "insert", "after": "pick", "kind": "code",
+                                "takes_over": "compare_copy1"}, state)
+    assert reason and "'pick' reads 'compare_copy1''s output 'compare_copy1.txt'" in reason, \
+        reason
 
 
 def test_an_op_working_from_its_declaration_is_renamed_not_refused():
@@ -92,45 +155,81 @@ def test_an_op_working_from_its_declaration_is_renamed_not_refused():
             assert reason is None or "cannot rename" not in reason, (edit, reason)
 
 
-# ── both runtimes ─────────────────────────────────────────────────────────
+# ── renames survive a rewrite of the code ─────────────────────────────────
 
 
-#: Accepted next to the finding: compare taken over right after it (no step before the
-#: new one reads it), and the new fork's code branch taken over after its join (its code
-#: wrapped to return under the new names).
-ACCEPTED = {
-    "compare right after it": [PARALLEL, {"op": "insert", "after": "compare", "kind": "agent",
-                                          "text": "Rewrite the notes.", "takes_over": "compare"}],
-    "a code branch after the join": [PARALLEL, {"op": "insert", "after": "step_join_join",
-                                                "kind": "code", "takes_over": "step_join_branch2"}],
-}
+#: A code branch of a new fork taken over after its join (on S4); and a code step that
+#: names its outputs, split into a copy of itself and a review (the fuzz corpus case).
+TAKEN = [PARALLEL, {"op": "insert", "after": "step_join_join", "kind": "code",
+                    "takes_over": "step_join_branch2"}]
+COPIED = json.loads((sf.CORPUS / "split_copies_code_that_names_its_outputs.json")
+                    .read_text())["edits"]
+#: Code returning both the fact and the file the copied step was built with.
+COPY_CODE = "def main(inp):\n    return {'facts': {'code1_fact': 1}, 'files': {'code1.txt': 'x'}}\n"
+REWRITES = [(S4, TAKEN, "step_join_branch2", PLAIN_CODE % "step_join_branch2"),
+            ("fuzz_tool_step", COPIED, "code1_a", COPY_CODE)]
 
 
-@pytest.mark.parametrize("name", sorted(ACCEPTED))
-def test_what_s4_accepts_runs_on_the_walker(name):
-    applier = _applier()
-    state = _accepted(applier, ACCEPTED[name])
-    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
-
-
-def test_a_code_step_taken_over_returns_its_outputs_under_the_new_names():
-    state = _accepted(_applier(), ACCEPTED["a code branch after the join"])
+def test_a_code_step_taken_over_keeps_its_code_and_declares_its_renames():
+    seed = _applier().replay([PARALLEL])[0][-1].state
+    state = _accepted(_applier(), TAKEN)
     branch = state["graph"]["nodes"]["step_join_branch2"]
     renamed = "step_join_branch2_own_step_join_branch2"
     assert branch["produces"] == [renamed]
+    assert branch["renames"] == {"facts": {"step_join_branch2": renamed}}
     assert state["graph"]["nodes"]["step_join_join_next"]["produces"] == ["step_join_branch2"]
-    code = state["knobs"]["step_join_branch2__code"]["value"]
-    assert f"{{'step_join_branch2': '{renamed}'}}" in code, code
+    assert state["knobs"]["step_join_branch2__code"] == seed["knobs"]["step_join_branch2__code"]
+
+
+@pytest.mark.parametrize("seed, edits, step, code", REWRITES, ids=["taken over", "copied"])
+def test_code_rewritten_to_return_the_old_names_still_runs_on_the_walker(seed, edits, step, code):
+    applier = _applier(seed)
+    state = _accepted(applier, [*edits, {"op": "set_knob", "name": f"{step}__code",
+                                         "value": code}])
+    assert state["graph"]["nodes"][step]["renames"]
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
 
 
 @needs_spine
-@pytest.mark.parametrize("name", sorted(ACCEPTED))
-def test_what_s4_accepts_runs_on_the_spine_as_on_the_walker(name):
-    applier = _applier()
-    state = _accepted(applier, ACCEPTED[name])
-    assert sf.spine_eligible(state)
-    assert sf.check_state(applier, state, walker=True, spine=True,
-                          only=(*CHECKED, "spine")) == []
+@pytest.mark.parametrize("seed, edits, step, code", REWRITES, ids=["taken over", "copied"])
+def test_code_rewritten_to_return_the_old_names_still_runs_on_the_spine(seed, edits, step, code):
+    applier = _applier(seed)
+    _on_both(applier, _accepted(applier, [*edits, {"op": "set_knob", "name": f"{step}__code",
+                                                   "value": code}]))
+
+
+# ── the LiveMath ops send the same prompts ────────────────────────────────
+
+
+def _exchanges(mode) -> tuple[dict, dict]:
+    """Every agent exchange per item of ``mode`` with default knobs, on each runtime."""
+    state = mode.state_dict()
+    graph = sf._graph_of(state)
+    answers = {n: f"{n} says <answer>B</answer>" for n, x in graph.nodes.items()
+               if x.kind == "agent"}
+    seed = sf.seeds()[S4]
+    tmp = Path(tempfile.mkdtemp(prefix="take-over-prompts-"))
+    walked = sf.run_walker(seed, state, tmp / "walker", sf.ScriptedModel(answers))
+    assert walked.exit_ok, walked.error
+    with sf.livemath_fixture():
+        assert _spine(graph, tmp / "spine", tmp, agent_responses=answers, mode_state=state) == 0
+    spun = json.loads((tmp / "spine" / "item_records.json").read_text())
+
+    def calls(records):
+        return {str(r["id"]): [(e["node"], e["prompt"]) for e in r.get("exchanges", [])]
+                for r in records}
+    return calls(walked.facts["item_scores"]), calls(spun)
+
+
+@needs_spine
+@pytest.mark.parametrize("block", ["skill_graph", "solve_then_verify",
+                                   "two_attempts_then_judge", "solve_then_self_check"])
+def test_the_ops_reading_their_declaration_send_the_same_prompts_on_both_runtimes(block):
+    from refactory_packages.livemath.mode import Solver
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    walker, spine = _exchanges(SkillGraph() if block == "skill_graph" else Solver(block=block))
+    assert walker == spine and sum(map(len, walker.values())) >= 10
 
 
 # ── any graph ─────────────────────────────────────────────────────────────
