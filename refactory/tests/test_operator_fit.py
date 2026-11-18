@@ -165,11 +165,17 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
     assert rows["precision"][0].startswith(
         "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare)")
     assert rows["notes_prompts"][0] == "-"  # only model steps' prompts are traced
-    # The text a plain op builds a prompt from is often a knob: named as one.
-    # One op makes two prompts: its knobs are said to be the op's, not each prompt's.
+    # The text a plain op builds a prompt from is often a knob: named as one. One op
+    # makes two prompts and declares which knob each carries (`knob_outputs`)...
+    assert "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), " \
+        "knob precision_task)" in rows["precision"][0], rows["precision"][0]
+    # ...and an op that does not declare it has its knobs said to be the op's.
+    undeclared = _start_state()
+    undeclared["graph"]["nodes"]["notes_prompts"].pop("knob_outputs")
+    rows_u = _rows(_section(undeclared))
     assert "precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), " \
         "knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))" \
-        in rows["precision"][0], rows["precision"][0]
+        in rows_u["precision"][0], rows_u["precision"][0]
     assert "decide_prompt (op decide_prompt, which reads" in rows["decide"][0]
     assert "knob decide_task)" in rows["decide"][0]  # one output: the knob is its own
 
@@ -199,11 +205,10 @@ def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
     state = _start_state()
     refused = _rows(_section(state))["decide"][2]
-    hint = re.search(r"replace it with (\{.*?\}\]\})", refused)
-    assert hint, refused
-    edit = json.loads(hint.group(1))
-    assert edit == {"op": "split", "step": "decide",
-                    "into": [{"kind": "agent", "text": "<what it does>", "sees": ["task"]}]}
+    at = refused.index(core_ops.OWN_TEXT_HINT) + len(core_ops.OWN_TEXT_HINT)
+    edit = json.JSONDecoder().raw_decode(refused, at)[0]
+    assert edit == {"op": "rewire", "step": "decide", "sees": ["task"],
+                    "text": "<what it does>"}
     assert _outcome(edit, state) is None
     # The same exact edit for a data pass's ends, where the replacement is code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state)
@@ -217,10 +222,10 @@ def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s()
     split an attempt refuses (E-protected). The attempt checks the hinted edit itself."""
     state = _start_state()
     rewire = {"op": "rewire", "step": "decide", "sees": ["task"]}
-    assert '"op": "split"' in nn_edits.precheck(rewire, state)
+    assert '"op": "rewire"' in nn_edits.precheck(rewire, state).split(core_ops.OWN_TEXT_HINT)[1]
     reason = _outcome(rewire, state, protected=("decide",))
-    assert "replacing it is refused too (E-protected" in reason, reason
-    assert '"op": "split"' not in reason
+    assert "giving it its own text is refused too (E-protected" in reason, reason
+    assert core_ops.OWN_TEXT_HINT not in reason
     # A code replacement refused the same way leaves no note about its default code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state, protected=("data",))
     assert "replacing it is refused too (E-protected: node 'data'" in reason, reason
@@ -228,12 +233,16 @@ def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s()
 
 
 def test_a_refusal_never_names_a_replacing_edit_that_would_be_refused():
-    """Where the replacement is refused too (a fork's branch; a step alone reading a frozen
-    knob), the hint says so with that refusal instead of naming the edit."""
+    """Where the replacement is refused too (a step alone reading a frozen knob), the hint
+    says so with that refusal instead of naming the edit; a fork's branch is replaced in
+    place by a rewire with its own text, which the row names and which applies."""
     state = _start_state()
     refused = _rows(_section(state))["hypotheses"][2]
-    assert "replacing it is refused too ('hypotheses' is a fork's branch" in refused, refused
-    assert '"op": "split"' not in refused
+    assert "refused too" not in refused, refused
+    named = [json.dumps(json.JSONDecoder().raw_decode(refused, at.end())[0])
+             for at in re.finditer(re.escape(core_ops.OWN_TEXT_HINT), refused)]
+    assert named and all(json.loads(edit)["op"] == "rewire" for edit in named), refused
+    assert all(_outcome(json.loads(edit), state) is None for edit in named), refused
     _package, mode = registry.resolve(Path("."), "livemath/solver")
     solver = mode().state_dict()
     reason = _outcome({"op": "remove", "step": "solve"}, solver)
@@ -530,8 +539,8 @@ def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
     rows = _rows(_section(_start_state()))
     assert rows["step_fork"][0] == (
         "a new branch here can see: compare_prompt@prepare (+knob compare_task), "
-        "hypotheses_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
-        "precision_prompt@notes_prompts (+knob precision_task, hypotheses_task), "
+        "hypotheses_prompt@notes_prompts (+knob hypotheses_task), "
+        "precision_prompt@notes_prompts (+knob precision_task), "
         "user_prompt@prepare, compare_notes.txt@compare, "
         "current_item.json@data; \"task\" gives user_prompt")
     nested = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
