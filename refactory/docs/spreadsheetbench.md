@@ -119,8 +119,11 @@ Where neither can run, code is not run.
 6. **Grader**: `recalc` by default. Its scores compare only with a SkillOpt run graded
    the same way (the lab's wrapper with `SB_GRADER=recalc`), never with SkillOpt's
    cached-grader numbers. A recalculation LibreOffice cannot make (it fails, or runs past
-   its 180 s wall) is a harness incident (`error_kind` `harness_incident`), not a wrong
-   answer: the outer loop runs the item again and, still one, leaves it out of the score
+   its 180 s wall) is told apart by recalculating a known-good tiny workbook with the same
+   LibreOffice (`recalc.soffice_works`, trusted for 5 minutes): if that works, the
+   prediction's own file is at fault and keeps its cached, failing grade
+   (`recalc_failed`); if not, the grader is broken, a harness incident (`error_kind`
+   `harness_incident`), not a wrong answer: the outer loop runs the item again and, still one, leaves it out of the score
    (outer-loop.md, "A harness incident is rerun"). So is a sandbox setup that fails.
 7. **Analysts' view**: a feedback message after the last model call (a loop that ended on
    turns or the backstop) is not in the conversation the analysts see; `n_turns` counts

@@ -313,15 +313,20 @@ results" ("N item(s) (...) had a harness incident and are not scored"; listed on
 as no failure, as a harness timeout below). The seed cache does not replay an evaluation
 with one. Each rerun item is a rollout (none past `max_rollouts`), and its tokens and cost
 are its trial's. A mode with no `item_scores` fact keeps its incidents in its score, and
-the run warns once (`harness_incident_kept`).
+the run warns once (`harness_incident_kept`); the request says each such item once as a
+harness incident the mode keeps, never as a harness timeout. A rerun never takes the run
+past `max_rollouts`, the evaluation's own items counted first. The SkillOpt port's
+analysts and slow-update comparison leave an unscored item out, as the request does.
 
 **Every comparison between candidates uses the same items.** When an incident left an
 item out of any candidate's rollout, `Loop.shared_scores` puts them all on the items every
 one was scored on in every repeat (with repeats, the mean of each repeat's mean): the val
 gate's bar and its ranking of a round's siblings (`ValidationGate.judge`, `judge_round`),
-the best (`offer_best`), and the post-training test deltas (`FinalEvaluation`:
-`best_test_delta` and `final_test_delta` are then the shared-item deltas, with
-`<delta>_raw` and `<delta>_left_out` beside them). Each such comparison is logged. When
+the best (`offer_best`), every parent pick that ranks by val (`Loop._val_scores`: the
+policies, `_fittest`, the merge's two parents, the tree's leader), SkillOpt's patience
+count, and the post-training test deltas (`FinalEvaluation`: `best_test_delta` and
+`final_test_delta` are then the shared-item deltas, with `<delta>_raw` and
+`<delta>_left_out` beside them). Each such comparison is logged. When
 the scores cannot be put on the same items (a score that is not its items' mean, a
 missing rollout), they compare as they are, with a warning. SkillOpt's early stop at a
 perfect val score needs every val item scored.
@@ -331,7 +336,10 @@ first line is written by the harness (the walker's `<node>: <Kind>: ...`, the sp
 `<node>: <Kind>: ...` from the worker's own error line, `worker: ...`). `items.error_kind`
 reads a harness incident, the backstop, the completion timeout, the declared timeout and
 their retries-spent forms from that line only (`items.first_line`), so a model's reply
-quoted further down never classifies an item. The spine takes that line from the line its
+quoted further down never classifies an item. A harness incident's line must also name
+a `model.HarnessIncident` class (`model.HARNESS_INCIDENT_CLASSES`) as its type, so an op's
+`ValueError` quoting a reply, or a code node's own exception (`SnippetError: the code
+raised ...`), is never one, whatever its message says. The spine takes that line from the line its
 worker writes after `--- refactory worker error ---`, last in its stderr, never from a
 `worker:` line a quoted reply could hold (`workflow-spine` `nodeErrorLine`).
 

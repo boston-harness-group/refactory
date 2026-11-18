@@ -49,3 +49,8 @@ class SplitAnswerTask(Task):
             raise HarnessIncident(f"{HARNESS_INCIDENT_TEXT}the grader's sandbox did not start")
         right = answer == "right"
         return VerifyResult(passed=right, score=1.0 if right else 0.0)
+
+
+def quote_reply(ctx: Any) -> None:
+    """An op whose own error quotes a reply that starts like a harness incident."""
+    raise ValueError("harness incident: the reply said the grader failed")

@@ -492,10 +492,23 @@ def first_line(text: Any) -> str:
 
 
 #: A `model.HarnessIncident` that crossed a process as text: its message starts with
-#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "``, the spine's
-#: ``"<node>: <Class>: "`` (its worker's marker line) or ``"worker: "``, on the error's
-#: first line only (`first_line`): a later line may quote a model's reply.
-_HARNESS_INCIDENT_LINE = re.compile(r"(?:[A-Za-z0-9_.-]+: )*" + re.escape(HARNESS_INCIDENT_TEXT))
+#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "`` or the spine's
+#: (its worker's marker line), on the error's first line only (`first_line`): a later
+#: line may quote a model's reply. Its class must be a harness incident's (`_incident_line`).
+_HARNESS_INCIDENT_LINE = re.compile(
+    rf"{_NODE}(?P<kind>[A-Za-z_][A-Za-z0-9_]*): " + re.escape(HARNESS_INCIDENT_TEXT))
+
+
+def _incident_line(head: str) -> bool:
+    """Whether an error's first line is a `model.HarnessIncident` that crossed a process:
+    ``"<node>: <Class>: harness incident: ..."`` (the walker's form, and the spine's from
+    its worker's marker line), its class one of `model.HARNESS_INCIDENT_CLASSES`. Any other
+    type -- a ValueError quoting a reply, a code node's `SnippetError` -- is not one,
+    whatever its message says."""
+    from refactory_dsh.model import HARNESS_INCIDENT_CLASSES
+
+    found = _HARNESS_INCIDENT_LINE.match(head)
+    return found is not None and found.group("kind") in HARNESS_INCIDENT_CLASSES
 
 
 def error_kind(error: BaseException) -> str:
@@ -520,7 +533,7 @@ def error_kind(error: BaseException) -> str:
     from refactory_dsh.node_retry import RetriesExhausted
 
     head = first_line(error)
-    if isinstance(error, HarnessIncident) or _HARNESS_INCIDENT_LINE.match(head):
+    if isinstance(error, HarnessIncident) or _incident_line(head):
         return "harness_incident"
     if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.match(head):
         return "backstop"

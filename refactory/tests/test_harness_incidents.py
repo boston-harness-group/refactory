@@ -414,6 +414,7 @@ def test_a_mode_with_no_item_scores_keeps_its_incidents_and_says_so(tmp_path):
     seed = loop.population[0]
     [t2] = [r for r in loop._train_item_records[seed.id] if r["id"] == "t2"]
     assert t2["error_kind"] == "harness_incident" and "not_scored" not in t2
+    assert t2["incident_kept"] is True, "said as a kept incident, not a timeout"
     assert len(_journal_events(loop, "harness_incident_kept")) == 1
     assert not _journal_events(loop, "harness_incident")
 
@@ -437,3 +438,147 @@ def test_a_session_still_writing_at_the_backstop_is_the_candidates_failure(tmp_p
     lines = "\n".join(_item_evidence(records))
     assert "harness incident" not in lines and "harness timeout" not in lines
     assert "1 failed with an error" in lines and "mean score 0.875" in lines
+
+
+# ── the SkillOpt port, and the parent picks ────────────────────────────────
+
+
+def test_a_new_best_ahead_only_on_shared_items_is_no_stale_epoch():
+    """b leads the seed on the shared items (0.75 vs 0.25) while its raw val score
+    (0.7) is below the seed's (0.8): the epoch improved, so the patience count resets."""
+    from refactory_packages.skillopt.loop import SkillOptLoop
+
+    run, gate, b, _c = _gate_case()
+    loop = types.SimpleNamespace(early_stop_patience=2, early_stop_at_full_val=False,
+                                 gate=gate, _early_stop_best=0.8, _early_stop_best_id="seed",
+                                 _stale_epochs=1)
+    gate.best_id, gate.best_score = "b", 0.7
+    SkillOptLoop._count_stale_epoch(loop, run)  # type: ignore[arg-type]
+    assert loop._stale_epochs == 0 and loop._early_stop_best_id == "b"
+
+
+def test_the_skillopt_analysts_and_slow_update_leave_unscored_items_out(monkeypatch):
+    """An item left out of the score is no failure for the analysts and no regression
+    for the slow update's comparison."""
+    from refactory_packages.skillopt import analysts as sk_analysts
+    from refactory_packages.skillopt.proposer import comparison_pairs
+
+    seen: list[list[str]] = []
+
+    class Env:
+        def prompt(self, name):  # type: ignore[no-untyped-def]
+            return "system"
+
+        def rollout_result(self, record, knobs):  # type: ignore[no-untyped-def]
+            return {"id": record["id"], "success": bool(record.get("passed"))}
+
+    class Trace:
+        def record_decision(self, step, **fields):  # type: ignore[no-untyped-def]
+            seen.append(list(fields.get("record_ids") or ()))
+
+    monkeypatch.setattr(sk_analysts, "ask", lambda *a, **k: "{}")
+    monkeypatch.setattr(sk_analysts.prompts, "format_analyst_user", lambda *a, **k: "user")
+    records = [{"id": "a", "passed": False, "score": 0.0},
+               {"id": "b", "passed": False, "score": None, "not_scored": "harness_incident",
+                "error_kind": "harness_incident"},
+               {"id": "c", "passed": True, "score": 1.0}]
+    sk_analysts.reflect(None, records, "skill", 3, "", 1, 8, 1, Trace(), env=Env())
+    assert sorted(i for ids in seen for i in ids) == ["a", "c"]
+
+    prev = [{"id": "a", "passed": True}, {"id": "b", "passed": True}]
+    pairs = comparison_pairs(prev, records, ["a", "b"], env=Env())
+    assert [p["id"] for p in pairs] == ["a"]
+
+
+def test_parent_picks_rank_on_the_shared_items(monkeypatch):
+    """`Loop._val_scores`, which every parent pick under the gate ranks by, gives each
+    rolled-out candidate its score on the items all were scored on."""
+    run, gate, _b, _c = _gate_case()
+    kept = run.kept
+    fake = types.SimpleNamespace(
+        config=types.SimpleNamespace(val_gate=True), _custom_strategy=None,
+        _gate=lambda: gate, _part_results=kept._part_results,
+        shared_scores=kept.shared_scores)
+    scores = Loop._val_scores(fake)  # type: ignore[arg-type]
+    assert scores["b"] == pytest.approx(0.75) and scores["c"] == pytest.approx(0.5)
+    assert scores["seed"] == pytest.approx(0.25)
+
+
+def test_kept_incidents_are_said_as_incidents_not_timeouts():
+    """In a mode that cannot leave an incident out, the request says it once as a harness
+    incident it keeps, never under the harness timeout line."""
+    records = [{"id": "a", "passed": True, "score": 1.0},
+               {"id": "b", "passed": False, "score": 0.0, "error_kind": "harness_incident",
+                "error_text": "data: RecalcFailed: harness incident: x", "incident_kept": True}]
+    lines = "\n".join(_item_evidence(records))
+    assert "1 more (b) had a harness incident this mode cannot leave out" in lines
+    assert "harness timeout" not in lines and lines.count("(b)") == 1
+
+
+# ── what a candidate writes is never an incident ───────────────────────────
+
+
+@pytest.mark.parametrize("text", [
+    "check: ValueError: harness incident: the grader failed",   # an op quoting a reply
+    "digest: SnippetError: the code raised RuntimeError: harness incident: x",
+    "digest: SnippetError: the code raised HarnessIncident: harness incident: x",
+    "worker: harness incident: x",
+])
+def test_text_a_candidate_controls_is_not_an_incident(text):
+    from refactory_dsh.items import error_kind
+
+    assert error_kind(RuntimeError(text)) == "RuntimeError"
+
+
+@pytest.mark.parametrize("code", [
+    "def main(inp):\n    raise RuntimeError('harness incident: the grader failed')\n",
+    "class HarnessIncident(Exception):\n    pass\n"
+    "def main(inp):\n    raise HarnessIncident('harness incident: the grader failed')\n",
+])
+def test_a_code_node_raising_an_incident_is_its_own_failure(tmp_path, code):
+    """A code node (candidate-written, run in the sandbox) that raises a harness incident
+    by name or text: its items fail as the candidate's, never as harness incidents."""
+    from refactory_dsh import snippet
+    from test_code_nodes import DIGEST, _accepted, _walk
+
+    if not snippet.available()[0]:
+        pytest.skip("no snippet sandbox here")
+    edit = {**DIGEST, "node": {**DIGEST["node"], "code": code}}
+    state = _accepted([edit])
+    result, _model = _walk(state, tmp_path)
+    failed = [r for r in result.item_records if r.get("error_text")]
+    assert failed, result.item_records
+    assert all(r["error_kind"] != "harness_incident" and not harness_incident(r) for r in failed)
+    assert all("SnippetError" in r["error_text"].split("\n", 1)[0] for r in failed), failed[0]
+
+
+def test_an_op_raising_incident_text_is_not_an_incident(tmp_path):
+    """An op whose own error quotes a reply starting "harness incident: " (a ValueError):
+    the walker names its type, so the item is the op's failure, not an incident."""
+    from refactory_dsh.nn.executor import execute
+
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="check", subgraph_exit="check",
+                      writes=("current_item.json",), produces=("item_scores",),
+                      task_ref="inactivity_ops:TwoItemTask"))
+    graph.add(nn.Node("check", "op", call="inactivity_ops:quote_reply"))
+    result = execute(graph, tmp_path / "run", max_steps=50)
+    records = result.item_records
+    assert records and all(r["error_kind"] == "RuntimeError" or r["error_kind"] == "ValueError"
+                           for r in records), records
+    assert not any(map(harness_incident, records))
+
+
+def test_a_rerun_never_takes_the_run_past_its_rollout_budget(tmp_path):
+    """``max_rollouts`` 8: the seed's 8 train items spend it, so t2's incident is not run
+    again (the evaluation's own items count before any rerun) and is left out."""
+    dsh = Dsh(tmp_path / "dsh")
+    dsh.plan({"/t2_&level 5.": "GRADER_DOWN", "level": "right"})
+    with _patch_mode(Probe):
+        loop = _interrupted_loop(tmp_path, dsh, [[]], max_rollouts=8)  # type: ignore[arg-type]
+        try:
+            loop.run()
+        except Exception:  # noqa: BLE001 - the spent budget may stop the run; the record stands
+            pass
+    entry = _incidents(loop, "train")[0]
+    assert entry["reran"] == 0 and entry["not_scored"] == ["t2"], entry

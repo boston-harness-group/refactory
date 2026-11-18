@@ -2366,7 +2366,8 @@ class Loop(OuterLoop):
             self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
             incidents, budget_hit = self._settle_incidents(
                 candidate, trial_dir, part, seed, result, eval_kwargs,
-                rerun=not budget_exhausted_after_trial)
+                rerun=not budget_exhausted_after_trial,
+                pending=len(all_item_records) + len(result.item_records or ()))
             budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
             # After the incident reruns, so their tokens and cost are the trial's.
             after = self.budget.snapshot() if self.budget else {}
@@ -2434,7 +2435,7 @@ class Loop(OuterLoop):
 
     def _settle_incidents(
         self, candidate: Candidate, trial_dir: Path, part: str, seed: int | None,
-        result: Any, eval_kwargs: dict[str, Any], *, rerun: bool = True,
+        result: Any, eval_kwargs: dict[str, Any], *, rerun: bool = True, pending: int = 0,
     ) -> tuple[list[str], bool]:
         """Run a trial's harness-incident items again, then leave out of its score those
         still incidents; ``(the ids left out, whether a budget stopped a rerun)``.
@@ -2474,13 +2475,18 @@ class Loop(OuterLoop):
                     warned.add(SCORES_FACT)
                     self._journal("harness_incident_kept", id=candidate.id, part=part, items=ids)
                     self._progress("warning", candidate=candidate.id, warning=note)
+            # Said as such to the optimizer (`base._item_evidence`), not as a timeout.
+            result.item_records = [{**r, "incident_kept": True} if harness_incident(r) else r
+                                   for r in records]
             return [], False
         fact_entries = list(facts.get(SCORES_FACT) or [])
         budget_hit = False
         reran = 0
         max_rollouts = getattr(self.config, "max_rollouts", None)
         while ids and rerun and reran < INCIDENT_RERUNS:
-            if max_rollouts is not None and self.rollouts + len(ids) > max_rollouts:
+            # This evaluation's own items count first: the caller adds them to
+            # ``rollouts`` only after it returns (``pending``).
+            if max_rollouts is not None and self.rollouts + pending + len(ids) > max_rollouts:
                 # A rerun is a rollout of each item it runs: none past the budget.
                 break
             reran += 1
@@ -5686,7 +5692,12 @@ class Loop(OuterLoop):
         policies rank by it); empty otherwise."""
         if not self.config.val_gate or self._custom_strategy is not None:
             return {}
-        return dict(self._gate().cache)
+        scores = dict(self._gate().cache)
+        # On the items every rolled-out candidate was scored on, when a harness incident
+        # left one out of any (`shared_scores`): every parent pick ranks on these.
+        rolled = [cid for cid in scores if self._part_results.get(cid, {}).get("val")]
+        shared = self.shared_scores(rolled) if len(rolled) > 1 else None
+        return {**scores, **shared[0]} if shared is not None else scores
 
     def _root_state(self) -> dict[str, Any] | None:
         """The root candidate's state (the seed every lineage starts from); ``None``

@@ -2765,7 +2765,11 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     # An item a harness incident kept from an outcome, run again and still one, is left
     # out of the score (`loop.Loop._settle_incidents`): said once, on its own line.
     incidents = [r for r in records if r.get("not_scored")]
-    timed_out = [r for r in records if harness_timeout(r) and not r.get("not_scored")]
+    # One a mode with no item_scores fact could not leave out (``incident_kept``): still
+    # scored 0, said once on its own line, never as a timeout.
+    kept = [r for r in records if r.get("incident_kept") and not r.get("not_scored")]
+    timed_out = [r for r in records if harness_timeout(r) and not r.get("not_scored")
+                 and not r.get("incident_kept")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
     total = len(records) - len(incidents)
     records = _pipeline_items(records)
@@ -2781,13 +2785,20 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
         f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output or "
                       "crashed), " if unanswered else "")
-        + f"{len(errored)} failed with an error{'' if timed_out else mean}. An error is the "
+        + f"{len(errored)} failed with an error{'' if timed_out or kept else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
     if incidents:
         ids = list(dict.fromkeys(str(r.get("id", "")) for r in incidents))
         lines.append(f"{len(ids)} item(s) ({', '.join(ids)}) had a harness incident and are "
                      "not scored: not caused by the pipeline's design; not a target.")
+    if kept:
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in kept))
+        lines.append(f"{len(ids)} more ({', '.join(ids)}) had a harness incident this mode "
+                     "cannot leave out of its score (scored 0): not caused by the pipeline's "
+                     "design; not a target"
+                     + (f"; mean score over all {total}:{mean.removeprefix(', mean score')}."
+                        if mean and not timed_out else "."))
     if timed_out:
         ids = list(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
         lines.append(f"{len(ids)} more ({', '.join(ids)}), each a {HARNESS_TIMEOUT}"

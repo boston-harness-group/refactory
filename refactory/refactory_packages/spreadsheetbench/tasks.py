@@ -33,6 +33,9 @@ from typing import Any
 from refactory_dsh.task import Task, TaskError, TaskInstance, VerifyResult
 
 from . import recalc
+# SandboxFailed, like RecalcFailed, must be known as a harness incident wherever a record
+# is classified (`model.HARNESS_INCIDENT_CLASSES`), the spine's item command included.
+from . import sandbox  # noqa: F401
 from . import skillopt_port as port
 
 MANIFEST = Path(__file__).resolve().parent / "manifest.json"

@@ -1062,11 +1062,39 @@ def test_a_failed_recalculation_is_a_harness_incident(tmp_path, sb_data, monkeyp
                         t1.metadata["answer_position_eval"])
     assert isinstance(raised.value, HarnessIncident)
     assert error_kind(raised.value) == "harness_incident"
+    assert not recalc.soffice_works(), "the reference workbook fails too: the grader is broken"
     # A prediction without formulas never needs LibreOffice: graded as before.
     plain = make_workbook(tmp_path / "plain.xlsx",
                           [{"title": "Sheet1", "cells": {"A1": 1, "B1": 41}}])
     assert not recalc.evaluate(str(plain), t1.metadata["gold_path"], "Cell-Level Manipulation",
                                t1.metadata["answer_position_eval"])["ok"]
+
+
+def test_a_workbook_libreoffice_cannot_recalculate_is_the_models_fault(tmp_path, sb_data,
+                                                                       monkeypatch):
+    """LibreOffice recalculates the known-good reference workbook but not the prediction:
+    the model's file is at fault. It keeps its cached, failing grade (``recalc_failed``),
+    never a harness incident. A LibreOffice that fails the reference too is the grader's
+    fault (`test_a_failed_recalculation_is_a_harness_incident`)."""
+    fake = tmp_path / "soffice"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, shutil, sys\n"
+        "src = sys.argv[-1]; out = sys.argv[sys.argv.index('--outdir') + 1]\n"
+        "if os.path.basename(src) != 'reference.xlsx':\n"
+        "    sys.exit(1)\n"
+        "os.makedirs(out, exist_ok=True); shutil.copyfile(src, os.path.join(out, os.path.basename(src)))\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv(recalc.SOFFICE_ENV, str(fake))
+    monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+    assert recalc.soffice_works()
+    t1 = tasks.SpreadsheetBenchTask().instances()[0]
+    pred = make_workbook(tmp_path / "pred.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": "=40+2"}}])
+    graded = recalc.evaluate(str(pred), t1.metadata["gold_path"], "Cell-Level Manipulation",
+                             t1.metadata["answer_position_eval"])
+    assert graded["ok"] is False and graded["recalc_failed"] is True, graded
+    assert "could not recalculate this workbook" in graded["reason"]
 
 
 def _failing_setup(*args: Any, ready_fd: int | None = None) -> str:

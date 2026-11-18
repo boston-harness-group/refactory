@@ -256,6 +256,9 @@ def test_the_backstop_is_read_from_anchored_signals_only():
         == "backstop"
     # A harness fault, by its type or its walker/spine line, is a harness incident.
     from refactory_dsh.model import HarnessIncident
+    # A harness incident's text names its class, known once its module is loaded
+    # (`model.HARNESS_INCIDENT_CLASSES`): the package that raises it is.
+    import refactory_packages.spreadsheetbench.recalc  # noqa: F401
     assert error_kind(HarnessIncident("grader down")) == "harness_incident"
     assert error_kind(RuntimeError("data: RecalcFailed: harness incident: grader down")) \
         == "harness_incident"
@@ -298,6 +301,7 @@ def test_a_harness_line_only_counts_as_the_errors_first_line(line):
     """Only an error's first line is the harness's (`items.first_line`): the same line
     quoted from a model's reply further down another failure's text classifies nothing,
     while as the first line it does."""
+    import refactory_packages.spreadsheetbench.sandbox  # noqa: F401  (SandboxFailed)
     from refactory_dsh.items import error_kind
 
     assert error_kind(RuntimeError(f"parse: ValueError: bad reply:\n{line}")) == "RuntimeError"

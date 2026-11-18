@@ -76,8 +76,21 @@ class HarnessIncident(RuntimeError):
     ``error_kind`` is ``harness_incident`` (`items.error_kind`): the loop runs the item
     again and, still one, leaves it out of the score (`loop.Loop._settle_incidents`).
     One raised in another process reaches the record as text, so its message starts with
-    `HARNESS_INCIDENT_TEXT`. A model that failed -- a wrong answer, an output limit, a
-    session still writing at the backstop (`HarnessBackstop`) -- is never one."""
+    `HARNESS_INCIDENT_TEXT`, after its class's name (`HARNESS_INCIDENT_CLASSES`). A model
+    that failed -- a wrong answer, an output limit, a session still writing at the
+    backstop (`HarnessBackstop`) -- is never one."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        HARNESS_INCIDENT_CLASSES.add(cls.__name__)
+
+
+#: The names of `HarnessIncident` and every subclass defined in this process: an error
+#: that crossed a process as text is one only when its first line names one of them as
+#: its type (`items.error_kind`), so a message that merely starts with
+#: `HARNESS_INCIDENT_TEXT` -- a model's reply quoted in a ValueError, a code node's own
+#: exception -- is not.
+HARNESS_INCIDENT_CLASSES: set[str] = {"HarnessIncident"}
 
 
 class HarnessBackstop(RuntimeError):

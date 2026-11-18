@@ -232,6 +232,9 @@ class SkillOptLoop(OuterLoop):
         self._stale_epochs: int = 0
         # The best score the early stop measures improvement against.
         self._early_stop_best: float = 0.0
+        #: The candidate `_early_stop_best` is the val score of, so a new best is compared
+        #: with it on the items both were scored on (`ValidationGate.shared`).
+        self._early_stop_best_id: str | None = None
         self._trace: TraceRecorder | None = None
         # Per-phase marker for resume (ask 3)
         self._phase: str = ""
@@ -355,6 +358,7 @@ class SkillOptLoop(OuterLoop):
             current = run.seed()
             score = self.gate.start(run, current)
             self._early_stop_best = self.gate.best_score
+            self._early_stop_best_id = self.gate.best_id
             run.save_strategy_state()
 
             self._trace.record_decision(
@@ -547,7 +551,7 @@ class SkillOptLoop(OuterLoop):
     def _end_epoch(self, run: Run, epoch: int) -> bool:
         """Close the epoch: count a stale epoch, record its optimizer calls, mark it
         done, and check the early stop (⑩). ``True`` when the run stops here."""
-        self._count_stale_epoch()
+        self._count_stale_epoch(run)
         all_failed = self._record_epoch_calls(run, epoch)
         self._phase = "epoch_done"
         run.save_strategy_state()
@@ -668,11 +672,21 @@ class SkillOptLoop(OuterLoop):
             run.stop(self._run_error)
         return all_failed
 
-    def _count_stale_epoch(self) -> None:
+    def _count_stale_epoch(self, run: Run) -> None:
+        """An epoch is stale unless the best on val beat the best at the last improvement:
+        on the items both were scored on when a harness incident left one out of either
+        (`ValidationGate.shared`), as `ValidationGate.offer_best` compared them."""
         if not (self.early_stop_patience or self.early_stop_at_full_val):
             return
-        if self.gate.best_score > self._early_stop_best + 1e-9:
+        best_id, before_id = self.gate.best_id, self._early_stop_best_id
+        shared = (self.gate.shared(run, [best_id, before_id])
+                  if best_id is not None and before_id is not None and best_id != before_id
+                  else None)
+        improved = (shared[best_id] > shared[before_id] + 1e-9 if shared is not None  # type: ignore[index]
+                    else self.gate.best_score > self._early_stop_best + 1e-9)
+        if improved:
             self._early_stop_best = self.gate.best_score
+            self._early_stop_best_id = best_id
             self._stale_epochs = 0
         else:
             self._stale_epochs += 1
@@ -878,6 +892,7 @@ class SkillOptLoop(OuterLoop):
             "epoch": self._epoch,
             "stale_epochs": self._stale_epochs,
             "early_stop_best": self._early_stop_best,
+            "early_stop_best_id": self._early_stop_best_id,
             "phase": self._phase,
             # Cached intermediate outputs for mid-epoch resume.
             "cached_failure_patches": self._cached_failure_patches,
@@ -905,6 +920,7 @@ class SkillOptLoop(OuterLoop):
         self._epoch = restored.get("epoch", 0)
         self._stale_epochs = restored.get("stale_epochs", 0)
         self._early_stop_best = restored.get("early_stop_best", self.gate.best_score)
+        self._early_stop_best_id = restored.get("early_stop_best_id", self.gate.best_id)
         self._phase = restored.get("phase", "")
         self._cached_failure_patches = restored.get("cached_failure_patches", [])
         self._cached_success_patches = restored.get("cached_success_patches", [])
