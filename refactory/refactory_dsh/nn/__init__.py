@@ -24,8 +24,8 @@ from __future__ import annotations
 
 from . import edits, resolve
 from .declarations import DeclarationError, Memory, Port
-from .executor import (ExecutionError, Executor, ModelClient, RunContext, Step, Verdict, execute,
-                       fills_facts)
+from .executor import (ExecutionError, Executor, ModelClient, RunContext, Step, Verdict,
+                       by_declaration, execute, fills_facts)
 from .graph import Edge, Graph, GraphError, Node
 from .knob import KINDS, Knob, KnobError
 from .mode import STATE_VERSION, Mode, RunResult, StateError
@@ -75,6 +75,7 @@ __all__ = [
     "execute",
     "fact_produced",
     "fills_facts",
+    "by_declaration",
     "artifact_produced",
     "mode_id",
     "on_path_nodes",

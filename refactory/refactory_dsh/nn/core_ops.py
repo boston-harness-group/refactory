@@ -1110,22 +1110,52 @@ def _code_text(node: Node, state: Mapping[str, Any]) -> str | None:
     return str(node.code or "")
 
 
+def _by_declaration(node: Node) -> bool:
+    """Whether an op or gate's callable reads, writes and sets only what its node declares
+    (marked `nn.by_declaration`), so its inputs and outputs can be renamed."""
+    from .resolve import resolve
+
+    call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+    if not call:
+        return False
+    try:
+        return bool(getattr(resolve(call), "by_declaration", False))
+    except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
+        return False
+
+
+def _names_itself(node: Node, code: str | None, name: str) -> bool:
+    """Whether ``node`` may name ``name`` itself (its code says it, or its callable is not
+    marked `nn.by_declaration`): renaming its declaration does not reach it."""
+    if code is not None:
+        return re.search(rf"\b{re.escape(name)}\b", code) is not None
+    return not _by_declaration(node)
+
+
 def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
                     anchor: Node
-                    ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str]]:
+                    ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str],
+                               str | None]:
     """What ``insert``'s 'takes_over' does: the step it takes over, the new name of each of
     that step's outputs (``(kind, name) -> new name``: ``<step>.txt`` and ``<step>`` when
     free), the steps that read on under the new names -- every step that does not run
     after the new one -- and the new text of each knob they read that names a renamed
-    fact. Refused when the step does not run before the new one on every path to it, has
-    no outputs, or a reader's reading cannot be renamed: a frozen knob, a knob a step
-    after the new one reads too (it must keep the old name), or the fact named in a
-    step's code or feedback keys, which no renaming reaches."""
+    fact (and, for a code step taken over, its code returning its outputs under the new
+    names: in its code knob's new text, else the last item). Refused when the step does
+    not run before the new one on every path to it, has no outputs, sets them from a
+    callable that names them itself, or a reader's reading cannot be renamed: a frozen
+    knob, a knob a step after the new one reads too (it must keep the old name), a fact
+    named in a step's code or feedback keys, or a file an op or gate opens by name. No
+    renaming reaches those."""
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
     if target.kind not in ("agent", "op") or not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if target.kind == "op" and _code_text(target, state) is None and not _by_declaration(target):
+        raise _Refused(f"{target_id!r} runs {target.call!r}, which sets its outputs under names "
+                       "of its own; 'takes_over' cannot rename them: take over a model or code "
+                       "step")
     following = [e.target for e in graph.out_edges(anchor.id)] if side == "after" else [anchor.id]
     before = [anchor.id] if side == "after" else [e.source for e in graph.in_edges(anchor.id)]
     if side == "before":
@@ -1150,6 +1180,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             made.add((kind, new))
     readers = {n for n in graph.nodes if n not in after and n != target_id}
     facts = {old for (kind, old) in names if kind == "fact"}
+    files = {old for (kind, old) in names if kind == "file"}
     knobs = state.get("knobs") or {}
     frozen = {name for name, entry in knobs.items() if (entry.get("spec") or {}).get("frozen")}
     later_knobs = {k for n in after if n in graph.nodes
@@ -1172,14 +1203,37 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             texts[knob] = renamed
         named = sorted(facts & set(node.feedback_keys))
         code = _code_text(node, state)
-        for fact in sorted(facts & set(node.inputs)):
-            if code is None or re.search(rf"\b{re.escape(fact)}\b", code):
-                named.append(fact)
+        named += [fact for fact in sorted(facts & set(node.inputs))
+                  if _names_itself(node, code, fact)]
+        if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
+            # An op or fn gate opens its files in its code: a renamed read reaches it only
+            # when it opens what it declares (LiveMath's notes_prompts opens
+            # compare_notes.txt by name). A model step is handed its files as declared.
+            named += [name for name in sorted(files & {*node.reads, *node.required_reads})
+                      if _names_itself(node, code, name)]
         if named:
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
-    return target, names, readers, texts
+    own_code = None
+    code = _code_text(target, state)
+    if code is not None:
+        # Code returns its outputs under the names it was written for: wrapped, it
+        # returns them under the new ones (as a copy's code is, `_renamed_code`).
+        new_names = ([names[("fact", n)] for n in target.produces],
+                     [names[("file", n)] for n in target.writes])
+        wrapped = _renamed_code(code, target, target_id, *new_names)
+        knob = next((k for f, k in target.field_bindings if f == "code"), None)
+        if knob is None:
+            own_code = wrapped
+        elif knob in frozen or any(knob in (k for _f, k in n.field_bindings)
+                                   for n in graph.nodes.values() if n.id != target_id):
+            raise _Refused(f"{target_id!r}'s code is in {knob!r}, which is frozen or another "
+                           "step's too; it cannot be changed to return its outputs under new "
+                           "names")
+        else:
+            texts[knob] = wrapped
+    return target, names, readers, texts, own_code
 
 
 def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
@@ -1255,13 +1309,14 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                         **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
                            if plan is not None else {}))
     if plan is not None:
-        target, names, readers, texts = plan
+        target, names, readers, texts, own_code = plan
         # The step taken over writes under new names, and every step before the new one
         # (the new one too) reads them there; the steps after it read the new step's.
         build.add(_respec(build.state, target.id, {
             **target.to_state(),
             "writes": [names[("file", n)] for n in target.writes],
-            "produces": [names[("fact", n)] for n in target.produces]}))
+            "produces": [names[("fact", n)] for n in target.produces],
+            **({"code": own_code} if own_code is not None else {})}))
         for reader in sorted(readers):
             node = build.graph.nodes[reader]
             before = node.to_state()

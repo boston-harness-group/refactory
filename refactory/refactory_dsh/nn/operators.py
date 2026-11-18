@@ -42,6 +42,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .executor import by_declaration
 from .graph import Graph, Node
 
 #: The ``collect`` op: files to one fact.
@@ -85,6 +86,7 @@ def _section(ctx: Any, name: str) -> str:
     return f"### {name}\n{text.rstrip()}"
 
 
+@by_declaration
 def collect(ctx: Any) -> dict[str, Any]:
     """`COLLECT_CALL`: each declared read, in order, under its own header, as the node's
     one declared fact. Nothing is required: a missing file is said to be missing."""
@@ -97,6 +99,7 @@ def collect(ctx: Any) -> dict[str, Any]:
     return {fact: "\n\n".join(_section(ctx, name) for name in ctx.declared_reads)}
 
 
+@by_declaration
 def file_text(ctx: Any) -> dict[str, Any]:
     """`FILE_TEXT_CALL`: the node's one declared read, whole, as its one declared fact.
     Refused for any other shape, or a file that is not text."""
@@ -117,6 +120,7 @@ def _stem(name: str) -> str:
     return Path(name).stem
 
 
+@by_declaration
 def select(ctx: Any) -> dict[str, Any]:
     """`SELECT_CALL`: the label in the first declared read names one of the other declared
     reads (by its file name or its name without the extension, in any case); that file's
@@ -155,6 +159,7 @@ def select(ctx: Any) -> dict[str, Any]:
     return {fact: text} if fact else {}
 
 
+@by_declaration
 def step_failed(ctx: Any) -> Any:
     """`graph.FALLBACK_GATE_CALL`: ``fallback`` when the step before this gate (its
     declaration's ``step``, `lowering.snippet_spec`) was recorded missing in this run

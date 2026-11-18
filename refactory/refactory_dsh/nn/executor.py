@@ -432,6 +432,16 @@ def fills_facts(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
+def by_declaration(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Mark an op or gate callable that reads, writes and sets only what its node
+    declares, under the declared names (``ctx.declared_reads``, its declared writes and
+    facts), never a name of its own choosing. An edit may then rename that node's inputs
+    and outputs (``insert``'s 'takes_over', `core_ops._take_over_plan`); a callable
+    without the mark is taken to open or return them by name."""
+    fn.by_declaration = True  # type: ignore[attr-defined]
+    return fn
+
+
 def _eval_condition(expr: str, values: dict[str, Any]) -> bool:
     """Evaluate a simple conditional expression against *values*.
 
