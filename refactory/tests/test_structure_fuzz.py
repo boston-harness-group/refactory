@@ -103,7 +103,7 @@ def test_quick_tier_every_accepted_edit_is_sound():
 def test_the_core_operators_own_checks_are_reached_and_sound():
     """'takes_over' (taken and refused), a field an operator would ignore and a route that
     loses an input are drawn and reached, and every edit accepted on the way is sound."""
-    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1000)
+    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1500)
     assert not stats.findings, _report(stats)
     for path in ("ignored field refused", "lost input refused", "takes_over accepted",
                  "takes_over: target not first"):
@@ -391,9 +391,9 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     the grade, and the leak invariant finds it by content: the grader-only answers and
     the grader's own verdicts in the finished items' records. The leak needs no code
     node, so the walks draw none and are the same on every machine, whether or not it
-    can sandbox code nodes (this seed finds it at edit 102)."""
+    can sandbox code nodes (this seed finds it at edit 122)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
-    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=3,
            code_nodes=False)
 
 

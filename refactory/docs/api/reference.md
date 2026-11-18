@@ -196,6 +196,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `grader_derived` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `grader_issues` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]', *, grader_side: 'Iterable[str]' = (), graders: 'Iterable[str]' = (), resolve_tasks: 'bool' = True) -> 'list[Issue]'` |
 | function | `knob_slot_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, guarded: 'bool' = False, resolve_calls: 'bool' = True) -> 'set[str]'` |
+| function | `map_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `on_path_nodes` | `(graph: 'Graph') -> 'set[str]'` |
 | function | `overwritten_write_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `produced_on_path` | `(graph: 'Graph') -> 'set[str]'` |
@@ -233,6 +234,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`grader_derived`** — The provenance set: every ``("fact"|"file", name)`` that carries the grade.
 - **`grader_issues`** — V17: a node outside the grader side that consumes grader-derived data.
 - **`knob_slot_facts`** — The run facts the knobs an op fills (`filled_knobs`) take in: their ``{{name}}``
+- **`map_read_issues`** — V6 for a map (`operators.MAP_CALL`): its element files are written only for the
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`overwritten_write_issues`** — V19: a step whose every write is overwritten before anything reads it.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.

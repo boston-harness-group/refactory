@@ -353,10 +353,9 @@ def _every_visit_and_call_recorded(records: list[dict], runs: int = 3) -> None:
 
 
 @needs_spine
-@pytest.mark.xfail(strict=True, reason="item-record-lock")
 def test_spine_records_every_visit_and_call_of_a_map(tmp_path):
-    """The spine's parallel runs write the item's exchanges without a lock, so visits and
-    calls are lost (fixed on branch item-record-lock, which flips this)."""
+    """Eight runs at once on every item, five items at once: the spine's records keep every
+    visit and call (#692 locks the item's record against parallel writers)."""
     # Eight runs at once on every item, five items at once: many writers per record.
     eight = OPTIONS.replace("for c in item['choices']]", "for c in item['choices'] * 2]")
     state = nn_edits.apply({"op": "insert", "before": "solve", "kind": "code", "id": "options",
@@ -365,7 +364,7 @@ def test_spine_records_every_visit_and_call_of_a_map(tmp_path):
     state = nn_edits.apply({"op": "map", "after": "options", "over": "options", "text": CHECK,
                             "max": 8, "combine": {"kind": "agent", "text": WEIGH}}, state)
     state = nn_edits.configure(state, "data_parallelism", "5")
-    # The loss is a race: three runs, so the test fails on it reliably even under load.
+    # A lost entry is a race: three runs, so a regression shows even under light load.
     for attempt in range(3):
         records, _dsh = _dispatched("livemath/solver", state, {
             WEIGH: ["<answer>B</answer>"], CHECK: ["a verdict"], "": ["<answer>B</answer>"]},
@@ -712,3 +711,38 @@ def test_remove_takes_out_the_slot_and_heading_wherever_they_were_moved():
                             _state("livemath/skill_graph"))
     assert removed["knobs"]["decide_task"]["value"] == \
         before["knobs"]["decide_task"]["value"] + " Mind."
+
+
+def test_map_runs_take_sealed_tools_as_insert_s_step_does():
+    """'tools' on a map: each run gets the sealed list in a fresh workspace and reads its
+    element's file itself; a list outside the sealed set is refused as insert refuses it."""
+    from refactory_dsh.nn.core_ops import MAP_ELEMENT_TOOLS_PROMPT
+
+    state = _s4(tools=["bash"])
+    assert validate_state(state) == []
+    graph = _graph(state)
+    for run in RUNS:
+        node = graph.nodes[run]
+        assert node.tools == ("bash",) and node.tool_policy is None
+        assert node.workspace["kind"] == "scratch" and node.reads == (f"{run}_element.txt",)
+        assert node.prompt_template == MAP_ELEMENT_TOOLS_PROMPT.format(
+            file=f"{run}_element.txt")
+    assert graph.nodes["options_map_combine"].tools == ()
+    base = {"op": "map", "after": "options", "over": "options"}
+    plain = nn_edits.apply({"op": "insert", "before": "compare", "kind": "code",
+                            "id": "options", "sees": ["current_item.json"], "text": OPTIONS},
+                           _state("livemath/skill_graph"))
+    insert = nn_edits.precheck({"op": "insert", "after": "options", "tools": ["curl"]}, plain)
+    assert _refused({**base, "tools": ["curl"]}, plain) == insert
+    assert insert.startswith("'tools' lists the tools a new step uses")
+
+
+def test_only_a_map_s_runs_read_its_element_files():
+    """The fuzz found a step added by hand reading an element file a short list never
+    wrote: the validator refuses it (V6), naming the map step."""
+    state = nn_edits.apply({"op": "add_node", "position": {"after": "options_map_combine"},
+                            "node": {"id": "peek", "kind": "agent", "prompt_template": "Look.",
+                                     "reads": ["options_map_4_element.txt"],
+                                     "writes": ["peek.txt"]}}, _s4())
+    assert [(i.code, i.node) for i in validate_state(state)
+            if "map step" in i.message] == [("V6", "peek")]

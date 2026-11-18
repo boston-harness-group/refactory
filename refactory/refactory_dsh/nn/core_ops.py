@@ -78,6 +78,8 @@ NEUTRAL_ELEMENT = "Work on the element below, with what you are given, and write
 NEUTRAL_COMBINE = "Combine the results for each element above into one result for the task."
 #: A map run's own prompt, before the input that holds its element and what to do with it.
 MAP_ELEMENT_PROMPT = "Do what the input below says, for the one element it gives."
+#: The same for a run with tools, which reads its element's file itself.
+MAP_ELEMENT_TOOLS_PROMPT = "Do what the file {file} says, for the one element it gives."
 #: A map's elements by default, and at most (one branch each, `MAX_BRANCHES`).
 MAP_MAX = (4, 2, MAX_BRANCHES)
 #: What a judge agent is told about its answer's first word.
@@ -2318,6 +2320,7 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
                   "notes": f"Splits {over!r} into one prompt per element for {base}'s runs."})
     route = _spec({"kind": "agent", "route": edit.get("route")}).get("route") or (
         anchor.route if anchor.kind == "agent" else None)
+    tools = edit.get("tools") or None
     branch = []
     systems = []
     for copy in copies:
@@ -2328,11 +2331,18 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
         systems.append({"op": "add_knob", "name": system, "spec": Knob(
             "You are one step of a pipeline.", "str",
             description=f"system prompt for {copy}").spec()})
+        element = f"{copy}_element.txt"
         node: dict[str, Any] = {
             "id": copy, "kind": "agent", "prompt_template": MAP_ELEMENT_PROMPT,
             "system_prompt_template": "You are one step of a pipeline.",
             "knobs": [system], "field_bindings": [["system_prompt_template", system]],
-            "reads": [f"{copy}_element.txt"], "writes": [f"{copy}.txt"], "tool_policy": "none"}
+            "reads": [element], "writes": [f"{copy}.txt"], "tool_policy": "none"}
+        if tools:
+            # Sealed tools, as insert's (`workspace.SEALED_TOOLS`): a fresh workspace
+            # holding only its element's file, which it reads with them.
+            node.update({"tool_policy": None, "tools": list(tools),
+                         "workspace": {"kind": "scratch"},
+                         "prompt_template": MAP_ELEMENT_TOOLS_PROMPT.format(file=element)})
         if anchor.kind == "agent" and anchor.role:
             node["role"] = anchor.role
         if route:
@@ -2763,7 +2773,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "map": {
         "reads_as": ('map',),
-        "fields": ("after", "over", "text", "sees", "max", "combine", "id", "to", "route"),
+        "fields": ("after", "over", "text", "sees", "max", "combine", "id", "to", "route",
+                   "tools"),
         "line": "after a step, a new agent step run once per element of 'over' (a list there: "
                 "a fact, a file or a step's output), one model call each, all at once: a JSON "
                 "array gives its items, a bulleted, numbered or lettered list its items, other "
