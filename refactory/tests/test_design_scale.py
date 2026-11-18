@@ -20,6 +20,7 @@ import sys
 
 import pytest
 
+from refactory_dsh.code_graph import EXPLORER_MARK
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import (
     REFINE_SCOPE_REASON,
@@ -1271,7 +1272,8 @@ def test_sizer_node_bounds(tmp_path):
     assert node.kind == "agent" and node.tool_policy is None and node.tools == ()
     assert node.timeout_s == SIZER_TIMEOUT_S == 600
     assert node.retry is None and node.workspace is None
-    assert node.reads == ("brief.json",) and node.writes == ("sizing.json",)
+    # It reads the explorer's code context, written before it (`explore_code`).
+    assert node.reads == ("brief.json", "graph-context.md") and node.writes == ("sizing.json",)
     assert "size_change" in PLANNING_STEPS
     assert graph.nodes["fork_size"].optional_targets == ("size_change",)
     workflow = lowering.to_workflow(DesignMode().state_dict())
@@ -1316,7 +1318,9 @@ def test_one_function_brief_is_sized_scoped_before_research(tmp_path):
                              [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
                              sizer=[_sizing()], to_gate=True)
     [sizer] = _asked(model, SIZER_MARK)
-    assert model.prompts.index(sizer) == 0, "the sizer runs before research"
+    # The sizer runs before research, after the code explorer.
+    assert model.prompts.index(sizer) == 1, "the sizer runs before research"
+    assert EXPLORER_MARK in model.prompts[0]
     assert (run.facts["presize_scope"], run.facts["presize_scope_reason"]) == ("scoped", ONE_FUNCTION)
     [research] = _asked(model, RESEARCH_DIRECTOR)
     assert "## Research scope\nscoped\n" in research
@@ -1534,6 +1538,7 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
         graph["edges"] += [
             # The code explorer stays: research declares its file.
             {"source": "route_refine_design", "target": "await_code_graph", "condition": "proceed"},
+            {"source": "record_graph_context", "target": "research_director", "condition": None},
             {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
         # The sizer's own knobs (its system prompt) go with it, and build_code_graph's
         # knobs with it; the explorer keeps the two it reads.

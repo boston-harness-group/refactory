@@ -245,15 +245,27 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     }
   })
 
-  it('the sizer runs before research, and a sizer that fails is missing and research still runs', () => {
+  it('the explorer runs before the sizer, and either one failing is missing and research still runs', () => {
     const s = new Spine(graph)
     expect(spineEdges(graph, 'route_refine_design')).toEqual(
       [['build_code_graph', 'proceed'], ['design_doc', 'light']])
+    expect(spineEdges(graph, 'build_code_graph')).toEqual([['await_code_graph', '']])
+    expect(s.view('fork_explore').optional_targets).toEqual(['explore_code'])
     expect(s.view('fork_size').optional_targets).toEqual(['size_change'])
-    const before = advance(s, 'size_change', 'proceed')
-    expect(before).toEqual(['prepare', 'route_refine_design', 'build_code_graph', 'clear_sizing', 'fork_size'])
+    const before = advance(s, 'explore_code', 'proceed')
+    expect(before).toEqual(['prepare', 'route_refine_design', 'build_code_graph', 'await_code_graph', 'fork_explore'])
+    expect(ids(s)).toEqual(['explore_code'])
+    // The explorer is its fork's only optional branch: its failure goes on to the join.
+    s.complete('explore_code', { failed: true })
+    expect(ids(s)).toEqual(['join_explore'])
+    s.complete('join_explore')
+    expect(ids(s)).toEqual(['record_graph_context'])
+    s.complete('record_graph_context')
+    expect(ids(s)).toEqual(['clear_sizing'])
+    s.complete('clear_sizing')
+    expect(ids(s)).toEqual(['fork_size'])
+    s.complete('fork_size')
     expect(ids(s)).toEqual(['size_change'])
-    // The sizer is the fork's only optional branch: its failure goes on to the join.
     s.complete('size_change', { failed: true })
     expect(ids(s)).toEqual(['join_size'])
     s.complete('join_size')
@@ -261,21 +273,6 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     // presize_scale is not optional: it never fails (it sizes full instead).
     expect(() => s.complete('presize_scale', { failed: true })).toThrow(/is not optional/)
     s.complete('presize_scale')
-    expect(ids(s)).toEqual(['await_code_graph'])
-  })
-
-  it('the code explorer runs after sizing, and an explorer that fails is missing and research still runs', () => {
-    const s = new Spine(graph)
-    expect(spineEdges(graph, 'presize_scale')).toEqual([['await_code_graph', '']])
-    expect(s.view('fork_explore').optional_targets).toEqual(['explore_code'])
-    const before = advance(s, 'explore_code', 'proceed')
-    expect(before.slice(-3)).toEqual(['presize_scale', 'await_code_graph', 'fork_explore'])
-    expect(ids(s)).toEqual(['explore_code'])
-    s.complete('explore_code', { failed: true })
-    expect(ids(s)).toEqual(['join_explore'])
-    s.complete('join_explore')
-    expect(ids(s)).toEqual(['record_graph_context'])
-    s.complete('record_graph_context')
     expect(ids(s)).toEqual(['research_director'])
   })
 

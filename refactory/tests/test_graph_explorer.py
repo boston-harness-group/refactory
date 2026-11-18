@@ -1,8 +1,9 @@
 """The code explorer step: graph query/path, the wait, the explorer's file, and its reach.
 
-The explorer (`explore_code`) runs after sizing and writes graph-context.md, from the code
+The explorer (`explore_code`) runs before sizing and writes graph-context.md, from the code
 graph when there is one and from the files when there is not; `record_graph_context`
-heads it with which, and research, strategy, design and the builder read it once each.
+heads it with which, and the sizer, research, strategy, design and the builder read it
+once each.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ from refactory_dsh.code_graph import (
     record_graph_context,
 )
 from refactory_dsh.design import DesignMode
+from refactory_dsh.design_ops import SIZER_MARK
 from refactory_dsh.nn.executor import RunContext
 from tests_support import (
     DESIGN_DOC_ANSWER,
@@ -198,6 +200,10 @@ def test_await_says_ready_and_gives_the_commands(tmp_path):
     for verb in ("query", "explain", "path", "callers"):
         assert f"graph {verb} " in out["code_graph_usage"]
     assert f"--graph {run / GRAPH_SUBDIR}" in out["code_graph_usage"]
+    command = out["code_graph_usage"].split("`", 2)[1].split(" graph ", 1)[0]
+    assert Path(command).is_absolute() and Path(command).is_file()
+    for word in ("limit", "maximum", "at most", "no more than"):
+        assert word not in out["code_graph_usage"].lower()
     # An earlier visit's context is never read as this one's.
     assert not (run / GRAPH_CONTEXT).exists()
 
@@ -254,6 +260,8 @@ def test_await_picks_up_a_build_that_finishes_while_it_waits(tmp_path):
 # ── record_graph_context ──────────────────────────────────────────────────────
 
 BODY = "## Relevant modules\n- shop/pricing.py:20 price_order\n"
+#: BODY as the prompts carry it: its headings nest under their `## Code context`.
+NESTED = "### Relevant modules\n- shop/pricing.py:20 price_order\n"
 
 
 def _record_run(tmp_path: Path, status: dict | None, queries: list[dict] = (), body: str | None = BODY,
@@ -281,7 +289,7 @@ def test_a_context_made_from_the_graph_says_so_with_its_queries(tmp_path):
                                              {"node": "explore_code", "status": "failed: x"}],
                            facts={"code_graph_state": "ready: 10 nodes, 9 edges"})
     assert out["graph_context"] == (
-        "Made from the code graph (ready: 10 nodes, 9 edges; 2 explorer queries).\n\n" + BODY)
+        "Made from the code graph (ready: 10 nodes, 9 edges; 2 explorer queries).\n\n" + NESTED)
     assert (run / GRAPH_CONTEXT).read_text() == out["graph_context"]
     assert out["graph_context_source"].startswith("the code graph")
     # The later steps' paragraph is for follow-ups, pointing at the context above.
@@ -338,6 +346,13 @@ def test_a_long_context_is_cut_and_points_at_the_file(tmp_path):
     assert out["graph_context"].rstrip().endswith(f"the rest is in {GRAPH_CONTEXT})")
 
 
+def test_the_context_s_headings_nest_under_the_prompts_heading(tmp_path):
+    body = "# Map\n## Relevant modules\n- a.py:1\n#### Deep\n- not # a heading: `x ## y`\n"
+    _, out = _record_run(tmp_path, READY, body=body)
+    assert out["graph_context"].endswith(
+        "## Map\n### Relevant modules\n- a.py:1\n##### Deep\n- not # a heading: `x ## y`\n")
+
+
 def test_recording_twice_keeps_one_heading(tmp_path):
     run, first = _record_run(tmp_path, READY, [EXPLORER_QUERY], facts={"code_graph_state": "ready"})
     second = record_graph_context(_ctx(run, facts={"code_graph_state": "ready"}))
@@ -347,18 +362,24 @@ def test_recording_twice_keeps_one_heading(tmp_path):
 
 # ── the design graph ──────────────────────────────────────────────────────────
 
-READERS = ("research_director", "pitfalls_researcher", "strategy_director", "synthesize_strategy",
-           "design_doc", "emit")
+READERS = ("size_change", "research_director", "pitfalls_researcher", "strategy_director",
+           "synthesize_strategy", "design_doc", "emit")
 
 
-def test_the_explorer_runs_after_sizing_and_before_research():
+def test_the_explorer_runs_before_sizing_and_the_sizer_before_research():
     graph = DesignMode().build()
     edges = {(edge.source, edge.target) for edge in graph.edges}
-    for pair in (("presize_scale", "await_code_graph"), ("await_code_graph", "fork_explore"),
+    for pair in (("build_code_graph", "await_code_graph"), ("await_code_graph", "fork_explore"),
                  ("fork_explore", "join_explore"), ("join_explore", "record_graph_context"),
-                 ("record_graph_context", "research_director")):
+                 ("record_graph_context", "clear_sizing"), ("presize_scale", "research_director")):
         assert pair in edges
-    assert ("presize_scale", "research_director") not in edges
+    assert ("build_code_graph", "clear_sizing") not in edges
+    assert ("presize_scale", "await_code_graph") not in edges
+    # The explorer starts from the brief alone: nothing the sizer decides reaches it.
+    template = graph.nodes["explore_code"].prompt_template
+    for sized in ("presize_scope", "presize_scale", "sizing.json", "research_scope"):
+        assert sized not in template
+    assert graph.nodes["explore_code"].reads == ("brief.json",)
     assert graph.nodes["fork_explore"].optional_targets == ("explore_code",)
     explorer = graph.nodes["explore_code"]
     assert explorer.writes[0] == GRAPH_CONTEXT
@@ -392,6 +413,7 @@ def test_both_runtimes_get_the_explorer_steps():
 # ── a walker run ──────────────────────────────────────────────────────────────
 
 CONTEXT = "## Relevant modules\n- tool.py:1 build — UNIQUE-CODE-CONTEXT-LINE\n"
+NESTED_CONTEXT = CONTEXT.replace("## ", "### ")
 BUILD = [render({"tool.py": "def build():\n    print('built')\n"}),
          "health: ok", "code review: ok", "qa: ok", VERIFICATION_ANSWER, "VERDICT: PASS"]
 SCOPED_RUN = [SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER, *BUILD]
@@ -431,12 +453,18 @@ def test_a_walker_run_hands_the_context_to_each_later_step_once(tmp_path, no_gra
     recorded = (tmp_path / "run" / GRAPH_CONTEXT).read_text()
     assert recorded.startswith(
         "Made from file exploration: no code graph (skipped: graphify not installed).\n\n")
-    for mark in ("You are the research director", "You are the pitfalls researcher",
+    for mark in (SIZER_MARK, "You are the research director", "You are the pitfalls researcher",
                  "Compile the perspectives into one plan", "Write the design document"):
         (prompt,) = _prompts(model, mark)
         assert prompt.count("UNIQUE-CODE-CONTEXT-LINE") == 1, mark
         assert prompt.count("## Code context\n") == 1, mark
         assert "graph callers" not in prompt
+    # The sizer is told to check the context in the code, not to trust it or the brief; the
+    # context's headings nest under its own.
+    (sizer,) = _prompts(model, SIZER_MARK)
+    assert "starting from the code context above: confirm what it cites in the code" in sizer
+    assert "### Relevant modules\n" in sizer and "\n## Relevant modules" not in sizer
+    assert sizer.index("## Code context") < sizer.index("Size this change")
     (builder,) = _prompts(model, "Write the artifact `short_tool`")
     assert "UNIQUE-CODE-CONTEXT-LINE" not in builder
     assert f"the map of the code it touches from `{GRAPH_CONTEXT}`" in builder
@@ -505,16 +533,18 @@ def test_the_spine_node_runner_runs_both_explorer_ops(tmp_path):
     (run / GRAPH_CONTEXT).write_text(CONTEXT)
     facts = node("record_graph_context")
     assert facts["graph_context"] == (
-        "Made from the code graph (ready: 10 nodes, 9 edges; 2 explorer queries).\n\n" + CONTEXT)
+        "Made from the code graph (ready: 10 nodes, 9 edges; 2 explorer queries).\n\n"
+        + NESTED_CONTEXT)
     assert facts["code_graph_paragraph"].startswith("## Code graph follow-ups")
 
 
-# ── a reused graph of a later commit ──────────────────────────────────────────
+# ── a reused graph graphify refuses to update ─────────────────────────────────
 
 @pytest.mark.parametrize("reused, status", [(True, "ready"), (False, "failed: graphify exit 1")])
 def test_a_reused_graph_graphify_refuses_is_rebuilt_afresh(tmp_path, reused, status):
-    """graphify refuses to update a graph to a smaller one (a copy from a run at a later
-    commit); a build that started from such a copy retries once from nothing."""
+    """graphify refuses to update a reused graph when the update comes out smaller (seen
+    on a copy from another run of the same commit); a build that started from such a copy
+    retries once from nothing."""
     repo = git_repo(tmp_path / "repo")
     graph_dir = tmp_path / "code-graph"
     out = graph_dir / "graphify-out"

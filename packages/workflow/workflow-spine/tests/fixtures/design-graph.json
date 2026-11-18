@@ -343,7 +343,7 @@
     },
     {
       "source": "build_code_graph",
-      "target": "clear_sizing",
+      "target": "await_code_graph",
       "condition": null
     },
     {
@@ -558,7 +558,7 @@
     },
     {
       "source": "presize_scale",
-      "target": "await_code_graph",
+      "target": "research_director",
       "condition": null
     },
     {
@@ -578,7 +578,7 @@
     },
     {
       "source": "record_graph_context",
-      "target": "research_director",
+      "target": "clear_sizing",
       "condition": null
     },
     {

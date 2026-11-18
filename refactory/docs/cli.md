@@ -245,7 +245,7 @@ The read verbs pass through the console's own `--project`, `--runs-root`, `--aft
 
 ## Code knowledge graph
 
-Design mode builds a code knowledge graph (using `graphifyy`) in the background after `prepare`, before the sizer, which may query it. After sizing, the code explorer step maps the code the change touches into `graph-context.md` in the run directory: `await_code_graph` waits up to `code_graph_wait_s` for the build, `explore_code` (read only, 600 s) runs `query`, `explain` and `path` on the graph, or explores the files when there is no graph, and `record_graph_context` heads the file with which of the two it was made from (and why, without a graph). Research, strategy and design carry the file once as their `## Code context`; the builder is pointed at it. Their remaining graph paragraph is for follow-ups only, and is dropped when the graph failed or is off.
+Design mode builds a code knowledge graph (using `graphifyy`) in the background after `prepare`. Before sizing, the code explorer step maps the code the brief names into `graph-context.md` in the run directory: `await_code_graph` waits up to `code_graph_wait_s` for the build, `explore_code` (read only, 600 s) runs `query`, `explain` and `path` on the graph, or explores the files when there is no graph, and `record_graph_context` heads the file with which of the two it was made from (and why, without a graph). The sizer, research, strategy and design carry the file once as their `## Code context` (the sizer is told to confirm it in the code); the builder is pointed at it. Their remaining graph paragraph is for follow-ups only, and is dropped when the graph failed or is off.
 
 | command | what it does |
 |---|---|

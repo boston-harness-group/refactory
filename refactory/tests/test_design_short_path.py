@@ -34,7 +34,9 @@ def test_the_design_graph_routes_on_the_scale():
     # precedes (moved on purpose: the sizing chain starts on its proceed edge).
     assert ("prepare", "route_refine_design", None) in edges
     assert ("route_refine_design", "build_code_graph", "proceed") in edges
-    assert ("build_code_graph", "clear_sizing", None) in edges
+    # The code explorer sits between the graph build and the sizer (moved on purpose).
+    assert ("build_code_graph", "await_code_graph", None) in edges
+    assert ("record_graph_context", "clear_sizing", None) in edges
     assert ("route_refine_design", "design_doc", "light") in edges
     assert ("gate_research", "classify_scale", "proceed") in edges
     # Moved on purpose: the widening gate sits between classify_scale and the pitfalls.
@@ -63,7 +65,8 @@ def test_the_spine_gets_the_same_routes():
     lowered = {(e.source, e.target, e.condition) for e in workflow.edges}
     assert ("prepare", "route_refine_design", None) in lowered
     assert ("route_refine_design", "build_code_graph", "proceed") in lowered
-    assert ("build_code_graph", "clear_sizing", None) in lowered
+    assert ("build_code_graph", "await_code_graph", None) in lowered
+    assert ("record_graph_context", "clear_sizing", None) in lowered
     assert ("route_refine_design", "design_doc", "light") in lowered
     assert ("route_strategy", "synthesize_strategy", "scoped") in lowered
     assert ("check_design_claims", "gate_design_review", None) in lowered
@@ -188,15 +191,15 @@ def test_a_full_design_keeps_both_steps(tmp_path):
 
 SIZING_CHAIN = {
     ("route_refine_design", "build_code_graph", "proceed"),
-    ("build_code_graph", "clear_sizing", None),
-    ("clear_sizing", "fork_size", None),
-    ("fork_size", "join_size", None),
-    ("join_size", "presize_scale", None),
-    ("presize_scale", "await_code_graph", None),
+    ("build_code_graph", "await_code_graph", None),
     ("await_code_graph", "fork_explore", None),
     ("fork_explore", "join_explore", None),
     ("join_explore", "record_graph_context", None),
-    ("record_graph_context", "research_director", None),
+    ("record_graph_context", "clear_sizing", None),
+    ("clear_sizing", "fork_size", None),
+    ("fork_size", "join_size", None),
+    ("join_size", "presize_scale", None),
+    ("presize_scale", "research_director", None),
     ("classify_scale", "widen_research", None),
     ("widen_research", "research_director", "reloop"),
     ("widen_research", "pitfalls_researcher", "proceed"),

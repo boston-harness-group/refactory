@@ -227,6 +227,12 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
     spine.node("prepare")
     assert spine.node("route_refine_design") == "proceed"
     spine.node("build_code_graph")
+    # The code explorer, before sizing: no graphify here, so it is told to explore the files.
+    spine.node("await_code_graph")
+    prompt = spine.agent("explore_code", {GRAPH_CONTEXT: SPINE_CONTEXT}, {})
+    assert prompt.startswith(EXPLORER_MARK) and "## No code graph (" in prompt
+    assert not UNRENDERED.findall(prompt)
+    spine.node("record_graph_context")
     spine.node("clear_sizing")
     if sizing is None:
         (spine.run / "reviews").mkdir(exist_ok=True)
@@ -235,13 +241,9 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
         prompt = spine.agent("size_change", {"sizing.json": sizing}, {})
         assert prompt.startswith(SIZER_MARK) and spine.facts()["source"] in prompt
         assert not UNRENDERED.findall(prompt)
+        # The sizer starts from the explorer's file, once.
+        assert prompt.count(SPINE_CONTEXT_LINE) == 1 and prompt.count("## Code context\n") == 1
     spine.node("presize_scale")
-    # The code explorer: no graphify here, so it is told to explore the files.
-    spine.node("await_code_graph")
-    prompt = spine.agent("explore_code", {GRAPH_CONTEXT: SPINE_CONTEXT}, {})
-    assert prompt.startswith(EXPLORER_MARK) and "## No code graph (" in prompt
-    assert not UNRENDERED.findall(prompt)
-    spine.node("record_graph_context")
 
 
 def _research(spine: SpineRun, plan: str) -> str:

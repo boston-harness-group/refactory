@@ -379,13 +379,20 @@ DESIGN_RESEARCH_SCHEMA = RESEARCH_SCHEMA.replace(
     "Usually three to five directions for a full design; a scoped change often needs "
     "only one. You decide how many.")
 
+#: The code context, as the sizer, research, strategy and design are given it (once per
+#: prompt; `code_graph.record_graph_context` nests its headings under this one).
+CODE_CONTEXT = "{% if graph_context %}## Code context\n{{graph_context}}\n{% endif %}"
+
 #: The change sizer's prompt (`size_change`): it sizes the change by reading the code,
 #: before research, so a small change gets a lean research plan.
 SIZER_PROMPT = (
     SIZER_MARK + "\n\n"
     "Artifact name: {{name}}\nBrief: {{brief}}\n"
     "The target's checkout: {{source}}\n\n"
-    "Size this change before it is researched, by investigating {{source}} yourself. "
+    + CODE_CONTEXT +
+    "Size this change before it is researched, by investigating {{source}} yourself"
+    "{% if graph_context %}, starting from the code context above: confirm what it "
+    "cites in the code, never take it or the brief on trust{% endif %}. "
     "For a bug, locate where the behaviour lives; for a feature, find where the change "
     "plugs in. Read that code, trace its callers with grep, and look at the tests that "
     "pin its current behaviour. Go only as far as sizing needs: do not survey the "
@@ -415,19 +422,16 @@ SIZER_PROMPT = (
 )
 
 
-#: The code explorer's prompt (`explore_code`): after sizing, it maps the code the change
-#: touches into `graph-context.md`, from the code graph when there is one and from the
-#: files when there is not, and the later steps start from that file.
+#: The code explorer's prompt (`explore_code`): before sizing, it maps the code the brief
+#: names into `graph-context.md`, from the code graph when there is one and from the files
+#: when there is not, and the sizer and the later steps start from that file.
 EXPLORER_PROMPT = (
     EXPLORER_MARK + "\n\n"
     "Artifact name: {{name}}\nBrief: {{brief}}\n"
-    "The target's checkout: {{source}}\n"
-    "{% if presize_scope %}{% if presize_scope_reason %}Sized before research: "
-    "{{presize_scope}} \u2014 {{presize_scope_reason}}. {% endif %}{% endif %}"
-    "The sizer's footprint is in `" + SIZING + "` in the run directory when it wrote one: "
-    "start there.\n\n"
-    "Map the code this change touches, for the research, strategy, design and build "
-    "steps after you. Go only as far as the brief reaches: do not survey the repository.\n\n"
+    "The target's checkout: {{source}}\n\n"
+    "Map the code this change touches, starting from the names, files and behaviour the "
+    "brief gives, for the sizing, research, strategy, design and build steps after you. "
+    "Go only as far as the brief reaches: do not survey the repository.\n\n"
     "## Rules\n"
     "- Read only: change nothing in {{source}}.\n"
     "- Spawn no subagents.\n"
@@ -449,9 +453,6 @@ EXPLORER_PROMPT = (
     "modules a change here could break). Cite path:line for every entry, and nothing you "
     "did not see in the graph or the code.\n"
 )
-
-#: The code context, as research, strategy and design are given it (once per prompt).
-CODE_CONTEXT = "{% if graph_context %}## Code context\n{{graph_context}}\n{% endif %}"
 
 
 class DesignMode(Mode):
@@ -640,7 +641,7 @@ class DesignMode(Mode):
             "size_change", "agent",
             prompt_template=SIZER_PROMPT,
             timeout_s=SIZER_TIMEOUT_S,
-            reads=("brief.json",),
+            reads=("brief.json", GRAPH_CONTEXT),
             writes=(SIZING,),
             notes="size the change by reading the code it touches, before research; read "
                   "only, no subagents, no web. The spine's CEO-subagent route does not "
@@ -657,7 +658,7 @@ class DesignMode(Mode):
                   "same rule as classify_scale; full unless the verdict proves it scoped",
         ))
 
-        # ── the explorer, after sizing: it maps the code the change touches into
+        # ── the explorer, before sizing: it maps the code the brief names into
         # graph-context.md, from the code graph or, without one, from the files ──
         graph.add(Node(
             "await_code_graph", "op", call="refactory_dsh.code_graph:await_code_graph",
@@ -675,11 +676,9 @@ class DesignMode(Mode):
             "explore_code", "agent",
             prompt_template=EXPLORER_PROMPT,
             timeout_s=EXPLORER_TIMEOUT_S,
-            # Not sizing.json: a sizer that did not finish wrote none, and a declared read
-            # must exist on both runtimes. The prompt names it for when it is there.
             reads=("brief.json",),
             writes=(GRAPH_CONTEXT,),
-            notes="map the code the change touches with the code graph's query, explain and "
+            notes="map the code the brief names with the code graph's query, explain and "
                   "path, or the files without a graph; read only, no subagents, no web",
         ))
         graph.add(Node("join_explore", "join", sources=("explore_code",),
@@ -1463,17 +1462,18 @@ class DesignMode(Mode):
 
         graph.connect("prepare", "route_refine_design")
         graph.connect("route_refine_design", "build_code_graph", condition="proceed")
-        graph.connect("build_code_graph", "clear_sizing")
-        graph.connect("clear_sizing", "fork_size")
-        # No edge from size_change to join_size, as fork_qa's branches have none.
-        graph.connect("fork_size", "join_size")
-        graph.connect("join_size", "presize_scale")
-        graph.connect("presize_scale", "await_code_graph")
+        # The explorer maps the code first, so the sizer starts from it.
+        graph.connect("build_code_graph", "await_code_graph")
         graph.connect("await_code_graph", "fork_explore")
-        # No edge from explore_code to join_explore, as for the sizer.
+        # No edge from explore_code to join_explore, as fork_qa's branches have none.
         graph.connect("fork_explore", "join_explore")
         graph.connect("join_explore", "record_graph_context")
-        graph.connect("record_graph_context", "research_director")
+        graph.connect("record_graph_context", "clear_sizing")
+        graph.connect("clear_sizing", "fork_size")
+        # No edge from size_change to join_size, for the same reason.
+        graph.connect("fork_size", "join_size")
+        graph.connect("join_size", "presize_scale")
+        graph.connect("presize_scale", "research_director")
         graph.connect("route_refine_design", "design_doc", condition="light")
         graph.connect("research_director", "record_findings")
         graph.connect("record_findings", "gate_research")

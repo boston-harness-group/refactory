@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -575,8 +576,9 @@ def _extract():
 try:
     result = _extract()
     if result.returncode > 0 and REUSED:
-        # A graph reused from another run of this repository may be of a later commit;
-        # graphify refuses to update it to a smaller one. Build this checkout afresh.
+        # graphify refuses an update of a graph reused from another run of this repository
+        # when the update comes out smaller (some sources' extraction was incomplete),
+        # which a build from nothing does not compare against. Build this checkout afresh.
         import shutil
         shutil.rmtree(GRAPHIFY_OUT, ignore_errors=True)
         result = _extract()
@@ -1042,8 +1044,10 @@ def record_graph_context(ctx: Any) -> dict[str, Any]:
                 "code_graph_paragraph": paragraph}
 
     if body.startswith("Made from "):
-        # Recorded already (a resumed visit): the heading is this op's to write.
+        # Recorded already (a resumed visit): the heading is this op's to write, and its
+        # headings were nested.
         body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
+        body = re.sub(r"(?m)^#(#{1,5}) ", r"\1 ", body)
     queries = _explorer_queries(graph_dir)
     asked = str(ctx.facts.get("code_graph_state", state))
     if queries:
@@ -1056,6 +1060,8 @@ def record_graph_context(ctx: Any) -> dict[str, Any]:
         body = (body[:GRAPH_CONTEXT_MAX_CHARS].rsplit("\n", 1)[0]
                 + f"\n\n(cut at {GRAPH_CONTEXT_MAX_CHARS} characters; the rest is in "
                 f"{GRAPH_CONTEXT})")
+    # The prompts carry it under their own `## Code context` heading: its headings nest.
+    body = re.sub(r"(?m)^(#{1,5}) ", r"#\1 ", body)
     text = f"Made from {source}.\n\n{body}\n"
     ctx.write_text(GRAPH_CONTEXT, text)
     return {"graph_context": text, "graph_context_source": source,

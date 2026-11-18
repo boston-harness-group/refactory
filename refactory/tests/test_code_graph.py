@@ -27,6 +27,7 @@ from refactory_dsh.code_graph import (
     cli_graph,
     explain_node,
 )
+from refactory_dsh.code_graph import EXPLORER_MARK
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import SIZER_MARK
 from tests_support import (
@@ -643,24 +644,16 @@ def _prompt(model, mark: str) -> str:
 _SCOPED_RUN = [SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER, *BUILD]
 
 
-def test_graph_on_prompts_carry_the_paragraph(tmp_path, stub_graphify):
+def test_a_graph_that_failed_is_never_offered_to_a_later_prompt(tmp_path, stub_graphify):
     run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN),
                                         extra_knobs={"code_graph": True})
     assert run.exit_ok, run.error
-    paragraph = _PARAGRAPH_TEMPLATE.split("{", 1)[0]
-    sizer = _prompt(model, SIZER_MARK)
-    assert paragraph in sizer
-    paragraph = sizer[sizer.index(paragraph):].split("\n\n", 1)[0]
-    # The stub's build writes no graph, so after the explorer step the later prompts are
-    # not told to query it (`record_graph_context`).
+    # The stub's build writes no graph: the explorer is told so and explores the files,
+    # and no step after it is told to query the graph (`record_graph_context`).
+    assert "## No code graph (failed: " in _prompt(model, EXPLORER_MARK)
     assert run.facts["code_graph_paragraph"] == ""
-    for mark in ("You are the research director", "pitfalls researcher"):
+    for mark in (SIZER_MARK, "You are the research director", "pitfalls researcher"):
         assert "graph callers" not in _prompt(model, mark)
-    assert "$VENV_BIN" not in paragraph
-    command = paragraph.split("run `", 1)[1].split(" graph callers", 1)[0]
-    assert Path(command).is_absolute() and Path(command).is_file()
-    for word in ("limit", "maximum", "at most", "no more than"):
-        assert word not in paragraph.lower()
 
 
 def test_the_graph_is_on_by_default(tmp_path, stub_graphify):
