@@ -1057,6 +1057,12 @@ def test_a_branch_whose_whole_prompt_is_a_fact_names_the_rewire_that_applies():
     # ...or a knob it does not read.
     ({**BRANCH_REWIRE, "text": "Use {{decide_task}}."},
      "'text' names knob {{decide_task}}, which 'hypotheses' does not read"),
+    # ...or its own system prompt, which it is already given.
+    ({**BRANCH_REWIRE, "text": "Follow {{hypotheses__system_prompt}}."},
+     "'text' names {{hypotheses__system_prompt}}, 'hypotheses''s own system prompt"),
+    # A file of a step it sees comes in through its collect step's one slot.
+    ({**BRANCH_REWIRE, "sees": ["task", "compare"], "text": "Use {{compare_notes}} well."},
+     "the files 'hypotheses' sees reach it together as {{hypotheses_inputs}}; use that slot"),
 ])
 def test_a_rewire_s_text_is_an_agent_s_own_instructions(edit, reason):
     refused = _s4(edit)
@@ -1119,6 +1125,42 @@ def test_any_op_built_prompt_left_unread_is_a_dead_knob():
     out = _accepted({"op": "rewire", "step": "decide", "sees": ["task"], "text": "Decide."})
     assert "decide_task" in core_ops.dead_text_knobs(out.state)
     assert "decide_task" not in core_ops.reader_knobs(out.state, "prepare")
+
+
+def _shared_decide_task() -> dict:
+    """S4 with decide_prompt2, a copy of decide_prompt between it and decide that also
+    fills decide_task and whose output nothing reads: decide_task still reaches decide
+    through decide_prompt."""
+    import copy
+
+    state = _mode("livemath/skill_graph").state_dict()
+    nodes, edges = state["graph"]["nodes"], state["graph"]["edges"]
+    copied = copy.deepcopy(nodes["decide_prompt"])
+    copied.update(id="decide_prompt2", produces=["decide_prompt2"])
+    nodes["decide_prompt2"] = copied
+    for edge in edges:
+        if edge["source"] == "decide_prompt" and edge["target"] == "decide":
+            edge["target"] = "decide_prompt2"
+    edges.append({"source": "decide_prompt2", "target": "decide", "condition": None})
+    assert validate_state(state) == []
+    return state
+
+
+@pytest.mark.parametrize("edit", [
+    {"op": "set_knob", "name": "decide_task", "value": "## Your Task\nWeigh it all."},
+    {"op": "insert", "before": "decide_prompt", "kind": "agent", "text": "Check.",
+     "to": "decide_task"},
+])
+def test_a_knob_is_dead_only_when_no_reader_of_it_reaches_a_step(edit):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    state = _shared_decide_task()
+    graph = Graph.from_state(state["graph"])
+    assert "decide_task" in core_ops._dead_in(graph, graph.nodes["decide_prompt2"], state)
+    assert core_ops.dead_text_knobs(state) == {}
+    out = Optimizer().attempt(Proposal(edits=[edit]), Candidate.from_state(state), (), True, (),
+                              protected=("data", "extract_answer", "finish"))
+    assert not isinstance(out, list), out
 
 
 # ── H2: new text alone keeps what the step sees ──────────────────────────

@@ -777,17 +777,25 @@ def _dead_in(graph: Graph, node: Node, state: Mapping[str, Any]) -> dict[str, li
 
 
 def dead_text_knobs(state: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]]:
-    """Every text knob an op fills whose text reaches no step any more: knob -> (the op,
-    the outputs carrying it that nothing reads), e.g. a prompt an op builds for a step that
-    was rewired to see something else."""
+    """Every text knob an op fills whose text reaches no step any more: knob -> (an op
+    filling it, the outputs carrying it that nothing reads), e.g. a prompt an op builds for
+    a step that was rewired to see something else. A knob is dead only when every node
+    reading it is an op or gate filling it into outputs nothing reads (`_dead_in`): one
+    other op whose prompt is read, or any other reader, keeps it alive."""
     graph = _edits()._graph(state)
     knobs = state.get("knobs") or {}
-    out: dict[str, tuple[str, list[str]]] = {}
+    dead_by: dict[str, list[tuple[str, list[str]]]] = {}
     for node in graph.nodes.values():
         if node.kind in ("op", "gate"):
             for name, outputs in _dead_in(graph, node, state).items():
-                if ((knobs.get(name) or {}).get("spec") or {}).get("kind") == "str":
-                    out[name] = (node.id, outputs)
+                dead_by.setdefault(name, []).append((node.id, outputs))
+    readers = graph.knob_consumers()
+    out: dict[str, tuple[str, list[str]]] = {}
+    for name, found in dead_by.items():
+        if ((knobs.get(name) or {}).get("spec") or {}).get("kind") != "str":
+            continue
+        if set(readers.get(name, ())) <= {op for op, _outputs in found}:
+            out[name] = found[0]
     return out
 
 
@@ -2130,12 +2138,25 @@ def _own_text_slots(graph: Graph, state: Mapping[str, Any], node: Node, text: st
         facts.add(gather)
     knobs = set(state.get("knobs") or {})
     makers = made_by(graph)
+    system = {knob for field_name, knob in node.field_bindings
+              if field_name == "system_prompt_template"}
+    seen_files = {name for kind, name in seen if kind == "file"}
     for name in sorted(template_names(text)):
+        if name in system:
+            raise _Refused(f"'text' names {{{{{name}}}}}, {node.id!r}'s own system prompt, "
+                           "which it is already given; set that knob to change it")
         if name in knobs:
             if name not in node.knobs:
                 raise _Refused(f"'text' names knob {{{{{name}}}}}, which {node.id!r} does not "
                                "read; write what it should say into 'text' itself")
         elif name not in facts:
+            files = {made_name for kind, made_name in makers
+                     if kind == "file" and (made_name == name
+                                            or made_name.rsplit(".", 1)[0] == name)}
+            if files & seen_files:
+                # A file it sees reaches an agent through its collect step, as one fact.
+                raise _Refused(f"'text' names {{{{{name}}}}}: the files {node.id!r} sees reach "
+                               f"it together as {{{{{gather}}}}}; use that slot")
             made = sorted({m for (kind, made_name), steps in makers.items()
                            if made_name == name or (kind == "file"
                                                     and made_name.rsplit(".", 1)[0] == name)
