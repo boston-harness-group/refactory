@@ -246,7 +246,12 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
                 name: 'your final response' for name in writes[1:]}} if writes else {}
         else:
             execution['outputs'] = [str(place / name) for name in writes]
-    if context.get('runtime_root'):
+        if workspace.get('sealed'):
+            # Its reads were copied in, and nothing outside the workspace is readable.
+            execution['inputs'] = [str(place / name) for name in sorted(reads)]
+            for key in ('workdir', 'python', 'refactory_source'):
+                execution.pop(key, None)
+    if context.get('runtime_root') and not (workspace or {}).get('sealed'):
         execution['runtime_root'] = str(context['runtime_root'])
 
     # Rebase paths when the target IS the driver checkout (dm-159).
@@ -303,7 +308,9 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
     if workspace is not None:
         instructions += _workspace_instructions(workspace, writes)
     # Worktree-aware contract instructions (dm-159).
-    if wt_found is not None and workspace is not None:
+    if (workspace or {}).get('sealed'):
+        pass  # It sees its workspace only; the run's worktree is outside what it can read.
+    elif wt_found is not None and workspace is not None:
         # A workspace node reads, changes and runs the repository in its workspace,
         # never in the run's worktree or the target.
         instructions += (
@@ -355,6 +362,10 @@ def _workspace_instructions(workspace: dict[str, Any], writes: list[str]) -> str
                  ' dependencies installed and its setup and generate commands run.'
                  ' Read, change and run the repository there (its own virtual environment and'
                  ' package binaries come first on PATH), and give paths relative to it.')
+    elif workspace.get('sealed'):
+        where = (f' Your workspace is {place}, a new folder holding copies of your inputs: work and'
+                 ' run commands there, and give paths relative to it. Nothing outside it can be'
+                 ' read or changed, and there is no network.')
     else:
         where = (f' Your workspace is {place}, a new empty folder: work and run commands there,'
                  ' and give paths relative to it.')

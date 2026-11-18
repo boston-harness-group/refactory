@@ -1648,3 +1648,36 @@ def test_fork_inside_data_deadline_spine(tmp_path):
     assert (rc, status) == (0, "done")
     scores = {s["id"]: (s.get("error_kind"), s.get("score")) for s in _spine_facts(run)["item_scores"]}
     assert scores == {"0": (None, 1.0), "1": ("timeout", 0.0), "2": (None, 1.0)}, scores
+
+
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_step_cap_allows_each_items_reloops(tmp_path, parallelism):
+    """A pass whose gate reloops walks its nodes once per attempt: each item is allowed
+    its gates' max_iterations more walks, so 6 items of 5 attempts each (two body steps an
+    attempt, then one) all finish under max_steps=10, at any parallelism. Scaled by the
+    node count alone the cap was 10 + 5 × 4 = 30 steps for the 66 the items take."""
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "data", "data", subgraph_entry="attempt", subgraph_exit="done",
+        writes=(CURRENT_ITEM,), produces=("item_scores",),
+        inline_items=tuple({"id": str(i)} for i in range(6)), parallelism=parallelism,
+    ))
+    graph.add(nn.Node("attempt", "op", call="_ops_reloop_pass:attempt",
+                      reads=(CURRENT_ITEM,), writes=("attempts.json",), produces=("attempted",)))
+    graph.add(nn.Node("again", "gate", evaluator="_ops_reloop_pass:again",
+                      reads=("attempts.json",), max_iterations=8))
+    graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph.connect("attempt", "again")
+    graph.connect("again", "attempt", condition="reloop")
+    graph.connect("again", "done", condition="proceed")
+    graph.add(nn.Node("report", "op", call="loop_ops:write_best",
+                      writes=("best.json",), produces=("best",)))
+    graph.connect("data", "report")
+
+    result = execute(graph, tmp_path / "run", max_steps=10)
+
+    assert result.exit_ok, result.error
+    # No Task grades these items, so only a failed item would leave a record.
+    assert result.item_records == []
+    attempts = [json.loads(p.read_text()) for p in (tmp_path / "run").glob("passes/data/*/attempts.json")]
+    assert sorted(attempts) == [5] * 6

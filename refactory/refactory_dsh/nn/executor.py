@@ -1065,14 +1065,23 @@ class Executor:
                 # Scale step cap for data nodes: save the initial step count
                 # and the original max_steps so we can account for the kept
                 # history after the loop. Scale max_steps by item count so
-                # large benchmarks don't hit the global cap.
+                # large benchmarks don't hit the global cap. A pass whose gates
+                # reloop walks its nodes once more per reloop, up to each gate's
+                # max_iterations, so each item is allowed that many walks.
                 _data_steps_start = len(self.steps)
                 _subgraph_node_count = len([
                     n for n in self.graph.nodes.values()
                     if n.id != node.id
                 ]) or 1
+                from .loops import loop_edges as _loop_edges
+
+                _body = self.graph.data_body(node.id)
+                _reloops = sum(
+                    self._effective_max_iterations(self.graph.nodes[gate])
+                    for gate in {key[0] for key in _loop_edges(self.graph)} & _body
+                )
                 _original_max_steps = self.max_steps
-                self.max_steps += (len(items) - 1) * _subgraph_node_count
+                self.max_steps += (len(items) - 1) * _subgraph_node_count * (1 + _reloops)
 
                 # Read part/seed from subset.json once for all items (ask 5).
                 from refactory_dsh.task import part_seed_kwargs, subset_part_seed
@@ -1182,6 +1191,7 @@ class Executor:
                     _pass_dir = prepare_pass_dir(
                         _run_workdir, node.id, item_id, index,
                         declared_reads=_declared_reads,
+                        task_ref=node.task_ref or "",
                     )
                     _pass_completed = False
                     record = None
@@ -2021,12 +2031,14 @@ class Executor:
     def _visit_agent(self, node: Node) -> None:
         if self.ctx.model is None:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
-        # Refuse an agent node with a tools field, matching the spine's
-        # lowering refusal (workers.py:306-307) — SWEEP-7 / gap 15.
-        if getattr(node, "tools", None):
+        # Refuse an agent node with a tools field it cannot run sealed, matching the
+        # spine's lowering refusal (`workers.lower_workflow`) — SWEEP-7 / gap 15.
+        from refactory_dsh.workspace import SEALED_TOOLS, is_sealed
+        if getattr(node, "tools", None) and not is_sealed(node):
             raise ValueError(
-                f"agent node {node.id!r} declares a 'tools' field; "
-                "tools are not supported on agent nodes"
+                f"agent node {node.id!r} declares tools {list(node.tools)} it cannot run "
+                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)}, "
+                "in a 'scratch' workspace, with no tool_policy"
             )
         from refactory_dsh.agent_delivery import _path, fill_feedback, with_feedback
 
@@ -2098,6 +2110,7 @@ class Executor:
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
                 route=route, budget=self.ctx.budget, fresh=retrying,
+                tools=node.tools if is_sealed(node) else (), reads=node.reads,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)
 

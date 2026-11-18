@@ -174,7 +174,7 @@ def test_a_saved_profile_with_removed_settings_still_loads_and_runs(project):
     file is left as it was), ``val_gate: false`` (the default before #627) reads as
     unset, and the run decides the gate from its parts manifest."""
     old = {**_experiment(project), "val_gate": False, "fresh_evidence": False,
-           "max_edits_per_proposal": 2}
+           "max_edits_per_proposal": 2, "allow_new_node_tools": True}
     profiles.save(project, "old", {"settings": _experiment(project)})
     path = project / profiles.PROFILE_ROOT / "old" / "1.json"
     saved = json.loads(path.read_text())

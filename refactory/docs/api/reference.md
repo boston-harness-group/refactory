@@ -185,6 +185,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
+| function | `feedback_channel_issues` | `(graph: 'Graph', *, grader_side: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 | function | `filled_knobs` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'tuple[str, ...]'` |
 | function | `fills_facts` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'bool \| None'` |
 | function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
@@ -221,6 +222,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`consumed`** — Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
+- **`feedback_channel_issues`** — V17's one exception, held to its shape: a train-feedback node
 - **`filled_knobs`** — The knobs whose slots an op or gate fills: every knob it reads that is not bound
 - **`fills_facts`** — Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
 - **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
@@ -313,7 +315,7 @@ The two extension points: what proposes, and what runs the search.
 | kind | name | signature |
 |---|---|---|
 | class | `BudgetStopped` | `(message: 'str', *, reason: 'str' = '') -> 'None'` |
-| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None) -> None` |
+| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None, gold_feedback: 'bool' = False) -> None` |
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |
 | class | `OuterLoopError` | `` |
@@ -467,7 +469,7 @@ The optimizer loop, named like one.
 | class | `EpochSummary` | `(epoch: 'int', evaluated: 'int', best: 'float \| None', mean: 'float \| None', improved: 'bool', proposed: 'int', accepted: 'int', refused: 'int', population: 'int', refused_total: 'int', structural_in_population: 'int') -> None` |
 | class | `EvaluationInterrupted` | `` |
 | class | `Loop` | `(mode_id: 'str', config: 'LoopConfig \| None' = None, *, project: 'Path \| None' = None, model: 'Any' = None, optimizer: 'Optimizer \| None' = None) -> 'None'` |
-| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, allow_new_node_tools: 'bool' = False, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
+| class | `LoopConfig` | `(epochs: 'int' = 2, batch_size: 'int' = 4, optimizer: 'str' = 'autoresearch', edit_preset: 'str' = 'broad', seed: 'int' = 0, elite: 'int' = 3, max_evaluations: 'int' = 64, holdout: 'float' = 0.3, parsimony: 'float' = 0.01, runs_root: 'Path' = PosixPath('.factory/loop'), max_steps: 'int' = 2000, attempts: 'int' = 3, frozen: 'tuple[str, ...]' = (), intent: 'str' = '', knobs: 'dict[str, Any]' = <factory>, history_limit: 'int' = 200, prior_runs: 'int' = 3, memory_global_root: 'Path \| None' = None, evaluator: 'str' = 'walker', omit_steering: 'bool' = False, dsh_timeout_s: 'int' = 900, resume: 'bool' = False, progress: 'bool' = True, print_events: 'bool' = False, verbose: 'bool' = False, control_poll_s: 'float' = 1.0, strategy: 'str' = 'default', repeats: 'int' = 1, allowed_ops: 'tuple[str, ...]' = (), worker_backend: 'str' = 'dsh', provider: 'str' = '', model: 'str' = '', effort: 'str' = '', permission_mode: 'str' = 'skip', setting_sources: 'str' = '', claude_executable: 'str' = '', role_routes: 'dict[str, Any]' = <factory>, node_routes: 'dict[str, Any]' = <factory>, provider_config: 'dict[str, Any]' = <factory>, max_elapsed_s: 'float \| None' = None, max_tokens: 'int \| None' = None, validation_reserve_s: 'float' = 0, validation_reserve_tokens: 'int' = 0, max_rollouts: 'int \| None' = None, max_concurrent_evaluations: 'int' = 4, max_items_in_flight: 'int \| None' = None, parts_manifest: 'str \| None' = None, seed_results: 'str \| None' = None, val_gate: 'bool \| None' = None, train_minibatch: 'int' = 0, allow_code_nodes: 'bool' = True, early_stop_patience: 'int' = 0, early_stop_at_full_val: 'bool' = False, resolved_profile: 'dict[str, Any]' = <factory>, strategy_options: 'dict[str, Any]' = <factory>, parent_picker: 'str' = '', portfolio: 'str' = '', selection: 'str' = '', pool_size: 'int' = 8, run_ledger: 'bool' = True, lessons: 'bool' = True, step_review: 'bool' = True, structure_guidance: 'bool' = False, analysts: 'bool' = False, analyst_group_size: 'int' = 8, analyst_merge_batch_size: 'int' = 8, analyst_max_batches: 'int' = 0, integrity_judge: 'str \| dict[str, Any]' = 'off') -> None` |
 | class | `LoopError` | `` |
 | function | `default_selection` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'str'` |
 | function | `gap_standard_error` | `(first: 'float', first_items: 'int', second: 'float', second_items: 'int') -> 'float \| None'` |
@@ -1014,7 +1016,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `session_store_choice` | `(value: 'str \| None' = None) -> 'str'` |
 | function | `session_store_rows` | `(store: 'Path \| None') -> 'list[dict[str, Any]]'` |
 | function | `validate_route` | `(route: 'dict[str, Any]') -> 'dict[str, Any]'` |
-| function | `write_patch` | `(path: 'Path', runtime_root: 'Path', route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None' = None, *, workspace_root: 'Path \| None' = None, tool_home: 'Path \| None' = None, system_prompt: 'str' = '', tool_policy: 'str' = '', session_store: 'Path \| None' = None) -> 'None'` |
+| function | `write_patch` | `(path: 'Path', runtime_root: 'Path', route: 'dict[str, Any]', provider_config: 'dict[str, Any] \| None' = None, *, workspace_root: 'Path \| None' = None, tool_home: 'Path \| None' = None, system_prompt: 'str' = '', tool_policy: 'str' = '', seal: 'dict[str, Any] \| None' = None, session_store: 'Path \| None' = None) -> 'None'` |
 
 - **`GraphTelemetry`** — One coordinator receipt; node subprocesses own distinct worker receipts.
 - **`StepRoutes`** — The routes a run names -- its own, and each role's and node's in its route maps --
@@ -1110,7 +1112,7 @@ The per-item half of a data node, from the command line.
 | function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
-| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True) -> 'Path'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True, task_ref: 'str' = '') -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |

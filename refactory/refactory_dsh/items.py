@@ -167,6 +167,7 @@ def prepare_pass_dir(
     declared_reads: tuple[str, ...] | list[str] = (),
     *,
     starting: bool = True,
+    task_ref: str = "",
 ) -> Path:
     """Create and return the pass directory for one item.
 
@@ -182,6 +183,9 @@ def prepare_pass_dir(
       stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
       attempt's and never counts the time a run spent stopped; the spine's ``end``
       reuses the directory with ``starting`` False.
+    * Marks it as a pass (:data:`PASS_MARKER`): the data node, the item and its index,
+      and the node's Task (*task_ref*), so a grader-side op inside the pass can find
+      the item's Task on either runtime (`refactory_dsh.feedback`).
     """
     run_dir = Path(run_dir)
     pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
@@ -207,7 +211,10 @@ def prepare_pass_dir(
     marker = pass_dir / PASS_MARKER
     if not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({"node": node_id, "item": item_id, "index": index}) + "\n")
+        record: dict[str, Any] = {"node": node_id, "item": item_id, "index": index}
+        if task_ref:
+            record["task"] = task_ref
+        marker.write_text(json.dumps(record) + "\n")
     return pass_dir
 
 
@@ -426,7 +433,9 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
 #: (``model.CompletionTimeout``); a failed pass carries it in its text on both runtimes.
 COMPLETION_TIMEOUT_TEXT = "model completion timed out"
 
-from refactory_dsh.model import DECLARED_TIMEOUT_TEXT, HARNESS_BACKSTOP_TEXT  # noqa: E402
+from refactory_dsh.model import (  # noqa: E402
+    DECLARED_TIMEOUT_TEXT, HARNESS_BACKSTOP_TEXT, HARNESS_INCIDENT_TEXT,
+)
 
 
 #: How much of a failed item's error its record keeps: the spine's 4096-character stderr
@@ -445,7 +454,8 @@ ERROR_TEXT_CHARS = 4096 + 512 + 1
 #:
 #: - `_HARNESS_TIMEOUT_LINE`: a model call the harness ended for time (``timeout``);
 #: - `HARNESS_BACKSTOP_LINE`: the backstop, the model still writing (``backstop``);
-#: - `HARNESS_INCIDENT_LINE`: a harness fault (`task.HarnessIncident`; ``harness_incident``);
+#: - `_HARNESS_INCIDENT_LINE`: a harness fault (`model.HarnessIncident`, whose message
+#:   starts with `model.HARNESS_INCIDENT_TEXT`; ``harness_incident``);
 #: - `DECLARED_TIMEOUT_LINE`: the node's declared wall (``declared_timeout``);
 #: - `DECLARED_TIMEOUT_RETRIED_LINE`, `_HARNESS_TIMEOUT_RETRIED_LINE`: the same two, once
 #:   the node's declared retry is spent (`node_retry.RetriesExhausted`).
@@ -456,8 +466,6 @@ _HARNESS_TIMEOUT_LINE = re.compile(
 
 HARNESS_BACKSTOP_LINE = re.compile(
     rf"(?:{_NODE}(?:HarnessBackstop: )?|worker: )model session {re.escape(HARNESS_BACKSTOP_TEXT)}")
-
-HARNESS_INCIDENT_LINE = re.compile(rf"{_NODE}HarnessIncident: ")
 
 DECLARED_TIMEOUT_LINE = re.compile(
     rf"(?:{_NODE}(?:DeclaredTimeout: )?|worker: ){re.escape(DECLARED_TIMEOUT_TEXT)}")
@@ -483,10 +491,17 @@ def first_line(text: Any) -> str:
     return str(text or "").split("\n", 1)[0]
 
 
+#: A `model.HarnessIncident` that crossed a process as text: its message starts with
+#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "``, the spine's
+#: ``"<node>: <Class>: "`` (its worker's marker line) or ``"worker: "``, on the error's
+#: first line only (`first_line`): a later line may quote a model's reply.
+_HARNESS_INCIDENT_LINE = re.compile(r"(?:[A-Za-z0-9_.-]+: )*" + re.escape(HARNESS_INCIDENT_TEXT))
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a harness fault
-    (`task.HarnessIncident`: a grader or sandbox failed, not the candidate),
-    ``"backstop"`` for a session still writing at the harness backstop
+    (`model.HarnessIncident`: a grader or sandbox whose own machinery failed, not the
+    candidate), ``"backstop"`` for a session still writing at the harness backstop
     (`model.HarnessBackstop`: the model's own failure, scored like a wrong answer),
     ``"declared_timeout"`` for one stopped at its node's declared wall
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
@@ -499,12 +514,13 @@ def error_kind(error: BaseException) -> str:
     (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
     ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.model import (
+        CompletionTimeout, DeclaredTimeout, HarnessBackstop, HarnessIncident,
+    )
     from refactory_dsh.node_retry import RetriesExhausted
-    from refactory_dsh.task import HarnessIncident
 
     head = first_line(error)
-    if isinstance(error, HarnessIncident) or HARNESS_INCIDENT_LINE.match(head):
+    if isinstance(error, HarnessIncident) or _HARNESS_INCIDENT_LINE.match(head):
         return "harness_incident"
     if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.match(head):
         return "backstop"
@@ -642,7 +658,7 @@ def make_item_record(
 #: are none of these: they are the candidate's failed answers. Nor is a session the
 #: harness backstop stopped (`model.HarnessBackstop`): its process did not die, its model
 #: kept writing for hours, the candidate's own failure (``backstop``). A harness fault
-#: (`task.HarnessIncident`) is no interruption either: the loop runs that item alone
+#: (`model.HarnessIncident`) is no interruption either: the loop runs that item alone
 #: again (`harness_incident`). Known gap: the spine's own
 #: worker or op process killed with no stderr reads ``exited with code null``, which
 #: names no signal, so it is not recognised there (docs/outer-loop.md).
@@ -690,7 +706,7 @@ NOT_SCORED_INCIDENT = "harness_incident"
 
 def harness_incident(record: dict[str, Any]) -> bool:
     """Whether an item record is a harness incident: a harness fault
-    (`task.HarnessIncident`: its grader or sandbox failed) kept the item from an outcome
+    (`model.HarnessIncident`: its grader or sandbox failed) kept the item from an outcome
     of the candidate's. Its ``error_kind`` says so, or it has no answer because a step it
     went without was stopped by one (``missing_steps`` cause ``harness_incident``). An
     item the Task graded is its result, whatever a fork's other branch did. A model's own
@@ -1092,7 +1108,8 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
 
     # Create the isolated pass directory.
     declared_reads = _subgraph_declared_reads(workdir, node)
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads,
+                                task_ref=node.task_ref or "")
 
     # Write current_item to both pass_dir (for the subgraph) and workdir
     # (for progress tracking / PIT-005), without the Task's grader-only fields: the
@@ -1189,7 +1206,8 @@ def command_end(
     item_id = str(item.get("id") or index)
 
     # Compute the pass directory (idempotent — reuses the one command_begin created).
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False,
+                                task_ref=node.task_ref or "")
 
     # F4 parity: when the caller says the item's subgraph failed, skip verify
     # and write a failure record directly, as the walker does.
