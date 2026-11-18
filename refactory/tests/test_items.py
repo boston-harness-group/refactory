@@ -1342,7 +1342,7 @@ def test_a_spent_timeout_retry_is_still_a_harness_timeout_and_quoted_words_are_n
     assert error_kind(RuntimeError(quoted)) == "RuntimeError"
 
 
-def _capped_graph(cap: int = 1) -> nn.Graph:
+def _capped_graph(cap: int = 1, evaluator: str = "loop_ops:always_reloop") -> nn.Graph:
     """A data pass whose gate always sends its op back, capped at ``cap`` reloops; past
     the cap the item goes on with its last attempt (``on_exhausted: continue``)."""
     graph = nn.Graph()
@@ -1350,7 +1350,7 @@ def _capped_graph(cap: int = 1) -> nn.Graph:
                       task_ref="counting", writes=(CURRENT_ITEM,), produces=("item_scores",)))
     graph.add(nn.Node("work", "op", call="loop_ops:record_item", reads=(CURRENT_ITEM,),
                       writes=("seen.json",), produces=("seen",)))
-    graph.add(nn.Node("check", "gate", evaluator="loop_ops:always_reloop",
+    graph.add(nn.Node("check", "gate", evaluator=evaluator,
                       max_iterations=cap, on_exhausted="continue"))
     graph.add(nn.Node("next", "op", call="loop_ops:noop"))
     graph.connect("work", "check")
@@ -1359,7 +1359,9 @@ def _capped_graph(cap: int = 1) -> nn.Graph:
     return graph
 
 
-def test_both_runtimes_mark_the_reloop_a_gate_s_cap_refused(tmp_path):
+@pytest.mark.parametrize("evaluator", ["loop_ops:always_reloop",
+                                       "loop_ops:always_reloop_capitalised"])
+def test_both_runtimes_mark_the_reloop_a_gate_s_cap_refused(tmp_path, evaluator):
     """With a cap of 1 the gate answers reloop twice; the second is refused and the item
     goes on. Both runtimes' records say so (``exhausted``, with the cap), so no reader
     counts one more reloop than ran."""
@@ -1368,11 +1370,12 @@ def test_both_runtimes_mark_the_reloop_a_gate_s_cap_refused(tmp_path):
     import refactory_dsh.run
 
     _probe_task()
-    graph = _capped_graph()
+    graph = _capped_graph(evaluator=evaluator)
     walked = execute(graph, tmp_path / "walked")
     assert walked.exit_ok, walked.error
-    expected = [("work", None, None), ("check", "reloop", None), ("work", None, None),
-                ("check", "reloop", 1), ("next", None, None)]
+    said = "Reloop" if "capitalised" in evaluator else "reloop"
+    expected = [("work", None, None), ("check", said, None), ("work", None, None),
+                ("check", said, 1), ("next", None, None)]
     for record in walked.facts["item_scores"]:
         assert [(s["node"], s.get("verdict"), s.get("cap")) for s in record["steps"]] == expected
         assert [s.get("exhausted", False) for s in record["steps"]] == [
@@ -1384,9 +1387,9 @@ def test_both_runtimes_mark_the_reloop_a_gate_s_cap_refused(tmp_path):
         pass_dir = Path(items.command_begin(node, driven, index)["pass_dir"])
         with mock.patch.object(refactory_dsh.run, "install_workspace_packages", lambda: None):
             for target, node_id, kind in (("loop_ops:record_item", "work", "FnNode"),
-                                          ("loop_ops:always_reloop", "check", "GateNode"),
+                                          (evaluator, "check", "GateNode"),
                                           ("loop_ops:record_item", "work", "FnNode"),
-                                          ("loop_ops:always_reloop", "check", "GateNode"),
+                                          (evaluator, "check", "GateNode"),
                                           ("loop_ops:noop", "next", "FnNode")):
                 with mock.patch.dict("os.environ", {refactory_dsh.run.NODE_ENV: json.dumps(
                         {"id": node_id, "type": kind})}):
@@ -1404,3 +1407,63 @@ def test_a_reloop_within_the_cap_is_not_marked():
     assert items.refused_at_cap([first, first], {**first}, reloop)
     assert not items.refused_at_cap([first, first], {**first, "verdict": "proceed"}, reloop)
     assert not items.refused_at_cap([first, first], {**first, "node": "other"}, reloop)
+
+
+
+def _nested_graph(inner_cap: int, outer_cap: int) -> nn.Graph:
+    """work -> inner (always reloop to work) -> mid -> outer (always reloop to work)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="work", subgraph_exit="next",
+                      task_ref="counting", writes=(CURRENT_ITEM,), produces=("item_scores",)))
+    graph.add(nn.Node("work", "op", call="loop_ops:record_item", reads=(CURRENT_ITEM,),
+                      writes=("seen.json",), produces=("seen",)))
+    graph.add(nn.Node("inner", "gate", evaluator="loop_ops:always_reloop",
+                      max_iterations=inner_cap, on_exhausted="continue"))
+    graph.add(nn.Node("mid", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("outer", "gate", evaluator="loop_ops:always_reloop",
+                      max_iterations=outer_cap, on_exhausted="continue"))
+    graph.add(nn.Node("next", "op", call="loop_ops:noop"))
+    graph.connect("work", "inner")
+    graph.connect("inner", "work", condition="reloop")
+    graph.connect("inner", "mid", condition="proceed")
+    graph.connect("mid", "outer")
+    graph.connect("outer", "work", condition="reloop")
+    graph.connect("outer", "next", condition="proceed")
+    return graph
+
+
+@pytest.mark.parametrize("caps", [(1, 1), (2, 1), (1, 2)])
+def test_nested_capped_loops_are_marked_alike_and_said_with_each_gate_s_reruns(tmp_path, caps):
+    """Nested loops: the spine's runner, replayed over the walker's visits, marks the same
+    refusals; the request says each refused verdict on its own and each gate's reruns
+    (its accepted reloops) once, never the item's total on every group."""
+    from refactory_dsh.nn.loops import loop_edges
+    from refactory_dsh.optim.base import _verdicts
+
+    _probe_task()
+    graph = _nested_graph(*caps)
+    walked = execute(graph, tmp_path / "walked")
+    assert walked.exit_ok, walked.error
+    steps = walked.facts["item_scores"][0]["steps"]
+    declared = {gate: {"verdicts": sorted({c for g, _t, c in loop_edges(graph) if g == gate}),
+                       "max_iterations": graph.nodes[gate].max_iterations}
+                for gate in ("inner", "outer")}
+    replay: list[dict] = []
+    for step in steps:
+        visit = {key: step[key] for key in ("node", "kind", "verdict") if key in step}
+        if visit.get("kind") == "gate" and items.refused_at_cap(replay, visit,
+                                                                 declared[visit["node"]]):
+            items.mark_refused(visit, declared[visit["node"]]["max_iterations"])
+        replay.append(visit)
+    marks = lambda seq: [(s["node"], bool(s.get("exhausted"))) for s in seq  # noqa: E731
+                         if s.get("kind") == "gate"]
+    assert marks(replay) == marks(steps)
+    record = {"steps": steps}
+    for gate, cap in zip(("inner", "outer"), caps):
+        visits = [s for s in steps if s.get("node") == gate]
+        taken = sum(1 for s in visits if not s.get("exhausted"))
+        refused = sum(1 for s in visits if s.get("exhausted"))
+        said = _verdicts(record, gate)
+        assert said.count(f"(refused: cap of {cap} reached)") == refused, said
+        if refused:
+            assert said.endswith(f"{taken} rerun{'' if taken == 1 else 's'} taken"), said

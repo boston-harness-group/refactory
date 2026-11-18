@@ -741,8 +741,10 @@ optimizer, at no extra compute (train records only):
   records (`step_facts`): each step whose reply changed, is new, runs more or fewer
   times, or no longer runs at all ("gone"), with its runs on parent and child
   (`solve 1 -> 2 run(s)`), and each gate whose verdicts moved, both said (`check: parent
-  proceed; child reloop x2 (the last refused at its cap of 1: 1 rerun)`). A reloop its
-  cap refused is marked on the item's record by both runtimes (`items.refused_at_cap`:
+  proceed; child reloop, reloop (refused: cap of 1 reached), 1 rerun taken`): a refused
+  reloop is said where it happened, and the reruns the gate took (its accepted reloops)
+  once per gate. A reloop its cap refused is marked on the item's record by both
+  runtimes (`items.refused_at_cap`, verdicts read whatever their case, as both route:
   the walker's `_visit_gate`, the spine's node runner from the gate's declared reloop
   verdicts and cap), so it is never read as a rerun. Up to `EDIT_ITEMS_WHOLE` (4) of
   them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
@@ -759,7 +761,9 @@ optimizer, at no extra compute (train records only):
   rooms: a forced pick past its share of it (the forced picks still to come sharing it
   evenly) has its child's moved replies cut head and tail too, never below
   `EDIT_CHILD_FLOOR` (8,000) characters each, every cut marked in place and recorded,
-  and the section says so. Every other pick -- a score drop or rise included -- is
+  and the section says so. With many moved replies (a step in a map counts each run)
+  the floor can keep the blocks past the ceiling: the section then says by how much and
+  why, and the run's omissions record it (`over ceiling`). Every other pick -- a score drop or rise included -- is
   shown only when it fits what is left whole; one that does not is skipped for the
   next, and its line says why (its size against the room left, or that the most shown
   whole came first). A trace or input "Trajectories" shows whole, or a reply this

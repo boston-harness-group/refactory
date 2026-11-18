@@ -4725,28 +4725,30 @@ def _counts_in(record: Mapping[str, Any], node: str) -> int:
 
 
 def _verdicts(record: Mapping[str, Any], gate: str) -> str:
-    """The verdicts a gate (or loop check) gave on an item, in order, runs counted
-    (``reloop x2, proceed``); a reloop its cap refused is said so (``reloop x2 (the last
-    refused at its cap of 1: 1 rerun)``, `items.refused_at_cap`); ``not run`` when it
-    gave none."""
+    """The verdicts a gate (or loop check) gave on an item, in order, a run of the same
+    verdict counted (``reloop x2, proceed``; case aside, as both runtimes route). A
+    reloop its cap refused (`items.refused_at_cap`) is said on its own, ``reloop
+    (refused: cap of 1 reached)``, and the gate's reruns -- the reloops of that verdict
+    it took -- are said once after them; ``not run`` when it gave none."""
+    visits = [v for v in record.get("steps") or ()
+              if isinstance(v, Mapping) and str(v.get("node")) == gate and v.get("verdict")]
     out: list[list[Any]] = []
-    for v in record.get("steps") or ():
-        if not (isinstance(v, Mapping) and str(v.get("node")) == gate and v.get("verdict")):
-            continue
-        verdict = str(v.get("verdict"))
-        if out and out[-1][0] == verdict and not out[-1][2]:
+    for v in visits:
+        verdict = str(v.get("verdict")).strip()
+        refused = v.get("cap") if v.get("exhausted") else None
+        if out and out[-1][0].lower() == verdict.lower() and out[-1][2] is None \
+                and refused is None:
             out[-1][1] += 1
         else:
-            out.append([verdict, 1, None])
-        if v.get("exhausted"):
-            out[-1][2] = v.get("cap")
-    said = []
-    for verdict, count, cap in out:
-        text = verdict if count == 1 else f"{verdict} x{count}"
-        if cap is not None:
-            text += (f" (the last refused at its cap of {cap}: {cap} rerun"
-                     f"{'' if cap == 1 else 's'})")
-        said.append(text)
+            out.append([verdict, 1, refused])
+    said = [(verdict if count == 1 else f"{verdict} x{count}")
+            + (f" (refused: cap of {cap} reached)" if cap is not None else "")
+            for verdict, count, cap in out]
+    refused_labels = {str(v.get("verdict")).strip().lower() for v in visits if v.get("exhausted")}
+    if refused_labels:
+        reruns = sum(1 for v in visits if not v.get("exhausted")
+                     and str(v.get("verdict")).strip().lower() in refused_labels)
+        said.append(f"{reruns} rerun{'' if reruns == 1 else 's'} taken")
     return ", ".join(said) or "not run"
 
 
@@ -4876,6 +4878,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     forced: set[str] = set()
     over: list[tuple[int, str, int]] = []
     capped: list[tuple[int, str, int]] = []
+    past: list[tuple[int, str, int]] = []
     quoted = _Quoted(shown)
     used = 0
 
@@ -4923,6 +4926,10 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
             block = render(index, key, item, trial, chars, None)
             if used + len(block) + 2 > room:
                 over.append((index, item, max(0, room - used)))
+            if chars[1] < ITEM_TEXT_MAX and used + len(block) + 2 > ceiling:
+                # Even at the floor the child's moved replies pass the ceiling: kept, and
+                # said so, never claimed to fit.
+                past.append((index, item, used + len(block) + 2))
         forced.add(key)
         picks[(index, item)] = chars
         quoted, used = trial, used + len(block) + 2
@@ -4941,6 +4948,9 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
         omissions += [{"item": item, "step": "what the last edit changed: over room",
                        "chars": 0, "block": len(blocks[(index, item)]), "room": room,
                        "room_left": left} for index, item, left in over]
+        omissions += [{"item": item, "step": "what the last edit changed: over ceiling",
+                       "chars": 0, "blocks": total, "ceiling": ceiling,
+                       "child_floor": EDIT_CHILD_FLOOR} for _index, item, total in past]
     lines = ["## What the last edit changed",
              "The latest children of the candidate you edit (every child of its last round, "
              "siblings included), or that "
@@ -4960,6 +4970,26 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
              f"would pass {ceiling:,}; every other pick only when it fits whole with the "
              "ones before it, and an item not shown whole says why. A trace shown whole elsewhere in this "
              "request is named by where it is, not repeated."]
+    def said_cut(at: int, item: str) -> str:
+        parent, child = (side[item] for side in records[at])
+        moves = step_moves(parent, child)
+        keys = {*moves["changed"], *moves["new"]}
+        moved = len(keys)
+        cut = next((n for at2, item2, n in capped if (at2, item2) == (at, item)), None)
+        if cut is not None and not any(
+                len(str(e.get("response") or "").strip()) - cut >= EDIT_CUT_MIN
+                for key, e in _runs(child) if key in keys):
+            cut = None  # every moved reply was already within the cut: none was made
+        said = (f"its child's {moved} moved replies cut to {cut:,} chars each (head and tail, "
+                "marked)" if cut is not None else "the child's moved replies whole")
+        total = next((n for at2, item2, n in past if (at2, item2) == (at, item)), None)
+        if total is not None:
+            return (f"{said}; the blocks shown whole are past the section's {ceiling:,}-char "
+                    f"limit: {total:,} chars, because each of its {moved} moved replies keeps "
+                    f"at least {EDIT_CHILD_FLOOR:,} chars or is whole.")
+        return said + (f" to keep the blocks shown whole within the section's {ceiling:,}-char "
+                       "ceiling." if cut is not None else ".")
+
     for index, pair in enumerate(pairs):
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
@@ -5009,12 +5039,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                 lines.append(
                     f"Item {item}'s block is {len(blocks[(at, item)]):,} chars, past the "
                     f"{left:,} chars left of the {room:,}-char room: as the first pick of "
-                    "its kind it is shown all the same, "
-                    + next((f"its child's moved replies cut to {n:,} chars each (head and "
-                            f"tail, marked) to keep the blocks shown whole within the "
-                            f"section's {ceiling:,}-char ceiling." for at2, item2, n in capped
-                            if (at2, item2) == (at, item)),
-                           "the child's moved replies whole."))
+                    "its kind it is shown all the same, " + said_cut(at, item))
         for key, item in changed:
             if (index, item) in blocks:
                 lines += ["", blocks[(index, item)]]

@@ -125,6 +125,7 @@ def test_the_first_pick_is_shown_whatever_the_room_and_only_the_parent_s_side_is
     assert small.count("chars omitted]") == 4
     assert sorted(o["step"] for o in omissions) == [
         "check (parent)", "check (parent)", "final (parent)", "final (parent)",
+        *["what the last edit changed: over ceiling"] * 2,
         *["what the last edit changed: over room"] * 2]
     assert small.count("chars left of the 100-char room") == 2
 
@@ -385,7 +386,7 @@ def test_at_20k_replies_the_forced_picks_share_the_ceiling_never_below_the_floor
     assert [b.split(" -- ")[0] for b in blocks] == ["#### Item i00", "#### Item i03"]
     ceiling = base.EDIT_CEILING_ROOMS * 30000
     assert sum(len(b) for b in blocks) <= ceiling + 2000
-    said = re.findall(r"its child's moved replies cut to ([\d,]+) chars each \(head and tail, "
+    said = re.findall(r"its child's 4 moved replies cut to ([\d,]+) chars each \(head and tail, "
                       r"marked\) to keep the blocks shown whole within the section's "
                       rf"{ceiling:,}-char ceiling", section)
     assert len(said) == 2 and all(int(n.replace(",", "")) >= base.EDIT_CHILD_FLOOR for n in said)
@@ -461,8 +462,8 @@ def test_a_reloop_refused_at_its_cap_is_not_counted_as_run():
                        {"node": "check", "kind": "gate", "verdict": "reloop",
                         "exhausted": True, "cap": 1}]}
     facts = base.step_facts(parent, child)
-    assert ("`check`: parent proceed; child reloop x2 (the last refused at its cap of 1: "
-            "1 rerun)") in facts
+    assert ("`check`: parent proceed; child reloop, reloop (refused: cap of 1 reached), "
+            "1 rerun taken") in facts
     assert "`solve` 1 -> 2 run(s), more runs" in facts
 
 
@@ -478,3 +479,44 @@ def test_of_two_parent_replies_cut_to_one_length_the_one_barely_over_stays_whole
                               None, 2000)
     assert "T" * 2300 in block and "S" * 3000 not in block
     assert [o["step"] for o in omissions] == ["s (parent)"]
+
+
+def test_forced_blocks_past_the_ceiling_at_the_floor_are_said_and_recorded_honestly():
+    """Twelve moved steps of 20k each: even at the 8,000-char floor the first broken item
+    passes the ceiling. It is shown, and the section says by how much and why; no line
+    claims it was kept within the ceiling."""
+    nodes = [f"s{k}" for k in range(12)]
+
+    def rec(passed: bool, side: str) -> dict:
+        return {"id": "a", "passed": passed, "score": float(passed),
+                "exchanges": [{"node": n, "prompt": "p", "response": f"{side} {n} " + "x" * 20000}
+                              for n in nodes]}
+
+    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [rec(True, "old")],
+            "child_records": [rec(False, "new")]}
+    omissions: list = []
+    text = "\n".join(base._edit_change_lines([pair], omissions=omissions, room=30000))
+    found = re.search(r"the blocks shown whole are past the section's 90,000-char limit: "
+                      r"([\d,]+) chars, because each of its 12 moved replies keeps at least "
+                      r"8,000 chars or is whole\.", text)
+    assert found and int(found.group(1).replace(",", "")) > 90000
+    assert "within the section's 90,000-char ceiling" not in text
+    assert "its child's 12 moved replies cut to 8,000 chars each" in text
+    past = [o for o in omissions if o["step"].endswith("over ceiling")]
+    assert past == [{"item": "a", "step": "what the last edit changed: over ceiling", "chars": 0,
+                     "blocks": int(found.group(1).replace(",", "")), "ceiling": 90000,
+                     "child_floor": 8000}]
+
+
+def test_a_refused_reloop_is_said_on_its_own_and_reruns_once_per_gate():
+    """Nested loops: the inner gate refused twice at its cap of 1, a rerun between them.
+    Each refusal is said where it happened; the reruns it took are said once."""
+    def visit(verdict: str, refused: bool = False) -> dict:
+        return {"node": "inner", "kind": "gate", "verdict": verdict,
+                **({"exhausted": True, "cap": 1} if refused else {})}
+
+    record = {"steps": [visit("reloop"), visit("reloop", True), visit("Reloop"),
+                        visit("reloop", True), visit("proceed")]}
+    assert base._verdicts(record, "inner") == (
+        "reloop, reloop (refused: cap of 1 reached), Reloop, reloop (refused: cap of 1 "
+        "reached), proceed, 2 reruns taken")

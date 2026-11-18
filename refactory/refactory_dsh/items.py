@@ -475,11 +475,14 @@ def refused_at_cap(earlier: Sequence[Mapping[str, Any]], visit: Mapping[str, Any
     item's record says which verdict was refused, not one more reloop than ran."""
     if not reloop or visit.get("kind") != "gate":
         return False
-    verdicts = {str(v) for v in reloop.get("verdicts") or ()}
-    if str(visit.get("verdict")) not in verdicts:
+    # Both runtimes route a verdict whatever its case (`nn.executor.route_verdict`, the
+    # spine's own), so it is read the same here.
+    verdicts = {str(v).strip().lower() for v in reloop.get("verdicts") or ()}
+    if str(visit.get("verdict")).strip().lower() not in verdicts:
         return False
     taken = sum(1 for v in earlier if isinstance(v, Mapping) and v.get("kind") == "gate"
-                and v.get("node") == visit.get("node") and str(v.get("verdict")) in verdicts
+                and v.get("node") == visit.get("node")
+                and str(v.get("verdict")).strip().lower() in verdicts
                 and not v.get("exhausted"))
     return taken + 1 > int(reloop.get("max_iterations") or 0)
 
