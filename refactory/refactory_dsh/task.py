@@ -80,8 +80,8 @@ class Task:
     grader_outputs: tuple[str, ...] = ()
     #: The files ``verify`` reads in an item's workspace: what is scored. A step that takes
     #: over another's outputs reaches the score by writing one of these when nothing after
-    #: it reads them (`nn.core_ops`). Default: none declared, so any file a pass leaves
-    #: may be scored.
+    #: it reads them (`nn.core_ops`). Default: none declared, so a take-over of any name
+    #: is taken (the Task may score it).
     graded_files: tuple[str, ...] = ()
     #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
     #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.

@@ -499,3 +499,35 @@ def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
         assert found == [], (edits, [str(v) for v in found])
     _sound(applier, shape_first)
     _sound(applier, take_first)
+
+
+def test_a_rename_then_a_removal_reached_by_an_accepted_graph_runs_on_the_walker():
+    """The same renames with no check turned off: a step after decide that takes decide over
+    and also reads compare's notes is a reader after the new step, so taking compare over
+    after decide_prompt is accepted; decide_prompt reads by its renames (V21 holds), and
+    taking precision out after it still runs."""
+    from refactory_dsh.nn.validate import validate_state
+
+    applier = _applier()
+    state = _accepted(applier, [
+        {"op": "insert", "after": "decide", "kind": "agent", "id": "final",
+         "text": "Check the answer against the notes.", "sees": ["decide", "compare"],
+         "takes_over": "decide"},
+        {"op": "insert", "after": "decide_prompt", "kind": "code", "takes_over": "compare"},
+        {"op": "remove", "step": "precision"}])
+    node = state["graph"]["nodes"]["decide_prompt"]
+    assert node["renames"]["reads"] == {"compare_notes.txt": "compare.txt"}
+    assert not [i for i in validate_state(state) if i.code == "V21"]
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
+
+
+def test_a_task_that_declares_no_scored_files_keeps_every_take_over():
+    """fuzz_draft_review names no Task's graded_files: any name may be scored, so a
+    take-over whose readers all run before the new step is still taken (LiveMath's Task,
+    which scores answer.txt only, refuses it: test_core_op_fixes)."""
+    from refactory_dsh import task as task_mod
+
+    applier = _applier("fuzz_draft_review")
+    assert task_mod.graded_files(applier.seed_state) is None
+    _accepted(applier, [{"op": "insert", "after": "finalize", "kind": "code",
+                         "takes_over": "draft"}])

@@ -834,3 +834,66 @@ def test_the_walker_s_handed_back_subprocess_timeout_is_the_step_s_own():
     for error in (handed, real):
         assert own_timeout(error) and not falls_back_on(error)
         assert (missing_cause(error), failure_kind(error)) == ("step_timeout", "timeout")
+
+
+# ── a later take-over renames the fallback with its step ───────────────────
+
+
+#: A step before extract_answer taking decide over, after decide has a fallback.
+TAKE_DECIDE = {"op": "insert", "before": "extract_answer", "kind": "agent", "id": "x",
+               "text": "Give the final letter.", "takes_over": "decide"}
+FALLBACK_SAYS = "<answer>B</answer> FALLBACK-NOTE"
+
+
+def _s4_taken() -> dict[str, Any]:
+    """S4 with decide's fallback, then decide taken over by an attempt: decide and its
+    fallback are one writer group, renamed together, so x reads whichever answered."""
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    seed = Candidate.from_state(_s4())
+    mode = _mode("livemath/skill_graph", seed.state)
+    out = Optimizer().attempt(Proposal(edit=TAKE_DECIDE), seed, mode.invariants(), True, (),
+                              protected=mode.edit_protected())
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["decide"]["writes"] == nodes["decide_fallback"]["writes"] == ["decide.txt"]
+    assert nodes["x"]["writes"] == ["answer.txt"]
+    return out.state
+
+
+class _Prompts(_Model):
+    """`_Model`, keeping each prompt by node."""
+
+    def for_node(self, node_id: str, role: str = "") -> "_Prompts":
+        model = _Prompts(self.answers, self.log, node_id)
+        model.prompts = self.prompts
+        return model
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        self.prompts.setdefault(self.node, []).append(prompt)
+        return super().complete(prompt, **kwargs)
+
+
+def test_walker_a_take_over_after_a_fallback_sees_the_fallback_s_answer(tmp_path, monkeypatch):
+    _patch_task(monkeypatch)
+    model = _Prompts({"decide": CRASH, "decide_fallback": FALLBACK_SAYS,
+                      "x": "<answer>B</answer>"})
+    model.prompts = {}
+    run = tmp_path / "walker"
+    run.mkdir()
+    result = _mode("livemath/skill_graph", _s4_taken()).run(run, model=model)
+    assert result.exit_ok, result.error
+    assert len(model.prompts["x"]) == ITEMS
+    assert all("FALLBACK-NOTE" in prompt for prompt in model.prompts["x"])
+    _graded_b(result.facts["item_scores"])
+
+
+@needs_spine
+def test_spine_a_take_over_after_a_fallback_sees_the_fallback_s_answer(tmp_path):
+    records, dsh = _on_spine("livemath/skill_graph", _s4_taken(), {
+        SIMPLE: [FALLBACK_SAYS], "Weigh the notes above": [WORKER_CRASH],
+        "Give the final letter.": ["<answer>B</answer>"],
+        "": ["notes <answer>A</answer>"]}, tmp_path)
+    _graded_b(records)
+    prompts = dsh.prompts("Give the final letter.")
+    assert len(prompts) == ITEMS and all("FALLBACK-NOTE" in p for p in prompts), prompts[:1]

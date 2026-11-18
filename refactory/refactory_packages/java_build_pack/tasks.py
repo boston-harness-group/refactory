@@ -73,6 +73,8 @@ class JavaBuildTask(Task):
     """Small Java source trees, each with its entry point and the output it must print."""
 
     name = "java_build"
+    #: ``verify`` runs the pass's build.sh.
+    graded_files = ("build.sh",)
 
     def items_root(self) -> Path:
         """Where this Task reads its items: the directory the package ships."""

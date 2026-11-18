@@ -1233,6 +1233,16 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             names[(kind, name)] = new
             made.add((kind, new))
     readers = {n for n in graph.nodes if n not in after and n != target_id}
+    # Every other step before the new one that writes the taken names -- a fallback, a
+    # route way's in-place writer -- writes them on a way the taken step does not end:
+    # one writer group, renamed with it, so the new step reads whichever ran.
+    for node_id in sorted(readers):
+        node = graph.nodes[node_id]
+        if _outputs(node) & set(names) and node.kind == "op" \
+                and _code_text(node, state) is None and not _by_declaration(node):
+            raise _Refused(f"{node_id!r} writes {target_id!r}'s outputs too, from {node.call!r}, "
+                           "which sets them under names of its own; 'takes_over' cannot rename "
+                           "them")
     facts = {old for (kind, old) in names if kind == "fact"}
     files = {old for (kind, old) in names if kind == "file"}
     knobs = state.get("knobs") or {}
@@ -1290,7 +1300,7 @@ def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
                         after: set[str]) -> str:
     """Why outputs of ``target`` that a new step writes again reach nothing, or ``""``: a
     step in ``after`` (those after the new step) reads one, the Task scores one
-    (`task.graded_files`), or nothing reads them and the Task declares no scored files."""
+    (`task.graded_files`), or the Task declares no scored files (it may score any name)."""
     from refactory_dsh.task import graded_files
 
     taken = _outputs(target)
@@ -1300,7 +1310,7 @@ def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
         return ""
     graded = graded_files(state)
     if graded is None:
-        return "" if not read_by else f"its readers {', '.join(sorted(read_by))} run before it"
+        return ""  # a Task that declares no scored files may score any name: taken
     if set(target.writes) & set(graded):
         return ""
     return (f"its readers {', '.join(sorted(read_by))} run before it" if read_by else
@@ -1398,6 +1408,19 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                 # It finds its files by role: it is told the new name of each it reads.
                 after["renames"] = {**dict(node.renames or {}), "reads": roles} if roles \
                     else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
+            if _outputs(node) & set(names):
+                # A co-writer of the taken names (a fallback, a route way's step) writes the
+                # new names as the taken step does; code records them so (`renames`).
+                facts = [names.get(("fact", n), n) for n in node.produces]
+                files_new = [names.get(("file", n), n) for n in node.writes]
+                after["writes"], after["produces"] = files_new, facts
+                if _code_text(node, state) is not None:
+                    outputs = _output_renames(node, facts, files_new) or {}
+                    kept = {k: v for k, v in dict(after.get("renames") or {}).items()
+                            if k == "reads"}
+                    after["renames"] = {**kept, **outputs} if kept or outputs else None
+                    if after["renames"] is None:
+                        after.pop("renames")
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
@@ -2300,13 +2323,24 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
-def _routes(edit: dict, graph: Graph, anchor: Node) -> dict[str, Any]:
+def _routes(edit: dict, graph: Graph, anchor: Node,
+            state: Mapping[str, Any]) -> dict[str, Any]:
+    """The route's ways: its 'to', or by default 'proceed' to the next step and 'revise',
+    a new agent step that redoes an agent step's work -- taking it over in place
+    (`_route_take_over`) where that reaches the result, else writing its own."""
     to = edit.get("to")
     if to is None:
         succ = _sole_out(graph, anchor.id)
         if succ is None:
             raise _Refused(f"{anchor.id!r} has no next step to route to")
-        return {"proceed": succ, "revise": {"kind": "agent", "text": NEUTRAL_REVIEW}}
+        revise = {"kind": "agent", "text": NEUTRAL_REVIEW}
+        if anchor.kind == "agent":
+            try:
+                _route_take_over(graph, state, anchor, _spec({**revise, "takes_over": anchor.id}))
+                revise["takes_over"] = anchor.id
+            except Exception:  # noqa: BLE001 - refused, or a graph the edit's own checks refuse
+                pass
+        return {"proceed": succ, "revise": revise}
     if not isinstance(to, dict) or not 2 <= len(to) <= MAX_ROUTES:
         raise _Refused(f"'to' maps 2 to {MAX_ROUTES} one-word labels to a step id or a new step")
     return to
@@ -2321,7 +2355,7 @@ def _pre_route(edit: dict, state: dict) -> str | None:
     _judge(edit)
     upstream = _upstream(graph, anchor.id) | {anchor.id}
     seen_labels: set[str] = set()
-    for label, target in _routes(edit, graph, anchor).items():
+    for label, target in _routes(edit, graph, anchor, state).items():
         if not isinstance(label, str) or not _LABEL.fullmatch(label) or label.lower() == "halt":
             raise _Refused(f"route label {label!r} is not one word (and 'halt' ends the run)")
         if label.lower() in seen_labels:
@@ -2374,7 +2408,7 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
     succ = _sole_out(graph, anchor.id)
     assert succ is not None
     judge = _judge(edit)
-    routes = _routes(edit, graph, anchor)
+    routes = _routes(edit, graph, anchor, state)
     avail = _available(graph)
     there = avail.get(anchor.id, set()) | _outputs(anchor)
     view = _neighbour_view(graph, state, anchor)
@@ -2407,8 +2441,12 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         taken.append(node_id)
         over = (_route_take_over(graph, state, anchor, spec)
                 if spec.get("takes_over") is not None else None)
-        nodes = _step_nodes(graph, state, spec, node_id,
-                            _seen(graph, state, there, view, spec.get("sees")),
+        way_seen = _seen(graph, state, there, view, spec.get("sees"))
+        if over is not None and spec.get("sees") is None:
+            # By default it sees what it rewrites, wherever before the route that was made.
+            way_seen = sorted(set(way_seen) | (_readable(graph, state, _outputs(over)) & there),
+                              key=lambda key: (key[0] != "fact", key[1]))
+        nodes = _step_nodes(graph, state, spec, node_id, way_seen,
                             settings_from=anchor if anchor.kind == "agent" else None,
                             **({"writes": list(over.writes), "produces": list(over.produces)}
                                if over is not None else {}))

@@ -100,6 +100,8 @@ class SpreadsheetBenchTask(Task):
     """
 
     name = "spreadsheetbench"
+    #: ``verify`` scores the pass's final record and its latest prediction.
+    graded_files = (PRED, FINAL)
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 

@@ -804,3 +804,72 @@ def test_a_route_way_takes_over_only_a_step_every_run_passes_before_it():
     unread = _s4({**REVISE, "to": {"proceed": "extract_answer",
                                    "revise": {"kind": "agent", "text": "Redo it."}}})
     assert "give the way's new step 'takes_over': decide" in unread[0], unread
+
+
+# ── final check: a later take-over renames a route way's in-place writer with it ──
+
+
+TAKE_DECIDE = {"op": "insert", "before": "extract_answer", "kind": "agent", "id": "x",
+               "text": "Give the final letter.", "takes_over": "decide"}
+
+
+def _revised_then_taken():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(REVISE, TAKE_DECIDE)
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["decide"]["writes"] == nodes["rev"]["writes"] == ["decide.txt"]
+    assert nodes["x"]["writes"] == ["answer.txt"]
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+@pytest.mark.parametrize("verdict,seen", [("revise", "<answer>C</answer>"),
+                                          ("proceed", "<answer>A</answer>")])
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(
+        verdict, seen, tmp_path, monkeypatch):
+    mode, _state = _revised_then_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "x": "<answer>D</answer>"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    prompts = [prompt for node, prompt, _s in model.log if node == "x"]
+    assert prompts and all(seen in prompt for prompt in prompts), prompts[:1]
+
+
+@needs_spine
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_spine(tmp_path,
+                                                                           monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _revised_then_taken()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": "revise: because",
+        "x": "<answer>D</answer>"}) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        prompts = [e["prompt"] for e in record["exchanges"] if e["node"] == "x"]
+        assert prompts and all("<answer>C</answer>" in p for p in prompts), record["id"]
+
+
+def test_the_default_route_revises_the_step_in_place_where_that_reaches_the_result():
+    """With no 'to', the revise way redoes the step it follows (S4: decide's answer.txt)."""
+    out = _s4({"op": "route", "after": "decide", "judge": "agent"})
+    assert not isinstance(out, list), out
+    assert out.state["graph"]["nodes"]["decide_revise"]["writes"] == ["answer.txt"]
+
+
+def test_a_way_step_taking_over_a_step_before_the_fork_sees_what_it_rewrites():
+    """compare runs before step_fork; a way after hypotheses (inside the fork) rewriting
+    compare's notes is given them to read, though hypotheses itself does not see them."""
+    out = _s4({"op": "route", "after": "hypotheses", "judge": "agent", "text": "?",
+               "to": {"proceed": "step_join",
+                      "revise": {"kind": "agent", "id": "redo", "text": "Redo the notes.",
+                                 "takes_over": "compare"}}})
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["redo"]["writes"] == ["compare_notes.txt"]
+    assert "compare_notes.txt" in nodes["redo_inputs"]["reads"], nodes["redo_inputs"]
