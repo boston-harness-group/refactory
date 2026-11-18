@@ -170,3 +170,57 @@ def keep_answer(ctx: Any) -> dict[str, Any]:
     (Path(ctx.workdir) / "kept.txt").write_text(draft)
     ctx.write_text("answer.txt", draft)
     return {}
+
+
+def _listing(ctx: Any) -> str:
+    from pathlib import Path
+
+    out = Path(ctx.workdir) / "out"
+    if not out.is_dir():
+        return "(no out)"
+    return ",".join(sorted(str(p.relative_to(out)) for p in out.rglob("*"))) or "(empty)"
+
+
+def prep_out(ctx: Any) -> dict[str, Any]:
+    """Makes ``out/`` with ``keep.txt`` before the solver runs."""
+    from pathlib import Path
+
+    (Path(ctx.workdir) / "out").mkdir(exist_ok=True)
+    (Path(ctx.workdir) / "out/keep.txt").write_text("kept\n")
+    return {}
+
+
+def dir_solve_unless_first(ctx: Any) -> dict[str, Any]:
+    """Writes ``answer.txt`` and ``out/``; on item ``0`` it half-fills ``out/`` (making it
+    when it is not there) and raises."""
+    from pathlib import Path
+
+    out = Path(ctx.workdir) / "out"
+    out.mkdir(exist_ok=True)
+    (out / "partial.txt").write_text("half\n")
+    if _first_item(ctx):
+        (out / "deep").mkdir(exist_ok=True)
+        (out / "deep/more.txt").write_text("half\n")
+        raise ValueError("item 0 breaks the solver half way through out/")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def dir_fallback(ctx: Any) -> dict[str, Any]:
+    """A fallback that notes what ``out/`` held when it began (in seen.txt), then answers."""
+    from pathlib import Path
+
+    (Path(ctx.workdir) / "seen.txt").write_text(_listing(ctx) + "\n")
+    (Path(ctx.workdir) / "out").mkdir(exist_ok=True)
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def own_subprocess_timeout_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its own subprocess runs over its limit."""
+    import subprocess
+
+    if _first_item(ctx):
+        raise subprocess.TimeoutExpired(["slow-tool"], 1)
+    ctx.write_text("answer.txt", "right\n")
+    return {}

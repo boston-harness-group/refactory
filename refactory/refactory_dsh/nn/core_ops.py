@@ -2808,7 +2808,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "fields": ("step", "kind", "text", "system", "sees", "id", "call", "reads", "tools",
                    "route"),
         "line": "a step run instead when 'step' (one run per item) fails -- it raises, "
-                "crashes past its retries or hits its output limit; never for time or a "
+                "crashes past its retries or hits its output or prompt limit; never for time or a "
                 "harness fault: it writes that step's outputs, so what reads them still "
                 "gets an answer; 'kind' as in insert; it sees what 'step' sees",
         "example": {"op": "fallback", "step": "<step>", "kind": "agent",

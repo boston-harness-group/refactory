@@ -101,21 +101,40 @@ def leaves_no_answer(error: BaseException) -> bool:
     return isinstance(error, RetriesExhausted) or failure_kind(error) == "output_limit"
 
 
+#: How the walker's op child hands back a `subprocess.TimeoutExpired` it cannot rebuild
+#: from its message (`nn.executor.Executor._reraise_child_error`): a RuntimeError whose
+#: text starts with the class name.
+_OWN_TIMEOUT_TEXT = "TimeoutExpired: "
+
+
+def own_timeout(error: BaseException) -> bool:
+    """Whether ``error`` is a step running over its own time limit: an op's own
+    `subprocess.TimeoutExpired` (not a model session's `model.InactivityTimeout`) or a code
+    step's `snippet.SnippetTimeout`, by type or as the walker's op child hands it back
+    (``"TimeoutExpired: "``, `items.SNIPPET_TIMEOUT_LINE`). The one classifier both
+    runtimes use: recorded ``step_timeout`` (`missing_cause`), never a fallback
+    (`falls_back_on`)."""
+    from refactory_dsh.items import SNIPPET_TIMEOUT_LINE
+    from refactory_dsh.model import InactivityTimeout
+    from refactory_dsh.snippet import SnippetTimeout
+
+    if isinstance(error, SnippetTimeout) or (
+            isinstance(error, subprocess.TimeoutExpired)
+            and not isinstance(error, InactivityTimeout)):
+        return True
+    return str(error).startswith(_OWN_TIMEOUT_TEXT) or bool(
+        SNIPPET_TIMEOUT_LINE.search(str(error)))
+
+
 def missing_cause(error: BaseException) -> str | None:
     """Why a session's failure left its step without an answer, by the error's type, when
     it ended for time: ``harness_incident`` (`model.HarnessBackstop`), ``declared_timeout``
     (`model.DeclaredTimeout`), ``step_timeout`` (the step's own limit: an op's own
     `subprocess.TimeoutExpired`, a code step's `snippet.SnippetTimeout` -- its fault, never
     a harness timeout) or ``timeout`` (`failure_kind`); else None."""
-    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop, InactivityTimeout
-    from refactory_dsh.snippet import SnippetTimeout
+    from refactory_dsh.model import DeclaredTimeout, HarnessBackstop
 
-    if isinstance(error, SnippetTimeout) or (
-            isinstance(error, subprocess.TimeoutExpired)
-            and not isinstance(error, InactivityTimeout)) or str(error).startswith(
-                "TimeoutExpired: "):
-        # The last: the walker's op child cannot rebuild a `TimeoutExpired` from its
-        # message, so it reaches the parent as a RuntimeError naming it first.
+    if own_timeout(error):
         return "step_timeout"
     if isinstance(error, HarnessBackstop):
         return "harness_incident"
@@ -149,10 +168,8 @@ def falls_back_on(error: BaseException) -> bool:
     from refactory_dsh.budgets import BudgetExhausted
     from refactory_dsh.items import error_kind, interrupted_cause
     from refactory_dsh.model import CompletionFailed
-    from refactory_dsh.items import SNIPPET_TIMEOUT_LINE
     from refactory_dsh.nn.executor import OpOutcomeUnknown, OpTimeoutError
     from refactory_dsh.run import BuildLoopStop
-    from refactory_dsh.snippet import SnippetTimeout
 
     if isinstance(error, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
         return False
@@ -160,7 +177,7 @@ def falls_back_on(error: BaseException) -> bool:
             error.kind == "transport"
             or (error.kind == "setup" and "prompt is too long" not in str(error).lower())):
         return False
-    if isinstance(error, SnippetTimeout) or SNIPPET_TIMEOUT_LINE.search(str(error)):
+    if own_timeout(error):
         return False
     if failure_kind(error) == "timeout" or interrupted_cause(str(error)) is not None:
         return False
@@ -172,28 +189,50 @@ _ABSENT = object()
 
 
 def snapshot_outputs(workdir: Path, writes: Any) -> dict[str, Any]:
-    """What a step with a fallback's declared files hold before its visit, so a fall back
-    restores them (`restore_outputs`). A directory is left as it is."""
+    """What a step with a fallback's declared outputs hold before its visit, so a fall back
+    restores them (`restore_outputs`): a file's bytes, a directory's whole tree (each
+    subdirectory, each file's bytes), or that it was absent."""
     found: dict[str, Any] = {}
     for name in writes or ():
         path = Path(workdir) / str(name)
-        if path.is_dir():
-            continue
-        found[str(name)] = path.read_bytes() if path.is_file() else _ABSENT
+        if path.is_dir() and not path.is_symlink():
+            found[str(name)] = (
+                sorted(str(p.relative_to(path)) for p in path.rglob("*") if p.is_dir()),
+                {str(p.relative_to(path)): p.read_bytes()
+                 for p in path.rglob("*") if p.is_file()})
+        elif path.is_file():
+            found[str(name)] = path.read_bytes()
+        else:
+            found[str(name)] = _ABSENT
     return found
 
 
 def restore_outputs(workdir: Path, snapshot: dict[str, Any]) -> None:
-    """Put a failed step's declared files back as its visit found them (`snapshot_outputs`)
-    before its fallback runs: one it made goes, one it only rewrote is as it was, so its
-    fallback sees what it saw and nothing half-made is graded."""
+    """Put a failed step's declared outputs back as its visit found them
+    (`snapshot_outputs`) before its fallback runs: what it made goes, file or directory;
+    what it only rewrote is as it was; so its fallback sees what it saw and nothing
+    half-made is graded."""
+    import shutil
+
     for name, content in snapshot.items():
         path = Path(workdir) / name
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
         if content is _ABSENT:
-            path.unlink(missing_ok=True)
-        else:
+            continue
+        if isinstance(content, bytes):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+            continue
+        dirs, files = content
+        path.mkdir(parents=True, exist_ok=True)
+        for sub in dirs:
+            (path / sub).mkdir(parents=True, exist_ok=True)
+        for rel, data in files.items():
+            (path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (path / rel).write_bytes(data)
 
 
 def record_spent(workdir: Path, node: str, error: BaseException) -> None:
@@ -250,7 +289,10 @@ def failure_kind(error: BaseException) -> str | None:
         # A session whose runtime did not finish shutting down (a timeout that then
         # hung): its tools may still be running, so a fresh session could collide.
         return None
-    if isinstance(error, (CompletionTimeout, DeclaredTimeout, subprocess.TimeoutExpired)):
+    if isinstance(error, (CompletionTimeout, DeclaredTimeout, subprocess.TimeoutExpired)) \
+            or str(error).startswith(_OWN_TIMEOUT_TEXT):
+        # The last: an op's own subprocess timeout as the walker's op child hands it back
+        # (`own_timeout`), so both runtimes read it alike.
         return "timeout"
     if isinstance(error, RuntimeError) and str(error).startswith("model completion timed out"):
         return "timeout"

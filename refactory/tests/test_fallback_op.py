@@ -761,3 +761,57 @@ def test_a_fallback_takes_sealed_tools_as_insert_does():
     built = nn_edits.apply({**S1_FALLBACK, "tools": ["bash"]}, state)
     assert _graph(built).nodes["solve_fallback"].tools == ("bash",)
     assert _refused({**S1_FALLBACK, "tools": True}, state).startswith("'tools' lists the tools")
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_fall_back_restores_a_directory_output(runtime, existing, tmp_path):
+    """solve writes answer.txt and the directory out/; on item 0 it half-fills out/ (with a
+    subdirectory) and raises. Its fallback finds out/ as solve's visit found it: absent, or
+    holding only what was there before."""
+    graph = Graph()
+    graph.add(_data("prep" if existing else "solve", "score"))
+    if existing:
+        graph.add(Node("prep", "op", call="crash_ops:prep_out", writes=("out",)))
+    graph.add(Node("solve", "op", call="crash_ops:dir_solve_unless_first",
+                   writes=("answer.txt", "out")))
+    graph.add(Node("score", "op", call="crash_ops:score", reads=("answer.txt",),
+                   writes=("item_result.json",)))
+    graph.add(Node("report", "op", call="loop_ops:noop"))
+    if existing:
+        graph.connect("prep", "solve")
+    graph.connect("solve", "score")
+    graph.connect("data", "report")
+    state = nn_edits.apply({"op": "fallback", "step": "solve", "kind": "op",
+                            "call": "crash_ops:dir_fallback"}, {"graph": graph.to_state()})
+    assert validate_state(state) == [], validate_state(state)
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    scores, run = _both(runtime, Graph.from_state(state["graph"]), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert (_pass(run, "0") / "seen.txt").read_text() == ("keep.txt\n" if existing
+                                                          else "(no out)\n")
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_op_s_own_subprocess_timeout_is_read_alike_on_both_runtimes(runtime, tmp_path):
+    """The walker's op child hands a `TimeoutExpired` back as text, the spine's runner as
+    the exception: one classifier reads both, so item 0 fails the same way and its
+    fallback is never asked."""
+    graph = _with_fallback(_pass_graph(Node("solve", "op",
+                                            call="crash_ops:own_subprocess_timeout_on_first",
+                                            writes=("answer.txt",))))
+    dsh = Scripted(tmp_path / "dsh", {"": ["right"]})
+    scores, run = _both(runtime, graph, tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, "RuntimeError"), *RIGHT[1:]]
+    assert dsh.calls() == 0
+    assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
+
+
+def test_the_walker_s_handed_back_subprocess_timeout_is_the_step_s_own():
+    from refactory_dsh.node_retry import failure_kind, falls_back_on, missing_cause, own_timeout
+
+    handed = RuntimeError("TimeoutExpired: Command '['slow-tool']' timed out after 1 seconds\n")
+    real = subprocess.TimeoutExpired(["slow-tool"], 1)
+    for error in (handed, real):
+        assert own_timeout(error) and not falls_back_on(error)
+        assert (missing_cause(error), failure_kind(error)) == ("step_timeout", "timeout")
