@@ -757,8 +757,9 @@ def role_read_issues(graph: Graph) -> list[Issue]:
         found = set(declared_files(node.reads, roles, renamed)) if node.reads else set()
         lost = [name for name in node.required_reads if name not in found]
         if lost:
-            issues.append(Issue("V21", f"required reads {lost} are no file {call!r} finds: it "
-                                       f"finds {list(roles)} by name (renamed {renamed or 'none'})",
+            issues.append(Issue("V21", f"the edits leave '{node_id}' unable to find {lost}: it "
+                                       f"finds only {list(roles)}; propose a change that keeps "
+                                       "those files under the names it reads",
                                 node=node_id))
     return issues
 
