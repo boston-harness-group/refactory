@@ -172,6 +172,9 @@ out.flush()
 """
 
 
+from refactory_dsh.incidents import HarnessIncident  # noqa: E402
+
+
 class SnippetError(RuntimeError):
     """A code node could not run, or returned something its node cannot use."""
 
@@ -180,8 +183,10 @@ class SnippetTimeout(SnippetError):
     """A sandboxed run went over its wall-clock limit."""
 
 
-class SandboxUnavailable(SnippetError):
-    """The sandbox did not start within :data:`STARTUP_S`: the machine, not the code."""
+class SandboxUnavailable(SnippetError, HarnessIncident):
+    """The sandbox did not start within :data:`STARTUP_S`: the machine, not the code, so a
+    harness incident (`model.HarnessIncident`: rerun, then left out of the score), known by
+    its class's name when its error crosses a process (`model.HARNESS_INCIDENT_CLASSES`)."""
 
 
 class NoSandbox(SandboxUnavailable):

@@ -286,6 +286,66 @@ may say "429") never decides it.
 - **Out of scope.** An interrupted evaluation runs again from its start. Resuming inside
   forks, loops and per-item passes is separate work.
 
+## A harness incident is rerun, then left out of the score
+
+An item whose grader or sandbox failed (`model.HarnessIncident`, raised by a Task's `setup`
+or `verify` or an op; `items.harness_incident`: `error_kind` `harness_incident`, or no
+answer because a step it went without hit one) has no outcome of the candidate's, and is
+never its wrong answer. A session still writing at the 4 h backstop
+(`model.HarnessBackstop`, `error_kind` `backstop`) is not one: the model kept writing, so it
+is the candidate's failure, scored 0, not rerun and a target for the optimizer, like
+running out of output. After the trial, the
+loop runs each such item again, alone, on the same candidate, part and rollout seed, in
+`<trial>/incident_reruns/<n>`, up to `INCIDENT_RERUNS` (2, as many as an interrupted
+evaluation's in-run retries) times (`Loop._settle_incidents`). A rerun's record takes the
+item's place in the records and in `item_scores`, so an item a rerun answers is scored as
+any item. One still an incident after them keeps its record with `score: null` and
+`not_scored: "harness_incident"`, and leaves `item_scores`; the mode's `score()` is run
+again on those facts, so the item is in neither numerator nor denominator, on every mode,
+strategy and runtime (every train, re-score, memory, val, test and holdout rollout goes
+through `_measure`). A trial whose every item is one fails ("every item was a harness
+incident"). A trial that did not finish is left as it is.
+
+It is said wherever a score is: the journal and progress line (`harness_incident`: rerun,
+recovered, or NOT SCORED), `report.json` `harness_incidents` (each evaluation's items,
+those recovered and those not scored) and a line in `report.md`, and the request's "Item
+results" ("N item(s) (...) had a harness incident and are not scored"; listed once, read
+as no failure, as a harness timeout below). The seed cache does not replay an evaluation
+with one. Each rerun item is a rollout (none past `max_rollouts`), and its tokens and cost
+are its trial's. A mode with no `item_scores` fact keeps its incidents in its score, and
+the run warns once (`harness_incident_kept`); the request says each such item once as a
+harness incident the mode keeps, never as a harness timeout. A rerun never takes the run
+past `max_rollouts`, the evaluation's own items counted first. The SkillOpt port's
+analysts and slow-update comparison leave an unscored item out, as the request does.
+
+**Every comparison between candidates uses the same items.** When an incident left an
+item out of any candidate's rollout, `Loop.shared_scores` puts them all on the items every
+one was scored on in every repeat (with repeats, the mean of each repeat's mean): the val
+gate's bar and its ranking of a round's siblings (`ValidationGate.judge`, `judge_round`),
+the best (`offer_best`), every parent pick that ranks by val (`Loop._val_scores`: the
+policies, `_fittest`, the merge's two parents, the tree's leader), SkillOpt's patience
+count, and the post-training test deltas (`FinalEvaluation`: `best_test_delta` and
+`final_test_delta` are then the shared-item deltas, with `<delta>_raw` and
+`<delta>_left_out` beside them). Each such comparison is logged. When
+the scores cannot be put on the same items (a score that is not its items' mean, a
+missing rollout), they compare as they are, with a warning. SkillOpt's early stop at a
+perfect val score needs every val item scored.
+
+**Which line classifies an error.** An item's error crosses a process as text; only its
+first line is written by the harness (the walker's `<node>: <Kind>: ...`, the spine's
+`<node>: <Kind>: ...` from the worker's own error line, `worker: ...`). `items.error_kind`
+reads a harness incident, the backstop, the completion timeout, the declared timeout and
+their retries-spent forms from that line only (`items.first_line`), so a model's reply
+quoted further down never classifies an item. A harness incident's line must also name
+a `model.HarnessIncident` class (`model.HARNESS_INCIDENT_CLASSES`) as its type, so an op's
+`ValueError` quoting a reply, or a code node's own exception (`SnippetError: the code
+raised ...`), is never one, whatever its message says. The spine takes that line from the line its
+worker writes after `--- refactory worker error ---`, last in its stderr, never from a
+`worker:` line a quoted reply could hold (`workflow-spine` `nodeErrorLine`). A line no
+harness marker gave -- a command's own stderr, the last `worker:` line of a worker that
+died before its marker -- comes back as `unmarked: ...` (`items.UNMARKED`) and classifies
+nothing: no harness incident, no timeout.
+
 ## Train minibatches (`train_minibatch: N`)
 
 By default every candidate is scored on the whole train part. With
@@ -1923,8 +1983,10 @@ each candidate's measured model cost over its train items.
 
 **A harness timeout is not a target.** An item the harness ended for time
 (`base.harness_timeout`: an `error_kind`, or a step's `missing_steps` cause, of `timeout`
--- a session ended on inactivity, the item deadline -- or `harness_incident`, the
-backstop; never read from an error's text) still scores what it scored, 0, but no request reads it as the
+-- a session ended on inactivity, the item deadline -- or `harness_incident`, a harness
+fault, which is rerun and then not scored at all (see "A harness incident is rerun"); a
+session still writing at the backstop, `backstop`, is the model's failure and a target;
+never read from an error's text) still scores what it scored, 0, but no request reads it as the
 pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
 error row, no item shown in full, no time and no analyst's batch, and the analysts are told
 not to propose changes aimed at timeouts or retries for them. A wall a step declares

@@ -665,6 +665,10 @@ def comparison_pairs(
     each side with the knobs it was rolled out with.
     """
     env = env if env is not None else SkillOptEnv()
+    # An item a harness incident left out of either rollout's score (``not_scored``) is
+    # neither a regression nor an improvement: no pair for it.
+    unscored = {str(r.get("id", "")) for r in (*prev_records, *curr_records) if r.get("not_scored")}
+    sample_ids = [i for i in sample_ids if str(i) not in unscored]
     prev_by_id = {
         str(r.get("id", "")): env.rollout_result(r, dict(prev_knobs or {}))
         for r in prev_records

@@ -50,6 +50,9 @@ def reflect(
     """
     env = env if env is not None else SkillOptEnv()
     knobs = dict(knobs or {})
+    # An item a harness incident kept from an outcome is neither (`items.harness_incident`,
+    # left out of the score: ``not_scored``), as `optim.base._item_evidence` leaves it out.
+    records = [r for r in records if not r.get("not_scored")]
     failures = [r for r in records if not r.get("passed", False)]
     successes = [r for r in records if r.get("passed", False)]
 

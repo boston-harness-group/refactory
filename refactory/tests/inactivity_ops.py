@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from refactory_dsh.model import HARNESS_INCIDENT_TEXT, HarnessIncident
 from refactory_dsh.task import Task, TaskInstance, VerifyResult
 
 
@@ -26,3 +27,30 @@ class TwoItemTask(Task):
             return VerifyResult(passed=False, score=0.0, details="no answer")
         right = answer.read_text().strip() == "right"
         return VerifyResult(passed=right, score=1.0 if right else 0.0)
+
+
+class SplitAnswerTask(Task):
+    """The toy split's train, val and test ids (`test_skillopt`), each passed when its
+    pass kept the answer ``right`` (``final.txt``): `test_harness_incidents`'s Task, by a
+    reference a spine worker can import. An answer ``GRADER_DOWN`` stands for a grader
+    that failed: a harness incident (`model.HarnessIncident`), not the candidate's."""
+
+    name = "split_answer_task"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        ids = ([f"t{i}" for i in range(1, 9)] + [f"v{i}" for i in range(1, 5)]
+               + [f"x{i}" for i in range(1, 4)])
+        return [TaskInstance(id=item, metadata={}) for item in ids]
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        final = Path(workspace) / "final.txt"
+        answer = final.read_text().strip() if final.exists() else ""
+        if answer == "GRADER_DOWN":
+            raise HarnessIncident(f"{HARNESS_INCIDENT_TEXT}the grader's sandbox did not start")
+        right = answer == "right"
+        return VerifyResult(passed=right, score=1.0 if right else 0.0)
+
+
+def quote_reply(ctx: Any) -> None:
+    """An op whose own error quotes a reply that starts like a harness incident."""
+    raise ValueError("harness incident: the reply said the grader failed")

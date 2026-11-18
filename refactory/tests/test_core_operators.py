@@ -889,9 +889,12 @@ def test_a_harness_timeout_is_read_from_structured_fields_only():
 
     assert harness_timeout({"error_kind": "timeout"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "timeout"}}})
-    # The backstop is the harness's too; a wall the step declared is the pipeline's.
+    # A harness fault is the harness's too; a wall the step declared, and a session
+    # still writing at the backstop, are the pipeline's.
     assert harness_timeout({"error_kind": "harness_incident"})
     assert harness_timeout({"missing_steps": {"check": {"cause": "harness_incident"}}})
+    assert not harness_timeout({"error_kind": "backstop"})
+    assert not harness_timeout({"missing_steps": {"check": {"cause": "backstop"}}})
     assert not harness_timeout({"error_kind": "declared_timeout"})
     assert not harness_timeout({"missing_steps": {"check": {"cause": "declared_timeout"}}})
     assert not harness_timeout({"passed": True, "error_kind": "timeout"})
@@ -926,8 +929,9 @@ def test_an_item_error_is_a_timeout_only_when_the_harness_ended_a_call(error, ki
         "completion": lambda: CompletionTimeout("model completion timed out after 1800s"),
         "walker": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
                                        "after 1800s; requested runtime shutdown"),
-        "spine": lambda: RuntimeError("solve exited with code 1\nworker: model completion "
-                                      "timed out after 1800s; requested runtime shutdown"),
+        # The spine's item error (`nodeErrorText`): the node's line first, then the tail.
+        "spine": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out after "
+                                      "1800s\nworker: model completion timed out after 1800s"),
         "inactivity": lambda: RuntimeError("solve: CompletionTimeout: model completion timed out "
                                            "after 600s of inactivity"),
         "quoted": lambda: RuntimeError("check: ValueError: the reply was 'model completion "

@@ -2682,10 +2682,12 @@ def _clip(text: Any, limit: int = ITEM_EVIDENCE_CHARS) -> str:
 #: model call or an item ended it, whatever that limit is (`harness_timeout`).
 HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a target"
 
-#: The ``error_kind`` (and ``missing_steps`` cause) values a harness ending sets: a model
-#: call the client ended (``timeout``: inactivity, the item deadline) and the backstop
-#: (``harness_incident``). A wall a step declares (``timeout_s``; ``declared_timeout``) is
-#: the pipeline's design, an ordinary failure the optimizer sees.
+#: The ``error_kind`` (and ``missing_steps`` cause) values the harness sets on its own
+#: account: a model call the client ended (``timeout``: inactivity, the item deadline)
+#: and a harness fault (``harness_incident``, `model.HarnessIncident`). A wall a step
+#: declares (``timeout_s``; ``declared_timeout``) is the pipeline's design, and a session
+#: still writing at the backstop (``backstop``) the model's own failure: both ordinary
+#: failures the optimizer sees and may target.
 HARNESS_TIMEOUT_KINDS = frozenset({"timeout", "harness_incident"})
 
 
@@ -2696,7 +2698,8 @@ def harness_timeout(record: Mapping[str, Any]) -> bool:
     an error's text: an op that quotes a reply saying "timed out", a code step's own
     ``TimeoutExpired`` and a ``SnippetTimeout`` are the pipeline's. The item still scores
     what it scored (0); a request lists it once (`HARNESS_TIMEOUT`) and reads none of it
-    as the pipeline's failure."""
+    as the pipeline's failure. A harness incident a rerun did not recover
+    is not scored at all (``not_scored``) and is listed on its own line."""
     if record.get("passed"):
         return False
     if str(record.get("error_kind") or "") in HARNESS_TIMEOUT_KINDS:
@@ -2721,6 +2724,7 @@ NO_ANSWER_CAUSES = {
     "output_limit": "ran out of output without answering",
     "crash": "crashed in every session",
     "timeout": "timed out",
+    "backstop": "was still writing at the session time limit (4 h by default)",
     "step_timeout": "ran over its own time limit",
     "failed": "failed (optional branch)",
 }
@@ -2759,9 +2763,16 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
     records only, as ``OuterLoop.item_records`` enforces. A harness timeout is listed
     once (`HARNESS_TIMEOUT`) and counted nowhere else.
     """
-    timed_out = [r for r in records if harness_timeout(r)]
+    # An item a harness incident kept from an outcome, run again and still one, is left
+    # out of the score (`loop.Loop._settle_incidents`): said once, on its own line.
+    incidents = [r for r in records if r.get("not_scored")]
+    # One a mode with no item_scores fact could not leave out (``incident_kept``): still
+    # scored 0, said once on its own line, never as a timeout.
+    kept = [r for r in records if r.get("incident_kept") and not r.get("not_scored")]
+    timed_out = [r for r in records if harness_timeout(r) and not r.get("not_scored")
+                 and not r.get("incident_kept")]
     scores = [float(r["score"]) for r in records if isinstance(r.get("score"), (int, float))]
-    total = len(records)
+    total = len(records) - len(incidents)
     records = _pipeline_items(records)
     errored = [r for r in records if r.get("error_text")]
     passed = [r for r in records if not r.get("error_text") and r.get("passed")]
@@ -2775,9 +2786,20 @@ def _item_evidence(records: Sequence[dict[str, Any]]) -> list[str]:
         f"{len(records)} train item(s): {len(passed)} passed, {len(wrong)} answered "
         f"wrong, " + (f"{len(unanswered)} had no answer (a step ran out of output, "
                       "crashed or ran over its own time limit), " if unanswered else "")
-        + f"{len(errored)} failed with an error{'' if timed_out else mean}. An error is the "
+        + f"{len(errored)} failed with an error{'' if timed_out or kept else mean}. An error is the "
         "item's run failing (its cause is below), not a wrong answer.",
     ]
+    if incidents:
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in incidents))
+        lines.append(f"{len(ids)} item(s) ({', '.join(ids)}) had a harness incident and are "
+                     "not scored: not caused by the pipeline's design; not a target.")
+    if kept:
+        ids = list(dict.fromkeys(str(r.get("id", "")) for r in kept))
+        lines.append(f"{len(ids)} more ({', '.join(ids)}) had a harness incident this mode "
+                     "cannot leave out of its score (scored 0): not caused by the pipeline's "
+                     "design; not a target"
+                     + (f"; mean score over all {total}:{mean.removeprefix(', mean score')}."
+                        if mean and not timed_out else "."))
     if timed_out:
         ids = list(dict.fromkeys(str(r.get("id", "")) for r in timed_out))
         lines.append(f"{len(ids)} more ({', '.join(ids)}), each a {HARNESS_TIMEOUT}"

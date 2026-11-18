@@ -168,6 +168,19 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         if outcome == "recorded_failed":
             return line + f" · interrupted {record.get('stops', '?')} times; recorded as failed"
         return line + " · not scored; the run stops: resume it to evaluate it again"
+    if step == "harness_incident":
+        # Shown without --verbose: an item the harness kept from an outcome is never
+        # the candidate's wrong answer, and the reader must see it left the score.
+        items = ", ".join(map(str, record.get("items") or ()))
+        line = (f"epoch {epoch} · candidate {record.get('candidate', '?')} · "
+                f"{record.get('part', '?')} · harness incident on {items}")
+        outcome = record.get("outcome")
+        if outcome == "rerun":
+            return line + f" · running it again ({record.get('attempt', '?')}/{record.get('of', '?')})"
+        if outcome == "recovered":
+            return line + " · the rerun scored it"
+        not_scored = ", ".join(map(str, record.get("not_scored") or ()))
+        return line + f" · NOT SCORED: {not_scored} left out of the score"
     if step == "proposal_failed":
         # Shown without --verbose: a round that never reached the model must not
         # read as one that proposed nothing.
