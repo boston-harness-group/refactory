@@ -96,8 +96,7 @@ def test_a_fuzz_run_is_determined_by_its_seed():
 
 def test_quick_tier_every_accepted_edit_is_sound():
     stats = sf.Fuzzer(QUICK_SEED, walker=True).run(QUICK_EDITS)
-    # A floor on what the tier exercises; a step nothing reads is refused (E-unread).
-    assert stats.accepted > QUICK_EDITS // 6, _report(stats)
+    assert stats.accepted > QUICK_EDITS // 5, _report(stats)
     assert not stats.findings, _report(stats)
 
 
@@ -204,8 +203,7 @@ def test_the_compound_generator_mixes_every_kind_of_edit():
 def test_quick_compound_tier_every_accepted_bundle_is_sound():
     stats = sf.Fuzzer(QUICK_SEED, walker=True, compound=COMPOUND_SHARE).run(QUICK_EDITS)
     summary = stats.summary()["compound"]
-    # A floor on what the tier exercises; a bundle leaving a step unread is refused (E-unread).
-    assert summary["accepted"] > 10, _report(stats)
+    assert summary["accepted"] > 20, _report(stats)
     assert summary["refusals_naming_the_edit"] > 0, _report(stats)
     assert "E-too-many-edits" in summary["refused"], _report(stats)
     assert not stats.findings, _report(stats)
@@ -389,7 +387,7 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 
 
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
-    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, sealed=None: [])
+    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, sealed=None, check=None: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 

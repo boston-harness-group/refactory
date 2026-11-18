@@ -372,6 +372,26 @@ def sealed_steps(model: Any) -> tuple[bool, str]:
     return True, ""
 
 
+def sealed_step(model: Any, node_id: str, node: Mapping[str, Any]) -> tuple[bool, str]:
+    """Whether the sealed step ``node`` (a node state) can run in a run on ``model``, on the
+    client its dispatch takes: its node's and role's route (`for_node`), its own route
+    (`with_step_route`), then the sealed route (`for_sealed_step`), as both runtimes take
+    them. An attempt refuses a new sealed step on this answer (``E-new-node-tools``)."""
+    ok, why = sealed_steps(None)
+    if not ok:
+        return False, why
+    client = model
+    try:
+        if callable(getattr(client, "for_node", None)):
+            client = client.for_node(node_id, role=str(node.get("role") or "ceo"))
+        if node.get("route") and callable(getattr(client, "with_step_route", None)):
+            client = client.with_step_route(node["route"])
+        for_sealed_step(client, node_id, True)
+    except (WorkspaceError, ValueError) as exc:
+        return False, str(exc)
+    return True, ""
+
+
 def for_sealed_step(client: Any, node: str, sealed: bool) -> Any:
     """``client`` for agent node ``node``'s dispatch: moved to the sealed route
     (`sealed_steps`) when it runs its tools sealed (``sealed``, `is_sealed`), else as it is."""

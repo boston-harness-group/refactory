@@ -71,7 +71,8 @@ def _edits_by_label(state: dict, step: str) -> dict[str, dict]:
 def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[str]]:
     """Every row's verdicts agree with an attempt's: an applying label is accepted, a
     refused one is refused with the reason the row gives (its replacing hint checked)."""
-    rows = _rows(_section(state, protected=protected))
+    # The whole verdicts (a table past its size cap cuts each to its first clause).
+    rows = _rows(_section(state, protected=protected, limit=10 ** 6))
     assert rows
     for step, (_carries, applies, refused) in rows.items():
         edits = _edits_by_label(state, step)

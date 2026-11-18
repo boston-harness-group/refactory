@@ -658,3 +658,91 @@ def test_a_to_inside_a_parallel_or_route_step_is_honoured_never_ignored():
     knobs = beside.state["knobs"]
     assert "{{bg}}" in knobs["hypotheses_task"]["value"] and "{{ex}}" in knobs["precision_task"]["value"]
     assert "{{ex}}" not in knobs["hypotheses_task"]["value"]
+
+
+# ── review: the result is what the Task grades; where a hint can send the output ──
+
+
+def _s1(*edits: dict):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    mode = _mode("livemath/solver")
+    seed = Candidate.from_state(mode.state_dict())
+    return Optimizer().attempt(Proposal(edits=list(edits)), seed, mode.invariants(), True, (),
+                               protected=mode.edit_protected())
+
+
+def test_a_step_ending_the_run_with_names_of_its_own_is_refused_naming_the_take_over():
+    """S1: the Task grades answer.txt (livemath/tasks.py), so a step after solve writing
+    solve_next.txt changes no score; taking over solve, it writes answer.txt, and is taken."""
+    refused = _s1({"op": "insert", "after": "solve", "kind": "agent", "text": "Check."})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    assert "give it 'takes_over': solve" in refused[0], refused
+    taken = _s1({"op": "insert", "after": "solve", "kind": "agent", "text": "Check.",
+                 "takes_over": "solve"})
+    assert not isinstance(taken, list), taken
+    assert taken.state["graph"]["nodes"]["solve_next"]["writes"] == ["answer.txt"]
+
+
+def test_at_the_last_agent_step_the_hint_names_the_take_over_never_an_impossible_rewire():
+    """S4's decide and S1's solve have only plain ops after them: the hint names a step
+    that takes over decide/solve, and that pattern is taken."""
+    copies = _s4({"op": "parallelize", "steps": ["decide"], "copies": 1})
+    assert "insert one seeing it with 'takes_over': decide" in copies[0], copies
+    assert "rewire" not in copies[0], copies
+    after = _s4({"op": "insert", "after": "decide", "kind": "agent", "text": "Check."})
+    assert "give it 'takes_over': decide" in after[0] and "rewire" not in after[0], after
+    chosen = _s1({"op": "parallelize", "steps": ["solve"], "copies": 2},
+                 {"op": "insert", "after": "solve_join", "kind": "agent", "id": "choose",
+                  "text": "Pick the best.", "sees": ["solve", "solve_copy1", "solve_copy2"],
+                  "takes_over": "solve"})
+    assert not isinstance(chosen, list), chosen
+
+
+def test_a_route_way_cannot_take_over_and_both_refusals_name_the_loop_that_redoes_it():
+    """A route's other ways keep decide's answer.txt, so a way's step cannot write it: the
+    refusal names 'loop' on decide, which is taken."""
+    revise = {"op": "route", "after": "decide", "judge": "agent", "text": "Good enough?",
+              "to": {"proceed": "extract_answer", "revise": {"kind": "agent", "text": "Redo."}}}
+    unread = _s4(revise)
+    assert "'loop' on decide redoes it" in unread[0], unread
+    taking = _s4({**revise, "to": {"proceed": "extract_answer", "revise": {
+        "kind": "agent", "text": "Redo.", "takes_over": "decide"}}})
+    assert isinstance(taking, list) and "'takes_over' is insert's" in taking[0], taking
+    assert "'loop' on it" in taking[0]
+    assert not isinstance(_s4({"op": "loop", "step": "decide", "judge": "agent",
+                               "text": "Good enough?"}), list)
+
+
+def test_a_map_combine_s_to_is_honoured_and_two_tos_are_refused():
+    combine = {"kind": "agent", "text": "Combine.", "to": "precision_task"}
+    taken = _s4({"op": "map", "after": "compare", "over": "compare", "text": "One.",
+                 "combine": combine})
+    assert not isinstance(taken, list), taken
+    knobs = taken.state["knobs"]
+    assert "{{compare_map_combine}}" in knobs["precision_task"]["value"]
+    assert "{{compare_map_combine}}" not in knobs["decide_task"]["value"]
+    both = _s4({"op": "map", "after": "compare", "over": "compare", "text": "One.",
+                "combine": combine, "to": "decide_task"})
+    assert isinstance(both, list) and "name it once" in both[0], both
+
+
+def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
+    from refactory_dsh.optim import base
+    from test_operator_fit import _rows, _section
+
+    rows = _rows(_section(_mode("livemath/solver").state_dict()))
+    assert "insert" not in rows["solve"][1].split(", "), rows["solve"]
+    assert "'takes_over': solve" in rows["solve"][2], rows["solve"]
+    assert base.OPERATOR_FIT_CHARS == 7700
+
+
+def test_a_map_run_an_edit_removes_is_refused_not_a_crash():
+    """Found by the fuzz walk: removing a map's run left its fork naming no node, and V6's
+    map check read that node."""
+    applier = sf.Applier(sf.seeds()["fuzz_file_output"])
+    _states, refusal = applier.replay([
+        {"op": "insert", "before": "plot"},
+        {"op": "map", "after": "plot_prep_inputs", "over": "plot_prep_inputs"},
+        {"op": "remove_node", "id": "plot_prep_inputs_map_4"}])
+    assert refusal and not any("KeyError" in r for r in refusal), refusal

@@ -25,6 +25,7 @@ over the winner is re-evaluated on the items no candidate saw.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import math
 import random
@@ -769,9 +770,11 @@ class Loop(OuterLoop):
         self.optimizer.step_routes = StepRoutes.of(model)
         # Whether a new step's tools can run sealed in this run: one answer for the
         # request's offer and an attempt's acceptance (`workspace.sealed_steps`).
-        from refactory_dsh.workspace import sealed_steps
+        from refactory_dsh.workspace import sealed_step, sealed_steps
 
         self.optimizer.sealed_tools = sealed_steps(model)
+        # Each new sealed step on its own route, as its dispatch takes it.
+        self.optimizer.sealed_check = functools.partial(sealed_step, model)
         self.optimizer.grader_secrets = self._grader_secrets
         # A new or changed code node is dry-run on its parent's recorded item inputs
         # (`optim.checks.code_dry_run`), found in the parent's run directory.
@@ -1536,6 +1539,7 @@ class Loop(OuterLoop):
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
         sampler.step_routes = self.optimizer.step_routes
         sampler.sealed_tools = self.optimizer.sealed_tools
+        sampler.sealed_check = self.optimizer.sealed_check
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]

@@ -1026,3 +1026,53 @@ def test_the_linux_runner_passes_no_shell_code_through_its_arguments(tmp_path):
     assert not any("$" in argument for argument in place.runner)
     with pytest.raises(seal.SealError, match="no '\\$'"):
         seal.linux_arguments("/w/$HOME", seal.LINUX_READS, seal.LINUX_LIMITS)
+
+
+def test_a_sealed_step_is_judged_on_its_own_route_as_its_dispatch_takes_it(tmp_path):
+    """A tool step whose role route (or its own route) names a model no DSH provider lists
+    is refused at the attempt, with the reason its dispatch would give (`sealed_step`)."""
+    _sealable()
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.optim import Candidate, Proposal
+    from test_pipeline_view import _mode
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    client = _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                                 role_routes={"solver": {"model": "claude-sonnet-4-6"}})
+    loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs"),
+                project=Path("."), model=client)
+    assert loop._tools_offered()  # the run's own model has a DSH provider
+    edit = {"op": "insert", "after": "compare", "kind": "agent", "text": "Check it.",
+            "tools": ["bash"], "to": "decide_task"}
+    refused = loop.optimizer.attempt(Proposal(edits=[edit]), seed, mode.invariants(), True, (),
+                                     protected=mode.edit_protected())
+    assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
+    assert "'claude-sonnet-4-6'" in refused[0], refused
+    node = {"kind": "agent", "role": "solver", "tools": ["bash"], "workspace": {"kind": "scratch"}}
+    ok, why = workspace.sealed_step(client, "probe", node)
+    with pytest.raises(workspace.WorkspaceError) as raised:
+        workspace.for_sealed_step(client.for_node("probe", role="solver"), "probe", True)
+    assert not ok and why == str(raised.value)
+    # Its own route to the run's model is taken.
+    own = {**edit, "route": {"model": "claude-opus-4-6"}}
+    taken = loop.optimizer.attempt(Proposal(edits=[own]), seed, mode.invariants(), True, (),
+                                   protected=mode.edit_protected())
+    assert isinstance(taken, Candidate), taken
+
+
+def test_the_sealed_route_takes_the_exact_model_and_an_effort_dsh_offers(tmp_path):
+    long = _claude_code_client(tmp_path, dsh_cli="/bin/true", model="claude-opus-4-6[1m]")
+    with pytest.raises(ValueError, match="no DSH provider"):
+        long.for_sealed()
+    offered = {"vertex": {"models": [{"id": "claude-opus-4-6",
+                                      "reasoningEfforts": {"low": "low", "medium": "medium"}}]}}
+    assert _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                               provider_config=offered).for_sealed().route()["effort"] == "medium"
+    for effort, config in (("max", offered),
+                           ("medium", {"vertex": {"models": [{"id": "claude-opus-4-6",
+                                                              "reasoningEfforts": False}]}})):
+        client = _claude_code_client(tmp_path, dsh_cli="/bin/true", effort=effort,
+                                     provider_config=config)
+        with pytest.raises(ValueError, match=f"effort {effort!r}"):
+            client.for_sealed()

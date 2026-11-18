@@ -189,7 +189,9 @@ def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str
 
 
 def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
-                    sealed: tuple[bool, str] | None = None) -> list[str]:
+                    sealed: tuple[bool, str] | None = None,
+                    check: Callable[[str, dict[str, Any]], tuple[bool, str]] | None = None
+                    ) -> list[str]:
     """``E-new-node-tools`` for each agent node the search added that would run with tools
     outside a sealed workspace.
 
@@ -201,7 +203,8 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     directory or beyond it. A node whose id the seed has is held to the seed's own policy
     instead (`_tool_policy_escalated`). ``sealed`` is the run's answer to whether a
     sealed step can run (`workspace.sealed_steps`, which the request's offer takes too);
-    without one, whether the seal runs here.
+    without one, whether the seal runs here. ``check`` judges each new sealed step on the
+    client its dispatch takes, its own route included (`workspace.sealed_step`).
     """
     from refactory_dsh.workspace import is_sealed, sealed_steps
 
@@ -220,6 +223,8 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
             continue
         if is_sealed(node):
             sealable, why = sealed if sealed is not None else sealed_steps(None)
+            if sealable and check is not None:
+                sealable, why = check(node_id, node)
             if not sealable:
                 reasons.append(f"E-new-node-tools: new agent node {node_id!r} runs its tools "
                                f"sealed, and this run cannot run a sealed step: {why}")
@@ -2333,7 +2338,7 @@ def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
                 states.append(current)
         except Exception:  # noqa: BLE001 - not this check's to judge
             return bundle
-        unread = core_ops.unread_steps(state, current)
+        unread = core_ops.unread_new_steps(state, current)
         if not unread:
             return bundle
         index = next(i for i, after in enumerate(states)
@@ -4374,6 +4379,10 @@ class Optimizer:
     #: (`workspace.sealed_steps`); the loop sets it from its model, and the request offers
     #: a tool step on the same answer. ``None`` asks whether the seal runs here.
     sealed_tools: tuple[bool, str] | None = None
+    #: How a new sealed step is judged on the client its dispatch takes, its own route
+    #: included (`workspace.sealed_step`, bound to the loop's model); ``None`` judges by
+    #: ``sealed_tools`` alone.
+    sealed_check: Any = None
     #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
     #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
     sandbox: tuple[bool, str] | None = None
@@ -4762,7 +4771,8 @@ class Optimizer:
         if escalation:
             return escalation
         tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state,
-                                 getattr(self, "sealed_tools", None))
+                                 getattr(self, "sealed_tools", None),
+                                 getattr(self, "sealed_check", None))
         if tooled:
             return tooled
         routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))
