@@ -45,15 +45,6 @@ class TaskError(ValueError):
     """A Task reference does not resolve, or a Task misbehaves."""
 
 
-class HarnessIncident(RuntimeError):
-    """The harness, not the candidate, kept an item from an outcome: its grader or
-    sandbox failed (a Task's ``setup`` or ``verify`` raises it, as may an op that runs
-    one). The item's ``error_kind`` is ``harness_incident`` (`items.error_kind`): the
-    loop runs it again and, still one, leaves it out of the score
-    (`loop.Loop._settle_incidents`). A model that failed -- a wrong answer, an output
-    limit, a session still writing at the backstop -- is never one."""
-
-
 @dataclass(frozen=True)
 class TaskInstance:
     """One item a Task says the mode has to process."""

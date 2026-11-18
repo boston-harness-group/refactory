@@ -181,7 +181,7 @@ class SpreadsheetBenchTask(Task):
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
         if final.get("backstop"):
-            # The harness's fault, not the method's: recorded as a harness incident.
+            # The model kept going for the whole limit: its own failure (``backstop``).
             from refactory_dsh.model import HARNESS_BACKSTOP_TEXT, HarnessBackstop
 
             raise HarnessBackstop(f"the item's turns {HARNESS_BACKSTOP_TEXT} "

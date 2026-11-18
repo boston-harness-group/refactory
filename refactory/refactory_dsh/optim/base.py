@@ -2684,7 +2684,7 @@ HARNESS_TIMEOUT = "harness timeout: not caused by the pipeline's design; not a t
 
 #: The ``error_kind`` (and ``missing_steps`` cause) values the harness sets on its own
 #: account: a model call the client ended (``timeout``: inactivity, the item deadline)
-#: and a harness fault (``harness_incident``, `task.HarnessIncident`). A wall a step
+#: and a harness fault (``harness_incident``, `model.HarnessIncident`). A wall a step
 #: declares (``timeout_s``; ``declared_timeout``) is the pipeline's design, and a session
 #: still writing at the backstop (``backstop``) the model's own failure: both ordinary
 #: failures the optimizer sees and may target.

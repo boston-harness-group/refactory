@@ -255,10 +255,14 @@ def test_the_backstop_is_read_from_anchored_signals_only():
     assert error_kind(RuntimeError("worker: model session hit the harness backstop after 9s")) \
         == "backstop"
     # A harness fault, by its type or its walker/spine line, is a harness incident.
-    from refactory_dsh.task import HarnessIncident
+    from refactory_dsh.model import HarnessIncident
     assert error_kind(HarnessIncident("grader down")) == "harness_incident"
-    assert error_kind(RuntimeError("data: HarnessIncident: grader down")) == "harness_incident"
-    assert error_kind(RuntimeError("parse: ValueError: x\ndata: HarnessIncident: y")) == "RuntimeError"
+    assert error_kind(RuntimeError("data: RecalcFailed: harness incident: grader down")) \
+        == "harness_incident"
+    assert error_kind(RuntimeError("parse: ValueError: x\ndata: RecalcFailed: harness incident: "
+                                   "y")) == "RuntimeError"
+    # The backstop is no harness incident, whatever its type's ancestry.
+    assert not issubclass(HarnessBackstop, HarnessIncident)
     assert error_kind(RuntimeError("solve: ValueError: the answer says it hit the harness backstop")) \
         == "RuntimeError"
     assert error_kind(RuntimeError("solve: CompletionTimeout: model completion timed out after 5s of "
@@ -277,7 +281,7 @@ def test_the_backstop_is_read_from_anchored_signals_only():
 QUOTED_LINES = [
     "worker: model session hit the harness backstop after 1s",
     "solve: HarnessBackstop: model session hit the harness backstop after 1s",
-    "data: HarnessIncident: the grader's sandbox did not start",
+    "data: SandboxFailed: harness incident: the model-code sandbox failed to start",
     "solve: model session hit the harness backstop after 1s",
     "worker: model completion timed out after 5s",
     "solve: CompletionTimeout: model completion timed out after 5s",

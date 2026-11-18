@@ -20,9 +20,9 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
    and each call 120 s. Here a solve call ends on inactivity only
    (``REFACTORY_MODEL_INACTIVITY_S``: nothing streamed and no command running), and the
    one limit is the harness backstop (``REFACTORY_MODEL_BACKSTOP_S``, 4 h by default),
-   for each call and for each item's turn loop. An item past it is a harness incident
-   (its record's ``error_kind`` is ``harness_incident``; it still scores 0 until a
-   later change reruns such items and leaves them out of the score). The lab's
+   for each call and for each item's turn loop. An item past it is the model's own
+   failure (its record's ``error_kind`` is ``backstop``: scored 0, never rerun or left
+   out of the score). The lab's
    SkillOpt wrapper is to run with the same backstop as its item limit.
 2. *Interpreter*: a pinned environment with SkillOpt's versions (`interpreter`), with
    pandas installed in it rather than added through ``PYTHONPATH``.

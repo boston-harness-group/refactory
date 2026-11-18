@@ -610,9 +610,10 @@ def test_turn_gate_stops_with_ten_seconds_left_before_the_backstop(tmp_path, mon
     assert str(ops.turn_gate(ctx)) == "proceed"
 
 
-def test_an_item_past_the_backstop_is_a_harness_incident(tmp_path, sb_data, monkeypatch):
-    """No item budget: an item whose turns ran past the harness backstop is the harness's
-    fault, recorded with ``error_kind`` ``harness_incident``."""
+def test_an_item_past_the_backstop_is_the_models_failure(tmp_path, sb_data, monkeypatch):
+    """No item budget: an item whose turns ran past the harness backstop kept the model
+    writing for the whole limit, the candidate's own failure, recorded with
+    ``error_kind`` ``backstop`` (scored 0, never rerun or left out)."""
     from refactory_dsh import model
     from refactory_dsh.items import error_kind
 
@@ -628,7 +629,7 @@ def test_an_item_past_the_backstop_is_a_harness_incident(tmp_path, sb_data, monk
     ops.finalize(ctx)
     with pytest.raises(model.HarnessBackstop) as raised:
         task.verify(t1, tmp_path)
-    assert error_kind(raised.value) == "harness_incident"
+    assert error_kind(raised.value) == "backstop"
     # A long item inside the backstop is graded as any other.
     ctx.write_json("turn.json", {"start": time.time() - 59, "turn": 1, "status": "ran",
                                  "code": "pass"})
@@ -1009,10 +1010,10 @@ def test_the_spine_runs_the_loop_as_the_walker_does(tmp_path, sb_env, part, flag
 @pytest.mark.skipif(NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/"
                                          "@deepseek-ai/cordis").exists(),
                     reason="the spine drain needs Node and the installed workspace")
-def test_an_item_past_the_backstop_is_a_harness_incident_on_both_runtimes(tmp_path, sb_env,
+def test_an_item_past_the_backstop_is_the_models_failure_on_both_runtimes(tmp_path, sb_env,
                                                                           monkeypatch):
     """A 1 s backstop and a 2 s turn pause: the first turn runs past it, so on either
-    runtime the item's record is a harness incident (``error_kind``)."""
+    runtime the item's record is the model's ``backstop`` failure (``error_kind``)."""
     import child_patches
 
     monkeypatch.setenv("REFACTORY_MODEL_BACKSTOP_S", "1")
@@ -1026,7 +1027,7 @@ def test_an_item_past_the_backstop_is_a_harness_incident_on_both_runtimes(tmp_pa
     records, _ = _spine(tmp_path, "val", [_good(7)], gold_feedback=False, turn_pause_s=2,
                         expect_ok=False)
     for record in (*walked.item_records, *records):
-        assert record["error_kind"] == "harness_incident", record
+        assert record["error_kind"] == "backstop", record
         assert record["passed"] is False
 
 
@@ -1094,8 +1095,9 @@ def test_a_sandbox_setup_failure_is_a_harness_incident(tmp_path, sb_env, monkeyp
 
 def _incident_and_graded(records: list[dict]) -> None:
     """t1's formula met the broken recalculation: recorded as a harness incident; t2's
-    plain value was graded as usual, right, with no incident. (Its score is not checked:
-    an incident still scores 0 until a later change reruns it and leaves it out.)"""
+    plain value was graded as usual, right, with no incident. Within the run t1's record
+    has no score of the candidate's; the outer loop runs it again and, still an incident,
+    leaves it out of the score (`loop.Loop._settle_incidents`, `test_harness_incidents`)."""
     by_id = {r["id"]: r for r in records}
     assert set(by_id) == {"t1", "t2"}, records
     assert by_id["t1"]["error_kind"] == "harness_incident", by_id["t1"]

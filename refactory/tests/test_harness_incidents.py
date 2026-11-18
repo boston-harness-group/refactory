@@ -1,7 +1,7 @@
 """An item a harness fault kept from an outcome is the harness's failure, never a wrong
 answer; a session still writing at the backstop is the candidate's own.
 
-A grader or sandbox that fails (`task.HarnessIncident`) leaves its item with no outcome
+A grader or sandbox that fails (`model.HarnessIncident`) leaves its item with no outcome
 of the candidate's (`items.harness_incident`). The loop runs that item again, alone, on
 the same candidate, part and seed, up to `INCIDENT_RERUNS` times
 (`Loop._settle_incidents`); a rerun that answers is scored as any item. One still an
@@ -216,7 +216,7 @@ def test_edit_effect_reads_no_harness_incident_as_a_broken_item():
     parent = [{"id": "a", "passed": True, "score": 1.0}, {"id": "b", "passed": True, "score": 1.0}]
     ran = [{"node": "check", "prompt": "", "response": "x"}]
     child = [{"id": "a", "passed": False, "score": None, "error_kind": "harness_incident",
-              "error_text": "data: HarnessIncident: the grader's sandbox did not start",
+              "error_text": "data: SandboxFailed: harness incident: the grader sandbox did not start",
               "not_scored": "harness_incident", "exchanges": ran},
              {"id": "b", "passed": False, "score": 0.0, "exchanges": ran}]
     effect = edit_effect(parent, child, new_steps={"check"})

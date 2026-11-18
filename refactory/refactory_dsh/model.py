@@ -70,16 +70,17 @@ HARNESS_INCIDENT_TEXT = "harness incident: "
 
 
 class HarnessIncident(RuntimeError):
-    """The harness failed an item, not the method: its record's ``error_kind`` is
-    ``harness_incident`` (`items.error_kind`), so it is told apart from a wrong answer.
-    Its record still scores 0 for now (a later change reruns such items and leaves
-    them out of the score). Raised by a Task's grader or an op when the harness's own
-    machinery fails (SpreadsheetBench's LibreOffice recalculation, its model-code
-    sandbox), and the base of `HarnessBackstop`. One raised in an op child reaches the
-    record as text, so its message starts with `HARNESS_INCIDENT_TEXT`."""
+    """The harness, not the candidate, kept an item from an outcome: its grader or
+    sandbox failed (SpreadsheetBench's LibreOffice recalculation, its model-code
+    sandbox; any Task's ``setup`` or ``verify``, or an op, may raise it). Its record's
+    ``error_kind`` is ``harness_incident`` (`items.error_kind`): the loop runs the item
+    again and, still one, leaves it out of the score (`loop.Loop._settle_incidents`).
+    One raised in another process reaches the record as text, so its message starts with
+    `HARNESS_INCIDENT_TEXT`. A model that failed -- a wrong answer, an output limit, a
+    session still writing at the backstop (`HarnessBackstop`) -- is never one."""
 
 
-class HarnessBackstop(HarnessIncident):
+class HarnessBackstop(RuntimeError):
     """A node's model session was still streaming at the harness backstop
     (`DEFAULT_BACKSTOP_S`): a model frame came within the inactivity limit before it.
 

@@ -288,7 +288,7 @@ may say "429") never decides it.
 
 ## A harness incident is rerun, then left out of the score
 
-An item whose grader or sandbox failed (`task.HarnessIncident`, raised by a Task's `setup`
+An item whose grader or sandbox failed (`model.HarnessIncident`, raised by a Task's `setup`
 or `verify` or an op; `items.harness_incident`: `error_kind` `harness_incident`, or no
 answer because a step it went without hit one) has no outcome of the candidate's, and is
 never its wrong answer. A session still writing at the 4 h backstop

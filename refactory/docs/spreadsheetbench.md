@@ -48,7 +48,8 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
 - `turn_gate` loops while turns (30) remain and more than 10 s remain before the harness
   backstop.
 - `finalize` fails an empty last code block, runs the last code once more when there is
-  no prediction, and records an item past the backstop as a harness incident.
+  no prediction, and records an item past the backstop as the model's own failure
+  (`backstop`).
 
 The grader (`recalc.evaluate`) is SkillOpt's cell comparison on cached values, then, when
 the prediction's answer cells hold formulas, the same comparison on a LibreOffice-
@@ -100,9 +101,8 @@ Where neither can run, code is not run.
    A solve call ends on inactivity only (`REFACTORY_MODEL_INACTIVITY_S`: nothing
    streamed and no command running); the one limit is the harness backstop
    (`REFACTORY_MODEL_BACKSTOP_S`, 4 h), for each call and for each item's turn loop. An
-   item past it is recorded as a harness incident (`error_kind` `harness_incident`), not a
-   wrong answer; it still scores 0 until a later change reruns such items and leaves them
-   out of the score.
+   item past it is the model's own failure (`error_kind` `backstop`), scored 0 like a
+   wrong answer and never rerun.
    The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
 2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
    the pass's first step runs.
@@ -120,7 +120,8 @@ Where neither can run, code is not run.
    the same way (the lab's wrapper with `SB_GRADER=recalc`), never with SkillOpt's
    cached-grader numbers. A recalculation LibreOffice cannot make (it fails, or runs past
    its 180 s wall) is a harness incident (`error_kind` `harness_incident`), not a wrong
-   answer.
+   answer: the outer loop runs the item again and, still one, leaves it out of the score
+   (outer-loop.md, "A harness incident is rerun"). So is a sandbox setup that fails.
 7. **Analysts' view**: a feedback message after the last model call (a loop that ended on
    turns or the backstop) is not in the conversation the analysts see; `n_turns` counts
    model calls; each message is shown stripped, as the History framing sends it.
