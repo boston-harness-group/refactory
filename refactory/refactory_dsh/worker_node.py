@@ -291,24 +291,15 @@ def main() -> int:
                         update_facts(workdir, {f: facts_before[f] for f in produces
                                                if f in facts_before},
                                      tuple(f for f in produces if f not in facts_before))
-                reviews_dir = workdir / 'reviews'
-                reviews_dir.mkdir(parents=True, exist_ok=True)
-                (reviews_dir / f'{node_id}-missing.txt').write_text(
-                    f'{type(error).__name__}: {error}\n')
-                # Why it has no answer, when its type says (`node_retry.record_spent`): a
-                # spent retry, the output limit, or an optional branch that ended for time.
-                from refactory_dsh.node_retry import record_spent
-                record_spent(workdir, node_id, error)
-                # dm-232: settle the pending delivery marker at the point
-                # the branch is recorded missing, so it never goes stale.
-                try:
-                    from refactory_dsh.agent_delivery import invalidate as _invalidate
-                    _invalidate(workdir, [node_id], f'optional branch missing: {error}')
-                except Exception as settle_error:
+                # Its missing record, why, and its delivery settled (dm-232), as the
+                # walker and the bridge record it (`agent_delivery.record_missing`).
+                from refactory_dsh.agent_delivery import record_missing
+                unsettled = record_missing(workdir, node_id, error)
+                if unsettled is not None:
                     # The branch stays missing either way; a marker left pending only
                     # makes the next resume ask for `graph-control acknowledge`.
                     print(f'refactory: run warning: could not settle the delivery marker of '
-                          f'optional {node_id}: {type(settle_error).__name__}: {settle_error}; '
+                          f'optional {node_id}: {unsettled}; '
                           f'a later resume asks for graph-control acknowledge', file=sys.stderr)
                 print(json.dumps({'node': node_id, 'status': 'missing'}))
                 # The spine records the node failed, not completed (`run.OPTIONAL_MISSING_MARKER`).

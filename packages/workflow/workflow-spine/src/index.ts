@@ -2257,6 +2257,7 @@ export function apply(ctx: Context, config: Config): void {
     commandEnv: Record<string, string>,
     dataCommand: string,
     agentCommand: string,
+    earlier: { ran?: RanStep; warnings: string[] } = { warnings: [] },
   ): Promise<JsonValue> {
     applyControls(spine, workdir, commandEnv, dataCommand, agentCommand)
     /** Drain pending skip receipts through the runtime bridge. */
@@ -2286,13 +2287,16 @@ export function apply(ctx: Context, config: Config): void {
     }
     drainSkipReceipts(spine, workdir, commandEnv, agentCommand)
     let drained: Awaited<ReturnType<typeof drain>>
-    const warnings: string[] = []
+    const warnings: string[] = [...earlier.warnings]
     try { drained = await drain(spine, workdir, commandEnv, dataCommand, agentCommand, warnings) }
     catch (error) {
       recordStatus(spine, workdir, 'failed', error instanceof Error ? error.message : String(error))
       throw error
     }
-    const { next, failure, item, ran } = drained
+    const { next, failure, item } = drained
+    // What an earlier round of this call ran, when an optional branch refused before it
+    // ran sent it round again (below).
+    const ran = drained.ran ?? earlier.ran
     // Warnings no `ran` step carries travel on the view itself: a configured graph
     // drains many boundaries per call and names none of them, and a failed boundary
     // is reported as the failure, not as a step.
@@ -2334,6 +2338,7 @@ export function apply(ctx: Context, config: Config): void {
       const agentEnv = agentPass?.passDir
         ? { ...commandEnv, REFACTORY_WORKDIR: agentPass.passDir }
         : commandEnv
+      const refused: string[] = []
       for (const node of next.nodes) {
         if (node._type !== 'AgentNode' && node._type !== 'LLMNode') continue
         // Dispatched AgentNodes are run by commandOf()/drain(); skip them here
@@ -2343,7 +2348,15 @@ export function apply(ctx: Context, config: Config): void {
           action: 'begin', node: node.id, prompt: node.prompt_template ?? '',
           reads: node.reads ?? [], writes: node.writes ?? [],
           ...(node.tool_policy === 'none' ? { tool_policy: 'none' } : {}),
+          ...(spine.isOptionalBranch(node.id) ? { optional: true } : {}),
         })
+        if (receipt.missing === true) {
+          // An optional branch refused before any model call (a map's run with no
+          // element: its element file was never written). The bridge recorded it
+          // missing, as the walker and the worker do; it is never handed to the driver.
+          refused.push(node.id)
+          continue
+        }
         if (typeof receipt.prompt !== 'string') throw new Error('agent delivery bridge returned no prompt')
         node.prompt_template = receipt.prompt
         const mapKey = `${runKey}:${node.id}`
@@ -2367,6 +2380,14 @@ export function apply(ctx: Context, config: Config): void {
           }
           pendingUnresolvedKeys.set(mapKey, unresolvedKeys as unknown[])
         }
+      }
+      if (refused.length > 0) {
+        // Each goes on failed, as a worker's missing optional node does (`complete`), and
+        // the call goes round again for what is due now: the peers begun above are
+        // begun again as reuses, the join once every branch has settled.
+        for (const id of refused) spine.complete(id, { failed: true })
+        return report(spine, workdir, commandEnv, dataCommand, agentCommand,
+          { ...(ran === undefined ? {} : { ran }), warnings })
       }
     }
     // A user gate's question is shown as the CEO sees it here and as the card puts it.
