@@ -4653,6 +4653,9 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
     counts: dict[str, int] = {}
     for (node, _run), _e in [*_runs(parent), *_runs(child)]:
         counts[node] = max(counts.get(node, 0), _run)
+    gates = _gate_facts(parent, child)
+    if gates:
+        lines.append("Gates whose verdicts moved: " + "; ".join(gates) + ".")
     if moves["same"]:
         lines.append("Same reply in parent and child: "
                      + ", ".join(_run_name(k, counts) for k in moves["same"]) + ".")
@@ -4706,14 +4709,52 @@ def _counts_in(record: Mapping[str, Any], node: str) -> int:
     return sum(1 for (n, _r), _e in _runs(record) if n == node)
 
 
-def _moved_line(parent: Mapping[str, Any], child: Mapping[str, Any], kind: str,
-                child_id: Any) -> str:
-    """A changed item not shown whole, in one line: each side's verdict and answer and
-    which steps' replies changed, are new or are gone."""
+def _verdicts(record: Mapping[str, Any], gate: str) -> str:
+    """The verdicts a gate (or loop check) gave on an item, in order, runs counted
+    (``reloop x2, proceed``); ``not run`` when it gave none."""
+    said = [str(v.get("verdict")) for v in record.get("steps") or ()
+            if isinstance(v, Mapping) and str(v.get("node")) == gate and v.get("verdict")]
+    out: list[list[Any]] = []
+    for verdict in said:
+        if out and out[-1][0] == verdict:
+            out[-1][1] += 1
+        else:
+            out.append([verdict, 1])
+    return ", ".join(v if n == 1 else f"{v} x{n}" for v, n in out) or "not run"
+
+
+def step_facts(parent: Mapping[str, Any], child: Mapping[str, Any]) -> str:
+    """How an item's steps moved, from the records alone and in few words: each step whose
+    reply changed, is new or is gone, with its runs on parent and child (``solve 1 -> 2
+    run(s), reply changed``), and each gate's verdicts on both (``check: parent proceed;
+    child reloop, proceed``). Empty when nothing moved."""
     moves = step_moves(parent, child)
-    counts: dict[str, int] = {}
-    for (node, run), _e in [*_runs(parent), *_runs(child)]:
-        counts[node] = max(counts.get(node, 0), run)
+    runs = {"parent": {}, "child": {}}
+    for side, record in (("parent", parent), ("child", child)):
+        for (node, _run), _e in _runs(record):
+            runs[side][node] = runs[side].get(node, 0) + 1
+    status: dict[str, str] = {}
+    for name, label in (("changed", "reply changed"), ("new", "new"), ("gone", "gone")):
+        for node, _run in moves[name]:
+            status.setdefault(node, label)
+    parts = [f"`{node}` {runs['parent'].get(node, 0)} -> {runs['child'].get(node, 0)} "
+             f"run(s), {label}" for node, label in status.items()]
+    return "; ".join([*parts, *_gate_facts(parent, child)])
+
+
+def _gate_facts(parent: Mapping[str, Any], child: Mapping[str, Any]) -> list[str]:
+    """Each gate whose verdicts on the item differ between parent and child, both said."""
+    gates = list(dict.fromkeys(
+        str(v.get("node")) for record in (parent, child) for v in record.get("steps") or ()
+        if isinstance(v, Mapping) and v.get("verdict")))
+    return [f"`{gate}`: parent {_verdicts(parent, gate)}; child {_verdicts(child, gate)}"
+            for gate in gates if _verdicts(parent, gate) != _verdicts(child, gate)]
+
+
+def _moved_line(parent: Mapping[str, Any], child: Mapping[str, Any], kind: str,
+                child_id: Any, why: str = "") -> str:
+    """A changed item not shown whole, in one line: both scores, each side's verdict and
+    answer, how its steps moved (`step_facts`) and why it is not shown whole (``why``)."""
 
     def answer(value: Any) -> str:
         text = " ".join(str(value).split())
@@ -4725,13 +4766,12 @@ def _moved_line(parent: Mapping[str, Any], child: Mapping[str, Any], kind: str,
         return _outcome(record) + (f", gave {answer(record.get('prediction'))}"
                                    if record.get("prediction") is not None else "")
 
-    steps = "; ".join(f"{label}: " + ", ".join(_run_name(k, counts) for k in moves[name])
-                      for name, label in (("changed", "reply changed"), ("new", "new"),
-                                          ("gone", "gone")) if moves[name])
+    steps = step_facts(parent, child)
     return (f"- Item {child.get('id')} -- {kind} (child {child_id}), score "
             f"{fmt_score(parent.get('score'))} -> {fmt_score(child.get('score'))}: parent "
             f"{side(parent)}; child {side(child)}"
-            + (f"; {steps}" if steps else "; no reply changed") + ".")
+            + (f"; {steps}" if steps else "; no reply changed")
+            + (f" ({why})" if why else "") + ".")
 
 
 def _changed_items(pairs: Sequence[dict[str, Any]]) -> list[tuple[int, str, str]]:
@@ -4790,32 +4830,45 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
         return _moved_block(parent[item], child[item], labels[key], pairs[index].get("child"),
                             quoted, found, settled, chars)
 
-    # Choose the items shown whole, in turn (`_changed_items`). The first is always shown:
-    # the child's moved replies whole, the parent's whole when the block fits ``room``,
-    # else each cut to the longest length that fits, at least ``EDIT_PARENT_FLOOR``
-    # (marked). Each later one only when it
-    # fits what is left of the room whole; one that does not is skipped for the next.
+    # Choose the items shown whole, in turn (`_changed_items`). The first pick of each kind
+    # (broken, fixed, score dropped, score rose) is always shown: the child's moved replies
+    # whole, the parent's whole when the block fits what is left of ``room``, else each
+    # cut to the longest length that fits, at least ``EDIT_PARENT_FLOOR`` (marked). Each
+    # later pick only when it fits what is left whole; one that does not is skipped for
+    # the next, and its line says why.
     picks: dict[tuple[int, str], int] = {}
+    skipped: dict[tuple[int, str], str] = {}
+    forced: set[str] = set()
+    over: list[tuple[int, str, int]] = []
     quoted = _Quoted(shown)
     used = 0
     for index, key, item in _changed_items(pairs):
         if len(picks) >= EDIT_ITEMS_WHOLE:
-            break
+            skipped[(index, item)] = (f"not shown whole: {EDIT_ITEMS_WHOLE} items, the most "
+                                      "shown whole, came first")
+            continue
+        must = key not in forced
+        forced.add(key)
         chars = ITEM_TEXT_MAX
         trial = quoted.copy()
         block = render(index, key, item, trial, chars, None)
         if used + len(block) + 2 > room:
-            if picks:
+            if not must:
+                skipped[(index, item)] = (f"not shown whole: its block is {len(block):,} "
+                                          f"chars, {max(0, room - used):,} of the "
+                                          f"{room:,}-char room left")
                 continue
             low, high = EDIT_PARENT_FLOOR, ITEM_TEXT_MAX
             while low < high:  # the longest parent reply that lets the block fit
                 middle = (low + high + 1) // 2
-                if len(render(index, key, item, quoted.copy(), middle, None)) + 2 <= room:
+                if used + len(render(index, key, item, quoted.copy(), middle, None)) + 2 <= room:
                     low = middle
                 else:
                     high = middle - 1
             chars, trial = low, quoted.copy()
             block = render(index, key, item, trial, chars, None)
+            if used + len(block) + 2 > room:
+                over.append((index, item, max(0, room - used)))
         picks[(index, item)] = chars
         quoted, used = trial, used + len(block) + 2
     # Rendered again in the order they are printed, so a reference only points back.
@@ -4826,6 +4879,12 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
               for item in edit_change(pair.get("parent_records"),
                                       pair.get("child_records"))[key]
               if (index, item) in picks}
+    # A kind's first pick past the room (the child's moved replies are always whole):
+    # said in the section and recorded, so neither the proposer nor the run log misses it.
+    if omissions is not None:
+        omissions += [{"item": item, "step": "what the last edit changed: over room",
+                       "chars": 0, "block": len(blocks[(index, item)]), "room": room,
+                       "room_left": left} for index, item, left in over]
     lines = ["## What the last edit changed",
              "The latest children of the candidate you edit (every child of its last round, "
              "siblings included), or that "
@@ -4838,10 +4897,11 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
              f"named with both scores, each side's answer and the steps whose reply changed, "
              f"is new or is gone. Up to {EDIT_ITEMS_WHOLE} of them are shown with those "
              "steps whole, the parent's reply beside the child's, picked one per child and "
-             "per kind in turn (broken, fixed, score dropped, score rose). The first pick is "
-             "always shown, the child's replies whole and the parent's cut (head and tail, "
-             f"marked) only when the block would pass {room:,} characters; each later pick "
-             "only when it fits whole with the ones before it. A trace shown whole elsewhere in this "
+             "per kind in turn (broken, fixed, score dropped, score rose). The first pick "
+             "of each kind is always shown, the child's replies whole and the parent's cut "
+             f"(head and tail, marked) only when the block would pass what is left of "
+             f"{room:,} characters; each later pick only when it fits whole with the ones "
+             "before it, and an item not shown whole says why. A trace shown whole elsewhere in this "
              "request is named by where it is, not repeated."]
     for index, pair in enumerate(pairs):
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
@@ -4887,10 +4947,18 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                          + (", ".join(whole) if whole else "none")
                          + (f"; in one line each after them: {len(changed) - len(whole)}"
                             if len(changed) > len(whole) else "") + ".")
+        for at, item, left in over:
+            if at == index:
+                lines.append(
+                    f"Item {item}'s block is {len(blocks[(at, item)]):,} chars, past the "
+                    f"{left:,} chars left of the {room:,}-char room: as the first pick of "
+                    "its kind it is shown all the same, the child's moved replies whole "
+                    "(never cut to fit).")
         for key, item in changed:
             if (index, item) in blocks:
                 lines += ["", blocks[(index, item)]]
-        rest = [_moved_line(parent[item], child[item], labels[key], pair.get("child"))
+        rest = [_moved_line(parent[item], child[item], labels[key], pair.get("child"),
+                            skipped.get((index, item), ""))
                 for key, item in changed if (index, item) not in blocks]
         if rest:
             lines += ["", *rest]

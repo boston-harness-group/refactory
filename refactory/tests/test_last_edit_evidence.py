@@ -71,7 +71,8 @@ def test_every_changed_item_is_named_and_the_ones_shown_whole_are_said():
     assert count and int(count.group(1)) == len(FLIPPED)
     assert count.group(2).split(", ") == [item for item, _kind in whole]
     line = next(line for line in section.splitlines() if line.startswith("- Item "))
-    assert "reply changed: `check`, `final`; new: `alt`, `merge`" in line
+    assert ("`check` 1 -> 1 run(s), reply changed; `final` 1 -> 1 run(s), reply changed; "
+            "`alt` 0 -> 1 run(s), new; `merge` 0 -> 1 run(s), new (not shown whole: ") in line
 
 
 def test_a_shown_item_has_its_moved_steps_whole_and_names_what_it_does_not_repeat():
@@ -114,13 +115,18 @@ def test_the_first_pick_is_shown_whatever_the_room_and_only_the_parent_s_side_is
             "child_records": child_records()}
     omissions: list = []
     small = "\n".join(base._edit_change_lines([pair], omissions=omissions, room=100))
-    assert "shown whole below: i00; in one line each after them: 5." in small
-    assert len(re.findall(r"(?m)^- Item ", small)) == 5
-    for node in ("alt", "merge", "check", "final"):
-        assert evidence.escape_headings(reply(node, "i00", "child")) in small, node
+    # The first broken and the first fixed item, whatever the room.
+    assert "shown whole below: i00, i03; in one line each after them: 4." in small
+    assert len(re.findall(r"(?m)^- Item ", small)) == 4
+    for item in ("i00", "i03"):
+        for node in ("alt", "merge", "check", "final"):
+            assert evidence.escape_headings(reply(node, item, "child")) in small, node
     # The parent's changed replies are cut, marked, and recorded: never silently.
-    assert small.count("chars omitted]") == 2
-    assert sorted(o["step"] for o in omissions) == ["check (parent)", "final (parent)"]
+    assert small.count("chars omitted]") == 4
+    assert sorted(o["step"] for o in omissions) == [
+        "check (parent)", "check (parent)", "final (parent)", "final (parent)",
+        *["what the last edit changed: over room"] * 2]
+    assert small.count("chars left of the 100-char room") == 2
 
 
 def test_a_later_pick_too_large_is_skipped_for_a_smaller_one():
@@ -215,7 +221,8 @@ def test_with_long_structural_traces_the_first_pick_still_shows_its_moved_replie
     pick shows the child's moved replies whole and the parent's, whole or cut and marked."""
     text = context(size, parent_shown=False).render()
     section = _section(text)
-    block = section.split("#### Item i00 -- broken (child c2)\n", 1)[1].split("\n- Item ")[0]
+    block = section.split("#### Item i00 -- broken (child c2)\n", 1)[1].split(
+        "\n- Item ")[0].split("\n#### ")[0]
     for node in ("alt", "merge", "check", "final"):
         assert evidence.escape_headings(reply(node, "i00", "child", size)) in block, node
     for node in ("check", "final"):
@@ -239,7 +246,8 @@ def test_one_item_of_40k_a_side_is_shown_its_child_side_whole():
                                              omissions=omissions))
     assert "#### Item x -- broken (child c)" in text and "C " + "c" * big in text
     assert "P " + "p" * big not in text and "chars omitted]" in text
-    assert [o["step"] for o in omissions] == ["s (parent)"]
+    assert [o["step"] for o in omissions] == ["s (parent)",
+                                              "what the last edit changed: over room"]
 
 
 def test_every_reference_points_back_to_a_text_shown_whole():
@@ -300,3 +308,68 @@ def test_the_memory_pass_reads_its_previous_note_byte_exact():
     text = request()[0]
     assert "\n".join(evidence.exact_block(note)) in text and "\\#" not in text
     assert "## Lessons" not in own_headings(text)
+
+
+def test_a_first_pick_past_the_room_is_said_and_recorded():
+    """8k replies: the first broken item's four moved replies alone nearly fill the 30k
+    room, and the first fixed one is shown too. Each block past what is left says so,
+    with its size, and the run's omissions record it."""
+    ctx = context(8000)
+    section = _section(ctx.render())
+    said = re.findall(r"Item (\w+)'s block is ([\d,]+) chars, past the ([\d,]+) chars left "
+                      r"of the 30,000-char room: as the first pick of its kind it is shown "
+                      r"all the same", section)
+    assert [item for item, _size, _left in said] == ["i00", "i03"], said
+    record = [o for o in ctx.omissions if o["step"].endswith("over room")]
+    assert [(o["item"], f"{o['block']:,}", f"{o['room_left']:,}") for o in record] == said
+    assert all(o["room"] == 30000 and o["chars"] == 0 for o in record)
+    assert len(re.findall(r"(?m)^#### Item ", section)) == 2
+    small = context(3000)
+    assert "chars left of the" not in _section(small.render())
+    assert not [o for o in small.omissions if o["step"].endswith("over room")]
+
+
+@pytest.mark.parametrize("size", [6000, 8000])
+@pytest.mark.parametrize("parent_shown", [True, False])
+def test_one_broken_and_one_fixed_item_are_shown_whole_at_realistic_sizes(size, parent_shown):
+    """The replay's loss: with 4-step traces only one item fit, always a broken one, and
+    no fixed item's replies reached the request. The first of each kind is shown."""
+    section = _section(context(size, parent_shown).render())
+    whole = re.findall(r"(?m)^#### Item (\w+) -- (\w+) \(child c2\)$", section)
+    assert [kind for _item, kind in whole] == ["broken", "fixed"], whole
+    for item, _kind in whole:
+        for node in ("alt", "merge", "check", "final"):
+            assert evidence.escape_headings(reply(node, item, "child", size)) in section
+
+
+def _loop_record(item: str, passed: bool, relooped: int, side: str) -> dict:
+    solves = 1 + relooped
+    exchanges = [{"node": "solve", "prompt": f"Solve {item}.",
+                  "response": f"{side} solve {item} attempt {k}"} for k in range(solves)]
+    verdicts = ["reloop"] * relooped + ["proceed"] if side == "child" else []
+    return {"id": item, "passed": passed, "score": float(passed), "prediction": "7",
+            "exchanges": exchanges,
+            "steps": [{"node": "solve_check", "kind": "gate", "verdict": v} for v in verdicts]}
+
+
+def test_a_one_line_item_says_its_steps_runs_and_its_gate_s_verdicts():
+    """The S1-s45 loss: a loop's judge was blamed for broken items it never sent back.
+    Each one-line item says how often each moved step ran and what the gate answered."""
+    looped = {"b0": 1, "b1": 0, "b2": 1, "b3": 0, "b4": 2}
+    pair = {"child": "c", "parent": "p", "edit": [{"op": "loop", "step": "solve"}],
+            "parent_records": [_loop_record(i, True, 0, "parent") for i in looped],
+            "child_records": [_loop_record(i, False, r, "child") for i, r in looped.items()]}
+    text = "\n".join(base._edit_change_lines([pair], room=0))
+    lines = {re.match(r"- Item (\w+)", line).group(1): line
+             for line in text.splitlines() if line.startswith("- Item ")}
+    assert sorted(lines) == ["b1", "b2", "b3", "b4"], "b0, the first pick, is shown whole"
+    assert "`solve` 1 -> 3 run(s)" in lines["b4"]
+    assert "`solve_check`: parent not run; child reloop x2, proceed" in lines["b4"]
+    assert "`solve` 1 -> 2 run(s), reply changed" in lines["b2"]
+    assert "`solve_check`: parent not run; child reloop, proceed" in lines["b2"]
+    for item in ("b1", "b3"):
+        assert "`solve` 1 -> 1 run(s), reply changed" in lines[item]
+        assert "`solve_check`: parent not run; child proceed" in lines[item]
+        assert "reloop" not in lines[item]
+    assert ("Gates whose verdicts moved: `solve_check`: parent not run; child reloop, proceed."
+            in text)

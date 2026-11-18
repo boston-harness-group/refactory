@@ -736,19 +736,24 @@ optimizer, at no extra compute (train records only):
   batch), or the edited candidate itself when it has none yet, are compared with their
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
-  rises and drops among the rest. Every changed item is named, with each side's answer
-  and the steps whose reply changed, are new or are gone (`_moved_line`). Up to
-  `EDIT_ITEMS_WHOLE` (4) of them show how the edit moved them (`_moved_block`): each
-  side's verdict, the steps with the same reply named, and each changed, new or gone
-  step's reply whole, the parent's beside the child's. They are picked one per child and
-  per kind in turn (broken, fixed, score dropped, score rose). The first pick is always
-  shown: the child's moved replies whole (a single text over `ITEM_TEXT_MAX` is cut, and
-  said), the parent's whole unless the block would pass the room -- `EDIT_CHANGE_SHARE`
-  (a quarter) of the call's evidence budget -- when each is cut to fit, head and tail,
-  at least `EDIT_PARENT_FLOOR` characters, the cut marked and recorded. Each later pick
-  is shown only when it fits what is left of the room whole; one that does not is
-  skipped for the next. Every other changed item is one line: both scores, each side's
-  answer (a long one clipped, its length said) and its moved steps. A trace or input
+  rises and drops among the rest. Every changed item is named with both scores, each
+  side's answer (a long one clipped, its length said) and how its steps moved, from the
+  records (`step_facts`): each step whose reply changed, is new or is gone with its runs
+  on parent and child (`solve 1 -> 2 run(s)`), and each gate whose verdicts moved, both
+  said (`check: parent proceed; child reloop x2, proceed`). Up to `EDIT_ITEMS_WHOLE` (4)
+  of them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
+  verdicts, the steps with the same reply named, and each changed, new or gone step's
+  reply whole, the parent's beside the child's. They are picked one per child and per
+  kind in turn (broken, fixed, score dropped, score rose). The first pick of each kind
+  present is always shown: the child's moved replies whole (a single text over
+  `ITEM_TEXT_MAX` is cut, and said), the parent's whole unless the block would pass what
+  is left of the room -- `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget --
+  when each is cut to fit, head and tail, at least `EDIT_PARENT_FLOOR` characters, the
+  cut marked and recorded. Such a block can pass the room (the child's moved replies
+  alone may): the section then says so, with its size against what was left, and the
+  run's omissions record it. Each later pick is shown only when it fits what is left
+  whole; one that does not is skipped for the next, and its line says why (its size
+  against the room left, or that the most shown whole came first). A trace or input
   "Trajectories" shows whole, or a reply this section already showed (a sibling's same
   parent), is named by where it is, never repeated; blocks print in the section's
   order, so a reference points back. It also
@@ -2062,9 +2067,11 @@ a heading, a setext underline, a fence -- reads as the request's Markdown. Evide
 step's output, a trace, a prompt) also has its heading lines escaped
 (`evidence.escape_headings`: `\## Answer`). A text the optimizer may copy into a prompt
 -- a knob text, an analyst's finding or proposed change, the memory note, a reviewer's
-note or example -- is byte-exact in its fence on every path (`evidence.exact_block`,
-`evidence.quoted`), so it gains no escape; a one-line one sits mid-line, where nothing
-reads as a heading. Generic: lines of
+note or example -- is never escaped: it sits in its fence as it is (`evidence.exact_block`,
+`evidence.quoted`), a one-line one mid-line, where nothing reads as a heading. The
+proposer's own knob texts are byte-exact, since a patch quotes them; the analysts' view
+of them may say a line an earlier knob showed by where it is, or clip a long text to fit
+the analyst's room, each marked, never by adding an escape. Generic: lines of
 text are compared, with no knowledge of the task or the pipeline.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
