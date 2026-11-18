@@ -30,8 +30,11 @@ def _knobs(state: dict) -> dict:
 def _optional_branch(**extra) -> tuple[sf.Applier, Candidate, str, str]:
     """``fuzz_fork_join`` with a branch added as optional: the applier, the candidate, the
     branch's first step and its knob."""
-    applier, out = _ok("fuzz_fork_join", {"op": "branch", "fork": "split", "optional": True,
-                                          **extra})
+    branch = {"op": "branch", "fork": "split", "optional": True, **extra}
+    # decide reads the branch's output: a step nothing reads is refused (E-unread).
+    reader = {"op": "rewire", "step": "decide",
+              "sees": ["right_a", "left", "right_b", extra.get("id", "split_branch")]}
+    applier, out = _ok("fuzz_fork_join", {"edits": [branch, reader]})
     graph = Graph.from_state(out.state["graph"])
     head = graph.nodes["split"].targets[-1]
     return applier, out, head, graph.nodes[head].bound_knob("optional")
@@ -144,7 +147,8 @@ def _bound(state: dict) -> dict[str, str]:
 @pytest.mark.parametrize("optional", [True, False])
 @pytest.mark.parametrize("edit, survives", [
     ({"op": "serialize", "fork": "split"}, False),
-    ({"op": "remove", "step": "split_branch"}, False),
+    ({"edits": [{"op": "rewire", "step": "decide", "sees": ["right_a", "left", "right_b"]},
+                {"op": "remove", "step": "split_branch"}]}, False),
     ({"op": "loop", "step": "split_branch", "judge": "agent"}, True),
     ({"op": "route", "after": "split_branch", "judge": "agent"}, True),
     ({"op": "parallelize", "steps": ["split_branch"], "copies": 1}, True),

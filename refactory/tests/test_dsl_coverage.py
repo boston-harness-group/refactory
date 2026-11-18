@@ -147,35 +147,35 @@ EXAMPLES.update({
     ("node kind", "fork"): ("fuzz_draft_review", {"op": "parallelize", "steps": ["draft"],
                                                   "copies": 1},
                             lambda p, c: _kinds(c, "fork") == _kinds(p, "fork") + 1),
-    ("node kind", "join"): ("fuzz_dataflow", {"op": "parallelize", "after": "clean", "new": [
+    ("node kind", "join"): ("fuzz_draft_review", {"op": "parallelize", "after": "draft", "new": [
         {"kind": "agent", "text": "One."}, {"kind": "agent", "text": "Two."}]},
         lambda p, c: _kinds(c, "join") == _kinds(p, "join") + 1),
     ("gate kind", "fn"): ("fuzz_draft_review", {"op": "loop", "step": "draft", "judge": "agent"},
                           lambda p, c: c.nodes["draft_check"].gate_kind == "fn"),
-    ("edge form", "verdict"): ("fuzz_data_pass", {"op": "route", "after": "solve", "to": {
-        "proceed": "check", "again": {"kind": "agent", "text": "Again."}}},
+    ("edge form", "verdict"): ("fuzz_draft_review", {"op": "route", "after": "review", "to": {
+        "proceed": "finalize", "again": {"kind": "agent", "text": "Again."}}},
         lambda p, c: "again" in _conditions(c) and "again" not in _conditions(p)),
-    ("composition", "nested fork"): ("fuzz_nested_fork", {"op": "branch", "fork": "inner",
-                                                          "kind": "agent", "text": "Deeper."},
-                                     lambda p, c: len(c.nodes["inner"].targets) == 3),
+    ("composition", "nested fork"): ("livemath_skill_graph", {
+        "op": "parallelize", "after": "hypotheses", "new": [{"kind": "agent", "text": "One."},
+                                                            {"kind": "agent", "text": "Two."}]},
+        lambda p, c: "hypotheses_fork" in c.nodes and _kinds(c, "fork") == 2),
     ("composition", "gate routing to several steps"): ("fuzz_draft_review", {
         "op": "route", "after": "review", "to": {"proceed": "finalize",
                                                  "rewrite": {"kind": "agent", "text": "Redo."}}},
         lambda p, c: len(c.out_edges("review_route")) == 2),
-    ("node field", "optional_targets"): ("fuzz_fork_join", {"op": "branch", "fork": "split",
-                                                            "optional": True},
-                                         # The new branch's first step binds its optional.
-                                         lambda p, c: [t for t in c.nodes["split"].targets
-                                                       if c.nodes[t].bound_knob("optional")]
-                                         == [c.nodes["split"].targets[-1]]),
+    ("node field", "optional_targets"): ("livemath_skill_graph", {
+        "op": "branch", "fork": "step_fork", "optional": True},
+        # The new branch's first step binds its optional.
+        lambda p, c: [t for t in c.nodes["step_fork"].targets if c.nodes[t].bound_knob("optional")]
+        == [c.nodes["step_fork"].targets[-1]]),
 })
 
 
 #: Covered changes and removals of an existing construct: the seed, the edit, which of the
 #: entry's aspects names its operation, and what the child shows.
 CHANGES: dict[tuple[str, str, str], tuple[str, Any, Callable[[Graph, Graph], bool]]] = {
-    ("node kind", "fork", "change"): ("fuzz_fork_join", {"op": "branch", "fork": "split"},
-                                      lambda p, c: len(c.nodes["split"].targets) == 3),
+    ("node kind", "fork", "change"): ("livemath_skill_graph", {"op": "branch", "fork": "step_fork"},
+                                      lambda p, c: len(c.nodes["step_fork"].targets) == 3),
     ("node kind", "fork", "remove"): ("fuzz_fork_join", {"op": "serialize", "fork": "split"},
                                       lambda p, c: "split" not in c.nodes),
     ("node kind", "join", "remove"): ("fuzz_nested_fork", {"op": "serialize", "fork": "inner"},
@@ -196,8 +196,9 @@ CHANGES: dict[tuple[str, str, str], tuple[str, Any, Callable[[Graph, Graph], boo
                                        lambda p, c: "review" not in c.nodes and any(
                                            n.call == fg.STEP and n.id not in p.nodes
                                            for n in c.nodes.values())),
-    ("node field", "targets", "change"): ("fuzz_fork_join", {"op": "insert", "before": "left"},
-                                          lambda p, c: "left" not in c.nodes["split"].targets),
+    ("node field", "targets", "change"): ("livemath_skill_graph", {
+        "op": "insert", "before": "hypotheses"},
+        lambda p, c: "hypotheses" not in c.nodes["step_fork"].targets),
     ("node field", "sources", "change"): ("fuzz_nested_fork", {"op": "remove", "step": "deep_b"},
                                           lambda p, c: "inner_join" not in c.nodes),
     ("composition", "gate routing to several steps", "remove"): (

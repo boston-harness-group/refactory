@@ -767,6 +767,11 @@ class Loop(OuterLoop):
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
         # The routes a step may choose its own model, effort and cap from (`Node.route`).
         self.optimizer.step_routes = StepRoutes.of(model)
+        # Whether a new step's tools can run sealed in this run: one answer for the
+        # request's offer and an attempt's acceptance (`workspace.sealed_steps`).
+        from refactory_dsh.workspace import sealed_steps
+
+        self.optimizer.sealed_tools = sealed_steps(model)
         self.optimizer.grader_secrets = self._grader_secrets
         # A new or changed code node is dry-run on its parent's recorded item inputs
         # (`optim.checks.code_dry_run`), found in the parent's run directory.
@@ -987,11 +992,13 @@ class Loop(OuterLoop):
         return bool(sandbox[0])
 
     def _tools_offered(self) -> bool:
-        """Whether the request shows a tool step: a new step's tools run sealed only where
-        the seal runs (`seal.available`)."""
-        from refactory_dsh import seal
+        """Whether the request shows a tool step: on the answer an attempt refuses one by
+        (`workspace.sealed_steps`, the optimizer's ``sealed_tools``)."""
+        if getattr(self.optimizer, "sealed_tools", None) is None:
+            from refactory_dsh.workspace import sealed_steps
 
-        return bool(seal.available()[0])
+            self.optimizer.sealed_tools = sealed_steps(self.model)
+        return bool(self.optimizer.sealed_tools[0])
 
     def _sandbox_answer(self) -> tuple[bool, str] | None:
         """The machine's sandbox answer for one request (`snippet.available`), taken once
@@ -1528,6 +1535,7 @@ class Loop(OuterLoop):
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
         sampler.step_routes = self.optimizer.step_routes
+        sampler.sealed_tools = self.optimizer.sealed_tools
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]

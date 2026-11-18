@@ -514,3 +514,147 @@ def test_a_judge_is_not_split_into_code_that_cannot_answer_its_verdict():
     own = "def main(inp):\n    return {'files': {'left_check_judge.txt': 'proceed'}}\n"
     assert nn_edits.precheck({**edit, "into": [{"kind": "code"}, {"kind": "code", "text": own}]},
                              state) is None
+
+
+# ── smoke dry run: an added step's output reaches a reader; 'reads' is never ignored ──
+
+
+def _s4(*edits: dict):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    return Optimizer().attempt(Proposal(edits=list(edits)), seed, mode.invariants(), True, (),
+                               protected=mode.edit_protected())
+
+
+def test_an_insert_whose_output_nothing_reads_is_refused_naming_where_it_could_go():
+    """S4: decide's prompt is built by decide_prompt from decide_task, so a step inserted
+    before decide reaches nothing; the refusal names the insert that does, which applies."""
+    refused = _s4({"op": "insert", "before": "decide", "kind": "agent", "text": "Check."})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    assert ("decide takes no knob: insert before decide_prompt with 'to': decide_task"
+            in refused[0]), refused
+    taken = _s4({"op": "insert", "before": "decide_prompt", "kind": "agent", "text": "Check.",
+                 "to": "decide_task"})
+    assert not isinstance(taken, list), taken
+    # After compare, notes_prompts fills two prompts, so which one is the proposer's to say.
+    refused = _s4({"op": "insert", "after": "compare", "kind": "agent", "text": "Check."})
+    assert "in 'to': precision_task, hypotheses_task, decide_task" in refused[0], refused
+
+
+def test_a_to_whose_reader_runs_before_the_new_step_is_refused():
+    refused = _s4({"op": "insert", "before": "decide", "kind": "agent", "text": "Check.",
+                   "to": "decide_task"})
+    assert isinstance(refused, list) and refused[0].startswith("E-wiring"), refused
+    assert "decide_prompt, which runs before" in refused[0], refused
+
+
+def test_a_reader_a_later_edit_of_the_same_proposal_adds_is_a_reader():
+    """Edits are judged as a batch: an insert with no reader of its own, then a patch that
+    puts its output into a prompt, is taken."""
+    alone = {"op": "insert", "after": "compare", "kind": "agent", "id": "check", "text": "Check."}
+    assert isinstance(_s4(alone), list)
+    taken = _s4(alone, {"op": "set_knob", "name": "decide_task",
+                        "patch": [{"kind": "append", "content": "\n\n{{check}}"}]})
+    assert not isinstance(taken, list), taken
+
+
+@pytest.mark.parametrize("op", ["fallback", "map"])
+def test_the_other_ops_that_add_a_step_are_held_to_the_same_rule(op):
+    """A fallback writes its step's outputs, so what read them reads it; a map's combine is
+    placed as insert's step is, and refused the same way when nothing takes it."""
+    if op == "fallback":
+        out = _s4({"op": "fallback", "step": "compare", "kind": "agent", "text": "Simpler."})
+        assert not isinstance(out, list), out
+    else:
+        out = _s4({"op": "map", "after": "decide", "over": "decide", "text": "One."})
+        assert isinstance(out, list) and out[0].startswith("E-unread"), out
+
+
+@pytest.mark.parametrize("mode_id,after", [("livemath/solver", "solve"),
+                                           ("livemath/skill_graph", "compare")])
+@pytest.mark.parametrize("kind", ["agent", "code"])
+def test_reads_on_an_agent_or_code_step_is_refused_pointing_at_sees(mode_id, after, kind):
+    state = _mode(mode_id).state_dict()
+    for edit in ({"op": "insert", "after": after, "kind": kind, "reads": ["answer.txt"]},
+                 {"op": "fallback", "step": after, "kind": kind, "reads": ["answer.txt"]},
+                 {"op": "map", "after": after, "over": after, "text": "One.",
+                  "combine": {"kind": kind, "reads": ["answer.txt"]}}):
+        reason = nn_edits.precheck(edit, state)
+        assert reason and "gets a file by naming it in 'sees'" in reason, (edit, reason)
+    # An op step's reads are its own (`_step_nodes`), and stay taken.
+    assert nn_edits.precheck({"op": "insert", "after": after, "kind": "op",
+                              "call": core_ops.select_call(), "reads": []}, state) is None
+
+
+SEES_FILE = {"op": "insert", "after": "compare", "kind": "agent", "id": "check",
+             "text": "Check the notes.", "sees": ["compare_notes.txt"], "to": "decide_task"}
+
+
+def _sees_file_mode():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(SEES_FILE)
+    assert not isinstance(out, list), out
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_walker(
+        tmp_path, monkeypatch):
+    mode, _state = _sees_file_mode()
+    model = _StepModel({"compare": "COMPARE-NOTES", "check": "CHECKED"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    check = [prompt for node, prompt, _s in model.log if node == "check"]
+    decide = [prompt for node, prompt, _s in model.log if node == "decide"]
+    assert check and all("COMPARE-NOTES" in prompt for prompt in check)
+    assert decide and all("CHECKED" in prompt for prompt in decide)
+
+
+@needs_spine
+def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_spine(
+        tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _sees_file_mode()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state,
+                  agent_responses={"compare": "COMPARE-NOTES", "check": "CHECKED"}) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        prompts = {e["node"]: e["prompt"] for e in record["exchanges"]}
+        assert "COMPARE-NOTES" in prompts["check"] and "CHECKED" in prompts["decide"], record["id"]
+
+
+def test_a_to_inside_a_parallel_or_route_step_is_honoured_never_ignored():
+    """'to' is a step field: a step parallelize's 'new' or a route's 'to' adds goes where it
+    says, and a 'to' whose reader runs before the step is refused, as insert's is."""
+    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    from refactory_dsh.optim import Candidate
+
+    parent = Candidate.from_state(applier.seed_state)
+    routed = applier.attempt(parent, {
+        "op": "route", "after": "compare", "judge": "agent", "text": "Which?",
+        "to": {"proceed": "notes_prompts",
+               "other": {"kind": "agent", "id": "alt", "text": "Alt.", "to": "decide_task"}}},
+        {parent.id})
+    assert isinstance(routed, Candidate), routed
+    assert "{{alt}}" in routed.state["knobs"]["decide_task"]["value"]
+    assert "{{alt}}" not in routed.state["knobs"]["precision_task"]["value"]
+    early = applier.attempt(parent, {
+        "op": "route", "after": "decide_prompt", "judge": "agent", "text": "Which?",
+        "to": {"proceed": "decide",
+               "other": {"kind": "agent", "id": "alt", "text": "Alt.", "to": "decide_task"}}},
+        {parent.id})
+    assert isinstance(early, list) and early[0].startswith("E-wiring"), early
+    # After compare, notes_prompts fills two prompts: only 'to' says which one takes each.
+    beside = applier.attempt(parent, {"op": "parallelize", "after": "compare", "new": [
+        {"kind": "agent", "id": "bg", "text": "BG.", "to": "hypotheses_task"},
+        {"kind": "agent", "id": "ex", "text": "EX.", "to": "precision_task"}]}, {parent.id})
+    assert isinstance(beside, Candidate), beside
+    knobs = beside.state["knobs"]
+    assert "{{bg}}" in knobs["hypotheses_task"]["value"] and "{{ex}}" in knobs["precision_task"]["value"]
+    assert "{{ex}}" not in knobs["hypotheses_task"]["value"]

@@ -2,65 +2,69 @@
   "seed": "fuzz_tool_step",
   "edits": [
     {
-      "op": "route",
-      "after": "reason",
-      "judge": "code",
-      "to": {
-        "proceed": "ship",
-        "other": {
-          "kind": "code"
-        }
-      }
-    },
-    {
-      "op": "parallel",
-      "target": "reason_other",
-      "branches": [
+      "edits": [
         {
-          "id": "code3",
-          "kind": "op",
-          "call": "refactory_dsh.snippet:run",
-          "reads": [
-            "brief.txt"
-          ],
-          "inputs": [
-            "reason_other"
-          ],
-          "writes": [
-            "code3.txt"
-          ],
-          "produces": [
-            "code3_fact"
-          ],
-          "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code3_fact': len(text)},\n            'files': {'code3.txt': text[:200]}}\n"
+          "op": "route",
+          "after": "reason",
+          "judge": "code",
+          "to": {
+            "proceed": "ship",
+            "other": {
+              "kind": "code"
+            }
+          }
         },
         {
-          "id": "op4",
-          "kind": "op",
-          "call": "structure_fuzz_graphs:step",
-          "reads": [
-            "brief.txt"
-          ],
-          "writes": [
-            "op4.txt"
-          ],
-          "produces": [
-            "op4_fact"
+          "op": "parallel",
+          "target": "reason_other",
+          "branches": [
+            {
+              "id": "code3",
+              "kind": "op",
+              "call": "refactory_dsh.snippet:run",
+              "reads": [
+                "brief.txt"
+              ],
+              "inputs": [
+                "reason_other"
+              ],
+              "writes": [
+                "code3.txt"
+              ],
+              "produces": [
+                "code3_fact"
+              ],
+              "code": "import json\ndef main(inp):\n    text = json.dumps(inp, sort_keys=True, default=str)\n    return {'facts': {'code3_fact': len(text)},\n            'files': {'code3.txt': text[:200]}}\n"
+            },
+            {
+              "id": "op4",
+              "kind": "op",
+              "call": "structure_fuzz_graphs:step",
+              "reads": [
+                "brief.txt"
+              ],
+              "writes": [
+                "op4.txt"
+              ],
+              "produces": [
+                "op4_fact"
+              ]
+            }
           ]
+        },
+        {
+          "op": "route",
+          "after": "code3",
+          "judge": "code",
+          "to": {
+            "proceed": "reason_other_join",
+            "other": {
+              "kind": "code"
+            },
+            "skip": "reason"
+          }
         }
       ]
-    },
-    {
-      "op": "route",
-      "after": "code3",
-      "judge": "code",
-      "to": {
-        "proceed": "reason_other_join",
-        "other": {
-          "kind": "code"
-        },
-        "skip": "reason"
-      }
     }
   ],
   "found": [

@@ -37,6 +37,19 @@ def _accepted(run: Run, seed: Candidate, op: str, rng: random.Random) -> Candida
             outcome = run.attempt(Proposal(edit=edit, parent=seed.id), seed, record=False)
             if isinstance(outcome, Candidate):
                 return outcome
+    # An operator whose new steps no later prompt here can take alone (copies of a step
+    # making no fact) is taken in a composition that gives them a reader (E-unread).
+    from refactory_dsh.optim import base
+
+    graph = seed.state["graph"]
+    for _title, bundle in base.composition_examples(
+            nn_edits.catalogue("broad"), list(graph["nodes"].values()), list(graph["edges"]),
+            knob_values={k: v["value"] for k, v in seed.state["knobs"].items()}):
+        if bundle[0]["op"] == op:
+            outcome = run.attempt(Proposal(edits=tuple(bundle), parent=seed.id), seed,
+                                  record=False)
+            if isinstance(outcome, Candidate):
+                return outcome
     return None
 
 

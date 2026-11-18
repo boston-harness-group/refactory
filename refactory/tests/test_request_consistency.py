@@ -143,13 +143,15 @@ def _serialize() -> None:
 def _branch() -> None:
     """'a new step as another branch of a fork ...; its output goes into the nearest prompt
     after the join that can take it ...'"""
-    before = _seed("fuzz_fork_join")
-    _a, out = _ok("fuzz_fork_join", {"op": "branch", "fork": "split"})
+    # On a fork whose readers after the join take a prompt (fuzz_fork_join's take none, so
+    # a branch there reaches nothing and is refused, E-unread).
+    before = _seed("livemath_skill_graph")
+    _a, out = _ok("livemath_skill_graph", {"op": "branch", "fork": "step_fork"})
     graph = _graph(out)
-    fork = graph.nodes["split"]
-    join = next(n for n in graph.nodes.values() if n.kind == "join")
-    heads = [t for t in fork.targets if t not in before.nodes["split"].targets]
-    new = [s for s in join.sources if s not in before.nodes["merge"].sources]
+    fork = graph.nodes["step_fork"]
+    join = graph.nodes[graph.fork_join("step_fork")]
+    heads = [t for t in fork.targets if t not in before.nodes["step_fork"].targets]
+    new = [s for s in join.sources if s not in before.nodes[join.id].sources]
     assert len(heads) == 1 and len(new) == 1 and _reaches(graph, heads[0], new[0])
     _reaches_the_reader(out, new[0], join.id)
 
@@ -440,7 +442,7 @@ def _text_knob(state: dict) -> tuple[str, str]:
 
 @pytest.mark.parametrize("seed, edit", [
     ("fuzz_draft_review", {"op": "insert", "after": "draft", "kind": "agent"}),
-    ("fuzz_fork_join", {"op": "branch", "fork": "split", "kind": "agent"}),
+    ("livemath_skill_graph", {"op": "branch", "fork": "step_fork", "kind": "agent"}),
     ("fuzz_draft_review", {"op": "split", "step": "finalize",
                            "into": [{"kind": "agent"}, {"kind": "agent", "text": "Second."}]}),
 ], ids=["insert", "branch", "split"])

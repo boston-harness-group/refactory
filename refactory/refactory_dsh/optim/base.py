@@ -188,7 +188,8 @@ def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str
     return reasons
 
 
-def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any]) -> list[str]:
+def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
+                    sealed: tuple[bool, str] | None = None) -> list[str]:
     """``E-new-node-tools`` for each agent node the search added that would run with tools
     outside a sealed workspace.
 
@@ -198,10 +199,11 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any])
     file, no network. A copy of a step of the seed that uses tools keeps them in a fresh
     workspace of its own. Any other new node with tools could read anything in the run
     directory or beyond it. A node whose id the seed has is held to the seed's own policy
-    instead (`_tool_policy_escalated`).
+    instead (`_tool_policy_escalated`). ``sealed`` is the run's answer to whether a
+    sealed step can run (`workspace.sealed_steps`, which the request's offer takes too);
+    without one, whether the seal runs here.
     """
-    from refactory_dsh import seal
-    from refactory_dsh.workspace import is_sealed
+    from refactory_dsh.workspace import is_sealed, sealed_steps
 
     seed_nodes = (seed_state.get("graph") or {}).get("nodes") or {}
     # The tools a step of the seed already runs with: a copy of such a step may keep them
@@ -217,10 +219,10 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any])
         if node.get("tool_policy") == "none" and not node.get("tools"):
             continue
         if is_sealed(node):
-            sealable, why = seal.available()
+            sealable, why = sealed if sealed is not None else sealed_steps(None)
             if not sealable:
                 reasons.append(f"E-new-node-tools: new agent node {node_id!r} runs its tools "
-                               f"sealed, and the seal cannot run on this machine: {why}")
+                               f"sealed, and this run cannot run a sealed step: {why}")
             continue
         if (node.get("tool_policy"), tuple(node.get("tools") or ())) in seed_tools \
                 and _fresh_workspace(node):
@@ -1914,7 +1916,8 @@ def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[s
     plain next step) for which it does, else placeholders for the step ids."""
     from refactory_dsh.nn import core_ops
 
-    placeholders = {**ids, "step": "<step>", "next step": "<next step>"}
+    placeholders = {**ids, "step": "<step>", "next step": "<next step>",
+                    **({"fork": "<fork>"} if "fork" in ids else {})}
     if state is None:
         return placeholders
     out_of = {}
@@ -1936,7 +1939,8 @@ def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[s
         named = [example.get(k) for k in ("step", "steps", "after", "before", "fork")]
         if "<" in json.dumps(named) or "<" in json.dumps(list(example.get("to") or {}.values())):
             continue
-        if nn_edits.precheck(example, dict(state)) is None:
+        if nn_edits.precheck(example, dict(state)) is None \
+                and _read_example(state, [example]) == [example]:
             return option
     return placeholders
 
@@ -1974,7 +1978,7 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
 
 #: The most characters the "what each step carries" section takes: past it, each refusal
 #: is cut to its first clause, then rows are left out, last first, and named.
-OPERATOR_FIT_CHARS = 7000
+OPERATOR_FIT_CHARS = 7700
 
 
 def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
@@ -2154,6 +2158,15 @@ def _fork_inputs(fork_id: str, state: dict[str, Any]) -> str:
             f"; \"task\" gives {', '.join(n for _k, n in sorted(task)) or 'nothing'}")
 
 
+def fit_reason(verdict: Sequence[Any], step: str) -> str:
+    """An attempt's refusal as the operator table says it in ``step``'s row: without the
+    precondition code, and a new step whose output nothing reads said of ``step``, so the
+    operators refused for that one reason on a step share one entry (``E-unread``)."""
+    reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
+    return re.sub(r"^E-unread: nothing reads the output of new step '[^']+', so it changes no "
+                  r"result", f"E-unread: nothing reads a new step at {step}", reason)
+
+
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                          knobs: Sequence[Mapping[str, Any]],
@@ -2195,7 +2208,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                               in _code_signatures(verdict.state).items())
                 applies.append(f"{label} (not dry-run)" if changed else label)
                 continue
-            reason = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
+            reason = fit_reason(verdict, node_id)
             reasons.setdefault(reason, []).append(label)
         refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
         rows.append([node_id, carries, ", ".join(applies) or "-", " | ".join(refused) or "-"])
@@ -2296,6 +2309,43 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
     return lines
 
 
+#: The core operators whose new step takes 'to' (where its output goes).
+_TAKES_TO = ("insert", "branch", "map")
+
+
+def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
+                  ) -> list[dict[str, Any]] | None:
+    """``bundle`` as an example an attempt takes: a step it adds that nothing reads gets
+    'to', the nearest prompt after it that can take it (`core_ops.reader_knobs`), where its
+    operator takes one; None when one stays unread (``E-unread``). A bundle that does not
+    apply here, or a state built without the knobs' values (which say what a prompt takes),
+    is returned as it is."""
+    from refactory_dsh.nn import core_ops
+
+    bundle = [dict(edit) for edit in bundle]
+    if not state.get("knobs"):
+        return bundle
+    for _ in range(len(bundle) + 1):
+        states, current = [], dict(state)
+        try:
+            for edit in bundle:
+                current = nn_edits.apply(edit, current)
+                states.append(current)
+        except Exception:  # noqa: BLE001 - not this check's to judge
+            return bundle
+        unread = core_ops.unread_steps(state, current)
+        if not unread:
+            return bundle
+        index = next(i for i, after in enumerate(states)
+                     if unread[0] in ((after.get("graph") or {}).get("nodes") or {}))
+        edit = bundle[index]
+        knobs = core_ops.reader_knobs(states[index], unread[0])
+        if edit.get("op") not in _TAKES_TO or "to" in edit or not knobs:
+            return None
+        bundle[index] = {**edit, "to": knobs[0]}
+    return None
+
+
 def composition_examples(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                          *, protected: Sequence[str] = (), code_nodes: bool = False,
@@ -2376,7 +2426,9 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     removable = _removable_step(node_states, edges, protected, state) if "remove" in ops else None
     if removable is not None:
         out.append(("Dropping a step that does not help", [{"op": "remove", "step": removable}]))
-    return out
+    # Each shape as an attempt takes it: a step it adds reaches a reader, or it is not shown.
+    read = [(title, _read_example(state, bundle)) for title, bundle in out]
+    return [(title, bundle) for title, bundle in read if bundle is not None]
 
 
 def time_lines(facts: Mapping[str, Any] | None) -> list[str]:
@@ -4318,6 +4370,10 @@ class Optimizer:
     #: What a step may choose its own route from (`workers.StepRoutes`); one outside it is
     #: refused with ``E-route``. The loop sets it from its model; None offers nothing.
     step_routes: Any = None
+    #: Whether a step that runs its tools sealed can run in this run, and why not
+    #: (`workspace.sealed_steps`); the loop sets it from its model, and the request offers
+    #: a tool step on the same answer. ``None`` asks whether the seal runs here.
+    sealed_tools: tuple[bool, str] | None = None
     #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
     #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
     sandbox: tuple[bool, str] | None = None
@@ -4683,13 +4739,6 @@ class Optimizer:
             if old is not None and (new is None or new.to_state() != old.to_state()):
                 return [f"E-protected: node {grader!r} grades, and the edit changes its "
                         "declaration"]
-        # A step the bundle adds keeps the reader the bundle gave it (finding 16).
-        from refactory_dsh.nn.core_ops import unread_by_bundle
-
-        unread = unread_by_bundle(parent.state, prefixes, applied)
-        if unread:
-            return [f"E-unread: {unread}"]
-
         # A bundle that changes nothing at all is refused below as one no-op.
         dead = (_dead_edit(applied, parent.state, state)
                 if candidate_id(state) != parent.id else None)
@@ -4712,7 +4761,8 @@ class Optimizer:
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
         if escalation:
             return escalation
-        tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state)
+        tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state,
+                                 getattr(self, "sealed_tools", None))
         if tooled:
             return tooled
         routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))
@@ -4760,6 +4810,14 @@ class Optimizer:
                                 baseline=parent.state)
         if issues:
             return [str(issue) for issue in issues]
+        # A step the edits add has a reader when they are done (finding 16): an output
+        # nothing reads changes no result.
+        from refactory_dsh.nn.core_ops import unread_by_bundle
+
+        # The last state is the one wired (file_text steps reading a file are readers).
+        unread = unread_by_bundle(parent.state, [*prefixes[:-1], state], applied)
+        if unread:
+            return [f"E-unread: {unread}"]
         unlowerable = _lowering_refusal(parent.state, state)
         if unlowerable:
             return [unlowerable]

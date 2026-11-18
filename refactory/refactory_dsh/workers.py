@@ -697,16 +697,19 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         selected = client.for_node(name, role=node.role.value)
         if node.route is not None:
             selected = selected.with_step_route(node.route)
+        from refactory_dsh.workspace import for_sealed_step, is_sealed
+        node_state = {'kind': 'agent', 'tools': list(node.tools or ()),
+                      'tool_policy': node.tool_policy,
+                      'workspace': getattr(node, 'workspace', None)}
+        # A sealed step runs on the dsh backend with the run's model, as on the walker.
+        selected = for_sealed_step(selected, name, is_sealed(node_state))
         # The node's tool policy is part of its client: a session without tools may
         # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
         # below reserves every attempt.
         selected = selected.with_tool_policy(getattr(node, "tool_policy", None) or "")
         if node.tool_policy == "none" and node.tools:
             raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
-        from refactory_dsh.workspace import is_sealed
-        if node.tools and not is_sealed({'kind': 'agent', 'tools': list(node.tools),
-                                         'tool_policy': node.tool_policy,
-                                         'workspace': getattr(node, 'workspace', None)}):
+        if node.tools and not is_sealed(node_state):
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)
         selected_context = selected.context()

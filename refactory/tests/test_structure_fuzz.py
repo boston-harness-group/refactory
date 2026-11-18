@@ -96,7 +96,8 @@ def test_a_fuzz_run_is_determined_by_its_seed():
 
 def test_quick_tier_every_accepted_edit_is_sound():
     stats = sf.Fuzzer(QUICK_SEED, walker=True).run(QUICK_EDITS)
-    assert stats.accepted > QUICK_EDITS // 5, _report(stats)
+    # A floor on what the tier exercises; a step nothing reads is refused (E-unread).
+    assert stats.accepted > QUICK_EDITS // 6, _report(stats)
     assert not stats.findings, _report(stats)
 
 
@@ -203,7 +204,8 @@ def test_the_compound_generator_mixes_every_kind_of_edit():
 def test_quick_compound_tier_every_accepted_bundle_is_sound():
     stats = sf.Fuzzer(QUICK_SEED, walker=True, compound=COMPOUND_SHARE).run(QUICK_EDITS)
     summary = stats.summary()["compound"]
-    assert summary["accepted"] > 20, _report(stats)
+    # A floor on what the tier exercises; a bundle leaving a step unread is refused (E-unread).
+    assert summary["accepted"] > 10, _report(stats)
     assert summary["refusals_naming_the_edit"] > 0, _report(stats)
     assert "E-too-many-edits" in summary["refused"], _report(stats)
     assert not stats.findings, _report(stats)
@@ -387,7 +389,7 @@ def test_mutation_slots_without_the_agent_input_rule_is_caught(monkeypatch):
 
 
 def test_mutation_tools_without_the_new_node_rule_is_caught(monkeypatch):
-    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state: [])
+    monkeypatch.setattr(base_mod, "_new_node_tools", lambda seed, state, sealed=None: [])
     _finds("tools", seeds=("fuzz_dataflow", "fuzz_gates"))
 
 
@@ -419,6 +421,9 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     node, so the walks draw none and are the same on every machine, whether or not it
     can sandbox code nodes (this seed finds it at edit 5)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
+    # The walks' leaking step is one nothing reads; that refusal (E-unread) is not V17's.
+    from refactory_dsh.nn import core_ops
+    monkeypatch.setattr(core_ops, "unread_by_bundle", lambda *args, **kwargs: None)
     _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
 
@@ -533,7 +538,14 @@ def test_a_new_agent_runs_without_tools_unless_they_run_sealed():
     applier = sf.Applier(sf.seeds()["fuzz_dataflow"])
     parent = sf.Candidate.from_state(applier.seed_state)
     node = {"id": "probe", "kind": "agent", "prompt_template": "Look.", "writes": ["probe.txt"]}
-    added = applier.attempt(parent, {"op": "insert_after", "target": "load", "node": node}, set())
+    # summarise reads what the probe writes: a new step nothing reads is refused (E-unread).
+    reader = {"op": "rewire", "step": "summarise", "sees": ["source", "clean", "probe"]}
+
+    def read(edit: dict) -> dict:
+        return {"edits": [edit, reader]}
+
+    added = applier.attempt(parent, read({"op": "insert_after", "target": "load", "node": node}),
+                            set())
     assert isinstance(added, sf.Candidate), added
     assert added.state["graph"]["nodes"]["probe"]["tool_policy"] == "none"
     asking = {**node, "tool_policy": None}
@@ -548,8 +560,8 @@ def test_a_new_agent_runs_without_tools_unless_they_run_sealed():
         assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
     sealed = {**asking, "tools": ["bash"], "workspace": {"kind": "scratch"}}
     with mock.patch.object(seal, "available", return_value=(True, "")):
-        allowed = applier.attempt(parent, {"op": "insert_after", "target": "load",
-                                           "node": sealed}, set())
+        allowed = applier.attempt(parent, read({"op": "insert_after", "target": "load",
+                                                "node": sealed}), set())
     assert isinstance(allowed, sf.Candidate), allowed
     with mock.patch.object(seal, "available", return_value=(False, "no unshare")):
         refused = applier.attempt(parent, {"op": "insert_after", "target": "load",

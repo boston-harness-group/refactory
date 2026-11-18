@@ -1041,6 +1041,50 @@ class DshModelClient:
         validate_route(client.route())
         return client
 
+    def for_sealed(self) -> DshModelClient:
+        """A copy for a step that runs its tools sealed (`workspace.is_sealed`): on the dsh
+        backend in ``skip`` mode, the one route the seal runs on, with this client's model
+        and effort, so a sealed step of a Claude Code or codex run keeps the run's model.
+        Raises ValueError when this machine cannot: no DSH runtime, or no DSH provider
+        chosen for that model (the DSH home's model choice, or a provider route listing
+        it)."""
+        from refactory_dsh.paths import INSTALLED_CLI_ENTRY
+        from refactory_dsh.workers import validate_route
+
+        client = copy.copy(self)
+        client._permission_mode = "skip"
+        if self._worker_backend == "dsh":
+            validate_route(client.route())
+            return client
+        if not (self._dsh_cli or (self._runtime_root / SOURCE_CLI_ENTRY).exists()
+                or (self._runtime_root / INSTALLED_CLI_ENTRY).exists()):
+            raise ValueError("a sealed step runs on the dsh backend, and no DSH runtime is "
+                             f"installed at {self._runtime_root}")
+
+        def bare(name: str) -> str:
+            return name.rsplit("/", 1)[-1].split("[", 1)[0].strip().lower()
+
+        from refactory_dsh.dsh_profile import stored_model_choice
+
+        stored = stored_model_choice(self._dsh_home)
+        routes = sorted(self._provider_config.items())
+        rows = [(stored["provider"], stored["model"])] + [
+            (name, str(entry.get("id") or "")) for name, cfg in routes
+            for entry in ((cfg or {}).get("models") or ()) if isinstance(entry, dict)]
+        found = [(provider, model) for provider, model in rows
+                 if provider and model and self._model and bare(model) == bare(self._model)]
+        if not found:
+            raise ValueError("a sealed step runs on the dsh backend with the run's model "
+                             f"{self._model or '(the backend default)'!r}, and no DSH provider "
+                             "is chosen for it (`refactory model set --provider <provider> "
+                             f"--model {self._model or '<model>'}`)")
+        client._worker_backend = "dsh"
+        client._provider, client._model = found[0]
+        client._setting_sources = ""
+        client._claude_executable = ""
+        validate_route(client.route())
+        return client
+
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
         if policy not in ("", "none"):

@@ -51,14 +51,14 @@ def _rows(lines: list[str]) -> dict[str, list[str]]:
     return rows
 
 
-def _outcome(edit: dict, state: dict, protected: tuple = ()) -> str | None:
+def _outcome(edit: dict, state: dict, protected: tuple = (), step: str = "") -> str | None:
     """An attempt's verdict on one edit (`Optimizer.attempt`), as the section's reason
     text: None when it is accepted."""
     verdict = Optimizer().attempt(Proposal(edit=edit), Candidate.from_state(copy.deepcopy(state)),
                                   (), False, (), protected=protected, record=False)
     if not isinstance(verdict, list):
         return None
-    return "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
+    return base.fit_reason(verdict, step)
 
 
 def _edits_by_label(state: dict, step: str) -> dict[str, dict]:
@@ -76,11 +76,11 @@ def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[s
     for step, (_carries, applies, refused) in rows.items():
         edits = _edits_by_label(state, step)
         for label in filter(None, applies.split(", ")) if applies != "-" else ():
-            assert _outcome(edits[label], state, protected) is None, (step, label)
+            assert _outcome(edits[label], state, protected, step) is None, (step, label)
         for entry in refused.split(" | ") if refused != "-" else ():
             labels, reason = entry.split(": ", 1)
             for label in labels.split(", "):
-                got = _outcome(edits[label], state, protected)
+                got = _outcome(edits[label], state, protected, step)
                 assert got is not None, (step, label)
                 assert got == reason, (step, label, got)
     return rows
@@ -448,7 +448,7 @@ def test_the_run_s_table_skips_the_code_dry_run_and_marks_new_code(tmp_path, mon
                       "What each step carries, and which operators apply to it")
     rows = _rows([body[body.index("| step |"):]])
     assert "merge (not dry-run)" in rows["tally"][1].split(", "), rows["tally"]
-    assert "insert" in rows["tally"][1].split(", ")  # no code changed: no mark
+    assert "loop" in rows["tally"][1].split(", ")  # no code changed: no mark
     assert given and all(recorded is None for recorded in given), given
 
 

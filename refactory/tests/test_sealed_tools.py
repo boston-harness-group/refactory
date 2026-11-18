@@ -448,6 +448,96 @@ def test_a_sealed_step_runs_sealed_on_both_runtimes_and_its_output_is_collected(
                       "grader": "DENIED", "other": "DENIED"}
 
 
+def _claude_code_client(tmp_path: Path, **overrides) -> DshModelClient:
+    """A client routed as the LiveMath arms are (Claude Code, ``dontAsk``), with a DSH home
+    and provider routes of its own: ``vertex`` lists the arm's model."""
+    settings = dict(worker_backend="claude_code", permission_mode="dontAsk",
+                    model="claude-opus-4-6", effort="medium", attempts=1,
+                    dsh_home=str(tmp_path / "dsh-home"),
+                    provider_config={"vertex": {"models": [{"id": "claude-opus-4-6"}]}})
+    return DshModelClient(**{**settings, **overrides})
+
+
+@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def test_a_sealed_step_of_a_claude_code_run_runs_sealed_on_dsh_with_the_run_s_model(
+        tmp_path, runtime):
+    """The LiveMath arms' route: a sealed step moves to the dsh backend in skip mode with the
+    arm's model and effort, on both runtimes; a step without tools keeps the arm's route."""
+    _sealable()
+    run = tmp_path / "run"
+    (run / "items" / "b").mkdir(parents=True)
+    (run / "items" / "b" / "answer.txt").write_text("OTHER-ITEM")
+    (run / "grader.json").write_text("GOLD-IN-RUN")
+    (run / "input.txt").write_text("THE-INPUT")
+    argv = tmp_path / "argv.json"
+    script = tmp_path / "agent-cli"
+    script.write_text(f"#!{sys.executable}\n" + AGENT.replace("{grader}", str(run / "grader.json"))
+                      .replace("{other}", str(run / "items" / "b" / "answer.txt"))
+                      + f"pathlib.Path({str(argv)!r}).write_text(json.dumps(sys.argv))\n")
+    script.chmod(0o755)
+    client = _claude_code_client(tmp_path, dsh_cli=str(script))
+    assert client.for_sealed().route() == {
+        "worker_backend": "dsh", "provider": "vertex", "model": "claude-opus-4-6",
+        "effort": "medium", "permission_mode": "skip"}
+    assert workspace.sealed_steps(client) == (True, "")
+    graph = Graph()
+    graph.add(Node("solve", "agent", prompt_template="Solve it.", reads=("input.txt",),
+                   writes=("answer.txt",), tools=("bash",), workspace="scratch"))
+    if runtime == "walker":
+        ctx = RunContext(run, knobs={}, facts={}, task={})
+        ctx.model = client
+        result = Executor(graph, ctx).run(start=graph.start)
+        assert result.exit_ok, result.error
+    else:
+        from refactory_dsh import worker_node
+        graph.add(Node("plain", "agent", prompt_template="Think.", writes=("plain.txt",),
+                       tool_policy="none"))
+        state = {"graph": graph.to_state(), "knobs": {}}
+        lowered = workers.lower_workflow(lowering.to_workflow(state), run, client.context(),
+                                         lowering.node_declarations(state))
+        specs = {name: json.loads(Path(shlex.split(lowered.nodes[name].dispatch_command)[-1])
+                                  .read_text()) for name in ("solve", "plain")}
+        assert specs["plain"]["model_context"]["worker_backend"] == "claude_code"
+        assert specs["solve"]["model_context"]["worker_backend"] == "dsh"
+        worker_node.execute(specs["solve"], run)
+    answer = json.loads((run / "answer.txt").read_text())
+    assert answer == {"tools": ["bash"], "policy": ["workspace-write"], "input": "THE-INPUT",
+                      "grader": "DENIED", "other": "DENIED"}
+    called = json.loads(argv.read_text())
+    assert called[called.index("--provider") + 1] == "vertex"
+    assert called[called.index("--model") + 1] == "claude-opus-4-6"
+
+
+def test_without_dsh_a_tool_step_is_never_offered_and_is_refused_on_the_same_answer(tmp_path):
+    """No DSH runtime, or no DSH provider for the run's model: the loop's request offers no
+    tool step, and its attempts refuse one (`workspace.sealed_steps`, one answer)."""
+    _sealable()
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.optim import Candidate, Proposal
+    from test_pipeline_view import _mode
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    edit = {"op": "insert", "after": "compare", "kind": "agent", "text": "Check it.",
+            "tools": ["bash"], "to": "decide_task"}
+    clients = {"": _claude_code_client(tmp_path, dsh_cli="/bin/true"),
+               "no DSH runtime": _claude_code_client(tmp_path, dsh_cli="",
+                                                     runtime_root=str(tmp_path / "none")),
+               "no DSH provider": _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                                                      provider_config={})}
+    for why, client in clients.items():
+        loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs" / (why or "ok")),
+                    project=Path("."), model=client)
+        assert loop._tools_offered() is (not why), why
+        out = loop.optimizer.attempt(Proposal(edits=[edit]), seed, mode.invariants(), True, (),
+                                     protected=mode.edit_protected())
+        if not why:
+            assert isinstance(out, Candidate), out
+        else:
+            assert isinstance(out, list) and out[0].startswith("E-new-node-tools"), out
+            assert why in out[0], out
+
+
 @pytest.mark.parametrize("runtime", ["walker", "spine"])
 def test_an_unsealable_tools_list_is_refused_on_both_runtimes(tmp_path, runtime):
     graph = Graph()

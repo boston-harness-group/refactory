@@ -352,6 +352,37 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
     return workspace
 
 
+def sealed_steps(model: Any) -> tuple[bool, str]:
+    """Whether a step that runs its tools sealed can run in a run on ``model``: the seal
+    runs on this machine (`seal.available`), and the run's client can move the step onto
+    the dsh backend with its model (`DshModelClient.for_sealed`; a client without routes,
+    a test's scripted model, runs it where it is). The request's offer and an attempt's
+    acceptance both take this answer, and each runtime moves a sealed step the same way."""
+    from refactory_dsh import seal
+
+    ok, why = seal.available()
+    if not ok:
+        return False, why
+    sealed = getattr(model, "for_sealed", None)
+    if callable(sealed):
+        try:
+            sealed()
+        except ValueError as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def for_sealed_step(client: Any, node: str, sealed: bool) -> Any:
+    """``client`` for agent node ``node``'s dispatch: moved to the sealed route
+    (`sealed_steps`) when it runs its tools sealed (``sealed``, `is_sealed`), else as it is."""
+    if sealed and callable(getattr(client, "for_sealed", None)):
+        try:
+            return client.for_sealed()
+        except ValueError as exc:
+            raise WorkspaceError(f"agent node {node!r} runs its tools sealed: {exc}") from None
+    return client
+
+
 def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
                   route: dict[str, Any]) -> None:
     """Refuse a sealed step that cannot run sealed here: never run it with less."""
