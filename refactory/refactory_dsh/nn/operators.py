@@ -16,6 +16,10 @@ same way on both runtimes (the walker in its forkserver child, the spine through
 - ``select`` (`SELECT_CALL`): reads a label from its first declared read (the first word
   or the last line, as a verdict gate reads one) and copies the declared read whose name
   that label names to its first write (and its fact, when it declares one).
+- ``elements`` (`MAP_CALL`): splits a list (its first declared read, else its first input
+  fact; `list_elements`) into one prompt per element -- its one text knob, filled from
+  the run's facts, then the element -- written to its i-th write; a ``map``'s branch
+  reads its own (`map_of`).
 - ``step_failed`` (`graph.FALLBACK_GATE_CALL`): a fallback gate's verdict, ``fallback``
   when the step before it is missing because it failed (``items.missing_steps``) and not
   because it ran out of time (`node_retry.TIMEOUT_KINDS`), else ``proceed``.
@@ -50,6 +54,8 @@ COLLECT_CALL = "refactory_dsh.nn.operators:collect"
 FILE_TEXT_CALL = "refactory_dsh.nn.operators:file_text"
 #: The ``select`` op: copy the file a label names.
 SELECT_CALL = "refactory_dsh.nn.operators:select"
+#: The ``elements`` op: a list to one prompt per element, for a ``map``'s branches.
+MAP_CALL = "refactory_dsh.nn.operators:elements"
 #: Past this many characters ``collect`` shows a file as its path and size, not its text.
 COLLECT_TEXT_CHARS = 40000
 
@@ -153,6 +159,166 @@ def select(ctx: Any) -> dict[str, Any]:
     text = ctx.read_text(chosen)
     ctx.write_text(writes[0], text)
     return {fact: text} if fact else {}
+
+
+#: A line that starts a list item: a bullet, or a number or letter then ``.`` or ``)``.
+LIST_ITEM = re.compile(r"^(?P<indent>\s*)(?:[-*+\u2022]|\(?(?:\d+|[A-Za-z])[.)])\s+\S")
+#: A code fence (``` or ~~~, with a language or none) and what it holds.
+FENCE = re.compile(r"^(```|~~~)[\w-]*[ \t]*\n(.*?)\n?\1[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def _json_array(text: str) -> list[Any] | None:
+    """The first JSON array in ``text`` that parses and is not empty, or None."""
+    import json
+
+    decoder = json.JSONDecoder()
+    for found in re.finditer(r"\[", text):
+        try:
+            value, _end = decoder.raw_decode(text, found.end() - 1)
+        except ValueError:
+            continue
+        if isinstance(value, list) and value:
+            return value
+    return None
+
+
+def _list_items(lines: Sequence[str]) -> list[str] | None:
+    """The items of a markdown, numbered or lettered list in ``lines`` (two or more at the
+    outermost indent), or None: lines before the first are an introduction; an indented
+    line, a nested item among them, stays with its item; a blank line followed by text that
+    is neither an item nor indented ends the list (what follows is an outro)."""
+    marks = [(i, len(m.group("indent"))) for i, line in enumerate(lines)
+             if (m := LIST_ITEM.match(line))]
+    if not marks:
+        return None
+    top = min(indent for _i, indent in marks)
+    if sum(indent == top for _i, indent in marks) < 2:
+        return None
+    items: list[str] = []
+    blank = False
+    for line in lines:
+        mark = LIST_ITEM.match(line)
+        if mark and len(mark.group("indent")) == top:
+            items.append(line.strip())
+        elif not items:
+            continue
+        elif not line.strip():
+            blank = True
+            continue
+        elif blank and len(line) - len(line.lstrip()) <= top:
+            break
+        else:
+            # A nested item keeps its indent under its parent; a wrapped line does not.
+            items[-1] += "\n" + (line[top:].rstrip() if mark else line.strip())
+        blank = False
+    return items
+
+
+def list_elements(raw: Any) -> list[str]:
+    """The elements of a list, as text. When the text holds one code fence (``` or ~~~),
+    what it holds is the list. Text that is JSON: an array gives its items (an item that is
+    not text as compact JSON), anything else is one element. Else two or more list items
+    (``-``, ``*``, ``1.``, ``2)``, ``A)``) at the outermost indent give one element per item
+    (`_list_items`); else the first JSON array in the text that parses gives its items;
+    else each non-empty line is one element."""
+    import json
+
+    if isinstance(raw, list):
+        items: list[Any] = raw
+    else:
+        text = str(raw if raw is not None else "").strip()
+        fences = FENCE.findall(text)
+        if len(fences) == 1:
+            text = fences[0][1].strip()
+        lines = [line.rstrip() for line in text.splitlines()]
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        listed = None if parsed is not None else _list_items(lines)
+        if parsed is None and listed is None:
+            parsed = _json_array(text)
+        if isinstance(parsed, list):
+            items = parsed
+        elif parsed is not None:
+            items = [text]
+        elif listed is not None:
+            items = listed
+        else:
+            items = [line.strip() for line in lines if line.strip()]
+    return [item if isinstance(item, str) else json.dumps(item, separators=(",", ":"))
+            for item in items]
+
+
+#: Where a map's run with no element this time is marked not needed (`<run>.txt`, why),
+#: which `items.missing_steps` reads to leave it out: the list had fewer elements than the
+#: map has runs, so it had nothing to do. Apart from the missing records, which each visit
+#: of a step rewrites (`node_retry.record_spent`).
+NOT_NEEDED_DIR = ".refactory/not-needed"
+
+
+def elements(ctx: Any) -> dict[str, Any]:
+    """`MAP_CALL`: the list (its first declared read, else its first declared input fact:
+    its declaration's ``inputs``, `lowering.snippet_spec`) split into elements
+    (`list_elements`); for the i-th of the first as many as it has writes, its text knob
+    (``task_knob``) filled from the run's facts, then the element, is written to its i-th
+    declared write. First every element file, and every output of the map's runs
+    (``runs``), is taken away, so a pass run again (a loop) never shows a run an element or
+    a result from before. A run with no element this time is marked not needed
+    (`NOT_NEEDED_DIR`), never a step that failed. Its fact says how many ran: ``ran K of N
+    elements (max M)``, which the combine step sees."""
+    from refactory_dsh.node_retry import MISSING_DIR
+
+    from .executor import ExecutionError, render
+
+    found = getattr(ctx, "snippet", None) or {}
+    reads = list(ctx.declared_reads)
+    inputs = list(found.get("inputs") or ())
+    source = reads[0] if reads else (inputs[0] if inputs else "")
+    if reads and not ctx.exists(source):
+        raise ExecutionError(f"map step {ctx.node_id!r}: its list {source!r} was not written")
+    if not reads and source not in ctx.facts:
+        raise ExecutionError(f"map step {ctx.node_id!r}: its list {source!r} was not set")
+    items = list_elements(ctx.read_text(source) if reads else ctx.facts[source])
+    writes = list(getattr(ctx, "_declared", ()) or ())
+    runs = list(found.get("runs") or ())
+    workdir = Path(ctx.workdir)
+    for run in runs:
+        for name in (*run.get("writes", ()), f"reviews/{run['id']}-missing.txt",
+                     f"{MISSING_DIR}/{run['id']}.json", f"{NOT_NEEDED_DIR}/{run['id']}.txt"):
+            (workdir / name).unlink(missing_ok=True)
+    for name in writes:
+        (workdir / name).unlink(missing_ok=True)
+    used = items[:len(writes)]
+    instruction = render(str(ctx.knobs.get(found.get("task_knob") or "") or ""), ctx).rstrip()
+    for index, item in enumerate(used):
+        ctx.write_text(writes[index],
+                       f"{instruction}\n\n## Element {index + 1} of {len(used)}\n{item}\n")
+    for run in runs[len(used):]:
+        marker = workdir / NOT_NEEDED_DIR / f"{run['id']}.txt"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"not needed: the list had {len(items)} element(s)\n")
+    facts = list(getattr(ctx, "_declared_facts", ()) or ())
+    said = f"ran {len(used)} of {len(items)} elements (max {len(writes)})"
+    return {facts[0]: said} if facts else {}
+
+
+#: It fills each ``{{name}}`` in the knob it reads, as an agent's prompt is filled
+#: (`executor.fills_facts`): set here, since the executor imports this module.
+elements.fills_facts = True  # type: ignore[attr-defined]
+
+
+def map_of(graph: Graph, fork_id: str) -> str | None:
+    """The ``elements`` step (`MAP_CALL`) whose list fork ``fork_id`` maps over -- its one
+    way in -- or None: the fork a ``map`` builds, whose branches each read one element."""
+    fork = graph.nodes.get(fork_id)
+    if fork is None or fork.kind != "fork":
+        return None
+    before = graph.in_edges(fork_id)
+    if len(before) != 1:
+        return None
+    op = graph.nodes.get(before[0].source)
+    return op.id if op is not None and op.kind == "op" and op.call == MAP_CALL else None
 
 
 def step_failed(ctx: Any) -> Any:

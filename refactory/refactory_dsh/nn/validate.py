@@ -44,7 +44,7 @@ RULES: dict[str, str] = {
           "gate follows one step in a data pass, its only way in, and leads on by "
           "'proceed' and 'fallback'",
     "V6": "every file a node reads must be written by a node on a path from the "
-          "start node to a terminal",
+          "start node to a terminal; a map's element files are read by its runs alone",
     "V7": "every knob a node consumes must be declared, and every declared knob "
           "must be consumed by some node",
     "V8": "every call and evaluator must resolve to a real callable",
@@ -510,6 +510,7 @@ def validate(
     # V6 every read is written upstream; V15 an agent's inputs are there on every path.
     knob_values = dict(values)
     issues.extend(read_issues(graph))
+    issues.extend(map_read_issues(graph))
     issues.extend(agent_input_issues(graph, knob_values, resolve_calls=resolve_calls))
     issues.extend(required_read_issues(graph))
     # V20 a {{name}} slot an edit adds to a knob is somewhere a runtime fills it.
@@ -1082,6 +1083,35 @@ def gate_label_issues(graph: Graph) -> list[Issue]:
         if twice:
             issues.append(Issue("V5", f"two or more out-edges carry the verdict(s) {twice}; each "
                                       "verdict names exactly one edge", node=node_id))
+    return issues
+
+
+def map_read_issues(graph: Graph) -> list[Issue]:
+    """V6 for a map (`operators.MAP_CALL`): its element files, and its runs' results, are
+    written only for the elements a list has. So only its own runs (whose fork lets a run
+    with none be not needed) read the element files, and no agent requires a run's result
+    -- an op or a gate may read one, as the combine's collect step does, said missing when
+    it is not there."""
+    from .operators import MAP_CALL, map_of
+
+    issues: list[Issue] = []
+    for op in sorted(n for n, node in graph.nodes.items()
+                     if node.kind == "op" and node.call == MAP_CALL):
+        runs = {t for f in graph.nodes if map_of(graph, f) == op for t in graph.nodes[f].targets}
+        files = set(graph.nodes[op].writes)
+        results = {w for run in runs for w in graph.nodes[run].writes}
+        for node in sorted(graph.nodes.values(), key=lambda n: n.id):
+            read = sorted(files & set(node.reads))
+            if read and node.id not in runs:
+                issues.append(Issue("V6", f"reads {read}, which map step {op!r} writes only "
+                                          "for the elements its list has: only its runs read "
+                                          "them", node=node.id))
+            needed = sorted(results & set(node.reads)) if node.kind == "agent" else []
+            if needed:
+                issues.append(Issue("V6", f"requires {needed}, the results of map step "
+                                          f"{op!r}'s runs, which a short list leaves unwritten; "
+                                          "read them through an op (the map's combine does)",
+                                    node=node.id))
     return issues
 
 
