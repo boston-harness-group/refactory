@@ -160,7 +160,6 @@ class Run:
             seed_state=getattr(self._loop, '_original_seed_state', None),
             protected=getattr(self._loop, "protected", ()),
             graders=getattr(self._loop, "graders", ()),
-            allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
             record=record,
             dry_run_code=dry_run_code,
         )

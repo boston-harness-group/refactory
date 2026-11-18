@@ -751,3 +751,13 @@ def test_a_fall_back_puts_back_what_the_step_only_rewrote(runtime, tmp_path):
     scores, run = _both(runtime, Graph.from_state(state["graph"]), tmp_path, dsh)
     assert _keys(scores) == RIGHT
     assert (_pass(run, "0") / "kept.txt").read_text() == "right\n"
+
+
+def test_a_fallback_takes_sealed_tools_as_insert_does():
+    """A two-file step's agent fallback needs tools: a list of sealed tools, as insert
+    takes; ``true`` is not one."""
+    state = _state("livemath/solver")
+    state["graph"]["nodes"]["solve"]["writes"] = ["answer.txt", "work.txt"]
+    built = nn_edits.apply({**S1_FALLBACK, "tools": ["bash"]}, state)
+    assert _graph(built).nodes["solve_fallback"].tools == ("bash",)
+    assert _refused({**S1_FALLBACK, "tools": True}, state).startswith("'tools' lists the tools")

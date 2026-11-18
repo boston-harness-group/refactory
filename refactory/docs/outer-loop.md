@@ -452,7 +452,8 @@ V17 covers what the graph declares, nothing more. What the graph does not declar
 file in its working directory, the runtime's grading files included (`items.GRADER_FILES`;
 the runtime does not hide them from it, since modes such as `build` run tool-enabled
 agents inside a pass that need the working directory as it is); an agent an edit adds runs without
-tools (`E-new-node-tools`), so tools are only on agents the mode's author gave them,
+tools, or with tools sealed (see "New agents run without tools, or sealed" below), so
+tools that can read the working directory are only on agents the mode's author gave them,
 and those are trusted as the author's. An author's op may read facts it does not
 declare; it is the mode's own code. A code node an edit adds is not: its code gets only
 its declared reads and `inputs`, sandboxed (see "Code nodes" below), so V17 sees
@@ -1459,10 +1460,31 @@ state is promised, on any graph shape:
   graph's nodes read, never carries them, on either runtime; the grader gets the whole
   item; no knob shows a grader-only field. LiveMath hides `correct_choice`, `label`,
   `label_text`, `theorem` and `sketch`.
-- **New agents run without tools.** An agent node an edit adds gets `tool_policy: none`
-  unless it asks for tools (`tool_policy: null` or a `tools` list), and asking is refused
-  `E-new-node-tools` unless the run allows it (`LoopConfig.allow_new_node_tools`, off by
-  default). A node whose id the seed has keeps the seed's policy.
+- **New agents run without tools, or sealed.** An agent node an edit adds gets
+  `tool_policy: none` unless it lists tools from `workspace.SEALED_TOOLS` (the shell) in a
+  `scratch` workspace; any other ask for tools is refused `E-new-node-tools`. A sealed
+  step's workspace holds copies of the files it reads, and every command it runs goes
+  through `seal.runner_command`, set as DSH's local sandbox provider's `runnerCommand`:
+  on Linux, user, network, mount and PID namespaces around a new root built from an
+  allow-list (`seal.LINUX_READS` read only, the workspace read and write), the command
+  running unprivileged in a nested user namespace, unable to make one of its own, so no
+  mount can be undone; on macOS, a deny-by-default Seatbelt profile. It reads nothing
+  outside its workspace and the system's programs (no other item, no grader file, no gold
+  answer, no other process's environment), writes only its workspace, has no network, and
+  starts with an environment of its own (no credential) and, on Linux, an empty session
+  keyring of its own. On Linux each command runs in a systemd user scope capped at 8 GiB
+  of memory and 256 processes where the person's user manager can make one, else with
+  128 processes and 8 GiB of address space per process; it dies with the DSH process
+  that started it. Before its outputs are collected, every process still sealed in its
+  workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
+  workspace over 4 GiB is not collected, and each output is opened one name at a time
+  relative to its folder's descriptor without following a link, so nothing it leaves or
+  swaps in makes collection read outside the workspace. Each file it `reads` is copied
+  in; a folder, the run directory itself, or a file the run directory lacks is refused.
+  DSH's in-process tools (file, web) run outside the runner, so they are never listed.
+  The step runs only on the dsh worker backend in `skip` mode, where the seal runs
+  (`seal.available`); elsewhere it is refused, never run with less, and the request does
+  not show a tool step. A node whose id the seed has keeps the seed's policy.
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -1843,8 +1865,8 @@ request), including a new step whose output no step reads yet.
 **Tools.** A copy of a step that uses tools (a `parallelize` copy, or an `insert`/`branch`
 whose default is a copy of one) keeps its tools only in a fresh workspace of its own
 (`scratch`): the attempt path lets a new agent run with the same tools a step of the seed
-runs with when it works in such a workspace (`E-new-node-tools` otherwise, unless the run
-allows tools for new nodes). A step that uses tools in the run directory is not run
+runs with when it works in such a workspace (`E-new-node-tools` otherwise; a step listing
+its own tools runs sealed instead). A step that uses tools in the run directory is not run
 beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
 
 **Each kind tried, against the noise.** A kind tried once with a small result read as a

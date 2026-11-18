@@ -150,7 +150,6 @@ def test_a_copy_takes_no_sees():
     ({"op": "insert", "after": "solve", "text": "x", "role": "judge"}, "'role'"),
     ({"op": "insert", "after": "solve", "text": "x", "timeout_s": 60, "retry": {}},
      "'retry', 'timeout_s'"),
-    ({"op": "insert", "after": "solve", "text": "x", "tools": ["Bash"]}, "'tools' is true"),
     ({"op": "split", "step": "solve", "into": [{"kind": "agent", "text": "a", "role": "x"}]},
      "a new step does not take 'role'"),
 ])
@@ -293,12 +292,12 @@ def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
     assert own == copy and "decide_copy1__task" not in nodes["decide_copy1"]["knobs"]
 
 
-@pytest.mark.parametrize("tools,refused", [(True, False), (False, False), (["Bash"], True),
-                                           ("yes", True)])
-def test_tools_is_true_or_false(tools, refused):
+@pytest.mark.parametrize("tools,refused", [(["bash"], False), (False, False), (True, True),
+                                           (["Bash"], True), ("yes", True)])
+def test_tools_is_a_list_from_the_sealed_set_or_false(tools, refused):
     edit = {"op": "insert", "after": "solve", "kind": "agent", "text": "x", "tools": tools}
     reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
-    assert bool(reason and "'tools' is true" in reason) == refused, reason
+    assert bool(reason and "lists the tools a new step uses, from bash" in reason) == refused, reason
 
 
 # ── finding 16: a bundle keeps the reader it gave a new step ────────────────

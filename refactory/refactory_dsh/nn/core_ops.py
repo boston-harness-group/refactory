@@ -53,6 +53,8 @@ import json
 import re
 from typing import Any, Collection, Iterable, Mapping, Sequence
 
+from refactory_dsh.seal import SEALED_TOOLS
+
 from .graph import Graph, Node
 from .operators import TASK_MEANING
 
@@ -493,7 +495,8 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     if kind == "agent":
         text = _strip_unseen(spec["text"] or NEUTRAL_STEP,
                              set(facts) | set(state.get("knobs") or {}))
-        if files:
+        tools = spec.get("tools")
+        if files and not tools:
             gather = _fresh(graph, f"{node_id}_inputs", (node_id,))
             out.append(collect_node(gather, files, gather,
                                     notes=f"Hands {node_id} the files it sees."))
@@ -525,9 +528,14 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             if like.tools:
                 node["tools"] = list(like.tools)
             node["workspace"] = {"kind": "scratch"}
-        if spec.get("tools") is True:
+        if tools:
+            # Its tools run sealed, in a fresh workspace holding only the files it reads
+            # (`workspace.SEALED_TOOLS`): no other item, grader file or network.
             node["tool_policy"] = None
+            node["tools"] = list(tools)
             node["workspace"] = {"kind": "scratch"}
+            if files:
+                node["reads"] = files
         carried = _carried_knobs("agent", text, node["system_prompt_template"], knobs)
         if carried:
             node["knobs"] = carried
@@ -1016,10 +1024,10 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         raise _Refused(f"node {spec['id']!r} already exists")
     if edit.get("takes_over") is not None:
         target = _take_over_plan(graph, state, edit["takes_over"], side, anchor)[0]
-        if spec["kind"] == "agent" and spec.get("tools") is not True and len(target.writes) > 1:
+        if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
             raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
                            "step without tools writes only its reply; take it over with a "
-                           "code step, or with 'tools': true")
+                           "code step, or with 'tools'")
     return None
 
 
@@ -2231,10 +2239,10 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
 
 def _fallback_spec(edit: dict, step: Node) -> dict:
     spec = _spec({k: v for k, v in edit.items() if k not in ("op", "step")})
-    if spec["kind"] == "agent" and spec.get("tools") is not True and len(step.writes) > 1:
+    if spec["kind"] == "agent" and not spec.get("tools") and len(step.writes) > 1:
         raise _Refused(f"{step.id!r} writes {len(step.writes)} files, and a new agent step "
                        "without tools writes only its reply; give it a code step, or "
-                       "'tools': true")
+                       "'tools'")
     return spec
 
 
@@ -2702,6 +2710,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
                 "'system' its system prompt), code (text = Python) or op (with 'call'); it "
                 "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
+                + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
+                + "; runs sealed: only the files it sees, no network"
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",
@@ -2947,6 +2957,15 @@ def lost_inputs(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | No
 STEP_FIELDS = ("kind", "text", "system", "sees", "id", "to", "call", "reads", "tools", "route")
 
 
+def _tools_refusal(tools: Any) -> str | None:
+    """Why ``tools`` is not a list of the tools a new step may use, or ``None``."""
+    if (not isinstance(tools, list) or not tools
+            or any(t not in SEALED_TOOLS for t in tools) or len(set(tools)) != len(tools)):
+        return (f"'tools' lists the tools a new step uses, from {', '.join(SEALED_TOOLS)}; "
+                f"{tools!r} is not such a list")
+    return None
+
+
 def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
     """Why ``edit`` names a field its operator would ignore -- a role, a timeout, a tool
     list -- or ``None``. An ignored field would let the proposer believe it set what it
@@ -2974,11 +2993,10 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
             if extra:
                 return (f"a new step does not take {', '.join(repr(k) for k in extra)}; it "
                         f"would be ignored. A step's fields: {', '.join(STEP_FIELDS)}")
-        # Interim, until tool lists ship (the new-step-tools work replaces this): only
-        # true or false is honoured, so any other value is refused, not ignored.
-        if "tools" in spec and spec["tools"] is not True and spec["tools"] is not False:
-            return ("'tools' is true (the step gets tools, in a workspace of its own) or false "
-                    f"(none, as when left out); {spec['tools']!r} would be ignored")
+        if "tools" in spec and spec["tools"] is not False:
+            refused = _tools_refusal(spec["tools"])
+            if refused:
+                return refused
     return None
 
 

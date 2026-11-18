@@ -77,6 +77,8 @@
     "refactory_dsh.run_preparation",
     "refactory_dsh.run_state",
     "refactory_dsh.sandbox",
+    "refactory_dsh.seal",
+    "refactory_dsh.seal_reaper",
     "refactory_dsh.seed_cache",
     "refactory_dsh.snippet",
     "refactory_dsh.spawn_count",
@@ -273,6 +275,21 @@
       "path": "refactory_dsh/no_tools_plugin.mjs",
       "classification": "core",
       "reason": "no-tools registry guard and provider boundary used by workers"
+    },
+    {
+      "path": "refactory_dsh/tools_plugin.mjs",
+      "classification": "core",
+      "reason": "a sealed step's tool allow-list and escalation guard, used by workers"
+    },
+    {
+      "path": "refactory_dsh/seal_linux.sh",
+      "classification": "core",
+      "reason": "the Linux seal's runner: builds the allow-list root and starts the command, used by seal"
+    },
+    {
+      "path": "refactory_dsh/seal_close.sh",
+      "classification": "core",
+      "reason": "a sealed command's last step: closes and checks its descriptors, used by seal"
     }
   ]
 }

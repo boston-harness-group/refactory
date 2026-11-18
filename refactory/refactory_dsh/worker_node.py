@@ -154,7 +154,8 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     def dispatch_workspace(retrying: bool):
         return workspaces.dispatched(
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None)
+            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None,
+            tools=spec.get('tools') or (), reads=spec.get('reads') or ())
 
     system = render(spec.get('system_prompt', ''), context)
     # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.
