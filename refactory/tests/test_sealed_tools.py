@@ -1076,3 +1076,31 @@ def test_the_sealed_route_takes_the_exact_model_and_an_effort_dsh_offers(tmp_pat
                                      provider_config=config)
         with pytest.raises(ValueError, match=f"effort {effort!r}"):
             client.for_sealed()
+
+
+def test_a_run_offered_no_tool_step_says_why_once_in_its_journal_and_start_line(tmp_path):
+    """Without a DSH provider for the arm's model, the loss of tool steps is visible: the
+    journal records the reason once and the start summary prints it."""
+    _sealable()
+    from refactory_dsh import events
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    client = _claude_code_client(tmp_path, dsh_cli="/bin/true", provider_config={})
+    loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs", epochs=1,
+                                                    batch_size=1, optimizer="random"),
+                project=Path("."), model=client)
+    reason = loop._tools_not_offered()
+    assert "no DSH provider" in reason, reason
+    loop.init()
+    journal = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    noted = [r for r in journal if r.get("kind", r.get("event")) == "tools_not_offered"
+             or r.get("type") == "tools_not_offered"]
+    assert len(noted) == 1 and reason in json.dumps(noted[0]), journal[:3]
+    progress = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    start = next(r for r in progress if r.get("step") == "init")
+    assert f"no tool steps: {reason}" in events.render(start)
+    # A run that permits only knob edits loses nothing, and says nothing.
+    knobs = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "knobs",
+                                                     allowed_ops=("set_knob",)),
+                 project=Path("."), model=client)
+    assert knobs._tools_not_offered() == ""

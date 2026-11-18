@@ -78,6 +78,11 @@ class Task:
     #: nodes could find them: grader-derived, so no node outside the grader side may
     #: consume them (V17). Default: none.
     grader_outputs: tuple[str, ...] = ()
+    #: The files ``verify`` reads in an item's workspace: what is scored. A step that takes
+    #: over another's outputs reaches the score by writing one of these when nothing after
+    #: it reads them (`nn.core_ops`). Default: none declared, so any file a pass leaves
+    #: may be scored.
+    graded_files: tuple[str, ...] = ()
     #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
     #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.
     #: ``{"answer_leak": "the task is to recall facts about these items"}``. A category
@@ -193,6 +198,27 @@ def grader_outputs(ref: str) -> tuple[str, ...]:
     if not isinstance(cls, type) or not issubclass(cls, Task):
         return ()
     return tuple(str(name) for name in (getattr(cls, "grader_outputs", ()) or ()))
+
+
+def graded_files(state: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The files the state's Tasks score (``Task.graded_files``), or ``None`` when one of
+    its data nodes' Tasks declares none (any file a pass leaves may then be scored)."""
+    nodes = ((state.get("graph") or {}).get("nodes") or {}).values()
+    refs = sorted({str(n.get("task_ref")) for n in nodes
+                   if n.get("kind") == "data" and n.get("task_ref")})
+    out: list[str] = []
+    for ref in refs:
+        module_name, _, attribute = ref.partition(":")
+        try:
+            cls = (getattr(importlib.import_module(module_name), attribute, None) if attribute
+                   else TASKS.get(ref))
+        except ImportError:
+            return None
+        declared = tuple(getattr(cls, "graded_files", ()) or ()) if isinstance(cls, type) else ()
+        if not declared:
+            return None
+        out += [str(name) for name in declared]
+    return tuple(out) if refs else None
 
 
 def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str]:

@@ -1003,6 +1003,13 @@ class Loop(OuterLoop):
             self.optimizer.sealed_tools = sealed_steps(self.model)
         return bool(self.optimizer.sealed_tools[0])
 
+    def _tools_not_offered(self) -> str:
+        """Why the request offers no tool step, for the run's start summary and journal; empty
+        when it offers one, or when the run permits no operator that adds a step."""
+        if self._tools_offered() or not {"insert", "map"} & set(self.permitted_ops()):
+            return ""
+        return str(self.optimizer.sealed_tools[1] or "the seal cannot run here")
+
     def _sandbox_answer(self) -> tuple[bool, str] | None:
         """The machine's sandbox answer for one request (`snippet.available`), taken once
         so the offer and the refusals agree; ``None`` when the run allows no code nodes."""
@@ -1269,11 +1276,17 @@ class Loop(OuterLoop):
             self._write_state()
             self._progress("init", resumed=True, population=len(self.population),
                            **({"warning": self.selection_warning} if self.selection_warning else {}),
+                           **({"tools_not_offered": why_not} if (why_not := self._tools_not_offered())
+                              else {}),
                            epochs=self.config.epochs, batch_size=self.config.batch_size,
                            optimizer=self.search_name())
             return
 
         self._journal("start", mode=self.mode_id, config=self.config.to_dict())
+        # A tool step the request cannot offer is said once, never lost silently.
+        tools_not_offered = self._tools_not_offered()
+        if tools_not_offered:
+            self._journal("tools_not_offered", reason=tools_not_offered)
         seed = Candidate.from_state(seed_state)
         # Persist the original seed state for tool-policy admission checks.
         # Anchored here and restored on resume, not derived from population[0].
@@ -1287,6 +1300,7 @@ class Loop(OuterLoop):
             "init",
             # The run's events say it (the command line prints them): no val items.
             **({"warning": self.selection_warning} if self.selection_warning else {}),
+            **({"tools_not_offered": tools_not_offered} if tools_not_offered else {}),
             resumed=False,
             population=len(self.population),
             epochs=self.config.epochs,

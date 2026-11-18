@@ -63,6 +63,8 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             f"population {record.get('population', '?')}"
             + (" · resumed" if record.get("resumed") else "")
             + (f" · warning: {record['warning']}" if record.get("warning") else "")
+            + (f" · no tool steps: {record['tools_not_offered']}"
+               if record.get("tools_not_offered") else "")
         )
     if step == "forward":
         where = f"{record.get('index', '?')}/{record.get('of', '?')}"

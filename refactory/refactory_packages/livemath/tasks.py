@@ -164,6 +164,8 @@ class LiveMathTask(Task):
     """
 
     name = "livemath"
+    #: ``verify`` grades the solver's reply in answer.txt, and only that.
+    graded_files = ("answer.txt",)
     #: The answer, and what states it: the correct choice (and its label and text),
     #: and the theorem and its sketch, which state the correct option. The grader
     #: reads them from the instance; ``current_item.json`` never carries them.
