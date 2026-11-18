@@ -164,13 +164,15 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def needs_snippet_spec(node: Any) -> bool:
     """Whether ``node`` runs a `refactory_dsh.snippet` callable (a code op, a code gate or
-    a verdict gate), which reads its declaration from the runtime."""
+    a verdict gate), or a map's elements step, which read their declaration from the
+    runtime."""
     from refactory_dsh import snippet
 
     from refactory_dsh.nn.graph import FALLBACK_GATE_CALL
+    from refactory_dsh.nn.operators import MAP_CALL
 
     target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
-    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT, FALLBACK_GATE_CALL)
+    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT, FALLBACK_GATE_CALL, MAP_CALL)
 
 
 def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[str, Any]:
@@ -178,11 +180,20 @@ def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[s
     the walker builds it for its child, the lowering writes it for the spine's runner."""
     from refactory_dsh import snippet
     from refactory_dsh.nn.graph import FALLBACK_GATE_CALL
+    from refactory_dsh.nn.operators import MAP_CALL, map_of
 
     found = snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
     if node.kind == "gate" and node.evaluator == FALLBACK_GATE_CALL:
         # The step whose failure the fallback gate reads (`nn.operators.step_failed`).
         found["step"] = next((edge.source for edge in graph.in_edges(node.id)), "")
+    if node.kind == "op" and node.call == MAP_CALL:
+        # The text knob a map's elements step fills, and the map's runs with what each
+        # writes, which it clears before a pass (`nn.operators.elements`).
+        found["task_knob"] = node.knobs[0] if node.knobs else ""
+        fork = next((e.target for e in graph.out_edges(node.id)
+                     if map_of(graph, e.target) == node.id), None)
+        found["runs"] = [{"id": run, "writes": list(graph.nodes[run].writes)}
+                         for run in (graph.nodes[fork].targets if fork else ())]
     return found
 
 

@@ -1608,6 +1608,18 @@ class EditGenerator:
                 edge = rng.choice(plain)
                 return {"op": "merge", "steps": [edge.source, edge.target]}
             return {"op": "merge", "steps": [target, rng.choice(ids)]}
+        if op == "map":
+            # Over a step's output (often the target's own), now and then a name not there.
+            over = target if rng.random() < 0.6 else rng.choice([*ids, "ghost_list"])
+            edit = {"op": "map", "after": target, "over": over}
+            if rng.random() < 0.6:
+                self.counter += 1
+                edit["text"] = f"Work on this element ({self.counter})."
+            if rng.random() < 0.4:
+                edit["max"] = rng.choice((2, 3, 9))
+            if rng.random() < 0.5:
+                edit["combine"] = self.step_spec(state, sees=False)
+            return self._stray(edit)
         if op == "fallback":
             # Mostly a step in a per-item pass; now and then any node, so the refusals (no
             # pass, no outputs, a branch's end, a gate) are drawn too.

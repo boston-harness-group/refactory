@@ -421,6 +421,7 @@ def test_every_macro_expands_to_primitives_only():
         ("route", {"after": "review"}, review),
         ("split", {"step": "finalize"}, review),
         ("merge", {"steps": ["review", "finalize"]}, review),
+        ("map", {"after": "draft", "over": "draft"}, review),
         ("fallback", {"step": "solve"}, fg.DataPass().state_dict()),
     ]
     macros = [name for name in nn.edits.names() if nn.edits.is_macro(name)]

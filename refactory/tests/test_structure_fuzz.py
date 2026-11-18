@@ -31,6 +31,7 @@ import pytest
 import structure_fuzz as sf
 from refactory_dsh import seal
 from refactory_dsh.nn import edits as edits_mod
+from refactory_dsh.nn.operators import MAP_CALL
 from refactory_dsh.optim import Candidate
 from refactory_dsh.optim import base as base_mod
 from test_livemath_blocks import needs_spine
@@ -103,11 +104,44 @@ def test_the_core_operators_own_checks_are_reached_and_sound():
     """'takes_over' (taken and refused), a field an operator would ignore, a route that
     loses an input and a 'fallback' outside a pass are drawn and reached, and every edit
     accepted on the way is sound."""
-    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1000)
+    stats = sf.Fuzzer(QUICK_SEED, walker=True).run(1500)
     assert not stats.findings, _report(stats)
     for path in ("ignored field refused", "lost input refused", "takes_over accepted",
                  "takes_over: target not first", "fallback: outside a pass"):
         assert stats.paths[path] > 0, (path, dict(stats.paths))
+
+
+def _map_cases() -> list[tuple[str, dict]]:
+    """A map over each step's own output, after it, on every seed."""
+    out = []
+    for name in sorted(sf.seeds()):
+        graph = sf._graph_of(sf.Applier(sf.seeds()[name]).seed_state)
+        for step in sorted(n for n, node in graph.nodes.items() if node.kind in ("agent", "op")):
+            out.append((name, {"op": "map", "after": step, "over": step, "max": 2}))
+    return out
+
+
+@pytest.mark.parametrize("name, edit", _map_cases(),
+                         ids=lambda v: v if isinstance(v, str) else v["after"])
+def test_every_map_a_seed_takes_is_sound(name, edit):
+    """Each map the edit layer takes keeps every invariant on the walker, and removing it
+    by its elements step gives back the seed's graph and knobs."""
+    applier = sf.Applier(sf.seeds()[name])
+    seed = Candidate.from_state(applier.seed_state)
+    outcome = applier.attempt(seed, edit, set())
+    if isinstance(outcome, list):
+        return
+    assert sf.check_state(applier, outcome.state, walker=True) == []
+    [op] = [n for n in edits_mod._graph(outcome.state).nodes if n not in applier.seed_state[
+        "graph"]["nodes"] and edits_mod._graph(outcome.state).nodes[n].call == MAP_CALL]
+    removed = applier.attempt(outcome, {"op": "remove", "step": op}, set())
+    assert not isinstance(removed, list), removed
+
+    def key(state: dict) -> tuple:
+        graph = state["graph"]
+        return (graph["nodes"], sorted(json.dumps(e, sort_keys=True) for e in graph["edges"]),
+                state.get("knobs"))
+    assert key(removed.state) == key(applier.seed_state)
 
 
 def _fallback_cases() -> list[tuple[str, dict]]:
@@ -383,7 +417,7 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     the grade, and the leak invariant finds it by content: the grader-only answers and
     the grader's own verdicts in the finished items' records. The leak needs no code
     node, so the walks draw none and are the same on every machine, whether or not it
-    can sandbox code nodes (this seed finds it at edit 102)."""
+    can sandbox code nodes (this seed finds it at edit 5)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
     _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
