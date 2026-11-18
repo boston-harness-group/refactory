@@ -184,6 +184,11 @@ class SandboxUnavailable(SnippetError):
     """The sandbox did not start within :data:`STARTUP_S`: the machine, not the code."""
 
 
+class NoSandbox(SandboxUnavailable):
+    """Code nodes cannot run on this machine at all (`available` says why): the harness,
+    not the code, so a code step's fallback never answers it; a dry run refuses on it."""
+
+
 #: The line the driver writes first, once the sandbox has started (`_DRIVER`).
 _STARTED = "STARTED"
 
@@ -729,7 +734,7 @@ def execute(code: str, inp: Any, *, timeout_s: float = WALL_S,
     hide besides :data:`HIDDEN_ROOTS` (the run directory, the project)."""
     ok, why = available()
     if not ok:
-        raise SnippetError(f"code nodes cannot run here: {why}")
+        raise NoSandbox(f"code nodes cannot run here: {why}")
     issues = static_issues(code)
     if issues:
         raise SnippetError("the code is refused (rule V18): " + "; ".join(issues))

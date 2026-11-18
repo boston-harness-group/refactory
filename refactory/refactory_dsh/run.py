@@ -370,6 +370,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
             }
             if entry.get("optional"):
                 result["optional"] = True
+            if entry.get("falls_back"):
+                result["falls_back"] = True
             if entry.get("required_reads"):
                 result["required_reads"] = list(entry["required_reads"])
             if isinstance(entry.get("snippet"), dict):
@@ -477,6 +479,12 @@ def run_node(
     is_retryable = node_type not in ("gate", "GateNode")
     started = copy.deepcopy(ctx.facts)
     facts_snapshot = copy.deepcopy(ctx.facts) if is_retryable else None
+    from refactory_dsh.node_retry import snapshot_outputs
+
+    # A step with a fallback's declared files before its visit, put back if it falls back.
+    before_visit = (snapshot_outputs(directory, declarations(directory, node_id).get("writes"))
+                    if is_retryable and declarations(directory, node_id).get("falls_back")
+                    else {})
 
     def _write_facts() -> None:
         _write_changes(directory, started, ctx.facts)
@@ -501,15 +509,30 @@ def run_node(
         try:
             produced = resolve(target)(ctx)
         except Exception as retry_exc:
-            _write_facts()
-            # Optional nodes (named in a fork's optional_targets) are recorded
-            # as missing instead of failing the run.
+            # Optional nodes (named in a fork's optional_targets), and a step with a
+            # fallback that genuinely failed (`falls_back`), are recorded as missing
+            # instead of failing the run.
+            from refactory_dsh.node_retry import falls_back_on, record_spent, restore_outputs
+
             decl = declarations(directory, node_id)
-            if decl.get("optional"):
+            fell = bool(decl.get("falls_back")) and falls_back_on(retry_exc)
+            if fell:
+                # Its outputs as its visit found them: its fallback sees what it saw, and
+                # nothing it left half-made is graded (`Executor._missing_optional`).
+                restore_outputs(directory, before_visit)
+                for fact in decl.get("produces") or ():
+                    if fact in started:
+                        ctx.facts[fact] = started[fact]
+                    else:
+                        ctx.facts.pop(fact, None)
+            _write_facts()
+            if decl.get("optional") or fell:
                 reviews_dir = directory / "reviews"
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f"{node_id}-missing.txt").write_text(
                     f"{type(retry_exc).__name__}: {retry_exc}\n")
+                # Why it has no answer, when its type says, as the walker records it.
+                record_spent(directory, node_id, retry_exc)
                 # dm-232: settle the pending delivery marker at the point
                 # the branch is recorded missing, so it never goes stale.
                 try:
@@ -529,6 +552,12 @@ def run_node(
             ctx.set_fact(key, value)
     ctx._check_produces()  # noqa: SLF001
     _write_facts()
+    if is_retryable:
+        from refactory_dsh.node_retry import clear_spent
+
+        # A step that answered is not missing, whatever an earlier visit left: a fallback
+        # gate reads only this visit (the walker clears it in `Executor._visit`).
+        clear_spent(directory, node_id)
     record_visit(directory, node_id, produced, gate=not is_retryable)
     if not is_retryable:
         # A reloop to a step that cannot see what the gate read hands it those files.

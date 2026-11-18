@@ -1726,6 +1726,35 @@ describe('a data-pass agent whose crash retries are spent (missing_on_crash)', (
   })
 })
 
+describe('a step with a fallback that failed (falls_back)', () => {
+  const graph: WorkflowGraph = {
+    name: 'fell',
+    start_node: 'solve',
+    nodes: {
+      solve: { _type: 'FnNode', id: 'solve', command: 'run solve', falls_back: true, reads: [], writes: ['answer.txt'] },
+      solve_fallback_gate: { _type: 'GateNode', id: 'solve_fallback_gate', evaluator_type: 'fn', evaluator_command: 'run gate', reads: [], writes: [] },
+      simple: { _type: 'AgentNode', id: 'simple', role: 'solver', reads: [], writes: ['answer.txt'] },
+      check: { _type: 'FnNode', id: 'check', command: 'run check', reads: [], writes: [] },
+    },
+    edges: [
+      { source: 'solve', target: 'solve_fallback_gate' },
+      { source: 'solve_fallback_gate', target: 'check', condition: 'proceed' },
+      { source: 'solve_fallback_gate', target: 'simple', condition: 'fallback' },
+      { source: 'simple', target: 'check' },
+    ],
+  } as WorkflowGraph
+
+  it('may fail and go on to its gate, whose fallback verdict runs the fallback step', () => {
+    const spine = new Spine(graph)
+    spine.complete('solve', { failed: true })
+    expect(ids(spine)).toEqual(['solve_fallback_gate'])
+    expect(spine.state().log).toContain('failed solve')
+    spine.verdict('solve_fallback_gate', 'fallback')
+    expect(ids(spine)).toEqual(['simple'])
+    expect(() => spine.complete('simple', { failed: true })).toThrow(/not optional/)
+  })
+})
+
 describe('fork inside a data pass', () => {
   it('walks fork→branches→join inside each item pass', () => {
     const spine = new Spine(forkInsideData.graph)

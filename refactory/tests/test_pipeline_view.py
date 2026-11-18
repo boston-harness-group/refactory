@@ -270,7 +270,8 @@ def test_every_input_gate_fork_and_edge_is_shown_on_seeds_and_random_edits(seed)
                 for _kind, name in consumed(node, view.values):
                     assert f"{name}@" in line or f"{name} (via " in line, (seed, node_id, name)
             if node.kind == "gate":
-                assert re.match(r"(loop|route)\(", text.get(node_id, "")), (seed, node_id)
+                assert re.match(r"(loop|route|fallback)\(", text.get(node_id, "")), (seed,
+                                                                                    node_id)
             if node.kind == "fork":
                 assert text.get(node_id) == f"parallel {node_id} {{", (seed, node_id)
         reached = set(view.reach(graph.start))
@@ -699,6 +700,12 @@ def _touched(before: dict, after: dict) -> set[str]:
                       if r in view.graph.nodes}
     # A gate naming a step whose fold changed names the next shown step instead.
     out |= {e.source for e in view.graph.edges if e.target in flipped}
+    # Likewise a step that became, or stopped being, a gate's judge (its readers changed):
+    # its line moves into, or out of, that gate's line, and a gate naming it names the next
+    # shown step instead.
+    judged = {n for n in common if (n in view.judges.values()) != (n in was.judges.values())}
+    out |= judged | {g for v in (view, was) for g, j in v.judges.items() if j in judged}
+    out |= {e.source for e in view.graph.edges if e.target in judged}
     return out
 
 
