@@ -6,7 +6,7 @@ Claude backend puts around the user message — skillopt/model/claude_backend.py
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 
 # Ported from skillopt/envs/livemathematicianbench/rollout.py:24-28 (MIT)
@@ -77,6 +77,20 @@ def unwrap_claude_backend_prompt(prompt: str) -> str:
     if not body.startswith(" "):
         return prompt
     return body[1:].replace("\n  ", "\n")
+
+
+def declared_io(ctx: Any, files: Sequence[str], facts: Sequence[str]
+              ) -> tuple[list[str | None], list[str]]:
+    """The files this op reads, one per role in ``files`` (the names it was built with,
+    `nn.declared_files`: what an edit's check resolves too), and the facts it sets, one
+    per role in ``facts``, as its node declares them (`nn.by_declaration`), so an edit may
+    rename them."""
+    from refactory_dsh.nn import declared_files
+
+    made = list(getattr(ctx, "_declared_facts", ()) or ())
+    chosen = declared_files(getattr(ctx, "declared_reads", ()) or (), files,
+                            getattr(ctx, "read_renames", None))
+    return chosen, made if len(made) == len(facts) else list(facts)
 
 
 def format_prompt(ctx: Any) -> dict[str, Any]:

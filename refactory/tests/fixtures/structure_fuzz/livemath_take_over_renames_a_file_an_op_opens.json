@@ -1,0 +1,30 @@
+{
+  "seed": "livemath_skill_graph",
+  "edits": [
+    {
+      "op": "parallelize",
+      "after": "step_join",
+      "new": [
+        {
+          "kind": "agent",
+          "text": "Try A."
+        },
+        {
+          "kind": "agent",
+          "text": "Try B."
+        }
+      ]
+    },
+    {
+      "op": "insert",
+      "after": "step_join_join",
+      "kind": "agent",
+      "text": "Pick the best notes.",
+      "takes_over": "compare"
+    }
+  ],
+  "found": [
+    "walker: failed: data: all 5 items failed"
+  ],
+  "fixed_by": "notes_prompts and decide_prompt read and set what they declare (nn.by_declaration), so the take over renames what they open; an op that opens a renamed file by name refuses it"
+}

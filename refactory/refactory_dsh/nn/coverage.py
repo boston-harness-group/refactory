@@ -171,6 +171,9 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),
     "knob_outputs": (_NEW, Gap("excluded by decision",
                                "the mode's declaration of what its op does")),
+    # What a code step's run records its returned outputs under: set by an edit that gives
+    # code new output names (a copy of a code step; 'takes_over' of one), never by hand.
+    "renames": (("add_node", "insert", "split", "branch", "parallelize"), ("insert",)),
     "max_iterations": (_GATE_ADD, ("set_knob",)),
     "on_exhausted": (_GATE_ADD, _DEFERRED_SETTING),
     "timeout_s": (_NEW, _DEFERRED_SETTING),

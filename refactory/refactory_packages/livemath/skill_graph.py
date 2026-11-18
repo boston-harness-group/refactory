@@ -56,6 +56,7 @@ from refactory_dsh import nn
 from .grading import normalize_label, parse_choice_label
 from .mode import MAX_COMPLETION_TOKENS, OPS, SYSTEM_PROMPT, TASK
 from .ops import build_user_prompt, claude_backend_prompt, skill_section
+from .ops import declared_io as _declared
 
 SKILL_GRAPH_OPS = "refactory_packages.livemath.skill_graph"
 
@@ -218,14 +219,21 @@ def _question(ctx: Any) -> str:
     return str(ctx.facts.get("user_prompt") or "")
 
 
+@nn.by_declaration(files=(NOTES["compare"][0],))
 @nn.fills_facts
 def notes_prompts(ctx: Any) -> dict[str, Any]:
-    """precision's and hypotheses' framed prompts: the question and compare's notes."""
-    notes = ctx.read_text(NOTES["compare"][0])
+    """precision's and hypotheses' framed prompts: the question and compare's notes.
+
+    It reads its one declared file (compare's notes, ``compare_notes.txt`` as built) and
+    sets its two declared facts in order (precision's, then hypotheses'), whatever they
+    are named (`nn.by_declaration`): an edit may rename them."""
+    reads, facts = _declared(ctx, notes_prompts.declared_files,
+                             ["precision_prompt", "hypotheses_prompt"])
+    notes = ctx.read_text(reads[0] or NOTES["compare"][0])
     return {
-        "precision_prompt": claude_backend_prompt(
+        facts[0]: claude_backend_prompt(
             precision_message(_question(ctx), notes, _task(ctx, "precision"))),
-        "hypotheses_prompt": claude_backend_prompt(
+        facts[1]: claude_backend_prompt(
             hypotheses_message(_question(ctx), notes, _task(ctx, "hypotheses"))),
     }
 
@@ -235,20 +243,27 @@ def notes_prompts(ctx: Any) -> dict[str, Any]:
 NO_NOTES = "(This step gave no notes: its session did not answer.)"
 
 
+@nn.by_declaration(files=tuple(NOTES[s][0] for s in ("compare", "precision", "hypotheses")))
 @nn.fills_facts
 def decide_prompt(ctx: Any) -> dict[str, Any]:
     """decide's framed prompt: the question and all three steps' notes.
 
+    It reads its declared files in order -- compare's, precision's and hypotheses' notes
+    -- and sets its one declared fact, whatever they are named (`nn.by_declaration`).
     precision and hypotheses run as a fork; one that did not answer is shown as
     `NO_NOTES`. With neither, there is nothing to decide from, and the missing notes are
     the error (the item then has no answer, `items.no_answer`)."""
-    fork = [NOTES[s][0] for s in ("precision", "hypotheses")]
+    reads, facts = _declared(ctx, decide_prompt.declared_files,
+                             ["decide_prompt"])
+    fork = [name for name in reads[1:] if name]
     if not any(ctx.exists(name) for name in fork):
         raise FileNotFoundError(f"neither fork step wrote its notes: {', '.join(fork)}")
-    notes = [ctx.read_text(name) if ctx.exists(name) else NO_NOTES for name in fork]
-    message = decide_message(_question(ctx), ctx.read_text(NOTES["compare"][0]), *notes,
+    notes = [ctx.read_text(name) if name and ctx.exists(name) else NO_NOTES
+             for name in reads[1:]]
+    message = decide_message(_question(ctx), ctx.read_text(reads[0] or NOTES["compare"][0]),
+                             *notes,
                              task=_task(ctx, "decide"))
-    return {"decide_prompt": claude_backend_prompt(message)}
+    return {facts[0]: claude_backend_prompt(message)}
 
 
 def extract_answer(ctx: Any) -> dict[str, Any]:

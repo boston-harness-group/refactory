@@ -242,6 +242,7 @@ _NODE_FIELDS = frozenset(
         "code",
         "knob_outputs",
         "inputs",
+        "renames",
     }
 )
 
@@ -312,6 +313,46 @@ def _knob_outputs(node: "Node") -> dict[str, tuple[str, ...]]:
             raise GraphError(f"node {node.id!r}: knob_outputs[{output!r}] names a knob twice")
         out[output] = tuple(knobs)
     return out
+
+
+def _renames(node: "Node") -> dict[str, dict[str, str | None]] | None:
+    """``node.renames`` in its canonical form (each key present only when not empty; None
+    when none is), or a `GraphError`: ``facts`` and ``files`` only on an op with code, each
+    name it records under one the op declares, once; ``reads`` only on an op or a gate,
+    each built name mapped to a file name."""
+    value = node.renames
+    if not isinstance(value, Mapping) or set(value) - {"facts", "files", "reads"}:
+        raise GraphError(f"node {node.id!r}: renames is {{'facts': {{...}}, 'files': {{...}}, "
+                         "'reads': {...}}")
+    has_code = bool(node.code) or any(f == "code" for f, _k in node.field_bindings)
+    if (value.get("facts") or value.get("files")) and not (node.kind == "op" and has_code):
+        raise GraphError(f"node {node.id!r} is a {node.kind} without code and renames what it "
+                         "returns; only a code op does")
+    if value.get("reads") and node.kind not in ("op", "gate"):
+        raise GraphError(f"node {node.id!r} is a {node.kind} and renames what it reads; only an "
+                         "op or a gate does")
+    out: dict[str, dict[str, str | None]] = {}
+    reads = value.get("reads") or {}
+    if not isinstance(reads, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in reads.items()):
+        raise GraphError(f"node {node.id!r}: renames['reads'] maps a built file name to the "
+                         "name it is read under")
+    if reads:
+        out["reads"] = dict(reads)
+    for key, declared in (("facts", node.produces), ("files", node.writes)):
+        table = value.get(key) or {}
+        if not isinstance(table, Mapping) or not all(
+                isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in table.items()):
+            raise GraphError(f"node {node.id!r}: renames[{key!r}] maps a returned name to a "
+                             "declared one or None")
+        named = [v for v in table.values() if v is not None]
+        outside = sorted(set(named) - set(declared))
+        if outside or len(set(named)) != len(named):
+            raise GraphError(f"node {node.id!r}: renames[{key!r}] records under {named}; each "
+                             f"must be one of its declared {key} {list(declared)}, once")
+        if table:
+            out[key] = dict(table)
+    return out or None
 
 
 #: The most items a data node runs at once, whether set as ``parallelism`` or by its
@@ -483,6 +524,15 @@ class Node:
     #: carrying it in every output (`operators.carried_knobs`), so a step told to see the
     #: task's own input (``"sees": ["task"]``) never gets another step's instructions.
     knob_outputs: dict[str, tuple[str, ...]] | None = None
+    #: `op` or `gate`: names the edit layer gave this step's files, so what it runs stays
+    #: as written on both runtimes: for a code op, the outputs its code returns that the
+    #: run records under another name, ``{"facts": {returned: declared}, "files":
+    #: {returned: declared}}`` (None drops one; `refactory_dsh.snippet.run`); for a
+    #: callable that finds its files by role (`nn.by_declaration` with ``files``), the
+    #: name each built file is read under, ``{"reads": {built: read as}}``
+    #: (`nn.declared_files`). Set by edits that rename a step's files (a copy of code,
+    #: ``insert``'s 'takes_over'), never by a proposal.
+    renames: dict[str, dict[str, str | None]] | None = None
 
     def __post_init__(self) -> None:
         if self.tool_policy is not None and self.tool_policy != "none":
@@ -610,6 +660,8 @@ class Node:
 
         if self.knob_outputs is not None:
             self.knob_outputs = _knob_outputs(self)
+        if self.renames is not None:
+            self.renames = _renames(self)
 
         # field_bindings: structural validation only (pair shape, knob membership).
         # Domain rules (bindable fields, parallelism on data nodes) are checked
@@ -716,6 +768,8 @@ class Node:
             **({"inputs": list(self.inputs)} if self.inputs else {}),
             **({"knob_outputs": {out: list(knobs) for out, knobs in self.knob_outputs.items()}}
                if self.knob_outputs is not None else {}),
+            **({"renames": {key: dict(table) for key, table in self.renames.items()}}
+               if self.renames else {}),
         }
 
     @classmethod
@@ -774,6 +828,7 @@ class Node:
             code=str(state.get("code") or ""),
             inputs=tuple(state.get("inputs") or ()),
             knob_outputs=state.get("knob_outputs"),
+            renames=state.get("renames"),
         )
 
     def bound_knob(self, field_name: str) -> str:

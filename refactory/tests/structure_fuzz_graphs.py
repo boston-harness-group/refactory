@@ -33,6 +33,7 @@ TASK_REF = f"{MODULE}:FuzzTask"
 MISSING_DIR = ".fuzz-missing"
 
 
+@nn.by_declaration
 def step(ctx: Any) -> dict[str, Any]:
     """Read every declared input, then write every declared file and set every declared
     fact, deterministically.
@@ -71,6 +72,7 @@ def fail(ctx: Any) -> dict[str, Any]:
 FAIL = f"{MODULE}:fail"
 
 
+@nn.by_declaration
 def proceed(ctx: Any) -> str:
     """A fn gate that always answers ``proceed``."""
     return "proceed"
@@ -80,6 +82,7 @@ def proceed(ctx: Any) -> str:
 BINARY = bytes(range(256)) * 4
 
 
+@nn.by_declaration
 def render(ctx: Any) -> dict[str, Any]:
     """Like `step`, but every declared write that is not ``.txt`` gets bytes that are not
     text (`BINARY`): a step whose output is a file a model cannot read as text."""

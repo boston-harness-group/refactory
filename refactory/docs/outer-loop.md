@@ -2228,6 +2228,7 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | node field: `code` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `inputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `rewire` | - |
 | node field: `knob_outputs` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *excluded by decision: the mode's declaration of what its op does* | - |
+| node field: `renames` | `add_node`, `insert`, `split`, `branch`, `parallelize` | `insert` | - |
 | edge form: `plain` | `add_edge`, `insert_after`, `insert_before`, `insert` | `remove_edge`, `add_edge`, `serialize`, `remove` | `remove_edge`, `remove` |
 | edge form: `verdict` | `add_edge`, `loop`, `wrap`, `route` | `remove_edge`, `add_edge` | `remove_edge`, `remove` |
 | edge form: `reloop` | `loop`, `add_edge` | `remove_edge`, `add_edge` | `remove_edge`, `remove` |

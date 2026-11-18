@@ -152,6 +152,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["inputs"] = list(node.inputs)
         if node.knob_outputs is not None:
             entry["knob_outputs"] = {out: list(k) for out, k in node.knob_outputs.items()}
+        if (node.renames or {}).get("reads"):
+            # The name each built file is read under (`nn.declared_files`), as the walker
+            # hands it to its child.
+            entry["read_renames"] = dict(node.renames["reads"])
         if node_id in blind:
             entry["blind_reloops"] = blind[node_id]
         if needs_snippet_spec(node):

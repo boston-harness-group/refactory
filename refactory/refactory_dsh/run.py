@@ -378,6 +378,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
                 result["snippet"] = dict(entry["snippet"])
             if isinstance(entry.get("blind_reloops"), dict):
                 result["blind_reloops"] = dict(entry["blind_reloops"])
+            if isinstance(entry.get("read_renames"), dict):
+                result["read_renames"] = dict(entry["read_renames"])
             return result
     manifest = _manifest()
     if str(manifest.get("id")) == node_id:
@@ -444,6 +446,7 @@ def build_op_context(
     ctx._declared = tuple(declared["writes"])  # noqa: SLF001
     ctx._declared_reads = tuple(declared["reads"])  # noqa: SLF001
     ctx._declared_facts = tuple(declared["produces"])  # noqa: SLF001
+    ctx.read_renames = dict(declared.get("read_renames") or {})
     # A code or verdict node's declaration (`refactory_dsh.snippet`), as the walker hands it.
     ctx.snippet = declared.get("snippet")
     return ctx

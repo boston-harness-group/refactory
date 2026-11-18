@@ -447,36 +447,25 @@ def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
     return spec
 
 
-def _renamed_code(code: str, source: Node, node_id: str, facts: Sequence[str],
-                  files: Sequence[str]) -> str:
-    """``code`` copied from ``source`` for a step with outputs of its own: it runs as it
-    did, and what it returns under ``source``'s fact and file names is renamed to the
-    copy's, in declaration order (one the copy does not declare is dropped). The code
-    names its outputs itself, so a bare copy returns the original's and is refused at run
-    time. The names are the copy's own, so a copy of a copy wraps a wrapper soundly. Code
-    whose ``main`` calls itself calls the wrapper and is renamed twice, which changes
-    nothing: the copy's names are fresh, never one of ``source``'s."""
-    if list(source.produces) == list(facts) and list(source.writes) == list(files):
-        return code
-    tag = re.sub(r"\W", "_", node_id)
-    fact_names = {old: (facts[i] if i < len(facts) else None)
-                  for i, old in enumerate(source.produces)}
-    file_names = {old: (files[i] if i < len(files) else None)
-                  for i, old in enumerate(source.writes)}
-    return (f"{code.rstrip()}\n\n\n"
-            f"_main_before_{tag} = main\n"
-            f"_names_for_{tag} = {{'facts': {fact_names!r}, 'files': {file_names!r}}}\n\n\n"
-            "def main(inp):\n"
-            f"    out = _main_before_{tag}(inp)\n"
-            "    if not isinstance(out, dict):\n"
-            "        return out\n"
-            "    renamed = dict(out)\n"
-            f"    for key, names in _names_for_{tag}.items():\n"
-            "        given = out.get(key)\n"
-            "        if isinstance(given, dict):\n"
-            "            renamed[key] = {names.get(k, k): v for k, v in given.items()\n"
-            "                            if names.get(k, k) is not None}\n"
-            "    return renamed\n")
+def _output_renames(source: Node, facts: Sequence[str], files: Sequence[str]
+                    ) -> dict[str, dict[str, str | None]] | None:
+    """The ``renames`` (`graph.Node.renames`) of a code step that runs ``source``'s code
+    but declares ``facts`` and ``files`` in place of ``source``'s outputs, in declaration
+    order (an output past the new lists is dropped): what the code returns -- under
+    ``source``'s names, or the names ``source``'s own renames map -- recorded under the new
+    ones. The code is never changed, so it stays right however it is rewritten later."""
+    out: dict[str, dict[str, str | None]] = {}
+    for key, declared, new in (("facts", source.produces, facts),
+                               ("files", source.writes, files)):
+        before = dict((source.renames or {}).get(key) or {})
+        returned_as = {name: returned for returned, name in before.items() if name is not None}
+        table: dict[str, str | None] = {r: None for r, name in before.items() if name is None}
+        for index, name in enumerate(declared):
+            table[returned_as.get(name, name)] = new[index] if index < len(new) else None
+        table = {returned: name for returned, name in table.items() if returned != name}
+        if table:
+            out[key] = table
+    return out or None
 
 
 def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str,
@@ -553,10 +542,13 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
     if kind == "code":
         made = list(produces) if produces is not None else [node_id]
         code = spec["text"] or _default_code(made, list(writes or ()))
+        renames = None
         if like is not None and spec.get("_copied") is not None and code == spec["_copied"]:
-            code = _renamed_code(code, like, node_id, made, list(writes or ()))
+            renames = _output_renames(like, made, list(writes or ()))
         node = {"id": node_id, "kind": "op", "call": snippet.RUN, "code": code,
                 "reads": files, "inputs": facts, "produces": made}
+        if renames:
+            node["renames"] = renames
         if writes:
             node["writes"] = list(writes)
         out.append(node)
@@ -1119,22 +1111,92 @@ def _code_text(node: Node, state: Mapping[str, Any]) -> str | None:
     return str(node.code or "")
 
 
+def _marked(node: Node, mark: str) -> bool:
+    """Whether an op or gate's callable carries ``mark`` (False when it does not resolve)."""
+    from .resolve import resolve
+
+    call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+    if not call:
+        return False
+    try:
+        return bool(getattr(resolve(call), mark, False))
+    except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
+        return False
+
+
+def _by_declaration(node: Node) -> bool:
+    """Whether an op or gate's callable reads, writes and sets only what its node declares
+    (marked `nn.by_declaration`), so its inputs and outputs can be renamed."""
+    return _marked(node, "by_declaration")
+
+
+def _roles(node: Node) -> tuple[str, ...] | None:
+    """The files ``node``'s callable was built to read, one per role, when it finds them by
+    role (`nn.by_declaration` with ``files``, `nn.declared_files`); else None."""
+    from .resolve import resolve
+
+    call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+    if not call:
+        return None
+    try:
+        roles = getattr(resolve(call), "declared_files", None)
+    except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
+        return None
+    return tuple(roles) if roles is not None else None
+
+
+def _read_renames(node: Node, files: Mapping[str, str]) -> dict[str, str] | None:
+    """For a step that finds its files by role (`_roles`) or shows their names (collect),
+    its ``renames`` ``reads`` once the files in ``files`` (old -> new) are renamed: each
+    built name mapped to the name it is read under, so the step still knows which file is
+    which whatever else changes in its reads (`nn.declared_files`), and shows each under
+    the name it was built with. None for any other step, or when nothing changes."""
+    roles = _roles(node)
+    before = dict((node.renames or {}).get("reads") or {})
+    if roles is None and _marked(node, "shows_names"):
+        # It shows each file under its name (collect): the names it was built with.
+        built_as = {read: built for built, read in before.items()}
+        roles = tuple(built_as.get(read, read) for read in node.reads)
+    if roles is None:
+        return None
+    after = {built: files.get(before.get(built, built), before.get(built, built))
+             for built in roles}
+    after = {built: name for built, name in after.items() if name != built}
+    return after if after != before else None
+
+
+def _names_itself(node: Node, code: str | None, name: str) -> bool:
+    """Whether ``node`` may name ``name`` itself (its code says it, or its callable is not
+    marked `nn.by_declaration`): renaming its declaration does not reach it."""
+    if code is not None:
+        return re.search(rf"\b{re.escape(name)}\b", code) is not None
+    return not _by_declaration(node)
+
+
 def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side: str,
                     anchor: Node
-                    ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str]]:
+                    ) -> tuple[Node, dict[tuple[str, str], str], set[str], dict[str, str],
+                               dict[str, dict[str, str | None]] | None]:
     """What ``insert``'s 'takes_over' does: the step it takes over, the new name of each of
     that step's outputs (``(kind, name) -> new name``: ``<step>.txt`` and ``<step>`` when
     free), the steps that read on under the new names -- every step that does not run
     after the new one -- and the new text of each knob they read that names a renamed
-    fact. Refused when the step does not run before the new one on every path to it, has
-    no outputs, or a reader's reading cannot be renamed: a frozen knob, a knob a step
-    after the new one reads too (it must keep the old name), or the fact named in a
-    step's code or feedback keys, which no renaming reaches."""
+    fact, and for a code step taken over the ``renames`` its run records its outputs
+    under the new names by (`_output_renames`; else None). Refused when the step does
+    not run before the new one on every path to it, has no outputs, sets them from a
+    callable that names them itself, or a reader's reading cannot be renamed: a frozen
+    knob, a knob a step after the new one reads too (it must keep the old name), a fact
+    named in a step's code or feedback keys, or a file an op or gate opens by name. No
+    renaming reaches those."""
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
     if target.kind not in ("agent", "op") or not (target.writes or target.produces):
         raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if target.kind == "op" and _code_text(target, state) is None and not _by_declaration(target):
+        raise _Refused(f"{target_id!r} runs {target.call!r}, which sets its outputs under names "
+                       "of its own; 'takes_over' cannot rename them: take over a model or code "
+                       "step")
     following = [e.target for e in graph.out_edges(anchor.id)] if side == "after" else [anchor.id]
     before = [anchor.id] if side == "after" else [e.source for e in graph.in_edges(anchor.id)]
     if side == "before":
@@ -1159,6 +1221,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             made.add((kind, new))
     readers = {n for n in graph.nodes if n not in after and n != target_id}
     facts = {old for (kind, old) in names if kind == "fact"}
+    files = {old for (kind, old) in names if kind == "file"}
     knobs = state.get("knobs") or {}
     frozen = {name for name, entry in knobs.items() if (entry.get("spec") or {}).get("frozen")}
     later_knobs = {k for n in after if n in graph.nodes
@@ -1181,14 +1244,28 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             texts[knob] = renamed
         named = sorted(facts & set(node.feedback_keys))
         code = _code_text(node, state)
-        for fact in sorted(facts & set(node.inputs)):
-            if code is None or re.search(rf"\b{re.escape(fact)}\b", code):
-                named.append(fact)
+        # A fact an op or gate reads, it reads by name unless its code says otherwise.
+        named += [fact for fact in sorted(facts & set(node.inputs))
+                  if code is None or re.search(rf"\b{re.escape(fact)}\b", code)]
+        if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
+            # An op or fn gate opens its files in its code: a renamed read reaches it only
+            # when it opens what it declares (LiveMath's notes_prompts opens
+            # compare_notes.txt by name). A model step is handed its files as declared.
+            # One whose names matter (`nn.names_matter`: select matches a label against
+            # them) would act differently on a renamed read.
+            named += [name for name in sorted(files & {*node.reads, *node.required_reads})
+                      if _names_itself(node, code, name) or _marked(node, "names_matter")]
         if named:
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
-    return target, names, readers, texts
+    renames = None
+    if _code_text(target, state) is not None:
+        # Code returns its outputs under the names it was written for: the run records
+        # them under the new ones (`graph.Node.renames`), its code as written.
+        renames = _output_renames(target, [names[("fact", n)] for n in target.produces],
+                                  [names[("file", n)] for n in target.writes])
+    return target, names, readers, texts, renames
 
 
 def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
@@ -1264,17 +1341,24 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                         **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
                            if plan is not None else {}))
     if plan is not None:
-        target, names, readers, texts = plan
+        target, names, readers, texts, renames = plan
         # The step taken over writes under new names, and every step before the new one
         # (the new one too) reads them there; the steps after it read the new step's.
         build.add(_respec(build.state, target.id, {
             **target.to_state(),
             "writes": [names[("file", n)] for n in target.writes],
-            "produces": [names[("fact", n)] for n in target.produces]}))
+            "produces": [names[("fact", n)] for n in target.produces],
+            **({"renames": renames} if renames else {})}))
+        files = {old: new for (kind, old), new in names.items() if kind == "file"}
         for reader in sorted(readers):
             node = build.graph.nodes[reader]
             before = node.to_state()
             after = _renamed_refs(before, names)
+            roles = _read_renames(node, files)
+            if roles is not None:
+                # It finds its files by role: it is told the new name of each it reads.
+                after["renames"] = {**dict(node.renames or {}), "reads": roles} if roles \
+                    else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
