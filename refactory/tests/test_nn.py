@@ -421,6 +421,7 @@ def test_every_macro_expands_to_primitives_only():
         ("route", {"after": "review"}, review),
         ("split", {"step": "finalize"}, review),
         ("merge", {"steps": ["review", "finalize"]}, review),
+        ("fallback", {"step": "solve"}, fg.DataPass().state_dict()),
     ]
     macros = [name for name in nn.edits.names() if nn.edits.is_macro(name)]
     assert sorted(macros) == sorted(set(samples) | {name for name, _e, _s in core})

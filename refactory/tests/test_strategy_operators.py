@@ -72,7 +72,8 @@ def test_a_strategy_with_no_model_draws_every_core_operator():
     written-out loop and split)."""
     reached: set[str] = set()
     plain: set[str] = set()
-    for name in ("fuzz_draft_review", "fuzz_fork_join", "fuzz_dataflow"):
+    # fuzz_data_pass for fallback, which answers only for a step in a per-item pass.
+    for name in ("fuzz_draft_review", "fuzz_fork_join", "fuzz_dataflow", "fuzz_data_pass"):
         state = sf.Applier(sf.seeds()[name]).seed_state
         rng, rng_plain = random.Random(f"ops:{name}"), random.Random(f"plain:{name}")
         for _ in range(300):

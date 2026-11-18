@@ -271,10 +271,29 @@ class ScriptedModel:
     def route(self) -> dict:
         return {"worker_backend": "dsh"}
 
-    def complete(self, prompt: str, *, system: str = "", **_: Any) -> str:
+    def complete(self, prompt: str, *, system: str = "", **kwargs: Any) -> str:
         self.log.append((self.node, prompt, system))
         self.routes.append((self.node, self.route_now))
-        return self.answers.get(self.node, "<answer>B</answer>")
+        answer = self.answers.get(self.node, "<answer>B</answer>")
+        if kwargs.get("seal"):
+            # A sealed tool session writes its outputs itself, as a real one does: each
+            # path its delivery block lists, in its workspace.
+            for output in _sealed_outputs(prompt):
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+                Path(output).write_text(f"{answer}\n")
+        return answer
+
+
+def _sealed_outputs(prompt: str) -> list[str]:
+    """The ``outputs`` a worker's delivery block lists (`agent_delivery`), or none."""
+    start = prompt.rfind('{\n  "node"')
+    end = prompt.find("<!-- end refactory worker execution -->", start)
+    if start < 0 or end < 0:
+        return []
+    try:
+        return list(json.loads(prompt[start:end]).get("outputs") or [])
+    except ValueError:
+        return []
 
 
 # ── invariants ────────────────────────────────────────────────────────────
@@ -1589,6 +1608,15 @@ class EditGenerator:
                 edge = rng.choice(plain)
                 return {"op": "merge", "steps": [edge.source, edge.target]}
             return {"op": "merge", "steps": [target, rng.choice(ids)]}
+        if op == "fallback":
+            # Mostly a step in a per-item pass; now and then any node, so the refusals (no
+            # pass, no outputs, a branch's end, a gate) are drawn too.
+            inside = sorted(n for n, node in graph.nodes.items()
+                            if node.kind in ("agent", "op") and graph.in_data_pass(n))
+            step = rng.choice(inside) if inside and rng.random() < 0.7 else target
+            return self._stray({"op": "fallback", "step": step,
+                                **(self.step_spec(state, sees=False) if rng.random() < 0.8
+                                   else {})})
         raise AssertionError(f"unhandled core op {op}")  # pragma: no cover
 
 
@@ -1608,17 +1636,21 @@ PATH_MARKS = (("would be ignored", "ignored field refused"),
               ("on every path to it", "takes_over: target not first"),
               ("both read", "takes_over: shared knob"),
               ("in its code or feedback keys", "takes_over: code reads"),
-              ("writes only its reply", "takes_over: agent and two files"))
+              ("writes only its reply", "takes_over: agent and two files"),
+              ("a fallback answers for a step that runs once per item",
+               "fallback: outside a pass"))
 
 
 def path_of(edit: Any, outcome: Any) -> str | None:
     """Which core-operator check an edit reached: a refusal by its words, or an accepted
-    'takes_over'."""
+    'takes_over' or 'fallback'."""
     if isinstance(outcome, list):
         text = " ".join(map(str, outcome))
         return next((label for mark, label in PATH_MARKS if mark in text), None)
     if isinstance(edit, dict) and edit.get("takes_over") is not None:
         return "takes_over accepted"
+    if isinstance(edit, dict) and edit.get("op") == "fallback":
+        return "fallback accepted"
     return None
 
 

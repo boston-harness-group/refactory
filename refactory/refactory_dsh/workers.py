@@ -749,6 +749,9 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         if getattr(node, 'missing_on_crash', None):
             # Spent retries leave the step missing, not failed (`worker_node.main`).
             payload['missing_on_crash'] = True
+        if getattr(node, 'falls_back', None):
+            # A genuine failure leaves it missing for its fallback gate (`worker_node.main`).
+            payload['falls_back'] = True
         if node.workspace:
             # Only when declared, so the spec of a node without one -- named by its
             # hash -- is the bytes it was before workspaces.

@@ -851,6 +851,10 @@ class Executor:
     _outcome: str = field(default="pending", init=False, repr=False)
     #: Whether the visit being started is a failed op's one retry (`_try_visit`).
     _retrying: bool = field(default=False, init=False, repr=False)
+    #: What each step with a fallback's declared files and facts held before its visit
+    #: (`_try_visit`), put back when it falls back (`_missing_optional`).
+    _before_visit: dict[str, tuple[dict[str, Any], dict[str, Any]]] = field(
+        default_factory=dict, init=False, repr=False)
     _next_after_completion: str | None = field(default=None, init=False, repr=False)
     _retries: set[tuple[str, str, str]] | None = field(default=None, init=False, repr=False)
     _status: str = field(default="", init=False, repr=False)
@@ -1631,9 +1635,14 @@ class Executor:
         its item goes on
         without its answer, so a gate after it can reloop and a join sees the branch
         without one, as the spine's worker records it (``missing_on_crash``).
+
+        So is a step with a fallback that genuinely failed, never for time
+        (`Graph.falls_back`, `node_retry.falls_back_on`): its fallback gate, next, sends
+        the item to the fallback step, as the spine's worker and runner record it
+        (``falls_back``).
         """
         from refactory_dsh.budgets import BudgetExhausted
-        from refactory_dsh.node_retry import leaves_no_answer
+        from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
         from refactory_dsh.run import BuildLoopStop
 
         from .fork import _record_missing, _settle_missing
@@ -1641,13 +1650,25 @@ class Executor:
         optional = any(node.id in self.graph.optional_targets_of(fork, self.ctx.knobs)
                        for fork in self.graph.nodes.values() if fork.kind == "fork")
         spent = leaves_no_answer(exc) and self.graph.missing_on_crash(node.id)
-        if not (optional or spent) or node.kind not in ("op", "agent") or isinstance(
+        fell = self.graph.falls_back(node.id) and falls_back_on(exc)
+        if not (optional or spent or fell) or node.kind not in ("op", "agent") or isinstance(
                 exc, (BudgetExhausted, BuildLoopStop, OpTimeoutError, OpOutcomeUnknown)):
             return False
         error = f"{type(exc).__name__}: {exc}"
         _record_missing(self.ctx.workdir, node.id, error)
         _settle_missing(self.ctx.workdir, [node], error)
-        from refactory_dsh.node_retry import record_spent
+        from refactory_dsh.node_retry import record_spent, restore_outputs
+
+        if fell:
+            # Its outputs as its visit found them (`_try_visit`): its fallback sees what it
+            # saw, and nothing the failed step left half-made is graded.
+            files, facts = self._before_visit.pop(node.id, ({}, {}))
+            restore_outputs(self.ctx.workdir, files)
+            for fact in node.produces:
+                if fact in facts:
+                    self.ctx.facts[fact] = facts[fact]
+                else:
+                    self.ctx.facts.pop(fact, None)
 
         # Why it has no answer, when its type says (`node_retry.record_spent`): a spent
         # retry, the output limit, or an optional branch that ended for time.
@@ -1655,8 +1676,16 @@ class Executor:
         return True
 
     def _try_visit(self, node: Node, step_started: float) -> tuple[str | None, str | None]:
-        """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``."""
-        if not self.enable_recovery or node.kind != "op":
+        """Wrap ``_visit`` with FnNode-only one-retry under ``enable_recovery``, and for a
+        step with a fallback always, as the spine's runner retries every op once
+        (`run.run_node`): its fallback answers after the same two attempts on both."""
+        if self.graph.falls_back(node.id):
+            from refactory_dsh.node_retry import snapshot_outputs
+
+            self._before_visit[node.id] = (
+                snapshot_outputs(self.ctx.workdir, node.writes),
+                {f: copy.deepcopy(self.ctx.facts[f]) for f in node.produces if f in self.ctx.facts})
+        if not (self.enable_recovery or self.graph.falls_back(node.id)) or node.kind != "op":
             return self._visit(node)
 
         from refactory_dsh.budgets import BudgetExhausted
@@ -1988,6 +2017,12 @@ class Executor:
             raise
         self._outcome = "completed"
         self._next_after_completion = result[0]
+        if node.kind in ("op", "agent"):
+            from refactory_dsh.node_retry import clear_spent
+
+            # A step that answered is not missing, whatever an earlier visit left: a
+            # fallback gate reads only this visit (`run.run_node` clears it on the spine).
+            clear_spent(self.ctx.workdir, node.id)
         if node.kind != "gate":  # a gate is recorded with its verdict
             self.record.complete(node)
         emit(self.ctx.workdir, "node_completed", node_id=node.id, state="completed", summary=render(node.notes, self.ctx))

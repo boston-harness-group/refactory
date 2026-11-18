@@ -34,6 +34,7 @@ directory's declarations file, written by the lowering.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -41,7 +42,7 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -333,22 +334,87 @@ def _subgraph_declared_reads(workdir: Path, node: Node) -> tuple[str, ...]:
     return pass_read_through(declared, body if isinstance(body, list) else set(declared), node.writes)
 
 
+def write_whole(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` whole: write a temporary file in the same folder,
+    flush it to disk, then rename it over ``path``, so a reader sees the old file or the
+    new one, never half of either."""
+    import tempfile
+
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def record_lock(path: Path) -> Iterator[None]:
+    """Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
+    every process and thread that opens it waits for the holder."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(f"{path.name}.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _set_aside(path: Path, why: str) -> None:
+    """Keep a record file that cannot be read as ``<name>.unreadable.<ns>`` (a name no
+    earlier one has) and say so on stderr: evidence is kept, never taken for empty, and
+    never fails the item it describes. Call it holding the file's `record_lock`."""
+    aside = path.with_name(f"{path.name}.unreadable.{time.time_ns()}")
+    os.replace(path, aside)
+    print(f"refactory: items warning: {path} cannot be read ({why}); kept as {aside}",
+          file=sys.stderr)
+
+
+def update_record_file(path: Path, change: Callable[[Any], Any], empty: Callable[[], Any]) -> Any:
+    """Read, change and rewrite the JSON record file ``path`` under an exclusive lock
+    (``<name>.lock`` beside it), replacing it whole (`write_whole`). Concurrent writers
+    of one pass (a fork's parallel branches, each its own process on the spine; threads
+    hold their own lock handle) each see the others' entries. A missing file starts
+    from ``empty()``; one that cannot be read, or holds another kind of value, is kept
+    aside (`_set_aside`) and the record starts again from ``empty()``. ``change`` edits
+    the value in place or returns a new one; the value written back is returned."""
+    with record_lock(path):
+        value = empty()
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text())
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                _set_aside(path, str(exc))
+            else:
+                if isinstance(loaded, type(value)):
+                    value = loaded
+                else:
+                    _set_aside(path, f"a {type(loaded).__name__}, not a {type(value).__name__}")
+        changed = change(value)
+        value = value if changed is None else changed
+        write_whole(path, json.dumps(value, default=str))
+        return value
+
+
+def _append_to_sidecar(workdir: Path, entry: dict[str, Any]) -> None:
+    update_record_file(workdir / EXCHANGES_SIDECAR, lambda existing: existing.append(entry), list)
+
+
 def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
-    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar, under
+    its lock (`update_record_file`): a fork's branches run in one pass folder.
 
     Called from agent execution in both runtimes so that ``command_end`` can
     include per-node exchanges in the item record.
     """
-    path = workdir / EXCHANGES_SIDECAR
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, Any]] = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-    existing.append({"node": node, "prompt": prompt, "response": response})
-    path.write_text(json.dumps(existing, default=str))
+    _append_to_sidecar(workdir, {"node": node, "prompt": prompt, "response": response})
 
 
 #: The kinds of step visit an item's record keeps beside its model calls (``steps``):
@@ -402,31 +468,29 @@ def gate_visit(node: str, verdict: Any) -> dict[str, Any]:
 
 def record_visit(workdir: Path, visit: dict[str, Any]) -> None:
     """Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
-    beside the model calls; `make_item_record` files it under ``steps``. The spine's
-    runner calls it inside a data-node pass (the walker keeps visits in memory)."""
-    path = workdir / EXCHANGES_SIDECAR
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, Any]] = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-    existing.append(visit)
-    path.write_text(json.dumps(existing, default=str))
+    beside the model calls, under its lock (`update_record_file`); `make_item_record`
+    files it under ``steps``. The spine's runner calls it inside a data-node pass (the
+    walker keeps visits in memory)."""
+    _append_to_sidecar(workdir, visit)
 
 
 def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
-    """Read per-item exchanges from the sidecar, then remove the file."""
+    """Read per-item exchanges from the sidecar, then remove the file, under its lock.
+    One that cannot be read is kept aside (`_set_aside`), never taken for an item with
+    no exchanges."""
     path = workdir / EXCHANGES_SIDECAR
     if not path.exists():
         return []
-    try:
-        data = json.loads(path.read_text())
+    with record_lock(path):
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            return []
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _set_aside(path, str(exc))
+            return []
         path.unlink(missing_ok=True)
         return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
 
 
 #: What every model-completion timeout's message starts with
@@ -491,6 +555,18 @@ def first_line(text: Any) -> str:
     return str(text or "").split("\n", 1)[0]
 
 
+#: How a code step that ran over its fixed wall (`snippet.SnippetTimeout`,
+#: `snippet.WALL_S`) reaches a record as text, anchored at a line's start: the walker's
+#: ``"<node>: SnippetTimeout: "`` and the spine runner's stderr ``"SnippetTimeout: "``
+#: (`run.main`). Its code's fault, so never a harness timeout; only no fallback answers it
+#: (`node_retry.falls_back_on`).
+SNIPPET_TIMEOUT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )?SnippetTimeout: the code ran over its ",
+                                  re.MULTILINE)
+
+#: The same for a sandbox that did not start (`snippet.SandboxUnavailable`): the machine.
+SANDBOX_UNAVAILABLE_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )?SandboxUnavailable: ",
+                                      re.MULTILINE)
+
 #: A `model.HarnessIncident` that crossed a process as text: its message starts with
 #: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "`` or the spine's
 #: (its worker's marker line), on the error's first line only (`first_line`): a later
@@ -513,7 +589,8 @@ def _incident_line(head: str) -> bool:
 
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a harness fault
-    (`model.HarnessIncident`: a grader or sandbox whose own machinery failed, not the
+    (`model.HarnessIncident`: a grader or sandbox whose own machinery failed, or a code
+    step whose sandbox did not start, `snippet.SandboxUnavailable`: the machine, not the
     candidate), ``"backstop"`` for a session still writing at the harness backstop
     (`model.HarnessBackstop`: the model's own failure, scored like a wrong answer),
     ``"declared_timeout"`` for one stopped at its node's declared wall
@@ -525,12 +602,14 @@ def error_kind(error: BaseException) -> str:
     out ..."``, the spine's worker stderr ``"worker: model completion timed out ..."`` --
     wrapped in a RuntimeError on both, so only that anchored prefix decides
     (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
-    ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
+    ``SnippetTimeout`` (its code's fault, a target), or a text that merely says "timed
+    out", is the pipeline's.
     """
     from refactory_dsh.model import (
         CompletionTimeout, DeclaredTimeout, HarnessBackstop, HarnessIncident,
     )
     from refactory_dsh.node_retry import RetriesExhausted
+    from refactory_dsh.snippet import SandboxUnavailable
 
     head = first_line(error)
     if isinstance(error, HarnessIncident) or _incident_line(head):
@@ -774,8 +853,9 @@ def _spent_phrase(info: dict[str, Any]) -> str:
     cause = {"output_limit": "reached its output limit without answering",
              "timeout": "timed out", "crash": "crashed",
              "declared_timeout": "timed out at its declared timeout_s",
-             "backstop": "was still writing at the session time limit"}.get(
-                 str(info.get("cause")), "failed")
+             "backstop": "was still writing at the session time limit",
+             "harness_incident": "hit a harness fault",
+             "step_timeout": "ran over its own time limit"}.get(str(info.get("cause")), "failed")
     sessions = info.get("sessions")
     return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
 
@@ -969,7 +1049,7 @@ def _read_pass_state(workdir: Path, node_id: str) -> dict[str, int]:
 def _write_pass_state(workdir: Path, node_id: str, state: dict[str, int]) -> None:
     path = _pass_state_path(workdir, node_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state))
+    write_whole(path, json.dumps(state))
 
 
 def _locked_pass_state_update(

@@ -256,18 +256,41 @@ def main() -> int:
             if hashlib.sha256(serialized.encode()).hexdigest() != path.stem:
                 raise ValueError('worker spec was modified after graph preparation; refusing execution')
         spec = json.loads(serialized)
+        before_visit: dict[str, Any] = {}
+        facts_before: dict[str, Any] = {}
+        if spec.get('falls_back'):
+            # Its declared files and facts before its visit, put back if it falls back.
+            from refactory_dsh.node_retry import snapshot_outputs
+            from refactory_dsh.run import _read_facts
+            before_visit = snapshot_outputs(workdir, spec.get('writes'))
+            facts_before = _read_facts(workdir)
         try:
             receipt = execute(spec, Path.cwd())
             print(json.dumps({'node': receipt['node'], 'status': receipt['status']}))
             return 0
         except Exception as error:
-            from refactory_dsh.node_retry import leaves_no_answer
+            from refactory_dsh.node_retry import falls_back_on, leaves_no_answer
             # An optional fork branch is missing on any failure; an agent step in a data
             # pass only when its retries are spent or it ran out of output without
-            # answering (`missing_on_crash`).
+            # answering (`missing_on_crash`); a step with a fallback on a genuine failure,
+            # never a timeout (`falls_back`).
+            fell = bool(spec.get('falls_back')) and falls_back_on(error)
             if spec.get('optional') or (spec.get('missing_on_crash')
-                                        and leaves_no_answer(error)):
+                                        and leaves_no_answer(error)) or fell:
                 node_id = spec.get('node_id', 'unknown')
+                if fell:
+                    # Its outputs as its visit found them: its fallback sees what it saw,
+                    # and nothing it left half-made is graded (`Executor._missing_optional`).
+                    from refactory_dsh.node_retry import restore_outputs
+                    from refactory_dsh.run import declarations, update_facts
+                    restore_outputs(workdir, before_visit)
+                    produces = spec.get('produces')
+                    if produces is None:
+                        produces = declarations(workdir, node_id)['produces']
+                    if produces:
+                        update_facts(workdir, {f: facts_before[f] for f in produces
+                                               if f in facts_before},
+                                     tuple(f for f in produces if f not in facts_before))
                 reviews_dir = workdir / 'reviews'
                 reviews_dir.mkdir(parents=True, exist_ok=True)
                 (reviews_dir / f'{node_id}-missing.txt').write_text(

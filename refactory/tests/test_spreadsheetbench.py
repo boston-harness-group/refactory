@@ -392,9 +392,15 @@ def test_hostile_code_walking_the_filesystem_finds_no_golden_file(tmp_path, sb_e
         copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(golden, copy)
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    walk = ("```python\nimport os, openpyxl\nfound = []\n"
+    # The system's own read-only trees and the interpreter's are left out: no copy is
+    # planted there, and walking them can outlast the code's 120 s run limit on a slow
+    # machine (a GitHub runner did), which reads as the model's error, not a find.
+    walk = ("```python\nimport os, sys, openpyxl\nfound = []\n"
+            "skip = ('/proc', '/sys', '/dev', '/usr', '/lib', '/lib64', '/bin', '/sbin', "
+            "'/etc', *(p for p in {os.path.realpath(sys.prefix), "
+            "os.path.realpath(sys.base_prefix)} if p != '/'))\n"
             "for top, dirs, files in os.walk('/'):\n"
-            "    if top == '/proc' or top.startswith('/proc/') or top.startswith('/sys'):\n"
+            "    if any(top == s or top.startswith(s.rstrip('/') + '/') for s in skip):\n"
             "        dirs[:] = []\n        continue\n"
             f"    found += [os.path.join(top, f) for f in files if f == {golden.name!r}]\n"
             "if found:\n    raise SystemExit('FOUND ' + repr(found))\n"

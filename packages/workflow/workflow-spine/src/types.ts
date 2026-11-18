@@ -74,6 +74,12 @@ export interface WorkflowNode {
    * (Python's `Graph.missing_on_crash`), as a fork's optional target does.
    */
   missing_on_crash?: boolean
+  /**
+   * `AgentNode` or `FnNode` with a fallback: a genuine failure, never a timeout, leaves it
+   * missing, and its fallback gate sends the item to the fallback step (Python's
+   * `Graph.falls_back`).
+   */
+  falls_back?: boolean
   /** `JoinNode`: the branch exits this barrier waits for. */
   sources?: string[]
   /** `AgentNode`: the annotation that lets a director hot-plug its planned children. */

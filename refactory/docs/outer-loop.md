@@ -1696,7 +1696,7 @@ refused `E-code-nodes`. The probe's answer, passing or failing, is kept for 5 mi
 one probe, not one per op; and one request's answer decides both whether it describes
 code nodes and whether it refuses one (`ProposalContext.sandbox`). The answer only says
 whether to try: code still runs only inside the sandbox. A failed code op is retried once, as every op is: always on the
-spine, and on the walker when recovery is on. A snippet is pure, so the retry changes
+spine, and on the walker when recovery is on or the step has a fallback. A snippet is pure, so the retry changes
 nothing but time.
 
 **Checks before anything runs.** V18 is defence in depth; the sandbox is the boundary.
