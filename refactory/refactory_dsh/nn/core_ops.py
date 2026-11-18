@@ -12,7 +12,8 @@ to every rule a hand-written edit is. They say nothing about what a step is for:
   once between a fork and a join;
 - ``serialize``: a fork's branches one after another, in their declared order;
 - ``branch``: a new step as another (optionally optional) branch of an existing fork;
-- ``rewire``: what an existing step sees (the task's own input, other steps' outputs);
+- ``rewire``: what an existing step sees (the task's own input, other steps' outputs),
+  and with ``text`` an agent's instructions too, in place (a fork's branch stays one);
 - ``loop`` (one-line form): a judge after a step that can send it back with a reason;
 - ``route``: a judge after a step choosing among labelled next steps that rejoin;
 - ``split`` (one-line form): a step replaced by two new ones, or by one (replace);
@@ -2031,6 +2032,14 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
     if _tools_beside(node):
         raise _Refused(f"{node.id!r} uses tools in the run directory, where it can read "
                        "anything; rewiring its declared inputs would not change what it sees")
+    own = edit.get("text")
+    if own is not None:
+        if kind != "agent":
+            raise _Refused(f"'text' is an agent's new instructions; {node.id!r} is a code "
+                           "step, so rewire what it sees alone, or replace it (split into one "
+                           "code step of your own text)")
+        if not isinstance(own, str) or not own.strip():
+            raise _Refused("'text' is the step's new instructions: a non-empty string")
     gather = f"{node.id}_inputs"
     helper = gather if gather in _owned(graph, node.id, state) else None
     there = set(_available(graph).get(helper or node.id, set()))
@@ -2038,7 +2047,7 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
     now = _consumed(node, state)
     if helper is not None:
         now = (now - {("fact", gather)}) | _consumed(graph.nodes[helper], state)
-    if set(seen) == _readable(graph, state, now):
+    if own is None and set(seen) == _readable(graph, state, now):
         raise _Refused(f"{node.id!r} already sees exactly that "
                        f"({', '.join(name for _k, name in seen) or 'nothing'}), so rewiring "
                        "would change nothing")
@@ -2046,14 +2055,32 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
         knob = _task_knob(node)
         if knob is not None and len(graph.knob_consumers().get(knob, ())) > 1:
             raise _Refused(f"{node.id!r}'s prompt knob {knob!r} is shared with other steps")
-        text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
+        text = own if own is not None else str(
+            _knob_values(state).get(knob) if knob else node.prompt_template)
         keep = {name for k, name in seen if k == "fact"} | set(state.get("knobs") or {}) | {gather}
         if text.strip() and not _strip_unseen(text, keep).strip():
+            if own is not None:
+                raise _Refused("'text' is only slots for facts the step would not see; write "
+                               "its instructions")
             raise _Refused(f"{node.id!r}'s whole prompt is a fact it would no longer see, so "
                            "rewiring would leave it no instructions; name that fact's step in "
                            "'sees', or give it your own text: "
-                           f"{_replace_hint(node, state, edit.get('sees', [TASK]))}")
+                           f"{_own_text_hint(node, state, edit.get('sees', [TASK]))}")
     return None
+
+
+def _own_text_hint(node: Node, state: dict, sees: Any) -> str:
+    """How to give ``node`` its own instructions with what it sees: this rewire with
+    'text', which keeps its id and so its place in a fork or join, when it applies to the
+    graph; else the replacing split (`_replace_hint`)."""
+    edit = {"op": "rewire", "step": node.id, "sees": sees, "text": "<what it does>"}
+    try:
+        if _edits().precheck(edit, state) is None:
+            _edits().apply(edit, state)
+            return f"replace it with {json.dumps(edit)}"
+    except _edits().EditError:
+        pass
+    return _replace_hint(node, state, sees)
 
 
 def _expand_rewire(edit: dict, state: dict) -> list[dict]:
@@ -2075,7 +2102,12 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
         build.add(_respec(build.state, node.id, new_state))
         return build.steps
     knob = _task_knob(node)
-    text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
+    before = text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
+    if edit.get("text") is not None:
+        # Its own instructions, in place: the same id, outputs and place in any fork or
+        # join, so every reader and role name stays. A prompt that was not a knob becomes
+        # its own ``<id>__task`` when the node is added again (`edits._own_bindings`).
+        text = str(edit["text"])
     keep = set(facts) | set(state.get("knobs") or {})
     if helper is not None:
         build.add(_bypass(build.state, helper))
@@ -2094,7 +2126,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
         build.add([{"op": "add_node", "position": {"before": node.id},
                     "node": collect_node(gather, files, gather,
                                          notes=f"Hands {node.id} the files it sees.")}])
-    if knob is not None and new_text != text:
+    if knob is not None and new_text != before:
         build.add([{"op": "set_knob", "name": knob, "value": new_text}])
     return build.steps
 
@@ -2870,6 +2902,9 @@ def _pre_split_line(edit: dict, state: dict) -> str | None:
     _sole_out(graph, node.id)
     specs = _split_specs(node, edit, state)
     if _forks_naming(graph, node.id):
+        # A new step would take a new id, which the fork's targets, the join's sources and
+        # the role names its readers resolve by (V21) would all have to follow; an agent's
+        # replacement in place is a rewire with 'text' (its refusal names it), which keeps it.
         raise _Refused(f"{node.id!r} is a fork's branch or a join's source; insert a step before "
                        "or after it instead")
     last = specs[-1]
@@ -3190,9 +3225,12 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "rewire": {
         "reads_as": ('sees', 'told'),
-        "fields": ("step", "sees"),
+        "fields": ("step", "sees", "text"),
         "line": f"change what a step sees: \"task\" ({TASK_MEANING}), step ids (their "
-                "outputs), or single fact or file names there before it (that input alone)",
+                "outputs), or single fact or file names there before it (that input alone); "
+                "'text' gives an agent step new instructions too, in place: the same id, "
+                "outputs and place in a fork or join (so a branch can work from the task "
+                "alone)",
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {

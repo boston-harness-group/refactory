@@ -199,11 +199,10 @@ def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
 def test_a_refusal_names_the_exact_replacing_edit_and_that_edit_applies():
     state = _start_state()
     refused = _rows(_section(state))["decide"][2]
-    hint = re.search(r"replace it with (\{.*?\}\]\})", refused)
-    assert hint, refused
-    edit = json.loads(hint.group(1))
-    assert edit == {"op": "split", "step": "decide",
-                    "into": [{"kind": "agent", "text": "<what it does>", "sees": ["task"]}]}
+    at = refused.index("replace it with ") + len("replace it with ")
+    edit = json.JSONDecoder().raw_decode(refused, at)[0]
+    assert edit == {"op": "rewire", "step": "decide", "sees": ["task"],
+                    "text": "<what it does>"}
     assert _outcome(edit, state) is None
     # The same exact edit for a data pass's ends, where the replacement is code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state)
@@ -217,10 +216,10 @@ def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s()
     split an attempt refuses (E-protected). The attempt checks the hinted edit itself."""
     state = _start_state()
     rewire = {"op": "rewire", "step": "decide", "sees": ["task"]}
-    assert '"op": "split"' in nn_edits.precheck(rewire, state)
+    assert '"op": "rewire"' in nn_edits.precheck(rewire, state).split("replace it with ")[1]
     reason = _outcome(rewire, state, protected=("decide",))
     assert "replacing it is refused too (E-protected" in reason, reason
-    assert '"op": "split"' not in reason
+    assert "replace it with" not in reason
     # A code replacement refused the same way leaves no note about its default code.
     reason = _outcome({"op": "remove", "step": "prepare"}, state, protected=("data",))
     assert "replacing it is refused too (E-protected: node 'data'" in reason, reason
@@ -228,12 +227,16 @@ def test_a_replacing_hint_is_held_to_the_attempt_s_checks_not_only_the_graph_s()
 
 
 def test_a_refusal_never_names_a_replacing_edit_that_would_be_refused():
-    """Where the replacement is refused too (a fork's branch; a step alone reading a frozen
-    knob), the hint says so with that refusal instead of naming the edit."""
+    """Where the replacement is refused too (a step alone reading a frozen knob), the hint
+    says so with that refusal instead of naming the edit; a fork's branch is replaced in
+    place by a rewire with its own text, which the row names and which applies."""
     state = _start_state()
     refused = _rows(_section(state))["hypotheses"][2]
-    assert "replacing it is refused too ('hypotheses' is a fork's branch" in refused, refused
-    assert '"op": "split"' not in refused
+    assert "refused too" not in refused, refused
+    named = [json.dumps(json.JSONDecoder().raw_decode(refused, at.end())[0])
+             for at in re.finditer("replace it with ", refused)]
+    assert named and all(json.loads(edit)["op"] == "rewire" for edit in named), refused
+    assert all(_outcome(json.loads(edit), state) is None for edit in named), refused
     _package, mode = registry.resolve(Path("."), "livemath/solver")
     solver = mode().state_dict()
     reason = _outcome({"op": "remove", "step": "solve"}, solver)

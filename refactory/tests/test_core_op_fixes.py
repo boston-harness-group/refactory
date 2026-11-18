@@ -937,3 +937,97 @@ def test_a_co_writer_whose_callable_names_its_outputs_is_refused():
                    "text": "Final.", "takes_over": "decide"})
     assert isinstance(refused, list), refused
     assert "'ofb' writes 'decide''s outputs too" in refused[0], refused
+
+
+# ── a fork's branch works from the task only: rewire with its own text ─────
+
+
+#: S4's hypotheses branch reads its whole prompt from notes_prompts (built from compare's
+#: notes); this one edit makes it work from the task alone, in its fork.
+OWN = "Work from the question alone: list the hypotheses each option needs."
+BRANCH_REWIRE = {"op": "rewire", "step": "hypotheses", "sees": ["task"], "text": OWN}
+REPLIES = {"compare": "COMPARE-NOTES", "hypotheses": "HYPOTHESES-REPLY",
+           "precision": "PRECISION-REPLY"}
+
+
+def test_a_rewire_with_text_keeps_a_branch_in_its_fork_seeing_the_task_only():
+    out = _s4(BRANCH_REWIRE)
+    assert not isinstance(out, list), out
+    graph = Graph.from_state(out.state["graph"])
+    assert graph.nodes["step_fork"].targets == ("precision", "hypotheses")
+    assert graph.nodes["step_join"].sources == ("precision", "hypotheses")
+    branch = graph.nodes["hypotheses"]
+    assert branch.writes == ("hypotheses_notes.txt",)
+    assert ("prompt_template", "hypotheses__task") in branch.field_bindings
+    task = out.state["knobs"]["hypotheses__task"]["value"]
+    assert task.startswith(OWN) and "{{user_prompt}}" in task
+    assert "hypotheses_prompt" not in task
+    # The other branch keeps the shared op's other output.
+    assert graph.nodes["precision"].prompt_template == "{{precision_prompt}}"
+    assert "precision_prompt" in graph.nodes["notes_prompts"].produces
+
+
+def test_a_branch_whose_whole_prompt_is_a_fact_names_the_rewire_that_applies():
+    """Without 'text' the rewire would leave the branch no instructions (and a split cannot
+    replace a fork's branch): the refusal names the rewire with 'text', which applies."""
+    refused = _s4({"op": "rewire", "step": "hypotheses", "sees": ["task"]})
+    assert isinstance(refused, list), refused
+    hint = json.loads(refused[0].split("replace it with ", 1)[1])
+    assert hint == {"op": "rewire", "step": "hypotheses", "sees": ["task"],
+                    "text": "<what it does>"}, refused
+    assert not isinstance(_s4(hint), list)
+
+
+@pytest.mark.parametrize("edit,reason", [
+    ({**BRANCH_REWIRE, "text": " "}, "'text' is the step's new instructions"),
+    ({**BRANCH_REWIRE, "text": "{{hypotheses_prompt}}"}, "'text' is only slots for facts"),
+    ({"op": "rewire", "step": "prepare", "sees": ["task"], "text": "x"}, "is a plain op"),
+])
+def test_a_rewire_s_text_is_an_agent_s_own_instructions(edit, reason):
+    refused = _s4(edit)
+    assert isinstance(refused, list) and reason in refused[0], refused
+
+
+def _rewired_branch():
+    out = _s4(BRANCH_REWIRE)
+    assert not isinstance(out, list), out
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+def _branch_prompts_hold(prompts: dict[str, list[str]]) -> None:
+    assert prompts["hypotheses"] and all(OWN in p and "COMPARE-NOTES" not in p
+                                         for p in prompts["hypotheses"]), prompts["hypotheses"]
+    assert prompts["precision"] and all("COMPARE-NOTES" in p for p in prompts["precision"])
+    assert prompts["decide"] and all("HYPOTHESES-REPLY" in p and "PRECISION-REPLY" in p
+                                     for p in prompts["decide"])
+
+
+def test_the_rewired_branch_works_from_the_task_on_the_walker(tmp_path, monkeypatch):
+    mode, _state = _rewired_branch()
+    model = _StepModel(REPLIES)
+    _walk(mode, model, tmp_path, monkeypatch)
+    prompts: dict[str, list[str]] = {"hypotheses": [], "precision": [], "decide": []}
+    for node, prompt, _system in model.log:
+        prompts.setdefault(node, []).append(prompt)
+    _branch_prompts_hold(prompts)
+
+
+@needs_spine
+def test_the_rewired_branch_works_from_the_task_on_the_spine(tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _rewired_branch()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, agent_responses=REPLIES,
+                  mode_state=state) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        prompts: dict[str, list[str]] = {"hypotheses": [], "precision": [], "decide": []}
+        for exchange in record["exchanges"]:
+            prompts.setdefault(exchange["node"], []).append(exchange["prompt"])
+        _branch_prompts_hold(prompts)
