@@ -878,12 +878,16 @@ def test_the_loop_says_what_a_repair_dropped_in_the_next_request_and_keeps_it(tm
         repairs=[{"edits": [_patch("Be careful.")], "why": "quoted the target"}])
     loop = _repair_run(tmp_path, monkeypatch, client)
     slim = next(p for p in client.prompts if p.startswith("# Repair a refused proposal"))
-    assert "Keep every text it wrote" in slim and "never deleting it" in slim
+    assert "Keep every text it wrote" in slim and "keep the edit without it" in slim
     [rejection] = loop.rejections
     assert rejection.repaired and rejection.dropped == f"set_knob 'patch' ({len(long)} chars)"
     assert f'"dropped": "{rejection.dropped}"' in (loop.root / "journal.jsonl").read_text()
     request = loop._context().render()
     assert f"`{rejection.repaired}` is your refused proposal as a slim repair fixed it" in request
+    # Next to the refusals, not among the trace numbers.
+    assert request.index("## Your repaired proposals") < request.index(rejection.dropped)
+    assert rejection.dropped not in request[request.index("## Evidence from the traces"):
+                                            request.index("## Your repaired proposals")]
     assert rejection.dropped in request
     from test_val_gate import _loop
     from test_compound_proposals import TwoLevels

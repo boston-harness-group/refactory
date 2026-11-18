@@ -467,7 +467,7 @@ def test_the_traces_carry_no_worker_receipts_or_paths(tmp_path, monkeypatch):
                                         "failures_by_cause": {"CompletionTimeout": 1}}}
     section = _traces_section(ProposalContext(traces=[gradient]).render())
     assert "w-0001" not in section and "/runs/" not in section and "workers" not in section
-    assert "(3019 chars)" in section and "CompletionTimeout" in section
+    assert "3019 chars" in section and "CompletionTimeout" in section
     assert len(section) < 1500
 
 

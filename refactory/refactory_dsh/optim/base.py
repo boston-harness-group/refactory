@@ -636,7 +636,8 @@ REFUSED_SHOWN = 2
 REFUSED_EDITS_CHARS = 4000
 
 
-def refused_lines(refused: Sequence[Mapping[str, Any]]) -> list[str]:
+def refused_lines(refused: Sequence[Mapping[str, Any]],
+                  homes: Mapping[str, str] | None = None) -> list[str]:
     """The latest refused proposals as written, each with its reasons, for a retry."""
     shown = [entry for entry in refused if entry.get("edit")][-REFUSED_SHOWN:]
     if not shown:
@@ -647,7 +648,7 @@ def refused_lines(refused: Sequence[Mapping[str, Any]]) -> list[str]:
         edit = entry.get("edit")
         steps = edit.get("edits") if isinstance(edit, dict) and "op" not in edit else edit
         lines += ["", "Refused for: " + " | ".join(str(r) for r in entry.get("reasons") or ()),
-                  describe_edits(steps, text_budget=REFUSED_EDITS_CHARS)]
+                  describe_edits(steps, text_budget=REFUSED_EDITS_CHARS, homes=homes)]
     return lines
 
 
@@ -1229,13 +1230,11 @@ class ProposalContext:
                 current={k.get("name"): k.get("value") for k in self.knobs},
                 seed=self.seed_knob_values),
                 [] if self.history_truncated else self.history)),
-            *repair_loss_lines(self.repair_losses),
         ]
         if self.edit_pairs:
-            promising = _promising(self.reasoning or ())
             lines += ["", *_edit_change_lines(
                 self.edit_pairs, omissions=self.omissions, settled=self._settled(),
-                homes=homes, whole=str(promising.get("id")) if promising else None)]
+                homes=homes)]
         if self.reasoning:
             predicted = [str(p.get("child")) for p in self.edit_pairs or () if p.get("prediction")]
             lines += ["", *_reasoning_lines(self.reasoning, below, predicted, homes)]
@@ -1263,8 +1262,11 @@ class ProposalContext:
                 "A proposal that breaks one of these is not evaluated at all. It costs "
                 "nothing but the answer, so fix the stated reason rather than guessing.",
                 _table(["reasons"], [[r] for r in self.rejections[-12:]]),
-                *refused_lines(self.refused),
+                *refused_lines(self.refused, homes),
+                *repair_loss_lines(self.repair_losses),
             ]
+        elif self.repair_losses:
+            lines += ["", "## Your repaired proposals", *repair_loss_lines(self.repair_losses)]
         return lines
 
     def render(self) -> str:
@@ -4020,6 +4022,51 @@ def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS,
     return "\n".join(lines) if lines else "(none)"
 
 
+def whole_edits(edits: Any, before: Mapping[str, Any] | None = None,
+                homes: Mapping[str, str] | None = None) -> str:
+    """A candidate's own edits as their home section shows them: every text whole, never
+    clipped, with its wiring. A text ``set_knob`` whose earlier value is known (``before``:
+    the parent's values) is shown as its change -- the lines it added and removed, whole --
+    not as the new value's unchanged start; a text a current knob holds (``homes``) is
+    named by that knob, whose text "Each step's settings" shows whole."""
+    import difflib
+
+    homes = homes or {}
+    values: dict[str, Any] = dict(before or {})
+    lines: list[str] = []
+    steps = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    for index, edit in enumerate(steps, 1):
+        if not isinstance(edit, dict):
+            lines.append(f"{index}. {json.dumps(edit, default=str, ensure_ascii=False)}")
+            continue
+        head = " ".join(f"{key}={json.dumps(edit[key], default=str)}"
+                        for key in EDIT_NAMING_FIELDS if key in edit)
+        name, new = edit.get("name"), edit.get("value", _UNKNOWN)
+        old = values.get(name, _UNKNOWN) if isinstance(name, str) else _UNKNOWN
+        if edit.get("op") == "set_knob" and isinstance(new, str) and isinstance(old, str):
+            diff = [line[0] + refer_to_knobs(line[1:], homes) if line[:1] in ("+", "-")
+                    else line for line in list(difflib.unified_diff(
+                        old.splitlines(), new.splitlines(), lineterm="", n=0))[2:]]
+            fence = _fence("\n".join(diff))
+            lines += [f"{index}. {head} -- {len(old)} -> {len(new)} chars; the lines it "
+                      "removed (-) and added (+):", fence + "diff", *(diff or ["(no change)"]),
+                      fence]
+        else:
+            rest = refer_to_knobs({key: value for key, value in edit.items()
+                                   if key not in EDIT_NAMING_FIELDS}, homes)
+            if isinstance(rest.get("patch"), list):
+                # A patch's 'target' quotes the text it replaced, not text it wrote.
+                rest["patch"] = [{**op, "target": _cut(op["target"], HISTORY_NODE_PROMPT_CHARS)}
+                                 if isinstance(op, dict) and isinstance(op.get("target"), str)
+                                 else op for op in rest["patch"]]
+            tail = "; ".join(f"{key}: {json.dumps(value, default=str, ensure_ascii=False)}"
+                             for key, value in rest.items())
+            lines.append(f"{index}. {head}" + (f" -- {tail}" if tail else ""))
+        if edit.get("op") == "set_knob" and isinstance(name, str):
+            values[name] = new
+    return "\n".join(lines) if lines else "(none)"
+
+
 #: How much of one edit "What this run has already tried" shows: a ``set_knob``'s
 #: diff against the value it replaced, a patch's ops, a structural edit's free text
 #: (its wiring is always whole).
@@ -4132,8 +4179,9 @@ def compact_edits(edits: Any, before: Mapping[str, Any] | None = None,
                 parts.append(f"set_knob {name}: {len(old)} -> {len(new)} chars; diff: "
                              + _bounded(DIFF_LINE_SEPARATOR.join(diff)))
             elif isinstance(new, str):
+                # Not pointed ``away``: that section may show this value as its change.
                 parts.append(f"set_knob {name} = ({len(new)} chars) "
-                             + _bounded(json.dumps(refer_to_knobs(new, homes, away))))
+                             + _bounded(json.dumps(refer_to_knobs(new, homes))))
             else:
                 parts.append(f"set_knob {name} = " + _bounded(json.dumps(new, default=str)))
         elif op == "set_knob" and "patch" in edit:
@@ -4296,15 +4344,14 @@ def _pair_block(parent: dict[str, Any], child: dict[str, Any],
 def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                        omissions: list[dict[str, Any]] | None = None,
                        settled: Collection[str] | None = None,
-                       homes: Mapping[str, str] | None = None,
-                       whole: str | None = None) -> list[str]:
+                       homes: Mapping[str, str] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts, and
     every changed item (fixed, broken, and the largest score rises and drops) is shown
     whole, parent beside child (`_pair_block`); size is never a reason to leave one
-    out. This is the home of each child's edits and prediction: other sections point here.
-    A text a current knob holds (``homes``) is named by that knob; the child ``whole``
-    (`_promising`) has its edits at `REJECTED_EDITS_CHARS`, to be built on."""
+    out. This is the home of each child's edits and prediction, shown whole (`whole_edits`:
+    a ``set_knob`` as the lines it changed against the pair's ``before`` values): other
+    sections point here. A text a current knob holds (``homes``) is named by that knob."""
     if not pairs:
         return []
     lines = ["## What the last edit changed",
@@ -4318,9 +4365,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     for pair in pairs:
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
-        lines += ["", head, "Edits:", describe_edits(
-            pair.get("edit"), homes=homes,
-            text_budget=REJECTED_EDITS_CHARS if whole and pair.get("child") == whole else None)]
+        lines += ["", head, "Edits:", whole_edits(pair.get("edit"), pair.get("before"), homes)]
         lines += [f"Wired by the system: {note}" for note in pair.get("notes") or ()]
         lines += _as_built_lines(pair)
         if pair.get("same_seed") is False:
@@ -4409,8 +4454,7 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
                       "Its edits, flow change and what they built")
                      + ": under \"What the last edit changed\" above."]
                     if str(entry.get("id")) in above else [
-                      "Edits:", describe_edits(entry.get("edit"), REASONING_TEXT_CHARS // 2,
-                                               homes=homes),
+                      "Edits:", whole_edits(entry.get("edit"), entry.get("before"), homes),
                       *[f"Wired by the system: {note}" for note in entry.get("notes") or ()]]),
                   f"Rationale: {_clip(entry.get('rationale'), REASONING_TEXT_CHARS) or '(none)'}",
                   *([f"Addresses: {_clip(entry['addresses'], REASONING_TEXT_CHARS)}"]
@@ -4426,11 +4470,13 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
         head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate that "
                 f"fixed more train items than it broke ({entry['fixed']} fixed / "
                 f"{entry['broken']} broken)")
-        if str(entry.get("id")) in above:
-            # Its child section shows them at this budget already (`_edit_change_lines`).
-            lines += ["", head, "Under \"What the last edit changed\" above, every step's "
-                      "wiring whole, to be built on or combined with edits to other steps; "
-                      "not to be re-proposed unchanged."]
+        shown = [str(e.get("id")) for e in reasoning_shown(entries)]
+        if str(entry.get("id")) in above or str(entry.get("id")) in shown:
+            # Its edits are whole in its own block already (`whole_edits`).
+            where = ("under \"What the last edit changed\" above"
+                     if str(entry.get("id")) in above else "in its block above")
+            lines += ["", head, f"Whole {where}, to be built on or combined with edits to "
+                      "other steps; not to be re-proposed unchanged."]
         else:
             lines += ["", head,
                       f"Every step's wiring whole, its text shortened to fit {REJECTED_EDITS_CHARS} "
@@ -4464,17 +4510,20 @@ UNSCORED_TRACE_KEYS = ("cost",)
 
 
 def _attribution_key(value: str, knob: str, current: Mapping[str, Any],
-                     seed: Mapping[str, Any]) -> str:
+                     seed: Mapping[str, Any], first: Any = None) -> str:
     """A knob value as ``knob_attribution`` names it: a long text (`SAID_ONCE_CHARS`+) by
-    which one it is -- the current one (whole under "Each step's settings") or the seed's
-    -- else by its head, with its length; a short one as it is."""
+    which one it is -- the current one (whole under "Each step's settings"), the seed's,
+    or the one candidate ``first`` was first evaluated with -- with its length; a short
+    one as it is. Unique for the knob's values; `_trace_rows` never merges two."""
     if len(value) < SAID_ONCE_CHARS:
         return value
     if isinstance(current.get(knob), str) and value == current[knob]:
         return f"the current text ({len(value)} chars)"
     if isinstance(seed.get(knob), str) and value == seed[knob]:
         return f"the seed's text ({len(value)} chars)"
-    return f"\"{_folded(value)[:POINTER_HEAD_CHARS]}…\" ({len(value)} chars)"
+    if first:
+        return f"the text {first} was first scored with ({len(value)} chars)"
+    return f"a text of {len(value)} chars, #{hashlib.sha1(value.encode()).hexdigest()[:8]}"
 
 
 def _trace_rows(traces: Sequence[dict[str, Any]],
@@ -4505,9 +4554,16 @@ def _trace_rows(traces: Sequence[dict[str, Any]],
         out = {}
         for knob, entry in attribution.items():
             if isinstance(entry, dict) and isinstance(entry.get("tried"), dict):
-                entry = {**entry, "tried": {
-                    _attribution_key(str(value), str(knob), current or {}, seed or {}): row
-                    for value, row in entry["tried"].items()}}
+                tried: dict[str, Any] = {}
+                for value, row in entry["tried"].items():
+                    key = _attribution_key(str(value), str(knob), current or {}, seed or {},
+                                           row.get("first") if isinstance(row, dict) else None)
+                    if key in tried:  # never one row for two values
+                        key += f" #{hashlib.sha1(str(value).encode()).hexdigest()[:8]}"
+                    # Which candidate it came from is in the key when it names a text.
+                    tried[key] = ({k: v for k, v in row.items() if k != "first"}
+                                  if isinstance(row, dict) else row)
+                entry = {**entry, "tried": tried}
             out[knob] = entry
         return out
 

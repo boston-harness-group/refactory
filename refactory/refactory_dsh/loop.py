@@ -134,6 +134,14 @@ def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
 
 
+def _values_before(parent: Candidate | None, edits: Sequence[Any]) -> dict[str, Any]:
+    """The parent's values of the knobs ``edits`` set (`optim.base.whole_edits`)."""
+    knobs = (parent.state.get("knobs") or {}) if parent is not None else {}
+    return {edit["name"]: (knobs[edit["name"]] or {}).get("value") for edit in edits
+            if isinstance(edit, dict) and edit.get("op") == "set_knob"
+            and isinstance(edit.get("name"), str) and edit["name"] in knobs}
+
+
 def _new_steps(parent: Any, child: Any) -> set[str]:
     """The child graph's steps its parent's graph lacks (none without a parent)."""
     if parent is None:
@@ -2952,6 +2960,9 @@ class Loop(OuterLoop):
         specs: dict[str, dict[str, Any]] = {}
         # A frozen knob (the mode's run settings, or one the operator froze) is not the
         # optimizer's to move, so its values are not attributed, nor its untried ones offered.
+        # The candidate each value was first evaluated in, which names a long text value
+        # in a request (`optim.base._attribution_key`).
+        first: dict[str, dict[str, str]] = {}
         frozen = set(self.config.frozen) | {
             name for name, knob in self.parameters.items() if getattr(knob, "frozen", False)}
         for candidate in evaluated:
@@ -2961,6 +2972,7 @@ class Loop(OuterLoop):
                     specs[name] = entry["spec"]
                     if entry["spec"].get("frozen"):
                         frozen.add(name)
+                first.setdefault(name, {}).setdefault(str(entry["value"]), candidate.id)
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
@@ -2978,6 +2990,7 @@ class Loop(OuterLoop):
                         "n": len(scores),
                         "mean": round(sum(scores) / len(scores), 6),
                         "max": round(max(scores), 6),
+                        "first": first[name][value],
                         **({"gate": decisions[name][value]} if name in decisions else {}),
                     }
                     for value, scores in sorted(values.items())
@@ -5787,6 +5800,8 @@ class Loop(OuterLoop):
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
+                # The values its set_knob edits replaced, so its edits show as changes.
+                "before": _values_before(parent, child.own_edits()),
                 "child_records": child_records,
                 "parent_records": parent_records, "same_seed": same,
                 # How a structural edit moved the items it changed (`optim.edit_effect`).
@@ -5915,6 +5930,7 @@ class Loop(OuterLoop):
                              if parent is None
                              or w not in _wiring_warnings(parent.state, parent.state)],
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
+                "before": _values_before(parent, candidate.own_edits()),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "addresses": record.get("addresses"), "flow_change": record.get("flow_change"),
                 "notes": list(candidate.notes or ()),

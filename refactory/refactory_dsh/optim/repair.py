@@ -314,8 +314,9 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
         "what it tries. Fix only what the reasons name. Keep every change it makes and what "
         "each one is for: the same steps, prompts, code and settings, changed only as far as "
         "the reasons require. Do not add, drop or redesign changes. Keep every text it "
-        "wrote: when a field is refused, fix that field only, moving its text where the "
-        "operation takes it, never deleting it. If it cannot be fixed "
+        "wrote and fix only the refused field: move its text to a field the operation "
+        "takes; if none can hold it, keep the edit without it (the proposer is told what "
+        "was left out). If it cannot be fixed "
         "without changing what it means, answer with an empty `edits` list and say why.",
         "",
         "## The refused proposal",
