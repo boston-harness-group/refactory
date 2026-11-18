@@ -17,6 +17,10 @@ sees how many ran and every result (one not written said so) through a collect s
   result and its output reaches decide (S4); a list longer than ``max`` runs its first
   ``max``, said so; a map in a loop never reruns an old element; a short list leaves no
   "no answer" in what the optimizer is told; ``remove`` takes a map out whole.
+- **A map the driver runs** (the structure fuzz's draft graph, no data pass): on both
+  runtimes a short, one-element, empty or over-max list runs only the runs with an
+  element; the others are recorded missing and not needed, never handed to a model or the
+  driver.
 """
 from __future__ import annotations
 
@@ -776,3 +780,89 @@ def test_no_agent_requires_a_map_run_s_result():
     assert [(i.code, i.node) for i in validate_state(state)
             if "results of map step" in i.message] == [("V6", "peek")]
     assert validate_state(_s4()) == []
+
+
+# ── a map the driver runs (no data pass, no dispatched workers) ─────────────
+
+
+def _driven(cap: int) -> dict[str, Any]:
+    """The structure fuzz's draft -> review -> finalize with a map after draft over draft's
+    reply, ``cap`` runs: its agents are handed to the driver on the spine (`wf_next`), not
+    to dispatched workers as LiveMath's are."""
+    import structure_fuzz as sf
+
+    edit = {"op": "map", "after": "draft", "over": "draft", "max": cap}
+    return nn_edits.apply(edit, sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state)
+
+
+def _driven_run(runtime: str, state: dict, draft: str, tmp_path: Path, monkeypatch
+                ) -> tuple[dict[str, list[str]], dict[str, Any], Path]:
+    """Each agent's prompts, the run's facts and its directory, on ``runtime``, with draft
+    answering ``draft`` (the list) and every other agent its structure-fuzz answer."""
+    import structure_fuzz as sf
+    from test_livemath_blocks import _spine as spine_drain
+
+    graph = _graph(state)
+    answers = {**sf._answers(graph), "draft": draft}
+    run = tmp_path / runtime
+    prompts: dict[str, list[str]] = {}
+    if runtime == "walker":
+        model = sf.ScriptedModel(answers)
+        result = sf.run_walker(sf.seeds()["fuzz_draft_review"], state, run, model)
+        assert result.exit_ok and not result.error, result.error
+        for node, prompt, _system in model.log:
+            prompts.setdefault(node, []).append(prompt)
+        return prompts, result.facts, run
+    record = tmp_path / "delivered.jsonl"
+    monkeypatch.setenv("DRAIN_RECORD", str(record))
+    assert spine_drain(graph, run, tmp_path, agent_responses=answers, mode_state=state) == 0
+    for line in record.read_text().splitlines():
+        entry = json.loads(line)
+        if "prompt" in entry:
+            prompts.setdefault(entry["node"], []).append(entry["prompt"])
+    return prompts, json.loads((run / "facts.json").read_text()), run
+
+
+@pytest.mark.parametrize("runtime", ["walker", pytest.param("spine", marks=needs_spine)])
+@pytest.mark.parametrize("elements, cap", [(2, 4), (1, 4), (0, 3), (5, 3)],
+                         ids=["short", "one", "empty", "over-max"])
+def test_a_driven_map_runs_only_its_elements_runs_on_both_runtimes(
+        runtime, elements, cap, tmp_path, monkeypatch):
+    """A run the list had no element for is never handed to a model or the driver: it is
+    recorded missing and not needed before any call (its element file was never written),
+    on the walker and on the spine alike, and no item lists it as a missing answer. Each run
+    that ran saw its own element; the combine ran once and was told how many ran."""
+    from refactory_dsh.items import missing_steps
+    from refactory_dsh.nn.operators import NOT_NEEDED_DIR
+
+    items = [f"element-{index}" for index in range(1, elements + 1)]
+    prompts, facts, run = _driven_run(runtime, _driven(cap), json.dumps(items),
+                                      tmp_path, monkeypatch)
+    runs = [f"draft_map_{index}" for index in range(1, cap + 1)]
+    ran = min(elements, cap)
+    assert [r for r in runs if r in prompts] == runs[:ran], sorted(prompts)
+    for index, name in enumerate(runs[:ran]):
+        (prompt,) = prompts[name]
+        assert f"## Element {index + 1} of {ran}\n{items[index]}" in prompt
+    assert len(prompts["draft_map_combine"]) == 1
+    said = f"ran {ran} of {elements} elements (max {cap})"
+    assert facts["draft_map"] == said
+    assert said in prompts["draft_map_combine"][0]
+    for name in runs[ran:]:
+        assert (run / NOT_NEEDED_DIR / f"{name}.txt").is_file(), name
+        assert (run / "reviews" / f"{name}-missing.txt").is_file(), name
+    assert missing_steps(run) == {}
+    assert len(prompts["finalize"]) == 1
+
+
+@needs_spine
+def test_the_fuzz_s_map_over_a_draft_runs_alike_on_the_walker_and_the_spine():
+    """The map the structure fuzz builds by default (after draft, over draft, max 4) on a
+    one-line draft: the spine drain once failed it ("no-tools input is not a readable
+    file") when it handed the second run, which had no element, to the driver."""
+    import structure_fuzz as sf
+
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    state = nn_edits.apply({"op": "map", "after": "draft", "over": "draft"},
+                           applier.seed_state)
+    assert sf.check_state(applier, state, walker=True, spine=True) == []

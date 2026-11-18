@@ -850,6 +850,26 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
     return receipt
 
 
+def record_missing(workdir: Path, node: str, error: BaseException) -> str | None:
+    """Record an optional branch's node as missing, where both runtimes look for it:
+    ``reviews/<node>-missing.txt`` with the error, why it has no answer
+    (`node_retry.record_spent`), and its pending delivery settled (dm-232). The walker's
+    executor (`nn.fork._record_missing`), the worker (`worker_node.main`) and the bridge's
+    refused ``begin`` (`main`) write the same. Returns why the delivery could not be
+    settled, if it could not: the branch stays missing either way."""
+    from refactory_dsh.node_retry import record_spent
+
+    reviews = Path(workdir) / "reviews"
+    reviews.mkdir(parents=True, exist_ok=True)
+    (reviews / f"{node}-missing.txt").write_text(f"{type(error).__name__}: {error}\n")
+    record_spent(Path(workdir), node, error)
+    try:
+        invalidate(Path(workdir), [node], f"optional branch missing: {error}")
+    except Exception as settle_error:  # noqa: BLE001
+        return f"{type(settle_error).__name__}: {settle_error}"
+    return None
+
+
 def invalidate(workdir: Path, nodes: list[str], reason: str) -> None:
     """Retire in-flight snapshots when an explicit skip or redo invalidates work."""
     for node in nodes:
@@ -920,9 +940,23 @@ def main() -> int:
                 scan_prompt = scan_prompt[:st_start] + scan_prompt[st_end + len(STEERING_END):]
             template_keys = _re.findall(r'\{\{\s*([A-Za-z_]\w*)\s*\}\}', scan_prompt)
             unresolved = [k for k in template_keys if k.strip() not in values and k not in (refilled_keys or [])]
-            result = begin(workdir, request['node'], rendered, request['writes'], reuse=True,
-                           reads=request.get('reads'),
-                           tool_policy=request.get('tool_policy', ''))
+            try:
+                result = begin(workdir, request['node'], rendered, request['writes'],
+                               reuse=True, reads=request.get('reads'),
+                               tool_policy=request.get('tool_policy', ''))
+            except Exception as refused:
+                if not request.get('optional'):
+                    raise
+                # An optional fork branch refused before any model call (a map's run
+                # with no element: its element file was never written) is missing, as
+                # the walker and the worker record it; the spine completes it failed.
+                unsettled = record_missing(workdir, request['node'], refused)
+                if unsettled is not None:
+                    print(f"refactory: run warning: could not settle the delivery marker "
+                          f"of optional {request['node']}: {unsettled}", file=sys.stderr)
+                print(json.dumps({'missing': True,
+                                  'error': f'{type(refused).__name__}: {refused}'}))
+                return 0
             # The bridge reads the prompt; the target snapshot is this module's own state.
             result = {key: value for key, value in result.items() if key != 'target'}
             if unresolved:

@@ -65,6 +65,7 @@ from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
     refused_entries,
+    repair_losses,
     summarise_reasons,
 )
 from refactory_dsh.optim.memory import report as memory_report
@@ -131,6 +132,14 @@ def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     p90 = durations[min(len(durations) - 1, max(0, -(-len(durations) * 9 // 10) - 1))]
     return {"per_item_median_s": round(median), "per_item_p90_s": round(p90),
             "per_item_max_s": round(durations[-1]), "timed_items": len(durations)}
+
+
+def _values_before(parent: Candidate | None, edits: Sequence[Any]) -> dict[str, Any]:
+    """The parent's values of the knobs ``edits`` set (`optim.base.whole_edits`)."""
+    knobs = (parent.state.get("knobs") or {}) if parent is not None else {}
+    return {edit["name"]: (knobs[edit["name"]] or {}).get("value") for edit in edits
+            if isinstance(edit, dict) and edit.get("op") == "set_knob"
+            and isinstance(edit.get("name"), str) and edit["name"] in knobs}
 
 
 def _new_steps(parent: Any, child: Any) -> set[str]:
@@ -2951,6 +2960,9 @@ class Loop(OuterLoop):
         specs: dict[str, dict[str, Any]] = {}
         # A frozen knob (the mode's run settings, or one the operator froze) is not the
         # optimizer's to move, so its values are not attributed, nor its untried ones offered.
+        # The candidate each value was first evaluated in, which names a long text value
+        # in a request (`optim.base._attribution_key`).
+        first: dict[str, dict[str, str]] = {}
         frozen = set(self.config.frozen) | {
             name for name, knob in self.parameters.items() if getattr(knob, "frozen", False)}
         for candidate in evaluated:
@@ -2960,6 +2972,7 @@ class Loop(OuterLoop):
                     specs[name] = entry["spec"]
                     if entry["spec"].get("frozen"):
                         frozen.add(name)
+                first.setdefault(name, {}).setdefault(str(entry["value"]), candidate.id)
                 buckets.setdefault(name, {}).setdefault(str(entry["value"]), []).append(
                     float(candidate.score)
                 )
@@ -2977,6 +2990,7 @@ class Loop(OuterLoop):
                         "n": len(scores),
                         "mean": round(sum(scores) / len(scores), 6),
                         "max": round(max(scores), 6),
+                        "first": first[name][value],
                         **({"gate": decisions[name][value]} if name in decisions else {}),
                     }
                     for value, scores in sorted(values.items())
@@ -3251,6 +3265,7 @@ class Loop(OuterLoop):
                 reasons=rejection.reasons,
                 epoch=self.epoch,
                 **({"repaired": rejection.repaired} if rejection.repaired else {}),
+                **({"dropped": rejection.dropped} if rejection.dropped else {}),
             )
         known = {c.id: c for c in (*self.population, *parents)}
         for candidate in candidates:
@@ -4000,7 +4015,9 @@ class Loop(OuterLoop):
         if used != before:
             self._journal("repair_calls", epoch=self.epoch, calls=used)
         if fixed is not None:
-            self.rejections[index] = dataclasses.replace(self.rejections[index], repaired=fixed.id)
+            self.rejections[index] = dataclasses.replace(
+                self.rejections[index], repaired=fixed.id,
+                dropped=str(getattr(self.optimizer, "last_repair_lost", "") or ""))
         else:
             after = list(getattr(self.optimizer, "last_repair_refusal", None) or ())
             if after:
@@ -5647,6 +5664,8 @@ class Loop(OuterLoop):
                 ]
             ),
             refused=refused_entries(self.rejections[-8:]),
+            # ...but what its fix dropped of the proposal's text is: it did not land.
+            repair_losses=repair_losses(self.rejections[-8:]),
             preset=self.config.edit_preset,
             strategy={**dict(self.strategy_decision), **({"search_contract": self.config.resolved_profile["contract"]} if self.config.resolved_profile.get("contract") else {})},
             # Read now, not at construction: the point of steering a search is that a
@@ -5781,6 +5800,8 @@ class Loop(OuterLoop):
             pairs.append({
                 "child": child.id, "parent": parent.id if parent else None,
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
+                # The values its set_knob edits replaced, so its edits show as changes.
+                "before": _values_before(parent, child.own_edits()),
                 "child_records": child_records,
                 "parent_records": parent_records, "same_seed": same,
                 # How a structural edit moved the items it changed (`optim.edit_effect`).
@@ -5909,6 +5930,7 @@ class Loop(OuterLoop):
                              if parent is None
                              or w not in _wiring_warnings(parent.state, parent.state)],
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
+                "before": _values_before(parent, candidate.own_edits()),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
                 "addresses": record.get("addresses"), "flow_change": record.get("flow_change"),
                 "notes": list(candidate.notes or ()),
@@ -7026,6 +7048,7 @@ class Loop(OuterLoop):
                     edit=dict(record.get("edit") or {}),
                     reasons=list(record.get("reasons") or []),
                     repaired=str(record.get("repaired") or ""),
+                    dropped=str(record.get("dropped") or ""),
                 )
                 self.rejections.append(rejection)
                 # A journal written before rejections carried their epoch: the epoch

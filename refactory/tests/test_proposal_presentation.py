@@ -392,8 +392,9 @@ def _long_split() -> list[dict]:
     return [split, insert]
 
 
-def _wiring_whole(text: str, compact: bool = False) -> None:
-    """Every step's id, reads, writes and produces appear whole; its prompts do not."""
+def _wiring_whole(text: str, compact: bool = False, whole: bool = False) -> None:
+    """Every step's id, reads, writes and produces appear whole; its prompts too with
+    ``whole`` (the section is their home), else shortened or pointed to."""
     for node_id, reads in (("meta_check", ["current_item.json"]),
                            ("final_decide", ["current_item.json", "meta_check_notes.txt"]),
                            ("verify", ["final_decide_notes.txt"])):
@@ -403,13 +404,17 @@ def _wiring_whole(text: str, compact: bool = False) -> None:
         assert f'"produces": ["{node_id}_notes"]' in text, node_id
         assert f"PROMPT-{node_id}" in text, "each prompt keeps its head"
     assert '"max_iterations": 3' in text and '"on_exhausted": "continue"' in text
-    assert "p" * 700 not in text and "more chars)" in text, "the prompts are shortened"
+    if whole:
+        assert "p" * 3000 in text and "s" * 3000 in text, "the prompts are whole"
+        return
+    assert "p" * 700 not in text and ("more chars)" in text or "chars, whole under" in text), \
+        "the prompts are shortened, or named where they are whole"
 
 
 def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
-    """'What the last edit changed', 'Your earlier reasoning' (and its full rejected
-    edits), the recent results and the history table: each shows every step's wiring
-    whole, however long the prompts before it, and shortens only the prompts."""
+    """'What the last edit changed', the recent results and the history table: each shows
+    every step's wiring whole, however long the prompts before it, and shortens only the
+    prompts; 'Your earlier reasoning' (and its full rejected edits) points to the first."""
     edits = _long_split()
     row = {"id": "c2", "parent": "c1", "score": 0.5, "structural": True, "exit_ok": True,
            "edits": edits}
@@ -423,11 +428,18 @@ def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
     full = text[text.index("### Full edits of"):].split("\n## ", 1)[0]
     recent = text[text.index("## Recent results"):text.index("## Evidence from the traces")]
     tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
-    for section in (changed, full, recent, tried):
+    _wiring_whole(changed, whole=True)
+    for section in (recent, tried):
         _wiring_whole(section)
-    # The reasoning points to the edit section rather than saying the wiring again.
+    # The history line names each prompt where it is whole: there, whole.
+    assert 'chars, whole under \\"What the last edit changed\\")' in tried
+    for node_id in ("meta_check", "final_decide", "verify"):
+        assert f"PROMPT-{node_id} " + "p" * 3000 in changed
+    # The reasoning and its full rejected edits point to the edit section, which shows
+    # them at the full edits' budget, rather than saying the wiring again.
     assert 'under "What the last edit changed" above' in reasoning
-    assert len(changed) < 6000 and len(tried) < 6000, "the text stays bounded"
+    assert 'Whole under "What the last edit changed" above' in full and '"id"' not in full
+    assert len(tried) < 6000, "the history stays bounded"
 
 
 def test_the_text_budget_shortens_long_texts_and_keeps_short_ones_whole():
@@ -447,8 +459,7 @@ def test_the_text_budget_shortens_long_texts_and_keeps_short_ones_whole():
 
 def test_a_patch_entrys_target_is_text_not_wiring():
     """``target`` names a node at an edit's top level, but inside a knob patch it is the
-    text being replaced: it is shortened like any text, so the sections stay within
-    the bounds they had before."""
+    text being replaced: it is shortened like any text it did not write."""
     patch = {"op": "set_knob", "name": "decide_prompt",
              "patch": [{"target": "T" * 6000, "replacement": "R" * 6000}]}
     text = ProposalContext(
@@ -459,8 +470,10 @@ def test_a_patch_entrys_target_is_text_not_wiring():
     reasoning = text[text.index("## Your earlier"):].split("\n## ", 1)[0]
     tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
     for section in (changed, reasoning):
-        assert "T" * 500 not in section and len(section) < 1500, len(section)
-    assert len(tried) < 1500, "the history keeps its own patch bound"
+        assert "T" * 500 not in section, "the quoted target is shortened"
+    # What the patch wrote is whole once, in the child's section; the rest point there.
+    assert "R" * 6000 in changed and "R" * 200 not in tried + reasoning
+    assert len(tried) < 1500 and len(reasoning) < 1500, "the history keeps its own patch bound"
     assert 'name="decide_prompt"' in changed, "the knob it patches is still named"
 
 

@@ -430,7 +430,8 @@ def test_listed_edits_are_not_clipped_away():
     reasoning = "\n".join(_reasoning_lines([{"id": "c", "edit": edits, "score": 0.5}]))
     for i in range(4):
         assert f'name="step{i}_prompt"' in text and f'name="step{i}_prompt"' in reasoning, i
-    assert long not in text, "values are clipped, names are not"
+    # The child's section is their home: every value whole, none cut after the first.
+    assert text.count(long) == 4, "every value is whole, none clipped away"
 
 
 def test_grader_nodes_are_protected_and_grader_side_knobs_hold():

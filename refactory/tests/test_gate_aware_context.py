@@ -260,8 +260,11 @@ def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path,
     ids = {_level(c): c.id for c in loop.population}
     assert f"### {ids[6]} (proposed in epoch 2) -- gate rejected" in section
     assert f"### {ids[7]} " not in section, "an older round is one line, not a block"
-    for marker in ("RATIONALE-2", "PREDICTION-2", "DIAGNOSIS-2", "RATIONALE-1"):
+    for marker in ("RATIONALE-2", "DIAGNOSIS-2", "RATIONALE-1"):
         assert marker in section, marker
+    # A child of the last round has its prediction under "What the last edit changed",
+    # once; the reasoning points there.
+    assert "PREDICTION-2" in text
     assert "1 broken vs its parent" in section and "0 fixed" in section
 
     again = Reasoning([[]])
@@ -410,11 +413,17 @@ def test_the_latest_train_positive_rejected_candidate_is_shown_in_full():
     full = section[section.index("### Full edits of"):]
     assert full.startswith("### Full edits of mine, the latest rejected candidate that fixed "
                            "more train items than it broke (8 fixed / 1 broken)")
-    assert long in full and "OLDVALUE" not in full and "EVENVALUE" not in full
-    assert "KEPTVALUE" not in full
+    # Its edits are whole once, in its own block, which the full-edits heading points to.
+    assert text.count(long) == 1 and long not in full and "Whole in its block above" in full
+    assert "OLDVALUE" not in full and "EVENVALUE" not in full and "KEPTVALUE" not in full
     huge = [entry("big", 3, 0, "Z" * 9000)]
     big = ProposalContext(reasoning=huge).render()
-    block = big[big.index("### Full edits of big"):].split("\n## ", 1)[0]
+    assert big.count("Z" * 9000) == 1, "whole once, never cut"
+    # One not shown in a block of its own keeps the bounded full edits.
+    hidden = [{**entry("hid", 3, 0, "Z" * 9000), "epoch": 1},
+              *({**entry(f"n{i}", 0, 0, "v"), "epoch": 2} for i in range(2))]
+    block = ProposalContext(reasoning=hidden).render()
+    block = block[block.index("### Full edits of hid"):].split("\n## ", 1)[0]
     assert "Z" * 9000 not in block and "more chars)" in block
     assert len(block) < REJECTED_EDITS_CHARS + 600
     none = [entry("x", 1, 3, "v"), entry("y", None, None, "w")]

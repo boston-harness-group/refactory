@@ -409,9 +409,12 @@ def _spec(raw: Any, *, default_kind: str = "agent", default_text: str = NEUTRAL_
     text = raw.get("text")
     if text is not None and not isinstance(text, str):
         raise _Refused("a new step's 'text' is a string (its prompt, or its code)")
-    for key in ("id", "to"):
+    for key in ("id", "to", "system"):
         if raw.get(key) is not None and not isinstance(raw.get(key), str):
             raise _Refused(f"'{key}' is a string")
+    if raw.get("system") is not None and kind != "agent":
+        # Only an agent has a system prompt: on a code or op step it would be ignored.
+        raise _Refused("only an agent step takes a 'system'")
     route = None
     if raw.get("route") is not None:
         if kind != "agent":
@@ -2557,7 +2560,8 @@ def _pre_map(edit: dict, state: dict) -> str | None:
             and combine["to"] != edit["to"]:
         raise _Refused("the map and its combine each name a 'to'; name it once: the combine "
                        "writes the map's one output")
-    _spec({"kind": "agent", "route": edit.get("route")})  # refused when it is no route
+    # Refused when it is no route, or a 'system' that is no text.
+    _spec({"kind": "agent", "route": edit.get("route"), "system": edit.get("system")})
     base = edit.get("id")
     if base is not None and not isinstance(base, str):
         raise _Refused("'id' is a string")
@@ -2615,6 +2619,8 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
     route = _spec({"kind": "agent", "route": edit.get("route")}).get("route") or (
         anchor.route if anchor.kind == "agent" else None)
     tools = edit.get("tools") or None
+    # Every run's system prompt: the edit's 'system', as insert's, else the default.
+    run_system = edit.get("system") or "You are one step of a pipeline."
     branch = []
     systems = []
     for copy in copies:
@@ -2623,12 +2629,12 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
         # so a branch with no element does not run.
         system = f"{copy}__system_prompt"
         systems.append({"op": "add_knob", "name": system, "spec": Knob(
-            "You are one step of a pipeline.", "str",
+            run_system, "str",
             description=f"system prompt for {copy}").spec()})
         element = f"{copy}_element.txt"
         node: dict[str, Any] = {
             "id": copy, "kind": "agent", "prompt_template": MAP_ELEMENT_PROMPT,
-            "system_prompt_template": "You are one step of a pipeline.",
+            "system_prompt_template": run_system,
             "knobs": [system], "field_bindings": [["system_prompt_template", system]],
             "reads": [element], "writes": [f"{copy}.txt"], "tool_policy": "none"}
         if tools:
@@ -3174,10 +3180,10 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "branch": {
         "reads_as": ('parallel',),
-        "fields": ("fork", "kind", "text", "sees", "optional", "id", "to", "route"),
+        "fields": ("fork", "kind", "text", "system", "sees", "optional", "id", "to", "route"),
         "line": "a new step as another branch of a fork ('optional': true lets it fail "
                 "without failing the item; 'sees' names its inputs: \"task\", step ids, or "
-                "single fact or file names there before the fork); "
+                "single fact or file names there before the fork; 'system' as insert's); "
                 + REACHES.format(where="after the join"),
         "example": {"op": "branch", "fork": "<fork>", "kind": "agent",
                     "text": "<what this branch does>"},
@@ -3233,9 +3239,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "merge": {
         "reads_as": ('step',),
-        "fields": ("steps", "kind", "text", "id", "route"),
+        "fields": ("steps", "kind", "text", "system", "id", "route"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
-                "outputs",
+                "outputs; 'system' as insert's",
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
@@ -3252,16 +3258,16 @@ OPERATORS: dict[str, dict[str, Any]] = {
     },
     "map": {
         "reads_as": ('map',),
-        "fields": ("after", "over", "text", "sees", "max", "combine", "id", "to", "route",
-                   "tools"),
+        "fields": ("after", "over", "text", "system", "sees", "max", "combine", "id", "to",
+                   "route", "tools"),
         "line": "after a step, a new agent step run once per element of 'over' (a list there: "
                 "a fact, a file or a step's output), one model call each, all at once: a JSON "
                 "array gives its items, a bulleted, numbered or lettered list its items, other "
                 f"text its non-empty lines; at most 'max' run (default {MAP_MAX[0]}, up to "
                 f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
-                "result and writes one output, placed as insert's is; 'tools' as insert's: "
-                "each run sealed; remove the elements step or the combine and the whole map "
+                "result and writes one output, placed as insert's is; 'system' as insert's, "
+                "for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map "
                 "goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",

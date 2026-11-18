@@ -313,7 +313,10 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
         "The proposal below was refused before anything ran, for how it is written, not for "
         "what it tries. Fix only what the reasons name. Keep every change it makes and what "
         "each one is for: the same steps, prompts, code and settings, changed only as far as "
-        "the reasons require. Do not add, drop or redesign changes. If it cannot be fixed "
+        "the reasons require. Do not add, drop or redesign changes. Keep every text it "
+        "wrote and fix only the refused field: move its text to a field the operation "
+        "takes; if none can hold it, keep the edit without it (the proposer is told what "
+        "was left out). If it cannot be fixed "
         "without changing what it means, answer with an empty `edits` list and say why.",
         "",
         "## The refused proposal",
@@ -360,6 +363,42 @@ def repair_request(proposal: Any, reasons: Sequence[str], parent_state: Mapping[
         + (f". At most {max_edits} changes." if max_edits > 1 else "."),
     ]
     return "\n".join(lines)
+
+
+#: The shortest text of a proposal whose loss in a repair is said (`lost_content`): an id
+#: or a label renamed is a fix, not lost content.
+LOST_TEXT_CHARS = 20
+
+
+def _texts(steps: Sequence[Any]) -> list[tuple[str, str]]:
+    """Each free text of ``steps`` (prompts, code, knob values, patch contents; not the
+    wiring, `optim.base.EDIT_WIRING_FIELDS`) at least `LOST_TEXT_CHARS` long, with where
+    it is: ``edit N (op) 'field'``."""
+    from .base import _map_text
+
+    out: list[tuple[str, str]] = []
+    for index, step in enumerate(steps, 1):
+        if not isinstance(step, Mapping):
+            continue
+        where = f"edit {index} ({step.get('op')})" if len(steps) > 1 else str(step.get("op"))
+        for key, value in step.items():
+            found: list[str] = []
+            _map_text({key: value}, lambda text: found.append(text) or text)
+            out += [(f"{where} '{key}'", text) for text in found
+                    if len(text.strip()) >= LOST_TEXT_CHARS]
+    return out
+
+
+def lost_content(original: Sequence[Any], fixed: Sequence[Any]) -> str:
+    """What a repair (``fixed``) dropped or changed of the proposal as written
+    (``original``): each field whose text does not appear, whitespace aside, anywhere in
+    the fix, with its length; empty when every text landed."""
+    landed = " ".join(" ".join(text.split()) for _where, text in _texts(fixed))
+    lost: dict[str, int] = {}
+    for where, text in _texts(original):
+        if " ".join(text.split()) not in landed:
+            lost[where] = lost.get(where, 0) + len(text)
+    return ", ".join(f"{where} ({chars} chars)" for where, chars in lost.items())
 
 
 def repaired_proposal(payload: Mapping[str, Any], original: Any) -> tuple[Any | None, str]:
