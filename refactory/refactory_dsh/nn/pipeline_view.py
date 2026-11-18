@@ -193,7 +193,10 @@ class _View:
         node = self.graph.nodes[node_id]
         parts = [self._input(k, n) for k, n in self._sorted(self.inputs[node_id])]
         if node.kind == "agent" and (node.tool_policy != "none" or node.tools):
-            where = "own workspace" if node.workspace is not None else "run dir"
+            from refactory_dsh.workspace import is_sealed
+
+            where = ("sealed workspace" if is_sealed(node) else
+                     "own workspace" if node.workspace is not None else "run dir")
             parts.insert(0, f"{where} (tools{': ' + ', '.join(node.tools) if node.tools else ''})")
         return ", ".join(parts)
 

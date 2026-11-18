@@ -660,6 +660,7 @@ class ReplayClient:
         cwd: Any = None,
         env: Any = None,
         confine: bool = False,
+        seal: Any = None,
     ) -> str:
         """Answer a request from A's recordings."""
         # Every strategy call is an optimizer call, made inside trace.ask (which
