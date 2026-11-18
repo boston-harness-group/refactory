@@ -646,12 +646,14 @@ def _add_detached(nodes: Sequence[dict[str, Any]], exact: Collection[str] = ()) 
     return steps
 
 
-def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any]) -> list[dict]:
+def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
+            values: Mapping[str, Any] | None = None) -> list[dict]:
     """Primitive steps that give an existing node ``new_state`` under the same id, judged
     on ``state`` (the state they apply to): removed and added again, with its own knobs
     (those ``remove_node`` takes with it) declared again at their values, and every edge it
     has in ``state``. Used for a fork's targets, a join's sources and what a rewired step
-    reads: topology, never a setting."""
+    reads: topology, never a setting -- unless ``values`` gives one of those knobs a new
+    value, which it is declared again at (a rewire's new prompt, holding its new slots)."""
     graph = _edits()._graph(state)
     node = graph.nodes[node_id]
     knobs = state.get("knobs") or {}
@@ -663,8 +665,9 @@ def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any]) -
                 and knob in knobs:
             entry = knobs[knob]
             steps.append({"op": "add_knob", "name": knob, "spec": dict(entry.get("spec") or {})})
-            if entry.get("value") != (entry.get("spec") or {}).get("default"):
-                restore.append({"op": "set_knob", "name": knob, "value": entry.get("value")})
+            value = (values or {}).get(knob, entry.get("value"))
+            if value != (entry.get("spec") or {}).get("default"):
+                restore.append({"op": "set_knob", "name": knob, "value": value})
     position = {"start": True} if graph.start == node_id else {"detached": True}
     steps.append({"op": "add_node", "node": new_state, "position": position})
     for edge in graph.edges:
@@ -730,8 +733,10 @@ class _Steps:
 # ── where a new step's output goes ────────────────────────────────────────
 
 
-def _filled_text_knobs(node: Node, state: Mapping[str, Any]) -> list[str]:
-    """The text knobs an op that fills facts fills (`validate.filled_knobs`)."""
+def _filled_text_knobs(node: Node, state: Mapping[str, Any],
+                       graph: Graph | None = None) -> list[str]:
+    """The text knobs an op that fills facts fills (`validate.filled_knobs`); with
+    ``graph``, only those whose text still reaches a step (not `_dead_in`)."""
     from .validate import filled_knobs
 
     try:
@@ -739,12 +744,78 @@ def _filled_text_knobs(node: Node, state: Mapping[str, Any]) -> list[str]:
     except Exception:  # noqa: BLE001 - an unresolvable callable fills nothing known
         return []
     knobs = state.get("knobs") or {}
+    dead = _dead_in(graph, node, state) if graph is not None else {}
     return [name for name in names
-            if ((knobs.get(name) or {}).get("spec") or {}).get("kind") == "str"]
+            if ((knobs.get(name) or {}).get("spec") or {}).get("kind") == "str"
+            and name not in dead]
 
 
-def _fills(node: Node, state: Mapping[str, Any]) -> bool:
-    return node.kind in ("op", "gate") and bool(_filled_text_knobs(node, state))
+def _dead_in(graph: Graph, node: Node, state: Mapping[str, Any]) -> dict[str, list[str]]:
+    """The text knobs ``node`` fills whose text reaches no step any more, each with the
+    outputs that carry it (`operators.carried_knobs`), none of which any other step reads
+    and none of which ends a data pass. A knob carried by an output still read (an op
+    that does not declare ``knob_outputs`` carries each knob in every output) is not
+    dead."""
+    from .operators import carried_knobs
+    from .validate import filled_knobs
+
+    try:
+        names = filled_knobs(node)
+    except Exception:  # noqa: BLE001 - an unresolvable callable fills nothing known
+        return {}
+    if not names or any(d.kind == "data" and d.subgraph_exit == node.id
+                        for d in graph.nodes.values()):
+        return {}
+    read = set().union(*(_consumed(n, state) for n in graph.nodes.values() if n.id != node.id))
+    carried = carried_knobs(node)
+    out: dict[str, list[str]] = {}
+    for name in names:
+        carriers = [key for key, knobs in carried.items() if name in knobs]
+        if carriers and not any(key in read for key in carriers):
+            out[name] = [output for _kind, output in carriers]
+    return out
+
+
+def dead_text_knobs(state: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]]:
+    """Every text knob an op fills whose text reaches no step any more: knob -> (the op,
+    the outputs carrying it that nothing reads), e.g. a prompt an op builds for a step that
+    was rewired to see something else."""
+    graph = _edits()._graph(state)
+    knobs = state.get("knobs") or {}
+    out: dict[str, tuple[str, list[str]]] = {}
+    for node in graph.nodes.values():
+        if node.kind in ("op", "gate"):
+            for name, outputs in _dead_in(graph, node, state).items():
+                if ((knobs.get(name) or {}).get("spec") or {}).get("kind") == "str":
+                    out[name] = (node.id, outputs)
+    return out
+
+
+def dead_knob_reason(name: str, state: Mapping[str, Any],
+                     before: Mapping[str, Any] | None = None) -> str | None:
+    """Why knob ``name`` changes no result in ``state`` (`dead_text_knobs`), naming the
+    steps it reached in ``before`` when it did; None when it still reaches a step."""
+    dead = dead_text_knobs(state).get(name)
+    if dead is None:
+        return None
+    op, outputs = dead
+    reached = ""
+    if before is not None:
+        try:
+            old = _edits()._graph(before)
+            readers = sorted(n.id for n in old.nodes.values() if n.id != op and any(
+                ("fact", o) in _consumed(n, before) or ("file", o) in _consumed(n, before)
+                for o in outputs))
+        except Exception:  # noqa: BLE001 - only the wording
+            readers = []
+        if readers:
+            reached = f" (it reached {', '.join(readers)} before)"
+    return (f"knob {name!r} reaches no step: op {op!r} fills it into {', '.join(outputs)}, "
+            f"which no step reads any more{reached}")
+
+
+def _fills(node: Node, state: Mapping[str, Any], graph: Graph | None = None) -> bool:
+    return node.kind in ("op", "gate") and bool(_filled_text_knobs(node, state, graph))
 
 
 def _readers_from(graph: Graph, node_id: str, state: Mapping[str, Any]) -> list[str]:
@@ -758,7 +829,7 @@ def _readers_from(graph: Graph, node_id: str, state: Mapping[str, Any]) -> list[
     order: list[str] = []
     seen, queue = {node_id}, [node_id]
     first = graph.nodes[node_id]
-    if first.kind == "agent" or _fills(first, state):
+    if first.kind == "agent" or _fills(first, state, graph):
         order.append(node_id)
     while queue:
         current = queue.pop(0)
@@ -773,7 +844,7 @@ def _readers_from(graph: Graph, node_id: str, state: Mapping[str, Any]) -> list[
             if target in seen or target not in graph.nodes:
                 continue
             seen.add(target)
-            if graph.nodes[target].kind == "agent" or _fills(graph.nodes[target], state):
+            if graph.nodes[target].kind == "agent" or _fills(graph.nodes[target], state, graph):
                 order.append(target)
             queue.append(target)
     return order
@@ -790,6 +861,11 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
     edits = _edits()
     graph = edits._graph(state)
     knob_to: str | None = None
+    if to is not None and to not in graph.nodes:
+        dead = dead_knob_reason(to, state)
+        if dead is not None:
+            raise edits.EditError(f"'to' {to!r}: {dead}, so the output would reach nothing; "
+                                  "name a knob a step still reads", code="E-wiring")
     if to is not None:
         if to in graph.nodes:
             readers = [to]
@@ -809,7 +885,7 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
             if knob is not None and len(graph.knob_consumers().get(knob, ())) > 1:
                 knob = None
         elif node is not None:
-            filled = _filled_text_knobs(node, state)
+            filled = _filled_text_knobs(node, state, graph)
             knob = knob_to if knob_to in filled else (filled[0] if len(filled) == 1 else None)
             if knob is None and to is None and filled:
                 return []  # it fills several prompts: which one is the proposer's to say
@@ -2022,6 +2098,54 @@ def _expand_branch(edit: dict, state: dict) -> list[dict]:
 # ── rewire ────────────────────────────────────────────────────────────────
 
 
+def _rewire_seen(graph: Graph, state: Mapping[str, Any], edit: Mapping[str, Any], node: Node
+                 ) -> tuple[str, str | None, set[tuple[str, str]], list[tuple[str, str]]]:
+    """A rewire's collect-step name, the collect step it made before (if any), what the
+    step sees now and what it will see: what 'sees' names (default ``"task"``), or --
+    when only 'text' is given -- what it sees now, so new instructions alone keep its
+    inputs."""
+    gather = f"{node.id}_inputs"
+    helper = gather if gather in _owned(graph, node.id, state) else None
+    there = set(_available(graph).get(helper or node.id, set()))
+    now = _consumed(node, state)
+    if helper is not None:
+        now = (now - {("fact", gather)}) | _consumed(graph.nodes[helper], state)
+    if edit.get("text") is not None and "sees" not in edit:
+        seen = _seen(graph, state, there, _readable(graph, state, now), None)
+    else:
+        seen = _seen(graph, state, there, set(), edit.get("sees", [TASK]))
+    return gather, helper, now, seen
+
+
+def _own_text_slots(graph: Graph, state: Mapping[str, Any], node: Node, text: str,
+                    seen: Sequence[tuple[str, str]], gather: str) -> None:
+    """Refused when the proposer's 'text' names a slot the step would not be given: a fact
+    or file it will not see (say which step to add to 'sees'), or a knob it does not read.
+    An inherited prompt's unseen slots are taken out instead (`_strip_unseen`)."""
+    from .operators import made_by
+    from .validate import template_names
+
+    facts = {name for kind, name in seen if kind == "fact"}
+    if any(kind == "file" for kind, _name in seen):
+        facts.add(gather)
+    knobs = set(state.get("knobs") or {})
+    makers = made_by(graph)
+    for name in sorted(template_names(text)):
+        if name in knobs:
+            if name not in node.knobs:
+                raise _Refused(f"'text' names knob {{{{{name}}}}}, which {node.id!r} does not "
+                               "read; write what it should say into 'text' itself")
+        elif name not in facts:
+            made = sorted({m for (kind, made_name), steps in makers.items()
+                           if made_name == name or (kind == "file"
+                                                    and made_name.rsplit(".", 1)[0] == name)
+                           for m in steps})
+            add = (f"add {' or '.join(made)} to 'sees'" if made
+                   else "name only what it sees")
+            raise _Refused(f"'text' names {{{{{name}}}}}, which {node.id!r} would not see; "
+                           f"{add}")
+
+
 def _pre_rewire(edit: dict, state: dict) -> str | None:
     graph = _edits()._graph(state)
     node = _plain_step(graph, edit.get("step"), "rewire")
@@ -2040,13 +2164,7 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
                            "code step of your own text)")
         if not isinstance(own, str) or not own.strip():
             raise _Refused("'text' is the step's new instructions: a non-empty string")
-    gather = f"{node.id}_inputs"
-    helper = gather if gather in _owned(graph, node.id, state) else None
-    there = set(_available(graph).get(helper or node.id, set()))
-    seen = _seen(graph, state, there, set(), edit.get("sees", [TASK]))
-    now = _consumed(node, state)
-    if helper is not None:
-        now = (now - {("fact", gather)}) | _consumed(graph.nodes[helper], state)
+    gather, _helper, now, seen = _rewire_seen(graph, state, edit, node)
     if own is None and set(seen) == _readable(graph, state, now):
         raise _Refused(f"{node.id!r} already sees exactly that "
                        f"({', '.join(name for _k, name in seen) or 'nothing'}), so rewiring "
@@ -2055,18 +2173,22 @@ def _pre_rewire(edit: dict, state: dict) -> str | None:
         knob = _task_knob(node)
         if knob is not None and len(graph.knob_consumers().get(knob, ())) > 1:
             raise _Refused(f"{node.id!r}'s prompt knob {knob!r} is shared with other steps")
-        text = own if own is not None else str(
-            _knob_values(state).get(knob) if knob else node.prompt_template)
+        if own is not None:
+            _own_text_slots(graph, state, node, own, seen, gather)
+            return None
+        text = str(_knob_values(state).get(knob) if knob else node.prompt_template)
         keep = {name for k, name in seen if k == "fact"} | set(state.get("knobs") or {}) | {gather}
         if text.strip() and not _strip_unseen(text, keep).strip():
-            if own is not None:
-                raise _Refused("'text' is only slots for facts the step would not see; write "
-                               "its instructions")
             raise _Refused(f"{node.id!r}'s whole prompt is a fact it would no longer see, so "
                            "rewiring would leave it no instructions; name that fact's step in "
-                           "'sees', or give it your own text: "
+                           "'sees', or "
                            f"{_own_text_hint(node, state, edit.get('sees', [TASK]))}")
     return None
+
+
+#: How a rewire refusal names the rewire that gives the step its own text (checked like
+#: a replacing hint, `optim.base.checked_hint`).
+OWN_TEXT_HINT = "give it its own text with "
 
 
 def _own_text_hint(node: Node, state: dict, sees: Any) -> str:
@@ -2077,10 +2199,10 @@ def _own_text_hint(node: Node, state: dict, sees: Any) -> str:
     try:
         if _edits().precheck(edit, state) is None:
             _edits().apply(edit, state)
-            return f"replace it with {json.dumps(edit)}"
+            return f"{OWN_TEXT_HINT}{json.dumps(edit)}"
     except _edits().EditError:
         pass
-    return _replace_hint(node, state, sees)
+    return f"give it your own text: {_replace_hint(node, state, sees)}"
 
 
 def _expand_rewire(edit: dict, state: dict) -> list[dict]:
@@ -2089,10 +2211,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     build = _Steps(state)
     graph = build.graph
     node = graph.nodes[edit["step"]]
-    gather = f"{node.id}_inputs"
-    helper = gather if gather in _owned(graph, node.id, state) else None
-    there = set(_available(graph).get(helper or node.id, set()))
-    seen = _seen(graph, state, there, set(), edit.get("sees", [TASK]))
+    gather, helper, _now, seen = _rewire_seen(graph, state, edit, node)
     facts = [name for kind, name in seen if kind == "fact"]
     files = [name for kind, name in seen if kind == "file"]
     new_state = node.to_state()
@@ -2120,13 +2239,17 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     # Its prompt as a knob carries the new slots (the field too, so the knob's slot check
     # holds); a prompt that is not a knob is re-slotted in place: data wiring, no new text.
     new_state["prompt_template"] = new_text
-    build.add(_respec(build.state, node.id, new_state))
+    # Its own prompt knob (`<id>__...`) goes and comes back with it (`_respec`), at the new
+    # text, so the restored value already holds the new slots.
+    own_knob = knob is not None and knob.startswith(f"{node.id}__")
+    build.add(_respec(build.state, node.id, new_state,
+                      values={knob: new_text} if own_knob else None))
     if files:
         build.add(_renamed(build.state, node.id, [gather], joins=False))
         build.add([{"op": "add_node", "position": {"before": node.id},
                     "node": collect_node(gather, files, gather,
                                          notes=f"Hands {node.id} the files it sees.")}])
-    if knob is not None and new_text != before:
+    if knob is not None and not own_knob and new_text != before:
         build.add([{"op": "set_knob", "name": knob, "value": new_text}])
     return build.steps
 
@@ -3230,7 +3353,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "outputs), or single fact or file names there before it (that input alone); "
                 "'text' gives an agent step new instructions too, in place: the same id, "
                 "outputs and place in a fork or join (so a branch can work from the task "
-                "alone)",
+                "alone); with 'text' and no 'sees' it keeps what it sees",
         "example": {"op": "rewire", "step": "<step>", "sees": ["task"]},
     },
     "loop": {
@@ -3432,7 +3555,7 @@ def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
             knob = _task_knob(node)
             found = [knob] if knob and len(graph.knob_consumers().get(knob, ())) == 1 else []
         else:
-            found = _filled_text_knobs(node, state)
+            found = _filled_text_knobs(node, state, graph)
         names += [k for k in found if k not in names and _open_knob(state, k)]
     return names
 
@@ -3485,7 +3608,8 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
             if (builder.id in after or builder.kind != "op" or not (_outputs(builder) & taken)
                     or "entry" in _data_ends(graph, builder.id)):
                 continue
-            filled = [k for k in _filled_text_knobs(builder, state) if _open_knob(state, k)]
+            filled = [k for k in _filled_text_knobs(builder, state, graph)
+                      if _open_knob(state, k)]
             if filled:
                 parts.append(f"{first.id} takes no knob: insert before {builder.id} with "
                              f"'to': {filled[0]}")
@@ -3938,6 +4062,14 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
         parts.append(f"the tools of {', '.join(toolless)} went with it: no new step uses tools")
     if dropped:
         parts.append(f"dropped knob(s) {', '.join(dropped)}, which no step reads now")
+    try:
+        was_dead = dead_text_knobs(before)
+        parts += [f"knob {name!r} now reaches no step ({op} fills it into "
+                  f"{', '.join(outputs)}, which no step reads)"
+                  for name, (op, outputs) in sorted(dead_text_knobs(after).items())
+                  if name not in was_dead]
+    except Exception:  # noqa: BLE001 - a note, never a refusal
+        pass
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
 
 

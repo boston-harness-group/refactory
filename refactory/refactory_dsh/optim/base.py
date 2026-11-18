@@ -2020,14 +2020,19 @@ _REPLACE_HINT = "replace it with "
 def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
     """``reason`` with the replacing edit it names checked by ``check`` (an attempt's
     verdict: a candidate, or its refusals): kept when it would be accepted, otherwise
-    turned into "replacing it is refused too (<why>)". The operators' own precheck knows
-    only the graph; an attempt also refuses on protected steps, frozen and guarded knobs,
-    wiring and validation, so the hint is held to that."""
-    start = reason.find(_REPLACE_HINT)
-    if start < 0:
+    turned into "replacing it is refused too (<why>)" -- for a rewire giving the step its
+    own text (`core_ops.OWN_TEXT_HINT`), "giving it its own text is refused too (<why>)".
+    The operators' own precheck knows only the graph; an attempt also refuses on protected
+    steps, frozen and guarded knobs, wiring and validation, so the hint is held to that."""
+    from refactory_dsh.nn.core_ops import CODE_HINT_NOTE, OWN_TEXT_HINT
+
+    found = [(at, phrase) for phrase in (_REPLACE_HINT, OWN_TEXT_HINT)
+             if (at := reason.find(phrase)) >= 0]
+    if not found:
         return reason
+    start, phrase = min(found)
     try:
-        edit, end = json.JSONDecoder().raw_decode(reason, start + len(_REPLACE_HINT))
+        edit, end = json.JSONDecoder().raw_decode(reason, start + len(phrase))
     except ValueError:
         return reason
     verdict = check(edit)
@@ -2037,11 +2042,11 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
         # Accepted without running the new code on recorded inputs (`attempt` skips that
         # for a hint: a process per request), which an attempt of the edit itself does.
         return (f"{reason[:end]} (not dry-run){reason[end:]}" if code else reason)
-    from refactory_dsh.nn.core_ops import CODE_HINT_NOTE
-
     why = "; ".join(str(r).removeprefix("E-precondition: ") for r in verdict)
     rest = reason[end:].removeprefix(CODE_HINT_NOTE)
-    return f"{reason[:start]}replacing it is refused too ({why}){rest}"
+    refused = ("giving it its own text is refused too" if phrase == OWN_TEXT_HINT
+               else "replacing it is refused too")
+    return f"{reason[:start]}{refused} ({why}){rest}"
 
 
 #: The most characters the "what each step carries" section takes: past it, each refusal
@@ -5257,6 +5262,18 @@ class Optimizer:
         unread = unread_by_bundle(parent.state, [*prefixes[:-1], state], applied)
         if unread:
             return [f"E-unread: {unread}"]
+        # A knob whose text reaches no step any more (an op fills it into a prompt nothing
+        # reads) changes no result: setting it is refused, naming what it used to reach.
+        from refactory_dsh.nn.core_ops import dead_knob_reason
+
+        for index, step in enumerate(applied):
+            name = step.get("name") if step.get("op") == "set_knob" else None
+            if isinstance(name, str) and (state.get("knobs") or {}).get(name) \
+                    != (parent.state.get("knobs") or {}).get(name):
+                dead = dead_knob_reason(name, state, parent.state)
+                if dead is not None:
+                    return [_at(f"E-unread: {dead}, so setting it changes no result; set "
+                                "the knob that step reads now instead", index, applied)]
         unlowerable = _lowering_refusal(parent.state, state)
         if unlowerable:
             return [unlowerable]
