@@ -873,3 +873,66 @@ def test_a_way_step_taking_over_a_step_before_the_fork_sees_what_it_rewrites():
     nodes = out.state["graph"]["nodes"]
     assert nodes["redo"]["writes"] == ["compare_notes.txt"]
     assert "compare_notes.txt" in nodes["redo_inputs"]["reads"], nodes["redo_inputs"]
+
+
+# ── a writer joins the take-over's group only where the new step is on its way ──
+
+
+TAKE_REV = {"op": "insert", "after": "rev", "kind": "agent", "id": "y",
+            "text": "Check the redo.", "takes_over": "rev"}
+
+
+def _rev_taken():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(REVISE, TAKE_REV)
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    # decide's way to extract_answer (proceed) passes no y: decide keeps answer.txt.
+    assert nodes["decide"]["writes"] == ["answer.txt"] == nodes["y"]["writes"]
+    assert nodes["rev"]["writes"] == ["rev.txt"] and nodes["y_inputs"]["reads"] == ["rev.txt"]
+    assert "answer.txt" in nodes["rev_inputs"]["reads"]
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(
+        verdict, label, tmp_path, monkeypatch):
+    mode, _state = _rev_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "y": "<answer>D</answer>"})
+    result = _walk(mode, model, tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
+    if verdict == "revise":
+        prompts = [prompt for node, prompt, _s in model.log if node == "y"]
+        assert prompts and all("<answer>C</answer>" in p for p in prompts)
+
+
+@needs_spine
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(
+        verdict, label, tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _rev_taken()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+        "y": "<answer>D</answer>"}) == 0
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert records and {r["prediction"] for r in records} == {label}
+
+
+def test_a_co_writer_whose_callable_names_its_outputs_is_refused():
+    """A fallback op that sets decide's answer.txt by its own name cannot be renamed with
+    decide, so taking decide over after it is refused, naming it."""
+    refused = _s4({"op": "fallback", "step": "decide", "kind": "op", "id": "ofb",
+                   "call": "refactory_packages.livemath.ops:finish"},
+                  {"op": "insert", "before": "extract_answer", "kind": "agent", "id": "x",
+                   "text": "Final.", "takes_over": "decide"})
+    assert isinstance(refused, list), refused
+    assert "'ofb' writes 'decide''s outputs too" in refused[0], refused

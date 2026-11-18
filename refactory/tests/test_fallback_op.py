@@ -845,14 +845,19 @@ TAKE_DECIDE = {"op": "insert", "before": "extract_answer", "kind": "agent", "id"
 FALLBACK_SAYS = "<answer>B</answer> FALLBACK-NOTE"
 
 
-def _s4_taken() -> dict[str, Any]:
+#: The same, straight after decide: x goes where decide's two ways rejoin.
+TAKE_DECIDE_AFTER = {**{k: v for k, v in TAKE_DECIDE.items() if k != "before"},
+                     "after": "decide"}
+
+
+def _s4_taken(edit: dict[str, Any] = TAKE_DECIDE) -> dict[str, Any]:
     """S4 with decide's fallback, then decide taken over by an attempt: decide and its
     fallback are one writer group, renamed together, so x reads whichever answered."""
     from refactory_dsh.optim import Candidate, Optimizer, Proposal
 
     seed = Candidate.from_state(_s4())
     mode = _mode("livemath/skill_graph", seed.state)
-    out = Optimizer().attempt(Proposal(edit=TAKE_DECIDE), seed, mode.invariants(), True, (),
+    out = Optimizer().attempt(Proposal(edit=edit), seed, mode.invariants(), True, (),
                               protected=mode.edit_protected())
     assert not isinstance(out, list), out
     nodes = out.state["graph"]["nodes"]
@@ -874,14 +879,16 @@ class _Prompts(_Model):
         return super().complete(prompt, **kwargs)
 
 
-def test_walker_a_take_over_after_a_fallback_sees_the_fallback_s_answer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("edit", [TAKE_DECIDE, TAKE_DECIDE_AFTER], ids=["before", "after"])
+def test_walker_a_take_over_after_a_fallback_sees_the_fallback_s_answer(edit, tmp_path,
+                                                                         monkeypatch):
     _patch_task(monkeypatch)
     model = _Prompts({"decide": CRASH, "decide_fallback": FALLBACK_SAYS,
                       "x": "<answer>B</answer>"})
     model.prompts = {}
     run = tmp_path / "walker"
     run.mkdir()
-    result = _mode("livemath/skill_graph", _s4_taken()).run(run, model=model)
+    result = _mode("livemath/skill_graph", _s4_taken(edit)).run(run, model=model)
     assert result.exit_ok, result.error
     assert len(model.prompts["x"]) == ITEMS
     assert all("FALLBACK-NOTE" in prompt for prompt in model.prompts["x"])
@@ -897,3 +904,45 @@ def test_spine_a_take_over_after_a_fallback_sees_the_fallback_s_answer(tmp_path)
     _graded_b(records)
     prompts = dsh.prompts("Give the final letter.")
     assert len(prompts) == ITEMS and all("FALLBACK-NOTE" in p for p in prompts), prompts[:1]
+
+
+# ── a route after a step with a fallback goes where its ways rejoin ────────
+
+
+ROUTE_AFTER = {"op": "route", "after": "decide", "judge": "agent", "text": "Good enough?",
+               "to": {"proceed": "extract_answer",
+                      "revise": {"kind": "agent", "text": "Redo it.", "takes_over": "decide"}}}
+
+
+def _s4_routed() -> dict[str, Any]:
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    seed = Candidate.from_state(_s4())
+    mode = _mode("livemath/skill_graph", seed.state)
+    out = Optimizer().attempt(Proposal(edit=ROUTE_AFTER), seed, mode.invariants(), True, (),
+                              protected=mode.edit_protected())
+    assert not isinstance(out, list), out
+    graph = Graph.from_state(out.state["graph"])
+    gate = graph.fallback_gate("decide")
+    # Both of decide's ways (it answered, or its fallback did) lead to the route's judge.
+    head = "decide_route_judge_inputs"
+    assert {e.target for e in graph.out_edges("decide_fallback")} == {head}
+    assert gate is not None and head in {e.target for e in graph.out_edges(gate)}
+    return out.state
+
+
+def test_walker_a_route_after_a_fallback_keeps_the_fallback_s_answer(tmp_path, monkeypatch):
+    records, log = _walk("livemath/skill_graph", _s4_routed(),
+                         {"decide": CRASH, "decide_route_judge": "proceed: fine"},
+                         tmp_path, monkeypatch)
+    _graded_b(records)
+    assert log.count("decide_fallback") == ITEMS
+
+
+@needs_spine
+def test_spine_a_route_after_a_fallback_keeps_the_fallback_s_answer(tmp_path):
+    records, _dsh = _on_spine("livemath/skill_graph", _s4_routed(), {
+        # The judge's prompt holds decide's too: its own words come first.
+        SIMPLE: ["<answer>B</answer>"], "Good enough?": ["proceed: fine"],
+        "Weigh the notes above": [WORKER_CRASH], "": ["notes <answer>A</answer>"]}, tmp_path)
+    _graded_b(records)
