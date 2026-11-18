@@ -7,7 +7,7 @@ name = "refactory-dsh"
 version = "0.1.0"
 description = "refactory's graph semantics -> graph.json -> DSH executes (create / optimize / design meta-modes)."
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2", "PyYAML>=6", "structlog>=24"]
+dependencies = ["pydantic>=2", "PyYAML>=6", "structlog>=24", "openpyxl==3.1.5"]
 
 [project.scripts]
 refactory = "refactory_dsh.cli:main"
@@ -57,4 +57,4 @@ clones = "refactory_dsh.clones:prepare"
 
 [tool.setuptools.package-data]
 refactory_dsh = ["*.mjs", "*.cjs", "patches/*.yml", "data/*.json"]
-refactory_packages = ["*/skillopt_prompts/*.md", "skillopt/generic_prompts/*.md"]
+refactory_packages = ["*/skillopt_prompts/*.md", "skillopt/generic_prompts/*.md", "spreadsheetbench/skills/*.md", "spreadsheetbench/*.json"]

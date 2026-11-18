@@ -833,12 +833,12 @@ def test_a_four_knob_run_resumed_before_the_val_gate_rebuilds_its_patch(tmp_path
     seen: dict[str, list[str]] = {"ref": [], "split": [], "resumed": []}
     label = {"run": "ref", "armed": False}
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         if part == "val":
             if label["armed"] and len(seen[label["run"]]) == 1:
                 raise RuntimeError("process died at the val gate")
             seen[label["run"]].append(candidate.id)
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     monkeypatch.setattr(Run, "evaluate", evaluate)
     graph_run(tmp_path / "ref", GraphClient(_responses()))

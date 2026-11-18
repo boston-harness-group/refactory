@@ -450,6 +450,23 @@ def test_another_rollout_seed_measures_the_part_and_says_why(tmp_path):
         assert [h["part"] for h in _events(tmp_path / "reuse", "seed_cache_hit")] == ["val"]
 
 
+def test_gold_feedback_measures_the_part_rather_than_reuse_one_without(tmp_path):
+    """A train part cached without gold feedback is not what a train evaluation that
+    asks for it would score (its passes are told about their attempts): measured for
+    real, and the miss says why."""
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        assert json.loads(Path(cache).read_text())["parts"]["train"]["gold_feedback"] is False
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(cache))
+        loop.init()
+        seed = loop.population[0]
+        Run(_loop=loop).evaluate(seed, gold_feedback=True)
+        assert loop.rollouts == len(PARTS["train"])
+        misses = _events(tmp_path / "reuse", "seed_cache_miss")
+        assert [(m["part"], m["reason"]) for m in misses] == [
+            ("train", "gold feedback True, cached False")]
+
+
 def test_the_export_records_each_parts_rollout_seed(tmp_path, exported):
     """Run A (seed 3, val gate) rolled its seed out on train with SkillOpt's epoch-1 seed
     and on val and test with the run's own."""

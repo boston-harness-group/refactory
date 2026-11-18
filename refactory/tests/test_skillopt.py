@@ -352,9 +352,9 @@ def _spy_evaluations(monkeypatch) -> list[tuple[str, tuple | None]]:  # type: ig
     original = Run.evaluate
     original_many = Run.evaluate_many
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((part, tuple(items) if items else None))
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
         for req in requests:
@@ -1418,7 +1418,8 @@ class _LiveSignatureClient(FakeClient):
     ``DshModelClient.complete`` takes, so any extra keyword an optimizer call
     sends fails here as it failed live (#493 G30)."""
 
-    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):  # type: ignore[no-untyped-def]
+    def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False,  # type: ignore[no-untyped-def]
+                 seal=None):
         return super().complete(prompt, system=system)
 
 
@@ -2138,9 +2139,9 @@ def test_slow_update_sample_seed(tmp_path, monkeypatch):
     original = Run.evaluate
     original_many = Run.evaluate_many
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((part, tuple(items) if items else None, seed))
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
         for req in requests:
@@ -2553,13 +2554,13 @@ def test_resume_before_the_val_gate_gates_the_patched_candidate(tmp_path, monkey
     label = {"run": ""}
     crash = {"armed": False}
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         if part == "val":
             vals = [entry for entry in log if entry[0] == label["run"] and entry[1] == "val"]
             if crash["armed"] and len(vals) == 1:
                 raise RuntimeError("process died at the val gate")
             log.append((label["run"], part, _skill(candidate)))
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     monkeypatch.setattr(Run, "evaluate", evaluate)
     options = {"max_epochs": 2}
@@ -3457,10 +3458,10 @@ def _spy_part_evaluations(monkeypatch) -> list[tuple[str, str, int | None, str]]
     original = Run.evaluate
     original_many = Run.evaluate_many
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         if part != "train":
             calls.append((part, candidate.id, seed, _skill(candidate)))
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
         for req in requests:
@@ -3605,13 +3606,13 @@ def test_post_training_val_check_promotes_a_better_final_skill(tmp_path, monkeyp
 
     original = Run.evaluate
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         # Every val item passes once training is over: the final skill's val check.
         trained = bool(self._loop._custom_strategy._train_stop)  # noqa: SLF001
         if part == "val" and trained:
             monkeypatch.setenv("_SKILLOPT_PASS_ALL", "1")
         try:
-            return original(self, candidate, part=part, items=items, seed=seed)
+            return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
         finally:
             monkeypatch.delenv("_SKILLOPT_PASS_ALL", raising=False)
 
@@ -4004,10 +4005,10 @@ def test_slow_update_of_a_rejected_epoch_compares_two_rollouts(tmp_path, monkeyp
     original = Run.evaluate
     original_many = Run.evaluate_many
 
-    def evaluate(self, candidate, *, part="train", items=None, seed=None):  # type: ignore[no-untyped-def]
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, **kwargs):  # type: ignore[no-untyped-def]
         if part == "train" and items:
             sampled.append(candidate.id)
-        return original(self, candidate, part=part, items=items, seed=seed)
+        return original(self, candidate, part=part, items=items, seed=seed, **kwargs)
 
     def evaluate_many(self, requests, *, on_result=None):  # type: ignore[no-untyped-def]
         sampled.extend(r.candidate.id for r in requests if r.part == "train" and r.items)
@@ -4197,3 +4198,34 @@ def test_every_candidate_skillopt_builds_goes_through_run_attempt(tmp_path, monk
     seed = infra.population[0].id
     assert {cid for _, cid in used} - {seed} <= attempted
     assert len([kind for kind, _ in used if kind == "keep"]) >= 4
+
+
+def test_only_the_train_rollout_asks_for_gold_feedback(tmp_path, monkeypatch):
+    """SkillOpt passes ``use_eval_feedback=True`` to its main train rollout only
+    (engine/trainer.py:1269-1272): the slow-update rollouts on sampled train items, and
+    every val and test evaluation, never ask for it, and only train subset files say so."""
+    from refactory_dsh import task as task_module
+    from refactory_dsh.outerloop import Run
+
+    written: list[tuple[str, bool]] = []
+    original_write = task_module.write_subset
+
+    def write_subset(workdir, part, holdout, *, seed=None, gold_feedback=False):  # type: ignore[no-untyped-def]
+        written.append((part, bool(gold_feedback)))
+        return original_write(workdir, part, holdout, seed=seed, gold_feedback=gold_feedback)
+
+    monkeypatch.setattr(task_module, "write_subset", write_subset)
+    asked: list[tuple[str, bool, bool]] = []
+    original = Run.evaluate
+
+    def evaluate(self, candidate, *, part="train", items=None, seed=None, gold_feedback=False):  # type: ignore[no-untyped-def]
+        asked.append((part, items is not None, gold_feedback))
+        return original(self, candidate, part=part, items=items, seed=seed,
+                        gold_feedback=gold_feedback)
+
+    monkeypatch.setattr(Run, "evaluate", evaluate)
+    _run_loop(tmp_path, client=FakeClient(), skillopt_options={"max_epochs": 2})
+    assert {flag for part, sampled, flag in asked if part == "train" and not sampled} == {True}
+    assert {flag for part, sampled, flag in asked if part != "train" or sampled} <= {False}
+    assert any(part != "train" for part, _f in written)
+    assert all(part == "train" for part, flag in written if flag)

@@ -28,8 +28,10 @@ RUNTIME_FIELDS = {"runs_root", "resume", "progress", "print_events", "verbose",
 #: resolved snapshot that holds one still loads: the key is dropped, and the run
 #: behaves as the setting's last default (``fresh_evidence`` on, at most
 #: ``MAX_EDITS_PER_PROPOSAL`` edits per proposal, ``val_gate`` decided by the parts
-#: manifest; a saved ``val_gate: false``, the default before #627, is read as unset).
-OBSOLETE_SETTINGS = frozenset({"fresh_evidence", "max_edits_per_proposal", "val_gate"})
+#: manifest; a saved ``val_gate: false``, the default before #627, is read as unset;
+#: a new step's tools always run sealed, so ``allow_new_node_tools`` has no switch).
+OBSOLETE_SETTINGS = frozenset({"fresh_evidence", "max_edits_per_proposal", "val_gate",
+                               "allow_new_node_tools"})
 
 
 class ProfileError(ValueError):
@@ -158,10 +160,6 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("early_stop_at_full_val") not in (True, False, 0, 1):
         raise ProfileError("early_stop_at_full_val must be true or false (1 or 0 on the command line)")
     result["early_stop_at_full_val"] = bool(result.get("early_stop_at_full_val"))
-    # allow_new_node_tools: a switch; the command line passes it as 0 or 1.
-    if result.get("allow_new_node_tools") not in (True, False, 0, 1, None):
-        raise ProfileError("allow_new_node_tools must be true or false (1 or 0 on the command line)")
-    result["allow_new_node_tools"] = bool(result.get("allow_new_node_tools"))
     # allow_code_nodes: a switch, on unless turned off; the command line passes 0 or 1.
     if result.get("allow_code_nodes") not in (True, False, 0, 1, None):
         raise ProfileError("allow_code_nodes must be true or false (1 or 0 on the command line)")

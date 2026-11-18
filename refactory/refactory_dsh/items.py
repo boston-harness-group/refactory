@@ -34,6 +34,7 @@ directory's declarations file, written by the lowering.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -41,7 +42,7 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +168,7 @@ def prepare_pass_dir(
     declared_reads: tuple[str, ...] | list[str] = (),
     *,
     starting: bool = True,
+    task_ref: str = "",
 ) -> Path:
     """Create and return the pass directory for one item.
 
@@ -182,6 +184,9 @@ def prepare_pass_dir(
       stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
       attempt's and never counts the time a run spent stopped; the spine's ``end``
       reuses the directory with ``starting`` False.
+    * Marks it as a pass (:data:`PASS_MARKER`): the data node, the item and its index,
+      and the node's Task (*task_ref*), so a grader-side op inside the pass can find
+      the item's Task on either runtime (`refactory_dsh.feedback`).
     """
     run_dir = Path(run_dir)
     pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
@@ -207,7 +212,10 @@ def prepare_pass_dir(
     marker = pass_dir / PASS_MARKER
     if not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({"node": node_id, "item": item_id, "index": index}) + "\n")
+        record: dict[str, Any] = {"node": node_id, "item": item_id, "index": index}
+        if task_ref:
+            record["task"] = task_ref
+        marker.write_text(json.dumps(record) + "\n")
     return pass_dir
 
 
@@ -326,22 +334,87 @@ def _subgraph_declared_reads(workdir: Path, node: Node) -> tuple[str, ...]:
     return pass_read_through(declared, body if isinstance(body, list) else set(declared), node.writes)
 
 
+def write_whole(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` whole: write a temporary file in the same folder,
+    flush it to disk, then rename it over ``path``, so a reader sees the old file or the
+    new one, never half of either."""
+    import tempfile
+
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def record_lock(path: Path) -> Iterator[None]:
+    """Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
+    every process and thread that opens it waits for the holder."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(f"{path.name}.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _set_aside(path: Path, why: str) -> None:
+    """Keep a record file that cannot be read as ``<name>.unreadable.<ns>`` (a name no
+    earlier one has) and say so on stderr: evidence is kept, never taken for empty, and
+    never fails the item it describes. Call it holding the file's `record_lock`."""
+    aside = path.with_name(f"{path.name}.unreadable.{time.time_ns()}")
+    os.replace(path, aside)
+    print(f"refactory: items warning: {path} cannot be read ({why}); kept as {aside}",
+          file=sys.stderr)
+
+
+def update_record_file(path: Path, change: Callable[[Any], Any], empty: Callable[[], Any]) -> Any:
+    """Read, change and rewrite the JSON record file ``path`` under an exclusive lock
+    (``<name>.lock`` beside it), replacing it whole (`write_whole`). Concurrent writers
+    of one pass (a fork's parallel branches, each its own process on the spine; threads
+    hold their own lock handle) each see the others' entries. A missing file starts
+    from ``empty()``; one that cannot be read, or holds another kind of value, is kept
+    aside (`_set_aside`) and the record starts again from ``empty()``. ``change`` edits
+    the value in place or returns a new one; the value written back is returned."""
+    with record_lock(path):
+        value = empty()
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text())
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                _set_aside(path, str(exc))
+            else:
+                if isinstance(loaded, type(value)):
+                    value = loaded
+                else:
+                    _set_aside(path, f"a {type(loaded).__name__}, not a {type(value).__name__}")
+        changed = change(value)
+        value = value if changed is None else changed
+        write_whole(path, json.dumps(value, default=str))
+        return value
+
+
+def _append_to_sidecar(workdir: Path, entry: dict[str, Any]) -> None:
+    update_record_file(workdir / EXCHANGES_SIDECAR, lambda existing: existing.append(entry), list)
+
+
 def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
-    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar.
+    """Append one ``{node, prompt, response}`` exchange to the per-item sidecar, under
+    its lock (`update_record_file`): a fork's branches run in one pass folder.
 
     Called from agent execution in both runtimes so that ``command_end`` can
     include per-node exchanges in the item record.
     """
-    path = workdir / EXCHANGES_SIDECAR
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, Any]] = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-    existing.append({"node": node, "prompt": prompt, "response": response})
-    path.write_text(json.dumps(existing, default=str))
+    _append_to_sidecar(workdir, {"node": node, "prompt": prompt, "response": response})
 
 
 #: The kinds of step visit an item's record keeps beside its model calls (``steps``):
@@ -395,31 +468,29 @@ def gate_visit(node: str, verdict: Any) -> dict[str, Any]:
 
 def record_visit(workdir: Path, visit: dict[str, Any]) -> None:
     """Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
-    beside the model calls; `make_item_record` files it under ``steps``. The spine's
-    runner calls it inside a data-node pass (the walker keeps visits in memory)."""
-    path = workdir / EXCHANGES_SIDECAR
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, Any]] = []
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-    existing.append(visit)
-    path.write_text(json.dumps(existing, default=str))
+    beside the model calls, under its lock (`update_record_file`); `make_item_record`
+    files it under ``steps``. The spine's runner calls it inside a data-node pass (the
+    walker keeps visits in memory)."""
+    _append_to_sidecar(workdir, visit)
 
 
 def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
-    """Read per-item exchanges from the sidecar, then remove the file."""
+    """Read per-item exchanges from the sidecar, then remove the file, under its lock.
+    One that cannot be read is kept aside (`_set_aside`), never taken for an item with
+    no exchanges."""
     path = workdir / EXCHANGES_SIDECAR
     if not path.exists():
         return []
-    try:
-        data = json.loads(path.read_text())
+    with record_lock(path):
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            return []
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _set_aside(path, str(exc))
+            return []
         path.unlink(missing_ok=True)
         return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
 
 
 #: What every model-completion timeout's message starts with
@@ -474,9 +545,16 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
     re.MULTILINE)
 
 
+#: A `model.HarnessIncident` that crossed a process as text: its message starts with
+#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "``, the spine
+#: worker's ``"worker: "`` or a traceback's ``"<Class>: "``, anchored at a line's start.
+_HARNESS_INCIDENT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )*harness incident: ", re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
-    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's) or
+    any other `model.HarnessIncident` (a grader whose own machinery failed),
     ``"declared_timeout"`` for one stopped at its node's declared wall
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
     else the class name.
@@ -488,10 +566,11 @@ def error_kind(error: BaseException) -> str:
     (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
     ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessIncident
     from refactory_dsh.node_retry import RetriesExhausted
 
-    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
+    if (isinstance(error, HarnessIncident) or HARNESS_BACKSTOP_LINE.search(str(error))
+            or _HARNESS_INCIDENT_LINE.search(str(error))):
         return "harness_incident"
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
@@ -906,7 +985,7 @@ def _read_pass_state(workdir: Path, node_id: str) -> dict[str, int]:
 def _write_pass_state(workdir: Path, node_id: str, state: dict[str, int]) -> None:
     path = _pass_state_path(workdir, node_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state))
+    write_whole(path, json.dumps(state))
 
 
 def _locked_pass_state_update(
@@ -1058,7 +1137,8 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
 
     # Create the isolated pass directory.
     declared_reads = _subgraph_declared_reads(workdir, node)
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads,
+                                task_ref=node.task_ref or "")
 
     # Write current_item to both pass_dir (for the subgraph) and workdir
     # (for progress tracking / PIT-005), without the Task's grader-only fields: the
@@ -1155,7 +1235,8 @@ def command_end(
     item_id = str(item.get("id") or index)
 
     # Compute the pass directory (idempotent — reuses the one command_begin created).
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False,
+                                task_ref=node.task_ref or "")
 
     # F4 parity: when the caller says the item's subgraph failed, skip verify
     # and write a failure record directly, as the walker does.

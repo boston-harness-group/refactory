@@ -62,6 +62,9 @@ class EvalRequest:
     #: score and id stay. It shares the batch's evaluation and rollout reservation,
     #: item gate and stop signal. The default loop's own requests only.
     rescore_epoch: int | None = None
+    #: A train request whose passes may be told how their attempt compares with the
+    #: answer (`refactory_dsh.feedback`); refused for any other part.
+    gold_feedback: bool = False
 
 
 class OuterLoopError(RuntimeError):
@@ -160,7 +163,6 @@ class Run:
             seed_state=getattr(self._loop, '_original_seed_state', None),
             protected=getattr(self._loop, "protected", ()),
             graders=getattr(self._loop, "graders", ()),
-            allow_new_node_tools=bool(getattr(self._loop.config, "allow_new_node_tools", False)),
             record=record,
             dry_run_code=dry_run_code,
         )
@@ -173,6 +175,7 @@ class Run:
         part: str = "train",
         items: list[str] | None = None,
         seed: int | None = None,
+        gold_feedback: bool = False,
     ) -> Candidate:
         """Run the mode and score it. Spends one unit of budget.
 
@@ -185,12 +188,18 @@ class Run:
         is refused there: an optimizer that chose its val subset would choose its
         own exam.
 
+        ``gold_feedback`` (train only) lets the passes be told how their attempt compares
+        with the answer, where the mode has a train-feedback node and its Task says what
+        to tell (`refactory_dsh.feedback`): SkillOpt's training rollouts.
+
         Refused once the evaluation or rollout budget is spent, for every part.
         """
         loop = self._loop
         manifest = getattr(loop, '_parts_manifest', None)
         if part not in ("train", "val", "test"):
             raise OuterLoopError(f"unknown part {part!r}; expected 'train', 'val' or 'test'")
+        if gold_feedback and part != "train":
+            raise OuterLoopError(f"gold feedback is for train evaluations only, not {part!r}")
         max_rollouts = getattr(loop.config, "max_rollouts", None)
         if max_rollouts is not None and loop.rollouts >= max_rollouts:
             raise OuterLoopError(
@@ -222,7 +231,8 @@ class Run:
                         f"items {sorted(extra)} are not in {where}; "
                         f"an optimizer may pick a train minibatch but never val/test ids as 'train'"
                     )
-            loop._evaluate(candidate, seed=seed, items=items)  # noqa: SLF001
+            loop._evaluate(candidate, seed=seed, items=items,  # noqa: SLF001
+                           gold_feedback=gold_feedback)
             return candidate
         if items is not None:
             raise OuterLoopError(
@@ -302,6 +312,10 @@ class Run:
             if req.part not in ("train", "val", "test"):
                 raise OuterLoopError(
                     f"request {i}: unknown part {req.part!r}; expected 'train', 'val' or 'test'"
+                )
+            if req.gold_feedback and req.part != "train":
+                raise OuterLoopError(
+                    f"request {i}: gold feedback is for train evaluations only, not {req.part!r}"
                 )
             if req.part == "train" and req.items is not None:
                 if manifest is not None:
@@ -425,6 +439,7 @@ class Run:
                 elif req.part == "train":
                     loop._evaluate(  # noqa: SLF001
                         req.candidate, seed=req.seed, items=req.items,
+                        gold_feedback=req.gold_feedback,
                         _budget_reserved=True,
                         item_gate=stoppable_gate,
                         item_slots=True, stop_event=stop_event,
