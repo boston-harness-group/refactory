@@ -519,8 +519,8 @@ SETTING_HELP = {
                  "pool otherwise)",
     "pool_size": "with --selection pool: how many candidates the pool keeps by val score, "
                  "ties at the edge kept (default: 8)",
-    "run_ledger": "1 (default) shows the model proposer every candidate of the run by kind "
-                  "of change, with train fixed/broken counts and the gate's word; 0 off",
+    "run_ledger": "1 (default) shows the model proposer every candidate of the run with "
+                  "what its edits did, train fixed/broken counts and the gate's word; 0 off",
     "lessons": "1 (default) runs the memory pass: once per epoch from epoch 2 one "
                "optimizer-model call compares the previous and current candidate on 20 "
                "train items and writes the memory note every analyst, merge and proposal "

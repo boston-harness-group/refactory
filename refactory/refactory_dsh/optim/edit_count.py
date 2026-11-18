@@ -11,12 +11,19 @@ edits that only connect it count as ONE change:
   direct neighbour binds or reads (a step that reads what it writes, writes what it
   reads, or sits next to it on an edge) whose changed lines each name the step or a
   file or fact it writes;
+- its readers' tuning: a ``set_knob`` of a knob bound or read by a step that, in the
+  proposal's final graph, reads what the new step writes or produces (a file in its
+  reads, a ``{{fact}}`` in its prompt) -- the edit that makes an existing step use or
+  account for the new one, whatever its lines say. Decided from the graph after every
+  edit is applied, never from edit order or names;
 - edges to it: an ``add_edge``/``remove_edge`` from or to the step whose other end is
   the step or a direct neighbour.
 
-Any other edit counts as one more change. Only direct neighbours (one hop on the data
+Any other edit counts as one more change: text tuning of a step that does not read the
+new step counts one per knob, as before. Only direct neighbours (one hop on the data
 flow or an edge) qualify, so one change cannot sprawl over the pipeline. Two structural
-edits are two changes.
+edits are two changes. However it counts, a proposal has at most
+``MAX_RAW_EDITS_PER_PROPOSAL`` edits (`optim.base`), a guard against runaway bundles.
 """
 
 from __future__ import annotations
@@ -60,6 +67,10 @@ def _inputs(node: Mapping[str, Any], state: Mapping[str, Any] | None) -> set[str
     texts = [str(node.get(key) or "") for key in _PROMPT_FIELDS]
     texts += [str(_knob_value(state, knob) or "") for field, knob in _bound(node)
               if field in _PROMPT_FIELDS]
+    # A text knob the node lists itself: an op fills its facts into it (a prompt it builds
+    # for the step after it, as LiveMath S4's decide_prompt builds decide's).
+    texts += [value for knob in node.get("knobs") or ()
+              for value in [_knob_value(state, str(knob))] if isinstance(value, str)]
     for text in texts:
         names |= set(_FACT.findall(text))
     return names
@@ -128,6 +139,22 @@ def _references(state: Mapping[str, Any] | None, ids: set[str]) -> set[str]:
     return {ref for ref in refs if ref}
 
 
+def readers(state: Mapping[str, Any] | None, ids: set[str]) -> set[str]:
+    """The steps outside ``ids`` that read what ``ids`` write or produce (a file in their
+    reads, a ``{{fact}}`` in their prompt or a prompt knob), in ``state``."""
+    nodes = _nodes(state)
+    out: set[str] = set()
+    for step in ids:
+        node = nodes.get(step)
+        if isinstance(node, Mapping):
+            out |= _outputs(node)
+    if not out:
+        return set()
+    return {str(other_id) for other_id, other in nodes.items()
+            if other_id not in ids and isinstance(other, Mapping)
+            and _inputs(other, state) & out}
+
+
 def _connects(edit: Mapping[str, Any], group: Mapping[str, Any], before: Mapping[str, Any],
               after: Mapping[str, Any], final: Mapping[str, Any]) -> bool:
     op = edit.get("op")
@@ -137,6 +164,8 @@ def _connects(edit: Mapping[str, Any], group: Mapping[str, Any], before: Mapping
         held = owners(final, name) | owners(before, name) | owners(after, name)
         if held and held <= subject:
             return True  # the step's own: no other step binds or reads it
+        if op == "set_knob" and owners(final, name) & readers(final, subject):
+            return True  # a reader of the new step tuned to use it
         if op != "set_knob" or not held & near:
             return False
         lines = changed_lines(_knob_value(before, name), _knob_value(after, name))

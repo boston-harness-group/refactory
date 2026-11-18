@@ -362,11 +362,15 @@ class RunStopped(CancelledError):
 #: a structural edit and the edits that only connect it are one. A constant, not a run
 #: setting.
 MAX_EDITS_PER_PROPOSAL = 4
+#: The most edits one proposal may carry however they count (three times the cap): a
+#: guard against runaway bundles, not the cap itself.
+MAX_RAW_EDITS_PER_PROPOSAL = 12
 #: How the cap counts, as a refusal and the bundling instructions say it.
-COUNTING_RULE = ("A structural edit and the edits that only connect it count as one change: "
-                 "the new step's own prompt and settings, its direct neighbours' prompt "
-                 "lines that name it or what it writes, and edges between it and them. "
-                 "Every other edit counts as one more.")
+COUNTING_RULE = ("The limit counts changes, not edits: a structural edit plus its own "
+                 "prompt and settings, edges to it, and set_knob edits of steps that read "
+                 "its output or name it count as one change (e.g. a new branch and the "
+                 "tuning of the step that reads it). Every other edit counts as one more. "
+                 f"At most {MAX_RAW_EDITS_PER_PROPOSAL} edits in all.")
 
 
 @dataclass(frozen=True)
@@ -533,6 +537,10 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
         return [f"E-proposal-shape: {steps[0][UNREADABLE_PROPOSAL]}. Write each proposal "
                 'as {"edit": {"op": ...}} or {"edits": [{"op": ...}, ...]}, with '
                 "rationale, prediction and confidence beside it"]
+    if max_edits is not None and int(max_edits) > 1 and len(steps) > MAX_RAW_EDITS_PER_PROPOSAL:
+        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and no proposal "
+                f"may carry more than {MAX_RAW_EDITS_PER_PROPOSAL}, however they count; "
+                "split it, or keep the edits the fix needs together"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
         limit = max(1, int(max_edits))
         # A limit of one asks for single edits only; a bundle counts by logical change.
@@ -1106,9 +1114,9 @@ class ProposalContext:
     #: candidates run headless, so the default leaves the person-answered gate kind out
     #: of the node schemas (`node_schema.render_schema`).
     person_gates: bool = False
-    #: Every evaluated candidate of the run with the kind of change it made, its train
+    #: Every evaluated candidate of the run with what its own edits did, its train
     #: fixed/broken counts against its parent and the gate's word (``Loop._ledger``,
-    #: ``LoopConfig.run_ledger``), for "Every change so far, by kind"; empty says nothing.
+    #: ``LoopConfig.run_ledger``), for "Every change so far"; empty says nothing.
     ledger: list[dict[str, Any]] = field(default_factory=list)
     #: The loop's memory note (`optim.memory`; ``LoopConfig.lessons``): ``{"text",
     #: "epoch", ...}`` and, when the epoch's pass failed, ``not_updated``; for
@@ -1565,7 +1573,7 @@ def _evidence_rows(rows: Sequence[tuple[str, Any]],
 
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
-    """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
+    """The run-wide feedback sections (`optim.feedback`): every change so far, whether
     the last round's added steps contributed, the loop's memory note (`optim.memory`),
     and the integrity judge's verdicts on its proposals (`optim.integrity`); each only
     when its field holds something."""
@@ -3879,20 +3887,13 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                 "scores; held-out scores are never shown. You edit the pipeline shown below. A `rejected` "
                 "candidate was not shown better than the current one on validation; that is "
                 "all a rejection says. " + resolution + "A change that was rejected must not "
-                "be proposed again unchanged, but when its train fixed/broken counts against "
-                "its parent (when shown below) were strongly positive, its direction may still "
-                "be right: you may build on it or combine it with edits to other steps in the "
-                "same failure path."]
+                "be proposed again unchanged. " + REJECTED_BUILD_TEXT]
     return ["This run has a validation gate (its rule is under \"What the score "
             "measures\"). Scores here are train scores; "
             "held-out scores are never shown. You edit the candidate marked `current`. A "
             "`rejected` candidate was not shown better on validation; that is all a "
             "rejection says. " + resolution + "A rejected candidate is never kept, and its "
-            "change must not be proposed again unchanged. When its train fixed/broken counts "
-            "against its parent (when shown below) were strongly positive, its direction may "
-            "still be right: "
-            "you may build on its change or combine it with edits to other steps in the "
-            "same failure path."]
+            "change must not be proposed again unchanged. " + REJECTED_BUILD_TEXT]
 
 
 #: The most score changes in each direction listed for graded items.
@@ -3900,10 +3901,19 @@ EDIT_CHANGE_GRADED = 3
 #: Entries in "Your earlier reasoning", and how much of each text it keeps.
 REASONING_ENTRIES = 6
 REASONING_TEXT_CHARS = 600
-#: The full edits of the latest rejected candidate that fixed more train items than
-#: it broke, shown under "Your earlier reasoning" so it can be built on, at most this
-#: many characters.
-REJECTED_EDITS_CHARS = 4000
+#: The full edits of the latest rejected candidate, whatever its net count, shown under
+#: "Your earlier reasoning" with what went wrong in it so it can be built on: every text
+#: whole (a new step's instructions, a judge's criteria), the whole within this many
+#: characters, head and tail with the cut said past it.
+REJECTED_EDITS_CHARS = 20000
+#: What the gate note says of building on a rejected change: by its mechanism, not its
+#: net count.
+REJECTED_BUILD_TEXT = (
+    "A rejected change can hold the right idea with a fixable mechanism, whatever its net "
+    "count: read how it moved its items (the latest one's full edits and what went wrong in "
+    "it are under \"Your earlier reasoning\"), and you may fix what went wrong -- its "
+    "instructions or criteria, its place, what it sends back, its limit -- or combine it "
+    "with edits to other steps in the same failure path.")
 
 
 def _by_item(records: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -4594,12 +4604,12 @@ def reasoning_shown(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _promising(entries: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    """The latest rejected candidate that fixed more train items than it broke, whose
-    edits a request shows whole so they can be built on; ``None`` when there is none."""
-    promising = [entry for entry in entries if entry.get("gate") == "rejected"
-                 and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
-                 and entry["fixed"] > entry["broken"]]
-    return promising[-1] if promising else None
+    """The latest rejected candidate with train counts against its parent, whatever its
+    net count, whose edits a request shows whole with what went wrong in it, so it can be
+    built on; ``None`` when there is none."""
+    rejected = [entry for entry in entries if entry.get("gate") == "rejected"
+                and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)]
+    return rejected[-1] if rejected else None
 
 
 def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (),
@@ -4643,23 +4653,35 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
                     if entry.get("considered") else [])]
     entry = _promising(entries)
     if entry is not None:
-        head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate that "
-                f"fixed more train items than it broke ({entry['fixed']} fixed / "
-                f"{entry['broken']} broken)")
+        from .edit_effect import effect_lines
+
+        head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate "
+                f"({entry['fixed']} fixed / {entry['broken']} broken)")
+        # How it moved the items it changed (`optim.edit_effect`): the mechanism to fix.
+        went = effect_lines(entry.get("effect") or {})
+        wrong = ([f"What went wrong in it (how it moved the items it changed): {went[0]}",
+                  *went[1:]] if went else [])
+        review = ("A step it added is reviewed under \"Did the added steps contribute?\"."
+                  if entry.get("added") else "")
         shown = [str(e.get("id")) for e in reasoning_shown(entries)]
         if str(entry.get("id")) in above or str(entry.get("id")) in shown:
             # Its edits are whole in its own block already (`whole_edits`).
             where = ("under \"What the last edit changed\" above"
                      if str(entry.get("id")) in above else "in its block above")
-            lines += ["", head, f"Whole {where}, to be built on or combined with edits to "
-                      "other steps; not to be re-proposed unchanged."]
+            lines += ["", head, f"Whole {where}, to be built on (fix what went wrong in it) "
+                      "or combined with edits to other steps; not to be re-proposed "
+                      "unchanged.", *wrong, *([review] if review else [])]
         else:
+            text = whole_edits(entry.get("edit"), entry.get("before"), homes)
+            cut = len(text) > REJECTED_EDITS_CHARS
             lines += ["", head,
-                      f"Every step's wiring whole, its text shortened to fit {REJECTED_EDITS_CHARS} "
-                      "characters, so it can be built on "
-                      "or combined with edits to other steps; not to be re-proposed unchanged.",
-                      describe_edits(entry.get("edit"), text_budget=REJECTED_EDITS_CHARS,
-                                     homes=homes)]
+                      "Every edit whole, a new step's instructions and a judge's criteria "
+                      "included" + (f" (past {REJECTED_EDITS_CHARS} characters its middle is "
+                                    "cut, the cut said)" if cut else "")
+                      + ", so it can be built on (fix what went wrong in it) or combined "
+                      "with edits to other steps; not to be re-proposed unchanged.",
+                      _clip_middle(text, REJECTED_EDITS_CHARS) if cut else text,
+                      *wrong, *([review] if review else [])]
     return lines
 
 

@@ -257,7 +257,8 @@ def test_autoresearch_parses_lists_and_says_it_may_bundle():
     assert proposals[1].rationale == "cascade"
     flat = client.prompts[0].replace("\n", " ")
     assert "up to 4 changes as an ordered list of edits" in flat
-    assert "A structural edit and the edits that only connect it count as one change" in flat
+    assert "The limit counts changes, not edits: a structural edit plus its own" in flat
+    assert "a new branch and the tuning of the step that reads it" in flat
     assert '"edits": [' in client.prompts[0]
     optimizer.propose(ProposalContext(max_edits=1), 1, [parent])
     assert '"edits": [' not in client.prompts[1], "a run of single edits does not mention bundles"

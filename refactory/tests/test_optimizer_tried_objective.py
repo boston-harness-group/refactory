@@ -64,16 +64,19 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     loop, _ = _run(tmp_path, monkeypatch, plan, proposer=proposer)
     by_level = {_level(c): c for c in loop.population}
     passes = _events(loop, "optimizer_memory")
-    assert [p["same"] for p in passes] == [False, True]
+    assert [p["same"] for p in passes] == [False, False]
     prompt = proposer.asked[1]["prompt"]
     tried = _section(prompt, "## What was tried this epoch")
     assert "proposed in round 2" in tried
-    assert "Nothing this epoch replaced it (what was tried and not kept" in prompt
+    # Nothing kept: the incumbent 7 is set against the rejected 6 on the item 6 broke.
+    assert "Nothing this epoch replaced it; the comparison below sets it against" in prompt
+    assert passes[1]["rejected"]["child"] == by_level[6].id
     six = by_level[6].id
     (line,) = [l for l in tried.splitlines() if l.startswith(f"- `{six}`")]
     assert f"from `{by_level[7].id}`" in line and "knob change: prompt/setting" in line
-    assert "set_knob: level" in line and f"train score {by_level[6].score}" in line
-    # Its counts and the gate's word are in the per-kind tally, said once there.
+    assert '{"op": "set_knob", "name": "level", "value": 6}' in line
+    assert f"train score {by_level[6].score}" in line
+    # Its counts and the gate's word are in the per-change tally, said once there.
     (tally,) = [l for l in tried.splitlines() if f"`{six}`" in l and l is not line
                 and not l.startswith(f"- `{six}`")]
     # 7 passes t1-t5, 6 passes t1-t4: one broken, none fixed.
@@ -83,7 +86,7 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     assert len(refusals) == 2
     # Newest first: the bypass was refused after the unreadable entry.
     assert "E-policy" in refusals[0] and "structural change" in refusals[0]
-    assert "bypass: work" in refusals[0]
+    assert '{"op": "bypass", "target": "work"}' in refusals[0]
     assert "E-proposal-shape" in refusals[1]
     assert "attempt 1; no readable edit)" in refusals[1] and "change:" not in refusals[1]
     assert tried.index(f"`{six}`") < tried.index("- refused"), "evaluated ones first"
@@ -143,7 +146,7 @@ def test_the_section_is_bounded_newest_first_with_the_cut_said():
                                round_=4, current="c59", gated=True)
     text = "\n".join(lines)
     assert len(text) <= memory.TRIED_CHARS
-    assert memory.TRIED_CHARS == 8000
+    assert memory.TRIED_CHARS == 16000
     assert "`c59`" in text and "`c0`" not in text, "the newest kept, the oldest cut"
     assert text.index("`c59`") < text.index("`c58`")
     assert lines[-1].startswith("[cut: ") and lines[-1].endswith(
@@ -191,13 +194,20 @@ def test_with_nothing_tried_the_unchanged_pipeline_points_nowhere():
     assert "Nothing this epoch replaced it (what was tried and not kept is under" in some
 
 
-def test_edits_in_short_name_the_op_and_what_it_touches_never_a_value():
-    text = memory.edits_text([{"op": "set_knob", "name": "a", "value": "SECRET-TEXT"},
+def test_edits_say_what_each_change_was_its_text_included():
+    # S1-s45: "loop" alone could not tell this judge's criteria from loops in general.
+    text = memory.edits_text([{"op": "set_knob", "name": "a", "value": "NEW-TEXT"},
                               {"op": "insert_after", "target": "solve",
-                               "node": {"id": "check", "kind": "agent"}}])
-    assert text == "set_knob: a; insert_after: check, solve"
+                               "node": {"id": "check", "kind": "agent",
+                                        "prompt_template": "CHECK-CRITERIA"}}])
+    assert "NEW-TEXT" in text and "CHECK-CRITERIA" in text and "solve" in text
+    # A knob's change against the parent's value is its diff, not the whole text.
+    diff = memory.edits_text([{"op": "set_knob", "name": "a", "value": "one\nTWO\nthree"}],
+                             {"a": "one\nthree"})
+    assert diff.startswith("set_knob a: 9 -> 13 chars; diff: ") and "+TWO" in diff
+    assert "\n" not in text and "\n" not in diff, "one line: nothing in it reads as a heading"
     assert memory.edits_text({UNREADABLE_PROPOSAL: "x"}) == "(no readable edit)"
-    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 900}])) == \
+    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 9000}])) == \
         memory.TRIED_EDITS_CHARS
 
 
