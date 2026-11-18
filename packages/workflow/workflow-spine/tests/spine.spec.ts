@@ -261,6 +261,21 @@ describe('design-graph fixture fork_qa carries optional_targets', () => {
     // presize_scale is not optional: it never fails (it sizes full instead).
     expect(() => s.complete('presize_scale', { failed: true })).toThrow(/is not optional/)
     s.complete('presize_scale')
+    expect(ids(s)).toEqual(['await_code_graph'])
+  })
+
+  it('the code explorer runs after sizing, and an explorer that fails is missing and research still runs', () => {
+    const s = new Spine(graph)
+    expect(spineEdges(graph, 'presize_scale')).toEqual([['await_code_graph', '']])
+    expect(s.view('fork_explore').optional_targets).toEqual(['explore_code'])
+    const before = advance(s, 'explore_code', 'proceed')
+    expect(before.slice(-3)).toEqual(['presize_scale', 'await_code_graph', 'fork_explore'])
+    expect(ids(s)).toEqual(['explore_code'])
+    s.complete('explore_code', { failed: true })
+    expect(ids(s)).toEqual(['join_explore'])
+    s.complete('join_explore')
+    expect(ids(s)).toEqual(['record_graph_context'])
+    s.complete('record_graph_context')
     expect(ids(s)).toEqual(['research_director'])
   })
 

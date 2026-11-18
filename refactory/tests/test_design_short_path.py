@@ -192,7 +192,11 @@ SIZING_CHAIN = {
     ("clear_sizing", "fork_size", None),
     ("fork_size", "join_size", None),
     ("join_size", "presize_scale", None),
-    ("presize_scale", "research_director", None),
+    ("presize_scale", "await_code_graph", None),
+    ("await_code_graph", "fork_explore", None),
+    ("fork_explore", "join_explore", None),
+    ("join_explore", "record_graph_context", None),
+    ("record_graph_context", "research_director", None),
     ("classify_scale", "widen_research", None),
     ("widen_research", "research_director", "reloop"),
     ("widen_research", "pitfalls_researcher", "proceed"),
@@ -217,7 +221,7 @@ def test_the_sizing_chain_sits_before_research():
             ("route_strategy", "strategy_director", "proceed"),
             ("route_strategy", "synthesize_strategy", "scoped")}
         # The sizer is reached through its fork, not an edge.
-        assert not {e for e in edges if "size_change" in e[:2]}
+        assert not {e for e in edges if "size_change" in e[:2] or "explore_code" in e[:2]}
     assert workflow.nodes["fork_size"].targets == ["size_change"]
     assert workflow.nodes["fork_size"].optional_targets == ["size_change"]
     assert workflow.nodes["join_size"].sources == ["size_change"]

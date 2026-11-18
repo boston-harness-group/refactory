@@ -12,6 +12,10 @@
       "id": "audit_corrections",
       "_type": "FnNode"
     },
+    "await_code_graph": {
+      "id": "await_code_graph",
+      "_type": "FnNode"
+    },
     "build_code_graph": {
       "id": "build_code_graph",
       "_type": "FnNode"
@@ -75,6 +79,22 @@
       "role": "ceo",
       "max_iterations": 1,
       "_type": "AgentNode"
+    },
+    "explore_code": {
+      "id": "explore_code",
+      "role": "ceo",
+      "max_iterations": 1,
+      "_type": "AgentNode"
+    },
+    "fork_explore": {
+      "id": "fork_explore",
+      "targets": [
+        "explore_code"
+      ],
+      "optional_targets": [
+        "explore_code"
+      ],
+      "_type": "ForkNode"
     },
     "fork_qa": {
       "id": "fork_qa",
@@ -149,6 +169,13 @@
       "role": "ceo",
       "max_iterations": 1,
       "_type": "AgentNode"
+    },
+    "join_explore": {
+      "id": "join_explore",
+      "sources": [
+        "explore_code"
+      ],
+      "_type": "JoinNode"
     },
     "join_qa": {
       "id": "join_qa",
@@ -225,6 +252,10 @@
     },
     "record_findings": {
       "id": "record_findings",
+      "_type": "FnNode"
+    },
+    "record_graph_context": {
+      "id": "record_graph_context",
       "_type": "FnNode"
     },
     "report": {
@@ -306,6 +337,11 @@
       "condition": null
     },
     {
+      "source": "await_code_graph",
+      "target": "fork_explore",
+      "condition": null
+    },
+    {
       "source": "build_code_graph",
       "target": "clear_sizing",
       "condition": null
@@ -353,6 +389,11 @@
     {
       "source": "emit",
       "target": "materialise",
+      "condition": null
+    },
+    {
+      "source": "fork_explore",
+      "target": "join_explore",
       "condition": null
     },
     {
@@ -456,6 +497,11 @@
       "condition": "proceed"
     },
     {
+      "source": "join_explore",
+      "target": "record_graph_context",
+      "condition": null
+    },
+    {
       "source": "join_qa",
       "target": "gate_check",
       "condition": null
@@ -512,7 +558,7 @@
     },
     {
       "source": "presize_scale",
-      "target": "research_director",
+      "target": "await_code_graph",
       "condition": null
     },
     {
@@ -528,6 +574,11 @@
     {
       "source": "record_findings",
       "target": "gate_research",
+      "condition": null
+    },
+    {
+      "source": "record_graph_context",
+      "target": "research_director",
       "condition": null
     },
     {

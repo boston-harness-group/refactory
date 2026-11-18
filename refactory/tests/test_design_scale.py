@@ -1532,12 +1532,14 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
         graph["edges"] = [edge for edge in graph["edges"]
                           if edge["source"] not in sizing_nodes and edge["target"] not in sizing_nodes]
         graph["edges"] += [
-            {"source": "route_refine_design", "target": "research_director", "condition": "proceed"},
+            # The code explorer stays: research declares its file.
+            {"source": "route_refine_design", "target": "await_code_graph", "condition": "proceed"},
             {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
-        # The sizer's own knobs (its system prompt) go with it, and the code_graph knobs
-        # with build_code_graph, which is removed with the sizing chain.
+        # The sizer's own knobs (its system prompt) go with it, and build_code_graph's
+        # knobs with it; the explorer keeps the two it reads.
         for knob in [knob for knob in state["knobs"]
-                     if knob.startswith("size_change__") or knob.startswith("code_graph")]:
+                     if knob.startswith("size_change__")
+                     or knob in ("code_graph_timeout_s", "code_graph_max_files")]:
             del state["knobs"][knob]
         assert validate_state(state) == []
 

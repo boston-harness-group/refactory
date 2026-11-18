@@ -6,7 +6,10 @@ codebase.  This module wraps it for design mode:
 - ``build_code_graph`` is the deterministic op that starts the build as a detached
   process and returns a prompt paragraph for the agents.
 - ``explain_node`` and ``callers_of`` query graph.json directly (no graphify binary).
-- ``cli_graph`` dispatches ``refactory graph explain|callers`` from the console.
+- ``query_graph`` and ``path_between`` find the code a brief names and the chain of
+  code edges between two nodes, for the explorer step (``await_code_graph`` →
+  ``explore_code`` → ``record_graph_context``).
+- ``cli_graph`` dispatches ``refactory graph explain|callers|query|path`` from the console.
 
 No module-level ``import graphify`` or ``from graphify import`` anywhere: graphify is
 optional, and the only reference is the subprocess command assembled at runtime.
@@ -368,8 +371,13 @@ def cli_graph(args: Any) -> int:
     if st == "building":
         st = _building_state(status)
 
-    name = args.name
     command = args.graph_command
+    if command == "path":
+        name = f"{args.start} -> {args.end}"
+    elif command == "query":
+        name = " ".join(args.terms)
+    else:
+        name = args.name
     started = time.monotonic()
 
     if st != "ready":
@@ -383,15 +391,22 @@ def cli_graph(args: Any) -> int:
         result = explain_node(graph_dir, name, stats)
     elif command == "callers":
         result = callers_of(graph_dir, name, stats)
+    elif command == "query":
+        result = query_graph(graph_dir, name, getattr(args, "depth", 1), stats)
+    elif command == "path":
+        result = path_between(graph_dir, args.start, args.end, stats)
     else:
         print(f"Unknown graph command: {command}", file=sys.stderr)
         return 1
     _log_query(graph_dir, command, name, hits=stats.get("hits", 0), started=started, status=st)
 
     if result is None:
-        print(f"No node named '{name}' found in the graph.")
+        print(f"No code node matches '{name}' in the graph." if command in ("query", "path")
+              else f"No node named '{name}' found in the graph.")
     elif result:
         print(result)
+    elif command == "path":
+        print(f"No path of code edges within {_PATH_MAX_HOPS} hops: {name}.")
     else:
         print(f"No callers found for '{name}'.")
     return 0
@@ -495,6 +510,7 @@ def _make_build_script(
     graph_dir: str,
     timeout_s: int,
     target_key: str,
+    reused: bool = False,
 ) -> str:
     return f'''\
 import json
@@ -510,6 +526,7 @@ SOURCE = {source!r}
 GRAPH_DIR = {graph_dir!r}
 TIMEOUT_S = {timeout_s}
 TARGET_KEY = {target_key!r}
+REUSED = {reused!r}
 GRAPHIFY_OUT = os.path.join(GRAPH_DIR, "graphify-out")
 STATUS_FILE = os.path.join(GRAPH_DIR, "status.json")
 
@@ -544,15 +561,25 @@ timer = threading.Timer(TIMEOUT_S, _timeout_handler)
 timer.daemon = True
 timer.start()
 
-try:
+def _extract():
     env = {{**os.environ, "GRAPHIFY_OUT": GRAPHIFY_OUT}}
-    result = subprocess.run(
+    return subprocess.run(
         [GRAPHIFY, "extract", SOURCE, "--code-only", "--update", "--out", GRAPH_DIR],
         cwd=GRAPH_DIR,
         env=env,
         capture_output=True,
         text=True,
     )
+
+
+try:
+    result = _extract()
+    if result.returncode > 0 and REUSED:
+        # A graph reused from another run of this repository may be of a later commit;
+        # graphify refuses to update it to a smaller one. Build this checkout afresh.
+        import shutil
+        shutil.rmtree(GRAPHIFY_OUT, ignore_errors=True)
+        result = _extract()
     if result.returncode != 0:
         if result.returncode < 0:
             why = "graphify killed by signal " + str(-result.returncode)
@@ -671,6 +698,7 @@ def build_code_graph(ctx: Any) -> dict[str, Any]:
         graph_dir=str(graph_dir),
         timeout_s=int(timeout_s),
         target_key=tkey,
+        reused=bool(reusable and reusable.is_dir()),
     )
     script_path = graph_dir / "_build.py"
     script_path.write_text(script)
@@ -690,3 +718,345 @@ def build_code_graph(ctx: Any) -> dict[str, Any]:
         graph_dir=str(graph_dir),
     )
     return {"code_graph_paragraph": paragraph}
+
+
+# ── query and path ─────────────────────────────────────────────────────────────
+
+#: The relations a query or path walks: code structure. ``references`` (type mentions,
+#: which route every path through nodes such as ``Any``), ``uses`` and ``rationale_for``
+#: (comments) are left out.
+STRUCTURAL_RELATIONS = frozenset({
+    "calls", "indirect_call", "imports", "imports_from", "contains", "method",
+    "inherits", "extends", "re_exports", "declares", "defines", "depends_on",
+})
+
+_QUERY_SEEDS = 12
+_QUERY_TEST_SEEDS = 3
+_QUERY_NEIGHBOURS = 40
+_PATH_MAX_HOPS = 10
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "into", "when", "what", "which",
+    "add", "use", "make", "new", "its", "not", "are", "has", "have", "should", "must",
+})
+
+
+def _is_code_node(node: dict) -> bool:
+    return bool(node.get("source_file")) and node.get("file_type") not in ("rationale", "concept")
+
+
+def _is_test(node: dict) -> bool:
+    path = str(node.get("source_file", "")).lower()
+    return any(part in path for part in ("test", "spec"))
+
+
+def _terms(text: str) -> list[str]:
+    import re
+
+    seen: list[str] = []
+    for word in re.split(r"[^A-Za-z0-9_]+", text.lower()):
+        for part in [word, *word.split("_")] if "_" in word else [word]:
+            if len(part) >= 3 and part not in _STOPWORDS and part not in seen:
+                seen.append(part)
+    return seen
+
+
+def _node_line(node: dict) -> str:
+    return f"{node.get('label', node.get('id', ''))}  " + _format_location(
+        node.get("source_file", ""), node.get("source_location", ""))
+
+
+def _structural(links: list[dict]) -> list[dict]:
+    return [link for link in links if link.get("relation") in STRUCTURAL_RELATIONS]
+
+
+def query_graph(graph_dir: Path, text: str, depth: int = 1,
+                stats: dict[str, int] | None = None) -> str | None:
+    """The code nodes whose names or files best match *text*'s terms, and their neighbours
+    over code-structure edges up to *depth* hops; None when nothing matches."""
+    nodes, links = _load_graph(graph_dir)
+    terms = _terms(text)
+    if stats is not None:
+        stats["hits"] = 0
+    if not terms:
+        return None
+    by_id = {n["id"]: n for n in nodes}
+    scored: list[tuple[int, str]] = []
+    for node in nodes:
+        if not _is_code_node(node):
+            continue
+        name = str(node.get("norm_label") or node.get("label", "")).lower()
+        name_parts = set(_terms(name))
+        path = str(node.get("source_file", "")).lower()
+        score = sum(3 if term in name_parts else 2 if term in name else 1 if term in path else 0
+                    for term in terms)
+        if score:
+            scored.append((score, node["id"]))
+    if not scored:
+        return None
+    structural = _structural(links)
+    degree: dict[str, int] = {}
+    for link in structural:
+        degree[link["source"]] = degree.get(link["source"], 0) + 1
+        degree[link["target"]] = degree.get(link["target"], 0) + 1
+    scored.sort(key=lambda item: (-item[0], -degree.get(item[1], 0), item[1]))
+    # Test names repeat the words of what they test, so they would crowd out the code:
+    # the code first, then a few tests.
+    code = [nid for _, nid in scored if not _is_test(by_id[nid])]
+    tests = [nid for _, nid in scored if _is_test(by_id[nid])]
+    code = code[:_QUERY_SEEDS - min(len(tests), _QUERY_TEST_SEEDS)]
+    seeds = code + tests[:_QUERY_SEEDS - len(code)]
+    if stats is not None:
+        stats["hits"] = len(scored)
+
+    adjacent: dict[str, list[tuple[str, str, str]]] = {}
+    for link in structural:
+        source, target, rel = link["source"], link["target"], link["relation"]
+        adjacent.setdefault(source, []).append((target, rel, "->"))
+        adjacent.setdefault(target, []).append((source, rel, "<-"))
+
+    parts = [f"{len(scored)} code node(s) match {terms}; the {len(seeds)} best:"]
+    parts.extend(f"  {_node_line(by_id[nid])}  ({degree.get(nid, 0)} edges)" for nid in seeds)
+    seen = set(seeds)
+    frontier = list(seeds)
+    shown = 0
+    neighbour_lines: list[str] = []
+    # An edge between two matches is shown once, from the better ranked.
+    paired: set[frozenset[str]] = set()
+    for hop in range(1, max(1, min(depth, 3)) + 1):
+        following: list[str] = []
+        for nid in frontier:
+            for other, rel, arrow in adjacent.get(nid, []):
+                if hop == 1 and other in seeds and other != nid:
+                    pair = frozenset((nid, other))
+                    if pair not in paired and shown < _QUERY_NEIGHBOURS:
+                        paired.add(pair)
+                        neighbour_lines.append(
+                            f"  [1] {by_id[nid].get('label', nid)} {arrow} {rel} {arrow} "
+                            f"{_node_line(by_id[other])}")
+                        shown += 1
+                    continue
+                if other in seen or other not in by_id or not _is_code_node(by_id[other]):
+                    continue
+                seen.add(other)
+                following.append(other)
+                if shown < _QUERY_NEIGHBOURS:
+                    neighbour_lines.append(
+                        f"  [{hop}] {by_id[nid].get('label', nid)} {arrow} {rel} {arrow} "
+                        f"{_node_line(by_id[other])}")
+                    shown += 1
+        frontier = following
+    if neighbour_lines:
+        total = len(seen) - len(seeds) + len(paired)
+        parts.append(f"\nNeighbours over code edges (depth {depth}; {shown} of {total} shown):")
+        parts.extend(neighbour_lines)
+    return "\n".join(parts)
+
+
+def _resolve(nodes: list[dict], name: str) -> list[str]:
+    exact = [n["id"] for n in nodes if _is_code_node(n) and _match_name(n.get("label", ""), name)]
+    if exact:
+        return exact
+    lowered = name.lower().rstrip("()")
+    return [n["id"] for n in nodes
+            if _is_code_node(n) and str(n.get("norm_label", "")).lower() == lowered]
+
+
+def path_between(graph_dir: Path, start: str, end: str,
+                 stats: dict[str, int] | None = None) -> str | None:
+    """The shortest chain of code-structure edges between two named nodes, either
+    direction; None when a name matches no code node, "" when no chain is found."""
+    from collections import deque
+
+    nodes, links = _load_graph(graph_dir)
+    by_id = {n["id"]: n for n in nodes}
+    starts, ends = _resolve(nodes, start), set(_resolve(nodes, end))
+    # A path through a test file (one that imports both) says nothing about the code:
+    # tests are only ends, never steps.
+    through_tests = any(_is_test(by_id[nid]) for nid in (*starts, *ends))
+    if stats is not None:
+        stats["hits"] = 0
+    if not starts or not ends:
+        return None
+    adjacent: dict[str, list[tuple[str, dict, bool]]] = {}
+    for link in _structural(links):
+        adjacent.setdefault(link["source"], []).append((link["target"], link, True))
+        adjacent.setdefault(link["target"], []).append((link["source"], link, False))
+    previous: dict[str, tuple[str, dict, bool] | None] = {nid: None for nid in starts}
+    queue = deque((nid, 0) for nid in starts)
+    found = ""
+    while queue:
+        nid, hops = queue.popleft()
+        if nid in ends:
+            found = nid
+            break
+        if hops >= _PATH_MAX_HOPS:
+            continue
+        for other, link, forward in adjacent.get(nid, []):
+            if other in previous or other not in by_id or not _is_code_node(by_id[other]):
+                continue
+            if other not in ends and not through_tests and _is_test(by_id[other]):
+                continue
+            previous[other] = (nid, link, forward)
+            queue.append((other, hops + 1))
+    if not found:
+        return ""
+    chain: list[str] = []
+    nid = found
+    while previous[nid] is not None:
+        before, link, forward = previous[nid]  # type: ignore[misc]
+        where = _format_location(link.get("source_file", ""), link.get("source_location", ""))
+        arrow = f"--{link['relation']}-->" if forward else f"<--{link['relation']}--"
+        chain.append(f"  {_node_line(by_id[nid])}")
+        chain.append(f"    {arrow}  ({where})")
+        nid = before
+    chain.append(f"  {_node_line(by_id[nid])}")
+    chain.reverse()
+    if stats is not None:
+        stats["hits"] = (len(chain) - 1) // 2
+    return f"{(len(chain) - 1) // 2} hop(s):\n" + "\n".join(chain)
+
+
+# ── the explorer step: await_code_graph → explore_code → record_graph_context ─────
+
+#: The explorer's answer, in the run directory: what research, strategy, design and the
+#: builder are given as the code the change touches.
+GRAPH_CONTEXT = "graph-context.md"
+#: The marker a runtime writes when the explorer did not finish (an optional branch).
+EXPLORER_MISSING = "reviews/explore_code-missing.txt"
+EXPLORER_NODE = "explore_code"
+#: The explorer prompt's first line (`design.EXPLORER_PROMPT`).
+EXPLORER_MARK = "You are the code explorer."
+#: How much of the explorer's file the later prompts carry; the rest stays in the file.
+GRAPH_CONTEXT_MAX_CHARS = 6000
+_DEFAULT_WAIT_S = 120
+
+_USAGE_TEMPLATE = (
+    "`{cmd} graph query WORDS... --depth 2 --graph {dir}` finds the code nodes matching "
+    "the words, with their neighbours; `{cmd} graph explain NAME --graph {dir}` lists a "
+    "node's callers, callees, importers and contents; `{cmd} graph path A B --graph {dir}` "
+    "shows the chain of code edges between two nodes; `{cmd} graph callers NAME --graph "
+    "{dir}` lists only the callers."
+)
+
+_FOLLOWUP_TEMPLATE = (
+    "## Code graph follow-ups\n"
+    "For code the code context above does not cover, the code graph answers in about a "
+    "second: " + _USAGE_TEMPLATE + " A graph answer is a lead, not evidence: confirm it in "
+    "the code."
+)
+
+
+def _knob(ctx: Any, name: str, default: Any) -> Any:
+    knobs = ctx.knobs if hasattr(ctx, "knobs") else {}
+    value = knobs.get(name, default)
+    return value.get("value", default) if isinstance(value, dict) else value
+
+
+def _run_dir(ctx: Any) -> Path:
+    return ctx.workdir if hasattr(ctx, "workdir") else Path(ctx.path(".")).resolve()
+
+
+def _graph_state(graph_dir: Path) -> tuple[str, dict[str, Any]]:
+    status = _read_status(graph_dir)
+    state = str(status.get("status", "absent"))
+    return (_building_state(status) if state == "building" else state), status
+
+
+def await_code_graph(ctx: Any) -> dict[str, Any]:
+    """Deterministic op: wait, at most ``code_graph_wait_s``, for the background build, and
+    say whether the explorer has a graph. Never fails: no graph is a state, not an error.
+
+    It also removes an earlier visit's code context and missing marker, so
+    `record_graph_context` reads only what this visit's explorer wrote.
+    """
+    ctx.path(GRAPH_CONTEXT).unlink(missing_ok=True)
+    ctx.path(EXPLORER_MISSING).unlink(missing_ok=True)
+    if not _knob(ctx, "code_graph", True):
+        return {"code_graph_state": "off (code_graph=0)", "code_graph_usage": ""}
+    graph_dir = _run_dir(ctx) / GRAPH_SUBDIR
+    wait_s = int(_knob(ctx, "code_graph_wait_s", _DEFAULT_WAIT_S))
+    deadline = time.monotonic() + wait_s
+    state, status = _graph_state(graph_dir)
+    while state == "building" and time.monotonic() < deadline:
+        time.sleep(1)
+        state, status = _graph_state(graph_dir)
+    if state == "building":
+        return {"code_graph_state": f"still building after {wait_s} s", "code_graph_usage": ""}
+    if state != "ready":
+        return {"code_graph_state": state, "code_graph_usage": ""}
+    cmd = _find_refactory_cmd() or "refactory"
+    return {
+        "code_graph_state": f"ready: {status.get('nodes', '?')} nodes, "
+                            f"{status.get('edges', '?')} edges",
+        "code_graph_usage": _USAGE_TEMPLATE.format(cmd=cmd, dir=graph_dir),
+    }
+
+
+def _explorer_queries(graph_dir: Path) -> int:
+    try:
+        lines = (graph_dir / QUERY_LOG).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    count = 0
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("node") == EXPLORER_NODE and entry.get("status") == "ready":
+            count += 1
+    return count
+
+
+def record_graph_context(ctx: Any) -> dict[str, Any]:
+    """Deterministic op: the explorer's code context as the later prompts get it, headed by
+    what it was made from: the code graph (with the explorer's query count), or file
+    exploration and why. Never fails; with no file the later prompts carry nothing.
+
+    It also settles the on-demand query paragraph for the steps after it: a follow-up form
+    that points at the code context when the graph is ready, none when the graph failed or
+    is off, and the build's own paragraph while the build is still running.
+    """
+    graph_dir = _run_dir(ctx) / GRAPH_SUBDIR
+    state, _ = _graph_state(graph_dir) if graph_dir.is_dir() else ("absent", {})
+    paragraph = str(ctx.facts.get("code_graph_paragraph", ""))
+    if state == "ready":
+        cmd = _find_refactory_cmd() or "refactory"
+        paragraph = _FOLLOWUP_TEMPLATE.format(cmd=cmd, dir=graph_dir)
+    elif state != "building":
+        paragraph = ""
+
+    body = ""
+    if ctx.exists(GRAPH_CONTEXT):
+        try:
+            body = ctx.read_text(GRAPH_CONTEXT).strip()
+        except (OSError, UnicodeDecodeError):
+            body = ""
+    if not body:
+        why = "the explorer step wrote nothing"
+        if ctx.exists(EXPLORER_MISSING):
+            why = "the explorer step did not finish: " + ctx.read_text(EXPLORER_MISSING).strip()[:200]
+        # The file stays, saying why, so the steps that declare it read the reason.
+        ctx.write_text(GRAPH_CONTEXT, f"No code context: {why}.\n")
+        return {"graph_context": "", "graph_context_source": f"none: {why}",
+                "code_graph_paragraph": paragraph}
+
+    if body.startswith("Made from "):
+        # Recorded already (a resumed visit): the heading is this op's to write.
+        body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
+    queries = _explorer_queries(graph_dir)
+    asked = str(ctx.facts.get("code_graph_state", state))
+    if queries:
+        source = f"the code graph ({asked}; {queries} explorer queries)"
+    elif asked.startswith("ready"):
+        source = "file exploration: the code graph was ready, but the explorer ran no queries"
+    else:
+        source = f"file exploration: no code graph ({asked})"
+    if len(body) > GRAPH_CONTEXT_MAX_CHARS:
+        body = (body[:GRAPH_CONTEXT_MAX_CHARS].rsplit("\n", 1)[0]
+                + f"\n\n(cut at {GRAPH_CONTEXT_MAX_CHARS} characters; the rest is in "
+                f"{GRAPH_CONTEXT})")
+    text = f"Made from {source}.\n\n{body}\n"
+    ctx.write_text(GRAPH_CONTEXT, text)
+    return {"graph_context": text, "graph_context_source": source,
+            "code_graph_paragraph": paragraph}

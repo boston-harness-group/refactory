@@ -245,12 +245,14 @@ The read verbs pass through the console's own `--project`, `--runs-root`, `--aft
 
 ## Code knowledge graph
 
-Design mode can build a code knowledge graph (using `graphifyy`) so that the sizer, research director and pitfalls researcher can look up callers and neighbours instead of grepping. The build starts in the background after `prepare` and before the sizer; agents query it through `refactory graph`.
+Design mode builds a code knowledge graph (using `graphifyy`) in the background after `prepare`, before the sizer, which may query it. After sizing, the code explorer step maps the code the change touches into `graph-context.md` in the run directory: `await_code_graph` waits up to `code_graph_wait_s` for the build, `explore_code` (read only, 600 s) runs `query`, `explain` and `path` on the graph, or explores the files when there is no graph, and `record_graph_context` heads the file with which of the two it was made from (and why, without a graph). Research, strategy and design carry the file once as their `## Code context`; the builder is pointed at it. Their remaining graph paragraph is for follow-ups only, and is dropped when the graph failed or is off.
 
 | command | what it does |
 |---|---|
 | `refactory graph explain NAME --graph <dir>` | Show a node's file:line, callers, callees, importers and contained items. |
 | `refactory graph callers NAME --graph <dir>` | Show only the calls edges into a node, as `path:line caller`. |
+| `refactory graph query WORDS... [--depth N] --graph <dir>` | Find the code nodes whose names or files match the words (code before tests), with their neighbours over code edges up to N hops. |
+| `refactory graph path A B --graph <dir>` | Show the shortest chain of code edges (calls, imports, contains; never type references, never a test as a step) between two nodes. |
 
 The `--graph` argument is the path to the run's `.refactory/code-graph/` directory (or the run directory that contains it); the graph is run state, outside the target checkout and the run's artifacts. When the graph is not ready the command prints one line saying so and exits 1. Every call, answered or not, appends a line to the graph's `queries.jsonl` (time, query kind, name, hits, status, ms), and the run's `design.json` reports a `code_graph` entry: the build's status and the query count, by node and by kind. A query counts under the node whose worker made it (`REFACTORY_NODE_ID`, which the model client sets on both runtimes); one from a route that sets none counts under the one node running at the time, `ambiguous` when several were, or `unattributed`.
 
@@ -259,6 +261,7 @@ The `--graph` argument is the path to the run's `.refactory/code-graph/` directo
 | `code_graph` | Bool knob controlling the code knowledge graph. On by default. Turn it off with `--no-graph`, `--knob code_graph=0`, or persistently with `REFACTORY_CODE_GRAPH=0` or `"code_graph": {"enabled": false}` in `refactory.workers.json`. |
 | `code_graph_timeout_s` | Seconds the background build may run before it is stopped (default 300); the run never waits for it. |
 | `code_graph_max_files` | The most code files a worktree may have for the graph to be built (default 20000); a larger one is skipped. |
+| `code_graph_wait_s` | Seconds the explorer step waits for a graph still being built (default 120) before it explores the files instead. |
 
 The three are also persistent settings, read for design runs only: the project's `refactory.workers.json` may carry `"code_graph": {"enabled": false, "timeout_s": 600, "max_files": 50000}`, and `REFACTORY_CODE_GRAPH`, `REFACTORY_CODE_GRAPH_TIMEOUT_S` and `REFACTORY_CODE_GRAPH_MAX_FILES` set the same things. The project file wins over the environment, `--no-graph` over both, and `--knob` over everything. `install.sh` installs graphify with `uv tool install` (its own environment, so a later `uv sync` keeps it); if that fails it warns with the reason and design mode greps instead.
 

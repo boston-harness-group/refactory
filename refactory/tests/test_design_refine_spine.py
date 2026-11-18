@@ -21,6 +21,7 @@ import pytest
 
 import refactory_dsh
 from refactory_dsh import lowering
+from refactory_dsh.code_graph import EXPLORER_MARK, GRAPH_CONTEXT
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import (LIGHT_REFINE_STRATEGY_PLAN, REFINE_SCOPE_REASON, SIZER_MARK,
                                       SIZER_MISSING)
@@ -217,6 +218,10 @@ def _fresh(tmp_path: Path) -> SpineRun:
     return SpineRun(run, state)
 
 
+SPINE_CONTEXT_LINE = "- tool.py:1 main — SPINE-CODE-CONTEXT"
+SPINE_CONTEXT = f"## Relevant modules\n{SPINE_CONTEXT_LINE}\n"
+
+
 def _to_research(spine: SpineRun, sizing: str | None) -> None:
     """prepare, the route and the sizing chain; the sizer writes ``sizing``, or goes missing."""
     spine.node("prepare")
@@ -231,11 +236,20 @@ def _to_research(spine: SpineRun, sizing: str | None) -> None:
         assert prompt.startswith(SIZER_MARK) and spine.facts()["source"] in prompt
         assert not UNRENDERED.findall(prompt)
     spine.node("presize_scale")
+    # The code explorer: no graphify here, so it is told to explore the files.
+    spine.node("await_code_graph")
+    prompt = spine.agent("explore_code", {GRAPH_CONTEXT: SPINE_CONTEXT}, {})
+    assert prompt.startswith(EXPLORER_MARK) and "## No code graph (" in prompt
+    assert not UNRENDERED.findall(prompt)
+    spine.node("record_graph_context")
 
 
 def _research(spine: SpineRun, plan: str) -> str:
     """research_director (stood in for), then the deterministic research nodes; the gate's verdict."""
     prompt = spine.agent("research_director", {"research-plan.json": plan}, {"research": "found"})
+    # The explorer's file, once, headed by what it was made from.
+    assert prompt.count(SPINE_CONTEXT_LINE) == 1 and prompt.count("## Code context\n") == 1
+    assert "## Code context\nMade from file exploration: no code graph (" in prompt
     spine.node("record_findings")
     assert spine.node("gate_research") == "proceed"
     spine.node("classify_scale")
