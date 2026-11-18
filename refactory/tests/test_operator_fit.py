@@ -76,15 +76,71 @@ def _check_rows_are_true(state: dict, protected: tuple = ()) -> dict[str, list[s
     assert rows
     for step, (_carries, applies, refused) in rows.items():
         edits = _edits_by_label(state, step)
-        for label in filter(None, applies.split(", ")) if applies != "-" else ():
-            assert _outcome(edits[label], state, protected, step) is None, (step, label)
+        for group in applies.split("; ") if applies != "-" else ():
+            added, _sep, labels = group.rpartition(": ") if group.startswith("+ ") else \
+                ("", "", group)
+            for label in labels.split(", "):
+                edit = edits[label]
+                if not added:
+                    assert _outcome(edit, state, protected, step) is None, (step, label)
+                    continue
+                # Refused alone only for its unread step; accepted with what the row adds.
+                alone = _outcome(edit, state, protected, step)
+                assert alone is not None and alone.startswith("E-unread"), (step, label, alone)
+                bundle = base._completed(state, [edit])
+                assert base._completion_label(edit, bundle) == added, (step, label, bundle)
+                assert _outcome({"edits": bundle}, state, protected, step) is None, (step, label)
         for entry in refused.split(" | ") if refused != "-" else ():
             labels, reason = entry.split(": ", 1)
             for label in labels.split(", "):
-                got = _outcome(edits[label], state, protected, step)
+                name, _sep, added = label.partition(" + ")
+                name = label if name not in edits else name
+                edit = edits[name]
+                if added:
+                    edit = {"edits": base._completed(state, [edit])}
+                got = _outcome(edit, state, protected, step)
                 assert got is not None, (step, label)
                 assert got == reason, (step, label, got)
     return rows
+
+
+#: The core operators each step's row (not a fork's) says applies or is refused, and those
+#: only an agent's row says (`base._fit_edits`).
+EVERY_STEP_OPS = {"insert", "insert before", "remove", "loop", "route", "split",
+                  "split (replace)", "fallback", "map"}
+AGENT_OPS = {"rewire", "parallelize"}
+
+
+def _labels(applies: str, refused: str) -> set[str]:
+    """Every operator label a row names, with what a completion adds left off."""
+    names = set()
+    for group in applies.split("; ") if applies != "-" else ():
+        labels = group.rpartition(": ")[2] if group.startswith("+ ") else group
+        names |= set(labels.split(", "))
+    for entry in refused.split(" | ") if refused != "-" else ():
+        names |= {label.partition(" + ")[0] for label in entry.split(": ", 1)[0].split(", ")}
+    return names
+
+
+def test_each_step_s_row_names_every_core_operator_on_s1_and_s4():
+    """The table says, for every step, whether each core operator applies -- including
+    insert before, fallback, map, and parallelize where the new step must take over the
+    graded output -- on S1 (one agent ending its pass) and S4."""
+    for name in ("livemath/solver", MODE):
+        _package, mode = registry.resolve(Path("."), name)
+        state = mode().state_dict()
+        rows = _check_rows_are_true(state, protected=tuple(mode().edit_protected()))
+        for step, (_carries, applies, refused) in rows.items():
+            kind = state["graph"]["nodes"][step]["kind"]
+            if kind == "fork":
+                continue
+            want = EVERY_STEP_OPS | (AGENT_OPS if kind == "agent" else set())
+            assert want <= _labels(applies, refused), (name, step, want - _labels(
+                applies, refused))
+    _package, mode = registry.resolve(Path("."), "livemath/solver")
+    solve = _rows(_section(mode().state_dict(), limit=10 ** 6))["solve"]
+    assert "+ a step taking over solve: parallelize, map" in solve[1], solve[1]
+    assert "+ takes_over solve: insert" in solve[1] and "fallback" in solve[1], solve[1]
 
 
 def test_each_row_on_the_s4_start_state_says_what_an_attempt_does():
@@ -448,7 +504,7 @@ def test_the_run_s_table_skips_the_code_dry_run_and_marks_new_code(tmp_path, mon
     body = section_of(loop._context().render(),
                       "What each step carries, and which operators apply to it")
     rows = _rows([body[body.index("| step |"):]])
-    assert "merge (not dry-run)" in rows["tally"][1].split(", "), rows["tally"]
+    assert "merge (not dry-run)" in re.split(r", |; ", rows["tally"][1]), rows["tally"]
     assert "loop" in rows["tally"][1].split(", ")  # no code changed: no mark
     assert given and all(recorded is None for recorded in given), given
 
@@ -512,3 +568,28 @@ def test_a_fork_whose_inputs_cannot_be_read_says_why_and_warns(caplog):
     with caplog.at_level("WARNING"):
         assert base._example_state([{"id": "a", "kind": "no-such-kind"}], []) is None
     assert "operator examples use placeholders" in caplog.text
+
+
+def test_the_analysts_are_told_which_operators_apply_at_each_step():
+    """The analysts see the table's "applies" column (an attempt's verdicts), one line per
+    step, so a finding recommends an operator that applies where it names it: on S1, a
+    loop or a take-over at ``solve`` and never ``insert`` alone or ``route`` there."""
+    from refactory_dsh.optim import ProposalContext, analysts
+
+    _package, mode = registry.resolve(Path("."), "livemath/solver")
+    state = mode().state_dict()
+    view = state_view(state)
+    ctx = ProposalContext(catalogue=nn_edits.catalogue("broad"), node_states=view.node_states,
+                          nodes=[{"id": n["id"], "kind": n["kind"]} for n in view.node_states],
+                          edges=view.edges, knobs=view.knobs, edit_check=_check(state),
+                          mode_name="livemath/solver")
+    text = analysts._changes_text(ctx)
+    line = next(line for line in text.splitlines() if line.startswith("- solve: "))
+    assert "loop" in line and "+ takes_over solve: insert" in line, line
+    plain = line.split(": ", 1)[1].split("; ")[0].split(", ")
+    assert "route" not in plain and "insert" not in plain and "route" not in line, line
+    assert text.count("Operators an attempt accepts at each step") == 1
+    assert "Operators an attempt accepts" not in analysts._changes_text(ctx, "success")
+    assert "Operators an attempt accepts" not in analysts._changes_text(
+        ProposalContext(catalogue=ctx.catalogue, node_states=ctx.node_states, nodes=ctx.nodes,
+                        edges=ctx.edges, knobs=ctx.knobs, mode_name="m"))

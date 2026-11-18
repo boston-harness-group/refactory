@@ -314,7 +314,7 @@ elements.fills_facts = True  # type: ignore[attr-defined]
 
 #: These work from their node's declaration alone (`executor.by_declaration`): set here,
 #: since the executor imports this module.
-for _op in (collect, file_text, select):
+for _op in (collect, file_text, select, elements):
     _op.by_declaration = True  # type: ignore[attr-defined]
 #: select matches a label against the names of the files it reads
 #: (`executor.names_matter`).

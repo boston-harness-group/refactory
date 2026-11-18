@@ -2121,7 +2121,7 @@ class Executor:
                 f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)}, "
                 "in a 'scratch' workspace, with no tool_policy"
             )
-        from refactory_dsh.agent_delivery import _path, fill_feedback, with_feedback
+        from refactory_dsh.agent_delivery import _path, fill_feedback, previous_output, with_feedback
 
         # ASK-4a / gap 15: Refuse a node whose declared reads are missing,
         # matching the spine's worker_node.py:82-84.
@@ -2202,7 +2202,12 @@ class Executor:
         # Bound template fields carry their knob's value, as lowering gives the spine.
         _spt = node.bound("system_prompt_template", self.ctx.knobs)
         _pt = node.bound("prompt_template", self.ctx.knobs)
-        prompt = with_feedback(render(_pt, self.ctx), self.record.feedback.get(node.id, ""))
+        feedback = self.record.feedback.get(node.id, "")
+        # The step's own output from its previous visit, which the feedback is about, as
+        # the spine's worker reads it (`agent_delivery.previous_output`).
+        previous = previous_output(self.ctx.workdir, node.writes, sees_run_dir=(
+            node.tool_policy != "none" and not node.workspace)) if feedback else ""
+        prompt = with_feedback(render(_pt, self.ctx), feedback, previous)
         system = render(_spt, self.ctx) if _spt else ""
         # Gap 20 / correction C: detect unresolved template keys and emit
         # run_warning events, matching the spine (index.ts:1800-1811).

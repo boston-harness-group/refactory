@@ -1694,22 +1694,28 @@ def _blocks_section(insertable: Sequence[dict[str, Any]],
 
 
 def _composition_anchor(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
-                        protected: Sequence[str]) -> tuple[dict[str, Any], str] | None:
-    """An agent of this graph with one plain out-edge to a step that is not a gate,
-    and that out-edge's target: where the composition examples attach. ``None`` when
-    the graph has none."""
+                        protected: Sequence[str]) -> tuple[dict[str, Any], str | None] | None:
+    """Where the composition examples attach: an agent of this graph with one plain
+    out-edge to a step that is not a gate, and that out-edge's target; else an agent with
+    no verdict out-edge (one that ends its pass or the run), and ``None`` for its next
+    step, so a graph whose only agent step ends its pass still gets examples (each built
+    in a form an attempt takes there, `_completed`). ``None`` when the graph has neither."""
     by_id = {str(state.get("id")): state for state in node_states}
+    ends: list[dict[str, Any]] = []
     for node_id in sorted(by_id):
         state = by_id[node_id]
         if state.get("kind") != "agent" or node_id in protected or not state.get("writes"):
             continue
         out = [edge for edge in edges if edge.get("source") == node_id]
-        if len(out) != 1 or out[0].get("condition") is not None:
+        if any(edge.get("condition") is not None for edge in out):
+            continue
+        if len(out) != 1:
+            ends += [state] if not out else []
             continue
         target = by_id.get(str(out[0].get("target"))) or {}
         if target.get("kind") in ("agent", "op"):
             return state, str(out[0].get("target"))
-    return None
+    return (ends[0], None) if ends else None
 
 
 def _fact_filled_knobs(node_states: Sequence[dict[str, Any]],
@@ -1870,7 +1876,7 @@ def _example_ids(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str
     out-edge to a step) and its next step, and a fork, where the graph has them."""
     ids: dict[str, str] = {}
     anchor = _composition_anchor(node_states, edges, protected)
-    if anchor is not None:
+    if anchor is not None and anchor[1] is not None:
         ids["step"], ids["next step"] = str(anchor[0]["id"]), anchor[1]
     fork = next((str(n.get("id")) for n in sorted(node_states, key=lambda n: str(n.get("id")))
                  if n.get("kind") == "fork"), None)
@@ -1963,7 +1969,7 @@ def _fitting_ids(name: str, ids: Mapping[str, str], node_states: Sequence[dict[s
         if "<" in json.dumps(named) or "<" in json.dumps(list(example.get("to") or {}.values())):
             continue
         if nn_edits.precheck(example, dict(state)) is None \
-                and _read_example(state, [example]) == [example]:
+                and _completed(state, [example]) == [example]:
             return option
     return placeholders
 
@@ -2001,7 +2007,7 @@ def checked_hint(reason: str, check: Callable[[dict[str, Any]], Any]) -> str:
 
 #: The most characters the "what each step carries" section takes: past it, each refusal
 #: is cut to its first clause, then rows are left out, last first, and named.
-OPERATOR_FIT_CHARS = 7700
+OPERATOR_FIT_CHARS = 8000
 
 
 def pipeline_view_lines(node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
@@ -2047,7 +2053,9 @@ PIPELINE_VIEW_LEAD = _view_lead()
 
 def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:
     """Each core operator the run permits, aimed at one step with its default arguments:
-    a split into one step that sees only the task stands for "replace it"."""
+    a split into one step that sees only the task stands for "replace it"; ``branch`` and
+    ``serialize`` on a fork, the rest on any other step (``map`` over the step's own
+    output)."""
     from refactory_dsh import snippet
 
     node_id = node.id
@@ -2059,6 +2067,7 @@ def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str
                  ("serialize", {"op": "serialize", "fork": node_id})]
     else:
         edits = [("insert", {"op": "insert", "after": node_id, "kind": "agent"}),
+                 ("insert before", {"op": "insert", "before": node_id, "kind": "agent"}),
                  ("remove", {"op": "remove", "step": node_id}),
                  *([("rewire", {"op": "rewire", "step": node_id, "sees": ["task"]})] if model
                    else []),
@@ -2068,7 +2077,9 @@ def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str
                  ("split (replace)", {"op": "split", "step": node_id,
                                       "into": [{"kind": "agent", "sees": ["task"]}]}),
                  *([("parallelize", {"op": "parallelize", "steps": [node_id], "copies": 1})]
-                   if node.kind == "agent" else [])]
+                   if node.kind == "agent" else []),
+                 ("fallback", {"op": "fallback", "step": node_id, "kind": "agent"}),
+                 ("map", {"op": "map", "after": node_id, "over": node_id})]
         if len(plain_next) == 1:
             edits.append(("merge", {"op": "merge", "steps": [node_id, plain_next[0]]}))
     return [(label, edit) for label, edit in edits if edit["op"] in ops]
@@ -2190,6 +2201,108 @@ def fit_reason(verdict: Sequence[Any], step: str) -> str:
                   r"result", f"E-unread: nothing reads a new step at {step}", reason)
 
 
+def _only_unread(verdict: Sequence[Any]) -> bool:
+    """Whether an attempt's refusals are all ``E-unread`` (a new step nothing reads)."""
+    return bool(verdict) and all(str(r).startswith("E-unread") for r in verdict)
+
+
+def _completion_label(edit: Mapping[str, Any], bundle: Sequence[Mapping[str, Any]]) -> str:
+    """How a table row names what `_completed` added to ``edit``, in a few words: ``+ to
+    K``, ``+ takes_over S``, ``+ rewire S``."""
+    first = bundle[0]
+    parts = []
+    if first.get("to") is not None and edit.get("to") is None:
+        parts.append(f"+ to {first['to']}")
+    if first.get("takes_over") is not None and edit.get("takes_over") is None:
+        parts.append(f"+ takes_over {first['takes_over']}")
+    for extra in bundle[1:]:
+        if extra.get("op") == "rewire":
+            parts.append(f"+ rewire {extra['step']}")
+        elif extra.get("takes_over") is not None:
+            parts.append(f"+ a step taking over {extra['takes_over']}")
+    return " ".join(parts) or "+ a reader"
+
+
+def _fit_rows(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
+              edges: Sequence[dict[str, Any]], knobs: Sequence[Mapping[str, Any]],
+              check: Callable[[dict[str, Any]], Any] | None
+              ) -> tuple[list[list[str]], list[list[str]], dict[str, Any] | None, Any]:
+    """The operator table's rows (step, what it carries, what applies, what is refused),
+    each step's refusals whole, the state and its graph: worked out once per edited
+    candidate and check (`_FIT_CACHE`), since the proposal and every analyst call of a
+    round show them. Nothing without a check or a core operator."""
+    from refactory_dsh.nn.graph import Graph
+
+    ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
+    state = _fit_state(node_states, edges, knobs) if ops and check is not None else None
+    if state is None or check is None:
+        return [], [], None, None
+    # The check itself in the key (held, so its id is never reused by another).
+    key = (check, json.dumps([sorted(ops), state], sort_keys=True, default=str))
+    if key in _FIT_CACHE:
+        return _FIT_CACHE[key]
+    graph = Graph.from_state(state["graph"])
+    knob_values = {k.get("name"): k.get("value") for k in knobs}
+    code_before = _code_signatures(state)
+    rows: list[list[str]] = []
+    full_refusals: list[list[str]] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind not in ("agent", "op", "fork"):
+            continue
+        carries = (_carries(node, graph, knob_values) if node.kind == "agent"
+                   else _fork_inputs(node_id, state) if node.kind == "fork" else "-")
+        applies: dict[str, list[str]] = {}
+        reasons: dict[str, list[str]] = {}
+        for label, edit in _fit_edits(node, graph, ops):
+            verdict, added = check(edit), ""
+            if isinstance(verdict, list) and _only_unread(verdict):
+                # Refused only because nothing reads its new step: what the refusal's hint
+                # names, checked as a whole (`_completed`), is what the row says.
+                bundle = _completed(state, [edit])
+                if bundle is not None and bundle != [edit]:
+                    added = _completion_label(edit, bundle)
+                    verdict = check({"edits": bundle})
+            if not isinstance(verdict, list):
+                # Its new or changed code was not run on recorded inputs (the loop's check
+                # skips that); proposing the edit runs it, as any attempt does.
+                changed = any(code_before.get(node_id) != signature for node_id, signature
+                              in _code_signatures(verdict.state).items())
+                applies.setdefault(added, []).append(f"{label} (not dry-run)" if changed
+                                                     else label)
+                continue
+            reason = fit_reason(verdict, node_id)
+            reasons.setdefault(reason, []).append(f"{label} {added}".strip())
+        refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
+        applied = "; ".join(", ".join(labels) if not added else f"{added}: {', '.join(labels)}"
+                            for added, labels in sorted(applies.items()))
+        rows.append([node_id, carries, applied or "-", " | ".join(refused) or "-"])
+        full_refusals.append(refused)
+    _FIT_CACHE.clear()  # one candidate's at a time: a round edits one
+    _FIT_CACHE[key] = (rows, full_refusals, state, graph)
+    return _FIT_CACHE[key]
+
+
+#: The last `_fit_rows` result, by its check and state.
+_FIT_CACHE: dict[Any, Any] = {}
+
+
+def applicability_lines(catalogue: Sequence[dict[str, Any]],
+                        node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
+                        knobs: Sequence[Mapping[str, Any]],
+                        check: Callable[[dict[str, Any]], Any] | None) -> list[str]:
+    """Which core operators apply at each step, as the operator table's "applies" column
+    says it (`_fit_rows`, an attempt's verdict), one line per step, for the analysts, so a
+    change they recommend uses an operator that applies where they name it. Nothing
+    without a check."""
+    rows = _fit_rows(catalogue, node_states, edges, knobs, check)[0]
+    if not rows:
+        return []
+    return ["Operators an attempt accepts at each step (`+ X: ops`: with X added); a "
+            "structural change you recommend uses one of them at the step it names:",
+            *(f"- {row[0]}: {row[2]}" for row in rows)]
+
+
 def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                          knobs: Sequence[Mapping[str, Any]],
@@ -2203,39 +2316,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
     attempt makes but the model-judged integrity one). Information only; nothing without
     a check (a request built outside a run, whose verdicts would be guesses) or when the
     run permits no core operator."""
-    from refactory_dsh.nn.graph import Graph
-
-    ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
-    state = _fit_state(node_states, edges, knobs) if ops and check is not None else None
-    if state is None or check is None:
-        return []
-    graph = Graph.from_state(state["graph"])
-    knob_values = {k.get("name"): k.get("value") for k in knobs}
-    code_before = _code_signatures(state)
-    rows: list[list[str]] = []
-    full_refusals: list[list[str]] = []
-    for node_id in sorted(graph.nodes):
-        node = graph.nodes[node_id]
-        if node.kind not in ("agent", "op", "fork"):
-            continue
-        carries = (_carries(node, graph, knob_values) if node.kind == "agent"
-                   else _fork_inputs(node_id, state) if node.kind == "fork" else "-")
-        applies: list[str] = []
-        reasons: dict[str, list[str]] = {}
-        for label, edit in _fit_edits(node, graph, ops):
-            verdict = check(edit)
-            if not isinstance(verdict, list):
-                # Its new or changed code was not run on recorded inputs (the loop's check
-                # skips that); proposing the edit runs it, as any attempt does.
-                changed = any(code_before.get(node_id) != signature for node_id, signature
-                              in _code_signatures(verdict.state).items())
-                applies.append(f"{label} (not dry-run)" if changed else label)
-                continue
-            reason = fit_reason(verdict, node_id)
-            reasons.setdefault(reason, []).append(label)
-        refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
-        rows.append([node_id, carries, ", ".join(applies) or "-", " | ".join(refused) or "-"])
-        full_refusals.append(refused)
+    rows, full_refusals, state, graph = _fit_rows(catalogue, node_states, edges, knobs, check)
     if not rows:
         return []
     from refactory_dsh.nn.core_ops import TASK, _readable, _Refused, _task_inputs
@@ -2262,7 +2343,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
             "...)`: a fact a plain op builds, and everything that op reads), and which core "
             "operators an attempt accepts for each step as written with their default "
             "arguments (`split (replace)`: a split into one step of your own text that sees "
-            "the task) and which it refuses, in the refusal's own words. A step that "
+            "the task) and which it refuses, in the refusal's own words (`+ X: ops`: refused alone "
+            "only because nothing reads their new step, accepted with X added). A step that "
             "alone reads a frozen knob is not removed, and is split or merged only when the "
             "new step's prompt names each such knob as `{{knob}}` (never one named after the "
             "step, `<step>__...`); otherwise insert a step beside it." + task_line)
@@ -2336,19 +2418,53 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
 _TAKES_TO = ("insert", "branch", "map")
 
 
-def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
-                  ) -> list[dict[str, Any]] | None:
+#: The text of the step a completion adds to take over the graded step's outputs.
+_TAKE_OVER_TEXT = "<write the final result from the work above>"
+
+
+def _reader_edit(after: Mapping[str, Any], node_id: str, edit: Mapping[str, Any],
+                 before: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """How a new step ``node_id`` that nothing reads in ``after`` reaches a reader, as one
+    edit, the way its refusal's hint says (`core_ops._reader_hint`): ``("append", edit)``
+    rewiring the nearest later agent or code step to see it as well as what it sees now,
+    or adding a step that takes over the graded step's outputs after it (after its join
+    when it is a fork's branch); ``("replace", edit)`` for an ``insert`` given
+    ``takes_over`` itself. ``None`` when no step could read it."""
+    from refactory_dsh.nn import core_ops
+
+    graph = nn_edits._graph(dict(after))
+    later = [r for r in core_ops._readers_from(graph, node_id, after)
+             if r != node_id and graph.nodes[r].kind == "agent"]
+    if later:
+        reader = graph.nodes[later[0]]
+        sees = sorted({name for _k, name in core_ops._readable(
+            graph, after, core_ops._consumed(reader, after))})
+        return "append", {"op": "rewire", "step": reader.id, "sees": [*sees, node_id]}
+    graded = core_ops._graded_step(graph, node_id, edit, before)
+    if graded is None or edit.get("op") == "route":
+        return None
+    if edit.get("op") == "insert" and "takes_over" not in edit:
+        return "replace", {**edit, "takes_over": graded}
+    out = [e.target for e in graph.out_edges(node_id)]
+    at = out[0] if len(out) == 1 and graph.nodes[out[0]].kind == "join" else node_id
+    return "append", {"op": "insert", "after": at, "kind": "agent", "text": _TAKE_OVER_TEXT,
+                      "takes_over": graded}
+
+
+def _completed(state: Mapping[str, Any], bundle: list[dict[str, Any]]
+               ) -> list[dict[str, Any]] | None:
     """``bundle`` as an example an attempt takes: a step it adds that nothing reads gets
     'to', the nearest prompt after it that can take it (`core_ops.reader_knobs`), where its
-    operator takes one; None when one stays unread (``E-unread``) or an edit of it is
-    refused here. A state built without the knobs' values (which say what a prompt takes)
-    returns it as it is."""
+    operator takes one; else the edit its refusal's hint names (`_reader_edit`: rewire a
+    later step to see it, or take over the graded step's outputs). None when one stays
+    unread (``E-unread``) or an edit of it is refused here. A state built without the
+    knobs' values (which say what a prompt takes) returns it as it is."""
     from refactory_dsh.nn import core_ops
 
     bundle = [dict(edit) for edit in bundle]
     if not state.get("knobs"):
         return bundle
-    for _ in range(len(bundle) + 1):
+    for _ in range(2 * len(bundle) + 2):
         states, current = [], dict(state)
         try:
             for edit in bundle:
@@ -2367,9 +2483,24 @@ def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
                      if unread[0] in ((after.get("graph") or {}).get("nodes") or {}))
         edit = bundle[index]
         knobs = core_ops.reader_knobs(states[index], unread[0])
-        if edit.get("op") not in _TAKES_TO or "to" in edit or not knobs:
+        if edit.get("op") in _TAKES_TO and "to" not in edit and knobs:
+            bundle[index] = {**edit, "to": knobs[0]}
+            continue
+        new = edit.get("new") if edit.get("op") == "parallelize" else None
+        if isinstance(new, list) and knobs and not any(
+                isinstance(spec, dict) and "to" in spec for spec in new):
+            # Each new step of a parallelize takes its own 'to' (`core_ops.STEP_FIELDS`).
+            bundle[index] = {**edit, "new": [{**spec, "to": knobs[0]} if isinstance(spec, dict)
+                                             else spec for spec in new]}
+            continue
+        found = _reader_edit(current, unread[0], edit, state)
+        if found is None:
             return None
-        bundle[index] = {**edit, "to": knobs[0]}
+        how, made = found
+        if how == "replace":
+            bundle[index] = made
+        else:
+            bundle.append(made)
     return None
 
 
@@ -2416,7 +2547,8 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
             {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
         span = {"op": "loop", "step": anchor[1], "back_to": step, "judge": "agent",
                 "text": "<what to check in the result>"}
-        if anchor[1] not in protected and nn_edits.precheck(span, dict(state)) is None:
+        if anchor[1] is not None and anchor[1] not in protected \
+                and nn_edits.precheck(span, dict(state)) is None:
             out.append(("Check a later step and send the work back to an earlier one", [span]))
     fork = next((str(n.get("id")) for n in node_states if n.get("kind") == "fork"), None)
     if fork and "branch" in ops:
@@ -2454,7 +2586,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
     if removable is not None:
         out.append(("Dropping a step that does not help", [{"op": "remove", "step": removable}]))
     # Each shape as an attempt takes it: a step it adds reaches a reader, or it is not shown.
-    read = [(title, _read_example(state, bundle)) for title, bundle in out]
+    read = [(title, _completed(state, bundle)) for title, bundle in out]
     return [(title, bundle) for title, bundle in read if bundle is not None]
 
 
@@ -2545,21 +2677,35 @@ def objective_text(parsimony: float | None, *, item_mean: bool = False,
 
 def objective_lines(parsimony: float | None, *, item_mean: bool = False,
                     gated: bool = False) -> list[str]:
-    """"What the score measures" (`objective_text`) as request lines; none when not
+    """"What the score measures" (`objective_with_policy`) as request lines; none when not
     known."""
+    text = objective_with_policy(parsimony, item_mean=item_mean, gated=gated)
+    return ["## What the score measures", *text.split("\n"), ""] if text else []
+
+
+def objective_with_policy(parsimony: float | None, *, item_mean: bool = False,
+                          gated: bool = False) -> str:
+    """What the score measures (`objective_text`) and, on its own line, the run's compute
+    policy (`compute_policy`): what every optimizer call that recommends or weighs a
+    change is told (the proposer, the analysts and their merges, the memory pass), from
+    this one place. Empty when the scoring settings are not known."""
     text = objective_text(parsimony, item_mean=item_mean, gated=gated)
     policy = compute_policy(parsimony, item_mean=item_mean)
-    return ["## What the score measures", text, *([policy] if policy else []), ""] if text else []
+    return f"{text}\n{policy}" if text and policy else text
 
 
 def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
-    """The run's compute policy, from its scoring settings, for the proposal request: with
-    parsimony 0, extra steps and model calls per item are not penalised, so a change that
-    adds them is weighed like any other. Empty with a size cost (the size cost lines say
-    what a node costs) or when the settings are not known."""
-    if parsimony is None or parsimony:
+    """The run's compute policy in one sentence, from its scoring settings: with
+    parsimony 0, cost is not a reason for or against a change (extra steps and model
+    calls per item are not penalised, so a change that adds them is weighed like any
+    other); with a size cost, that cost is the only one counted. Empty when the settings
+    are not known."""
+    if parsimony is None:
         return ""
-    # What the score text above does not say already (it says what the score is).
+    if parsimony:
+        return ("Compute policy: cost counts only as the size cost in the score; it is not "
+                "otherwise a reason for or against a change in this run.")
+    # What the score text does not say already (it says what the score is).
     return ("Compute policy: cost is not a reason for or against a change in this run"
             + ("; per-item cost is reported separately." if item_mean else "."))
 
@@ -2695,10 +2841,14 @@ def bundle_instructions(max_edits: int, catalogue: Sequence[dict[str, Any]] = ()
     fixes that only work together would be split across rounds and each judged
     alone: the advice is then to cover every step of the diagnosed failure path in
     the one proposal. Otherwise separate ideas go in separate proposals."""
-    example = json.dumps({"proposals": [{"edits": bundle,
-                                         "rationale": "<why these changes only work together>",
-                                         "prediction": "<expected effect on the score>",
-                                         "confidence": 0.0} for bundle in bundle_examples(catalogue)]})
+    shown = [{"edits": bundle, "rationale": "<why these changes only work together>",
+              "prediction": "<expected effect on the score>", "confidence": 0.0}
+             for bundle in bundle_examples(catalogue)]
+    # Never more proposals in one example than the request asks for: past that, each
+    # bundle is an example of its own, one answer each.
+    per = proposals if proposals > 0 else len(shown)
+    examples = [json.dumps({"proposals": shown[i:i + per]}) for i in range(0, len(shown), per)]
+    example = "\n\nor:\n\n".join(examples)
     if proposals == 1:
         scope = f"""\
 Only one proposal is asked for, so only one candidate is evaluated: an idea left for a
@@ -2720,7 +2870,7 @@ the whole proposal is, and the refusal names the edit.
 
 {scope}
 
-Example:
+Example{"s" if len(examples) > 1 else ""}:
 
 {example}"""
 

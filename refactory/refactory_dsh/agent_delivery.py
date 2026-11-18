@@ -14,7 +14,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from refactory_dsh import target_guard
 from refactory_dsh.invocations import EVIDENCE, REVIEWERS, WORKTREE_RECORD
@@ -87,8 +87,36 @@ def fill_feedback(workdir: Path, node: str, values: dict[str, Any], *,
 FEEDBACK_HEADING = '## Feedback for this visit'
 
 
-def with_feedback(prompt: str, feedback: str) -> str:
-    """``prompt`` with the feedback a reloop left for this visit, said once.
+#: The heading the step's own output from its previous visit travels under, after the
+#: feedback about it, so a step sent back sees the work the feedback is about.
+PREVIOUS_HEADING = '### Your own output from the previous visit, which this feedback is about'
+#: The most characters of that output said (head and tail, the cut said).
+PREVIOUS_CHARS = 40000
+
+
+def previous_output(workdir: Path, writes: Sequence[str], *, sees_run_dir: bool) -> str:
+    """What a step wrote on its previous visit (its first declared write, as it stands
+    before this visit runs), for :func:`with_feedback`; empty when it wrote nothing or
+    can read it itself (``sees_run_dir``: an agent whose tools work in the run
+    directory). Over :data:`PREVIOUS_CHARS` its head and tail are kept and the cut is
+    said. Both runtimes read it here, from the same file."""
+    if sees_run_dir or not writes:
+        return ''
+    try:
+        text = _path(Path(workdir), writes[0]).read_text(encoding='utf-8').strip()
+    except (OSError, ValueError, UnicodeDecodeError):
+        return ''
+    if len(text) > PREVIOUS_CHARS:
+        half = PREVIOUS_CHARS // 2
+        text = (f'{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n'
+                f'{text[-half:]}')
+    return text
+
+
+def with_feedback(prompt: str, feedback: str, previous: str = '') -> str:
+    """``prompt`` with the feedback a reloop left for this visit, said once, and the step's
+    own output from its previous visit (``previous``, :func:`previous_output`) under
+    :data:`PREVIOUS_HEADING`, so a step sent back sees the work the feedback is about.
 
     A gate that sends a node back says why, and the node's next prompt must carry it.
     Most prompts already do -- their template renders the gate's reason from a fact
@@ -101,6 +129,11 @@ def with_feedback(prompt: str, feedback: str) -> str:
     feedback = (feedback or '').strip()
     if not feedback or _rendered(feedback, prompt):
         return prompt
+    previous = (previous or '').strip()
+    if previous:
+        fence = '`' * max(3, 1 + max((len(run) for run in re.findall(r'`+', previous)),
+                                     default=0))
+        feedback = f'{feedback}\n\n{PREVIOUS_HEADING}\n{fence}\n{previous}\n{fence}'
     return f'{FEEDBACK_HEADING}\n\n{feedback}\n\n{prompt}'
 
 
