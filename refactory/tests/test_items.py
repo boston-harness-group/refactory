@@ -1340,3 +1340,67 @@ def test_a_spent_timeout_retry_is_still_a_harness_timeout_and_quoted_words_are_n
     quoted = ("parse: ValueError: reply said 'judge timed out twice. Last error: model "
               "completion timed out after 4s'")
     assert error_kind(RuntimeError(quoted)) == "RuntimeError"
+
+
+def _capped_graph(cap: int = 1) -> nn.Graph:
+    """A data pass whose gate always sends its op back, capped at ``cap`` reloops; past
+    the cap the item goes on with its last attempt (``on_exhausted: continue``)."""
+    graph = nn.Graph()
+    graph.add(nn.Node("data", "data", subgraph_entry="work", subgraph_exit="next",
+                      task_ref="counting", writes=(CURRENT_ITEM,), produces=("item_scores",)))
+    graph.add(nn.Node("work", "op", call="loop_ops:record_item", reads=(CURRENT_ITEM,),
+                      writes=("seen.json",), produces=("seen",)))
+    graph.add(nn.Node("check", "gate", evaluator="loop_ops:always_reloop",
+                      max_iterations=cap, on_exhausted="continue"))
+    graph.add(nn.Node("next", "op", call="loop_ops:noop"))
+    graph.connect("work", "check")
+    graph.connect("check", "work", condition="reloop")
+    graph.connect("check", "next", condition="proceed")
+    return graph
+
+
+def test_both_runtimes_mark_the_reloop_a_gate_s_cap_refused(tmp_path):
+    """With a cap of 1 the gate answers reloop twice; the second is refused and the item
+    goes on. Both runtimes' records say so (``exhausted``, with the cap), so no reader
+    counts one more reloop than ran."""
+    from unittest import mock
+
+    import refactory_dsh.run
+
+    _probe_task()
+    graph = _capped_graph()
+    walked = execute(graph, tmp_path / "walked")
+    assert walked.exit_ok, walked.error
+    expected = [("work", None, None), ("check", "reloop", None), ("work", None, None),
+                ("check", "reloop", 1), ("next", None, None)]
+    for record in walked.facts["item_scores"]:
+        assert [(s["node"], s.get("verdict"), s.get("cap")) for s in record["steps"]] == expected
+        assert [s.get("exhausted", False) for s in record["steps"]] == [
+            False, False, False, True, False]
+
+    driven = tmp_path / "driven"
+    node = _declared(graph, driven)
+    for index in range(items.command_list(node, driven)["count"]):
+        pass_dir = Path(items.command_begin(node, driven, index)["pass_dir"])
+        with mock.patch.object(refactory_dsh.run, "install_workspace_packages", lambda: None):
+            for target, node_id, kind in (("loop_ops:record_item", "work", "FnNode"),
+                                          ("loop_ops:always_reloop", "check", "GateNode"),
+                                          ("loop_ops:record_item", "work", "FnNode"),
+                                          ("loop_ops:always_reloop", "check", "GateNode"),
+                                          ("loop_ops:noop", "next", "FnNode")):
+                with mock.patch.dict("os.environ", {refactory_dsh.run.NODE_ENV: json.dumps(
+                        {"id": node_id, "type": kind})}):
+                    refactory_dsh.run.run_node(target, workdir=pass_dir, node_id=node_id)
+        items.command_end(node, driven, index)
+    driven_records = json.loads((driven / "facts.json").read_text())["item_scores"]
+    assert untimed(driven_records) == untimed(walked.facts["item_scores"])
+
+
+def test_a_reloop_within_the_cap_is_not_marked():
+    reloop = {"verdicts": ["reloop"], "max_iterations": 2}
+    first = {"node": "check", "kind": "gate", "verdict": "reloop"}
+    assert not items.refused_at_cap([], first, reloop)
+    assert not items.refused_at_cap([first], {**first}, reloop)
+    assert items.refused_at_cap([first, first], {**first}, reloop)
+    assert not items.refused_at_cap([first, first], {**first, "verdict": "proceed"}, reloop)
+    assert not items.refused_at_cap([first, first], {**first, "node": "other"}, reloop)

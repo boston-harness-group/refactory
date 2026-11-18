@@ -96,6 +96,13 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     from refactory_dsh.nn.loops import blind_reloops
 
     blind = blind_reloops(graph, knob_values)
+    from refactory_dsh.nn.graph import GraphError
+    from refactory_dsh.nn.loops import loop_edges
+
+    try:
+        reloops = loop_edges(graph)
+    except GraphError:
+        reloops = set()  # the validator refuses the graph; nothing to mark
     for node_id, node in graph.nodes.items():
         writes, reads, produces = op_io(node)
         entry: dict[str, Any] = {
@@ -158,6 +165,12 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["read_renames"] = dict(node.renames["reads"])
         if node_id in blind:
             entry["blind_reloops"] = blind[node_id]
+        verdicts = sorted({condition for gate, _target, condition in reloops if gate == node_id})
+        if node.kind == "gate" and verdicts:
+            # Its reloop verdicts and cap: the runner marks a reloop the cap refuses on the
+            # item's record (`items.refused_at_cap`), as the walker does.
+            entry["reloop"] = {"verdicts": verdicts,
+                               "max_iterations": node.bound("max_iterations", knob_values)}
         if needs_snippet_spec(node):
             # What a code or verdict node's callable needs beyond the context (its code,
             # inputs, labels): the runner hands it over as the walker's child does.

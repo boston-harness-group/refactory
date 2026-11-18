@@ -1112,6 +1112,7 @@ The per-item half of a data node, from the command line.
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
 | function | `make_item_record` | `(item_id: 'str', verdict: 'VerifyResult \| None', error: 'Exception \| None' = None, *, exchanges: 'list[dict[str, Any]] \| None' = None, prediction: 'str \| None' = None, label: 'str \| None' = None, label_text: 'str \| None' = None, fail_reason: 'str \| None' = None, metadata: 'dict[str, Any] \| None' = None, pass_dir: 'Path \| None' = None, outputs_of: 'Callable[[str], Iterable[str]] \| None' = None) -> 'dict[str, Any] \| None'` |
 | function | `mark_pass_complete` | `(pass_dir: 'Path', record: 'dict[str, Any] \| None' = None) -> 'None'` |
+| function | `mark_refused` | `(visit: 'dict[str, Any]', cap: 'Any') -> 'dict[str, Any]'` |
 | function | `merge_pass_results` | `(run_dir: 'Path', pass_dir: 'Path', produces: 'tuple[str, ...]') -> 'None'` |
 | function | `missing_steps` | `(pass_dir: 'Path') -> 'dict[str, dict[str, Any]]'` |
 | function | `no_answer` | `(pass_dir: 'Path', error_text: 'str', outputs_of: 'Callable[[str], Iterable[str]]') -> 'dict[str, dict[str, Any]]'` |
@@ -1121,7 +1122,8 @@ The per-item half of a data node, from the command line.
 | function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True, task_ref: 'str' = '') -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
-| function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |
+| function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]', reloop: 'Mapping[str, Any] \| None' = None) -> 'None'` |
+| function | `refused_at_cap` | `(earlier: 'Sequence[Mapping[str, Any]]', visit: 'Mapping[str, Any]', reloop: 'Mapping[str, Any] \| None') -> 'bool'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `update_record_file` | `(path: 'Path', change: 'Callable[[Any], Any]', empty: 'Callable[[], Any]') -> 'Any'` |
@@ -1151,6 +1153,7 @@ The per-item half of a data node, from the command line.
 - **`live_dir`** — The folder of *node_id*'s per-item aliases (``data_parallel._live_alias``).
 - **`make_item_record`** — Build a per-item record for one evaluated item.
 - **`mark_pass_complete`** — Finish a pass: keep its item record (when there is one), then the ``.done`` marker.
+- **`mark_refused`** — ``visit`` marked as a reloop its cap of ``cap`` refused (`refused_at_cap`).
 - **`merge_pass_results`** — Merge declared produces from a pass directory back to the run.
 - **`missing_steps`** — The steps a pass went on without, each with why: ``cause`` (``output_limit``,
 - **`no_answer`** — The missing steps whose absent output is why a later step of the pass failed, or {}.
@@ -1161,6 +1164,7 @@ The per-item half of a data node, from the command line.
 - **`record_exchange`** — Append one ``{node, prompt, response}`` exchange to the per-item sidecar, under
 - **`record_lock`** — Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
 - **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
+- **`refused_at_cap`** — Whether a gate visit's verdict is a reloop its cap refuses: one of the gate's
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`update_record_file`** — Read, change and rewrite the JSON record file ``path`` under an exclusive lock

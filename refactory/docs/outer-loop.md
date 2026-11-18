@@ -738,25 +738,33 @@ optimizer, at no extra compute (train records only):
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
   rises and drops among the rest. Every changed item is named with both scores, each
   side's answer (a long one clipped, its length said) and how its steps moved, from the
-  records (`step_facts`): each step whose reply changed, is new or is gone with its runs
-  on parent and child (`solve 1 -> 2 run(s)`), and each gate whose verdicts moved, both
-  said (`check: parent proceed; child reloop x2, proceed`). Up to `EDIT_ITEMS_WHOLE` (4)
-  of them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
+  records (`step_facts`): each step whose reply changed, is new, runs more or fewer
+  times, or no longer runs at all ("gone"), with its runs on parent and child
+  (`solve 1 -> 2 run(s)`), and each gate whose verdicts moved, both said (`check: parent
+  proceed; child reloop x2 (the last refused at its cap of 1: 1 rerun)`). A reloop its
+  cap refused is marked on the item's record by both runtimes (`items.refused_at_cap`:
+  the walker's `_visit_gate`, the spine's node runner from the gate's declared reloop
+  verdicts and cap), so it is never read as a rerun. Up to `EDIT_ITEMS_WHOLE` (4) of
+  them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
   verdicts, the steps with the same reply named, and each changed, new or gone step's
   reply whole, the parent's beside the child's. They are picked one per child and per
-  kind in turn (broken, fixed, score dropped, score rose). The first pick of each kind
-  present is always shown: the child's moved replies whole (a single text over
-  `ITEM_TEXT_MAX` is cut, and said), the parent's whole unless the block would pass what
-  is left of the room -- `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget --
-  when each is cut to fit, head and tail, at least `EDIT_PARENT_FLOOR` characters, the
-  cut marked and recorded. Such a block can pass the room (the child's moved replies
-  alone may): the section then says so, with its size against what was left, and the
-  run's omissions record it. Each later pick is shown only when it fits what is left
-  whole; one that does not is skipped for the next, and its line says why (its size
-  against the room left, or that the most shown whole came first). A trace or input
-  "Trajectories" shows whole, or a reply this section already showed (a sibling's same
-  parent), is named by where it is, never repeated; blocks print in the section's
-  order, so a reference points back. It also
+  kind in turn (broken, fixed, score dropped, score rose). The first broken and the
+  first fixed pick are always shown (`EDIT_FORCED_KINDS`): the child's moved replies
+  whole, the parent's whole unless the block would pass what is left of the room --
+  `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget -- when each is cut to
+  fit, head and tail, at least `EDIT_PARENT_FLOOR` characters (a cut that would save
+  fewer than `EDIT_CUT_MIN`, 500, is not made). Such a block can pass the room: the
+  section says so, with its size against what was left, and the run's omissions record
+  it. The blocks shown whole are kept within a ceiling of `EDIT_CEILING_ROOMS` (3)
+  rooms: a forced pick past its share of it (the forced picks still to come sharing it
+  evenly) has its child's moved replies cut head and tail too, never below
+  `EDIT_CHILD_FLOOR` (8,000) characters each, every cut marked in place and recorded,
+  and the section says so. Every other pick -- a score drop or rise included -- is
+  shown only when it fits what is left whole; one that does not is skipped for the
+  next, and its line says why (its size against the room left, or that the most shown
+  whole came first). A trace or input "Trajectories" shows whole, or a reply this
+  section already showed (a sibling's same parent), is named by where it is, never
+  repeated; blocks print in the section's order, so a reference points back. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of

@@ -373,3 +373,108 @@ def test_a_one_line_item_says_its_steps_runs_and_its_gate_s_verdicts():
         assert "reloop" not in lines[item]
     assert ("Gates whose verdicts moved: `solve_check`: parent not run; child reloop, proceed."
             in text)
+
+
+def test_at_20k_replies_the_forced_picks_share_the_ceiling_never_below_the_floor():
+    """20k replies: the first broken and fixed items alone would be ~170k. They share the
+    section's ceiling (3 rooms), each child reply cut head and tail, no shorter than the
+    floor, each cut marked and recorded, and the section says so."""
+    ctx = context(20000)
+    section = _section(ctx.render())
+    blocks = re.split(r"(?m)^(?=#### Item )", section.split("\n\n- Item ")[0])[1:]
+    assert [b.split(" -- ")[0] for b in blocks] == ["#### Item i00", "#### Item i03"]
+    ceiling = base.EDIT_CEILING_ROOMS * 30000
+    assert sum(len(b) for b in blocks) <= ceiling + 2000
+    said = re.findall(r"its child's moved replies cut to ([\d,]+) chars each \(head and tail, "
+                      r"marked\) to keep the blocks shown whole within the section's "
+                      rf"{ceiling:,}-char ceiling", section)
+    assert len(said) == 2 and all(int(n.replace(",", "")) >= base.EDIT_CHILD_FLOOR for n in said)
+    child_cuts = [o for o in ctx.omissions if o["step"] in ("alt", "merge", "check", "final")]
+    assert len(child_cuts) == 8 and section.count("chars omitted]") >= 8
+
+
+@pytest.mark.parametrize("size", [3000, 8000])
+def test_graded_kinds_are_shown_whole_only_when_they_fit(size):
+    """All four kinds: the first broken and fixed items are forced; a score rise or drop
+    only when it fits what is left, else one line saying why."""
+    section = _section(context(size, graded=True).render())
+    whole = re.findall(r"(?m)^#### Item (\w+) -- ([\w ]+) \(child c2\)$", section)
+    assert [kind for _i, kind in whole][:2] == ["broken", "fixed"]
+    graded = [line for line in section.splitlines()
+              if line.startswith(("- Item i07", "- Item i09"))]
+    shown = {item for item, _kind in whole}
+    assert len(graded) + len(shown & {"i07", "i09"}) == 2
+    assert all("(not shown whole: its block is " in line for line in graded)
+    if size == 8000:
+        assert not shown & {"i07", "i09"}, "no forced graded pick past the room"
+
+
+def test_a_cut_of_a_few_hundred_chars_is_not_made():
+    def rec(item: str, passed: bool, text: str) -> dict:
+        return {"id": item, "passed": passed, "score": float(passed),
+                "exchanges": [{"node": "s", "prompt": "p", "response": text}]}
+
+    old = "O" * 3000
+    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [rec("a", True, old)],
+            "child_records": [rec("a", False, "N" * 2000)]}
+    whole = "\n".join(base._edit_change_lines([pair], room=10 ** 6))
+    block = whole[whole.index("#### Item a"):]
+    # A room 300 short of the block: the parent's 3,000 chars would lose under 500.
+    omissions: list = []
+    text = "\n".join(base._edit_change_lines([pair], omissions=omissions,
+                                             room=len(block) + 2 - 300))
+    assert old in text and "chars omitted" not in text
+    assert [o["step"] for o in omissions] == ["what the last edit changed: over room"]
+    # 800 short: the cut is made, marked and recorded, and the block then fits.
+    omissions = []
+    text = "\n".join(base._edit_change_lines([pair], omissions=omissions,
+                                             room=len(block) + 2 - 800))
+    assert old not in text and "chars omitted]" in text
+    assert [o["step"] for o in omissions] == ["s (parent)"]
+
+
+def test_a_step_that_runs_less_often_reads_fewer_runs_not_gone():
+    def rec(passed: bool, solves: int, extra: bool) -> dict:
+        exchanges = [{"node": "solve", "prompt": "p", "response": f"r{k} {passed}"}
+                     for k in range(solves)]
+        if extra:
+            exchanges.append({"node": "polish", "prompt": "p", "response": "polished"})
+        return {"id": "a", "passed": passed, "score": float(passed), "exchanges": exchanges}
+
+    facts = base.step_facts(rec(True, 3, True), rec(False, 1, False))
+    assert facts == "`solve` 3 -> 1 run(s), reply changed; `polish` 1 -> 0 run(s), gone"
+    only_fewer = base.step_facts(rec(True, 2, False), {**rec(True, 1, False), "exchanges": [
+        {"node": "solve", "prompt": "p", "response": "r0 True"}]})
+    assert only_fewer == "`solve` 2 -> 1 run(s), fewer runs"
+
+
+def test_a_reloop_refused_at_its_cap_is_not_counted_as_run():
+    """The walker and the spine mark a reloop the cap refused (`items.refused_at_cap`);
+    the request says so instead of counting one more reloop than ran."""
+    parent = {"id": "a", "passed": True, "score": 1.0, "prediction": "1",
+              "exchanges": [{"node": "solve", "prompt": "p", "response": "first"}],
+              "steps": [{"node": "check", "kind": "gate", "verdict": "proceed"}]}
+    child = {"id": "a", "passed": False, "score": 0.0, "prediction": "2",
+             "exchanges": [{"node": "solve", "prompt": "p", "response": "first"},
+                           {"node": "solve", "prompt": "p", "response": "second"}],
+             "steps": [{"node": "check", "kind": "gate", "verdict": "reloop"},
+                       {"node": "check", "kind": "gate", "verdict": "reloop",
+                        "exhausted": True, "cap": 1}]}
+    facts = base.step_facts(parent, child)
+    assert ("`check`: parent proceed; child reloop x2 (the last refused at its cap of 1: "
+            "1 rerun)") in facts
+    assert "`solve` 1 -> 2 run(s), more runs" in facts
+
+
+def test_of_two_parent_replies_cut_to_one_length_the_one_barely_over_stays_whole():
+    parent = {"id": "a", "passed": True, "score": 1.0,
+              "exchanges": [{"node": "s", "prompt": "p", "response": "S" * 3000},
+                            {"node": "t", "prompt": "p", "response": "T" * 2300}]}
+    child = {"id": "a", "passed": False, "score": 0.0,
+             "exchanges": [{"node": "s", "prompt": "p", "response": "s"},
+                           {"node": "t", "prompt": "p", "response": "t"}]}
+    omissions: list = []
+    block = base._moved_block(parent, child, "broken", "c", base._Quoted({}), omissions,
+                              None, 2000)
+    assert "T" * 2300 in block and "S" * 3000 not in block
+    assert [o["step"] for o in omissions] == ["s (parent)"]
