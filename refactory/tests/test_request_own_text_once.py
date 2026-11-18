@@ -247,13 +247,29 @@ def test_the_memory_request_says_a_change_s_text_once(rejected):
                                shown_in={"c": section})
     rec = {"id": "i", "passed": True, "score": 1.0, "prediction": "A", "exchanges": []}
     entries, _ = memory.pairs([rec], [{**rec, "passed": False, "score": 0.0}], ["i"])
-    curr = {"id": "c", "pipeline": "C", "rollout": "R",
+    from refactory_dsh import registry
+    from refactory_dsh.optim import analysts
+    from refactory_dsh.optim.base import PIPELINE_VIEW_LEAD
+
+    state = registry.resolve(Path("."), "livemath/solver")[1]().state_dict()
+    child = nn_edits.apply(edit, state)
+    pipes = [analysts.pipeline_text(memory.state_view(s), memory.PIPELINE_TEXT_CHARS)
+             for s in (state, child)]
+    curr = {"id": "c", "pipeline": pipes[1], "rollout": "R",
             **({"rejected": {"child": "c", "changed": 1, "shown": 1, "broken": 1, "fixed": 0,
                              "shared": 1, "others": []}} if rejected else {})}
     text, _ = memory.build_prompt(epoch=2, mode_name="m",
-                                  prev={"id": "p", "pipeline": "P", "rollout": "R"}, curr=curr,
-                                  changes=memory.changes_lines(lineage), previous_note="",
+                                  prev={"id": "p", "pipeline": pipes[0], "rollout": "R"},
+                                  curr=curr,
+                                  changes=memory.changes_lines(lineage, homes={
+                                      "curr": (memory.pipeline_homes(child), "the new pipeline")}),
+                                  previous_note="",
                                   entries=entries, tried=tried)
     assert text.count(JUDGE_TEXT) == 1
     assert f'its edits are under "{section}" above' in text
     assert not [s for s in repeated_sentences(text) if "maximalist" in s or "reviewer" in s]
+    # Both pipelines are shown; how a pipeline is drawn is said once (S1-s45 e2: the legend
+    # twice was .115 of the request's repeated share).
+    assert text.count(PIPELINE_VIEW_LEAD) == 1
+    assert memory.SHARED_LINE_NOTE in text
+    assert not [s for s in repeated_sentences(text) if "one line per step" in s]

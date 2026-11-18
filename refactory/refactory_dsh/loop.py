@@ -6273,7 +6273,13 @@ class Loop(OuterLoop):
             prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
             curr={"id": current.id, "pipeline": view[current.id], "rollout": sides[1][3],
                   **({"rejected": dict(rejected)} if rejected else {})},
-            changes=memory.changes_lines(lineage),
+            changes=memory.changes_lines(lineage, homes={
+                "prev": (memory.pipeline_homes(prev.state),
+                         "the pipeline at the start of this epoch" if not rejected
+                         else "the incumbent pipeline"),
+                "curr": (memory.pipeline_homes(current.state),
+                         f"the {memory.noun({'rejected': rejected})}'s pipeline" if rejected
+                         else "the pipeline now")}),
             previous_note=previous, entries=entries, tried=tried_lines, objective=objective)
 
         outcome: dict[str, Any] = {}

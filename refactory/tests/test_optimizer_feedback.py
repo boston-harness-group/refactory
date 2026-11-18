@@ -232,12 +232,52 @@ def test_colliding_labels_are_told_apart_in_the_table_and_by_a_field_outside_the
                                              enumerate([*inserts, *inserts])]))
     tally = [line for line in lines.splitlines() if line.startswith("- insert_after")]
     assert len(tally) == 2
-    assert 'differs in node: {"id": "check", "kind": "agent", "reads": ["a.txt"]}' in tally[0]
-    assert '"reads": ["b.txt"]' in tally[1] and "its text ends" not in lines
+    assert 'differs in node: …reads": ["a.txt"]}' in tally[0]
+    assert 'reads": ["b.txt"]' in tally[1] and "its text ends" not in lines
+
+
+def test_a_multi_edit_label_names_every_edit_even_when_long():
+    """S4-s44 r3: a branch plus two long prompt tunes; the old 160-character cut ended on
+    the second tune's text and named `decide_task` nowhere. Every edit's op and name comes
+    first; text heads only as far as they fit."""
+    edits = [{"op": "branch", "fork": "step_fork", "id": "independent", "kind": "agent",
+              "text": "Solve the problem independently before reading the notes " * 3},
+             {"op": "set_knob", "name": "hypotheses_task",
+              "value": "Using the notes above, list every hypothesis each option needs " * 3},
+             {"op": "set_knob", "name": "decide_task",
+              "value": "Weigh the independent solution against the notes " * 3}]
+    label = feedback.change_label(edits)
+    for name in ("branch", "fork=step_fork", "id=independent", "name=hypotheses_task",
+                 "name=decide_task"):
+        assert name in label, name
+    assert len(label) <= feedback.LEDGER_CHANGE_CHARS
+    row = feedback.ledger_lines([{**_entry(0, change=label)}])[-1]
+    assert "name=decide_task" in row
+    many = feedback.change_label([{"op": "set_knob", "name": f"knob_{i:02d}_" + "x" * 20,
+                                   "value": "v"} for i in range(8)])
+    assert all(f"knob_{i:02d}_" in many for i in range(8)), "past the bound, still all named"
+
+
+def test_a_differing_field_is_shown_from_where_the_values_differ():
+    """Two inserts whose `reads` differ only in a late entry: the suffix starts where the
+    two lists first differ, so the two lines do not print the same prefix."""
+    reads = [f"file_{i:02d}.txt" for i in range(10)]
+    inserts = [{"op": "insert_after", "target": "solve",
+                "node": {"id": "check", "kind": "agent", "reads": [*reads, last],
+                         "prompt_template": "Check it."}} for last in ("a.txt", "b.txt")]
+    groups = []
+    for edit in inserts:
+        identity = feedback.change_identity([edit])
+        groups.append((feedback.change_label([edit]), identity["text"], identity["shape"]))
+    first, second = feedback.distinguish(groups)
+    assert "a.txt" in first and "b.txt" in second and first != second
+    assert '"file_00.txt"' not in first, "shown from where they differ, not from the start"
 
 
 def test_the_ledger_table_stays_within_its_characters():
-    entries = [_entry(i, change="insert step=" + "k" * 400) for i in range(300)]
+    label = feedback.change_label([{"op": "insert", "after": "solve", "kind": "agent",
+                                    "text": "k" * 400}])
+    entries = [_entry(i, change=label) for i in range(300)]
     lines = feedback.ledger_lines(entries)
     rows = [line for line in lines[-1].splitlines() if line.startswith("| c")]
     assert len(lines[-1]) <= feedback.LEDGER_CHARS < len(rows[0]) * feedback.LEDGER_ROWS

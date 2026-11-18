@@ -929,7 +929,8 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   settings it names such as `step=solve max_iterations=1`, the new steps it carries,
   and the first 60 characters of the text it set -- a new step's instructions, a
   judge's criteria, or a prompt's first changed line against the parent -- within 160
-  characters, its kind in brackets), its train fixed/broken counts against its parent
+  characters, every edit's op and names first and text heads only as far as they fit,
+  so no edit of a multi-edit change goes unnamed; its kind in brackets), its train fixed/broken counts against its parent
   on shared items, the gate's word and its rationale (140 characters). Under the gate the counts compare the candidate's records
   from the round it was evaluated in (not a later re-score of it as the edited
   candidate) with its parent's from that same round, so both share a seed; when the
@@ -1227,7 +1228,9 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   ancestor, each candidate on the way to either with its own edits and rationale (said
   plainly when they are on different branches, as a sibling train leader or a pool's
   pick can be, or share no ancestor), or the one pipeline when unchanged; what the score
-  measures (as every optimizer request says it, below); "What was tried this epoch":
+  measures (as every optimizer request says it, below); with two pipelines shown, how
+  a pipeline and its settings read is said once (the second points to the first), and
+  a text a shown pipeline's knob holds is named by that knob in what changed; "What was tried this epoch":
   every change the optimizer proposed in the round the start-of-epoch pipeline opened,
   newest first -- each candidate evaluated, with its kind as a label (structural or
   knob, and the change kind of the run ledger), what the change was (its edits whole on

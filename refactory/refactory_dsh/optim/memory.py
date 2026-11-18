@@ -534,17 +534,46 @@ def _pipelines_text(*, prev: Mapping[str, Any], curr: Mapping[str, Any], same: b
                      "moved.\n\n"
                      f"{prev.get('pipeline')}\n\n"
                      f"## The {noun(curr)}'s pipeline (candidate `{curr.get('id')}`, not kept)\n"
-                     f"{curr.get('pipeline')}\n\n"
+                     f"{_second_pipeline(prev.get('pipeline'), curr.get('pipeline'))}\n\n"
                      f"## {changes_heading(noun(curr))}\n"
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
     else:
         pipelines = (f"## The pipeline at the start of this epoch (candidate `{prev.get('id')}`)\n"
                      f"{prev.get('pipeline')}\n\n"
                      f"## The pipeline now (candidate `{curr.get('id')}`)\n"
-                     f"{curr.get('pipeline')}\n\n"
+                     f"{_second_pipeline(prev.get('pipeline'), curr.get('pipeline'))}\n\n"
                      f"## {changes_heading(None)}\n"
                      + ("\n".join(changes) if changes else "(not known)") + "\n\n")
     return pipelines
+
+
+#: What the second pipeline's text says by a pointer when the first said it: how a
+#: pipeline is drawn (`base.PIPELINE_VIEW_LEAD`) and how its settings read.
+SHARED_LINE_NOTE = "(How this pipeline and its settings read is said with the pipeline above.)"
+
+
+def _shared_frame() -> frozenset[str]:
+    from .base import PIPELINE_VIEW_LEAD, _settings_lines
+
+    return frozenset({PIPELINE_VIEW_LEAD, _settings_lines([], exact=False)[1]})
+
+
+def _second_pipeline(first: Any, second: Any) -> str:
+    """The second pipeline's text with the frame lines the first's text already holds
+    (`_shared_frame`: the legend of how a pipeline is drawn, the settings' lead) said by
+    one pointer, so the request says them once; its steps and settings stay whole."""
+    frame = _shared_frame() & set(str(first or "").splitlines())
+    if not frame:
+        return str(second or "")
+    out, pointed = [], False
+    for line in str(second or "").splitlines():
+        if line in frame:
+            if not pointed:
+                out.append(SHARED_LINE_NOTE)
+                pointed = True
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _deduped(entries: Sequence[Mapping[str, Any]], texts: Mapping[tuple[str, str], str],
@@ -931,7 +960,13 @@ def _shrunk_edit(edit: Mapping[str, Any] | None, part: str, head: str, room: int
                     high = middle - 1
             return render(low)
     rest = max(0, room - len(head) - 1)
-    return (f"{head} {_middle(part, rest)}" if head else _middle(part, room))[:max(room, 0)]
+    cut = f"{head} {_middle(part, rest)}" if head else _middle(part, room)
+    if len(cut) <= room:
+        return cut
+    # Too little room even for the cut's marker: keep the marker (and the head) whole and
+    # drop the text before it, rather than slicing the marker off.
+    mark = f"…[{len(part)} chars, middle cut]…"
+    return f"{head} {mark}" if head else mark
 
 
 #: The heading of the per-change tally (`change_tally_lines`).
@@ -1087,15 +1122,29 @@ def _refused_line(entry: Mapping[str, Any]) -> str:
                or "(no reason recorded)"))
 
 
-def changes_lines(lineage: Mapping[str, Any]) -> list[str]:
+def changes_lines(lineage: Mapping[str, Any],
+                  homes: Mapping[str, tuple[Mapping[str, str], str]] | None = None
+                  ) -> list[str]:
     """What separates the start-of-epoch candidate from the current one (``{"common",
     "prev", "curr"}``, `Loop._lineage_edits`): from their common ancestor, each
     candidate on the way to either with its own edits, oldest first; said plainly when
-    they are on different branches or share no ancestor."""
-    def lines(path: Sequence[Mapping[str, Any]]) -> list[str]:
+    they are on different branches or share no ancestor. ``homes`` (side -> the knob
+    texts of that side's pipeline as the request shows them, `knob_homes`, and its
+    heading): a text one of those knobs holds is named by its head and the knob, not
+    repeated, so the request says it once."""
+    from .base import _knob_home, _map_text, text_pointer
+
+    def lines(path: Sequence[Mapping[str, Any]], side: str = "curr") -> list[str]:
+        held, heading = (homes or {}).get(side) or ({}, "")
+
+        def point(text: str) -> str:
+            name = _knob_home(text, held) if held else None
+            return (text_pointer(text, f"in `{name}` under {heading}'s settings")
+                    if name is not None else text)
+
         out = []
         for step in path:
-            edits = json.dumps(step.get("edits") or [], default=str)
+            edits = json.dumps(_map_text(list(step.get("edits") or []), point), default=str)
             out.append(f"- `{step.get('id')}` (from `{step.get('parent')}`): "
                        f"{_clip_middle(edits, 4000)}"
                        + (f" -- rationale: {_clip(step.get('rationale'), 400)}"
@@ -1106,17 +1155,26 @@ def changes_lines(lineage: Mapping[str, Any]) -> list[str]:
         lineage.get("curr") or ())
     if common is None:
         return ["They share no ancestor in this run. The start-of-epoch candidate's lineage:",
-                *lines(before), "The current candidate's lineage:", *lines(after)]
+                *lines(before, "prev"), "The current candidate's lineage:", *lines(after)]
     if not before:
         return [f"The current candidate descends from the start-of-epoch one; the changes "
                 "since, oldest first:", *lines(after)]
     if not after:
         return ["The current candidate is an earlier version of the start-of-epoch one: "
                 "these changes, oldest first, made the start-of-epoch candidate from it, and "
-                "are not in the current one:", *lines(before)]
+                "are not in the current one:", *lines(before, "prev")]
     return [f"They are on different branches from their common ancestor `{common}`. "
-            "From it to the start-of-epoch candidate:", *lines(before),
+            "From it to the start-of-epoch candidate:", *lines(before, "prev"),
             "From it to the current candidate:", *lines(after)]
+
+
+def pipeline_homes(state: Mapping[str, Any]) -> dict[str, str]:
+    """The knob texts a pipeline's text (`analysts.pipeline_text`) shows whole
+    (`base.knob_homes`, at most ``PIPELINE_TEXT_CHARS`` each), for `changes_lines`."""
+    from .base import knob_homes
+
+    return {name: value for name, value in knob_homes(state_view(state).knobs).items()
+            if len(value) <= PIPELINE_TEXT_CHARS}
 
 
 def state_view(state: Mapping[str, Any]) -> Any:

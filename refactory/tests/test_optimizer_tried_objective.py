@@ -337,3 +337,14 @@ def test_a_cut_edit_keeps_its_wiring_and_cuts_its_text_in_the_middle():
         assert wiring in text, wiring
     assert "HEAD-OF-CRITERIA" in text and "TAIL-OF-CRITERIA" in text and "middle cut" in text
     assert all(f"k{i}" in text for i in range(3)) and "[cut: " in text
+
+
+def test_a_tiny_room_keeps_the_cut_marker_whole():
+    """With room for little more than the cut's marker, the marker is kept whole (and the
+    edit's head), the text before it dropped, never the marker sliced."""
+    from refactory_dsh.optim.memory import _shrunk_edit
+
+    part = "set_knob k: 10 -> 9000 chars; diff: " + "x" * 9000
+    short = _shrunk_edit(None, part, "[set_knob k]", 30)
+    assert short.endswith("middle cut]…") and short.startswith("[set_knob k]")
+    assert f"[{len(part)} chars, middle cut]" in short

@@ -52,7 +52,7 @@ LEDGER_CHARS = 9000
 LEDGER_RATIONALE_CHARS = 140
 #: How much of a change's label a ledger row or tally line shows (`change_cell`), and
 #: the most characters the per-change tally before the table takes.
-LEDGER_CHANGE_CHARS = 160
+LEDGER_CHANGE_CHARS = 160  # a label's bound where the ledger shows it (`change_label`)
 LEDGER_TALLY_CHARS = 3000
 
 #: Steps reviewed per request and train items each review reads. A review reads each
@@ -168,7 +168,7 @@ def touched(edits: Any) -> list[str]:
 #: The most characters a change's label (`change_label`) takes, and how much of the
 #: text it changed (a new step's instructions, a judge's criteria, a knob's new lines)
 #: it quotes: enough to tell two changes of one kind apart.
-CHANGE_LABEL_CHARS = 200
+CHANGE_LABEL_CHARS = LEDGER_CHANGE_CHARS
 CHANGE_TEXT_HEAD = 60
 #: The fields of an edit, or of a new step it carries, that hold free text: a step's
 #: instructions or a judge's criteria (``text``, ``prompt_template``), its system
@@ -250,6 +250,11 @@ def _new_steps(edit: Mapping[str, Any]) -> list[str]:
     return out
 
 
+#: The fields that name what an edit touches: a label keeps them whatever else it cuts.
+_NAME_FIELDS = ("name", "step", "steps", "target", "after", "before", "fork", "first",
+                "second", "id", "new_id", "over", "source")
+
+
 def change_label(edits: Any, before: Mapping[str, Any] | None = None,
                  chars: int = CHANGE_LABEL_CHARS) -> str:
     """A change in one line, by what it did rather than its kind: each edit's op, the
@@ -257,30 +262,49 @@ def change_label(edits: Any, before: Mapping[str, Any] | None = None,
     ``max_iterations=1``), the new steps it carries, and the head of the text it set (a
     new step's instructions or a judge's criteria, ``CHANGE_TEXT_HEAD`` characters; for
     a knob whose old value ``before`` holds, its first changed line). Whitespace folded,
-    within ``chars``, so it is one line wherever it is shown and nothing in it can read
-    as a heading. Two changes of one kind -- two loops whose judges check different
-    things -- get different labels; the run ledger and the memory's tally group by it."""
+    so it is one line wherever it is shown and nothing in it can read as a heading.
+
+    Within ``chars``, every edit's op and the names it touches are kept first, then its
+    other settings and new steps, then the text heads, in edit order, as far as they fit:
+    no edit of a multi-edit change goes unnamed, even past ``chars``. Two changes of one
+    kind -- two loops whose judges check different things -- get different labels."""
     before = before or {}
-    parts = []
+    levels: list[list[str]] = []  # per edit: names only, + settings, + text head
     for edit in edits if isinstance(edits, (list, tuple)) else [edits]:
         if not isinstance(edit, Mapping) or not edit.get("op"):
-            parts.append("(no readable edit)")
+            levels.append(["(no readable edit)"] * 3)
             continue
-        said = [str(edit["op"])]
-        said += [s for key, value in edit.items()
-                 if key not in (*_UNLABELLED, *_TEXT_FIELDS, *_STEP_FIELDS)
-                 for s in [_setting(key, value)] if s]
-        said += _new_steps(edit)
+        names = [str(edit["op"]), *(s for key in _NAME_FIELDS
+                                    for s in [_setting(key, edit.get(key))] if s)]
+        rest = [s for key, value in edit.items()
+                if key not in (*_UNLABELLED, *_TEXT_FIELDS, *_STEP_FIELDS, *_NAME_FIELDS)
+                for s in [_setting(key, value)] if s]
+        rest += _new_steps(edit)
         if "value" in edit and not isinstance(edit["value"], (str, list, dict)):
-            said.append(f"value={edit['value']}")
+            rest.append(f"value={edit['value']}")
         old, new = before.get(str(edit.get("name"))), edit.get("value")
         text = _fold(_changed_line(old, new) if edit.get("op") == "set_knob"
                      and isinstance(old, str) and isinstance(new, str) else _first_text(edit))
-        if text:
-            head = text[:CHANGE_TEXT_HEAD] + ("…" if len(text) > CHANGE_TEXT_HEAD else "")
-            said.append(json.dumps(head, ensure_ascii=False))
-        parts.append(" ".join(said))
-    return _clip(_fold("; ".join(parts) or "(none)"), chars)
+        head = ([json.dumps(text[:CHANGE_TEXT_HEAD] + ("…" if len(text) > CHANGE_TEXT_HEAD
+                                                       else ""), ensure_ascii=False)]
+                if text else [])
+        levels.append([_fold(" ".join(names)), _fold(" ".join([*names, *rest])),
+                       _fold(" ".join([*names, *rest, *head]))])
+    if not levels:
+        return "(none)"
+    chosen = [0] * len(levels)
+
+    def joined() -> str:
+        return "; ".join(level[c] for level, c in zip(levels, chosen))
+
+    # Raise each edit one level at a time, in order, while the label fits.
+    for step in (1, 2):
+        for index, level in enumerate(levels):
+            was = chosen[index]
+            chosen[index] = step
+            if len(joined()) > chars:
+                chosen[index] = was
+    return joined()
 
 
 #: How much of a change's folded text `change_identity` keeps, to tell two changes whose
@@ -339,8 +363,14 @@ def _shape_difference(shape: str, other: str) -> str:
         for field in sorted(set(edit) | set(them)):
             if edit.get(field) != them.get(field):
                 shown = json.dumps(edit.get(field), default=str, ensure_ascii=False)
-                return f"{field}: {shown[:CHANGE_TEXT_HEAD]}" + (
-                    "…" if len(shown) > CHANGE_TEXT_HEAD else "")
+                other = json.dumps(them.get(field), default=str, ensure_ascii=False)
+                # From where the two values first differ, as "differs at" does for texts.
+                at = next((n for n, (a, b) in enumerate(zip(shown, other)) if a != b),
+                          min(len(shown), len(other)))
+                start = max(0, at - 10)
+                piece = shown[start:start + CHANGE_TEXT_HEAD]
+                return (f"{field}: " + ("…" if start else "") + piece
+                        + ("…" if start + CHANGE_TEXT_HEAD < len(shown) else ""))
     return ""
 
 
@@ -489,7 +519,8 @@ def change_cell(entry: Mapping[str, Any], chars: int = CHANGE_LABEL_CHARS) -> st
     """A ledger entry's change as one cell or line: its label (`change_label`), the kind
     after it as a label only; the kind alone for an entry made before labels."""
     label, kind = str(entry.get("change") or ""), str(entry.get("kind") or "other")
-    return f"{_clip(label, chars)} ({kind})" if label else kind
+    # The label is bounded already, every edit named (`change_label`); never cut here.
+    return f"{label} ({kind})" if label else kind
 
 
 def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROWS,
