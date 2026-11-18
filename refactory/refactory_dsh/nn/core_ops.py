@@ -1223,11 +1223,6 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     after: set[str] = set()
     for start in following:
         after |= _downstream(graph, start)
-    unscored = _unscored_take_over(graph, state, target, after)
-    if unscored:
-        raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
-                       "so taking it over changes nothing; take over a step whose output a "
-                       "later step reads or the Task scores, or insert before those readers")
     made = {("file", n) for node in graph.nodes.values() for n in node.writes}
     made |= {("fact", n) for node in graph.nodes.values() for n in node.produces}
     names: dict[tuple[str, str], str] = {}
@@ -1277,6 +1272,11 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
+    unscored = _unscored_take_over(graph, state, target, after)
+    if unscored:
+        raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
+                       "so taking it over changes nothing; take over a step whose output a "
+                       "later step reads or the Task scores, or insert before those readers")
     renames = None
     if _code_text(target, state) is not None:
         # Code returns its outputs under the names it was written for: the run records
