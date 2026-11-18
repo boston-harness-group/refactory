@@ -53,6 +53,9 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 #: The system directories model code sees, read-only (Linux); a symlink among them is
 #: recreated as one (``/bin`` -> ``usr/bin``).
 SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc")
+#: The shell the Linux setup runs in: POSIX only (dash on Ubuntu, bash elsewhere); the
+#: tests run it under dash too where dash is installed.
+SHELL = "/bin/sh"
 #: The device files model code may open.
 DEVICES = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 
@@ -91,10 +94,12 @@ def _linux_script(read_only: list[str], writable: list[str], links: dict[str, st
               'mkdir "$R/.old"; cd "$R"; pivot_root . .old; umount -n -l /.old; rmdir /.old',
               'cd "$WD" 2>/dev/null || cd /',
               ('exec unshare -U -r -m -- "$@"' if ready_fd is None else
-               # The last step before the code: say so on the caller's pipe, then close
-               # it, so the code never holds it (`skillopt_port.run_generated_code`).
-               f'exec unshare -U -r -m -- /bin/sh -c \'printf ok >&{ready_fd}; '
-               f'exec {ready_fd}>&-; exec "$@"\' sh "$@"')]
+               # The last step before the code: say so on the caller's pipe
+               # (`skillopt_port.run_generated_code`, which reads only these 2 bytes).
+               # POSIX only: dash, Ubuntu's sh, takes no fd number above 9 in a
+               # redirection, so the pipe is opened by its /proc path.
+               f'exec unshare -U -r -m -- {SHELL} -c '
+               f'\'printf ok > /proc/self/fd/{int(ready_fd)} && exec "$@"\' sh "$@"')]
     return "\n".join(lines) + "\n"
 
 
@@ -233,7 +238,7 @@ def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
         _refuse_covering([*read_only, *writable], [*hidden, str(Path.home())])
         start = next((p for p in visible if os.path.isdir(p)), "/")
         unshare = shutil.which("unshare") or "unshare"
-        return [unshare, "-rnmpf", "--", "/bin/sh", "-c",
+        return [unshare, "-rnmpf", "--", SHELL, "-c",
                 _linux_script(read_only, _distinct(writable), links, ready_fd=ready_fd), "sh",
                 os.path.abspath(temp_dir), start, *command]
 

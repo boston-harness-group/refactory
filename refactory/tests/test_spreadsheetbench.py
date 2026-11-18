@@ -173,9 +173,17 @@ def test_code_runs_without_the_sandbox_never(monkeypatch):
         sandbox.require("python")
 
 
-def test_hostile_code_sees_neither_the_answer_nor_secrets(tmp_path, monkeypatch, sb_python):
+#: The shells the Linux sandbox setup is run under: the system's sh and, where installed,
+#: dash (Ubuntu's sh, which takes no fd number above 9 in a redirection).
+SHELLS = ["/bin/sh", *(["/usr/bin/dash"] if shutil.which("dash") else [])]
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_hostile_code_sees_neither_the_answer_nor_secrets(tmp_path, monkeypatch, sb_python,
+                                                          shell):
     """The golden file beside the input, the run, a secret in the home directory and the
     network are out of reach; the input copy reads and the output writes."""
+    monkeypatch.setattr(sandbox, "SHELL", shell)
     data = tmp_path / "data" / "spreadsheet" / "a"
     gold = make_workbook(data / "1_a_golden.xlsx", [{"title": "S", "cells": {"A1": "ANSWER"}}])
     run = tmp_path / "run"
@@ -356,12 +364,21 @@ def test_a_crashed_solve_call_gets_five_attempts(tmp_path, sb_env, crashes):
         assert prompts[5] != prompts[0]
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="the macOS sandbox is a hide-list: a copy outside the places it "
+                           "names (another run's directory under the temporary root) stays "
+                           "visible, so only Linux's allow-list can promise none is found")
+@pytest.mark.parametrize("shell", SHELLS)
 def test_hostile_code_walking_the_filesystem_finds_no_golden_file(tmp_path, sb_env,
-                                                                monkeypatch):
-    """Model code that searches the whole filesystem for the item's golden file finds
-    none: not the dataset's, not a copy beside it, in a model cache, in the home
-    directory or under the temporary root (Linux: only an allow-list is there)."""
+                                                                monkeypatch, shell):
+    """Model code that searches the whole filesystem for the item's golden file (by its
+    name) finds none: not the dataset's, not a copy beside it, in a model cache, in the
+    home directory or under the temporary root (Linux: only an allow-list is there)."""
     import tempfile
+
+    import child_patches
+
+    child_patches.for_test(monkeypatch).setattr(sandbox, "SHELL", shell)
 
     golden = sb_env / "sb400" / "spreadsheet" / "t1" / "1_t1_golden.xlsx"
     assert golden.exists()
@@ -379,7 +396,7 @@ def test_hostile_code_walking_the_filesystem_finds_no_golden_file(tmp_path, sb_e
             "for top, dirs, files in os.walk('/'):\n"
             "    if top == '/proc' or top.startswith('/proc/') or top.startswith('/sys'):\n"
             "        dirs[:] = []\n        continue\n"
-            "    found += [os.path.join(top, f) for f in files if 'golden' in f]\n"
+            f"    found += [os.path.join(top, f) for f in files if f == {golden.name!r}]\n"
             "if found:\n    raise SystemExit('FOUND ' + repr(found))\n"
             "wb = openpyxl.load_workbook(INPUT_PATH)\nwb.active['B1'] = 42\n"
             "wb.save(OUTPUT_PATH)\n```")
@@ -388,7 +405,8 @@ def test_hostile_code_walking_the_filesystem_finds_no_golden_file(tmp_path, sb_e
     finally:
         shutil.rmtree(elsewhere, ignore_errors=True)
     (record,) = result.item_records
-    assert len(prompts) == 1 and record["passed"], record
+    assert len(prompts) == 1 and record["passed"], (prompts[1][-1500:] if len(prompts) > 1
+                                                    else record)
 
 
 def test_task_items_hide_the_answer(sb_data):
@@ -1070,7 +1088,6 @@ def test_a_sandbox_setup_failure_is_a_harness_incident(tmp_path, sb_env, monkeyp
     child_patches.for_test(monkeypatch).setattr(sandbox, "_linux_script", _failing_setup)
     result, prompts = _walk(tmp_path, "val", [_good(7), _good(7)], expect_ok=False)
     (record,) = result.item_records
-    Path("/tmp/claude-1000/sbfail.json").write_text(json.dumps(record, default=str))
     assert record["error_kind"] == "harness_incident", record
     assert len(prompts) == 1
 

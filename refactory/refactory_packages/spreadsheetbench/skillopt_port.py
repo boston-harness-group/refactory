@@ -308,7 +308,7 @@ def _require_started(ready_r: int | None, ready_w: int | None, stderr: str) -> N
         return
     os.set_blocking(ready_r, False)  # the write end stays open here: no EOF to wait for
     try:
-        said = os.read(ready_r, 16)
+        said = os.read(ready_r, 2)  # the sandbox's 2 bytes; nothing the code writes after
     except BlockingIOError:
         said = b""
     if said != b"ok":
