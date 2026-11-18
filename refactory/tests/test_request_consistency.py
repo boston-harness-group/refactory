@@ -256,6 +256,34 @@ def _merge() -> None:
     assert _outputs(before, "draft") & _consumed(out, steps[0]), "the first's inputs"
 
 
+def _map() -> None:
+    """'after a step, a new agent step run once per element of 'over' ..., the runs at
+    once, at most 'max' ...; then 'combine' ... sees every result and writes one output'"""
+    from refactory_dsh.nn.operators import MAP_CALL, map_of
+
+    line = core_ops.OPERATORS["map"]["line"]
+    assert "one model call each" in line and "the combine is told so" in line
+    before = _seed("fuzz_draft_review")
+    _a, out = _ok("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft",
+                                        "max": 3})
+    graph = _graph(out)
+    [fork] = [n for n in _new(before, graph) if map_of(graph, n)]
+    op = graph.nodes[map_of(graph, fork)]
+    assert op.call == MAP_CALL and op.inputs[0] == "draft" and _pred(graph, op.id) == {"draft"}
+    runs = graph.nodes[fork].targets
+    assert len(runs) == 3 and set(graph.nodes[fork].optional_targets) == set(runs)
+    join = graph.fork_join(fork)
+    [combine] = [n for n in _succ(graph, join) | {s for q in _succ(graph, join)
+                                                 for s in _succ(graph, q)}
+                 if graph.nodes[n].kind == "agent"]
+    assert {f"{r}.txt" for r in runs} <= {n for _k, n in core_ops._consumed(
+        graph.nodes[f"{combine}_inputs"], out.state)}
+    for bad in (1, 9):
+        _a, refused = _apply("fuzz_draft_review", {"op": "map", "after": "draft",
+                                                   "over": "draft", "max": bad})
+        assert isinstance(refused, list) and "from 2 to 8" in refused[0], refused
+
+
 def _fallback() -> None:
     """'a step run instead when 'step' (one run per item) fails ... it writes that step's
     outputs, so what reads them still gets an answer; ... it sees what 'step' sees'"""
@@ -279,7 +307,7 @@ def _fallback() -> None:
 CLAIMS: dict[str, Callable[[], None]] = {
     "insert": _insert, "remove": _remove, "parallelize": _parallelize,
     "serialize": _serialize, "branch": _branch, "rewire": _rewire, "loop": _loop,
-    "route": _route, "split": _split, "merge": _merge, "fallback": _fallback}
+    "route": _route, "split": _split, "merge": _merge, "fallback": _fallback, "map": _map}
 
 
 def test_every_core_operator_s_line_is_checked():
@@ -459,6 +487,24 @@ def test_only_a_judge_s_prompt_is_split_at_the_system_s_verdict_rule():
     assert drawn.count("appended by the system") == 1, drawn
     review = next(line for line in drawn.splitlines() if line.strip().startswith("review "))
     assert "appended by the system" not in review
+
+
+def test_a_map_agrees_across_the_operator_section_the_legend_and_the_view(tmp_path):
+    """The request's operator line for ``map``, the legend's form and the drawn line say the
+    same: its runs, the list, the most elements; and the line and the form are said once."""
+    text, state = _request(tmp_path, "livemath/skill_graph",
+                           {"op": "map", "after": "compare", "over": "compare", "max": 3,
+                            "text": "Check this note."})
+    section = _section(text, "## Structural operators")
+    line = next(row for row in section.splitlines() if row.startswith("- `map` ("))
+    assert core_ops.OPERATORS["map"]["line"] in line
+    form = pipeline_view.FORMS["map"]
+    assert f"`{form}`" in text  # the legend
+    view = _fenced(_section(text, "## The pipeline you may edit"))
+    drawn = form.replace("step … step", "compare_map_1 … compare_map_3").replace(
+        "list", "compare_notes.txt@compare").replace("max N", "max 3")
+    assert any(row.strip().startswith(drawn) for row in view.splitlines()), view
+    assert text.count(core_ops.OPERATORS["map"]["line"]) == 1 and text.count(form) == 1
 
 
 def test_a_fallback_agrees_across_the_operator_section_the_legend_and_the_view(tmp_path):
