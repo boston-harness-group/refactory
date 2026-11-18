@@ -378,6 +378,8 @@ def declarations(workdir: Path, node_id: str) -> dict[str, Any]:
                 result["snippet"] = dict(entry["snippet"])
             if isinstance(entry.get("blind_reloops"), dict):
                 result["blind_reloops"] = dict(entry["blind_reloops"])
+            if isinstance(entry.get("reloop"), dict):
+                result["reloop"] = dict(entry["reloop"])
             if isinstance(entry.get("read_renames"), dict):
                 result["read_renames"] = dict(entry["read_renames"])
             return result
@@ -580,10 +582,12 @@ def record_visit(directory: Path, node_id: str, produced: Any, *, gate: bool) ->
     if not (directory / items.PASS_MARKER).exists():
         return
     try:
+        declared = declarations(directory, node_id)
         visit = (items.gate_visit(node_id, produced) if gate else
-                 items.op_visit(directory, node_id, produced,
-                                declarations(directory, node_id).get("writes") or ()))
-        items.record_visit(directory, visit)
+                 items.op_visit(directory, node_id, produced, declared.get("writes") or ()))
+        # A gate's reloop verdicts and cap (`lowering.write_declarations`): a reloop the
+        # cap refuses is recorded so, as the walker records it.
+        items.record_visit(directory, visit, declared.get("reloop") if gate else None)
     except Exception as exc:  # noqa: BLE001 - the item's evidence, never its outcome
         print(f"refactory: run warning: could not record the visit of {node_id}: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)

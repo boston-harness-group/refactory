@@ -27,9 +27,10 @@ from typing import Any
 
 import pytest
 
-from refactory_dsh.optim import base, ProposalContext, analysts, memory
+from refactory_dsh.optim import base, ProposalContext, analysts, evidence, memory
 from refactory_dsh.optim.base import Candidate
 from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+from refactory_dsh.tools.request_sizes import own_headings
 from refactory_dsh.outerloop import ValidationGate
 
 from test_gate_aware_context import _passes_by_level, _val
@@ -1337,11 +1338,13 @@ FULL = {"source": "failure", "finding": "F" * 900, "change": LONG_CHANGE, "prese
 
 def test_a_finding_is_shown_whole_with_its_line_breaks_quotes_and_both_actions():
     section = "\n".join(analysts.section_lines({"findings": [FULL], "batches": []}))
-    assert "F" * 900 in section and LONG_CHANGE in section, "no 600-character cut"
-    assert "## Rules\n- line one\n- line two\n" in section, "the change keeps its layout"
+    quoted = evidence.quoted(LONG_CHANGE)
+    assert "F" * 900 in section and quoted in section, "no 600-character cut"
+    assert "\n## Rules\n- line one\n- line two\n" in section, "byte-exact, its layout kept"
+    assert own_headings(section) == ["## What the analysts found, ranked"], "fenced: no heading"
     assert "S" * 400 in section
     assert all(f"QUOTE-{k} " + "q" * 300 in section for k in range(6)), "every quote, whole"
-    assert f"-- change: {LONG_CHANGE} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
+    assert f"-- change: {quoted} -- keep: KEEP-TOO" in section, "a failure's keep is kept"
     success = {**FULL, "source": "success"}
     assert "-- keep: KEEP-TOO -- change: " in analysts.finding_line(1, success)
     assert "[cut:" not in section

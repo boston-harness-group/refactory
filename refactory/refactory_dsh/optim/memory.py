@@ -64,6 +64,7 @@ import random
 from typing import Any, Mapping, Sequence
 
 from . import evidence
+from .evidence import exact_block
 from .analysts import ANALYST_ROOM, TEXT_FLOOR, fit_item, item_cap, item_text
 from .base import TRAJECTORY_INPUT_KEYS, _by_item, _clip, _clip_middle, _table, fmt_score
 
@@ -417,7 +418,10 @@ def _intro(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
     """The memory request up to its comparison: the objective, the pipelines and what
     changed, what was tried and the previous note to reflect on."""
     pipelines = _pipelines_text(prev=prev, curr=curr, same=same, changes=changes, tried=tried)
-    note = previous_note.strip() or "(No previous optimizer memory -- this is the first update.)"
+    # The note byte-exact in a fence (`evidence.exact_block`): the memory pass rewrites it,
+    # so it must read as no heading here and gain no escape.
+    note = ("\n".join(exact_block(previous_note.strip())) if previous_note.strip()
+            else "(No previous optimizer memory -- this is the first update.)")
     return (f"# Writing the optimizer's memory -- epoch {epoch}\n\n"
             f"Mode: `{mode_name}`.\n\n"
             + (f"## What the score measures\n{objective}\n\n" if objective else "")
@@ -972,7 +976,8 @@ def context_block(memory: Mapping[str, Any] | None) -> str:
             "This is optimizer-side memory distilled from earlier epochs of this run. Use it "
             "to improve how you analyse, merge and rank findings. Prefer it when the current "
             "evidence is ambiguous, but do not force it if the current traces clearly "
-            f"contradict it.{_stale_text(memory)}\n\n{text}\n\n")
+            f"contradict it.{_stale_text(memory)}\n\n" + "\n".join(exact_block(text))
+            + "\n\n")
 
 
 def _stale_text(memory: Mapping[str, Any] | None) -> str:
@@ -1010,7 +1015,7 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
         lines.append("The note was written from this tally of the epoch's tries, so the note "
                      "can be weighed against it:")
     return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
-            *([text] if text else [])]
+            *(exact_block(text) if text else [])]
 
 
 # ── the journal and the report ──────────────────────────────────────────────
