@@ -441,6 +441,25 @@ MISREAD = ("import json\n"
 
 
 @sandbox
+def test_a_machine_with_no_sandbox_refuses_the_code_dry_run(tmp_path, monkeypatch):
+    """No sandbox at all when the dry run runs (`snippet.NoSandbox`, the harness's) still
+    refuses the proposal, as before it was told apart from code failures; only a sandbox
+    slow to start skips."""
+    def no_sandbox(*_: Any, **__: Any) -> Any:
+        raise snippet.NoSandbox("code nodes cannot run here: no user namespaces")
+
+    monkeypatch.setattr(snippet, "execute", no_sandbox)
+    recorded = _recorded(tmp_path, {"id": "one", "parts": ["a", "b"]})
+    optimizer = Optimizer()
+    optimizer.recorded_inputs = lambda cid: recorded
+    refused = _attempt(_state("fuzz_data_pass"),
+                       {"op": "insert_after", "target": "read_item", "node": _code_op(MISREAD)},
+                       optimizer=optimizer, protected=("items", "check"))
+    assert isinstance(refused, list) and refused[0].startswith("E-code-run"), refused
+    assert "code nodes cannot run here: no user namespaces" in refused[0]
+
+
+@sandbox
 def test_regression_a_code_op_that_misreads_its_input_file_is_refused_before_scoring(tmp_path):
     """The new code op treats a list as a mapping: run on the parent's recorded item it
     raises, and the proposal is refused with the error and the line, before any item is

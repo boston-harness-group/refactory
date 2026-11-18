@@ -185,6 +185,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
+| function | `fallback_gate_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `feedback_channel_issues` | `(graph: 'Graph', *, grader_side: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 | function | `filled_knobs` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'tuple[str, ...]'` |
 | function | `fills_facts` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'bool \| None'` |
@@ -222,6 +223,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`consumed`** — Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
+- **`fallback_gate_issues`** — V5 for a fallback gate (`graph.FALLBACK_GATE_CALL`): it reads whether the one step
 - **`feedback_channel_issues`** — V17's one exception, held to its shape: a train-feedback node
 - **`filled_knobs`** — The knobs whose slots an op or gate fills: every knob it reads that is not bound
 - **`fills_facts`** — Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
@@ -521,13 +523,13 @@ The workflow IR this package owns and lowers a mode state into.
 | kind | name | signature |
 |---|---|---|
 | class | `AgentConfig` | `(*, role: refactory_dsh.ir.AgentRole, model: str, timeout: int = 600) -> None` |
-| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, missing_on_crash: bool \| None = None, workspace: dict[str, str] \| None = None, route: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
+| class | `AgentNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, role: refactory_dsh.ir.AgentRole, model: str = '', prompt_template: str = '', system_prompt: str = '', tools: list[str] = <factory>, timeout: int \| None = None, max_iterations: int = 1, post_checks: list[refactory_dsh.ir.ArtifactCheck] = <factory>, dispatch_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, retry: dict[str, typing.Any] \| None = None, missing_on_crash: bool \| None = None, falls_back: bool \| None = None, workspace: dict[str, str] \| None = None, route: dict[str, str] \| None = None, tool_policy: str \| None = None) -> None` |
 | class | `AgentRole` | `(*values)` |
 | class | `ArtifactCheck` | `(*, path: str, must_exist: bool = True, min_size: int = 0, must_contain: list[str] = <factory>) -> None` |
 | class | `DataItem` | `(*, id: str, path: str \| None = None, metadata: dict[str, typing.Any] = <factory>, prompt: str = '') -> None` |
 | class | `DataNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, task_ref: str \| None = None, source_path: str \| None = None, source_format: Literal['directory', 'jsonl', 'csv'] \| None = None, inline_items: list[refactory_dsh.ir.DataItem] = <factory>, subgraph_entry: str, subgraph_exit: str, parallelism: Annotated[int, Ge(ge=1)] = 1, split: Literal['train', 'val', 'test', 'all'] = 'all', shuffle: bool = False, shuffle_seed: int \| None = None, limit: int \| None = None, max_items: int = 500) -> None` |
 | class | `Edge` | `(*, source: str, target: str, condition: refactory_dsh.ir.VerdictType \| str \| None = None) -> None` |
-| class | `FnNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, command: str = '', callable_name: str \| None = None, notes: str = '', command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, knob_outputs: dict[str, list[str]] \| None = None, knobs: list[str] \| None = None, produces: list[str] \| None = None) -> None` |
+| class | `FnNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, command: str = '', callable_name: str \| None = None, notes: str = '', command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, knob_outputs: dict[str, list[str]] \| None = None, knobs: list[str] \| None = None, produces: list[str] \| None = None, falls_back: bool \| None = None) -> None` |
 | class | `ForkNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, targets: list[str], optional_targets: list[str] = <factory>) -> None` |
 | class | `GateNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, evaluator_type: Literal['agent', 'fn', 'user'] = 'agent', evaluator_role: refactory_dsh.ir.AgentRole \| None = None, evaluator_command: str \| None = None, command_timeout_s: Annotated[int \| None, Gt(gt=0), Le(le=2147483)] = None, gate_prompt: str = '', max_iterations: int \| None = None, on_exhausted: Literal['continue', 'fail_item'] \| None = None) -> None` |
 | class | `JoinNode` | `(*, id: str, reads: set[str] = <factory>, writes: set[str] = <factory>, blocking: bool = True, resource_role: Literal['work', 'final_validation'] \| None = None, sources: list[str]) -> None` |

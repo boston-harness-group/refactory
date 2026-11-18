@@ -1121,8 +1121,8 @@ export class Spine {
 
   /**
    * Mark a non-gate node complete and advance. `failed` records an optional node that
-   * failed (a fork's `optional_targets`, or a data-pass agent whose retries are spent,
-   * `missing_on_crash`): it is logged `failed`, not `completed`, and its branch goes on
+   * failed (a fork's `optional_targets`, a data-pass agent whose retries are spent,
+   * `missing_on_crash`, or a step with a fallback, `falls_back`): it is logged `failed`, not `completed`, and its branch goes on
    * with its next node, as the walker records and continues it.
    */
   complete(node: string, { failed = false }: { failed?: boolean } = {}): SpineNext {
@@ -1131,12 +1131,15 @@ export class Spine {
     return this.completeDue(node, failed)
   }
 
-  /** The nodes that may fail and go on: a fork's `optional_targets`, and `missing_on_crash` agents. */
+  /**
+   * The nodes that may fail and go on: a fork's `optional_targets`, `missing_on_crash`
+   * agents, and steps with a fallback (`falls_back`).
+   */
   private optionalNodes(): Set<string> {
     const bodies = [...this.nodes.values()]
     return new Set([
       ...bodies.flatMap(body => body.optional_targets ?? []),
-      ...bodies.filter(body => body.missing_on_crash === true).map(body => body.id),
+      ...bodies.filter(body => body.missing_on_crash === true || body.falls_back === true).map(body => body.id),
     ])
   }
 
