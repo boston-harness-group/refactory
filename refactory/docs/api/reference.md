@@ -185,6 +185,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `consumed` | `(node: 'Node', knob_values: 'Mapping[str, Any]', *, resolve_calls: 'bool' = True) -> 'set[tuple[str, str]]'` |
 | function | `declared_knobs` | `(state: 'Mapping[str, Any]') -> 'dict[str, Knob]'` |
 | function | `fact_produced` | `(*facts: 'str') -> 'Invariant'` |
+| function | `feedback_channel_issues` | `(graph: 'Graph', *, grader_side: 'Iterable[str]' = ()) -> 'list[Issue]'` |
 | function | `filled_knobs` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'tuple[str, ...]'` |
 | function | `fills_facts` | `(node: 'Node', *, resolve_calls: 'bool' = True) -> 'bool \| None'` |
 | function | `fork_branch_conflicts` | `(graph: 'Graph', knob_values: 'Mapping[str, Any]') -> 'list[tuple[str, str]]'` |
@@ -221,6 +222,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`consumed`** — Every fact and file a node takes in, as the graph declares it: each ``{{name}}``
 - **`declared_knobs`** — The knobs a state declares, as ``Knob`` objects.
 - **`fact_produced`** — An invariant requiring the graph to produce the facts ``score()`` reads.
+- **`feedback_channel_issues`** — V17's one exception, held to its shape: a train-feedback node
 - **`filled_knobs`** — The knobs whose slots an op or gate fills: every knob it reads that is not bound
 - **`fills_facts`** — Whether an op or a gate's callable fills the ``{{name}}`` slots in the knobs it
 - **`fork_branch_conflicts`** — ``(fork, reason)`` for each fork whose branches cannot run side by side.
@@ -313,7 +315,7 @@ The two extension points: what proposes, and what runs the search.
 | kind | name | signature |
 |---|---|---|
 | class | `BudgetStopped` | `(message: 'str', *, reason: 'str' = '') -> 'None'` |
-| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None) -> None` |
+| class | `EvalRequest` | `(candidate: 'Candidate', part: 'str' = 'train', items: 'list[str] \| None' = None, seed: 'int \| None' = None, rescore_epoch: 'int \| None' = None, gold_feedback: 'bool' = False) -> None` |
 | class | `FinalEvaluation` | `(*, record: 'Callable[..., Any] \| None' = None, label: 'str' = 'outer loop') -> 'None'` |
 | class | `OuterLoop` | `()` |
 | class | `OuterLoopError` | `` |
@@ -1108,7 +1110,7 @@ The per-item half of a data node, from the command line.
 | function | `op_visit` | `(workdir: 'Path', node: 'str', produced: 'Any', writes: 'Iterable[str]' = ()) -> 'dict[str, Any]'` |
 | function | `pass_dir_of` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int') -> 'Path'` |
 | function | `pass_read_through` | `(declared: 'dict[str, tuple[tuple[str, ...] \| list[str], tuple[str, ...] \| list[str]]]', body: 'set[str] \| list[str] \| tuple[str, ...]', data_writes: 'tuple[str, ...] \| list[str]' = ()) -> 'tuple[str, ...]'` |
-| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True) -> 'Path'` |
+| function | `prepare_pass_dir` | `(run_dir: 'Path', node_id: 'str', item_id: 'str', index: 'int', declared_reads: 'tuple[str, ...] \| list[str]' = (), *, starting: 'bool' = True, task_ref: 'str' = '') -> 'Path'` |
 | function | `record_exchange` | `(workdir: 'Path', node: 'str', prompt: 'str', response: 'str') -> 'None'` |
 | function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]') -> 'None'` |

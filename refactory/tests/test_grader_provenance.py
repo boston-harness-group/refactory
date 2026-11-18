@@ -126,7 +126,7 @@ def test_validate_state_reports_it_and_every_shipped_mode_is_clean():
     from test_lowering_smoke import _mode_classes
 
     classes = [c[-1] if isinstance(c, tuple) else c for c in _mode_classes()]
-    assert len(classes) == 22
+    assert len(classes) == 23
     for cls in classes:
         mode = cls()
         issues = validate_state(mode.state_dict(), invariants=mode.invariants(),

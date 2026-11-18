@@ -14009,6 +14009,272 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 }
 ```
 
+## spreadsheetbench/solver
+
+solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill knob is the search target. Requires SB_DATA. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench item with SkillOpt's multi-turn codegen loop",
+  "edges": [
+    {
+      "condition": null,
+      "source": "frame",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "gold_check",
+      "target": "next_turn"
+    },
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "frame"
+    },
+    {
+      "condition": null,
+      "source": "next_turn",
+      "target": "turn_gate"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "run_turn",
+      "target": "gold_check"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "run_turn"
+    },
+    {
+      "condition": "proceed",
+      "source": "turn_gate",
+      "target": "finalize"
+    },
+    {
+      "condition": "reloop",
+      "source": "turn_gate",
+      "target": "frame"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    },
+    {
+      "id": "turn_gate",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is the only lever: it is appended to the solver's system prompt for every item. Keep it general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench/solver",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [
+        "max_turns"
+      ],
+      "notes": "the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:frame",
+      "id": "frame",
+      "kind": "op",
+      "knobs": [],
+      "notes": "flatten the conversation into the History: prompt",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_dsh.feedback:train_feedback",
+      "id": "gold_check",
+      "kind": "op",
+      "knobs": [],
+      "notes": "train rollouts only: is the clean run's output right",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the loop",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:next_turn",
+      "id": "next_turn",
+      "kind": "op",
+      "knobs": [],
+      "notes": "a clean run ends the item unless train feedback says it is wrong",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and build SkillOpt's first message",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:run_turn",
+      "id": "run_turn",
+      "kind": "op",
+      "knobs": [
+        "turn_pause_s"
+      ],
+      "notes": "run the reply's code; an error is the next user message",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "max_completion_tokens",
+        "solve__system_prompt"
+      ],
+      "notes": "",
+      "role": "solver"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:turn_gate",
+      "gate_kind": "fn",
+      "id": "turn_gate",
+      "kind": "gate",
+      "knobs": [
+        "max_turns"
+      ],
+      "notes": "another turn while turns and budget remain",
+      "role": "ceo"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 24,
+      "description": "concurrent items (SkillOpt's workers)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 24,
+      "values": []
+    },
+    "max_completion_tokens": {
+      "default": 0,
+      "description": "output-token cap on each solve call; 0 = no cap (SkillOpt's claude backend drops its 16384)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        null
+      ],
+      "value": 0,
+      "values": []
+    },
+    "max_turns": {
+      "default": 30,
+      "description": "model calls per item",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        30
+      ],
+      "value": 30,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "skill appended to the solver's system prompt",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
+      "description": "the solve call's system prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
+      "values": []
+    },
+    "turn_pause_s": {
+      "default": 3,
+      "description": "cooldown after each model call",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        0,
+        3
+      ],
+      "value": 3,
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench Verified 400 items with SkillOpt's starting skill and SkillOpt's multi-turn codegen loop: up to 30 calls per item, the reply's code run in a sandbox against the input, errors sent back. Set SB_DATA to the extracted spreadsheetbench_verified_400 directory; build the pinned interpreter once with python -m refactory_packages.spreadsheetbench.interpreter.",
+        "knobs": {
+          "data_parallelism": 24,
+          "max_completion_tokens": 0
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench/solver; use refactory help topic=spreadsheetbench/solver first",
+      "cli": "refactory ceo spreadsheetbench/solver",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill knob is the search target. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "6087cd7802db46ff80d8f1be1adf855ffe103965642956f0e678d3d63c5e24ff"
+  }
+}
+```
+
 ## sympy_pack/exact
 
 establish closed forms of sums with sympy and score what checked out. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.

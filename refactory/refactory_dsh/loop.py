@@ -1010,6 +1010,19 @@ class Loop(OuterLoop):
             self.__dict__["_grader_secret_values"] = cached
         return cached
 
+    def _train_gold_feedback(self) -> bool:
+        """Whether this loop's own train evaluations ask for gold feedback: when the
+        run's Task offers it (`task.offers_train_feedback`), as SkillOpt's train rollouts
+        (``SkillOptLoop``) do, so both arms' train passes get the same information. Never
+        val or test (`task.write_subset` refuses it), and not the memory pass's rollouts,
+        SkillOpt's slow-update rollouts' counterpart. Read once; a Task that cannot be
+        loaded fails the run here rather than run it without the feedback."""
+        cached = self.__dict__.get("_offers_train_feedback")
+        if cached is None:
+            cached = task_module.offers_train_feedback(self.mode.state_dict())
+            self.__dict__["_offers_train_feedback"] = cached
+        return cached
+
     def permitted_ops(self) -> list[str]:
         """The edit operations this run may apply.
 
@@ -1591,6 +1604,7 @@ class Loop(OuterLoop):
         # when scoring a run's last proposals (an explicit ``epoch``): no proposal reads
         # those comparisons.
         parent = self._round_parent(batch, at) if epoch is None and batch else None
+        gold = self._train_gold_feedback()
         index = 0
         while index < len(batch):
             if self.evaluations >= self.config.max_evaluations:
@@ -1627,7 +1641,7 @@ class Loop(OuterLoop):
                     start = index
                     Run(_loop=self).evaluate_many(
                         [*(EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items,
-                                       seed=seed) for candidate in wave),
+                                       seed=seed, gold_feedback=gold) for candidate in wave),
                          EvalRequest(candidate=beside, part=task_module.TRAIN, items=items,
                                      seed=seed, rescore_epoch=at)],
                         on_result=lambda position, candidate: (
@@ -1635,12 +1649,13 @@ class Loop(OuterLoop):
                             if position < len(wave) else None),
                     )
                 elif len(wave) == 1:
-                    self._evaluate(wave[0], seed=seed, items=items)
+                    self._evaluate(wave[0], seed=seed, items=items, gold_feedback=gold)
                     self._forwarded(wave[0], index, len(batch), at, items)
                 else:
                     start = index
                     Run(_loop=self).evaluate_many(
-                        [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed)
+                        [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items, seed=seed,
+                                     gold_feedback=gold)
                          for candidate in wave],
                         on_result=lambda position, candidate: self._forwarded(
                             candidate, start + position, len(batch), at, items),
@@ -1858,7 +1873,8 @@ class Loop(OuterLoop):
         result, measurements = self._settled_measure(
             parent, workdir, task_module.TRAIN, prepare, rescore_epoch=epoch,
             seed=self._train_seed(epoch), items=batch, item_gate=item_gate,
-            item_slots=item_slots, stop_event=stop_event)
+            item_slots=item_slots, stop_event=stop_event,
+            gold_feedback=self._train_gold_feedback())
         if not measurements.get("count"):
             # The measurement's own budget checkpoint stopped it before a trial ran:
             # nothing was scored, so nothing is counted and the records stay.
@@ -1929,18 +1945,22 @@ class Loop(OuterLoop):
         workdir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, workdir / LEDGER)
 
-    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None) -> None:
+    def _write_subset(self, workdir: Path, part: str, *, seed: int | None = None,
+                      gold_feedback: bool = False) -> None:
         """Name the part of the items this candidate is evaluated on.
 
         Written into the candidate's own run directory before the evaluator starts,
         and read by the item loader of either runtime. It is not a knob: a search
         that could set it would choose its own exam, and there would be no item left
-        for the audit to hold out.
+        for the audit to hold out. ``gold_feedback`` lets a train evaluation's passes be
+        told how their attempt compares with the answer (`refactory_dsh.feedback`).
         """
-        task_module.write_subset(workdir, part, self.config.holdout, seed=seed)
+        task_module.write_subset(workdir, part, self.config.holdout, seed=seed,
+                                 gold_feedback=gold_feedback)
 
     def _evaluate(
         self, candidate: Candidate, *, seed: int | None = None, items: list[str] | None = None,
+        gold_feedback: bool = False,
         _budget_reserved: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
@@ -1983,7 +2003,7 @@ class Loop(OuterLoop):
         result, measurements = self._settled_measure(
             candidate, workdir, task_module.TRAIN, prepare, keep=("occasions",),
             seed=seed, items=items, item_gate=item_gate, item_slots=item_slots,
-            stop_event=stop_event,
+            stop_event=stop_event, gold_feedback=gold_feedback,
         )
         if measurements.get("budget_stopped"):
             self._budget_stopped(candidate, task_module.TRAIN, result, measurements)
@@ -2243,6 +2263,7 @@ class Loop(OuterLoop):
     def _measure(
         self, candidate: Candidate, workdir: Path, part: str, *,
         seed: int | None = None, items: list[str] | None = None,
+        gold_feedback: bool = False,
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
         stop_event: threading.Event | None = None,
@@ -2261,7 +2282,8 @@ class Loop(OuterLoop):
         if items is not None:
             expected_ids = set(str(i) for i in items)
 
-        cached = self._cached_measure(candidate, workdir, part, expected_ids, seed)
+        cached = self._cached_measure(candidate, workdir, part, expected_ids, seed,
+                                      gold_feedback=gold_feedback)
         if cached is not None:
             self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
             return cached
@@ -2274,7 +2296,7 @@ class Loop(OuterLoop):
         for index in range(self.config.repeats):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
-            self._write_subset(trial_dir, part, seed=seed)
+            self._write_subset(trial_dir, part, seed=seed, gold_feedback=gold_feedback)
             # Copy the manifest to trial sub-directories so select_subset
             # finds it there too (repeats > 1 creates separate directories).
             manifest = workdir / task_module.MANIFEST
@@ -2441,14 +2463,15 @@ class Loop(OuterLoop):
 
     def _cached_measure(
         self, candidate: Candidate, workdir: Path, part: str, expected_ids: set[str],
-        seed: int | None = None,
+        seed: int | None = None, gold_feedback: bool = False,
     ) -> tuple[Any, dict[str, Any]] | None:
         """The ``--seed-results`` entry for this evaluation, if one applies.
 
         Only the cache's own candidate, only on the exact item set it recorded and
         with the rollout seed it was measured with (a Task may shuffle an item by it:
         a gated run's train rollouts use SkillOpt's per-epoch seed, an ungated run's
-        the run's own), and only once per part: a later occasion is a fresh measurement. The
+        the run's own), with the same gold feedback (an entry without the flag had none),
+        and only once per part: a later occasion is a fresh measurement. The
         recorded run directory is copied in, so an optimizer that reads a
         candidate's pass files finds them as if the evaluation had run here.
         """
@@ -2468,12 +2491,13 @@ class Loop(OuterLoop):
                                           "workdir": entry.get("workdir"),
                                           "item_records": recorded.get("item_records") or []}]
         other_seed = entry.get("seed") != seed
+        other_feedback = bool(entry.get("gold_feedback")) != bool(gold_feedback)
         # A cached item that died with its run's processes is no result to replay
         # (`items.interrupted_item`): the part is measured here instead.
         from refactory_dsh.items import interrupted_item
         died = any(interrupted_item(record) for trial in trials
                    for record in trial.get("item_records") or ())
-        if (set(entry.get("items") or ()) != expected_ids or other_seed
+        if (set(entry.get("items") or ()) != expected_ids or other_seed or other_feedback
                 or len(trials) != self.config.repeats or died):
             # The cache's own candidate on a part it covers, measured on other items
             # (a train minibatch), with another rollout seed, or with items that died:
@@ -2483,6 +2507,8 @@ class Loop(OuterLoop):
                     self._seed_cache_missed.add(part)
                     reason = ("other items" if set(entry.get("items") or ()) != expected_ids
                               else f"rollout seed {seed}, cached {entry.get('seed')}" if other_seed
+                              else (f"gold feedback {bool(gold_feedback)}, cached "
+                                    f"{bool(entry.get('gold_feedback'))}") if other_feedback
                               else f"{len(trials)} cached trial(s), {self.config.repeats} requested"
                               if len(trials) != self.config.repeats
                               else "cached items died with their run's processes")
