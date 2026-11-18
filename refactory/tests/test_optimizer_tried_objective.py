@@ -319,3 +319,21 @@ def test_no_edit_is_dropped_and_the_cut_is_said():
                                {"op": "set_knob", "name": "a", "value": "one\ntwo\nthree"}],
                               {"a": "one"})
     assert twice.count("+two") == 1 and "+three" in twice, "the second diffs against the first"
+
+
+def test_a_cut_edit_keeps_its_wiring_and_cuts_its_text_in_the_middle():
+    """Past the bound a cut edit keeps its op, the step it names, where it sends back, what
+    it sees and its limit whole; only its long text is cut, head and tail kept; and the
+    whole stays within ``TRIED_EDITS_CHARS``."""
+    # Texts first and last, the wiring between: a cut of the whole line would lose it.
+    loop = {"text": "HEAD-OF-CRITERIA " + "c" * 6000 + " TAIL-OF-CRITERIA", "op": "loop",
+            "step": "solve", "back_to": "plan", "judge": "agent", "sees": ["task", "solve"],
+            "max_iterations": 2, "system": "SYSTEM-HEAD " + "s" * 3000 + " SYSTEM-TAIL"}
+    knobs = [{"op": "set_knob", "name": f"k{i}", "value": "V" * 900} for i in range(3)]
+    text = memory.edits_text([loop, *knobs])
+    assert len(text) <= memory.TRIED_EDITS_CHARS
+    for wiring in ('"step": "solve"', '"back_to": "plan"', '"sees": ["task", "solve"]',
+                   '"max_iterations": 2', '"op": "loop"'):
+        assert wiring in text, wiring
+    assert "HEAD-OF-CRITERIA" in text and "TAIL-OF-CRITERIA" in text and "middle cut" in text
+    assert all(f"k{i}" in text for i in range(3)) and "[cut: " in text

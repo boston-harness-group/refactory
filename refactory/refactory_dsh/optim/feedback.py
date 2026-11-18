@@ -306,7 +306,41 @@ def change_identity(edits: Any, before: Mapping[str, Any] | None = None) -> dict
             texts.append(" ".join(_changed_lines(old, new)))
         else:
             texts.append(_all_text(edit))
-    return {"key": key[:16], "text": _fold(" | ".join(t for t in texts if t))[:CHANGE_TEXT_KEPT]}
+    shape = json.dumps([_without_text(edit) for edit in listed], sort_keys=True, default=str)
+    return {"key": key[:16], "text": _fold(" | ".join(t for t in texts if t))[:CHANGE_TEXT_KEPT],
+            "shape": shape[:CHANGE_TEXT_KEPT]}
+
+
+def _without_text(value: Any) -> Any:
+    """An edit with its free text left out (``_TEXT_FIELDS``, at any depth): its op,
+    names, wiring and settings, to say where two changes differ outside their text."""
+    if isinstance(value, Mapping):
+        return {str(k): _without_text(v) for k, v in value.items() if k not in _TEXT_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [_without_text(v) for v in value]
+    return value
+
+
+def _shape_difference(shape: str, other: str) -> str:
+    """The first field (by edit, then name) whose value differs between two changes'
+    shapes, as ``reads: [...]``; empty when none is found."""
+    try:
+        mine, theirs = json.loads(shape), json.loads(other)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(mine, list) or not isinstance(theirs, list):
+        return ""
+    if len(mine) != len(theirs):
+        return f"edit count: {len(mine)}"
+    for edit, them in zip(mine, theirs):
+        if not isinstance(edit, dict) or not isinstance(them, dict):
+            continue
+        for field in sorted(set(edit) | set(them)):
+            if edit.get(field) != them.get(field):
+                shown = json.dumps(edit.get(field), default=str, ensure_ascii=False)
+                return f"{field}: {shown[:CHANGE_TEXT_HEAD]}" + (
+                    "…" if len(shown) > CHANGE_TEXT_HEAD else "")
+    return ""
 
 
 def _all_text(value: Any) -> str:
@@ -329,20 +363,29 @@ def _changed_lines(old: str, new: str) -> list[str]:
         if line[:1] in "+-" and line[1:].strip()]
 
 
-def distinguish(groups: Sequence[tuple[str, str]]) -> list[str]:
-    """For each ``(label, text)`` group, a suffix telling it from every other group with
-    the same label: ``""`` when its label is unique, else where its text first differs
-    from theirs (``differs at: "…"``, ``CHANGE_TEXT_HEAD`` characters)."""
+def distinguish(groups: Sequence[tuple[str, str, str]]) -> list[str]:
+    """For each ``(label, text, shape)`` group, a suffix telling it from every other
+    group with the same label: ``""`` when its label is unique; else where its text first
+    differs from theirs (``differs at: "…"``, ``CHANGE_TEXT_HEAD`` characters), or, when
+    the texts do not tell them apart, the first field outside the text that does
+    (``differs in reads: [...]``)."""
     out = []
-    for index, (label, text) in enumerate(groups):
-        others = [t for i, (l, t) in enumerate(groups) if i != index and l == label]
+    for index, (label, text, shape) in enumerate(groups):
+        others = [(t, h) for i, (l, t, h) in enumerate(groups) if i != index and l == label]
         if not others:
             out.append("")
             continue
-        at = min(next((n for n, (a, b) in enumerate(zip(text, other)) if a != b),
-                      min(len(text), len(other))) for other in others)
-        piece = text[at:at + CHANGE_TEXT_HEAD]
-        out.append(f' -- differs at: "…{piece}…"' if piece else " -- (its text ends there)")
+        texts_differ = [t for t, _h in others if t != text]
+        if texts_differ:
+            at = min(next((n for n, (a, b) in enumerate(zip(text, other)) if a != b),
+                          min(len(text), len(other))) for other in texts_differ)
+            piece = text[at:at + CHANGE_TEXT_HEAD]
+            if piece:
+                out.append(f' -- differs at: "…{piece}…"')
+                continue
+        fields = [d for d in (_shape_difference(shape, h) for _t, h in others) if d]
+        out.append(f" -- differs in {fields[0]}" if fields
+                   else " -- (its text ends where the other's goes on)")
     return out
 
 
@@ -465,12 +508,17 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     headers = ["id", "round", "parent", "change", "train fixed/broken",
                *(["gate"] if gated else []), *(["integrity"] if judged else []), "rationale"]
 
+    # Each row's change as the tally names it: two different changes whose labels collide
+    # say where they differ, in the table too (`group_changes`).
+    cells = {id(entry): cell for cell, group in group_changes(entries, LEDGER_CHANGE_CHARS)
+             for entry in group}
+
     def row(entry: Mapping[str, Any]) -> list[Any]:
         counts = (f"{entry['fixed']}/{entry['broken']} of {entry.get('shared')}"
                   if _net(entry) is not None else
                   "n/a (different seed)" if entry.get("same_seed") is False else "n/a")
         return [entry.get("id"), entry.get("round", ""), entry.get("parent"),
-                change_cell(entry, LEDGER_CHANGE_CHARS), counts,
+                cells.get(id(entry)) or change_cell(entry, LEDGER_CHANGE_CHARS), counts,
                 *([entry.get("gate") or ""] if gated else []),
                 *([entry.get("integrity") or "not judged"] if judged else []),
                 ("(in full under \"Your earlier reasoning\")" if str(entry.get("id")) in in_full
@@ -515,9 +563,9 @@ def group_changes(entries: Sequence[Mapping[str, Any]], chars: int = CHANGE_LABE
     for entry in entries:
         groups.setdefault(str(entry.get("change_key") or change_cell(entry, chars)),
                           []).append(entry)
-    cells = [(change_cell(group[0], chars), str(group[0].get("change_text") or ""))
-             for group in groups.values()]
-    return [(cell + suffix, group) for (cell, _t), suffix, group
+    cells = [(change_cell(group[0], chars), str(group[0].get("change_text") or ""),
+              str(group[0].get("change_shape") or "")) for group in groups.values()]
+    return [(cell + suffix, group) for (cell, _t, _h), suffix, group
             in zip(cells, distinguish(cells), groups.values())]
 
 

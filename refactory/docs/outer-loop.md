@@ -911,7 +911,8 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
   several is filed under its most specific structure. Results are grouped by the
   change itself (a hash of its full edits; the label is display only, and where two
-  changes' labels collide the tally line says where their texts differ), never by kind: two loops whose judges check different things are two
+  changes' labels collide the tally line and the table row say where their texts differ,
+  or, when their texts agree, the field that differs), never by kind: two loops whose judges check different things are two
   changes, and the section says a row's result is that change's, not its kind's. A
   tally line comes first for each change tried more than once or only in rows older
   than the table (tried, kept, best train fixed−broken; within 3000 characters, the
@@ -1168,7 +1169,7 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   child changed (broken first, at most 20), both sides' records from the child's
   evaluation round (one train seed), so the note can say why the tried change failed;
   the request labels the sides `Incumbent` and `Rejected change` (without the gate, where
-  the current is only the train leader, `Change not kept`, and it says why), shows both pipelines
+  the current is only the train leader, `Unkept change`, and it says why), shows both pipelines
   and what the rejected change changed, says how many it fixed and broke and that the
   items it left alone are not shown, and names the other rejected changes that moved
   items (under "What was tried this epoch", their traces not shown). The journal's pass
@@ -1203,8 +1204,9 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   knob, and the change kind of the run ledger), what the change was (its edits whole on
   one line: the text it gave a new step or judge -- its instructions, its criteria --
   and a knob's changed lines against the value before it, within 1500 characters: past
-  that no edit is dropped -- each keeps its op and names and the longest are cut to one
-  length, the cut said as `[cut: N edits / M chars]` -- and a candidate whose edits the
+  that no edit is dropped -- the longest are cut to one length, each keeping its op and
+  wiring whole (the steps it names, what it sees, reads and writes, where it sends back)
+  with only its long text cut in the middle, the cut said as `[cut: N edits / M chars]` -- and a candidate whose edits the
   changes section shows whole points there instead of repeating them), where each step it added sits and what it sends back
   (the steps feeding it, each labelled way out such as `reloop -> solve`, its limit),
   its train score, its train fixed/broken counts against its parent and the

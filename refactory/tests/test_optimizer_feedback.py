@@ -208,6 +208,34 @@ def test_two_changes_whose_labels_collide_are_tallied_apart_where_they_differ():
     assert len([line for line in lines if line.startswith("- loop")]) == 2
 
 
+def test_colliding_labels_are_told_apart_in_the_table_and_by_a_field_outside_the_text():
+    """The table's rows say where two changes with one label differ, as the tally does;
+    two inserts that differ only in what they read say so by that field."""
+    pre = "You are a careful reviewer of the solver's answer and you check it closely: "
+    loops = [{"op": "loop", "step": "solve", "judge": "agent", "max_iterations": 1,
+              "text": pre + rest} for rest in ("check the units.", "check every claim.")]
+    inserts = [{"op": "insert_after", "target": "solve",
+                "node": {"id": "check", "kind": "agent", "reads": reads,
+                         "prompt_template": "Check it."}}
+               for reads in (["a.txt"], ["b.txt"])]
+
+    def entry(index: int, edit: dict[str, Any]) -> dict[str, Any]:
+        identity = feedback.change_identity([edit])
+        return {**_entry(index, change=feedback.change_label([edit])),
+                "change_key": identity["key"], "change_text": identity["text"],
+                "change_shape": identity["shape"]}
+
+    table = feedback.ledger_lines([entry(0, loops[0]), entry(1, loops[1])])[-1]
+    rows = [line for line in table.splitlines() if line.startswith("| c")]
+    assert 'differs at: "…the units.' in rows[0] and 'differs at: "…every claim.' in rows[1]
+    lines = "\n".join(feedback.ledger_lines([entry(i, e) for i, e in
+                                             enumerate([*inserts, *inserts])]))
+    tally = [line for line in lines.splitlines() if line.startswith("- insert_after")]
+    assert len(tally) == 2
+    assert 'differs in node: {"id": "check", "kind": "agent", "reads": ["a.txt"]}' in tally[0]
+    assert '"reads": ["b.txt"]' in tally[1] and "its text ends" not in lines
+
+
 def test_the_ledger_table_stays_within_its_characters():
     entries = [_entry(i, change="insert step=" + "k" * 400) for i in range(300)]
     lines = feedback.ledger_lines(entries)

@@ -1392,7 +1392,7 @@ def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
 def test_without_the_gate_a_change_not_leading_is_compared_but_never_called_rejected(
         tmp_path, monkeypatch):
     """Ungated, the train leader is current: 7 scores below 5, so nothing replaced 5. The
-    pass sets 5 against 7 on the items 7 moved -- called the change not kept, since no gate
+    pass sets 5 against 7 on the items 7 moved -- called the unkept change, since no gate
     rejected it -- and makes no fresh rollout."""
     loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []], val_gate=False)
     (first,) = _events(loop, "optimizer_memory")
@@ -1402,6 +1402,7 @@ def test_without_the_gate_a_change_not_leading_is_compared_but_never_called_reje
     assert not _events(loop, "memory_rollout")
     prompt = proposer.asked[0]["prompt"]
     assert "Rejected change" not in prompt and "rejected change" not in prompt
-    assert f"Change not kept `{first['curr']}`" in prompt
-    assert "## The change not kept's pipeline" in prompt
+    assert f"Unkept change `{first['curr']}`" in prompt
+    assert "## The unkept change's pipeline" in prompt
+    assert "## What the unkept change changed" in prompt
     assert "without a validation gate the current is the train leader" in prompt

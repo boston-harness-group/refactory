@@ -345,7 +345,7 @@ def _answer(record: Mapping[str, Any]) -> str:
 
 #: What a pass calls the change it sets against the unchanged incumbent: under the
 #: validation gate it was rejected; without it, it was only not the train leader.
-REJECTED_NOUN, NOT_KEPT_NOUN = "rejected change", "change not kept"
+REJECTED_NOUN, NOT_KEPT_NOUN = "rejected change", "unkept change"
 
 
 def noun(curr: Mapping[str, Any]) -> str:
@@ -856,11 +856,12 @@ def edits_text(edits: Any, before: Mapping[str, Any] | None = None,
 
     values = dict(before or {})
     listed = list(edits) if isinstance(edits, (list, tuple)) else [edits]
-    parts, heads = [], []
+    parts, heads, objects = [], [], []
     for edit in listed:
         if not isinstance(edit, Mapping) or not edit.get("op"):
             parts.append("(no readable edit)")
             heads.append("")
+            objects.append(None)
             continue
         name, new = edit.get("name"), edit.get("value")
         old = values.get(str(name))
@@ -871,8 +872,10 @@ def edits_text(edits: Any, before: Mapping[str, Any] | None = None,
             diff = _text_diff(old, new)
             parts.append(f"set_knob {name}: {len(old)} -> {len(new)} chars; diff: "
                          + " ".join(diff.replace("\n", DIFF_LINE_SEPARATOR).split()))
+            objects.append(None)
         else:
             parts.append(json.dumps(dict(edit), default=str, ensure_ascii=False))
+            objects.append(dict(edit))
         if edit.get("op") == "set_knob" and name is not None and "value" in edit:
             values[str(name)] = new
     joined = "; ".join(parts) or "(none)"
@@ -882,15 +885,49 @@ def edits_text(edits: Any, before: Mapping[str, Any] | None = None,
     cap = item_cap([len(p) for p in parts], max(0, chars - marker_room - 2 * len(parts)),
                    floor=0) or 0
     shown, cut_edits, cut_chars = [], 0, 0
-    for part, head in zip(parts, heads):
+    for part, head, edit in zip(parts, heads, objects):
         if len(part) <= cap:
             shown.append(part)
             continue
-        keep = max(0, cap - len(head) - 1)
-        shown.append(f"{head} {part[:keep]}…" if head else f"{part[:keep]}…")
+        short = _shrunk_edit(edit, part, head, cap)
+        shown.append(short)
         cut_edits += 1
-        cut_chars += len(part) - keep
+        cut_chars += max(0, len(part) - len(short))
     return "; ".join(shown) + f" [cut: {cut_edits} edits / {cut_chars} chars]"
+
+
+def _middle(text: str, limit: int) -> str:
+    """``text`` within ``limit``: whole, else its head and tail around ``…[N cut]…``."""
+    mark = f"…[{len(text)} chars, middle cut]…"
+    if len(text) <= max(limit, len(mark)):
+        return text  # whole, or too short for a cut to shorten it
+    keep = max(0, limit - len(mark))
+    return text[:(keep + 1) // 2] + mark + (text[len(text) - keep // 2:] if keep // 2 else "")
+
+
+def _shrunk_edit(edit: Mapping[str, Any] | None, part: str, head: str, room: int) -> str:
+    """One edit's text within ``room``: a JSON edit keeps its op and wiring whole (the
+    steps it names, what it sees, reads and writes, where it sends back; `base._map_text`)
+    and only its free texts are cut in the middle, all to one length; past that, or for a
+    knob's diff, its head (op and names) and the middle-cut text."""
+    from .base import _map_text
+
+    if edit is not None:
+        def render(limit: int) -> str:
+            return json.dumps(_map_text(dict(edit), lambda t: _middle(t, limit)),
+                              default=str, ensure_ascii=False)
+
+        low, high = 0, len(part)
+        if len(render(0)) <= room:
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(render(middle)) <= room:
+                    low = middle
+                else:
+                    high = middle - 1
+            return render(low)
+    rest = max(0, room - len(head) - 1)
+    return (f"{head} {_middle(part, rest)}" if head else _middle(part, room))[:max(room, 0)]
 
 
 #: The heading of the per-change tally (`change_tally_lines`).
