@@ -2139,6 +2139,10 @@ class Executor:
                 raise ValueError(f"agent node {node.id!r} declares a route, which the model "
                                  "client cannot take")
             client = client.with_step_route(node.route)
+        # A sealed step runs on the dsh backend with the run's model, as on the spine
+        # (`workspace.for_sealed_step`).
+        from refactory_dsh.workspace import for_sealed_step
+        client = for_sealed_step(client, node.id, is_sealed(node))
         # ── no-tools enforcement ──────────────────────────────────────────
         tool_policy = node.tool_policy or ""
         if callable(getattr(client, "with_tool_policy", None)):

@@ -514,3 +514,425 @@ def test_a_judge_is_not_split_into_code_that_cannot_answer_its_verdict():
     own = "def main(inp):\n    return {'files': {'left_check_judge.txt': 'proceed'}}\n"
     assert nn_edits.precheck({**edit, "into": [{"kind": "code"}, {"kind": "code", "text": own}]},
                              state) is None
+
+
+# ── smoke dry run: an added step's output reaches a reader; 'reads' is never ignored ──
+
+
+def _s4(*edits: dict):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    return Optimizer().attempt(Proposal(edits=list(edits)), seed, mode.invariants(), True, (),
+                               protected=mode.edit_protected())
+
+
+def test_an_insert_whose_output_nothing_reads_is_refused_naming_where_it_could_go():
+    """S4: decide's prompt is built by decide_prompt from decide_task, so a step inserted
+    before decide reaches nothing; the refusal names the insert that does, which applies."""
+    refused = _s4({"op": "insert", "before": "decide", "kind": "agent", "text": "Check."})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    assert ("decide takes no knob: insert before decide_prompt with 'to': decide_task"
+            in refused[0]), refused
+    taken = _s4({"op": "insert", "before": "decide_prompt", "kind": "agent", "text": "Check.",
+                 "to": "decide_task"})
+    assert not isinstance(taken, list), taken
+    # After compare, notes_prompts fills two prompts, so which one is the proposer's to say.
+    refused = _s4({"op": "insert", "after": "compare", "kind": "agent", "text": "Check."})
+    assert "in 'to': precision_task, hypotheses_task, decide_task" in refused[0], refused
+
+
+def test_a_to_whose_reader_runs_before_the_new_step_is_refused():
+    refused = _s4({"op": "insert", "before": "decide", "kind": "agent", "text": "Check.",
+                   "to": "decide_task"})
+    assert isinstance(refused, list) and refused[0].startswith("E-wiring"), refused
+    assert "decide_prompt, which runs before" in refused[0], refused
+
+
+def test_a_reader_a_later_edit_of_the_same_proposal_adds_is_a_reader():
+    """Edits are judged as a batch: an insert with no reader of its own, then a patch that
+    puts its output into a prompt, is taken."""
+    alone = {"op": "insert", "after": "compare", "kind": "agent", "id": "check", "text": "Check."}
+    assert isinstance(_s4(alone), list)
+    taken = _s4(alone, {"op": "set_knob", "name": "decide_task",
+                        "patch": [{"kind": "append", "content": "\n\n{{check}}"}]})
+    assert not isinstance(taken, list), taken
+
+
+@pytest.mark.parametrize("op", ["fallback", "map"])
+def test_the_other_ops_that_add_a_step_are_held_to_the_same_rule(op):
+    """A fallback writes its step's outputs, so what read them reads it; a map's combine is
+    placed as insert's step is, and refused the same way when nothing takes it."""
+    if op == "fallback":
+        out = _s4({"op": "fallback", "step": "compare", "kind": "agent", "text": "Simpler."})
+        assert not isinstance(out, list), out
+    else:
+        out = _s4({"op": "map", "after": "decide", "over": "decide", "text": "One."})
+        assert isinstance(out, list) and out[0].startswith("E-unread"), out
+
+
+@pytest.mark.parametrize("mode_id,after", [("livemath/solver", "solve"),
+                                           ("livemath/skill_graph", "compare")])
+@pytest.mark.parametrize("kind", ["agent", "code"])
+def test_reads_on_an_agent_or_code_step_is_refused_pointing_at_sees(mode_id, after, kind):
+    state = _mode(mode_id).state_dict()
+    for edit in ({"op": "insert", "after": after, "kind": kind, "reads": ["answer.txt"]},
+                 {"op": "fallback", "step": after, "kind": kind, "reads": ["answer.txt"]},
+                 {"op": "map", "after": after, "over": after, "text": "One.",
+                  "combine": {"kind": kind, "reads": ["answer.txt"]}}):
+        reason = nn_edits.precheck(edit, state)
+        assert reason and "gets a file by naming it in 'sees'" in reason, (edit, reason)
+    # An op step's reads are its own (`_step_nodes`), and stay taken.
+    assert nn_edits.precheck({"op": "insert", "after": after, "kind": "op",
+                              "call": core_ops.select_call(), "reads": []}, state) is None
+
+
+SEES_FILE = {"op": "insert", "after": "compare", "kind": "agent", "id": "check",
+             "text": "Check the notes.", "sees": ["compare_notes.txt"], "to": "decide_task"}
+
+
+def _sees_file_mode():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(SEES_FILE)
+    assert not isinstance(out, list), out
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_walker(
+        tmp_path, monkeypatch):
+    mode, _state = _sees_file_mode()
+    model = _StepModel({"compare": "COMPARE-NOTES", "check": "CHECKED"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    check = [prompt for node, prompt, _s in model.log if node == "check"]
+    decide = [prompt for node, prompt, _s in model.log if node == "decide"]
+    assert check and all("COMPARE-NOTES" in prompt for prompt in check)
+    assert decide and all("CHECKED" in prompt for prompt in decide)
+
+
+@needs_spine
+def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_spine(
+        tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _sees_file_mode()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state,
+                  agent_responses={"compare": "COMPARE-NOTES", "check": "CHECKED"}) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        prompts = {e["node"]: e["prompt"] for e in record["exchanges"]}
+        assert "COMPARE-NOTES" in prompts["check"] and "CHECKED" in prompts["decide"], record["id"]
+
+
+def test_a_to_inside_a_parallel_or_route_step_is_honoured_never_ignored():
+    """'to' is a step field: a step parallelize's 'new' or a route's 'to' adds goes where it
+    says, and a 'to' whose reader runs before the step is refused, as insert's is."""
+    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    from refactory_dsh.optim import Candidate
+
+    parent = Candidate.from_state(applier.seed_state)
+    routed = applier.attempt(parent, {
+        "op": "route", "after": "compare", "judge": "agent", "text": "Which?",
+        "to": {"proceed": "notes_prompts",
+               "other": {"kind": "agent", "id": "alt", "text": "Alt.", "to": "decide_task"}}},
+        {parent.id})
+    assert isinstance(routed, Candidate), routed
+    assert "{{alt}}" in routed.state["knobs"]["decide_task"]["value"]
+    assert "{{alt}}" not in routed.state["knobs"]["precision_task"]["value"]
+    early = applier.attempt(parent, {
+        "op": "route", "after": "decide_prompt", "judge": "agent", "text": "Which?",
+        "to": {"proceed": "decide",
+               "other": {"kind": "agent", "id": "alt", "text": "Alt.", "to": "decide_task"}}},
+        {parent.id})
+    assert isinstance(early, list) and early[0].startswith("E-wiring"), early
+    # After compare, notes_prompts fills two prompts: only 'to' says which one takes each.
+    beside = applier.attempt(parent, {"op": "parallelize", "after": "compare", "new": [
+        {"kind": "agent", "id": "bg", "text": "BG.", "to": "hypotheses_task"},
+        {"kind": "agent", "id": "ex", "text": "EX.", "to": "precision_task"}]}, {parent.id})
+    assert isinstance(beside, Candidate), beside
+    knobs = beside.state["knobs"]
+    assert "{{bg}}" in knobs["hypotheses_task"]["value"] and "{{ex}}" in knobs["precision_task"]["value"]
+    assert "{{ex}}" not in knobs["hypotheses_task"]["value"]
+
+
+# ── review: the result is what the Task grades; where a hint can send the output ──
+
+
+def _s1(*edits: dict):
+    from refactory_dsh.optim import Candidate, Optimizer, Proposal
+
+    mode = _mode("livemath/solver")
+    seed = Candidate.from_state(mode.state_dict())
+    return Optimizer().attempt(Proposal(edits=list(edits)), seed, mode.invariants(), True, (),
+                               protected=mode.edit_protected())
+
+
+def test_a_step_ending_the_run_with_names_of_its_own_is_refused_naming_the_take_over():
+    """S1: the Task grades answer.txt (livemath/tasks.py), so a step after solve writing
+    solve_next.txt changes no score; taking over solve, it writes answer.txt, and is taken."""
+    refused = _s1({"op": "insert", "after": "solve", "kind": "agent", "text": "Check."})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    assert "give it 'takes_over': solve" in refused[0], refused
+    taken = _s1({"op": "insert", "after": "solve", "kind": "agent", "text": "Check.",
+                 "takes_over": "solve"})
+    assert not isinstance(taken, list), taken
+    assert taken.state["graph"]["nodes"]["solve_next"]["writes"] == ["answer.txt"]
+
+
+def test_at_the_last_agent_step_the_hint_names_the_take_over_never_an_impossible_rewire():
+    """S4's decide and S1's solve have only plain ops after them: the hint names a step
+    that takes over decide/solve, and that pattern is taken."""
+    copies = _s4({"op": "parallelize", "steps": ["decide"], "copies": 1})
+    assert "insert one seeing it with 'takes_over': decide" in copies[0], copies
+    assert "rewire" not in copies[0], copies
+    after = _s4({"op": "insert", "after": "decide", "kind": "agent", "text": "Check."})
+    assert "give it 'takes_over': decide" in after[0] and "rewire" not in after[0], after
+    chosen = _s1({"op": "parallelize", "steps": ["solve"], "copies": 2},
+                 {"op": "insert", "after": "solve_join", "kind": "agent", "id": "choose",
+                  "text": "Pick the best.", "sees": ["solve", "solve_copy1", "solve_copy2"],
+                  "takes_over": "solve"})
+    assert not isinstance(chosen, list), chosen
+
+
+def test_a_map_combine_s_to_is_honoured_and_two_tos_are_refused():
+    combine = {"kind": "agent", "text": "Combine.", "to": "precision_task"}
+    taken = _s4({"op": "map", "after": "compare", "over": "compare", "text": "One.",
+                 "combine": combine})
+    assert not isinstance(taken, list), taken
+    knobs = taken.state["knobs"]
+    assert "{{compare_map_combine}}" in knobs["precision_task"]["value"]
+    assert "{{compare_map_combine}}" not in knobs["decide_task"]["value"]
+    both = _s4({"op": "map", "after": "compare", "over": "compare", "text": "One.",
+                "combine": combine, "to": "decide_task"})
+    assert isinstance(both, list) and "name it once" in both[0], both
+
+
+def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
+    from refactory_dsh.optim import base
+    from test_operator_fit import _rows, _section
+
+    rows = _rows(_section(_mode("livemath/solver").state_dict()))
+    assert "insert" not in rows["solve"][1].split(", "), rows["solve"]
+    assert "'takes_over': solve" in rows["solve"][2], rows["solve"]
+    assert base.OPERATOR_FIT_CHARS == 7700
+
+
+def test_a_map_run_an_edit_removes_is_refused_not_a_crash():
+    """Found by the fuzz walk: removing a map's run left its fork naming no node, and V6's
+    map check read that node."""
+    applier = sf.Applier(sf.seeds()["fuzz_file_output"])
+    _states, refusal = applier.replay([
+        {"op": "insert", "before": "plot"},
+        {"op": "map", "after": "plot_prep_inputs", "over": "plot_prep_inputs"},
+        {"op": "remove_node", "id": "plot_prep_inputs_map_4"}])
+    assert refusal and not any("KeyError" in r for r in refusal), refusal
+
+
+# ── re-review: a take-over reaches a later reader; a route way rewrites in place ──
+
+
+def test_a_take_over_that_nothing_after_the_new_step_reads_is_refused():
+    """compare's readers (notes_prompts, decide_prompt) run before a step after decide:
+    taking compare over there would be a model call that changes nothing."""
+    refused = _s4({"op": "insert", "after": "decide", "kind": "agent", "text": "Check.",
+                   "takes_over": "compare"})
+    assert isinstance(refused, list) and "nothing after the new step reads 'compare''s" \
+        in refused[0], refused
+    for edit in ({"op": "insert", "after": "decide", "kind": "agent", "text": "Check.",
+                  "takes_over": "decide"},
+                 {"op": "insert", "after": "step_join", "kind": "agent", "text": "Check.",
+                  "takes_over": "precision"}):
+        assert not isinstance(_s4(edit), list), edit
+
+
+REVISE = {"op": "route", "after": "decide", "judge": "agent", "text": "Good enough?",
+          "to": {"proceed": "extract_answer",
+                 "revise": {"kind": "agent", "id": "rev", "text": "Redo it.",
+                            "takes_over": "decide"}}}
+
+
+def _revise_mode():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(REVISE)
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["rev"]["writes"] == ["answer.txt"] == nodes["decide"]["writes"]
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+#: decide answers A; the revise way's step answers C.
+REVISE_ANSWERS = {"decide": "<answer>A</answer>", "rev": "<answer>C</answer>"}
+
+
+@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_walker(verdict, label, tmp_path,
+                                                                    monkeypatch):
+    mode, _state = _revise_mode()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"})
+    result = _walk(mode, model, tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
+
+
+@needs_spine
+@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_spine(verdict, label, tmp_path,
+                                                                   monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _revise_mode()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"}) == 0
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert records and {r["prediction"] for r in records} == {label}
+
+
+def test_a_route_way_takes_over_only_a_step_every_run_passes_before_it():
+    refused = _s4({**REVISE, "after": "compare",
+                   "to": {"proceed": "notes_prompts", "revise": REVISE["to"]["revise"]}})
+    assert isinstance(refused, list) and "does not run before the route" in refused[0], refused
+    unread = _s4({**REVISE, "to": {"proceed": "extract_answer",
+                                   "revise": {"kind": "agent", "text": "Redo it."}}})
+    assert "give the way's new step 'takes_over': decide" in unread[0], unread
+
+
+# ── final check: a later take-over renames a route way's in-place writer with it ──
+
+
+TAKE_DECIDE = {"op": "insert", "before": "extract_answer", "kind": "agent", "id": "x",
+               "text": "Give the final letter.", "takes_over": "decide"}
+
+
+def _revised_then_taken():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(REVISE, TAKE_DECIDE)
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["decide"]["writes"] == nodes["rev"]["writes"] == ["decide.txt"]
+    assert nodes["x"]["writes"] == ["answer.txt"]
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+@pytest.mark.parametrize("verdict,seen", [("revise", "<answer>C</answer>"),
+                                          ("proceed", "<answer>A</answer>")])
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(
+        verdict, seen, tmp_path, monkeypatch):
+    mode, _state = _revised_then_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "x": "<answer>D</answer>"})
+    _walk(mode, model, tmp_path, monkeypatch)
+    prompts = [prompt for node, prompt, _s in model.log if node == "x"]
+    assert prompts and all(seen in prompt for prompt in prompts), prompts[:1]
+
+
+@needs_spine
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_spine(tmp_path,
+                                                                           monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _revised_then_taken()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": "revise: because",
+        "x": "<answer>D</answer>"}) == 0
+    for record in json.loads((spine_dir / "item_records.json").read_text()):
+        prompts = [e["prompt"] for e in record["exchanges"] if e["node"] == "x"]
+        assert prompts and all("<answer>C</answer>" in p for p in prompts), record["id"]
+
+
+def test_the_default_route_revises_the_step_in_place_where_that_reaches_the_result():
+    """With no 'to', the revise way redoes the step it follows (S4: decide's answer.txt)."""
+    out = _s4({"op": "route", "after": "decide", "judge": "agent"})
+    assert not isinstance(out, list), out
+    assert out.state["graph"]["nodes"]["decide_revise"]["writes"] == ["answer.txt"]
+
+
+def test_a_way_step_taking_over_a_step_before_the_fork_sees_what_it_rewrites():
+    """compare runs before step_fork; a way after hypotheses (inside the fork) rewriting
+    compare's notes is given them to read, though hypotheses itself does not see them."""
+    out = _s4({"op": "route", "after": "hypotheses", "judge": "agent", "text": "?",
+               "to": {"proceed": "step_join",
+                      "revise": {"kind": "agent", "id": "redo", "text": "Redo the notes.",
+                                 "takes_over": "compare"}}})
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    assert nodes["redo"]["writes"] == ["compare_notes.txt"]
+    assert "compare_notes.txt" in nodes["redo_inputs"]["reads"], nodes["redo_inputs"]
+
+
+# ── a writer joins the take-over's group only where the new step is on its way ──
+
+
+TAKE_REV = {"op": "insert", "after": "rev", "kind": "agent", "id": "y",
+            "text": "Check the redo.", "takes_over": "rev"}
+
+
+def _rev_taken():
+    from refactory_packages.livemath.skill_graph import SkillGraph
+
+    out = _s4(REVISE, TAKE_REV)
+    assert not isinstance(out, list), out
+    nodes = out.state["graph"]["nodes"]
+    # decide's way to extract_answer (proceed) passes no y: decide keeps answer.txt.
+    assert nodes["decide"]["writes"] == ["answer.txt"] == nodes["y"]["writes"]
+    assert nodes["rev"]["writes"] == ["rev.txt"] and nodes["y_inputs"]["reads"] == ["rev.txt"]
+    assert "answer.txt" in nodes["rev_inputs"]["reads"]
+    mode = SkillGraph()
+    mode.load_state_dict(out.state)
+    return mode, out.state
+
+
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(
+        verdict, label, tmp_path, monkeypatch):
+    mode, _state = _rev_taken()
+    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                        "y": "<answer>D</answer>"})
+    result = _walk(mode, model, tmp_path, monkeypatch)
+    assert {r["prediction"] for r in result.item_records} == {label}
+    if verdict == "revise":
+        prompts = [prompt for node, prompt, _s in model.log if node == "y"]
+        assert prompts and all("<answer>C</answer>" in p for p in prompts)
+
+
+@needs_spine
+@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(
+        verdict, label, tmp_path, monkeypatch):
+    from refactory_dsh import lowering
+
+    mode, state = _rev_taken()
+    _patch_task(monkeypatch)
+    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+    spine_dir = tmp_path / "spine"
+    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+        "y": "<answer>D</answer>"}) == 0
+    records = json.loads((spine_dir / "item_records.json").read_text())
+    assert records and {r["prediction"] for r in records} == {label}
+
+
+def test_a_co_writer_whose_callable_names_its_outputs_is_refused():
+    """A fallback op that sets decide's answer.txt by its own name cannot be renamed with
+    decide, so taking decide over after it is refused, naming it."""
+    refused = _s4({"op": "fallback", "step": "decide", "kind": "op", "id": "ofb",
+                   "call": "refactory_packages.livemath.ops:finish"},
+                  {"op": "insert", "before": "extract_answer", "kind": "agent", "id": "x",
+                   "text": "Final.", "takes_over": "decide"})
+    assert isinstance(refused, list), refused
+    assert "'ofb' writes 'decide''s outputs too" in refused[0], refused

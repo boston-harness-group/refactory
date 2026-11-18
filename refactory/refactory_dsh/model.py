@@ -765,6 +765,11 @@ def failure_cause(stderr: str) -> str:
     return lines[-1] if lines else ""
 
 
+#: DSH's reasoning levels (`llm-pi-ai`'s thinking levels): a run's effort reaches a sealed
+#: step on the dsh backend under the same name (`DshModelClient.for_sealed`).
+DSH_EFFORTS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
 class DshModelClient:
     """One-shot completions through ``dsh --profile headless``.
 
@@ -1038,6 +1043,58 @@ class DshModelClient:
         client = copy.copy(self)
         for key, value in (route_declaration(route) or {}).items():
             setattr(client, "_" + key, value)
+        validate_route(client.route())
+        return client
+
+    def for_sealed(self) -> DshModelClient:
+        """A copy for a step that runs its tools sealed (`workspace.is_sealed`): on the dsh
+        backend in ``skip`` mode, the one route the seal runs on, with this client's model
+        and effort, so a sealed step of a Claude Code or codex run keeps the run's model.
+        Raises ValueError when this machine cannot: no DSH runtime, or no DSH provider
+        chosen for that model (the DSH home's model choice, or a provider route listing
+        it)."""
+        from refactory_dsh.paths import INSTALLED_CLI_ENTRY
+        from refactory_dsh.workers import validate_route
+
+        client = copy.copy(self)
+        client._permission_mode = "skip"
+        if self._worker_backend == "dsh":
+            validate_route(client.route())
+            return client
+        if not (self._dsh_cli or (self._runtime_root / SOURCE_CLI_ENTRY).exists()
+                or (self._runtime_root / INSTALLED_CLI_ENTRY).exists()):
+            raise ValueError("a sealed step runs on the dsh backend, and no DSH runtime is "
+                             f"installed at {self._runtime_root}")
+
+        from refactory_dsh.dsh_profile import stored_model_choice
+
+        # The exact model id: ``claude-opus-4-6[1m]`` is another context than
+        # ``claude-opus-4-6``, so one never stands in for the other.
+        stored = stored_model_choice(self._dsh_home)
+        rows = [(stored["provider"], stored["model"], None)] + [
+            (name, str(entry.get("id") or ""), entry)
+            for name, cfg in sorted(self._provider_config.items())
+            for entry in ((cfg or {}).get("models") or ()) if isinstance(entry, dict)]
+        found = [(provider, model, entry) for provider, model, entry in rows
+                 if provider and self._model and model == self._model]
+        if not found:
+            raise ValueError("a sealed step runs on the dsh backend with the run's model "
+                             f"{self._model or '(the backend default)'!r}, and no DSH provider "
+                             "is chosen for it (`refactory model set --provider <provider> "
+                             f"--model {self._model or '<model>'}`)")
+        if self._effort:
+            # The run's effort is DSH's reasoning level of the same name; one DSH does not
+            # define, or the provider's model does not offer, is refused, never dropped.
+            offered = (found[0][2] or {}).get("reasoningEfforts")
+            if self._effort not in DSH_EFFORTS or offered is False or (
+                    isinstance(offered, Mapping) and self._effort not in offered):
+                raise ValueError(f"a sealed step runs on the dsh backend with the run's effort "
+                                 f"{self._effort!r}, which DSH's {found[0][0]}/{self._model} "
+                                 "does not offer")
+        client._worker_backend = "dsh"
+        client._provider, client._model = found[0][:2]
+        client._setting_sources = ""
+        client._claude_executable = ""
         validate_route(client.route())
         return client
 

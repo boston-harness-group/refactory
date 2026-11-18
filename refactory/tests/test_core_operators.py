@@ -53,6 +53,15 @@ def _ok(seed: str, edit: Any, state: dict | None = None) -> tuple[sf.Applier, Ca
     return applier, out
 
 
+def _built(seed: str, edit: dict) -> tuple[sf.Applier, Candidate]:
+    """``edit`` built by the operator alone, on a seed where no later step can take the new
+    step's output (only plain ops read after it): an attempt refuses it (``E-unread``), and
+    the state is still held to both runtimes."""
+    applier, refused = _apply(seed, edit)
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    return applier, Candidate.from_state(nn_edits.apply(edit, applier.seed_state))
+
+
 def _graph(candidate: Candidate) -> Graph:
     return Graph.from_state(candidate.state["graph"])
 
@@ -113,8 +122,9 @@ def test_insert_hands_a_file_to_a_model_step_through_a_collect_step():
 
 
 def test_insert_before_a_branch_head_takes_its_place_in_the_fork():
-    applier, out = _ok("fuzz_fork_join", {"op": "insert", "before": "left", "kind": "agent",
-                                          "text": "Prepare."})
+    applier, out = _ok("fuzz_fork_join", {"edits": [
+        {"op": "insert", "before": "left", "kind": "agent", "id": "left_prep", "text": "Prepare."},
+        {"op": "rewire", "step": "left", "sees": ["brief", "left_prep"]}]})
     graph = _graph(out)
     fork = graph.nodes["split"]
     # left reads a file, so its new neighbour gets it through a collect step, which heads
@@ -205,8 +215,12 @@ def test_parallelize_copies_run_beside_the_step_and_reach_the_next_reader():
 
 
 def test_parallelize_then_serialize_is_a_round_trip_of_the_structure():
-    applier, out = _ok("fuzz_dataflow", {"op": "parallelize", "after": "clean", "new": [
-        {"kind": "agent", "text": "One angle."}, {"kind": "agent", "text": "Another angle."}]})
+    applier, out = _ok("fuzz_dataflow", {"edits": [
+        {"op": "parallelize", "after": "clean", "new": [
+            {"kind": "agent", "id": "clean_branch1", "text": "One angle."},
+            {"kind": "agent", "id": "clean_branch2", "text": "Another angle."}]},
+        {"op": "rewire", "step": "summarise",
+         "sees": ["source", "clean", "clean_branch1", "clean_branch2"]}]})
     back = applier.attempt(out, {"op": "serialize", "fork": "clean_fork"}, {out.id})
     assert isinstance(back, Candidate), back
     graph = _graph(back)
@@ -235,8 +249,11 @@ def test_serialize_a_seed_fork_runs_its_branches_in_order():
 @needs_spine
 @pytest.mark.parametrize("seed, edit", [
     ("fuzz_draft_review", {"op": "parallelize", "steps": ["draft"], "copies": 2}),
-    ("fuzz_dataflow", {"op": "parallelize", "after": "clean", "new": [
-        {"kind": "agent", "text": "One angle."}, {"kind": "agent", "text": "Another."}]}),
+    ("fuzz_dataflow", {"edits": [
+        {"op": "parallelize", "after": "clean", "new": [
+            {"kind": "agent", "id": "angle1", "text": "One angle."},
+            {"kind": "agent", "id": "angle2", "text": "Another."}]},
+        {"op": "rewire", "step": "summarise", "sees": ["source", "clean", "angle1", "angle2"]}]}),
     ("fuzz_fork_join", {"op": "serialize", "fork": "split"}),
     ("fuzz_nested_fork", {"op": "serialize", "fork": "inner"}),
 ], ids=["copies", "new steps", "serialize", "serialize nested"])
@@ -249,8 +266,10 @@ def test_parallelize_and_serialize_run_alike_on_the_walker_and_the_spine(seed, e
 
 
 def test_branch_adds_a_step_to_the_fork_and_its_output_after_the_join():
-    applier, out = _ok("fuzz_fork_join", {"op": "branch", "fork": "split", "kind": "agent",
-                                          "text": "A third view.", "sees": ["task"]})
+    applier, out = _ok("fuzz_fork_join", {"edits": [
+        {"op": "branch", "fork": "split", "kind": "agent", "id": "split_branch",
+         "text": "A third view.", "sees": ["task"]},
+        {"op": "rewire", "step": "decide", "sees": ["right_a", "left", "right_b", "split_branch"]}]})
     graph = _graph(out)
     assert graph.nodes["split"].targets == ("left", "right_a", _head(graph, "split_branch"))
     assert set(graph.nodes["merge"].sources) == {"left", "right_b", "split_branch"}
@@ -285,11 +304,14 @@ def test_an_optional_branch_that_fails_leaves_the_item_running_on_both_runtimes(
 
 @needs_spine
 @pytest.mark.parametrize("seed, edit", [
-    ("fuzz_fork_join", {"op": "branch", "fork": "split", "kind": "agent", "text": "Third."}),
+    ("fuzz_fork_join", {"edits": [
+        {"op": "branch", "fork": "split", "kind": "agent", "id": "third", "text": "Third."},
+        {"op": "rewire", "step": "decide", "sees": ["right_a", "left", "right_b", "third"]}]}),
     ("fuzz_nested_fork", {"op": "branch", "fork": "inner", "kind": "agent", "text": "Deeper."}),
 ], ids=["a fork", "a nested fork"])
 def test_branch_runs_alike_on_the_walker_and_the_spine(seed, edit):
-    applier, out = _ok(seed, edit)
+    # In the nested fork only a plain op reads after the branch, so nothing can read it.
+    applier, out = _ok(seed, edit) if "edits" in edit else _built(seed, edit)
     _sound(applier, out, spine=True)
 
 
@@ -365,7 +387,8 @@ ROUTE = {"op": "route", "after": "solve", "judge": "agent", "text": "Which way?"
 
 
 def test_route_chooses_among_labelled_steps_that_rejoin():
-    applier, out = _ok("fuzz_data_pass", ROUTE)
+    # Only the plain op check reads after the route, so its new steps reach nothing.
+    applier, out = _built("fuzz_data_pass", ROUTE)
     graph = _graph(out)
     labels = {(e.target, e.condition) for e in graph.out_edges("solve_route")}
     assert labels == {("check", "proceed"), (_head(graph, "solve_again"), "again"),
@@ -381,8 +404,9 @@ def test_route_to_three_branches_inside_a_data_pass_runs_alike_on_both_runtimes(
     applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
     applier.seed_state = _parallel(applier.seed_state, parallelism)
     parent = Candidate.from_state(applier.seed_state)
-    out = applier.attempt(parent, ROUTE, {parent.id})
-    assert isinstance(out, Candidate), out
+    refused = applier.attempt(parent, ROUTE, {parent.id})
+    assert isinstance(refused, list) and refused[0].startswith("E-unread"), refused
+    out = Candidate.from_state(nn_edits.apply(ROUTE, applier.seed_state))
     _sound(applier, out, spine=True)
 
 
@@ -511,7 +535,9 @@ def test_split_replace_and_merge_run_alike_on_the_walker_and_the_spine(seed, edi
 
 
 def test_a_copy_of_a_tool_step_keeps_its_tools_in_a_fresh_workspace_of_its_own():
-    applier, out = _ok("fuzz_tool_step", {"op": "parallelize", "steps": ["gather"], "copies": 1})
+    applier, out = _ok("fuzz_tool_step", {"edits": [
+        {"op": "parallelize", "steps": ["gather"], "copies": 1},
+        {"op": "rewire", "step": "reason", "sees": ["brief", "gather", "gather_copy1"]}]})
     copy = _graph(out).nodes["gather_copy1"]
     assert copy.tool_policy is None and copy.workspace == {"kind": "scratch", "collect": "files"}
     _sound(applier, out)
@@ -542,7 +568,7 @@ DEFAULTS = [
     ("fuzz_draft_review", {"op": "remove", "step": "draft"}),
     ("fuzz_draft_review", {"op": "parallelize", "steps": ["draft"], "copies": 1}),
     ("fuzz_fork_join", {"op": "serialize", "fork": "split"}),
-    ("fuzz_fork_join", {"op": "branch", "fork": "split"}),
+    ("livemath_skill_graph", {"op": "branch", "fork": "step_fork"}),
     ("fuzz_draft_review", {"op": "rewire", "step": "review"}),
     ("fuzz_draft_review", {"op": "loop", "step": "draft"}),
     ("fuzz_draft_review", {"op": "route", "after": "review"}),
@@ -612,7 +638,8 @@ MUTATIONS = [
      {"op": "insert", "after": "draft", "kind": "agent", "text": "Weak points."},
      lambda c: "{{draft}}" in _knob(c, "draft_next__task")),
     ("_renamed", lambda *a, **k: [], "fuzz_fork_join",
-     {"op": "insert", "before": "left", "kind": "agent", "text": "Prepare."},
+     {"edits": [{"op": "insert", "before": "left", "kind": "agent", "id": "left_prep",
+                 "text": "Prepare."}, {"op": "rewire", "step": "left", "sees": ["brief", "left_prep"]}]},
      lambda c: "left_prep_inputs" in _graph(c).nodes["split"].targets),
     ("_fold_forks", lambda *a, **k: [], "fuzz_nested_fork",
      {"op": "remove", "step": "deep_a"},
@@ -625,7 +652,10 @@ MUTATIONS = [
      {"op": "rewire", "step": "review", "sees": ["task"]},
      lambda c: "{{draft}}" not in _knob(c, "review_task")),
     ("_respec", lambda *a, **k: [], "fuzz_fork_join",
-     {"op": "branch", "fork": "split", "kind": "agent", "text": "Third."},
+     {"edits": [{"op": "branch", "fork": "split", "kind": "agent", "id": "split_branch",
+                 "text": "Third."},
+                {"op": "rewire", "step": "decide", "sees": ["right_a", "left", "right_b",
+                                                            "split_branch"]}]},
      lambda c: _head(_graph(c), "split_branch") in _graph(c).nodes["split"].targets),
     ("_iterations_knob", lambda gate_id: (f"{gate_id}__max_iterations", {"kind": "int",
                                                                           "default": 9}),
@@ -696,8 +726,15 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
         ctx.catalogue, ctx.node_states, ctx.edges, protected=list(sf.Applier(
             sf.seeds()[seed]).protected), code_nodes=CODE, tools=sealed,
         knob_values={k["name"]: k["value"] for k in ctx.knobs})
-    if seed in ("fuzz_draft_review", "fuzz_dataflow"):
-        titles = {title for title, _b in examples}
+    titles = {title for title, _b in examples}
+    if seed == "fuzz_dataflow":
+        # Only plain ops and a literal prompt read after its anchor: a shape whose new step
+        # nothing could read is not shown (an attempt would refuse it, ``E-unread``).
+        assert {"Several attempts and a choice", "Check and send back"} <= titles, titles
+        assert not {"Another attempt beside it, sent exactly what it is sent",
+                    "A background pass beside an experiment",
+                    "A tool step before reasoning"} & titles, titles
+    if seed == "fuzz_draft_review":
         assert {"Several attempts and a choice", "Check and send back",
                 "Check a later step and send the work back to an earlier one",
                 "Another attempt beside it, sent exactly what it is sent",

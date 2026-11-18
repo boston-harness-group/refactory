@@ -56,7 +56,7 @@ from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.seal import SEALED_TOOLS
 
-from .graph import Graph, Node
+from .graph import Graph, GraphError, Node
 from .operators import TASK_MEANING
 
 #: The core operators, in the order the request lists them.
@@ -827,7 +827,18 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
 
 def _place_all(build: _Steps, facts: Sequence[str], *, after: str, to: str | None = None,
                guarded: bool = False) -> None:
-    """`_place` each fact, readers from the first model step after ``after`` on."""
+    """`_place` each fact, readers from the first model step after ``after`` on. A 'to'
+    whose reader never runs after ``after`` is refused: the output would never reach it."""
+    if to is not None and facts:
+        graph = build.graph
+        owners = [to] if to in graph.nodes else [
+            n.id for n in graph.nodes.values()
+            if _task_knob(n) == to or to in _filled_text_knobs(n, build.state)]
+        later = _downstream(graph, after, reloops=True) - {after}
+        if owners and not set(owners) & later:
+            raise _edits().EditError(
+                f"'to' {to!r} is read by {owners[0]}, which runs before {after!r}, so the output "
+                f"would never reach it; insert before {owners[0]} instead", code="E-wiring")
     for fact in facts:
         graph = build.graph
         readers = _readers_from(graph, after, build.state)
@@ -1032,12 +1043,12 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
     return None
 
 
-def _downstream(graph: Graph, start: str) -> set[str]:
+def _downstream(graph: Graph, start: str, *, reloops: bool = False) -> set[str]:
     """``start`` and every step after it (fork branches and a data pass's steps included,
-    no reloop back)."""
+    no reloop back unless ``reloops``)."""
     from .loops import loop_edges
 
-    back = {(source, target) for source, target, _c in loop_edges(graph)}
+    back = set() if reloops else {(source, target) for source, target, _c in loop_edges(graph)}
     out, queue = {start}, [start]
     while queue:
         node = graph.nodes.get(queue.pop())
@@ -1183,11 +1194,13 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
     after the new one -- and the new text of each knob they read that names a renamed
     fact, and for a code step taken over the ``renames`` its run records its outputs
     under the new names by (`_output_renames`; else None). Refused when the step does
-    not run before the new one on every path to it, has no outputs, sets them from a
-    callable that names them itself, or a reader's reading cannot be renamed: a frozen
-    knob, a knob a step after the new one reads too (it must keep the old name), a fact
-    named in a step's code or feedback keys, or a file an op or gate opens by name. No
-    renaming reaches those."""
+    not run before the new one on every path to it, has no outputs, has readers none of
+    which runs after the new one while the Task scores none of them (so the new outputs
+    would reach nothing, `_unscored_take_over`), sets them from a callable that names
+    them itself, or a reader's reading cannot be renamed: a frozen knob, a knob a step
+    after the new one reads too (it must keep the old name), a fact named in a step's
+    code or feedback keys, or a file an op or gate opens by name. No renaming reaches
+    those."""
     if not isinstance(target_id, str) or target_id not in graph.nodes:
         raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
     target = graph.nodes[target_id]
@@ -1198,6 +1211,12 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
                        "of its own; 'takes_over' cannot rename them: take over a model or code "
                        "step")
     following = [e.target for e in graph.out_edges(anchor.id)] if side == "after" else [anchor.id]
+    # Where the new step is: every way through ``cut`` passes it. After a step with a
+    # fallback it goes where the two ways rejoin (`_at_rejoin`), before that step.
+    cut = anchor.id
+    if side == "after" and graph.falls_back(anchor.id):
+        cut = _fallback_parts(graph, anchor.id)[1]
+        following = [cut]
     before = [anchor.id] if side == "after" else [e.source for e in graph.in_edges(anchor.id)]
     if side == "before":
         before += [n.id for n in graph.nodes.values()
@@ -1219,7 +1238,19 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             new = own if index == 0 and (kind, own) not in made else f"{target_id}_own_{name}"
             names[(kind, name)] = new
             made.add((kind, new))
-    readers = {n for n in graph.nodes if n not in after and n != target_id}
+    group = _writer_group(graph, state, target, set(names), anchor.id, cut, after)
+    # The steps that read the group's outputs: those after a writer of the group and
+    # before the new one. A step that reads the names only from a writer outside the
+    # group (one whose way reaches a later reader without the new step) keeps them.
+    flow = _forward_flow(graph)
+    readers = {n for member in group for n in _reach(flow, member)
+               if n not in after and n != target_id}
+    for node_id in sorted(group - {target_id}):
+        node = graph.nodes[node_id]
+        if node.kind == "op" and _code_text(node, state) is None and not _by_declaration(node):
+            raise _Refused(f"{node_id!r} writes {target_id!r}'s outputs too, from {node.call!r}, "
+                           "which sets them under names of its own; 'takes_over' cannot rename "
+                           "them")
     facts = {old for (kind, old) in names if kind == "fact"}
     files = {old for (kind, old) in names if kind == "file"}
     knobs = state.get("knobs") or {}
@@ -1259,13 +1290,60 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
                            "over a step no such step reads, or change that step first")
+    unscored = _unscored_take_over(graph, state, target, after)
+    if unscored:
+        raise _Refused(f"nothing after the new step reads {target_id!r}'s outputs ({unscored}), "
+                       "so taking it over changes nothing; take over a step whose output a "
+                       "later step reads or the Task scores, or insert before those readers")
     renames = None
     if _code_text(target, state) is not None:
         # Code returns its outputs under the names it was written for: the run records
         # them under the new ones (`graph.Node.renames`), its code as written.
         renames = _output_renames(target, [names[("fact", n)] for n in target.produces],
                                   [names[("file", n)] for n in target.writes])
-    return target, names, readers, texts, renames
+    return target, names, readers, texts, renames, group
+
+
+def _writer_group(graph: Graph, state: Mapping[str, Any], target: Node,
+                  taken: set[tuple[str, str]], anchor: str, cut: str, after: set[str]
+                  ) -> set[str]:
+    """The steps a take-over of ``target``'s outputs renames together: ``target`` and every
+    other step before the new one writing those names -- a fallback, a route way's in-place
+    writer -- whose every way to a step after the new one that reads them passes the new
+    step (every way through ``cut`` does; the step it follows, ``anchor``, leads to it), so
+    the new step reads whichever ran. A writer with a way around the new step to such a
+    reader keeps its names: that reader reads it there."""
+    flow = _forward_flow(graph)
+    later = {n for n in after if n in graph.nodes and _consumed(graph.nodes[n], state) & taken}
+    group = {target.id}
+    for node_id, node in graph.nodes.items():
+        if node_id in after or node_id == target.id or not _outputs(node) & taken:
+            continue
+        around = set() if node_id == anchor else _reach(flow, node_id, without=cut)
+        if not around & later:
+            group.add(node_id)
+    return group
+
+
+def _unscored_take_over(graph: Graph, state: Mapping[str, Any], target: Node,
+                        after: set[str]) -> str:
+    """Why outputs of ``target`` that a new step writes again reach nothing, or ``""``: a
+    step in ``after`` (those after the new step) reads one, the Task scores one
+    (`task.graded_files`), or the Task declares no scored files (it may score any name)."""
+    from refactory_dsh.task import graded_files
+
+    taken = _outputs(target)
+    read_by = {n for n, node in graph.nodes.items()
+               if n != target.id and _consumed(node, state) & taken}
+    if read_by & after:
+        return ""
+    graded = graded_files(state)
+    if graded is None:
+        return ""  # a Task that declares no scored files may score any name: taken
+    if set(target.writes) & set(graded):
+        return ""
+    return (f"its readers {', '.join(sorted(read_by))} run before it" if read_by else
+            f"the Task scores only {', '.join(graded)}")
 
 
 def _renamed_slots(text: str, names: Mapping[tuple[str, str], str]) -> str:
@@ -1341,7 +1419,7 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                         **({"writes": list(plan[0].writes), "produces": list(plan[0].produces)}
                            if plan is not None else {}))
     if plan is not None:
-        target, names, readers, texts, renames = plan
+        target, names, readers, texts, renames, group = plan
         # The step taken over writes under new names, and every step before the new one
         # (the new one too) reads them there; the steps after it read the new step's.
         build.add(_respec(build.state, target.id, {
@@ -1359,6 +1437,19 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
                 # It finds its files by role: it is told the new name of each it reads.
                 after["renames"] = {**dict(node.renames or {}), "reads": roles} if roles \
                     else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
+            if reader in group:
+                # A co-writer of the taken names (a fallback, a route way's step) writes the
+                # new names as the taken step does; code records them so (`renames`).
+                facts = [names.get(("fact", n), n) for n in node.produces]
+                files_new = [names.get(("file", n), n) for n in node.writes]
+                after["writes"], after["produces"] = files_new, facts
+                if _code_text(node, state) is not None:
+                    outputs = _output_renames(node, facts, files_new) or {}
+                    kept = {k: v for k, v in dict(after.get("renames") or {}).items()
+                            if k == "reads"}
+                    after["renames"] = {**kept, **outputs} if kept or outputs else None
+                    if after["renames"] is None:
+                        after.pop("renames")
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
@@ -1720,9 +1811,11 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
         there = avail.get(anchor.id, set()) | _outputs(anchor)
         view = _neighbour_view(graph, state, anchor)
         branches: list[list[dict]] = []
+        tos: list[str | None] = []
         taken: list[str] = [fork, join]
         for index, raw in enumerate(edit["new"]):
             spec = _spec(raw)
+            tos.append(spec.get("to"))
             node_id = spec.get("id") or _fresh(graph, f"{anchor.id}_branch{index + 1}", taken)
             taken.append(node_id)
             nodes = _step_nodes(graph, state, spec, node_id,
@@ -1742,7 +1835,8 @@ def _expand_parallelize(edit: dict, state: dict) -> list[dict]:
             build.add(_add_detached(nodes))
             build.add([{"op": "add_edge", "source": nodes[-1]["id"], "target": join,
                         "condition": None}])
-        _place_all(build, [f for nodes in branches for f in _new_facts(nodes)], after=join)
+        for nodes, to in zip(branches, tos):
+            _place_all(build, _new_facts(nodes), after=join, to=to)
         return build.steps
     ids = list(edit["steps"])
     first, last = graph.nodes[ids[0]], graph.nodes[ids[-1]]
@@ -2258,13 +2352,32 @@ def _expand_loop_line(edit: dict, state: dict) -> list[dict]:
 _LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
-def _routes(edit: dict, graph: Graph, anchor: Node) -> dict[str, Any]:
+def _route_next(graph: Graph, step: str) -> str | None:
+    """The step a route after ``step`` leads on to: its next step, or, for a step with a
+    fallback, where its two ways rejoin."""
+    if graph.falls_back(step):
+        return _fallback_parts(graph, step)[1]
+    return _sole_out(graph, step)
+
+
+def _routes(edit: dict, graph: Graph, anchor: Node,
+            state: Mapping[str, Any]) -> dict[str, Any]:
+    """The route's ways: its 'to', or by default 'proceed' to the next step and 'revise',
+    a new agent step that redoes an agent step's work -- taking it over in place
+    (`_route_take_over`) where that reaches the result, else writing its own."""
     to = edit.get("to")
     if to is None:
-        succ = _sole_out(graph, anchor.id)
+        succ = _route_next(graph, anchor.id)
         if succ is None:
             raise _Refused(f"{anchor.id!r} has no next step to route to")
-        return {"proceed": succ, "revise": {"kind": "agent", "text": NEUTRAL_REVIEW}}
+        revise = {"kind": "agent", "text": NEUTRAL_REVIEW}
+        if anchor.kind == "agent":
+            try:
+                _route_take_over(graph, state, anchor, _spec({**revise, "takes_over": anchor.id}))
+                revise["takes_over"] = anchor.id
+            except (_Refused, GraphError):
+                pass  # refused here, or a graph whose cycle the edit's own checks refuse
+        return {"proceed": succ, "revise": revise}
     if not isinstance(to, dict) or not 2 <= len(to) <= MAX_ROUTES:
         raise _Refused(f"'to' maps 2 to {MAX_ROUTES} one-word labels to a step id or a new step")
     return to
@@ -2279,7 +2392,7 @@ def _pre_route(edit: dict, state: dict) -> str | None:
     _judge(edit)
     upstream = _upstream(graph, anchor.id) | {anchor.id}
     seen_labels: set[str] = set()
-    for label, target in _routes(edit, graph, anchor).items():
+    for label, target in _routes(edit, graph, anchor, state).items():
         if not isinstance(label, str) or not _LABEL.fullmatch(label) or label.lower() == "halt":
             raise _Refused(f"route label {label!r} is not one word (and 'halt' ends the run)")
         if label.lower() in seen_labels:
@@ -2292,18 +2405,50 @@ def _pre_route(edit: dict, state: dict) -> str | None:
                 raise _Refused(f"route {label!r} leads back to {target!r}; use 'loop' to send "
                                "work back")
         else:
-            _spec(target)
+            spec = _spec(target)
+            if spec.get("takes_over") is not None:
+                _route_take_over(graph, state, anchor, spec)
     return None
+
+
+def _route_take_over(graph: Graph, state: Mapping[str, Any], anchor: Node,
+                     spec: Mapping[str, Any]) -> Node:
+    """The step a route way's new step takes over: one every run passes before the route,
+    whose outputs the new step writes again, in place, on its way only (the other ways
+    keep the step's own; the ways rejoin, so a reader after them reads whichever ran).
+    Refused as insert's 'takes_over' is when nothing after the route reads them."""
+    target_id = spec.get("takes_over")
+    if not isinstance(target_id, str) or target_id not in graph.nodes:
+        raise _Refused(f"'takes_over' names an existing step, not {target_id!r}")
+    target = graph.nodes[target_id]
+    if target.kind not in ("agent", "op") or not (target.writes or target.produces):
+        raise _Refused(f"{target_id!r} is a {target.kind} with no outputs to take over")
+    if target_id != anchor.id and not _runs_first_on_every_path(graph, target_id, [anchor.id]):
+        raise _Refused(f"{target_id!r} does not run before the route on every path; a way's "
+                       "new step takes over a step every run passes before it")
+    if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
+        raise _Refused(f"{target_id!r} writes {len(target.writes)} files, and a new agent step "
+                       "without tools writes only its reply; take it over with a code step")
+    succ = _route_next(graph, anchor.id)
+    unscored = _unscored_take_over(graph, state, target,
+                                   _downstream(graph, succ) if succ is not None else set())
+    if unscored:
+        raise _Refused(f"nothing after the route reads {target_id!r}'s outputs ({unscored}), "
+                       "so taking it over changes nothing")
+    return target
 
 
 def _expand_route(edit: dict, state: dict) -> list[dict]:
     build = _Steps(state)
     graph = build.graph
     anchor = graph.nodes[edit["after"]]
-    succ = _sole_out(graph, anchor.id)
+    succ = _route_next(graph, anchor.id)
     assert succ is not None
+    # After a step with a fallback the route goes where its two ways rejoin, so the
+    # fallback still answers for the step (as insert's new step does, `_at_rejoin`).
+    rejoin = graph.falls_back(anchor.id)
     judge = _judge(edit)
-    routes = _routes(edit, graph, anchor)
+    routes = _routes(edit, graph, anchor, state)
     avail = _available(graph)
     there = avail.get(anchor.id, set()) | _outputs(anchor)
     view = _neighbour_view(graph, state, anchor)
@@ -2316,14 +2461,16 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
                                                  "text": edit.get("text") or NEUTRAL_ROUTE}),
                             judge_id, seen, verdict=list(routes))
         taken += [str(n["id"]) for n in nodes]
-        build.add(_add_chain(nodes, {"after": anchor.id}))
+        build.add(_at_rejoin(build.graph, anchor.id, nodes) if rejoin
+                  else _add_chain(nodes, {"after": anchor.id}))
         gate = _gate_state(gate_id, judge, "", seen, label=next(iter(routes)),
                            reads=[f"{judge_id}.txt"])
         build.add([{"op": "add_node", "node": gate, "position": {"after": judge_id}}])
     else:
         gate = _gate_state(gate_id, judge, edit.get("text") or "", seen,
                            label=next(iter(routes)))
-        build.add([{"op": "add_node", "node": gate, "position": {"after": anchor.id}}])
+        build.add(_at_rejoin(build.graph, anchor.id, [gate]) if rejoin else
+                  [{"op": "add_node", "node": gate, "position": {"after": anchor.id}}])
     build.add([{"op": "remove_edge", "source": gate_id, "target": succ, "condition": None}])
     new_facts: list[str] = []
     for label, target in routes.items():
@@ -2334,16 +2481,30 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         spec = _spec(target)
         node_id = spec.get("id") or _fresh(graph, f"{anchor.id}_{label}", taken)
         taken.append(node_id)
-        nodes = _step_nodes(graph, state, spec, node_id,
-                            _seen(graph, state, there, view, spec.get("sees")),
-                            settings_from=anchor if anchor.kind == "agent" else None)
+        over = (_route_take_over(graph, state, anchor, spec)
+                if spec.get("takes_over") is not None else None)
+        way_seen = _seen(graph, state, there, view, spec.get("sees"))
+        if over is not None and spec.get("sees") is None:
+            # By default it sees what it rewrites, wherever before the route that was made.
+            way_seen = sorted(set(way_seen) | (_readable(graph, state, _outputs(over)) & there),
+                              key=lambda key: (key[0] != "fact", key[1]))
+        nodes = _step_nodes(graph, state, spec, node_id, way_seen,
+                            settings_from=anchor if anchor.kind == "agent" else None,
+                            **({"writes": list(over.writes), "produces": list(over.produces)}
+                               if over is not None else {}))
         taken += [str(n["id"]) for n in nodes]
         build.add(_add_detached(nodes))
         build.add([{"op": "add_edge", "source": gate_id, "target": nodes[0]["id"],
                     "condition": label},
                    {"op": "add_edge", "source": nodes[-1]["id"], "target": succ,
                     "condition": None}])
-        new_facts += _new_facts(nodes)
+        if over is not None:
+            pass  # it writes the taken step's names, which the steps after the rejoin read
+        elif spec.get("to") is not None:
+            # Where its 'to' says, as an inserted step's (`_place_all`).
+            _place_all(build, _new_facts(nodes), after=node_id, to=spec["to"], guarded=True)
+        else:
+            new_facts += _new_facts(nodes)
     for fact in new_facts:
         build.add(_place(build.state, fact, readers=_readers_from(build.graph, succ, build.state),
                          guarded=True))
@@ -2392,6 +2553,10 @@ def _pre_map(edit: dict, state: dict) -> str | None:
     if edit.get("text") is not None and not isinstance(edit.get("text"), str):
         raise _Refused("'text' is a string: what to do with one element")
     combine = _combine_spec(edit)
+    if combine.get("to") is not None and edit.get("to") is not None \
+            and combine["to"] != edit["to"]:
+        raise _Refused("the map and its combine each name a 'to'; name it once: the combine "
+                       "writes the map's one output")
     _spec({"kind": "agent", "route": edit.get("route")})  # refused when it is no route
     base = edit.get("id")
     if base is not None and not isinstance(base, str):
@@ -2497,7 +2662,8 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
     build.add([{"op": "add_edge", "source": copy, "target": join, "condition": None}
                for copy in copies])
     build.add(_add_chain(combined, {"after": join}))
-    _place_all(build, _new_facts(combined), after=combine_id, to=edit.get("to"))
+    _place_all(build, _new_facts(combined), after=combine_id,
+               to=edit.get("to") if edit.get("to") is not None else combine.get("to"))
     return build.steps
 
 
@@ -2951,7 +3117,7 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
 #: Where a new step's output goes (`_place`): one phrase for every operator that says it.
 REACHES = ("its output goes into the nearest prompt {where} that can take it -- an agent's own "
            "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
-           "with neither, nothing reads it until you add a reader")
+           "with neither, refused unless a step reads it")
 
 #: The field a new agent step names its own route in (`Node.route`).
 ROUTE_FIELD = "route"
@@ -2975,8 +3141,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "fields": ("after", "before", "kind", "text", "system", "sees", "to", "id", "call",
                    "reads", "tools", "takes_over", "route"),
         "line": "a new step after (or before) a step: 'kind' agent (text = its prompt; "
-                "'system' its system prompt), code (text = Python) or op (with 'call'); it "
-                "sees what that step sees plus its outputs; " + REACHES.format(where="after it")
+                "'system' its system prompt), code (text = Python) or op (with 'call' and "
+                "'reads'); it sees what that step sees plus its outputs; "
+                + REACHES.format(where="after it")
                 + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 + "; runs sealed: only the files it sees, no network"
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
@@ -3047,7 +3214,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "reads_as": ('route',),
         "fields": ("after", "judge", "text", "to", "sees", "id"),
         "line": "a judge after a step chooses one labelled next step ('to': label -> step id "
-                "or a new step); the branches rejoin",
+                "or a new step, whose 'takes_over' rewrites an earlier step's outputs on that "
+                "way); the branches rejoin; with no 'to', proceed or redo the step in place",
         "example": {"op": "route", "after": "<step>", "judge": "agent",
                     "text": "<how to choose>",
                     "to": {"proceed": "<next step>",
@@ -3145,43 +3313,152 @@ def _outputs_read(state: Mapping[str, Any], node_id: str) -> dict[str, set[tuple
 
 
 def unread_new_steps(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
-    """The steps ``after`` adds to ``before`` whose outputs no step takes in. A step with
-    no step after it (the end of a data pass or of the run) is not one: what it leaves is
-    the Task's or the run's result."""
-    old = set(((before.get("graph") or {}).get("nodes") or {}))
+    """The steps ``after`` adds to ``before`` whose outputs no step takes in. A step at the
+    end of the run or of a pass writing names of its own is read by nothing, since a Task
+    reads only the names it knows. A step writing names a step of ``before`` wrote is not
+    judged here: a fallback writes them instead of that step, and a take-over is refused
+    where it is built when nothing after it reads them or the Task scores none of them
+    (`_unscored_take_over`)."""
+    old_graph = _edits()._graph(before)
+    made = set().union(set(), *(_outputs(node) for node in old_graph.nodes.values()))
     nodes = (after.get("graph") or {}).get("nodes") or {}
     graph = _edits()._graph(after)
-    return [node_id for node_id in sorted(set(nodes) - old)
+    return [node_id for node_id in sorted(set(nodes) - set(old_graph.nodes))
             if nodes[node_id].get("kind") in ("agent", "op")
             and (nodes[node_id].get("produces") or nodes[node_id].get("writes"))
-            and graph.out_edges(node_id)
+            and not _outputs(graph.nodes[node_id]) & made
             and not _outputs_read(after, node_id)]
 
 
 def unread_by_bundle(parent: Mapping[str, Any], states: Sequence[Mapping[str, Any]],
                      edits: Sequence[Mapping[str, Any]]) -> str | None:
-    """Why a bundle's edits leave a step it adds with no reader, when an edit of the same
-    bundle removed the last one: ``states[i]`` is the state after ``edits[i]``. A step
-    added without a reader is not refused here (a Task may read its file); one whose
-    reader a later edit removed is, naming that edit and what it took out."""
+    """Why a bundle's edits leave a step it adds with no reader: ``states[i]`` is the state
+    after ``edits[i]``, and only the last state counts, so a reader a later edit of the
+    bundle adds is one (`unread_new_steps`). When an edit of the bundle removed the last reader,
+    the refusal names that edit. Otherwise only a core operator's step is refused, naming
+    where its output could go: a node object an edit adds whole reads and writes what it
+    says, and the candidate's As built says when nothing reads it."""
     if not states:
         return None
     for node_id in unread_new_steps(parent, states[-1]):
+        made = next(i for i, state in enumerate(states)
+                    if node_id in ((state.get("graph") or {}).get("nodes") or {}))
+        edit = edits[made] if made < len(edits) else {}
         last = max((i for i, state in enumerate(states[:-1]) if _outputs_read(state, node_id)),
                    default=None)
+        if last is None and edit.get("op") not in CORE_OPS:
+            continue  # a node object's own reads and writes are the proposer's, as written
         if last is None:
-            continue
+            return (f"nothing reads the output of new step {node_id!r}, so it changes no "
+                    f"result ({_reader_hint(states[-1], node_id, edit, parent)})")
         removed = last + 1
+        edit = edits[removed]
         lost = sorted(set().union(*_outputs_read(states[last], node_id).values()))
         what = ", ".join("{{" + name + "}}" if kind == "fact" else name for kind, name in lost)
         readers = ", ".join(sorted(_outputs_read(states[last], node_id)))
-        edit = edits[removed]
         named = " ".join(str(edit.get(k)) for k in ("op", "name", "step", "id") if edit.get(k))
         how = " value" if edit.get("op") == "set_knob" and "value" in edit else ""
         return (f"edit {removed + 1} ({named}{how}) removes {what}, the only read of the "
                 f"output of new step {node_id!r} (by {readers}); patch the text so it keeps "
                 f"{what}, or keep the slot")
     return None
+
+
+#: How many knobs a reader hint names.
+HINT_KNOBS = 4
+
+
+def _open_knob(state: Mapping[str, Any], name: str) -> bool:
+    return not (((state.get("knobs") or {}).get(name) or {}).get("spec") or {}).get("frozen")
+
+
+def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
+    """The prompt knobs after step ``node_id`` that 'to' can name for its output, nearest
+    first: an agent's own prompt knob, or a text knob an op fills facts into; none frozen."""
+    graph = _edits()._graph(state)
+    names: list[str] = []
+    if not graph.nodes[node_id].produces:
+        return names  # 'to' places a fact; a step making none has nothing to place
+    for reader in _readers_from(graph, node_id, state):
+        if reader == node_id:
+            continue
+        node = graph.nodes[reader]
+        if node.kind == "agent":
+            knob = _task_knob(node)
+            found = [knob] if knob and len(graph.knob_consumers().get(knob, ())) == 1 else []
+        else:
+            found = _filled_text_knobs(node, state)
+        names += [k for k in found if k not in names and _open_knob(state, k)]
+    return names
+
+
+def _graded_step(graph: Graph, node_id: str, edit: Mapping[str, Any],
+                 before: Mapping[str, Any]) -> str | None:
+    """The step of ``before`` whose outputs a new step at ``node_id`` could take over to
+    reach the result: the step a parallelize copies, else the nearest agent step before it
+    (its edit's anchor first)."""
+    old = set(((before.get("graph") or {}).get("nodes") or {}))
+    if edit.get("op") == "parallelize" and edit.get("steps"):
+        return str(list(edit["steps"])[-1])
+    seen, queue = {node_id}, [node_id]
+    while queue:
+        current = queue.pop(0)
+        node = graph.nodes.get(current)
+        if node is not None and current in old and node.kind == "agent":
+            return current
+        for e in graph.in_edges(current):
+            if e.source not in seen:
+                seen.add(e.source)
+                queue.append(e.source)
+    return None
+
+
+def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any],
+                 before: Mapping[str, Any]) -> str:
+    """Where step ``node_id``'s output could go, for a refusal, in one clause: the prompt
+    knobs after it (named in 'to' when ``edit``'s operator takes one); when the nearest
+    agent after it takes no knob of its own, the op before it that builds that agent's
+    prompt, to insert before; and when no later step can read it at all, a step that takes
+    over the one whose output is graded (``takes_over``; a route way's new step rewrites it
+    in place on its way)."""
+    op = edit.get("op")
+    takes_to = op in ("insert", "branch", "map", "route") or (
+        op == "parallelize" and bool(edit.get("new")))
+    graph = _edits()._graph(state)
+    readers = [r for r in _readers_from(graph, node_id, state) if r != node_id]
+    names = ", ".join(reader_knobs(state, node_id)[:HINT_KNOBS])
+    fact = (graph.nodes[node_id].produces or ("",))[0]
+    parts = []
+    if names:
+        parts.append(f"name a later prompt in 'to': {names}" if takes_to else
+                     f"put {{{{{fact}}}}} in a later prompt: {names}")
+    first = next((graph.nodes[r] for r in readers if graph.nodes[r].kind == "agent"), None)
+    if takes_to and first is not None and _task_knob(first) is None:
+        after = _downstream(graph, node_id)
+        taken = _consumed(first, state)
+        for builder in graph.nodes.values():
+            if (builder.id in after or builder.kind != "op" or not (_outputs(builder) & taken)
+                    or "entry" in _data_ends(graph, builder.id)):
+                continue
+            filled = [k for k in _filled_text_knobs(builder, state) if _open_knob(state, k)]
+            if filled:
+                parts.append(f"{first.id} takes no knob: insert before {builder.id} with "
+                             f"'to': {filled[0]}")
+                break
+    if parts:
+        return " or ".join(parts)
+    later = _downstream(graph, node_id) - {node_id}
+    if any(graph.nodes[n].kind == "agent" or _is_code(graph.nodes[n])
+           for n in later if n in graph.nodes):
+        return "rewire a later step to see it, in the same edits"
+    graded = _graded_step(graph, node_id, edit, before)
+    if graded is None:
+        return "no step can read it"
+    if op == "route":
+        return f"give the way's new step 'takes_over': {graded}"
+    if op == "insert" and "takes_over" not in edit:
+        return f"give it 'takes_over': {graded}"
+    return f"insert one seeing it with 'takes_over': {graded}"
 
 
 def _needed(node: Node, values: Mapping[str, Any]) -> set[tuple[str, str]]:
@@ -3278,10 +3555,16 @@ def _unknown_fields(edit: Mapping[str, Any]) -> str | None:
         if not isinstance(spec, Mapping):
             continue
         if spec is not edit:
-            extra = sorted(k for k in spec if k not in STEP_FIELDS and not k.startswith("_"))
+            allowed = (*STEP_FIELDS, "takes_over") if name == "route" else STEP_FIELDS
+            extra = sorted(k for k in spec if k not in allowed and not k.startswith("_"))
             if extra:
                 return (f"a new step does not take {', '.join(repr(k) for k in extra)}; it "
                         f"would be ignored. A step's fields: {', '.join(STEP_FIELDS)}")
+        if spec.get("reads") is not None and spec.get("kind") != "op":
+            # An agent or code step is given files by 'sees'; its own 'reads' are made from
+            # what it sees (`_step_nodes`), so a list here would be ignored.
+            return ("'reads' lists an op step's files (with 'call'); an agent or code step "
+                    "gets a file by naming it in 'sees', so 'reads' would be ignored")
         if "tools" in spec and spec["tools"] is not False:
             refused = _tools_refusal(spec["tools"])
             if refused:

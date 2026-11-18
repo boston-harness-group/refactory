@@ -448,6 +448,96 @@ def test_a_sealed_step_runs_sealed_on_both_runtimes_and_its_output_is_collected(
                       "grader": "DENIED", "other": "DENIED"}
 
 
+def _claude_code_client(tmp_path: Path, **overrides) -> DshModelClient:
+    """A client routed as the LiveMath arms are (Claude Code, ``dontAsk``), with a DSH home
+    and provider routes of its own: ``vertex`` lists the arm's model."""
+    settings = dict(worker_backend="claude_code", permission_mode="dontAsk",
+                    model="claude-opus-4-6", effort="medium", attempts=1,
+                    dsh_home=str(tmp_path / "dsh-home"),
+                    provider_config={"vertex": {"models": [{"id": "claude-opus-4-6"}]}})
+    return DshModelClient(**{**settings, **overrides})
+
+
+@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def test_a_sealed_step_of_a_claude_code_run_runs_sealed_on_dsh_with_the_run_s_model(
+        tmp_path, runtime):
+    """The LiveMath arms' route: a sealed step moves to the dsh backend in skip mode with the
+    arm's model and effort, on both runtimes; a step without tools keeps the arm's route."""
+    _sealable()
+    run = tmp_path / "run"
+    (run / "items" / "b").mkdir(parents=True)
+    (run / "items" / "b" / "answer.txt").write_text("OTHER-ITEM")
+    (run / "grader.json").write_text("GOLD-IN-RUN")
+    (run / "input.txt").write_text("THE-INPUT")
+    argv = tmp_path / "argv.json"
+    script = tmp_path / "agent-cli"
+    script.write_text(f"#!{sys.executable}\n" + AGENT.replace("{grader}", str(run / "grader.json"))
+                      .replace("{other}", str(run / "items" / "b" / "answer.txt"))
+                      + f"pathlib.Path({str(argv)!r}).write_text(json.dumps(sys.argv))\n")
+    script.chmod(0o755)
+    client = _claude_code_client(tmp_path, dsh_cli=str(script))
+    assert client.for_sealed().route() == {
+        "worker_backend": "dsh", "provider": "vertex", "model": "claude-opus-4-6",
+        "effort": "medium", "permission_mode": "skip"}
+    assert workspace.sealed_steps(client) == (True, "")
+    graph = Graph()
+    graph.add(Node("solve", "agent", prompt_template="Solve it.", reads=("input.txt",),
+                   writes=("answer.txt",), tools=("bash",), workspace="scratch"))
+    if runtime == "walker":
+        ctx = RunContext(run, knobs={}, facts={}, task={})
+        ctx.model = client
+        result = Executor(graph, ctx).run(start=graph.start)
+        assert result.exit_ok, result.error
+    else:
+        from refactory_dsh import worker_node
+        graph.add(Node("plain", "agent", prompt_template="Think.", writes=("plain.txt",),
+                       tool_policy="none"))
+        state = {"graph": graph.to_state(), "knobs": {}}
+        lowered = workers.lower_workflow(lowering.to_workflow(state), run, client.context(),
+                                         lowering.node_declarations(state))
+        specs = {name: json.loads(Path(shlex.split(lowered.nodes[name].dispatch_command)[-1])
+                                  .read_text()) for name in ("solve", "plain")}
+        assert specs["plain"]["model_context"]["worker_backend"] == "claude_code"
+        assert specs["solve"]["model_context"]["worker_backend"] == "dsh"
+        worker_node.execute(specs["solve"], run)
+    answer = json.loads((run / "answer.txt").read_text())
+    assert answer == {"tools": ["bash"], "policy": ["workspace-write"], "input": "THE-INPUT",
+                      "grader": "DENIED", "other": "DENIED"}
+    called = json.loads(argv.read_text())
+    assert called[called.index("--provider") + 1] == "vertex"
+    assert called[called.index("--model") + 1] == "claude-opus-4-6"
+
+
+def test_without_dsh_a_tool_step_is_never_offered_and_is_refused_on_the_same_answer(tmp_path):
+    """No DSH runtime, or no DSH provider for the run's model: the loop's request offers no
+    tool step, and its attempts refuse one (`workspace.sealed_steps`, one answer)."""
+    _sealable()
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.optim import Candidate, Proposal
+    from test_pipeline_view import _mode
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    edit = {"op": "insert", "after": "compare", "kind": "agent", "text": "Check it.",
+            "tools": ["bash"], "to": "decide_task"}
+    clients = {"": _claude_code_client(tmp_path, dsh_cli="/bin/true"),
+               "no DSH runtime": _claude_code_client(tmp_path, dsh_cli="",
+                                                     runtime_root=str(tmp_path / "none")),
+               "no DSH provider": _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                                                      provider_config={})}
+    for why, client in clients.items():
+        loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs" / (why or "ok")),
+                    project=Path("."), model=client)
+        assert loop._tools_offered() is (not why), why
+        out = loop.optimizer.attempt(Proposal(edits=[edit]), seed, mode.invariants(), True, (),
+                                     protected=mode.edit_protected())
+        if not why:
+            assert isinstance(out, Candidate), out
+        else:
+            assert isinstance(out, list) and out[0].startswith("E-new-node-tools"), out
+            assert why in out[0], out
+
+
 @pytest.mark.parametrize("runtime", ["walker", "spine"])
 def test_an_unsealable_tools_list_is_refused_on_both_runtimes(tmp_path, runtime):
     graph = Graph()
@@ -936,3 +1026,81 @@ def test_the_linux_runner_passes_no_shell_code_through_its_arguments(tmp_path):
     assert not any("$" in argument for argument in place.runner)
     with pytest.raises(seal.SealError, match="no '\\$'"):
         seal.linux_arguments("/w/$HOME", seal.LINUX_READS, seal.LINUX_LIMITS)
+
+
+def test_a_sealed_step_is_judged_on_its_own_route_as_its_dispatch_takes_it(tmp_path):
+    """A tool step whose role route (or its own route) names a model no DSH provider lists
+    is refused at the attempt, with the reason its dispatch would give (`sealed_step`)."""
+    _sealable()
+    from refactory_dsh.loop import Loop, LoopConfig
+    from refactory_dsh.optim import Candidate, Proposal
+    from test_pipeline_view import _mode
+
+    mode = _mode("livemath/skill_graph")
+    seed = Candidate.from_state(mode.state_dict())
+    client = _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                                 role_routes={"solver": {"model": "claude-sonnet-4-6"}})
+    loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs"),
+                project=Path("."), model=client)
+    assert loop._tools_offered()  # the run's own model has a DSH provider
+    edit = {"op": "insert", "after": "compare", "kind": "agent", "text": "Check it.",
+            "tools": ["bash"], "to": "decide_task"}
+    refused = loop.optimizer.attempt(Proposal(edits=[edit]), seed, mode.invariants(), True, (),
+                                     protected=mode.edit_protected())
+    assert isinstance(refused, list) and refused[0].startswith("E-new-node-tools"), refused
+    assert "'claude-sonnet-4-6'" in refused[0], refused
+    node = {"kind": "agent", "role": "solver", "tools": ["bash"], "workspace": {"kind": "scratch"}}
+    ok, why = workspace.sealed_step(client, "probe", node)
+    with pytest.raises(workspace.WorkspaceError) as raised:
+        workspace.for_sealed_step(client.for_node("probe", role="solver"), "probe", True)
+    assert not ok and why == str(raised.value)
+    # Its own route to the run's model is taken.
+    own = {**edit, "route": {"model": "claude-opus-4-6"}}
+    taken = loop.optimizer.attempt(Proposal(edits=[own]), seed, mode.invariants(), True, (),
+                                   protected=mode.edit_protected())
+    assert isinstance(taken, Candidate), taken
+
+
+def test_the_sealed_route_takes_the_exact_model_and_an_effort_dsh_offers(tmp_path):
+    long = _claude_code_client(tmp_path, dsh_cli="/bin/true", model="claude-opus-4-6[1m]")
+    with pytest.raises(ValueError, match="no DSH provider"):
+        long.for_sealed()
+    offered = {"vertex": {"models": [{"id": "claude-opus-4-6",
+                                      "reasoningEfforts": {"low": "low", "medium": "medium"}}]}}
+    assert _claude_code_client(tmp_path, dsh_cli="/bin/true",
+                               provider_config=offered).for_sealed().route()["effort"] == "medium"
+    for effort, config in (("max", offered),
+                           ("medium", {"vertex": {"models": [{"id": "claude-opus-4-6",
+                                                              "reasoningEfforts": False}]}})):
+        client = _claude_code_client(tmp_path, dsh_cli="/bin/true", effort=effort,
+                                     provider_config=config)
+        with pytest.raises(ValueError, match=f"effort {effort!r}"):
+            client.for_sealed()
+
+
+def test_a_run_offered_no_tool_step_says_why_once_in_its_journal_and_start_line(tmp_path):
+    """Without a DSH provider for the arm's model, the loss of tool steps is visible: the
+    journal records the reason once and the start summary prints it."""
+    _sealable()
+    from refactory_dsh import events
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    client = _claude_code_client(tmp_path, dsh_cli="/bin/true", provider_config={})
+    loop = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "runs", epochs=1,
+                                                    batch_size=1, optimizer="random"),
+                project=Path("."), model=client)
+    reason = loop._tools_not_offered()
+    assert "no DSH provider" in reason, reason
+    loop.init()
+    journal = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    noted = [r for r in journal if r.get("kind", r.get("event")) == "tools_not_offered"
+             or r.get("type") == "tools_not_offered"]
+    assert len(noted) == 1 and reason in json.dumps(noted[0]), journal[:3]
+    progress = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    start = next(r for r in progress if r.get("step") == "init")
+    assert f"no tool steps: {reason}" in events.render(start)
+    # A run that permits only knob edits loses nothing, and says nothing.
+    knobs = Loop("livemath/skill_graph", LoopConfig(runs_root=tmp_path / "knobs",
+                                                     allowed_ops=("set_knob",)),
+                 project=Path("."), model=client)
+    assert knobs._tools_not_offered() == ""

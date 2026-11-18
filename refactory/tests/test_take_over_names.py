@@ -73,8 +73,15 @@ def _on_both(applier: sf.Applier, state: dict) -> None:
 # ── the finding ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("after", ["step_join", "step_join_join", "step_join_branch1",
-                                   "decide_prompt", "decide"])
+@pytest.fixture
+def reach_off(monkeypatch):
+    """These build a take-over that nothing after the new step reads, to hold the renamed
+    reads of the steps before it to their runs; an attempt refuses such a take-over as
+    changing nothing (`core_ops._unscored_take_over`), which is turned off here."""
+    monkeypatch.setattr(core_ops, "_unscored_take_over", lambda *args, **kwargs: "")
+
+
+@pytest.mark.parametrize("after", ["step_join", "step_join_join", "step_join_branch1"])
 @pytest.mark.parametrize("kind", ["agent", "code"])
 def test_s4_taking_compare_over_after_a_new_fork_runs_on_the_walker(after, kind):
     """notes_prompts and decide_prompt read what they declare: renamed for them, they
@@ -88,6 +95,15 @@ def test_s4_taking_compare_over_after_a_new_fork_runs_on_the_walker(after, kind)
     assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
 
 
+@pytest.mark.parametrize("after", ["decide_prompt", "decide"])
+def test_s4_taking_compare_over_after_its_last_reader_is_refused(after):
+    """After decide_prompt, nothing reads compare's notes: the new step's would reach
+    nothing, so the take-over is refused rather than run as a call that changes nothing."""
+    reason = _refusal(_applier(), [PARALLEL, {"op": "insert", "after": after, "kind": "code",
+                                              "takes_over": "compare"}])
+    assert "nothing after the new step reads 'compare''s outputs" in reason, reason
+
+
 @needs_spine
 def test_s4_a_step_after_step_join_taking_compare_over_runs_on_both_runtimes():
     applier = _applier()
@@ -99,7 +115,7 @@ def test_s4_a_step_after_step_join_taking_compare_over_runs_on_both_runtimes():
 def test_s4_taking_decide_prompt_over_runs_on_the_walker():
     """decide_prompt sets its declared fact, so it can be taken over (renamed)."""
     applier = _applier()
-    state = _accepted(applier, [{"op": "insert", "after": "decide", "kind": "code",
+    state = _accepted(applier, [{"op": "insert", "after": "decide_prompt", "kind": "code",
                                  "takes_over": "decide_prompt"}])
     assert state["graph"]["nodes"]["decide_prompt"]["produces"] != ["decide_prompt"]
     assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
@@ -127,12 +143,13 @@ def test_select_whose_names_matter_refuses_a_renamed_read():
     """select matches a judge's label against the names of the files it reads: renamed,
     a label naming compare_copy1 would match nothing."""
     applier = _applier()
-    state = _accepted(applier, [
+    # One proposal: the copy alone has no reader yet (E-unread).
+    state = _accepted(applier, [{"edits": [
         {"op": "parallelize", "steps": ["compare"], "copies": 1},
         {"op": "insert", "after": "compare_join", "kind": "agent", "id": "choose",
          "text": "Name the better notes: compare or compare_copy1."},
         {"op": "insert", "after": "choose", "kind": "op", "id": "pick",
-         "call": core_ops.select_call()}])
+         "call": core_ops.select_call(), "to": "precision_task"}]}])
     assert "compare_copy1.txt" in state["graph"]["nodes"]["pick"]["reads"]
     reason = nn_edits.precheck({"op": "insert", "after": "pick", "kind": "code",
                                 "takes_over": "compare_copy1"}, state)
@@ -156,7 +173,7 @@ def _renamed_then_removed(target: str, removed: str) -> list[dict]:
 
 
 @pytest.mark.parametrize("name", sorted(RENAMED_THEN_REMOVED))
-def test_a_rename_then_a_removal_still_runs_on_the_walker(name):
+def test_a_rename_then_a_removal_still_runs_on_the_walker(name, reach_off):
     """decide_prompt finds each note by name -- its renames say what each built note is
     read under (`nn.declared_files`) -- never by position, so taking a step out after a
     rename leaves it knowing which note is which (once: every item failed)."""
@@ -170,7 +187,7 @@ def test_a_rename_then_a_removal_still_runs_on_the_walker(name):
 
 
 @needs_spine
-def test_a_rename_then_a_removal_runs_on_the_spine_as_on_the_walker():
+def test_a_rename_then_a_removal_runs_on_the_spine_as_on_the_walker(reach_off):
     applier = _applier()
     _on_both(applier, _accepted(applier, _renamed_then_removed("compare", "precision")))
 
@@ -188,7 +205,7 @@ def test_files_are_found_by_name_whatever_the_reads_count_or_order():
     assert declared_files(["a.txt", "b.txt", "c.txt"], roles, renames) == [None, "b.txt", "c.txt"]
 
 
-def test_v21_refuses_a_required_read_its_op_cannot_find():
+def test_v21_refuses_a_required_read_its_op_cannot_find(reach_off):
     """The whole-graph check (V21, after every edit): a required read decide_prompt would
     not find, or a renamed role it was not built with, is refused."""
     from refactory_dsh.nn.validate import validate_state
@@ -204,7 +221,7 @@ def test_v21_refuses_a_required_read_its_op_cannot_find():
     assert [i for i in validate_state(foreign) if i.code == "V21" and "other.txt" in i.message]
 
 
-def test_collect_shows_a_renamed_file_under_the_name_it_was_built_with(tmp_path):
+def test_collect_shows_a_renamed_file_under_the_name_it_was_built_with(tmp_path, reach_off):
     """A collect step before the new one reads compare's notes under their new name, and
     shows them under the old one: the step after it is sent the same text."""
     from refactory_dsh.nn import operators
@@ -212,7 +229,7 @@ def test_collect_shows_a_renamed_file_under_the_name_it_was_built_with(tmp_path)
 
     state = _accepted(_applier(), [
         {"op": "insert", "after": "compare", "kind": "op", "id": "gather",
-         "call": operators.COLLECT_CALL},
+         "call": operators.COLLECT_CALL, "to": "decide_task"},
         {"op": "insert", "after": "decide", "kind": "code", "takes_over": "compare"}])
     gather = state["graph"]["nodes"]["gather"]
     assert gather["reads"] == ["compare.txt"]
@@ -359,7 +376,7 @@ def _take_over(generator: sf.EditGenerator, state: dict, rng: random.Random) -> 
     if not outputs or not anchors:
         return None
     after = rng.choice(anchors)
-    before = [n for n in outputs if n != after and after in sf._downstream_ids(graph, n)]
+    before = [n for n in outputs if n == after or after in sf._downstream_ids(graph, n)]
     spec = generator.step_spec(state, kinds=("agent", "code", "op"), sees=False)
     if spec.get("kind") not in ("agent", "code", "op"):
         spec = {"kind": "code"}
@@ -459,7 +476,7 @@ def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
             continue
         graph = sf._graph_of(shaped.state)
         for target in sorted(graph.nodes):
-            for after in sorted(sf._downstream_ids(graph, target) - {target}):
+            for after in sorted(sf._downstream_ids(graph, target)):
                 edit = {"op": "insert", "after": after, "kind": "code", "takes_over": target}
                 taken = applier.attempt(shaped, edit, {shaped.id})
                 if not isinstance(taken, list):
@@ -482,3 +499,35 @@ def test_taking_over_with_a_fallback_or_a_loop_back_keeps_every_invariant(name):
         assert found == [], (edits, [str(v) for v in found])
     _sound(applier, shape_first)
     _sound(applier, take_first)
+
+
+def test_a_rename_then_a_removal_reached_by_an_accepted_graph_runs_on_the_walker():
+    """The same renames with no check turned off: a step after decide that takes decide over
+    and also reads compare's notes is a reader after the new step, so taking compare over
+    after decide_prompt is accepted; decide_prompt reads by its renames (V21 holds), and
+    taking precision out after it still runs."""
+    from refactory_dsh.nn.validate import validate_state
+
+    applier = _applier()
+    state = _accepted(applier, [
+        {"op": "insert", "after": "decide", "kind": "agent", "id": "final",
+         "text": "Check the answer against the notes.", "sees": ["decide", "compare"],
+         "takes_over": "decide"},
+        {"op": "insert", "after": "decide_prompt", "kind": "code", "takes_over": "compare"},
+        {"op": "remove", "step": "precision"}])
+    node = state["graph"]["nodes"]["decide_prompt"]
+    assert node["renames"]["reads"] == {"compare_notes.txt": "compare.txt"}
+    assert not [i for i in validate_state(state) if i.code == "V21"]
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
+
+
+def test_a_task_that_declares_no_scored_files_keeps_every_take_over():
+    """fuzz_draft_review names no Task's graded_files: any name may be scored, so a
+    take-over whose readers all run before the new step is still taken (LiveMath's Task,
+    which scores answer.txt only, refuses it: test_core_op_fixes)."""
+    from refactory_dsh import task as task_mod
+
+    applier = _applier("fuzz_draft_review")
+    assert task_mod.graded_files(applier.seed_state) is None
+    _accepted(applier, [{"op": "insert", "after": "finalize", "kind": "code",
+                         "takes_over": "draft"}])

@@ -9,6 +9,8 @@ class CountingTask(Task):
     """Two items, each judged by whether the pass wrote its own record."""
 
     name = "counting"
+    #: ``verify`` reads the pass's seen.json.
+    graded_files = ("seen.json",)
 
     def instances(self):
         return [TaskInstance(id="alpha"), TaskInstance(id="beta")]

@@ -25,6 +25,7 @@ over the winner is re-evaluated on the items no candidate saw.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import math
 import random
@@ -767,6 +768,13 @@ class Loop(OuterLoop):
         self.optimizer.allow_code_nodes = bool(self.config.allow_code_nodes)
         # The routes a step may choose its own model, effort and cap from (`Node.route`).
         self.optimizer.step_routes = StepRoutes.of(model)
+        # Whether a new step's tools can run sealed in this run: one answer for the
+        # request's offer and an attempt's acceptance (`workspace.sealed_steps`).
+        from refactory_dsh.workspace import sealed_step, sealed_steps
+
+        self.optimizer.sealed_tools = sealed_steps(model)
+        # Each new sealed step on its own route, as its dispatch takes it.
+        self.optimizer.sealed_check = functools.partial(sealed_step, model)
         self.optimizer.grader_secrets = self._grader_secrets
         # A new or changed code node is dry-run on its parent's recorded item inputs
         # (`optim.checks.code_dry_run`), found in the parent's run directory.
@@ -987,11 +995,20 @@ class Loop(OuterLoop):
         return bool(sandbox[0])
 
     def _tools_offered(self) -> bool:
-        """Whether the request shows a tool step: a new step's tools run sealed only where
-        the seal runs (`seal.available`)."""
-        from refactory_dsh import seal
+        """Whether the request shows a tool step: on the answer an attempt refuses one by
+        (`workspace.sealed_steps`, the optimizer's ``sealed_tools``)."""
+        if getattr(self.optimizer, "sealed_tools", None) is None:
+            from refactory_dsh.workspace import sealed_steps
 
-        return bool(seal.available()[0])
+            self.optimizer.sealed_tools = sealed_steps(self.model)
+        return bool(self.optimizer.sealed_tools[0])
+
+    def _tools_not_offered(self) -> str:
+        """Why the request offers no tool step, for the run's start summary and journal; empty
+        when it offers one, or when the run permits no operator that adds a step."""
+        if self._tools_offered() or not {"insert", "map"} & set(self.permitted_ops()):
+            return ""
+        return str(self.optimizer.sealed_tools[1] or "the seal cannot run here")
 
     def _sandbox_answer(self) -> tuple[bool, str] | None:
         """The machine's sandbox answer for one request (`snippet.available`), taken once
@@ -1259,11 +1276,17 @@ class Loop(OuterLoop):
             self._write_state()
             self._progress("init", resumed=True, population=len(self.population),
                            **({"warning": self.selection_warning} if self.selection_warning else {}),
+                           **({"tools_not_offered": why_not} if (why_not := self._tools_not_offered())
+                              else {}),
                            epochs=self.config.epochs, batch_size=self.config.batch_size,
                            optimizer=self.search_name())
             return
 
         self._journal("start", mode=self.mode_id, config=self.config.to_dict())
+        # A tool step the request cannot offer is said once, never lost silently.
+        tools_not_offered = self._tools_not_offered()
+        if tools_not_offered:
+            self._journal("tools_not_offered", reason=tools_not_offered)
         seed = Candidate.from_state(seed_state)
         # Persist the original seed state for tool-policy admission checks.
         # Anchored here and restored on resume, not derived from population[0].
@@ -1277,6 +1300,7 @@ class Loop(OuterLoop):
             "init",
             # The run's events say it (the command line prints them): no val items.
             **({"warning": self.selection_warning} if self.selection_warning else {}),
+            **({"tools_not_offered": tools_not_offered} if tools_not_offered else {}),
             resumed=False,
             population=len(self.population),
             epochs=self.config.epochs,
@@ -1528,6 +1552,8 @@ class Loop(OuterLoop):
         sampler = RandomOptimizer(seed=self.config.seed)
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
         sampler.step_routes = self.optimizer.step_routes
+        sampler.sealed_tools = self.optimizer.sealed_tools
+        sampler.sealed_check = self.optimizer.sealed_check
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
         insertable = [node.to_state() for node in self.mode.insertable()]

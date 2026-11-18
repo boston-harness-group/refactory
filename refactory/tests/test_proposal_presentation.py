@@ -98,10 +98,12 @@ def _fill(value, target: str):  # type: ignore[no-untyped-def]
     return json.loads(text)
 
 
-@pytest.mark.parametrize("seed", ["fuzz_dataflow", "fuzz_data_pass"])
+@pytest.mark.parametrize("seed", ["fuzz_draft_review"])
 def test_the_examples_parse_and_apply_to_a_generic_graph(seed):
     """Filled in, the structural example and the bundle are accepted by the attempt
-    path on a synthetic graph: the node built from the schema is a valid node."""
+    path on a synthetic graph: the node built from the schema is a valid node. (The other
+    synthetic graphs' later steps take literal prompts or end the run, so a new step there
+    reaches nothing and is refused, E-unread.)"""
     single, bundle = _examples(_answer(_render("broad", max_edits=4)))
     applier = sf.Applier(sf.seeds()[seed])
     parent = Candidate.from_state(applier.seed_state)

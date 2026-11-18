@@ -1144,7 +1144,8 @@ def map_read_issues(graph: Graph) -> list[Issue]:
                      if node.kind == "op" and node.call == MAP_CALL):
         runs = {t for f in graph.nodes if map_of(graph, f) == op for t in graph.nodes[f].targets}
         files = set(graph.nodes[op].writes)
-        results = {w for run in runs for w in graph.nodes[run].writes}
+        # A target with no node (an edit removed a run) is the fork rules' to report.
+        results = {w for run in runs if run in graph.nodes for w in graph.nodes[run].writes}
         for node in sorted(graph.nodes.values(), key=lambda n: n.id):
             read = sorted(files & set(node.reads))
             if read and node.id not in runs:

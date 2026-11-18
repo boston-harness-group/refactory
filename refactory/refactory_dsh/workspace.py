@@ -52,7 +52,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from refactory_dsh import git_exe
 from refactory_dsh.emitted_paths import unprintable_refusal
@@ -350,6 +350,57 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
         _warn(f"agent node {node!r} works in {workspace.path} without DSH's workspace-write policy "
               f"({workspace.unconfined}); its tools keep the access a node has without a workspace")
     return workspace
+
+
+def sealed_steps(model: Any) -> tuple[bool, str]:
+    """Whether a step that runs its tools sealed can run in a run on ``model``: the seal
+    runs on this machine (`seal.available`), and the run's client can move the step onto
+    the dsh backend with its model (`DshModelClient.for_sealed`; a client without routes,
+    a test's scripted model, runs it where it is). The request's offer and an attempt's
+    acceptance both take this answer, and each runtime moves a sealed step the same way."""
+    from refactory_dsh import seal
+
+    ok, why = seal.available()
+    if not ok:
+        return False, why
+    sealed = getattr(model, "for_sealed", None)
+    if callable(sealed):
+        try:
+            sealed()
+        except ValueError as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def sealed_step(model: Any, node_id: str, node: Mapping[str, Any]) -> tuple[bool, str]:
+    """Whether the sealed step ``node`` (a node state) can run in a run on ``model``, on the
+    client its dispatch takes: its node's and role's route (`for_node`), its own route
+    (`with_step_route`), then the sealed route (`for_sealed_step`), as both runtimes take
+    them. An attempt refuses a new sealed step on this answer (``E-new-node-tools``)."""
+    ok, why = sealed_steps(None)
+    if not ok:
+        return False, why
+    client = model
+    try:
+        if callable(getattr(client, "for_node", None)):
+            client = client.for_node(node_id, role=str(node.get("role") or "ceo"))
+        if node.get("route") and callable(getattr(client, "with_step_route", None)):
+            client = client.with_step_route(node["route"])
+        for_sealed_step(client, node_id, True)
+    except (WorkspaceError, ValueError) as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def for_sealed_step(client: Any, node: str, sealed: bool) -> Any:
+    """``client`` for agent node ``node``'s dispatch: moved to the sealed route
+    (`sealed_steps`) when it runs its tools sealed (``sealed``, `is_sealed`), else as it is."""
+    if sealed and callable(getattr(client, "for_sealed", None)):
+        try:
+            return client.for_sealed()
+        except ValueError as exc:
+            raise WorkspaceError(f"agent node {node!r} runs its tools sealed: {exc}") from None
+    return client
 
 
 def _check_sealed(node: str, declared: dict[str, str], tools: tuple[str, ...],
