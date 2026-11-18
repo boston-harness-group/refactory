@@ -124,6 +124,17 @@ class Task:
         """Judge one pass, or ``None`` when the Task has no opinion."""
         return None
 
+    def train_feedback(
+        self, instance: TaskInstance, workspace: Path,
+        *, part: str | None = None, seed: int | None = None,
+    ) -> Any:
+        """What the item's attempt so far is told, judged against its answer: a JSON value,
+        or ``None`` for nothing. Called mid-pass, and only on a train evaluation the outer
+        loop asked to give gold feedback (`gold_feedback_on`), by the one grader-side op
+        that may hand grader-derived data to the pass (`refactory_dsh.feedback`). Never
+        called on val or test. Nothing by default."""
+        return None
+
     def reply_correct(self, reply: str, metadata: Mapping[str, Any]) -> bool | None:
         """Whether ``reply``, taken as the item's answer, is what this Task would grade
         correct (``metadata``: the item's record metadata); ``None`` when a reply cannot be
@@ -216,6 +227,18 @@ def grader_secrets(state: dict[str, Any], *, part: str | None = None) -> set[str
             for name in hidden:
                 secrets |= strings(instance.metadata.get(name)) - visible
     return secrets
+
+
+def offers_train_feedback(state: dict[str, Any]) -> bool:
+    """Whether a data node's Task of ``state`` says what a train attempt is told
+    (it overrides `Task.train_feedback`). The default loop then asks for gold feedback
+    on its train evaluations, as SkillOpt's train rollouts do. A Task that cannot be
+    loaded raises: the run cannot say what its passes are told."""
+    from refactory_dsh.nn.graph import Graph
+
+    graph = Graph.from_state(state.get("graph") or {})
+    refs = sorted({n.task_ref for n in graph.nodes.values() if n.kind == "data" and n.task_ref})
+    return any(type(load_task(ref)).train_feedback is not Task.train_feedback for ref in refs)
 
 
 def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
@@ -471,19 +494,39 @@ def manifest_part_ids(manifest: Mapping[str, Any], part: str) -> list[str] | Non
     return None
 
 
-def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None) -> Path:
+def write_subset(workdir: Path, part: str, holdout: float, *, seed: int | None = None,
+                 gold_feedback: bool = False) -> Path:
     """Record which part of a Task's items a run directory evaluates.
 
     The outer loop writes this before it evaluates a candidate and the item loader
     reads it, so the part travels with the run directory rather than with the search.
+    ``gold_feedback`` marks a train evaluation whose passes may be told how their
+    attempt compares with the answer (`Task.train_feedback`); it is refused for any
+    other part, so val and test passes never are.
     """
+    if gold_feedback and part != TRAIN:
+        raise TaskError(f"gold feedback is for train evaluations only, not {part!r}")
     path = _subset_file(workdir)
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {"part": str(part), "holdout": float(holdout)}
     if seed is not None:
         data["seed"] = seed
+    if gold_feedback:
+        data[GOLD_FEEDBACK] = True
     path.write_text(json.dumps(data, indent=2))
     return path
+
+
+#: The ``subset.json`` key that turns gold feedback on for a train evaluation.
+GOLD_FEEDBACK = "gold_feedback"
+
+
+def gold_feedback_on(workdir: Path) -> bool:
+    """Whether a run directory's passes get gold feedback: only when its ``subset.json``
+    names the train part and turns it on. No file, any other part, or any other value
+    is off."""
+    record = read_subset(workdir)
+    return record.get("part") == TRAIN and record.get(GOLD_FEEDBACK) is True
 
 
 def read_subset(workdir: Path) -> dict[str, Any]:

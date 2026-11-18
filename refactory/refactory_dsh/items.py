@@ -167,6 +167,7 @@ def prepare_pass_dir(
     declared_reads: tuple[str, ...] | list[str] = (),
     *,
     starting: bool = True,
+    task_ref: str = "",
 ) -> Path:
     """Create and return the pass directory for one item.
 
@@ -182,6 +183,9 @@ def prepare_pass_dir(
       stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
       attempt's and never counts the time a run spent stopped; the spine's ``end``
       reuses the directory with ``starting`` False.
+    * Marks it as a pass (:data:`PASS_MARKER`): the data node, the item and its index,
+      and the node's Task (*task_ref*), so a grader-side op inside the pass can find
+      the item's Task on either runtime (`refactory_dsh.feedback`).
     """
     run_dir = Path(run_dir)
     pass_dir = pass_dir_of(run_dir, node_id, item_id, index)
@@ -207,7 +211,10 @@ def prepare_pass_dir(
     marker = pass_dir / PASS_MARKER
     if not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({"node": node_id, "item": item_id, "index": index}) + "\n")
+        record: dict[str, Any] = {"node": node_id, "item": item_id, "index": index}
+        if task_ref:
+            record["task"] = task_ref
+        marker.write_text(json.dumps(record) + "\n")
     return pass_dir
 
 
@@ -474,9 +481,16 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
     re.MULTILINE)
 
 
+#: A `model.HarnessIncident` that crossed a process as text: its message starts with
+#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "``, the spine
+#: worker's ``"worker: "`` or a traceback's ``"<Class>: "``, anchored at a line's start.
+_HARNESS_INCIDENT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )*harness incident: ", re.MULTILINE)
+
+
 def error_kind(error: BaseException) -> str:
     """A failed item's ``error_kind``: ``"harness_incident"`` for a session the harness
-    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's),
+    backstop stopped (`model.HarnessBackstop`: the harness's fault, not the method's) or
+    any other `model.HarnessIncident` (a grader whose own machinery failed),
     ``"declared_timeout"`` for one stopped at its node's declared wall
     (`model.DeclaredTimeout`: the pipeline's own limit), ``"timeout"`` for a timeout,
     else the class name.
@@ -488,10 +502,11 @@ def error_kind(error: BaseException) -> str:
     (`_HARNESS_TIMEOUT_LINE`). A code step's own ``subprocess.TimeoutExpired`` or
     ``SnippetTimeout``, or a text that merely says "timed out", is the pipeline's.
     """
-    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessBackstop
+    from refactory_dsh.model import CompletionTimeout, DeclaredTimeout, HarnessIncident
     from refactory_dsh.node_retry import RetriesExhausted
 
-    if isinstance(error, HarnessBackstop) or HARNESS_BACKSTOP_LINE.search(str(error)):
+    if (isinstance(error, HarnessIncident) or HARNESS_BACKSTOP_LINE.search(str(error))
+            or _HARNESS_INCIDENT_LINE.search(str(error))):
         return "harness_incident"
     if (isinstance(error, DeclaredTimeout) or DECLARED_TIMEOUT_LINE.search(str(error))
             or (isinstance(error, RetriesExhausted) and error.cause == "declared_timeout")
@@ -1053,7 +1068,8 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
 
     # Create the isolated pass directory.
     declared_reads = _subgraph_declared_reads(workdir, node)
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, declared_reads=declared_reads,
+                                task_ref=node.task_ref or "")
 
     # Write current_item to both pass_dir (for the subgraph) and workdir
     # (for progress tracking / PIT-005), without the Task's grader-only fields: the
@@ -1150,7 +1166,8 @@ def command_end(
     item_id = str(item.get("id") or index)
 
     # Compute the pass directory (idempotent — reuses the one command_begin created).
-    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False)
+    pass_dir = prepare_pass_dir(workdir, node.id, item_id, index, starting=False,
+                                task_ref=node.task_ref or "")
 
     # F4 parity: when the caller says the item's subgraph failed, skip verify
     # and write a failure record directly, as the walker does.

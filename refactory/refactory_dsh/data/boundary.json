@@ -11,6 +11,7 @@
     "refactory_dsh.emitted_paths",
     "refactory_dsh.evaluators",
     "refactory_dsh.events",
+    "refactory_dsh.feedback",
     "refactory_dsh.finished_control",
     "refactory_dsh.git_exe",
     "refactory_dsh.git_hooks",
@@ -190,6 +191,7 @@
     "loop_mode": "core",
     "review_pack": "core",
     "livemath": "core",
+    "spreadsheetbench": "core",
     "skillopt": "core",
     "sympy_pack": "core"
   },

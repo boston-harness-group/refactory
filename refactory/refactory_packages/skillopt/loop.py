@@ -385,10 +385,15 @@ class SkillOptLoop(OuterLoop):
                 return
 
             # ② Train rollout — mechanism 2, with the batch seed (dataloader.py:278).
+            # It is SkillOpt's one rollout with ``use_eval_feedback=True``
+            # (engine/trainer.py:1269-1272): where the mode has a train-feedback node,
+            # its passes are told how their attempt compares with the answer. The
+            # slow-update, validation and test rollouts are not.
             epoch_seed = self.proposer.batch_seed(epoch)
             if not self._past_phase(resume_epoch, resume_phase, epoch, "train"):
                 self._phase = "train"
-                current = run.evaluate(current, part="train", seed=epoch_seed)
+                current = run.evaluate(current, part="train", seed=epoch_seed,
+                                       gold_feedback=True)
                 run.save_strategy_state()
             records = run.item_records(current)
 
