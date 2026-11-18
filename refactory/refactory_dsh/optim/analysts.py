@@ -753,11 +753,14 @@ def _where_text(where: Mapping[str, Any], cap: int | None = None) -> str:
 
 def _cut(text: Any, cap: int | None) -> str:
     """``text`` whole, its line breaks kept (a proposed prompt keeps its layout); past
-    ``cap`` characters, cut there with how much was cut said (``… [cut: N chars]``)."""
+    ``cap`` characters, cut there with how much was cut said (``… [cut: N chars]``); of
+    several lines, fenced byte-exact (`evidence.quoted`)."""
     text = str(text or "").strip()
-    if cap is None or len(text) <= cap:
-        return text
-    return f"{text[:cap]}… [cut: {len(text) - cap} chars]"
+    if cap is not None and len(text) > cap:
+        text = f"{text[:cap]}… [cut: {len(text) - cap} chars]"
+    # A text of several lines goes byte-exact in a fence of its own (`evidence.quoted`):
+    # a proposed prompt's "## Rules" reads as no heading and is copied back unchanged.
+    return evidence.quoted(text)
 
 
 def _actions(entry: Mapping[str, Any]) -> list[tuple[str, str]]:

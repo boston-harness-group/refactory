@@ -81,7 +81,7 @@ def _no_loss(records, text: str) -> None:
     for record in records:
         block = blocks[str(record["id"])]
         for exchange in record["exchanges"]:
-            body = evidence._demoted(str(exchange["response"]).strip())  # as fenced
+            body = evidence.escape_headings(str(exchange["response"]).strip())  # as fenced
             assert block.count(body) >= 1 and (len(body) < 200 or text.count(body) == 1), (
                 record["id"], exchange["node"])
     instructions = set()
@@ -99,7 +99,7 @@ def _no_loss(records, text: str) -> None:
                 instructions.add(rest)
             seen.add(exchange["response"], f"{exchange['node']}'s reply")
     for rest in instructions:
-        assert text.count(evidence._demoted(rest)) == 1, rest[:200]
+        assert text.count(evidence.escape_headings(rest)) == 1, rest[:200]
 
 
 def test_s4_items_repeat_under_5_percent_and_lose_nothing(s4_records):

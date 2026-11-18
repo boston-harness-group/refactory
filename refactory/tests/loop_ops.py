@@ -125,6 +125,12 @@ def always_reloop(ctx: Any) -> str:
     return Verdict("reloop", reason="needs more work")
 
 
+def always_reloop_capitalised(ctx: Any) -> str:
+    """`always_reloop`, its verdict capitalised: both runtimes route it all the same."""
+    from refactory_dsh.nn import Verdict
+    return Verdict("Reloop", reason="needs more work")
+
+
 def fail_on_second_visit(ctx: Any) -> None:
     """Pass the first time, fail every time after: a run stopped right after a reloop."""
     visits = (ctx.read_json("visits.json", 0) or 0) + 1

@@ -1171,6 +1171,18 @@ class ProposalContext:
                               for side in ("parent_records", "child_records")
                               for r in pair.get(side) or ())])
 
+    def _trajectories_shown(self) -> dict[str, str]:
+        """What "Trajectories of the candidate being edited" shows whole
+        (`trajectories_whole`), as `shown_whole` keys it, with where: another section names
+        it."""
+        if not self.item_records:
+            return {}
+        whole = trajectories_whole(
+            self.item_records, budget=self.evidence_budget, findings=self.reader_findings,
+            analysed=(None if self.analysis is None
+                      else list(self.analysis.get("findings") or ())))
+        return shown_whole(whole, f"under \"{TRAJECTORIES_HEADING.lstrip('# ')}\" below")
+
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
         are in "What this run has already tried", one line each, so they are not repeated
@@ -1242,7 +1254,8 @@ class ProposalContext:
         if self.edit_pairs:
             lines += ["", *_edit_change_lines(
                 self.edit_pairs, omissions=self.omissions, settled=self._settled(),
-                homes=homes)]
+                homes=homes, shown=self._trajectories_shown(),
+                room=int(self.evidence_budget * EDIT_CHANGE_SHARE))]
         if self.reasoning:
             predicted = [str(p.get("child")) for p in self.edit_pairs or () if p.get("prediction")]
             lines += ["", *_reasoning_lines(
@@ -1486,9 +1499,12 @@ def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = No
         from .evidence import dedup_texts
 
         texts = dedup_texts(texts, [f"`{knob['name']}`" for knob in whole])
+    from .evidence import exact_block
+
+    # Byte-exact on every path (`evidence.exact_block`): a fence no line of the text can
+    # close, so its own headings read as none and nothing copied from it gains an escape.
     for knob, text in zip(whole, texts):
-        fence = _fence(text)
-        lines += [f"`{knob['name']}`:", fence, text, fence]
+        lines += [f"`{knob['name']}`:", *exact_block(text)]
     return [*lines, ""]
 
 
@@ -3193,26 +3209,13 @@ def _marked(text: Any, limit: int, *, item: Any = None, step: str = "",
     return f"{text[:keep]}\n{OMITTED.format(chars=chars)}\n{text[-keep:]}"
 
 
-def _demoted(text: str) -> str:
-    """``text`` with each Markdown heading line pushed below the request's own levels, so
-    an output's "## Answer" cannot read as one of the request's sections."""
-    return re.sub(r"(?m)^(#{1,3})(?=\s)", lambda m: "#" * (len(m.group(1)) + 3), text)
-
-
-def _fenced(text: str) -> list[str]:
-    """``text`` (headings demoted) in a code fence longer than any run of backticks in it."""
-    body = _demoted(text)
-    fence = _fence(body)
-    return [fence, body, fence]
-
-
 def _trajectory(record: dict[str, Any], text_chars: int = _WHOLE,
                 omissions: list[dict[str, Any]] | None = None,
                 settled: Collection[str] | None = None,
                 errors_said: Mapping[str, str] | None = None) -> str:
     """One train item (`optim.evidence.render_item`, as every call that reads items shows
     one): its verdict, what was expected and what it gave, the grader's reason, its input
-    once, then each step's reply, each fenced (headings demoted) so nothing in them reads
+    once, then each step's reply, each fenced (heading lines escaped) so nothing in them reads
     as a section of the request; with ``settled`` (`evidence.settled_lines`, the steps'
     settings), each step's ``Sees:`` line and the part of its prompt its settings do not
     hold, as `ITEM_FORM` says.
@@ -3469,6 +3472,35 @@ def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, A
     return failing, passing, by_findings
 
 
+TRAJECTORIES_HEADING = "## Trajectories of the candidate being edited"
+
+
+def _all_whole(items: Sequence[dict[str, Any]], budget: int) -> bool:
+    """Whether "Trajectories" shows every item whole (`_trajectories`)."""
+    return sum(len(_trajectory(r)) + 2 for r in items) <= min(budget, SHOW_ALL_BELOW)
+
+
+def _analysed_findings(analysed: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The analysts' ranked findings in the readers' form, for `_shown_items`."""
+    return [{"failure_patterns": [f for f in analysed if f.get("source") != "success"],
+             "success_patterns": [f for f in analysed if f.get("source") == "success"]}]
+
+
+def trajectories_whole(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
+                       findings: Sequence[dict[str, Any]] | None = None,
+                       analysed: Sequence[dict[str, Any]] | None = None
+                       ) -> list[dict[str, Any]]:
+    """The records "Trajectories of the candidate being edited" shows whole, by the same
+    rule `_trajectories` applies: every item when they all fit, else the items
+    `_shown_items` picks. Another section names these by item instead of repeating them."""
+    items = _ordered_items(records)
+    if not items or _all_whole(items, budget):
+        return items
+    failing, passing, _cited = _shown_items(
+        items, _analysed_findings(analysed) if analysed is not None else findings)
+    return [*failing, *passing]
+
+
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                   findings: Sequence[dict[str, Any]] | None = None,
                   failures: Sequence[dict[str, Any]] = (),
@@ -3492,14 +3524,13 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     items = _ordered_items(records)
     if not items:
         return []
-    header = ["## Trajectories of the candidate being edited",
+    header = [TRAJECTORIES_HEADING,
               f"The {len(items)} train item(s) counted under \"Item results\"."]
     groups = trajectory_groups(records, budget)
     # Numbered over the records "Errors, by cause" numbers its rows over (`_item_evidence`),
     # so an item's "cause N" is that table's row N.
     refs = error_refs(_pipeline_items(records))
-    whole = [_trajectory(r) for r in items]
-    if sum(len(block) + 2 for block in whole) <= min(budget, SHOW_ALL_BELOW):
+    if _all_whole(items, budget):
         return header + [f"Every item. {ITEM_FORM}",
                          *(line for r in items
                            for line in ("", _trajectory(r, ITEM_TEXT_MAX, omissions,
@@ -3511,8 +3542,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
             "Not every item is shown in full here. The analysts' ranked findings above "
             "cover them all; here is a table of every item, then the items the rule below "
             "picks, each whole."]
-        findings = [{"failure_patterns": [f for f in analysed if f.get("source") != "success"],
-                     "success_patterns": [f for f in analysed if f.get("source") == "success"]}]
+        findings = _analysed_findings(analysed)
     else:
         lines = header + [
             f"Not every item is shown in full here, so readers went through them in "
@@ -4483,75 +4513,466 @@ def _as_built_lines(entry: Mapping[str, Any]) -> list[str]:
             *(["Check the description above against As built."] if said else [])]
 
 
-def _pair_block(parent: dict[str, Any], child: dict[str, Any],
-                omissions: list[dict[str, Any]] | None = None,
-                settled: Collection[str] | None = None) -> str:
-    """One changed item, parent beside child, each whole: the parent's trajectory, then
-    the child's verdict and each of its steps' replies -- a reply the same as the parent's
-    at that step and attempt (a step a loop sent back runs more than once) is said so
-    rather than shown again, and the input (the same item) is not repeated. Each text cut
-    (over ``ITEM_TEXT_MAX``) is recorded in ``omissions``."""
+#: The most changed items "What the last edit changed" shows with their moved steps
+#: whole; every other changed item is listed in one line (`_moved_line`).
+EDIT_ITEMS_WHOLE = 4
+#: The share of the call's evidence budget (``ProposalContext.evidence_budget``) the
+#: changed items shown whole take together: items are chosen to fit it, never cut to.
+EDIT_CHANGE_SHARE = 0.25
+#: The least of each of the first pick's parent replies the section keeps (head and
+#: tail) when its block would pass the room: the reply the child's is compared with.
+EDIT_PARENT_FLOOR = 2000
+#: The kinds of changed item whose first pick is always shown whole.
+EDIT_FORCED_KINDS = ("broken", "fixed")
+#: The section's ceiling, in rooms: past it, a forced pick's child replies are cut too.
+EDIT_CEILING_ROOMS = 3
+#: The least of each child reply a forced pick past the ceiling keeps (head and tail).
+EDIT_CHILD_FLOOR = 8000
+#: A cut that would leave out fewer characters than this is not made: the text is whole.
+EDIT_CUT_MIN = 500
+#: The kinds of changed item, in the order the section picks them in turn.
+EDIT_KINDS = (("broken", "broken"), ("fixed", "fixed"), ("down", "score dropped"),
+              ("up", "score rose"))
+#: An answer as a changed item's one line says it.
+MOVED_ANSWER_CHARS = 160
+
+
+def record_key(record: Mapping[str, Any]) -> str:
+    """What one rendering of an item shows (its id, verdict, answer and each step's
+    reply), as a key: two records with the same key say the same thing, so a section
+    shows one and names the other by where it is."""
+    exchanges = [(str(e.get("node")), str(e.get("response") or "").strip())
+                 for e in record.get("exchanges") or () if isinstance(e, Mapping)]
+    return hashlib.sha1(json.dumps(
+        [str(record.get("id")), record.get("passed"), record.get("score"),
+         str(record.get("prediction")), str(record.get("error_text") or ""), exchanges],
+        default=str).encode()).hexdigest()
+
+
+def _runs(record: Mapping[str, Any]) -> list[tuple[tuple[str, int], Mapping[str, Any]]]:
+    """Each model call of an item keyed by its step and that step's run (a step a loop
+    sent back runs more than once), in the order it ran."""
+    out, counts = [], {}
+    for exchange in record.get("exchanges") or ():
+        if isinstance(exchange, Mapping):
+            node = str(exchange.get("node") or "agent")
+            counts[node] = counts.get(node, 0) + 1
+            out.append(((node, counts[node]), exchange))
+    return out
+
+
+def _run_name(key: tuple[str, int], counts: Mapping[str, int]) -> str:
+    node, run = key
+    return f"`{node}`" + (f" (run {run})" if counts.get(node, 0) > 1 or run > 1 else "")
+
+
+def step_moves(parent: Mapping[str, Any], child: Mapping[str, Any]) -> dict[str, list]:
+    """How an item's steps moved from parent to child, each step's run its own (a loop's
+    second run of a step is compared with the parent's second run): ``same`` (the same
+    reply), ``changed`` (a different reply), ``new`` (the child ran it, the parent did
+    not) and ``gone`` (the reverse), each a list of ``(node, run)`` in the order it ran."""
+    before = {key: str(e.get("response") or "").strip() for key, e in _runs(parent)}
+    after = _runs(child)
+    keys = {key for key, _e in after}
+    moves: dict[str, list] = {"same": [], "changed": [], "new": [], "gone": []}
+    for key, exchange in after:
+        reply = str(exchange.get("response") or "").strip()
+        moves["new" if key not in before else "same" if before[key] == reply
+              else "changed"].append(key)
+    moves["gone"] = [key for key, _e in _runs(parent) if key not in keys]
+    return moves
+
+
+def _side(record: Mapping[str, Any], cut: Callable[[Any, str], str]) -> str:
+    said = [f"{_outcome(record)} (score {fmt_score(record.get('score'))})"]
+    if record.get("prediction") is not None:
+        said.append(f"gave {cut(record.get('prediction'), 'prediction')}")
+    if record.get("fail_reason") and not record.get("passed"):
+        said.append(f"grader: {cut(record['fail_reason'], 'grader')}")
+    if record.get("error_text"):
+        said.append(f"error: {cut(record['error_text'], 'error')}")
+    return "; ".join(said)
+
+
+def _input_text(record: Mapping[str, Any]) -> str | None:
+    """An item's input as `_trajectory` shows it (the first of `TRAJECTORY_INPUT_KEYS`)."""
+    meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    return None if key is None else str(meta[key])
+
+
+def shown_whole(records: Iterable[Mapping[str, Any]], where: str) -> dict[str, str]:
+    """For records a section shows whole: each one's `record_key`, and its input's text
+    (``input:`` + the text: the same item's input whichever run shows it), with where."""
+    out: dict[str, str] = {}
+    for record in records:
+        said = f"{where}, item {record.get('id')}"
+        out[record_key(record)] = said
+        text = _input_text(record)
+        if text is not None:
+            out.setdefault("input:" + text, said)
+    return out
+
+
+class _Quoted:
+    """Where each text of the section is already shown whole: an item's whole rendering
+    or its input elsewhere in the request (``shown``, `shown_whole`), or a step's reply
+    or an item's input shown earlier in this section. A text is said once; then named."""
+
+    def __init__(self, shown: Mapping[str, str] | None) -> None:
+        self.shown = dict(shown or {})
+        self.texts: dict[tuple[str, ...], str] = {}
+
+    def where(self, record: Mapping[str, Any], *part: str) -> str | None:
+        found = self.shown.get(record_key(record))
+        return found or self.texts.get((record_key(record), *part))
+
+    def input_where(self, record: Mapping[str, Any]) -> str | None:
+        text = _input_text(record)
+        if text is None:
+            return None
+        return self.shown.get("input:" + text) or self.texts.get(("input", text))
+
+    def copy(self) -> "_Quoted":
+        other = _Quoted(self.shown)
+        other.texts = dict(self.texts)
+        return other
+
+
+def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child_id: Any,
+                 quoted: _Quoted, omissions: list[dict[str, Any]] | None = None,
+                 settled: Collection[str] | None = None,
+                 parent_chars: int = ITEM_TEXT_MAX, child_chars: int = ITEM_TEXT_MAX) -> str:
+    """How the edit moved one changed item: each side's verdict and answer, the input
+    once, the steps whose reply stayed the same named, and each step whose reply changed,
+    is new in the child or is gone from it shown whole -- the parent's reply beside the
+    child's. A text already shown (``quoted``) is named by where it is instead; what this
+    block shows is added to ``quoted``. Each text over ``ITEM_TEXT_MAX`` is cut, each
+    parent's reply over ``parent_chars`` (an item that must fit the section's room) and
+    each child's moved reply over ``child_chars`` (one past the section's ceiling), head
+    and tail around a marked count, each cut recorded in ``omissions``; a cut that would
+    leave out fewer than ``EDIT_CUT_MIN`` characters is not made."""
     from . import evidence
 
-    def cut(text: Any, step: str) -> str:
-        return evidence.clip(text, ITEM_TEXT_MAX, item=child.get("id"), step=step,
-                             omissions=omissions)
+    item = str(child.get("id"))
+    here = f"under child {child_id}'s item {item} in this section"
 
-    lines = ["Parent:", _trajectory(parent, ITEM_TEXT_MAX, omissions, settled), "Child:"]
-    replies: dict[tuple[str, int], str] = {}
-    runs: dict[str, int] = {}
-    for exchange in parent.get("exchanges") or ():
-        node = str(exchange.get("node"))
-        runs[node] = runs.get(node, 0) + 1
-        replies[(node, runs[node])] = str(exchange.get("response") or "").strip()
-    said = [f"{_outcome(child)} (score {fmt_score(child.get('score'))})"]
-    if child.get("prediction") is not None:
-        said.append(f"Given: {cut(child.get('prediction'), 'prediction')}")
-    if child.get("fail_reason") and not child.get("passed"):
-        said.append(f"Grader: {cut(child['fail_reason'], 'grader')}")
-    if child.get("error_text"):
-        said.append(f"Error: {cut(child['error_text'], 'error')}")
-    lines.append("; ".join(said))
-    exchanges = [e for e in child.get("exchanges") or () if isinstance(e, Mapping)]
-    attempts: dict[str, int] = {}
-    seen = evidence._Seen()
+    def cut(text: Any, step: str) -> str:
+        return evidence.clip(text, ITEM_TEXT_MAX, item=item, step=step, omissions=omissions)
+
+    lines = [f"#### Item {item} -- {kind} (child {child_id})"]
+    expected = _expected(child)
+    lines.append((f"Expected: {cut(expected, 'expected')}. " if expected else "")
+                 + f"Parent: {_side(parent, cut)}. Child: {_side(child, cut)}.")
     meta = child.get("metadata") if isinstance(child.get("metadata"), Mapping) else {}
     key = next((k for k in TRAJECTORY_INPUT_KEYS if meta.get(k)), None)
+    seen = evidence._Seen()
     if key is not None:
+        choices = _choice_lines(meta.get("choices"))
+        where = quoted.input_where(child)
+        if where:
+            lines.append(f"Input: as {where}.")
+        else:
+            text = cut(meta[key], "input")
+            if choices:
+                text += "\n\nChoices:\n" + "\n".join(choices)
+            lines += [f"Input ({key}):", *evidence.fenced(text)]
+            quoted.texts[("input", str(meta[key]))] = here
         seen.add(meta[key], "the input")
-        for choice in _choice_lines(meta.get("choices")):
+        for choice in choices:
             seen.add(choice, "the input", 1)
-    for number, exchange in enumerate(exchanges, 1):
-        node = str(exchange.get("node") or "agent")
-        attempts[node] = attempts.get(node, 0) + 1
-        reply = str(exchange.get("response") or "").strip()
-        lines.append(f"##### Step `{node}` ({number} of {len(exchanges)})")
+    moves = step_moves(parent, child)
+    counts: dict[str, int] = {}
+    for (node, _run), _e in [*_runs(parent), *_runs(child)]:
+        counts[node] = max(counts.get(node, 0), _run)
+    gates = _gate_facts(parent, child)
+    if gates:
+        lines.append("Gates whose verdicts moved: " + "; ".join(gates) + ".")
+    if moves["same"]:
+        lines.append("Same reply in parent and child: "
+                     + ", ".join(_run_name(k, counts) for k in moves["same"]) + ".")
+    before = dict(_runs(parent))
+    total = len(_runs(child))
+
+    def reply(record: Mapping[str, Any], exchange: Mapping[str, Any], node: str, run: int,
+              whose: str) -> list[str]:
+        where = quoted.where(record, node, str(run))
+        if where:
+            return [f"{whose} reply: as {where}, step `{node}`"
+                    + (f" (run {run})" if counts.get(node, 0) > 1 else "") + "."]
+        whole = str(exchange.get("response") or "").strip()
+        limit = min(parent_chars if record is parent else child_chars, ITEM_TEXT_MAX)
+        if limit < ITEM_TEXT_MAX and len(whole) - limit < EDIT_CUT_MIN:
+            limit = ITEM_TEXT_MAX  # a cut this small saves nothing worth a mark
+        text = evidence.clip(exchange.get("response"), limit, item=item,
+                             step=f"{node} (parent)" if record is parent else node,
+                             omissions=omissions)
+        if text == str(exchange.get("response") or "").strip():
+            # Only a whole reply is a reference's target.
+            quoted.texts[(record_key(record), node, str(run))] = here
+        return [f"{whose} reply:", *evidence.fenced(text)]
+
+    for number, ((node, run), exchange) in enumerate(_runs(child), 1):
+        if (node, run) in moves["same"]:
+            seen.add(exchange.get("response"), f"{node}'s reply")
+            continue
+        status = ("reply changed" if (node, run) in moves["changed"] else
+                  "new: the parent did not run it" if run == 1 else
+                  f"new: the parent ran it {_counts_in(parent, node)} time(s)")
+        lines.append(f"##### Step `{node}` ({number} of {total} in the child"
+                     + (f", run {run}" if counts.get(node, 0) > 1 else "") + f"; {status})")
         if settled is not None:
             lines += evidence.prompt_lines(seen, exchange.get("prompt"), settled,
                                            lambda text, node=node: cut(text, node))
+        if (node, run) in moves["changed"]:
+            lines += reply(parent, before[(node, run)], node, run, "Parent's")
+        lines += reply(child, exchange, node, run, "Child's")
         seen.add(exchange.get("response"), f"{node}'s reply")
-        if replies.get((node, attempts[node])) == reply:
-            lines.append("Reply: same as the parent's"
-                         + (f" (its run {attempts[node]} of that step)."
-                            if runs.get(node, 0) > 1 or attempts[node] > 1 else "."))
-        else:
-            lines += ["Reply:", *evidence.fenced(cut(reply, node))]
+    for node, run in moves["gone"]:
+        lines.append(f"##### Step `{node}`"
+                     + (f" (run {run})" if counts.get(node, 0) > 1 else "")
+                     + (f" -- the parent ran it {_counts_in(parent, node)} time(s), the child "
+                        f"{_counts_in(child, node)}: fewer runs" if _counts_in(child, node)
+                        else " -- the parent ran it, the child did not"))
+        lines += reply(parent, before[(node, run)], node, run, "Parent's")
+    if not moves["changed"] and not moves["new"] and not moves["gone"]:
+        lines.append("Every step's reply is the same as the parent's: the answer moved "
+                     "without any reply changing (the grader, or a step with no model "
+                     "call).")
     return "\n".join(lines)
+
+
+def _counts_in(record: Mapping[str, Any], node: str) -> int:
+    return sum(1 for (n, _r), _e in _runs(record) if n == node)
+
+
+def _verdicts(record: Mapping[str, Any], gate: str) -> str:
+    """The verdicts a gate (or loop check) gave on an item, in order, a run of the same
+    verdict counted (``reloop x2, proceed``; case aside, as both runtimes route). A
+    reloop its cap refused (`items.refused_at_cap`) is said on its own, ``reloop
+    (refused: cap of 1 reached)``, and the gate's reruns -- the reloops of that verdict
+    it took -- are said once after them; ``not run`` when it gave none."""
+    visits = [v for v in record.get("steps") or ()
+              if isinstance(v, Mapping) and str(v.get("node")) == gate and v.get("verdict")]
+    out: list[list[Any]] = []
+    for v in visits:
+        verdict = str(v.get("verdict")).strip()
+        refused = v.get("cap") if v.get("exhausted") else None
+        if out and out[-1][0].lower() == verdict.lower() and out[-1][2] is None \
+                and refused is None:
+            out[-1][1] += 1
+        else:
+            out.append([verdict, 1, refused])
+    said = [(verdict if count == 1 else f"{verdict} x{count}")
+            + (f" (refused: cap of {cap} reached)" if cap is not None else "")
+            for verdict, count, cap in out]
+    refused_labels = {str(v.get("verdict")).strip().lower() for v in visits if v.get("exhausted")}
+    if refused_labels:
+        reruns = sum(1 for v in visits if not v.get("exhausted")
+                     and str(v.get("verdict")).strip().lower() in refused_labels)
+        said.append(f"{reruns} rerun{'' if reruns == 1 else 's'} taken")
+    return ", ".join(said) or "not run"
+
+
+def step_facts(parent: Mapping[str, Any], child: Mapping[str, Any]) -> str:
+    """How an item's steps moved, from the records alone and in few words: each step whose
+    reply changed, is new or is gone, with its runs on parent and child (``solve 1 -> 2
+    run(s), reply changed``), and each gate's verdicts on both (``check: parent proceed;
+    child reloop, proceed``). Empty when nothing moved."""
+    moves = step_moves(parent, child)
+    runs = {"parent": {}, "child": {}}
+    for side, record in (("parent", parent), ("child", child)):
+        for (node, _run), _e in _runs(record):
+            runs[side][node] = runs[side].get(node, 0) + 1
+    status: dict[str, str] = {}
+    for name, label in (("changed", "reply changed"), ("new", "new"), ("gone", "gone")):
+        for node, _run in moves[name]:
+            said = label
+            if name == "gone" and runs["child"].get(node):
+                said = "fewer runs"  # it still runs, less often; "gone" is not at all
+            elif name == "new" and runs["parent"].get(node):
+                said = "more runs"
+            status.setdefault(node, said)
+    parts = [f"`{node}` {runs['parent'].get(node, 0)} -> {runs['child'].get(node, 0)} "
+             f"run(s), {label}" for node, label in status.items()]
+    return "; ".join([*parts, *_gate_facts(parent, child)])
+
+
+def _gate_facts(parent: Mapping[str, Any], child: Mapping[str, Any]) -> list[str]:
+    """Each gate whose verdicts on the item differ between parent and child, both said."""
+    gates = list(dict.fromkeys(
+        str(v.get("node")) for record in (parent, child) for v in record.get("steps") or ()
+        if isinstance(v, Mapping) and v.get("verdict")))
+    return [f"`{gate}`: parent {_verdicts(parent, gate)}; child {_verdicts(child, gate)}"
+            for gate in gates if _verdicts(parent, gate) != _verdicts(child, gate)]
+
+
+def _moved_line(parent: Mapping[str, Any], child: Mapping[str, Any], kind: str,
+                child_id: Any, why: str = "") -> str:
+    """A changed item not shown whole, in one line: both scores, each side's verdict and
+    answer, how its steps moved (`step_facts`) and why it is not shown whole (``why``)."""
+
+    def answer(value: Any) -> str:
+        text = " ".join(str(value).split())
+        if len(text) <= MOVED_ANSWER_CHARS:
+            return text
+        return f"{text[:MOVED_ANSWER_CHARS]}… (clipped: {len(text):,} chars)"
+
+    def side(record: Mapping[str, Any]) -> str:
+        return _outcome(record) + (f", gave {answer(record.get('prediction'))}"
+                                   if record.get("prediction") is not None else "")
+
+    steps = step_facts(parent, child)
+    return (f"- Item {child.get('id')} -- {kind} (child {child_id}), score "
+            f"{fmt_score(parent.get('score'))} -> {fmt_score(child.get('score'))}: parent "
+            f"{side(parent)}; child {side(child)}"
+            + (f"; {steps}" if steps else "; no reply changed")
+            + (f" ({why})" if why else "") + ".")
+
+
+def _changed_items(pairs: Sequence[dict[str, Any]]) -> list[tuple[int, str, str]]:
+    """Every changed item of every pair as ``(pair index, kind, item)``, in the order the
+    section picks items to show whole: per rank, each child in turn, each kind in turn
+    (`EDIT_KINDS`), so every child and every kind of change is seen before a second
+    item of any."""
+    per_pair = []
+    for pair in pairs:
+        if not pair.get("parent"):
+            per_pair.append({})
+            continue
+        change = edit_change(pair.get("parent_records"), pair.get("child_records"))
+        per_pair.append({key: list(change[key]) for key, _label in EDIT_KINDS})
+    order = []
+    depth = max((len(items) for kinds in per_pair for items in kinds.values()), default=0)
+    for rank in range(depth):
+        for index, kinds in enumerate(per_pair):
+            for key, _label in EDIT_KINDS:
+                if rank < len(kinds.get(key, ())):
+                    order.append((index, key, kinds[key][rank]))
+    return order
 
 
 def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                        omissions: list[dict[str, Any]] | None = None,
                        settled: Collection[str] | None = None,
-                       homes: Mapping[str, str] | None = None) -> list[str]:
+                       homes: Mapping[str, str] | None = None,
+                       shown: Mapping[str, str] | None = None,
+                       room: int | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
-    against its parent, on train items only. Every child is listed with its counts, and
-    every changed item (fixed, broken, and the largest score rises and drops) is shown
-    whole, parent beside child (`_pair_block`); size is never a reason to leave one
-    out. This is the home of each child's edits and prediction, shown whole (`whole_edits`:
-    a ``set_knob`` as the lines it changed against the pair's ``before`` values): other
-    sections point here. A text a current knob holds (``homes``) is named by that knob."""
+    against its parent, on train items only. Every child is listed with its counts and
+    every changed item (fixed, broken, and the largest score rises and drops) is named:
+    up to ``EDIT_ITEMS_WHOLE`` of them, chosen in turn (`_changed_items`), show how the
+    edit moved them (`_moved_block`); the rest are one line each (`_moved_line`). The
+    first pick is always shown -- the child's moved replies whole, the parent's cut to
+    fit ``room`` (by default ``EDIT_CHANGE_SHARE`` of ``TRAJECTORY_BUDGET``) only when the
+    block would pass it, each cut marked and in ``omissions`` -- and each later pick only
+    when it fits what is left of the room whole. Blocks are printed in the section's
+    order, so a reference to a text shown in it points back. A trace another
+    section shows whole (``shown``: `record_key` -> where) is named by where it is, never
+    repeated. This is the home of each child's edits and prediction, shown whole
+    (`whole_edits`: a ``set_knob`` as the lines it changed against the pair's ``before``
+    values): other sections point here. A text a current knob holds (``homes``) is named
+    by that knob."""
     if not pairs:
         return []
+    room = int(TRAJECTORY_BUDGET * EDIT_CHANGE_SHARE) if room is None else room
+    labels = dict(EDIT_KINDS)
+    records = [(_by_item(p.get("parent_records")), _by_item(p.get("child_records")))
+               for p in pairs]
+
+    def render(index: int, key: str, item: str, quoted: _Quoted, chars: tuple[int, int],
+               found: list[dict[str, Any]] | None) -> str:
+        parent, child = records[index]
+        return _moved_block(parent[item], child[item], labels[key], pairs[index].get("child"),
+                            quoted, found, settled, *chars)
+
+    # Choose the items shown whole, in turn (`_changed_items`). The first broken and the
+    # first fixed pick (`EDIT_FORCED_KINDS`) are always shown: the child's moved replies
+    # whole, the parent's whole when the block fits what is left of ``room``, else each
+    # cut to the longest length that fits, at least ``EDIT_PARENT_FLOOR`` (marked). Past
+    # its share of the section's ceiling (``EDIT_CEILING_ROOMS`` rooms, shared evenly by
+    # the forced picks still to come) a forced pick's child replies are cut too, to at
+    # least ``EDIT_CHILD_FLOOR``. Every other pick only when it fits
+    # what is left whole; one that does not is skipped for the next, its line saying why.
+    ceiling = EDIT_CEILING_ROOMS * room
+    picks: dict[tuple[int, str], tuple[int, int]] = {}
+    skipped: dict[tuple[int, str], str] = {}
+    forced: set[str] = set()
+    over: list[tuple[int, str, int]] = []
+    capped: list[tuple[int, str, int]] = []
+    past: list[tuple[int, str, int]] = []
+    quoted = _Quoted(shown)
+    used = 0
+
+    def longest(fits: Callable[[int], bool], low: int) -> int:
+        high = ITEM_TEXT_MAX
+        while low < high:
+            middle = (low + high + 1) // 2
+            low, high = (middle, high) if fits(middle) else (low, middle - 1)
+        return low
+
+    order = _changed_items(pairs)
+    present = [kind for kind in EDIT_FORCED_KINDS if any(key == kind for _i, key, _t in order)]
+    for index, key, item in order:
+        if len(picks) >= EDIT_ITEMS_WHOLE:
+            skipped[(index, item)] = (f"not shown whole: {EDIT_ITEMS_WHOLE} items, the most "
+                                      "shown whole, came first")
+            continue
+        must = key in EDIT_FORCED_KINDS and key not in forced
+        chars = (ITEM_TEXT_MAX, ITEM_TEXT_MAX)
+        trial = quoted.copy()
+        block = render(index, key, item, trial, chars, None)
+        if used + len(block) + 2 > room:
+            if not must:
+                skipped[(index, item)] = (f"not shown whole: its block is {len(block):,} "
+                                          f"chars, {max(0, room - used):,} of the "
+                                          f"{room:,}-char room left")
+                continue
+            # A cut that would save fewer than `EDIT_CUT_MIN` characters is not made.
+            parent_chars = ITEM_TEXT_MAX if used + len(block) + 2 - room < EDIT_CUT_MIN else (
+                longest(lambda n: used + len(render(
+                    index, key, item, quoted.copy(), (n, ITEM_TEXT_MAX), None)) + 2 <= room,
+                    EDIT_PARENT_FLOOR))
+            chars = (parent_chars, ITEM_TEXT_MAX)
+            block = render(index, key, item, quoted.copy(), chars, None)
+            # Its share of what is left under the ceiling, the forced picks still to come
+            # each getting the same.
+            share = (ceiling - used) // max(1, len([k for k in present if k not in forced]))
+            if len(block) + 2 > share:
+                child_chars = longest(lambda n: len(render(
+                    index, key, item, quoted.copy(), (parent_chars, n), None)) + 2 <= share,
+                    EDIT_CHILD_FLOOR)
+                chars = (parent_chars, child_chars)
+                capped.append((index, item, child_chars))
+            trial = quoted.copy()
+            block = render(index, key, item, trial, chars, None)
+            if used + len(block) + 2 > room:
+                over.append((index, item, max(0, room - used)))
+            if chars[1] < ITEM_TEXT_MAX and used + len(block) + 2 > ceiling:
+                # Even at the floor the child's moved replies pass the ceiling: kept, and
+                # said so, never claimed to fit.
+                past.append((index, item, used + len(block) + 2))
+        forced.add(key)
+        picks[(index, item)] = chars
+        quoted, used = trial, used + len(block) + 2
+    # Rendered again in the order they are printed, so a reference only points back.
+    quoted = _Quoted(shown)
+    blocks = {(index, item): render(index, key, item, quoted, picks[(index, item)], omissions)
+              for index, pair in enumerate(pairs) if pair.get("parent")
+              for key, _label in EDIT_KINDS
+              for item in edit_change(pair.get("parent_records"),
+                                      pair.get("child_records"))[key]
+              if (index, item) in picks}
+    # A forced pick past the room (the child's moved replies whole) or past the ceiling
+    # (them cut): said in the section and recorded, so neither the proposer nor the run
+    # log misses it.
+    if omissions is not None:
+        omissions += [{"item": item, "step": "what the last edit changed: over room",
+                       "chars": 0, "block": len(blocks[(index, item)]), "room": room,
+                       "room_left": left} for index, item, left in over]
+        omissions += [{"item": item, "step": "what the last edit changed: over ceiling",
+                       "chars": 0, "blocks": total, "ceiling": ceiling,
+                       "child_floor": EDIT_CHILD_FLOOR} for _index, item, total in past]
     lines = ["## What the last edit changed",
              "The latest children of the candidate you edit (every child of its last round, "
              "siblings included), or that "
@@ -4559,8 +4980,39 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
              "item on the train items both were scored on. The parent's records are from the "
              "child's epoch, so the same seed, when it was scored then (the candidate you edit "
              "is re-scored each epoch); a pair scored with different seeds is marked, and some "
-             "of its changes may be run-to-run noise."]
-    for pair in pairs:
+             "of its changes may be run-to-run noise.",
+             f"Every changed item (fixed, broken, and the largest score drops and rises) is "
+             f"named with both scores, each side's answer and the steps whose reply changed, "
+             f"is new or is gone. Up to {EDIT_ITEMS_WHOLE} of them are shown with those "
+             "steps whole, the parent's reply beside the child's, picked one per child and "
+             "per kind in turn (broken, fixed, score dropped, score rose). The first broken "
+             "and the first fixed pick are always shown, the child's replies whole and the "
+             "parent's cut (head and tail, marked) only when the block would pass what is "
+             f"left of {room:,} characters, the child's too when the blocks shown whole "
+             f"would pass {ceiling:,}; every other pick only when it fits whole with the "
+             "ones before it, and an item not shown whole says why. A trace shown whole elsewhere in this "
+             "request is named by where it is, not repeated."]
+    def said_cut(at: int, item: str) -> str:
+        parent, child = (side[item] for side in records[at])
+        moves = step_moves(parent, child)
+        keys = {*moves["changed"], *moves["new"]}
+        moved = len(keys)
+        cut = next((n for at2, item2, n in capped if (at2, item2) == (at, item)), None)
+        if cut is not None and not any(
+                len(str(e.get("response") or "").strip()) - cut >= EDIT_CUT_MIN
+                for key, e in _runs(child) if key in keys):
+            cut = None  # every moved reply was already within the cut: none was made
+        said = (f"its child's {moved} moved replies cut to {cut:,} chars each (head and tail, "
+                "marked)" if cut is not None else "the child's moved replies whole")
+        total = next((n for at2, item2, n in past if (at2, item2) == (at, item)), None)
+        if total is not None:
+            return (f"{said}; the blocks shown whole are past the section's {ceiling:,}-char "
+                    f"limit: {total:,} chars, because each of its {moved} moved replies keeps "
+                    f"at least {EDIT_CHILD_FLOOR:,} chars or is whole.")
+        return said + (f" to keep the blocks shown whole within the section's {ceiling:,}-char "
+                       "ceiling." if cut is not None else ".")
+
+    for index, pair in enumerate(pairs):
         head = (f"### Child {pair.get('child')} of {pair.get('parent') or '(none)'}"
                 + (f" -- gate: {pair['gate']}" if pair.get("gate") else ""))
         lines += ["", head, "Edits:", whole_edits(pair.get("edit"), pair.get("before"), homes)]
@@ -4596,12 +5048,28 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                       *([f"Prediction check -- {line}" for line in checked] or [
                           "Prediction check: it names no shared item or step, so only the "
                           "counts above can say whether it held."])]
-        parent, child = _by_item(pair.get("parent_records")), _by_item(pair.get("child_records"))
-        for kind, items in (("fixed", change["fixed"]), ("broken", change["broken"]),
-                            ("score rose", change["up"]), ("score dropped", change["down"])):
-            for item in items:
-                lines += ["", f"#### Item {item} -- {kind} (child {pair.get('child')})",
-                          _pair_block(parent[item], child[item], omissions, settled)]
+        parent, child = records[index]
+        changed = [(key, item) for key, _label in EDIT_KINDS for item in change[key]]
+        whole = [item for _key, item in changed if (index, item) in blocks]
+        if changed:
+            lines.append(f"{len(changed)} changed item(s); shown whole below: "
+                         + (", ".join(whole) if whole else "none")
+                         + (f"; in one line each after them: {len(changed) - len(whole)}"
+                            if len(changed) > len(whole) else "") + ".")
+        for at, item, left in over:
+            if at == index:
+                lines.append(
+                    f"Item {item}'s block is {len(blocks[(at, item)]):,} chars, past the "
+                    f"{left:,} chars left of the {room:,}-char room: as the first pick of "
+                    "its kind it is shown all the same, " + said_cut(at, item))
+        for key, item in changed:
+            if (index, item) in blocks:
+                lines += ["", blocks[(index, item)]]
+        rest = [_moved_line(parent[item], child[item], labels[key], pair.get("child"),
+                            skipped.get((index, item), ""))
+                for key, item in changed if (index, item) not in blocks]
+        if rest:
+            lines += ["", *rest]
     return lines
 
 
@@ -4697,7 +5165,9 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
             from .analysts import item_cap
 
             cap = item_cap([len(p) for p in parts], REJECTED_EDITS_CHARS, floor=200)
-            shown = [p if cap is None or len(p) <= cap else _clip_middle(p, cap)
+            # A cut edit is one line (its fence, if any, folded): head and tail around the
+            # cut, so no part of it can open a fence or read as a heading.
+            shown = [p if cap is None or len(p) <= cap else _one_line_cut(p, cap)
                      for p in parts]
             cut = sum(1 for p, q in zip(parts, shown) if p != q)
             lines += ["", head,
@@ -4710,6 +5180,17 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
                       "\n".join(shown) if shown else "(none)",
                       *wrong, *([review] if review else [])]
     return lines
+
+
+def _one_line_cut(text: str, limit: int) -> str:
+    """``text`` on one line (newlines as ``DIFF_LINE_SEPARATOR``) within ``limit``: its
+    head and tail around ``[... N characters omitted ...]``."""
+    flat = text.replace("\n", DIFF_LINE_SEPARATOR)
+    if len(flat) <= limit:
+        return flat
+    mark = f" [... {len(flat) - limit} characters omitted ...] "
+    keep = max(0, limit - len(mark))
+    return flat[:(keep + 1) // 2] + mark + (flat[len(flat) - keep // 2:] if keep // 2 else "")
 
 
 def _rules_text() -> str:

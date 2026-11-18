@@ -9,8 +9,8 @@ item. Here an item is shown with:
 - the task's input once;
 - for each step, what its prompt took from what is already shown (the input, an earlier
   step's reply) said by name -- ``sees: the input, compare's reply`` -- and only the rest
-  of its prompt (its own instructions), then its full reply, each fenced with headings
-  demoted so nothing in it reads as a section of the request;
+  of its prompt (its own instructions), then its full reply, each fenced with its heading
+  lines escaped (`escape_headings`) so nothing in it reads as a section of the request;
 - and, across the items of one request, an instruction text shown in an earlier item said
   as "same as item X" (`dedup`), so each distinct instruction appears once.
 
@@ -65,13 +65,44 @@ def _fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _demoted(text: str) -> str:
-    return re.sub(r"(?m)^(#{1,3})(?=\s)", lambda m: "#" * (len(m.group(1)) + 3), text)
+#: A line Markdown reads as a heading (`#` to `######` then a space or the line's end,
+#: indented at most three spaces).
+_HEADING = re.compile(r"(?m)^([ \t]{0,3})(#{1,6})(?=[ \t]|$)")
+
+
+def escape_headings(text: str) -> str:
+    """``text`` with each heading line's ``#`` run escaped (``\\##``), so a step's own
+    "## Answer", quoted as evidence, can never read as one of the request's headings at
+    any level. The words are unchanged; only the marker is escaped, as Markdown escapes
+    it. Evidence only: a text the optimizer may copy back is quoted by `exact_block`."""
+    return _HEADING.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
+
+
+def exact_block(text: Any) -> list[str]:
+    """``text`` byte-exact in a code fence longer than any run of backticks in it, so no
+    line of it can close the fence and nothing in it is read as Markdown (a heading, a
+    setext underline, a fence): for a text the optimizer may copy into a prompt -- a knob
+    text, a finding's proposed change, the memory note -- which must not gain escapes."""
+    body = "" if text is None else str(text)
+    fence = _fence(body)
+    return [fence, body, fence]
+
+
+def quoted(text: Any) -> str:
+    """A model's text embedded in one of the request's own lines: a one-line text as it
+    is (mid-line, nothing in it reads as a heading or a fence); a text of several lines
+    on lines of its own, byte-exact in a fence (`exact_block`)."""
+    body = "" if text is None else str(text)
+    if "\n" not in body:
+        return body
+    return "\n" + "\n".join(exact_block(body)) + "\n"
 
 
 def fenced(text: str) -> list[str]:
-    """``text`` (headings demoted) in a code fence longer than any run of backticks in it."""
-    body = _demoted(text)
+    """``text`` in a code fence longer than any run of backticks in it, its heading lines
+    escaped (`escape_headings`): a quoted step output, trace or prompt, whose own headings
+    cannot read as the request's at any level."""
+    body = escape_headings(text)
     fence = _fence(body)
     return [fence, body, fence]
 
@@ -88,7 +119,7 @@ def clip(text: Any, limit: int, *, item: Any = None, step: str = "",
     chars = len(text) - 2 * keep
     if omissions is not None:
         omissions.append({"item": item, "step": step, "chars": chars})
-    return f"{text[:keep]}\n{mark.format(chars=chars)}\n{text[-keep:]}"
+    return f"{text[:keep]}\n{mark.format(chars=chars)}\n{text[len(text) - keep:]}"
 
 
 class _Seen:

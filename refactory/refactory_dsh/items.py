@@ -44,7 +44,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from refactory_dsh.paths import project_root, project_for_nodes
 from refactory_dsh.nn import Node
@@ -466,12 +466,49 @@ def gate_visit(node: str, verdict: Any) -> dict[str, Any]:
             "reason": reason[:STEP_PREVIEW_CHARS]}
 
 
-def record_visit(workdir: Path, visit: dict[str, Any]) -> None:
+def refused_at_cap(earlier: Sequence[Mapping[str, Any]], visit: Mapping[str, Any],
+                   reloop: Mapping[str, Any] | None) -> bool:
+    """Whether a gate visit's verdict is a reloop its cap refuses: one of the gate's
+    reloop verdicts (``reloop["verdicts"]``) when the item's ``earlier`` visits of the
+    gate already took ``reloop["max_iterations"]`` reloops -- the count each runtime
+    routes on (the walker's `Executor._visit_gate`, the spine's `Spine.verdict`), so the
+    item's record says which verdict was refused, not one more reloop than ran."""
+    if not reloop or visit.get("kind") != "gate":
+        return False
+    # Both runtimes route a verdict whatever its case (`nn.executor.route_verdict`, the
+    # spine's own), so it is read the same here.
+    verdicts = {str(v).strip().lower() for v in reloop.get("verdicts") or ()}
+    if str(visit.get("verdict")).strip().lower() not in verdicts:
+        return False
+    taken = sum(1 for v in earlier if isinstance(v, Mapping) and v.get("kind") == "gate"
+                and v.get("node") == visit.get("node")
+                and str(v.get("verdict")).strip().lower() in verdicts
+                and not v.get("exhausted"))
+    return taken + 1 > int(reloop.get("max_iterations") or 0)
+
+
+def mark_refused(visit: dict[str, Any], cap: Any) -> dict[str, Any]:
+    """``visit`` marked as a reloop its cap of ``cap`` refused (`refused_at_cap`)."""
+    visit["exhausted"] = True
+    visit["cap"] = int(cap)
+    return visit
+
+
+def record_visit(workdir: Path, visit: dict[str, Any],
+                 reloop: Mapping[str, Any] | None = None) -> None:
     """Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
     beside the model calls, under its lock (`update_record_file`); `make_item_record`
     files it under ``steps``. The spine's runner calls it inside a data-node pass (the
-    walker keeps visits in memory)."""
-    _append_to_sidecar(workdir, visit)
+    walker keeps visits in memory). With ``reloop`` (a gate's reloop verdicts and cap,
+    from its declarations), a reloop the cap refuses is marked so (`refused_at_cap`),
+    counted under the same lock as the append."""
+
+    def append(existing: list[Any]) -> None:
+        if refused_at_cap(existing, visit, reloop):
+            mark_refused(visit, (reloop or {}).get("max_iterations"))
+        existing.append(visit)
+
+    update_record_file(workdir / EXCHANGES_SIDECAR, append, list)
 
 
 def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:

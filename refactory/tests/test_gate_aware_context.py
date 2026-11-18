@@ -190,8 +190,8 @@ def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkey
     ids = {_level(c): c.id for c in loop.population}
     assert f"### Child {ids[6]} of {ids[7]} -- gate: rejected" in section
     assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
-    assert f"#### Item t5 -- broken (child {ids[6]})\nParent:\n### Item t5 — passed" in section
-    assert "Child:\nanswered wrong (score" in section
+    head = section.split(f"#### Item t5 -- broken (child {ids[6]})\n", 1)[1].split("\n", 1)[0]
+    assert "Parent: passed (score" in head and "Child: answered wrong (score" in head, head
     assert 'name="level" -- value: 6' in section and "different seeds" in section
     assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
 
@@ -225,10 +225,12 @@ def test_graded_changes_list_the_largest_moves_each_way():
     assert change["up"] == ["i7", "i6", "i5"] and change["down"] == ["i0", "i1", "i2"]
 
 
-def test_every_changed_item_is_shown_whole_parent_beside_child():
-    """Twenty broken items with long replies: each is shown whole -- size is no reason to
-    leave one out -- the input once, and a reply the child kept said as the parent's."""
-    from refactory_dsh.optim.base import _edit_change_lines
+def test_every_changed_item_is_named_and_a_few_are_shown_whole_never_cut():
+    """Twenty broken items with long replies: every one is named, with its answers and the
+    step whose reply changed; the first ``EDIT_ITEMS_WHOLE`` that fit the room show that
+    step whole, parent beside child, the kept step only named -- items chosen, no text
+    cut."""
+    from refactory_dsh.optim.base import EDIT_ITEMS_WHOLE, _edit_change_lines
 
     def rec(item: str, passed: bool, reply: str) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
@@ -240,13 +242,26 @@ def test_every_changed_item_is_shown_whole_parent_beside_child():
             "parent_records": [rec(f"i{k}", True, f"OLD-{k} " + "z" * 9000) for k in range(20)],
             "child_records": [rec(f"i{k}", False, f"NEW-{k} " + "y" * 9000) for k in range(20)]}
     omissions: list = []
-    text = "\n".join(_edit_change_lines([pair], omissions=omissions))
+    text = "\n".join(_edit_change_lines([pair], omissions=omissions, room=10 ** 6))
+    whole = [k for k in range(20) if f"#### Item i{k} -- broken (child c)" in text]
+    # The first of the broken items in their listed (id) order.
+    assert [f"i{k}" for k in whole] == sorted(f"i{k}" for k in range(20))[:EDIT_ITEMS_WHOLE]
     for k in range(20):
-        assert f"#### Item i{k} -- broken (child c)" in text
-        assert f"OLD-{k} " + "z" * 9000 in text and f"NEW-{k} " + "y" * 9000 in text
-        assert text.count(f"QUESTION i{k}\n") == 1 and text.count(f"KEPT i{k}\n") == 1
-    assert text.count("Reply: same as the parent's.") == 20
-    assert omissions == [] and "did not fit" not in text
+        shown = k in whole
+        assert (f"OLD-{k} " + "z" * 9000 in text) is shown
+        assert (f"NEW-{k} " + "y" * 9000 in text) is shown
+        assert text.count(f"QUESTION i{k}\n") == int(shown) and f"KEPT i{k}" not in text
+        if not shown:
+            assert (f"- Item i{k} -- broken (child c), score 1 -> 0: parent passed; child "
+                    "answered wrong; `t` 1 -> 1 run(s), reply changed (not shown whole: 4 "
+                    "items, the most shown whole, came first).") in text
+    assert text.count("Same reply in parent and child: `s`.") == EDIT_ITEMS_WHOLE
+    listed = sorted(f"i{k}" for k in whole)
+    assert f"20 changed item(s); shown whole below: {', '.join(listed)}" in text
+    assert omissions == [] and "chars omitted" not in text
+    # A room for two: two shown whole, the rest still named.
+    small = "\n".join(_edit_change_lines([pair], room=2 * 18800))
+    assert small.count("#### Item ") == 2 and small.count("\n- Item ") == 18
 
 
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
@@ -609,9 +624,9 @@ def test_a_rationale_shown_in_full_is_not_repeated_in_every_change_so_far(tmp_pa
 
 def test_a_changed_item_s_cut_texts_are_recorded_and_replies_match_by_attempt():
     """In "What the last edit changed": a child's answer, grader reason or reply over
-    ITEM_TEXT_MAX is cut, marked and recorded; a reply the child kept is "same as the
-    parent's" only at the same step and attempt (a loop's retries are told apart)."""
-    from refactory_dsh.optim.base import ITEM_TEXT_MAX, _pair_block
+    ITEM_TEXT_MAX is cut, marked and recorded; a reply the child kept is the same as the
+    parent's only at the same step and attempt (a loop's retries are told apart)."""
+    from refactory_dsh.optim.base import ITEM_TEXT_MAX, _moved_block, _Quoted
 
     huge = "H" * (ITEM_TEXT_MAX + 500)
     parent = {"id": "i1", "passed": True, "score": 1.0, "prediction": "B",
@@ -623,9 +638,11 @@ def test_a_changed_item_s_cut_texts_are_recorded_and_replies_match_by_attempt():
                            {"node": "s", "prompt": "p", "response": "SECOND"},
                            {"node": "t", "prompt": "p", "response": huge}]}
     omissions: list = []
-    block = _pair_block(parent, child, omissions)
+    block = _moved_block(parent, child, "broken", "c", _Quoted({}), omissions)
     assert {o["step"] for o in omissions} == {"prediction", "grader", "t"}, omissions
     assert block.count("chars omitted]") == 3
-    steps = block.split("Child:", 1)[1].split("##### Step ")[1:]
-    assert "SECOND" in steps[0] and "same as" not in steps[0], "run 1 differs from run 1"
-    assert "same as the parent's (its run 2 of that step)." in steps[1]
+    assert "Same reply in parent and child: `s` (run 2)." in block
+    steps = block.split("##### Step ")[1:]
+    assert steps[0].startswith("`s` (1 of 3 in the child, run 1; reply changed)"), steps[0]
+    assert "FIRST" in steps[0] and "SECOND" in steps[0], "run 1 differs from run 1"
+    assert steps[1].startswith("`t` (3 of 3 in the child; new: the parent did not run it)")
