@@ -582,3 +582,16 @@ def test_a_rerun_never_takes_the_run_past_its_rollout_budget(tmp_path):
             pass
     entry = _incidents(loop, "train")[0]
     assert entry["reran"] == 0 and entry["not_scored"] == ["t2"], entry
+
+
+def test_an_unstarted_sandbox_is_the_one_harness_incident_class():
+    """`snippet.SandboxUnavailable` (and `NoSandbox`) is a `model.HarnessIncident`, so its
+    text crossing a process is known by its class name (`model.HARNESS_INCIDENT_CLASSES`)."""
+    from refactory_dsh.items import error_kind
+    from refactory_dsh.model import HARNESS_INCIDENT_CLASSES, HarnessIncident
+    from refactory_dsh.snippet import NoSandbox, SandboxUnavailable
+
+    assert issubclass(SandboxUnavailable, HarnessIncident) and issubclass(NoSandbox, HarnessIncident)
+    assert {"SandboxUnavailable", "NoSandbox"} <= HARNESS_INCIDENT_CLASSES
+    assert error_kind(RuntimeError("solve: NoSandbox: code nodes cannot run here")) \
+        == "harness_incident"

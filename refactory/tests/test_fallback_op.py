@@ -226,9 +226,12 @@ class _Model:
 CRASH = CompletionFailed("model completion failed (exit 1): " + WORKER_CRASH, kind="worker")
 TIMEOUTS = {
     "timeout": CompletionTimeout("model completion timed out after 1800s of inactivity"),
-    "harness_incident": HarnessBackstop("model session reached the harness backstop"),
     "declared_timeout": DeclaredTimeout("model session reached its node's declared timeout_s"),
 }
+
+#: A session still writing at the harness backstop: the model's own failure, like the
+#: output limit, so a fallback answers it.
+BACKSTOP = HarnessBackstop("model session hit the harness backstop after 14400s")
 
 
 def _walk(name: str, state: dict, answers: dict, tmp_path: Path, monkeypatch, *,
@@ -272,6 +275,19 @@ def test_walker_a_timeout_never_reaches_the_fallback(kind, name, state, step, tm
                          ok=False)
     assert f"{step}_fallback" not in log
     assert [r["error_kind"] for r in records] == [kind] * ITEMS
+
+
+@pytest.mark.parametrize("name, state, step", [("livemath/solver", _s1, "solve"),
+                                               ("livemath/skill_graph", _s4, "decide")])
+def test_walker_a_step_still_writing_at_the_backstop_is_answered_by_its_fallback(
+        name, state, step, tmp_path, monkeypatch):
+    """The model kept writing for the whole backstop: its own failure (``backstop``), so
+    the fallback answers, once per item, and the item is graded on that answer."""
+    records, log = _walk(name, state(), {step: BACKSTOP}, tmp_path, monkeypatch)
+    _graded_b(records)
+    assert log.count(f"{step}_fallback") == ITEMS
+    for record in records:
+        assert record["missing_steps"][step]["cause"] == "backstop", record
 
 
 def test_walker_timeout_retries_spent_go_on_without_an_answer(tmp_path, monkeypatch):
@@ -563,7 +579,7 @@ def _errors() -> dict[str, BaseException]:
                                          kind="output_limit"),
         "code error": SnippetError("the code raised: KeyError"),
         "inactivity": TIMEOUTS["timeout"],
-        "backstop": TIMEOUTS["harness_incident"],
+        "backstop": BACKSTOP,
         "declared wall": TIMEOUTS["declared_timeout"],
         "timeout spent": RetriesExhausted("solve timed out twice", kind="timeout"),
         "declared spent": RetriesExhausted("solve timed out twice", kind="timeout",
@@ -587,14 +603,15 @@ def _errors() -> dict[str, BaseException]:
     }
 
 
-GENUINE = {"raises", "crash spent", "output limit", "code error", "prompt too long"}
+GENUINE = {"raises", "crash spent", "output limit", "code error", "prompt too long",
+           "backstop"}
 
 
 @pytest.mark.parametrize("name", sorted(_errors()))
 def test_only_a_genuine_failure_falls_back(name):
     """The step's own failures (it raised, crashed past its retries, hit its output limit
-    or a prompt too long, its code raised) fall back; time, harness and configuration
-    failures of every kind never do."""
+    or a prompt too long, kept writing to the backstop, its code raised) fall back; time,
+    harness and configuration failures of every kind never do."""
     from refactory_dsh.node_retry import falls_back_on
 
     assert falls_back_on(_errors()[name]) is (name in GENUINE)
@@ -603,7 +620,9 @@ def test_only_a_genuine_failure_falls_back(name):
 @pytest.mark.parametrize("text, kind", [
     ("solve: SnippetTimeout: the code ran over its 10 s limit", "RuntimeError"),
     ("solve: SandboxUnavailable: the sandbox did not start within 60 s", "harness_incident"),
-    ("solve exited with code 1\nSandboxUnavailable: code nodes cannot run here", "harness_incident"),
+    ("solve: NoSandbox: code nodes cannot run here", "harness_incident"),
+    # Only the first line is the harness's own: a later one may quote a reply.
+    ("solve exited with code 1\nSandboxUnavailable: code nodes cannot run here", "RuntimeError"),
     ("check: ValueError: the reply said 'SnippetTimeout: the code ran over its 1 s limit'",
      "RuntimeError"),
 ])

@@ -524,15 +524,18 @@ ERROR_TEXT_CHARS = 4096 + 512 + 1
 #: - `DECLARED_TIMEOUT_RETRIED_LINE`, `_HARNESS_TIMEOUT_RETRIED_LINE`: the same two, once
 #:   the node's declared retry is spent (`node_retry.RetriesExhausted`).
 _NODE = r"[A-Za-z0-9_.-]+: "
+# A line naming its type (``"<node>: <Kind>: "``) is the harness's whatever the message
+# says: the type is written by the runtime. One without (the spine's untyped forms, the
+# worker's ``"worker: "``) must also carry the harness's own message text.
 
 _HARNESS_TIMEOUT_LINE = re.compile(
-    rf"(?:{_NODE}CompletionTimeout: |worker: ){re.escape(COMPLETION_TIMEOUT_TEXT)}")
+    rf"{_NODE}CompletionTimeout: |(?:{_NODE}|worker: ){re.escape(COMPLETION_TIMEOUT_TEXT)}")
 
 HARNESS_BACKSTOP_LINE = re.compile(
-    rf"(?:{_NODE}(?:HarnessBackstop: )?|worker: )model session {re.escape(HARNESS_BACKSTOP_TEXT)}")
+    rf"{_NODE}HarnessBackstop: |(?:{_NODE}|worker: )model session {re.escape(HARNESS_BACKSTOP_TEXT)}")
 
 DECLARED_TIMEOUT_LINE = re.compile(
-    rf"(?:{_NODE}(?:DeclaredTimeout: )?|worker: ){re.escape(DECLARED_TIMEOUT_TEXT)}")
+    rf"{_NODE}DeclaredTimeout: |(?:{_NODE}|worker: ){re.escape(DECLARED_TIMEOUT_TEXT)}")
 
 DECLARED_TIMEOUT_RETRIED_LINE = re.compile(
     rf"(?:{_NODE}(?:RetriesExhausted: )?|worker: )[A-Za-z0-9_.-]+ timed out [^\n]*?"
@@ -563,23 +566,20 @@ def first_line(text: Any) -> str:
 SNIPPET_TIMEOUT_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )?SnippetTimeout: the code ran over its ",
                                   re.MULTILINE)
 
-#: The same for a sandbox that did not start (`snippet.SandboxUnavailable`): the machine.
-SANDBOX_UNAVAILABLE_LINE = re.compile(r"^(?:[A-Za-z0-9_.-]+: )?SandboxUnavailable: ",
-                                      re.MULTILINE)
 
-#: A `model.HarnessIncident` that crossed a process as text: its message starts with
-#: `model.HARNESS_INCIDENT_TEXT`, after the walker's ``"<node>: <Class>: "`` or the spine's
-#: (its worker's marker line), on the error's first line only (`first_line`): a later
-#: line may quote a model's reply. Its class must be a harness incident's (`_incident_line`).
-_HARNESS_INCIDENT_LINE = re.compile(
-    rf"{_NODE}(?P<kind>[A-Za-z_][A-Za-z0-9_]*): " + re.escape(HARNESS_INCIDENT_TEXT))
+#: A `model.HarnessIncident` that crossed a process as text: the walker's
+#: ``"<node>: <Class>: "`` or the spine's (its worker's marker line, its runner's
+#: account), on the error's first line only (`first_line`): a later line may quote a
+#: model's reply. Its class must be a harness incident's (`_incident_line`); its message
+#: (`model.HARNESS_INCIDENT_TEXT` for one raised by a Task or an op) decides nothing.
+_HARNESS_INCIDENT_LINE = re.compile(rf"{_NODE}(?P<kind>[A-Za-z_][A-Za-z0-9_]*): ")
 
 
 def _incident_line(head: str) -> bool:
     """Whether an error's first line is a `model.HarnessIncident` that crossed a process:
-    ``"<node>: <Class>: harness incident: ..."`` (the walker's form, and the spine's from
-    its worker's marker line), its class one of `model.HARNESS_INCIDENT_CLASSES`. Any other
-    type -- a ValueError quoting a reply, a code node's `SnippetError` -- is not one,
+    ``"<node>: <Class>: ..."`` (the walker's form, and the spine's), its class one of
+    `model.HARNESS_INCIDENT_CLASSES` (`snippet.SandboxUnavailable` among them). Any other
+    type -- a ValueError quoting a reply, a code node's own `SnippetError` -- is not one,
     whatever its message says."""
     from refactory_dsh.model import HARNESS_INCIDENT_CLASSES
 
