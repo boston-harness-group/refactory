@@ -558,7 +558,25 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
         if permitted is not None and step.get("op") not in permitted:
             return [_at("E-policy: operation is outside this run's permitted edits",
                         index, steps)]
+        internal = _internal_node_fields(step)
+        if internal:
+            return [_at(f"E-node: {', '.join(map(repr, internal))} is set by the edit layer "
+                        "(when an operator gives a code step's outputs new names), never in a "
+                        "proposal; leave it out of the node", index, steps)]
     return []
+
+
+def _internal_node_fields(step: dict[str, Any]) -> list[str]:
+    """The node fields only the edit layer sets (`node_schema.INTERNAL_FIELDS`) that a
+    node object of ``step`` carries."""
+    from refactory_dsh.nn.node_schema import INTERNAL_FIELDS
+
+    nodes: list[Any] = []
+    for key in (*NODE_OBJECT_FIELDS, "nodes"):
+        value = step.get(key)
+        nodes += value if isinstance(value, list) else [value]
+    return sorted({name for node in nodes if isinstance(node, dict)
+                   for name in node if name in INTERNAL_FIELDS})
 
 
 def _patch_targets_missing(edit: dict[str, Any], reports: Sequence[dict[str, Any]]) -> str:
@@ -2322,9 +2340,9 @@ def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
                   ) -> list[dict[str, Any]] | None:
     """``bundle`` as an example an attempt takes: a step it adds that nothing reads gets
     'to', the nearest prompt after it that can take it (`core_ops.reader_knobs`), where its
-    operator takes one; None when one stays unread (``E-unread``). A bundle that does not
-    apply here, or a state built without the knobs' values (which say what a prompt takes),
-    is returned as it is."""
+    operator takes one; None when one stays unread (``E-unread``) or an edit of it is
+    refused here. A state built without the knobs' values (which say what a prompt takes)
+    returns it as it is."""
     from refactory_dsh.nn import core_ops
 
     bundle = [dict(edit) for edit in bundle]
@@ -2336,6 +2354,10 @@ def _read_example(state: Mapping[str, Any], bundle: list[dict[str, Any]]
             for edit in bundle:
                 current = nn_edits.apply(edit, current)
                 states.append(current)
+        except nn_edits.EditError as exc:
+            # An operator's own refusal here (a take-over that reaches nothing) is not
+            # shown; another error is this sketch state's, for the example's own check.
+            return None if exc.code == "E-precondition" else bundle
         except Exception:  # noqa: BLE001 - not this check's to judge
             return bundle
         unread = core_ops.unread_new_steps(state, current)

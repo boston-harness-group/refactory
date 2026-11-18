@@ -95,13 +95,24 @@ RULES: dict[str, str] = {
            "that fills facts (marked nn.fills_facts); a slot in a knob any other node reads "
            "would reach it as written, braces and all, so it is refused (one the parent "
            "already left unfilled for the same node and knob is not judged)",
+    "V21": "an op or gate whose callable finds its files by role (nn.by_declaration with "
+           "files) finds each of its required reads as one role's file, and each role it "
+           "names a file for under renames reads is one it was built with "
+           "(nn.declared_files: by name, never by position)",
     "I:": "the mode's own invariant, stated in Mode.invariants()",
 }
 
 
+#: Rules about what only the edit layer writes (`node_schema.INTERNAL_FIELDS`, which a
+#: proposal may not carry): checked after every edit like the rest, and named with their
+#: reason in any refusal, but left out of the rules the optimizer prompt lists.
+INTERNAL_RULES = frozenset({"V21"})
+
+
 def rules_text() -> str:
-    """The rules, as the optimizer prompt shows them."""
-    return "\n".join(f"- `{code}` — {text}" for code, text in RULES.items())
+    """The rules, as the optimizer prompt shows them (without `INTERNAL_RULES`)."""
+    return "\n".join(f"- `{code}` — {text}" for code, text in RULES.items()
+                     if code not in INTERNAL_RULES)
 
 
 @dataclass(frozen=True)
@@ -513,6 +524,8 @@ def validate(
     issues.extend(map_read_issues(graph))
     issues.extend(agent_input_issues(graph, knob_values, resolve_calls=resolve_calls))
     issues.extend(required_read_issues(graph))
+    if resolve_calls:
+        issues.extend(role_read_issues(graph))
     # V20 a {{name}} slot an edit adds to a knob is somewhere a runtime fills it.
     if baseline is not None:
         issues.extend(unfilled_slot_issues(graph, knob_values, baseline=baseline,
@@ -717,6 +730,38 @@ def unfilled_slots(graph: Graph, knob_values: Mapping[str, Any], *,
             if slots:
                 found[(node_id, name)] = slots
     return found
+
+
+def role_read_issues(graph: Graph) -> list[Issue]:
+    """V21: an op or gate that finds its files by role (`nn.declared_files`) and could not
+    find a required read, or is told the name of a role it was not built with."""
+    from .executor import declared_files
+
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+        if not call:
+            continue
+        try:
+            roles = getattr(resolve(call), "declared_files", None)
+        except ResolutionError:
+            continue  # V8's to report
+        if roles is None:
+            continue
+        renamed = dict((node.renames or {}).get("reads") or {})
+        foreign = sorted(set(renamed) - set(roles))
+        if foreign:
+            issues.append(Issue("V21", f"renames reads names {foreign}, which {call!r} was not "
+                                       f"built to read; its files: {list(roles)}", node=node_id))
+        found = set(declared_files(node.reads, roles, renamed)) if node.reads else set()
+        lost = [name for name in node.required_reads if name not in found]
+        if lost:
+            issues.append(Issue("V21", f"the edits leave '{node_id}' unable to find {lost}: it "
+                                       f"finds only {list(roles)}; propose a change that keeps "
+                                       "those files under the names it reads",
+                                node=node_id))
+    return issues
 
 
 def unfilled_slot_issues(graph: Graph, knob_values: Mapping[str, Any], *,

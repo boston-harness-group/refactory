@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .ops import claude_backend_prompt
+from refactory_dsh import nn
+
+from .ops import claude_backend_prompt, declared_io as _declared
 
 VERIFY_HEAD = (
     "The following question was answered by a solver. Review the answer and "
@@ -62,10 +64,13 @@ def self_check_message(question: str, draft: str) -> str:
             f"{SELF_CHECK_INSTRUCTION}\n\n{SELF_CHECK_FORMAT}")
 
 
+@nn.by_declaration(files=("draft_answer.txt",))
 def verify_prompt(ctx: Any) -> dict[str, Any]:
-    """The verify node's framed prompt: question and the draft."""
-    message = verify_message(_question(ctx), ctx.read_text("draft_answer.txt"))
-    return {"verify_prompt": claude_backend_prompt(message)}
+    """The verify node's framed prompt: question and the draft (its one declared read,
+    ``draft_answer.txt`` as built), as its one declared fact."""
+    reads, facts = _declared(ctx, verify_prompt.declared_files, ["verify_prompt"])
+    message = verify_message(_question(ctx), ctx.read_text(reads[0] or "draft_answer.txt"))
+    return {facts[0]: claude_backend_prompt(message)}
 
 
 #: What the judge is shown for a fork attempt that gave no answer (it crashed through
@@ -73,20 +78,27 @@ def verify_prompt(ctx: Any) -> dict[str, Any]:
 NO_ATTEMPT = "(This attempt gave no answer: its session did not answer.)"
 
 
+@nn.by_declaration(files=("attempt_a.txt", "attempt_b.txt"))
 def judge_prompt(ctx: Any) -> dict[str, Any]:
-    """The judge node's framed prompt: question and both fork branches' answers.
+    """The judge node's framed prompt: question and both fork branches' answers (its two
+    declared reads, in order), as its one declared fact.
 
     A branch that did not answer is shown as `NO_ATTEMPT`; with neither there is nothing
     to judge, and the missing attempts are the error (the item has no answer)."""
-    names = ("attempt_a.txt", "attempt_b.txt")
+    reads, facts = _declared(ctx, judge_prompt.declared_files, ["judge_prompt"])
+    names = [name for name in reads if name]
     if not any(ctx.exists(name) for name in names):
         raise FileNotFoundError(f"neither attempt was written: {', '.join(names)}")
-    attempts = [ctx.read_text(name) if ctx.exists(name) else NO_ATTEMPT for name in names]
+    attempts = [ctx.read_text(name) if name and ctx.exists(name) else NO_ATTEMPT
+                for name in reads]
     message = judge_message(_question(ctx), *attempts)
-    return {"judge_prompt": claude_backend_prompt(message)}
+    return {facts[0]: claude_backend_prompt(message)}
 
 
+@nn.by_declaration(files=("draft_answer.txt",))
 def self_check_prompt(ctx: Any) -> dict[str, Any]:
-    """The self-check node's framed prompt: question, choices and the draft."""
-    message = self_check_message(_question(ctx), ctx.read_text("draft_answer.txt"))
-    return {"self_check_prompt": claude_backend_prompt(message)}
+    """The self-check node's framed prompt: question, choices and the draft (its one
+    declared read), as its one declared fact."""
+    reads, facts = _declared(ctx, self_check_prompt.declared_files, ["self_check_prompt"])
+    message = self_check_message(_question(ctx), ctx.read_text(reads[0] or "draft_answer.txt"))
+    return {facts[0]: claude_backend_prompt(message)}

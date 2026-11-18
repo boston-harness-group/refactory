@@ -773,6 +773,8 @@ def spec(node: Any, labels: Any, knobs: Mapping[str, Any] | None = None) -> dict
     return {
         "code": str(node.bound("code", knobs or {}) or ""),
         "code_knob": node.bound_knob("code"),
+        **({"renames": {k: dict(v) for k, v in node.renames.items()}}
+           if getattr(node, "renames", None) else {}),
         "inputs": list(node.inputs),
         "required_reads": list(node.required_reads),
         "labels": sorted({str(label) for label in labels if label}),
@@ -866,11 +868,38 @@ def checked_result(node_id: str, result: Any, writes: Any, facts: Any
     return dict(made), dict(files)
 
 
+def _renamed_result(result: Any, renames: Mapping[str, Mapping[str, str | None]]) -> Any:
+    """``result`` with each fact and file the node's ``renames`` names recorded under its
+    declared name (dropped when None); a name it does not name, and a result that is not
+    an object, as they are (`checked_result` judges them)."""
+    if not renames or not isinstance(result, dict):
+        return result
+    out = dict(result)
+    for key, table in renames.items():
+        given = result.get(key)
+        if key not in ("facts", "files") or not isinstance(given, dict):
+            continue
+        recorded: dict[str, str] = {}
+        for name in given:
+            under = table.get(name, name)
+            if under is not None and under in recorded:
+                raise SnippetError(
+                    f"code op returned {key} {recorded[under]!r} and {name!r}, which the run "
+                    f"records under the same name {under!r} (its outputs were renamed by an "
+                    "edit); return one of them")
+            if under is not None:
+                recorded[under] = name
+        out[key] = {table.get(name, name): value for name, value in given.items()
+                    if table.get(name, name) is not None}
+    return out
+
+
 def run(ctx: Any) -> dict[str, Any]:
     """The code op: run the node's code on its declared inputs; write the files it
     returns (each a declared write) and return the facts it returns (each declared)."""
     found = _spec(ctx)
-    result = execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx))
+    result = _renamed_result(execute(_code(ctx, found), _input(ctx, found), hide=_hide(ctx)),
+                             found.get("renames") or {})
     facts, files = checked_result(ctx.node_id, result, ctx._declared,  # noqa: SLF001
                                   ctx._declared_facts)  # noqa: SLF001
     for name, text in files.items():

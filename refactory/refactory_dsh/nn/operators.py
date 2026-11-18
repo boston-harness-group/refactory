@@ -74,21 +74,26 @@ def _declared_fact(ctx: Any, op: str) -> str | None:
 
 
 def _section(ctx: Any, name: str) -> str:
-    """One file as ``collect`` shows it: a header, then its text, or why not its text."""
+    """One file as ``collect`` shows it: a header, then its text, or why not its text. The
+    header names the file as the step was built to read it (`graph.Node.renames` ``reads``,
+    `executor.RunContext.read_renames`), so a step after it is shown the same text when an
+    edit renames the file."""
+    shown = {read: built for built, read in (getattr(ctx, "read_renames", None) or {}).items()}
+    header = shown.get(name, name)
     if not ctx.exists(name):
-        return f"### {name}\n(not written: the step that writes it did not run or wrote nothing)"
+        return f"### {header}\n(not written: the step that writes it did not run or wrote nothing)"
     path: Path = ctx.path(name)
     if path.is_dir():
-        return f"### {name}\n(a directory, not shown)"
+        return f"### {header}\n(a directory, not shown)"
     size = path.stat().st_size
     try:
         text = ctx.read_text(name)
     except UnicodeDecodeError:
-        return f"### {name}\n(a binary file at {name}, {size} bytes; not shown)"
+        return f"### {header}\n(a binary file at {name}, {size} bytes; not shown)"
     if len(text) > COLLECT_TEXT_CHARS:
-        return (f"### {name}\n(a file at {name}, {size} bytes, {len(text)} characters: "
+        return (f"### {header}\n(a file at {name}, {size} bytes, {len(text)} characters: "
                 f"longer than {COLLECT_TEXT_CHARS}, so not shown)")
-    return f"### {name}\n{text.rstrip()}"
+    return f"### {header}\n{text.rstrip()}"
 
 
 def collect(ctx: Any) -> dict[str, Any]:
@@ -307,6 +312,17 @@ def elements(ctx: Any) -> dict[str, Any]:
 #: (`executor.fills_facts`): set here, since the executor imports this module.
 elements.fills_facts = True  # type: ignore[attr-defined]
 
+#: These work from their node's declaration alone (`executor.by_declaration`): set here,
+#: since the executor imports this module.
+for _op in (collect, file_text, select):
+    _op.by_declaration = True  # type: ignore[attr-defined]
+#: select matches a label against the names of the files it reads
+#: (`executor.names_matter`).
+select.names_matter = True  # type: ignore[attr-defined]
+#: collect shows each file under a header naming it: as it was built to read it, when an
+#: edit renamed it (`graph.Node.renames` ``reads``, `core_ops._read_renames`).
+collect.shows_names = True  # type: ignore[attr-defined]
+
 
 def map_of(graph: Graph, fork_id: str) -> str | None:
     """The ``elements`` step (`MAP_CALL`) whose list fork ``fork_id`` maps over -- its one
@@ -345,6 +361,9 @@ def step_failed(ctx: Any) -> Any:
     if cause in TIMEOUT_KINDS:
         return Verdict(PROCEED, reason=f"{step} ran out of time ({cause}); no fallback")
     return Verdict(FALLBACK, reason=f"{step} failed ({cause}): {info.get('error') or ''}"[:2000])
+
+
+step_failed.by_declaration = True  # type: ignore[attr-defined]
 
 
 # ── what a graph's data is made of ────────────────────────────────────────

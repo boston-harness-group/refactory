@@ -132,10 +132,14 @@ def test_every_rule_the_validator_emits_is_documented():
 
 
 def test_the_rules_text_lists_every_rule():
+    """Every rule but those about what only the edit layer writes (`INTERNAL_RULES`)."""
+    from refactory_dsh.nn.validate import INTERNAL_RULES
+
     text = nn.rules_text()
     for code, description in nn.RULES.items():
-        assert f"`{code}`" in text
-        assert description.split(",")[0][:24] in text
+        assert (f"`{code}`" in text) == (code not in INTERNAL_RULES), code
+        if code not in INTERNAL_RULES:
+            assert description.split(",")[0][:24] in text
 
 
 def test_the_optimizer_prompt_states_the_rules():
