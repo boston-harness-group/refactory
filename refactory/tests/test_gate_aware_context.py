@@ -260,8 +260,11 @@ def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path,
     ids = {_level(c): c.id for c in loop.population}
     assert f"### {ids[6]} (proposed in epoch 2) -- gate rejected" in section
     assert f"### {ids[7]} " not in section, "an older round is one line, not a block"
-    for marker in ("RATIONALE-2", "PREDICTION-2", "DIAGNOSIS-2", "RATIONALE-1"):
+    for marker in ("RATIONALE-2", "DIAGNOSIS-2", "RATIONALE-1"):
         assert marker in section, marker
+    # A child of the last round has its prediction under "What the last edit changed",
+    # once; the reasoning points there.
+    assert "PREDICTION-2" in text
     assert "1 broken vs its parent" in section and "0 fixed" in section
 
     again = Reasoning([[]])

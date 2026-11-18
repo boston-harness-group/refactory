@@ -1085,3 +1085,79 @@ def test_a_copied_code_step_records_its_outputs_under_its_own_names():
     # Code rewritten to return the declared names directly still runs.
     assert snippet._renamed_result({"facts": {"x_a": 2}}, renames) == {"facts": {"x_a": 2}}
 
+
+
+# ── 'system' on every new agent step ─────────────────────────────────────
+
+SYSTEM = "You check every claim against the brief before you write a word."
+
+#: Each way an operator makes a new agent step, given a system prompt: every one takes
+#: 'system' as insert does (a field it refused would be dropped by a repair, unsaid).
+SYSTEM_EDITS = [
+    ("fuzz_draft_review", {"op": "insert", "after": "draft", "kind": "agent", "text": "x",
+                           "system": SYSTEM}),
+    ("livemath_skill_graph", {"op": "branch", "fork": "step_fork", "kind": "agent",
+                              "text": "Check each option backwards.", "system": SYSTEM}),
+    ("fuzz_draft_review", {"op": "merge", "steps": ["review", "finalize"], "system": SYSTEM}),
+    ("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft", "system": SYSTEM}),
+    ("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft",
+                           "combine": {"kind": "agent", "text": "Join them.", "system": SYSTEM}}),
+    ("fuzz_data_pass", {"op": "fallback", "step": "solve", "kind": "agent", "text": "x",
+                        "system": SYSTEM}),
+    ("fuzz_draft_review", {"op": "split", "step": "finalize", "into": [
+        {"kind": "agent", "text": "First half.", "system": SYSTEM},
+        {"kind": "agent", "text": "Second half."}]}),
+    ("fuzz_dataflow", {"edits": [
+        {"op": "parallelize", "after": "clean", "new": [
+            {"kind": "agent", "id": "angle1", "text": "One angle.", "system": SYSTEM},
+            {"kind": "agent", "id": "angle2", "text": "Another."}]},
+        {"op": "rewire", "step": "summarise", "sees": ["source", "clean", "angle1", "angle2"]}]}),
+]
+
+
+def _systems(candidate: Candidate) -> list[str]:
+    """Every agent's system prompt as it runs: its own text, or its bound knob's value."""
+    knobs = {name: entry["value"] for name, entry in candidate.state["knobs"].items()}
+    out = []
+    for node in _graph(candidate).nodes.values():
+        if node.kind != "agent":
+            continue
+        bound = dict(node.field_bindings).get("system_prompt_template")
+        out.append(str(knobs[bound]) if bound in knobs else node.system_prompt_template)
+    return out
+
+
+@pytest.mark.parametrize("seed, edit", SYSTEM_EDITS, ids=lambda v: v if isinstance(v, str)
+                         else (v.get("op") or v["edits"][0]["op"])
+                         + ("-combine" if "combine" in v else ""))
+def test_every_new_agent_step_takes_a_system_prompt(seed, edit):
+    applier, out = _ok(seed, edit)
+    assert SYSTEM in _systems(out), edit
+    _sound(applier, out)
+
+
+def test_a_map_s_system_prompt_is_every_run_s():
+    _applier, out = _ok("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft",
+                                              "system": SYSTEM})
+    runs = [n for n in _graph(out).nodes if n.startswith("draft_map_") and n[-1].isdigit()]
+    assert runs and all(_knob(out, f"{run}__system_prompt") == SYSTEM for run in runs)
+
+
+@pytest.mark.parametrize("edit", [
+    {"op": "insert", "after": "draft", "kind": "code", "system": SYSTEM},
+    {"op": "branch", "fork": "split", "kind": "code", "system": SYSTEM},
+    {"op": "insert", "after": "draft", "kind": "agent", "system": ["not", "text"]},
+], ids=["code insert", "code branch", "not text"])
+def test_a_system_prompt_where_no_agent_reads_it_is_refused(edit):
+    seed = "fuzz_fork_join" if edit["op"] == "branch" else "fuzz_draft_review"
+    reason = nn_edits.precheck(edit, sf.Applier(sf.seeds()[seed]).seed_state)
+    assert reason and "'system'" in reason, reason
+
+
+@needs_spine
+@pytest.mark.parametrize("seed, edit", [SYSTEM_EDITS[1], SYSTEM_EDITS[2]], ids=["branch", "merge"])
+def test_a_new_step_s_system_prompt_runs_alike_on_the_walker_and_the_spine(seed, edit):
+    """A map is left out: on the spine a map run with no element of its own fails the
+    drain with or without 'system' (its walker run is checked above)."""
+    applier, out = _ok(seed, edit)
+    _sound(applier, out, spine=True)

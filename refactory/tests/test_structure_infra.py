@@ -822,3 +822,73 @@ def test_a_rule_is_counted_once_per_proposal_when_a_fixs_refusal_is_kept():
         "E-noop: same [the proposal as a slim repair call fixed it]"])
     assert len(rejection.reasons) == 3
     assert _codes([rejection]) == {"E-noop": 1, "V15": 1}
+
+
+# ── what a repair dropped is said ─────────────────────────────────────────
+
+LONG_SYSTEM = "You read every option twice and say which given each one breaks, if any."
+
+
+def test_a_repair_that_drops_text_says_which_and_keeps_the_rest_quiet():
+    original = [{"op": "insert", "after": "clean", "kind": "agent", "role": "judge",
+                 "text": "Summarise the cleaned text in three lines.", "system": LONG_SYSTEM}]
+    kept = [{**original[0], "role": None}]
+    assert repair.lost_content(original, [{k: v for k, v in kept[0].items() if k != "role"}]) == ""
+    lost = repair.lost_content(original, [{k: v for k, v in original[0].items()
+                                           if k not in ("role", "system")}])
+    assert lost == f"insert 'system' ({len(LONG_SYSTEM)} chars)", lost
+    changed = repair.lost_content(original, [{**original[0], "text": "Summarise it."}])
+    assert changed.startswith("insert 'text'"), changed
+    # A renamed id or a moved wiring field is a fix, not lost text.
+    assert repair.lost_content([{"op": "insert", "after": "clean", "id": "summary_step_one"}],
+                               [{"op": "insert", "after": "load", "id": "summary_step_two"}]) == ""
+
+
+def test_propose_valid_records_what_a_repair_dropped_and_the_next_request_says_it():
+    state = _state("fuzz_dataflow")
+    seen: list[ProposalContext] = []
+    written = {"op": "set_knob", "name": "depth", "value": 9}
+
+    class Dropper(Optimizer):
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            seen.append(ctx)
+            return [Proposal(edits=(written, {"op": "set_knob", "name": "nonexistent",
+                                              "value": LONG_SYSTEM}))]
+
+        def repair(self, ctx, proposal, reasons, parent):  # type: ignore[no-untyped-def]
+            return Proposal(edit={"op": "set_knob", "name": "depth", "value": 4})
+
+    accepted, rejections = Dropper(k=2).propose_valid(
+        ProposalContext(), 2, parents=[Candidate.from_state(state)])
+    assert accepted and rejections[0].repaired == accepted[0].id
+    assert rejections[0].dropped == f"edit 2 (set_knob) 'value' ({len(LONG_SYSTEM)} chars)"
+    assert seen[1].repair_losses == [{"candidate": accepted[0].id,
+                                      "dropped": rejections[0].dropped}]
+    [line] = base.repair_loss_lines(seen[1].repair_losses)
+    assert accepted[0].id in line and "edit 2 (set_knob) 'value'" in line and len(line) < 300
+    assert line in seen[1].render()
+
+
+def test_the_loop_says_what_a_repair_dropped_in_the_next_request_and_keeps_it(tmp_path,
+                                                                               monkeypatch):
+    long = "Check twice, then check the units of every quantity again before you answer."
+    client = _Scripted(
+        proposals=[{"proposals": [{"edit": {"op": "set_knob", "name": "note", "patch": [
+            {"kind": "replace", "target": "Be very careful.", "content": long}]}}]}],
+        repairs=[{"edits": [_patch("Be careful.")], "why": "quoted the target"}])
+    loop = _repair_run(tmp_path, monkeypatch, client)
+    slim = next(p for p in client.prompts if p.startswith("# Repair a refused proposal"))
+    assert "Keep every text it wrote" in slim and "never deleting it" in slim
+    [rejection] = loop.rejections
+    assert rejection.repaired and rejection.dropped == f"set_knob 'patch' ({len(long)} chars)"
+    assert f'"dropped": "{rejection.dropped}"' in (loop.root / "journal.jsonl").read_text()
+    request = loop._context().render()
+    assert f"`{rejection.repaired}` is your refused proposal as a slim repair fixed it" in request
+    assert rejection.dropped in request
+    from test_val_gate import _loop
+    from test_compound_proposals import TwoLevels
+    from test_skillopt import _patch_mode
+    with _patch_mode(TwoLevels):
+        again = _loop(tmp_path, epochs=1, batch_size=1)
+        again._replay(loop.root / "journal.jsonl")
+    assert again.rejections[0].dropped == rejection.dropped

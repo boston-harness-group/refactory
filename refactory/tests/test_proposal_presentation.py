@@ -403,13 +403,14 @@ def _wiring_whole(text: str, compact: bool = False) -> None:
         assert f'"produces": ["{node_id}_notes"]' in text, node_id
         assert f"PROMPT-{node_id}" in text, "each prompt keeps its head"
     assert '"max_iterations": 3' in text and '"on_exhausted": "continue"' in text
-    assert "p" * 700 not in text and "more chars)" in text, "the prompts are shortened"
+    assert "p" * 700 not in text and ("more chars)" in text or "chars, whole under" in text), \
+        "the prompts are shortened, or named where they are whole"
 
 
 def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
-    """'What the last edit changed', 'Your earlier reasoning' (and its full rejected
-    edits), the recent results and the history table: each shows every step's wiring
-    whole, however long the prompts before it, and shortens only the prompts."""
+    """'What the last edit changed', the recent results and the history table: each shows
+    every step's wiring whole, however long the prompts before it, and shortens only the
+    prompts; 'Your earlier reasoning' (and its full rejected edits) points to the first."""
     edits = _long_split()
     row = {"id": "c2", "parent": "c1", "score": 0.5, "structural": True, "exit_ok": True,
            "edits": edits}
@@ -423,10 +424,14 @@ def test_past_structural_edits_keep_every_steps_wiring_in_every_section():
     full = text[text.index("### Full edits of"):].split("\n## ", 1)[0]
     recent = text[text.index("## Recent results"):text.index("## Evidence from the traces")]
     tried = text[text.index("## What this run has already tried"):].split("\n## ", 1)[0]
-    for section in (changed, full, recent, tried):
+    for section in (changed, recent, tried):
         _wiring_whole(section)
-    # The reasoning points to the edit section rather than saying the wiring again.
+    # The history line names each prompt where it is whole, not cut at a budget.
+    assert 'chars, whole under \\"What the last edit changed\\")' in tried
+    # The reasoning and its full rejected edits point to the edit section, which shows
+    # them at the full edits' budget, rather than saying the wiring again.
     assert 'under "What the last edit changed" above' in reasoning
+    assert 'Under "What the last edit changed" above' in full and '"id"' not in full
     assert len(changed) < 6000 and len(tried) < 6000, "the text stays bounded"
 
 

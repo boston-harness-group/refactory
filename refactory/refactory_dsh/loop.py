@@ -65,6 +65,7 @@ from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
     MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
     refused_entries,
+    repair_losses,
     summarise_reasons,
 )
 from refactory_dsh.optim.memory import report as memory_report
@@ -3251,6 +3252,7 @@ class Loop(OuterLoop):
                 reasons=rejection.reasons,
                 epoch=self.epoch,
                 **({"repaired": rejection.repaired} if rejection.repaired else {}),
+                **({"dropped": rejection.dropped} if rejection.dropped else {}),
             )
         known = {c.id: c for c in (*self.population, *parents)}
         for candidate in candidates:
@@ -4000,7 +4002,9 @@ class Loop(OuterLoop):
         if used != before:
             self._journal("repair_calls", epoch=self.epoch, calls=used)
         if fixed is not None:
-            self.rejections[index] = dataclasses.replace(self.rejections[index], repaired=fixed.id)
+            self.rejections[index] = dataclasses.replace(
+                self.rejections[index], repaired=fixed.id,
+                dropped=str(getattr(self.optimizer, "last_repair_lost", "") or ""))
         else:
             after = list(getattr(self.optimizer, "last_repair_refusal", None) or ())
             if after:
@@ -5647,6 +5651,8 @@ class Loop(OuterLoop):
                 ]
             ),
             refused=refused_entries(self.rejections[-8:]),
+            # ...but what its fix dropped of the proposal's text is: it did not land.
+            repair_losses=repair_losses(self.rejections[-8:]),
             preset=self.config.edit_preset,
             strategy={**dict(self.strategy_decision), **({"search_contract": self.config.resolved_profile["contract"]} if self.config.resolved_profile.get("contract") else {})},
             # Read now, not at construction: the point of steering a search is that a
@@ -7025,6 +7031,7 @@ class Loop(OuterLoop):
                     edit=dict(record.get("edit") or {}),
                     reasons=list(record.get("reasons") or []),
                     repaired=str(record.get("repaired") or ""),
+                    dropped=str(record.get("dropped") or ""),
                 )
                 self.rejections.append(rejection)
                 # A journal written before rejections carried their epoch: the epoch
