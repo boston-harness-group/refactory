@@ -731,10 +731,10 @@ def test_every_composition_example_uses_only_core_operators_and_applies_as_writt
         # Only plain ops and a literal prompt read after its anchor: a shape whose new step
         # no later prompt takes is shown with the edit its refusal's hint names (a rewire
         # of a later step, or a step taking over the graded output), never unread.
-        assert {"Several attempts and a choice", "Check and send back",
+        assert {"Several attempts and a choice",
                 "Another attempt beside it, sent exactly what it is sent"} <= titles, titles
     if seed == "fuzz_draft_review":
-        assert {"Several attempts and a choice", "Check and send back",
+        assert {"Several attempts and a choice",
                 "Check a later step and send the work back to an earlier one",
                 "Another attempt beside it, sent exactly what it is sent",
                 "A background pass beside an experiment"} <= titles
@@ -779,9 +779,15 @@ def test_every_composition_example_on_a_live_mode_applies_through_an_attempt(mod
         nn_edits.catalogue("broad"), view.node_states, view.edges, protected=protected,
         code_nodes=True, tools=True, knob_values={k["name"]: k["value"] for k in view.knobs})
     titles = {title for title, _b in examples}
-    assert {"Several attempts and a choice", "Check and send back",
+    assert {"Several attempts and a choice",
             "A tool step before reasoning"} <= titles, titles
     for title, bundle in examples:
+        # A rewire names only steps the graph has or an earlier edit declares by 'id'.
+        declared = set(state["graph"]["nodes"]) | {e["id"] for e in bundle if "id" in e}
+        produced = {n for node in state["graph"]["nodes"].values()
+                    for n in [*(node.get("writes") or ()), *(node.get("produces") or ())]}
+        for edit in (e for e in bundle if e["op"] == "rewire"):
+            assert set(edit["sees"]) <= declared | produced, (title, edit)
         parent = Candidate.from_state(copy.deepcopy(state))
         out = Optimizer().attempt(Proposal(edits=tuple(bundle), parent=parent.id), parent, (),
                                   False, (), protected=protected, record=False)

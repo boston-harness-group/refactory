@@ -185,9 +185,15 @@ def test_the_compute_policy_follows_parsimony():
     # The score text says the parsimony; the policy line does not say it again.
     assert other.count("parsimony is 0") == 1
     sized = said(parsimony=0.01, score_is_item_mean=True)
-    assert ("Compute policy: cost counts only as the size cost in the score; it is not "
-            "otherwise a reason for or against a change in this run.") in sized
+    assert ("Compute policy: apart from the size cost, inference cost, latency and the "
+            "number of model calls are no reason for or against a change in this run, unless "
+            "the task's own score measures them.") in sized
     assert "size cost of 0.01 per node" in sized
+    # Said once: the score text leaves its own cost line to the policy.
+    assert "Apart from that size cost" not in sized and sized.count("latency") == 1
+    gated = said(parsimony=0.01, selection="validation")
+    assert "Compute policy: apart from the size cost in the train scores," in gated
+    assert gated.count("latency") == 1
     assert said() == "", "unknown scoring settings say nothing"
     # The objective's own text carries no policy; `objective_with_policy` adds it, once.
     assert "Compute policy" not in base.objective_text(0.0, item_mean=True)
@@ -205,7 +211,7 @@ def test_every_call_that_weighs_a_change_says_the_same_compute_policy(tmp_path):
     from refactory_dsh.optim import memory as memory_mod
 
     for parsimony in (0.0, 0.01):
-        policy = base.compute_policy(parsimony, item_mean=True)
+        policy = base.compute_policy(parsimony, item_mean=True, gated=True)
         ctx = ProposalContext(parsimony=parsimony, score_is_item_mean=True, mode_name="m",
                               selection="validation")
         requests = [analysts.analyst_prompt(ctx, kind, 1, 1, [_rec("i1", 0.0)], "pipeline")
@@ -223,12 +229,14 @@ def test_every_call_that_weighs_a_change_says_the_same_compute_policy(tmp_path):
             epoch=1, mode_name="m", prev={"id": "a"}, curr={"id": "a"}, changes=[],
             previous_note="", entries=[], objective=loop._objective())[0]
         assert memory_text.count(base.compute_policy(
-            parsimony, item_mean=bool(loop._score_is_item_mean))) == 1
+            parsimony, item_mean=bool(loop._score_is_item_mean),
+            gated=bool(loop.selection_mode()))) == 1
         for text in [*requests, memory_text]:
             assert text.count("Compute policy") == 1, text[:300]
         for text in requests:
             assert text.count(policy) == 1, text[:300]
-        said = ProposalContext(parsimony=parsimony, score_is_item_mean=True).render()
+        said = ProposalContext(parsimony=parsimony, score_is_item_mean=True,
+                               selection="validation").render()
         assert said.count(policy) == 1
     assert "not a reason to avoid adding or changing" in analysts.system("success")
     assert "Compute policy" not in analysts.system("success")

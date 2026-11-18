@@ -2203,7 +2203,7 @@ class Executor:
         _spt = node.bound("system_prompt_template", self.ctx.knobs)
         _pt = node.bound("prompt_template", self.ctx.knobs)
         feedback = self.record.feedback.get(node.id, "")
-        # The step's own output from its previous visit, which the feedback is about, as
+        # The step's own output from its previous visit, with the feedback, as
         # the spine's worker reads it (`agent_delivery.previous_output`).
         previous = previous_output(self.ctx.workdir, node.writes, sees_run_dir=(
             node.tool_policy != "none" and not node.workspace)) if feedback else ""

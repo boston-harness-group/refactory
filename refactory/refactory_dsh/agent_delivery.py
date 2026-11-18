@@ -88,10 +88,10 @@ FEEDBACK_HEADING = '## Feedback for this visit'
 
 
 #: The heading the step's own output from its previous visit travels under, after the
-#: feedback about it, so a step sent back sees the work the feedback is about.
-PREVIOUS_HEADING = '### Your own output from the previous visit, which this feedback is about'
+#: feedback, so a step sent back (by its own judge, or by a later one with back_to) sees it.
+PREVIOUS_HEADING = '### Your output from the previous visit'
 #: The most characters of that output said (head and tail, the cut said).
-PREVIOUS_CHARS = 40000
+PREVIOUS_CHARS = 8000
 
 
 def previous_output(workdir: Path, writes: Sequence[str], *, sees_run_dir: bool) -> str:
@@ -116,7 +116,7 @@ def previous_output(workdir: Path, writes: Sequence[str], *, sees_run_dir: bool)
 def with_feedback(prompt: str, feedback: str, previous: str = '') -> str:
     """``prompt`` with the feedback a reloop left for this visit, said once, and the step's
     own output from its previous visit (``previous``, :func:`previous_output`) under
-    :data:`PREVIOUS_HEADING`, so a step sent back sees the work the feedback is about.
+    :data:`PREVIOUS_HEADING`, so a step sent back sees what it wrote last.
 
     A gate that sends a node back says why, and the node's next prompt must carry it.
     Most prompts already do -- their template renders the gate's reason from a fact

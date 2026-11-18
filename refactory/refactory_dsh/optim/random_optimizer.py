@@ -431,7 +431,8 @@ class AutoresearchOptimizer(Optimizer):
 
         def review(index: int) -> tuple[int, dict[str, Any]]:
             entry = ctx.added_steps[index]
-            policy = compute_policy(ctx.parsimony, item_mean=ctx.score_is_item_mean)
+            policy = compute_policy(ctx.parsimony, item_mean=ctx.score_is_item_mean,
+                                    gated=bool(ctx.selection))
             prompt = feedback.review_prompt(entry, ctx.mode_name, policy=policy)
             key = feedback.review_key(prompt)
             if key in cache:

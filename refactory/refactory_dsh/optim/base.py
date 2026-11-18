@@ -2331,14 +2331,14 @@ def applicability_lines(catalogue: Sequence[dict[str, Any]],
                         knobs: Sequence[Mapping[str, Any]],
                         check: Callable[[dict[str, Any]], Any] | None) -> list[str]:
     """Which core operators apply at each step, as the operator table's "applies" column
-    says it (`_fit_rows`, an attempt's verdict), one line per step, for the analysts, so a
-    change they recommend uses an operator that applies where they name it. Nothing
-    without a check."""
+    says it (`_fit_rows`, an attempt's verdict on each operator with its default
+    arguments), one line per step, for the failure analysts. Nothing without a check."""
     rows = _fit_rows(catalogue, node_states, edges, knobs, check)[0]
     if not rows:
         return []
-    return ["Operators an attempt accepts at each step (`+ X: ops`: with X added); a "
-            "structural change you recommend uses one of them at the step it names:",
+    return ["Operators an attempt accepts at each step with their default arguments (`+ X: "
+            "ops`: with X added); one not listed may still apply with other arguments (a "
+            "rewire's or split's own sees or text), so prefer these where they fit:",
             *(f"- {row[0]}: {row[2]}" for row in rows)]
 
 
@@ -2462,18 +2462,25 @@ _TAKE_OVER_TEXT = "<write the final result from the work above>"
 
 
 def _reader_edit(after: Mapping[str, Any], node_id: str, edit: Mapping[str, Any],
-                 before: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+                 before: Mapping[str, Any], first: str | None = None
+                 ) -> tuple[str, dict[str, Any]] | None:
     """How a new step ``node_id`` that nothing reads in ``after`` reaches a reader, as one
     edit, the way its refusal's hint says (`core_ops._reader_hint`): ``("append", edit)``
     rewiring the nearest later agent or code step to see it as well as what it sees now,
     or adding a step that takes over the graded step's outputs after it (after its join
     when it is a fork's branch); ``("replace", edit)`` for an ``insert`` given
-    ``takes_over`` itself. ``None`` when no step could read it."""
+    ``takes_over`` itself; with ``first``, only a rewire of that step. ``None`` when no
+    step could read it."""
     from refactory_dsh.nn import core_ops
 
     graph = nn_edits._graph(dict(after))
     later = [r for r in core_ops._readers_from(graph, node_id, after)
              if r != node_id and graph.nodes[r].kind == "agent"]
+    if first is not None:
+        # Only that step (the one the new step was put before), when it is an agent.
+        later = [r for r in later if r == first]
+        if not later:
+            return None
     if later:
         reader = graph.nodes[later[0]]
         sees = sorted({name for _k, name in core_ops._readable(
@@ -2521,6 +2528,14 @@ def _completed(state: Mapping[str, Any], bundle: list[dict[str, Any]]
         index = next(i for i, after in enumerate(states)
                      if unread[0] in ((after.get("graph") or {}).get("nodes") or {}))
         edit = bundle[index]
+        if edit.get("op") == "insert" and edit.get("before") is not None:
+            # A step put before another feeds that one: it is rewired to see it too, the
+            # new step's id said, so the rewire names an id the insert declares.
+            found = _reader_edit(current, unread[0], edit, state, first=str(edit["before"]))
+            if found is not None and found[0] == "append":
+                bundle[index] = {**edit, "id": unread[0]}
+                bundle.append(found[1])
+                continue
         knobs = core_ops.reader_knobs(states[index], unread[0])
         if edit.get("op") in _TAKES_TO and "to" not in edit and knobs:
             bundle[index] = {**edit, "to": knobs[0]}
@@ -2539,6 +2554,8 @@ def _completed(state: Mapping[str, Any], bundle: list[dict[str, Any]]
         if how == "replace":
             bundle[index] = made
         else:
+            if made.get("op") == "rewire" and edit.get("op") == "insert" and "id" not in edit:
+                bundle[index] = {**edit, "id": unread[0]}  # the id the rewire names
             bundle.append(made)
     return None
 
@@ -2582,8 +2599,7 @@ def composition_examples(catalogue: Sequence[dict[str, Any]],
             {"op": "insert", "after": choose, "kind": "op", "call": core_ops.select_call(),
              "takes_over": step}]))
     if "loop" in ops:
-        out.append(("Check and send back", [
-            {"op": "loop", "step": step, "judge": "agent", "text": "<what to check in the work>"}]))
+        # A judge sending its own step back is the loop operator's own example.
         span = {"op": "loop", "step": anchor[1], "back_to": step, "judge": "agent",
                 "text": "<what to check in the result>"}
         if anchor[1] is not None and anchor[1] not in protected \
@@ -2679,7 +2695,7 @@ _GATE_RULE = ("The validation gate decides on the task's score on the validation
 
 
 def objective_text(parsimony: float | None, *, item_mean: bool = False,
-                   gated: bool = False) -> str:
+                   gated: bool = False, cost_line: bool = True) -> str:
     """What the score measures, said from the run's own settings (``LoopConfig.parsimony``,
     whether the score is the items' mean and whether a validation gate decides), so the
     optimizer does not trade task score for a cost the run does not count. Empty when
@@ -2704,14 +2720,15 @@ def objective_text(parsimony: float | None, *, item_mean: bool = False,
         return text + (" " + _GATE_RULE.format(none="", train="") if gated else "")
     size = (f"a size cost of {parsimony:g} per node of the pipeline's graph (score = raw "
             f"score - {parsimony:g} x nodes)")
-    rest = ("Apart from that size cost, inference cost, latency and the number of model "
-            f"calls are not part of the score {unless}.")
+    # Said by the compute policy instead when one follows (``cost_line=False``).
+    rest = (" Apart from that size cost, inference cost, latency and the number of model "
+            f"calls are not part of the score {unless}." if cost_line else "")
     if gated:
         return (f"The train scores shown are {task} minus {size}. "
                 + _GATE_RULE.format(none=", and that score carries no size cost",
                                     train=", size cost included,")
-                + f" {rest}")
-    return f"The score is {task} minus {size}. {rest}"
+                + rest)
+    return f"The score is {task} minus {size}.{rest}"
 
 
 def objective_lines(parsimony: float | None, *, item_mean: bool = False,
@@ -2728,22 +2745,26 @@ def objective_with_policy(parsimony: float | None, *, item_mean: bool = False,
     policy (`compute_policy`): what every optimizer call that recommends or weighs a
     change is told (the proposer, the analysts and their merges, the memory pass), from
     this one place. Empty when the scoring settings are not known."""
-    text = objective_text(parsimony, item_mean=item_mean, gated=gated)
-    policy = compute_policy(parsimony, item_mean=item_mean)
+    text = objective_text(parsimony, item_mean=item_mean, gated=gated, cost_line=False)
+    policy = compute_policy(parsimony, item_mean=item_mean, gated=gated)
     return f"{text}\n{policy}" if text and policy else text
 
 
-def compute_policy(parsimony: float | None, *, item_mean: bool = False) -> str:
+def compute_policy(parsimony: float | None, *, item_mean: bool = False,
+                   gated: bool = False) -> str:
     """The run's compute policy in one sentence, from its scoring settings: with
     parsimony 0, cost is not a reason for or against a change (extra steps and model
     calls per item are not penalised, so a change that adds them is weighed like any
-    other); with a size cost, that cost is the only one counted. Empty when the settings
-    are not known."""
+    other); with a size cost, that cost (in the train scores, under a validation gate,
+    whose own score carries none) is the only one counted. Empty when the settings are
+    not known."""
     if parsimony is None:
         return ""
     if parsimony:
-        return ("Compute policy: cost counts only as the size cost in the score; it is not "
-                "otherwise a reason for or against a change in this run.")
+        where = " in the train scores" if gated else ""
+        return (f"Compute policy: apart from the size cost{where}, inference cost, latency "
+                "and the number of model calls are no reason for or against a change in "
+                "this run, unless the task's own score measures them.")
     # What the score text does not say already (it says what the score is).
     return ("Compute policy: cost is not a reason for or against a change in this run"
             + ("; per-item cost is reported separately." if item_mean else "."))

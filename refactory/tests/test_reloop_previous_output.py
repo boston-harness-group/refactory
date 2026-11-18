@@ -93,7 +93,7 @@ def test_walker_a_step_sent_back_sees_its_last_output_and_the_judges_feedback(ca
     head = again.split(agent_delivery.PREVIOUS_HEADING, 1)
     assert len(head) == 2, again[:400]
     assert head[0].startswith(agent_delivery.FEEDBACK_HEADING) and REASON in head[0]
-    # Its own output from the visit the feedback is about, then its prompt as before.
+    # Its own output from its previous visit, then its prompt as before.
     assert FIRST in head[1] and SECOND not in head[1]
     assert again.endswith(first_visit), "the prompt itself follows, unchanged"
 
@@ -161,3 +161,13 @@ def test_a_step_that_reads_its_run_directory_with_tools_is_not_handed_its_output
     assert agent_delivery.with_feedback("P", "", FIRST) == "P"
     said = agent_delivery.with_feedback("P", REASON, "x ```` y")
     assert "`````\nx ```` y\n`````" in said
+
+
+def test_a_long_previous_output_is_cut_to_its_head_and_tail_and_the_cut_said(tmp_path):
+    cap = agent_delivery.PREVIOUS_CHARS
+    text = "H" * cap + "MIDDLE" + "T" * cap
+    (tmp_path / "out.txt").write_text(text)
+    said = agent_delivery.previous_output(tmp_path, ["out.txt"], sees_run_dir=False)
+    assert said.startswith("H" * (cap // 2) + "\n[... ") and said.endswith("\n" + "T" * (cap // 2))
+    assert f"[... {len(text) - cap} characters omitted ...]" in said and "MIDDLE" not in said
+    assert len(said) < cap + 100

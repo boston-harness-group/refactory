@@ -588,7 +588,8 @@ def test_the_analysts_are_told_which_operators_apply_at_each_step():
     assert "loop" in line and "+ takes_over solve: insert" in line, line
     plain = line.split(": ", 1)[1].split("; ")[0].split(", ")
     assert "route" not in plain and "insert" not in plain and "route" not in line, line
-    assert text.count("Operators an attempt accepts at each step") == 1
+    assert text.count("Operators an attempt accepts at each step with their default "
+                      "arguments") == 1
     assert "Operators an attempt accepts" not in analysts._changes_text(ctx, "success")
     assert "Operators an attempt accepts" not in analysts._changes_text(
         ProposalContext(catalogue=ctx.catalogue, node_states=ctx.node_states, nodes=ctx.nodes,
