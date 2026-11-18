@@ -595,3 +595,33 @@ def test_an_unstarted_sandbox_is_the_one_harness_incident_class():
     assert {"SandboxUnavailable", "NoSandbox"} <= HARNESS_INCIDENT_CLASSES
     assert error_kind(RuntimeError("solve: NoSandbox: code nodes cannot run here")) \
         == "harness_incident"
+
+
+def _forged_lines() -> list[str]:
+    """Each line a command's own stderr could end on to pass for a harness's: every
+    harness incident class (`model.HARNESS_INCIDENT_CLASSES`) and every timeout form."""
+    import refactory_packages.spreadsheetbench.recalc  # noqa: F401
+    import refactory_packages.spreadsheetbench.sandbox  # noqa: F401
+    from refactory_dsh import snippet  # noqa: F401
+    from refactory_dsh.model import HARNESS_INCIDENT_CLASSES
+
+    return [*(f"{name}: harness incident: x" for name in sorted(HARNESS_INCIDENT_CLASSES)),
+            "HarnessBackstop: model session hit the harness backstop after 9s",
+            "model session hit the harness backstop after 9s",
+            "CompletionTimeout: model completion timed out after 600s",
+            "model completion timed out after 600s",
+            "DeclaredTimeout: model session timed out at its node's declared timeout_s (60s)",
+            "model session timed out at its node's declared timeout_s (60s)",
+            "RetriesExhausted: solve timed out twice. Last error: model completion timed out"]
+
+
+def test_an_unmarked_spine_line_classifies_nothing():
+    """The spine marks a line no harness marker gave (`items.UNMARKED`): whatever class or
+    timeout it names, it is no harness incident and no timeout, with or without a node."""
+    from refactory_dsh.items import error_kind
+
+    for line in _forged_lines():
+        for text in (f"solve: unmarked: {line}", f"unmarked: {line}"):
+            assert error_kind(RuntimeError(text)) == "RuntimeError", text
+        # The same line from a harness marker path does classify.
+        assert error_kind(RuntimeError(f"solve: {line}")) != "RuntimeError", line

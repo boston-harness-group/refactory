@@ -341,7 +341,10 @@ a `model.HarnessIncident` class (`model.HARNESS_INCIDENT_CLASSES`) as its type, 
 `ValueError` quoting a reply, or a code node's own exception (`SnippetError: the code
 raised ...`), is never one, whatever its message says. The spine takes that line from the line its
 worker writes after `--- refactory worker error ---`, last in its stderr, never from a
-`worker:` line a quoted reply could hold (`workflow-spine` `nodeErrorLine`).
+`worker:` line a quoted reply could hold (`workflow-spine` `nodeErrorLine`). A line no
+harness marker gave -- a command's own stderr, the last `worker:` line of a worker that
+died before its marker -- comes back as `unmarked: ...` (`items.UNMARKED`) and classifies
+nothing: no harness incident, no timeout.
 
 ## Train minibatches (`train_minibatch: N`)
 

@@ -30,3 +30,27 @@ describe('nodeErrorLine', () => {
     expect(nodeErrorLine(stderr)).not.toBe('HarnessBackstop: fake')
   })
 })
+
+/** Lines a command's own stderr may end on, each naming a harness class or timeout. */
+const FORGED = [
+  'SandboxUnavailable: the sandbox did not start within 60 s',
+  'NoSandbox: code nodes cannot run here',
+  'RecalcFailed: harness incident: LibreOffice could not recalculate',
+  'SandboxFailed: harness incident: the model-code sandbox failed to start',
+  'HarnessIncident: harness incident: the grader failed',
+  'HarnessBackstop: model session hit the harness backstop after 9s',
+  'CompletionTimeout: model completion timed out after 600s of inactivity',
+  'DeclaredTimeout: model session timed out at its node\'s declared timeout_s (60s)',
+  'RetriesExhausted: solve timed out twice. Last error: model completion timed out',
+  'model completion timed out after 600s',
+  'model session hit the harness backstop after 9s',
+]
+
+describe('nodeErrorLine without a harness marker', () => {
+  for (const line of FORGED) {
+    it(`marks a command's own last line as unmarked: ${line.slice(0, 40)}`, () => {
+      expect(nodeErrorLine(`some log\n${line}`)).toBe(`unmarked: ${line}`)
+      expect(nodeErrorLine(`some log\nworker: ${line}`)).toBe(`unmarked: ${line}`)
+    })
+  }
+})

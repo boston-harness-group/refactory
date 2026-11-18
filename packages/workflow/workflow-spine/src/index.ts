@@ -251,8 +251,11 @@ const ITEM_ERROR_LINE = 512
 const WORKER_PREFIX = 'worker: '
 /** What a dispatched worker prints before the one line naming its failure (`items.WORKER_ERROR_MARKER`). */
 const WORKER_ERROR_MARKER = '--- refactory worker error ---'
-/** A model call that timed out, as `items.COMPLETION_TIMEOUT_TEXT` reads it. */
-const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
+/**
+ * What a failed node's error line starts with when no harness marker gave it
+ * (`nodeErrorLine`), so no text a command printed is read as a harness's typed line.
+ */
+const UNMARKED = 'unmarked: '
 
 /**
  * A failed pass-body node's error as its item record keeps it: a first line in the
@@ -263,7 +266,7 @@ const COMPLETION_TIMEOUT_TEXT = 'model completion timed out'
 function nodeErrorText(failure: CommandFailure): string {
   const tail = withoutAccountCopy((failure.stderr || failure.error
     || `failed with exit code ${String(failure.exitCode)}`).slice(-ITEM_ERROR_TAIL))
-  if (!failure.nodeId) return tail
+  if (!failure.nodeId) return `${UNMARKED}${tail}`
   return `${failure.nodeId}: ${nodeErrorLine(tail)}`.slice(0, ITEM_ERROR_LINE) + `\n${tail}`
 }
 
@@ -285,10 +288,13 @@ function withoutAccountCopy(stderr: string): string {
 }
 
 /**
- * The line of a failed node's stderr that says what failed, as `<Kind>: <message>` when
- * it can: the node runner's own account after its `--- refactory failure ---` marker
- * (`refactory_dsh.run.main`); else a dispatched agent's worker error (a model call that
- * timed out is a `CompletionTimeout`, as the walker names it); else the last line.
+ * The line of a failed node's stderr that says what failed, as `<Kind>: <message>` only
+ * from a harness marker: a dispatched worker's own line after its marker
+ * (`worker_node.main`), or the node runner's account after its `--- refactory failure ---`
+ * marker (`refactory_dsh.run.main`). Any other line -- the last `worker:` line, the last
+ * line -- may be a command's own stderr that a model controls, so it comes back marked
+ * `unmarked: ` (`UNMARKED`): never a type, so `items.error_kind` reads no harness incident
+ * and no timeout from it.
  */
 export function nodeErrorLine(stderr: string): string {
   const marker = '--- refactory failure ---'
@@ -304,7 +310,7 @@ export function nodeErrorLine(stderr: string): string {
   const before = lines(at === -1 ? stderr : stderr.slice(0, at))
   const worker = [...before].reverse().find(line => line.startsWith(WORKER_PREFIX))
   const line = worker !== undefined ? worker.slice(WORKER_PREFIX.length) : (before.at(-1) ?? '')
-  return line.startsWith(COMPLETION_TIMEOUT_TEXT) ? `CompletionTimeout: ${line}` : line
+  return `${UNMARKED}${line}`
 }
 
 /**

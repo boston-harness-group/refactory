@@ -553,9 +553,18 @@ _HARNESS_TIMEOUT_RETRIED_LINE = re.compile(
 WORKER_ERROR_MARKER = "--- refactory worker error ---"
 
 
+#: What the spine starts a failed node's error line with when no harness marker gave it
+#: (`workflow-spine` ``nodeErrorLine``): a command's own stderr, which a model may control.
+UNMARKED = "unmarked: "
+
+_UNMARKED_LINE = re.compile(rf"(?:[A-Za-z0-9_.-]+: )?{re.escape(UNMARKED)}")
+
+
 def first_line(text: Any) -> str:
-    """The first line of an error's text: the only one the harness writes itself."""
-    return str(text or "").split("\n", 1)[0]
+    """The first line of an error's text: the only one the harness writes itself. Empty
+    when the spine marked it unmarked (`UNMARKED`): it then classifies nothing."""
+    head = str(text or "").split("\n", 1)[0]
+    return "" if _UNMARKED_LINE.match(head) else head
 
 
 #: How a code step that ran over its fixed wall (`snippet.SnippetTimeout`,
