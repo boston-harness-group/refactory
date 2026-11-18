@@ -741,11 +741,17 @@ optimizer, at no extra compute (train records only):
   `EDIT_ITEMS_WHOLE` (4) of them show how the edit moved them (`_moved_block`): each
   side's verdict, the steps with the same reply named, and each changed, new or gone
   step's reply whole, the parent's beside the child's. They are picked one per child and
-  per kind in turn (broken, fixed, score dropped, score rose), each that fits
-  `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget with the ones before it:
-  items are chosen, never cut (only a single text over `ITEM_TEXT_MAX` is, and said). A
-  trace "Trajectories" shows whole, or a reply this section already showed (a sibling's
-  same parent), is named by where it is, never repeated. It also
+  per kind in turn (broken, fixed, score dropped, score rose). The first pick is always
+  shown: the child's moved replies whole (a single text over `ITEM_TEXT_MAX` is cut, and
+  said), the parent's whole unless the block would pass the room -- `EDIT_CHANGE_SHARE`
+  (a quarter) of the call's evidence budget -- when each is cut to fit, head and tail,
+  at least `EDIT_PARENT_FLOOR` characters, the cut marked and recorded. Each later pick
+  is shown only when it fits what is left of the room whole; one that does not is
+  skipped for the next. Every other changed item is one line: both scores, each side's
+  answer (a long one clipped, its length said) and its moved steps. A trace or input
+  "Trajectories" shows whole, or a reply this section already showed (a sibling's same
+  parent), is named by where it is, never repeated; blocks print in the section's
+  order, so a reference points back. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -2050,12 +2056,15 @@ step's instructions in its settings and again in an item fail it. Two renderings
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
 "What the last edit changed" shows only the steps an edit moved, a reply the child kept
-named, and names a trace shown elsewhere by where it is. Every quoted text -- a step's
-output, a trace, a finding, the memory note, a reviewer's note, a knob text an analyst
-reads -- has its heading lines escaped (`evidence.escape_headings`: `\## Answer`), so no
-heading in it reads as the request's at any level; a text quoted unfenced has its fence
-lines escaped too (`evidence.inline_quote`). The proposer's knob texts stay byte-exact
-in their fences, since a patch quotes them. Generic: lines of
+named, and names a trace shown elsewhere by where it is. Every quoted text of several
+lines sits in a code fence longer than any run of backticks in it, so nothing in it --
+a heading, a setext underline, a fence -- reads as the request's Markdown. Evidence (a
+step's output, a trace, a prompt) also has its heading lines escaped
+(`evidence.escape_headings`: `\## Answer`). A text the optimizer may copy into a prompt
+-- a knob text, an analyst's finding or proposed change, the memory note, a reviewer's
+note or example -- is byte-exact in its fence on every path (`evidence.exact_block`,
+`evidence.quoted`), so it gains no escape; a one-line one sits mid-line, where nothing
+reads as a heading. Generic: lines of
 text are compared, with no knowledge of the task or the pipeline.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per

@@ -252,8 +252,8 @@ def test_every_changed_item_is_named_and_a_few_are_shown_whole_never_cut():
         assert (f"NEW-{k} " + "y" * 9000 in text) is shown
         assert text.count(f"QUESTION i{k}\n") == int(shown) and f"KEPT i{k}" not in text
         if not shown:
-            assert (f"- Item i{k} -- broken (child c): parent passed; child answered wrong; "
-                    "reply changed: `t`.") in text
+            assert (f"- Item i{k} -- broken (child c), score 1 -> 0: parent passed; child "
+                    "answered wrong; reply changed: `t`.") in text
     assert text.count("Same reply in parent and child: `s`.") == EDIT_ITEMS_WHOLE
     listed = sorted(f"i{k}" for k in whole)
     assert f"20 changed item(s); shown whole below: {', '.join(listed)}" in text

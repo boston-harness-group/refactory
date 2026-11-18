@@ -26,7 +26,7 @@ import statistics
 from typing import Any, Mapping, Sequence
 
 from .base import _by_item, _clip, _clip_middle, _table, edit_change
-from .evidence import inline_quote
+from .evidence import quoted
 
 #: The kinds a change is filed under, in the order the tally lists them.
 CHANGE_KINDS = ("prompt/setting", "added agent step", "added code step", "split",
@@ -811,9 +811,9 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
         if isinstance(review, Mapping):
             said = f"review: {_verdict_text(review)}"
             if review.get("example"):
-                said += f' -- "{inline_quote(review["example"])}"'
+                said += f' -- "{quoted(review["example"])}"'
             if review.get("note"):
-                said += f" -- {inline_quote(review['note'])}"
+                said += f" -- {quoted(review['note'])}"
         elif entry.get("review_error"):
             said = f"review: not available ({_clip(entry['review_error'], 160)})"
         elif entry.get("visits"):
@@ -891,7 +891,7 @@ def visit_text(visits: Mapping[str, Any], counts: bool = True) -> str:
         text += (f": {_ids(fired['items'])}" + _moved(fired, counts)
                  + f", {visits.get('distinct_outputs', 0)} distinct output(s)")
         if visits.get("example"):
-            text += f', e.g. "{visits["example"]}"'
+            text += f', e.g. "{quoted(visits["example"])}"'
     if silent.get("items"):
         text += f"; empty output on {len(silent['items'])}" + _moved(silent, counts)
     return text

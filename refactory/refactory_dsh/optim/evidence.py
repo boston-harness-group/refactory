@@ -68,26 +68,34 @@ def _fence(text: str) -> str:
 #: A line Markdown reads as a heading (`#` to `######` then a space or the line's end,
 #: indented at most three spaces).
 _HEADING = re.compile(r"(?m)^([ \t]{0,3})(#{1,6})(?=[ \t]|$)")
-#: A line Markdown reads as a code fence's start or end.
-_FENCE_LINE = re.compile(r"(?m)^([ \t]{0,3})(`{3,}|~{3,})")
 
 
 def escape_headings(text: str) -> str:
-    """``text`` with each heading line's ``#`` run escaped (``\\##``), so a model's or a
-    skill's own "## Answer" can never read as one of the request's headings, at any level.
-    The words are unchanged; only the marker that would make the line a heading is
-    escaped, as Markdown itself escapes it."""
+    """``text`` with each heading line's ``#`` run escaped (``\\##``), so a step's own
+    "## Answer", quoted as evidence, can never read as one of the request's headings at
+    any level. The words are unchanged; only the marker is escaped, as Markdown escapes
+    it. Evidence only: a text the optimizer may copy back is quoted by `exact_block`."""
     return _HEADING.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
 
 
-def inline_quote(text: Any) -> str:
-    """A model's or a skill's text embedded among the request's own lines, unfenced (a
-    finding, a memory note, a reviewer's example): its heading lines escaped
-    (`escape_headings`) and a line that would open or close a code fence escaped too, so
-    it can neither start a section of the request nor swallow the request's next lines
-    into a fence. The words are unchanged."""
-    text = escape_headings("" if text is None else str(text))
-    return _FENCE_LINE.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
+def exact_block(text: Any) -> list[str]:
+    """``text`` byte-exact in a code fence longer than any run of backticks in it, so no
+    line of it can close the fence and nothing in it is read as Markdown (a heading, a
+    setext underline, a fence): for a text the optimizer may copy into a prompt -- a knob
+    text, a finding's proposed change, the memory note -- which must not gain escapes."""
+    body = "" if text is None else str(text)
+    fence = _fence(body)
+    return [fence, body, fence]
+
+
+def quoted(text: Any) -> str:
+    """A model's text embedded in one of the request's own lines: a one-line text as it
+    is (mid-line, nothing in it reads as a heading or a fence); a text of several lines
+    on lines of its own, byte-exact in a fence (`exact_block`)."""
+    body = "" if text is None else str(text)
+    if "\n" not in body:
+        return body
+    return "\n" + "\n".join(exact_block(body)) + "\n"
 
 
 def fenced(text: str) -> list[str]:
@@ -111,7 +119,7 @@ def clip(text: Any, limit: int, *, item: Any = None, step: str = "",
     chars = len(text) - 2 * keep
     if omissions is not None:
         omissions.append({"item": item, "step": step, "chars": chars})
-    return f"{text[:keep]}\n{mark.format(chars=chars)}\n{text[-keep:]}"
+    return f"{text[:keep]}\n{mark.format(chars=chars)}\n{text[len(text) - keep:]}"
 
 
 class _Seen:

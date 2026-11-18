@@ -16,13 +16,15 @@ FLIPPED = {"i00": "broken", "i01": "broken", "i02": "broken",
            "i03": "fixed", "i04": "fixed", "i05": "fixed"}
 
 
-def reply(node: str, item: str, side: str) -> str:
-    """A reply with headings at every level the request uses, then distinct prose."""
+def reply(node: str, item: str, side: str, size: int | None = None) -> str:
+    """A reply of about ``size`` characters (``REPLY``) with headings at every level the
+    request uses, then distinct prose."""
+    size = REPLY if size is None else size
     head = [f"## Theorem-Level Precision ({node}, {item}, {side})",
             f"#### Analysis of the case {item} by {node}",
             f"##### Step 1 of {node} on {item}"]
     body, k = [], 0
-    while len("\n".join(head + body)) < REPLY:
+    while len("\n".join(head + body)) < size:
         body.append(f"{side} {node} {item} line {k}: the quantity is computed again and "
                     f"checked against the bound stated in the problem ({k * 7 % 13}).")
         k += 1
@@ -38,21 +40,23 @@ def _record(item: str, passed: bool, steps: list[tuple[str, str]], prediction: s
                           for node, text in steps]}
 
 
-def parent_records() -> list[dict[str, Any]]:
+def parent_records(size: int | None = None, side: str = "parent") -> list[dict[str, Any]]:
+    """The parent's records; ``side`` names the run (another run of the same pipeline,
+    a re-score, says other words)."""
     out = []
     for n in range(ITEMS):
         item = f"i{n:02d}"
         passed = FLIPPED.get(item) == "broken" or (item not in FLIPPED and n % 2 == 0)
-        out.append(_record(item, passed, [(node, reply(node, item, "parent"))
+        out.append(_record(item, passed, [(node, reply(node, item, side, size))
                                           for node in ("solve", "check", "final")],
                            "42" if passed else "41"))
     return out
 
 
-def child_records() -> list[dict[str, Any]]:
+def child_records(size: int | None = None) -> list[dict[str, Any]]:
     """The child: solve unchanged, a new branch (alt, merge), check and final changed on
     the flipped items; every other item the same as the parent's."""
-    parents = {r["id"]: r for r in parent_records()}
+    parents = {r["id"]: r for r in parent_records(size)}
     out = []
     for item, record in parents.items():
         if item not in FLIPPED:
@@ -60,15 +64,17 @@ def child_records() -> list[dict[str, Any]]:
             continue
         passed = FLIPPED[item] == "fixed"
         steps = [("solve", record["exchanges"][0]["response"]),
-                 *((node, reply(node, item, "child")) for node in ("alt", "merge", "check",
-                                                                   "final"))]
+                 *((node, reply(node, item, "child", size))
+                   for node in ("alt", "merge", "check", "final"))]
         out.append(_record(item, passed, steps, "42" if passed else "43"))
     return out
 
 
-def context(**fields: Any):
+def context(size: int | None = None, parent_shown: bool = True, **fields: Any):
     """The proposal context: livemath/solver's pipeline, the parent's records as the
-    edited candidate's items, the child as the last edit's pair."""
+    edited candidate's items (with ``parent_shown`` off, a re-score of it with other
+    replies, so no trace of the pair is under "Trajectories"), the child as the last
+    edit's pair. ``size``: each reply's length."""
     from refactory_dsh import registry
     from refactory_dsh.nn import edits as nn_edits
     from refactory_dsh.optim import ProposalContext
@@ -78,9 +84,11 @@ def context(**fields: Any):
     view = state_view(mode().state_dict())
     pair = {"child": "c2", "parent": "c1", "gate": "rejected",
             "edit": [{"op": "branch", "step": "solve", "into": ["alt", "merge"]}],
-            "parent_records": parent_records(), "child_records": child_records(),
+            "parent_records": parent_records(size), "child_records": child_records(size),
             "steps": ["alt", "merge"]}
     return ProposalContext(mode_name="m", nodes=view.nodes, edges=view.edges,
                            node_states=view.node_states, knobs=view.knobs,
                            catalogue=nn_edits.catalogue("broad"),
-                           item_records=parent_records(), edit_pairs=[pair], **fields)
+                           item_records=parent_records(size, "parent" if parent_shown
+                                                       else "rescored"),
+                           edit_pairs=[pair], **fields)
