@@ -149,6 +149,22 @@
       "command": "python -m refactory_dsh.run refactory_packages.livemath.skill_graph:notes_prompts",
       "callable_name": "refactory_packages.livemath.skill_graph:notes_prompts",
       "notes": "",
+      "knob_outputs": {
+        "precision_prompt": [
+          "precision_task"
+        ],
+        "hypotheses_prompt": [
+          "hypotheses_task"
+        ]
+      },
+      "knobs": [
+        "precision_task",
+        "hypotheses_task"
+      ],
+      "produces": [
+        "precision_prompt",
+        "hypotheses_prompt"
+      ],
       "_type": "FnNode"
     },
     "precision": {

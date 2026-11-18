@@ -1869,7 +1869,7 @@ for. The proposer writes what kind of step (`agent`, `code`, or `op` with a `cal
 | `parallelize` | `{"op": "parallelize", "steps": ["A", "B"]}`, `{"steps": ["A"], "copies": 2}`, or `{"after": "X", "new": [{"kind": ..., "text": ...}, ...]}` | consecutive steps (neither reading the other's output), a step beside copies of itself (agents only), or new steps, between a new fork and join; copies' and new steps' outputs are wired after the join as **Wiring** below says |
 | `serialize` | `{"op": "serialize", "fork": "<fork>"}` | the branches one after another in their declared order; the fork and join go |
 | `branch` | `{"op": "branch", "fork": "<fork>", "kind": ..., "text": ..., "optional": true}` | a new branch: the fork's targets, the join's sources and edges; given `optional`, its first step binds it to a knob of its own (`<step>__optional`), which `set_knob` moves; it sees what the fork's predecessor sees and makes; its output is wired after the join as **Wiring** below says, guarded (`{% if %}`) when `optional` is given |
-| `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own input, once, as the model steps receive it (never a step's output or a knob's text: an op's output carries the knobs it declares in `knob_outputs`, else every knob it reads), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs |
+| `rewire` | `{"op": "rewire", "step": "<step>", "sees": ["task", "<step id>"]}` | what an agent or code step sees: `task` is the task's own input, once, as the model steps receive it (never a step's output or a knob's text: an op's output carries the knobs it declares in `knob_outputs`, else every knob it reads), a step id that step's outputs; slots for what it no longer sees leave its prompt knob, new ones are added; same id, outputs and knobs. With `text` (agents only; without `sees` it keeps what it sees; a slot it would not be given is refused) the step also gets those instructions in place of its prompt, so a fork's branch or a join's source whose whole prompt is another step's output can work from the task alone and stay in its fork (`split` cannot replace one: the new id would have to follow into the fork's targets, the join's sources and the role names its readers resolve by) |
 | `loop` | `{"op": "loop", "step": "<step>", "judge": "agent", "text": "<what to check>"}` (judge `code`, or a `module:function`) | a judge after the step (an agent whose reply a verdict gate reads, a code gate, or an fn gate) that sends it back with the reason; `max_iterations` (optional in the edit, 2, 1-5) is a knob of its own afterwards (`<gate>__max_iterations`); never a gate a person or an agent answers. The written-out form (`target` and a `gate` node) stays |
 | `route` | `{"op": "route", "after": "<step>", "judge": "agent", "text": "...", "to": {"<label>": "<step id>" or {kind, text}}}` | a judge and a gate after the step, one labelled edge per route; new steps rejoin at the step's old successor, their outputs read only when there |
 | `split` | `{"op": "split", "step": "<step>", "into": [{kind, text}, {kind, text}]}`; one entry replaces it | the first takes the step's inputs, the last its outputs (file and fact names), the step and its prompt knobs go, a mode knob it also read moves to the last. The written-out form (`target` and two node objects) stays |
@@ -2106,18 +2106,23 @@ output, and the view marks it `?`. Both runtimes accept the field and refuse a b
 (the walker's `Node`, the spine's `validateGraph`); lowering carries it into the IR's
 `FnNode` with the op's `knobs` and `produces` beside it, and into the node declarations.
 LiveMath's seeds declare it: S4's `prepare` (`user_prompt` carries nothing,
-`compare_prompt` carries `compare_task`) and S1's `format_prompt` (`user_prompt` and
-`solver_prompt` carry nothing, `skill_section` carries `skill`). So "task" is
-`user_prompt` on S4 and `solver_prompt` on S1. A `rewire` that would leave a step seeing
-what it sees now is refused.
+`compare_prompt` carries `compare_task`), S4's `notes_prompts` (`precision_prompt`
+carries `precision_task`, `hypotheses_prompt` carries `hypotheses_task`) and S1's
+`format_prompt` (`user_prompt` and `solver_prompt` carry nothing, `skill_section` carries
+`skill`). So "task" is `user_prompt` on S4 and `solver_prompt` on S1. A `rewire` that
+would leave a step seeing what it sees now is refused. A text knob whose carrying outputs
+no step reads any more (S4's `hypotheses_task` once `hypotheses` is rewired to the task)
+reaches no step: it is left out of `to` hints, a `to` naming it is refused `E-wiring`, and
+setting it is refused `E-unread`, naming the step it reached before
+(`core_ops.dead_text_knobs`).
 
 **What each step carries, and which operators apply to it.** After "Structural operators"
 the request has one row per step (`operator_fit_section` in `optim/base.py`): what a model
 step's prompt and reads carry, each with its maker, a fact a plain op builds followed back
 through the plain ops that built it to its sources (model steps, what the run was given,
-knobs; at most 4 ops deep, `CARRIES_DEPTH`). No op says which of its outputs a knob feeds,
-so an op with several outputs has its knobs marked as the op's
-(`precision_prompt (op notes_prompts, which reads compare_notes.txt (compare), knob(s) precision_task, hypotheses_task (the op's, for all 2 of its outputs))`),
+knobs; at most 4 ops deep, `CARRIES_DEPTH`). An op with several outputs that does not
+declare `knob_outputs` has its knobs marked as the op's
+(`(op O, which reads ..., knob(s) a, b (the op's, for all 2 of its outputs))`),
 and which core operators apply to the step as written with their default arguments and
 which are refused, in the refusal's own words (equal reasons grouped). Each verdict is the
 run's own attempt on the edited candidate (`Run.mechanics`: the catalogue, then

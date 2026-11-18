@@ -366,7 +366,10 @@ class SkillGraph(nn.Mode):
             _agent("compare", compare_notes, t),
             _op("notes_prompts", "notes_prompts", reads=(compare_notes,),
                 produces=("precision_prompt", "hypotheses_prompt"),
-                knobs=(task_knob("precision"), task_knob("hypotheses"))),
+                knobs=(task_knob("precision"), task_knob("hypotheses")),
+                # Each step's prompt carries that step's task only.
+                knob_outputs={"precision_prompt": (task_knob("precision"),),
+                              "hypotheses_prompt": (task_knob("hypotheses"),)}),
             nn.Node("step_fork", "fork", targets=("precision", "hypotheses")),
             _agent("precision", precision_notes, t),
             _agent("hypotheses", hypotheses_notes, t),
