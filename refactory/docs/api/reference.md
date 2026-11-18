@@ -236,7 +236,7 @@ The validator: what makes architecture-in-the-state safe.
 - **`grader_derived`** — The provenance set: every ``("fact"|"file", name)`` that carries the grade.
 - **`grader_issues`** — V17: a node outside the grader side that consumes grader-derived data.
 - **`knob_slot_facts`** — The run facts the knobs an op fills (`filled_knobs`) take in: their ``{{name}}``
-- **`map_read_issues`** — V6 for a map (`operators.MAP_CALL`): its element files are written only for the
+- **`map_read_issues`** — V6 for a map (`operators.MAP_CALL`): its element files, and its runs' results, are
 - **`on_path_nodes`** — Nodes that lie on some ``start -> terminal`` path.
 - **`overwritten_write_issues`** — V19: a step whose every write is overwritten before anything reads it.
 - **`produced_on_path`** — Every write and fact produced by a node on a ``start -> terminal`` path.

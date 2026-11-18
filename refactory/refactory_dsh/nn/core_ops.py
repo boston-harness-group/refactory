@@ -3007,8 +3007,9 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 f"text its non-empty lines; at most 'max' run (default {MAP_MAX[0]}, up to "
                 f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
-                "result and writes one output, placed as insert's is; remove the elements step "
-                "or the combine and the whole map goes",
+                "result and writes one output, placed as insert's is; 'tools' as insert's: "
+                "each run sealed; remove the elements step or the combine and the whole map "
+                "goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",
                     "combine": {"kind": "agent", "text": "<how to combine the results>"}},

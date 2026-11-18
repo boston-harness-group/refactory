@@ -1087,9 +1087,11 @@ def gate_label_issues(graph: Graph) -> list[Issue]:
 
 
 def map_read_issues(graph: Graph) -> list[Issue]:
-    """V6 for a map (`operators.MAP_CALL`): its element files are written only for the
-    elements a list has, so only its own runs, whose fork lets a run with none be not
-    needed, may read them."""
+    """V6 for a map (`operators.MAP_CALL`): its element files, and its runs' results, are
+    written only for the elements a list has. So only its own runs (whose fork lets a run
+    with none be not needed) read the element files, and no agent requires a run's result
+    -- an op or a gate may read one, as the combine's collect step does, said missing when
+    it is not there."""
     from .operators import MAP_CALL, map_of
 
     issues: list[Issue] = []
@@ -1097,12 +1099,19 @@ def map_read_issues(graph: Graph) -> list[Issue]:
                      if node.kind == "op" and node.call == MAP_CALL):
         runs = {t for f in graph.nodes if map_of(graph, f) == op for t in graph.nodes[f].targets}
         files = set(graph.nodes[op].writes)
+        results = {w for run in runs for w in graph.nodes[run].writes}
         for node in sorted(graph.nodes.values(), key=lambda n: n.id):
             read = sorted(files & set(node.reads))
             if read and node.id not in runs:
                 issues.append(Issue("V6", f"reads {read}, which map step {op!r} writes only "
                                           "for the elements its list has: only its runs read "
                                           "them", node=node.id))
+            needed = sorted(results & set(node.reads)) if node.kind == "agent" else []
+            if needed:
+                issues.append(Issue("V6", f"requires {needed}, the results of map step "
+                                          f"{op!r}'s runs, which a short list leaves unwritten; "
+                                          "read them through an op (the map's combine does)",
+                                    node=node.id))
     return issues
 
 

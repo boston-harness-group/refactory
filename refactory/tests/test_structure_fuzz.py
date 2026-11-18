@@ -417,9 +417,9 @@ def test_mutation_grader_without_the_provenance_rule_is_caught(monkeypatch):
     the grade, and the leak invariant finds it by content: the grader-only answers and
     the grader's own verdicts in the finished items' records. The leak needs no code
     node, so the walks draw none and are the same on every machine, whether or not it
-    can sandbox code nodes (this seed finds it at edit 122)."""
+    can sandbox code nodes (this seed finds it at edit 5)."""
     monkeypatch.setattr(validate_mod, "grader_issues", lambda *args, **kwargs: [])
-    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=3,
+    _finds("grader", seeds=("fuzz_data_pass", "fuzz_dataflow"), walker=True, edits=600, seed=1,
            code_nodes=False)
 
 

@@ -764,3 +764,15 @@ def test_a_fallback_goes_on_a_map_s_combine_and_never_inside_the_map():
         {"op": "insert", "before": "compare", "kind": "code", "id": "options",
          "sees": ["current_item.json"], "text": OPTIONS}, _state("livemath/skill_graph")))
 
+
+def test_no_agent_requires_a_map_run_s_result():
+    """The fuzz found an agent added by hand reading a run's result, which a short list
+    never writes: the validator refuses it (V6); the combine reads them through its collect
+    step, an op that says one missing."""
+    state = nn_edits.apply({"op": "add_node", "position": {"after": "options_map_combine"},
+                            "node": {"id": "peek", "kind": "agent", "prompt_template": "Look.",
+                                     "reads": ["options_map_2.txt"], "writes": ["peek.txt"]}},
+                           _s4())
+    assert [(i.code, i.node) for i in validate_state(state)
+            if "results of map step" in i.message] == [("V6", "peek")]
+    assert validate_state(_s4()) == []
