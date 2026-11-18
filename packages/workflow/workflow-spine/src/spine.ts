@@ -1131,6 +1131,12 @@ export class Spine {
     return this.completeDue(node, failed)
   }
 
+  /** Whether `node` is an optional fork branch (a fork's `optional_targets`): one that
+   * may fail before it runs and go on, recorded missing, as the walker records it. */
+  isOptionalBranch(node: string): boolean {
+    return [...this.nodes.values()].some(body => (body.optional_targets ?? []).includes(node))
+  }
+
   /**
    * The nodes that may fail and go on: a fork's `optional_targets`, `missing_on_crash`
    * agents, and steps with a fallback (`falls_back`).
