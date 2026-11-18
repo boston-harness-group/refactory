@@ -360,20 +360,36 @@ def record_lock(path: Path) -> Iterator[None]:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def _set_aside(path: Path, why: str) -> None:
+    """Keep a record file that cannot be read as ``<name>.unreadable.<ns>`` (a name no
+    earlier one has) and say so on stderr: evidence is kept, never taken for empty, and
+    never fails the item it describes. Call it holding the file's `record_lock`."""
+    aside = path.with_name(f"{path.name}.unreadable.{time.time_ns()}")
+    os.replace(path, aside)
+    print(f"refactory: items warning: {path} cannot be read ({why}); kept as {aside}",
+          file=sys.stderr)
+
+
 def update_record_file(path: Path, change: Callable[[Any], Any], empty: Callable[[], Any]) -> Any:
     """Read, change and rewrite the JSON record file ``path`` under an exclusive lock
     (``<name>.lock`` beside it), replacing it whole (`write_whole`). Concurrent writers
     of one pass (a fork's parallel branches, each its own process on the spine; threads
     hold their own lock handle) each see the others' entries. A missing file starts
-    from ``empty()``; one that cannot be read is refused, never overwritten. ``change``
-    edits the value in place or returns a new one; the value written back is returned."""
+    from ``empty()``; one that cannot be read, or holds another kind of value, is kept
+    aside (`_set_aside`) and the record starts again from ``empty()``. ``change`` edits
+    the value in place or returns a new one; the value written back is returned."""
     with record_lock(path):
         value = empty()
         if path.exists():
             try:
-                value = json.loads(path.read_text())
+                loaded = json.loads(path.read_text())
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError(f"{path} cannot be read ({exc}); refusing to overwrite it") from exc
+                _set_aside(path, str(exc))
+            else:
+                if isinstance(loaded, type(value)):
+                    value = loaded
+                else:
+                    _set_aside(path, f"a {type(loaded).__name__}, not a {type(value).__name__}")
         changed = change(value)
         value = value if changed is None else changed
         write_whole(path, json.dumps(value, default=str))
@@ -381,13 +397,7 @@ def update_record_file(path: Path, change: Callable[[Any], Any], empty: Callable
 
 
 def _append_to_sidecar(workdir: Path, entry: dict[str, Any]) -> None:
-    def append(existing: Any) -> list[Any]:
-        if not isinstance(existing, list):
-            raise ValueError(f"{workdir / EXCHANGES_SIDECAR} is not a list; refusing to overwrite it")
-        existing.append(entry)
-        return existing
-
-    update_record_file(workdir / EXCHANGES_SIDECAR, append, list)
+    update_record_file(workdir / EXCHANGES_SIDECAR, lambda existing: existing.append(entry), list)
 
 
 def record_exchange(workdir: Path, node: str, prompt: str, response: str) -> None:
@@ -459,8 +469,8 @@ def record_visit(workdir: Path, visit: dict[str, Any]) -> None:
 
 def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
     """Read per-item exchanges from the sidecar, then remove the file, under its lock.
-    One that cannot be read is kept as ``<name>.unreadable`` and named on stderr, never
-    taken for an item with no exchanges."""
+    One that cannot be read is kept aside (`_set_aside`), never taken for an item with
+    no exchanges."""
     path = workdir / EXCHANGES_SIDECAR
     if not path.exists():
         return []
@@ -470,10 +480,7 @@ def _read_and_clear_exchanges(workdir: Path) -> list[dict[str, Any]]:
         except FileNotFoundError:
             return []
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            aside = path.with_name(f"{path.name}.unreadable")
-            os.replace(path, aside)
-            print(f"refactory: items warning: {path} cannot be read ({exc}); kept as {aside}",
-                  file=sys.stderr)
+            _set_aside(path, str(exc))
             return []
         path.unlink(missing_ok=True)
         return data if isinstance(data, list) else []

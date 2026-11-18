@@ -57,16 +57,23 @@ def test_parallel_appends_keep_every_entry(tmp_path, trial):
     assert len(kept) == EARLIER + WRITERS * APPENDS
 
 
-def test_unreadable_sidecar_is_refused_not_overwritten(tmp_path):
-    """A record file that cannot be read is never taken for an empty one."""
+def test_unreadable_sidecar_is_kept_aside_and_never_fails_a_step(tmp_path, capsys):
+    """A record file that cannot be read never fails the step that adds to it and is
+    never taken for an empty one: it is kept aside, under a new name each time."""
     path = tmp_path / items.EXCHANGES_SIDECAR
     path.parent.mkdir(parents=True)
     path.write_text('[{"node": "a"')
-    with pytest.raises(ValueError, match="refusing to overwrite"):
-        items.record_exchange(tmp_path, "b", "p", "r")
-    assert path.read_text() == '[{"node": "a"'
+    items.record_exchange(tmp_path, "b", "p", "r")
+    assert "cannot be read" in capsys.readouterr().err
+    assert [e["node"] for e in json.loads(path.read_text())] == ["b"]
+    path.write_text('{"not": "a list"}')
+    items.record_visit(tmp_path, {"node": "c", "kind": "op"})
+    assert [e["node"] for e in json.loads(path.read_text())] == ["c"]
+    path.write_text("[")
     assert items._read_and_clear_exchanges(tmp_path) == []  # noqa: SLF001
-    assert (path.with_name(f"{path.name}.unreadable")).read_text() == '[{"node": "a"'
+    assert "cannot be read" in capsys.readouterr().err
+    kept = sorted(p.read_text() for p in path.parent.glob(f"{path.name}.unreadable.*"))
+    assert kept == sorted(['[{"node": "a"', '{"not": "a list"}', "["])
 
 
 # ── end to end: an S4-like fork (precision, hypotheses) in a data pass ──
