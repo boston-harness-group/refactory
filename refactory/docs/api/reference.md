@@ -204,6 +204,7 @@ The validator: what makes architecture-in-the-state safe.
 | function | `read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `required_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `required_slots` | `(template: 'str') -> 'set[str]'` |
+| function | `role_read_issues` | `(graph: 'Graph') -> 'list[Issue]'` |
 | function | `rules_text` | `() -> 'str'` |
 | function | `template_facts` | `(node: 'Node', knob_values: 'Mapping[str, Any]') -> 'set[str]'` |
 | function | `template_names` | `(template: 'str') -> 'set[str]'` |
@@ -243,7 +244,8 @@ The validator: what makes architecture-in-the-state safe.
 - **`read_issues`** — V6: every read is produced by a node on a path the run can take.
 - **`required_read_issues`** — V15 for ops and gates: each of a node's ``required_reads`` is written upstream on
 - **`required_slots`** — The ``{{name}}`` slots a template needs filled: all of them, except a slot inside
-- **`rules_text`** — The rules, as the optimizer prompt shows them.
+- **`role_read_issues`** — V21: an op or gate that finds its files by role (`nn.declared_files`) and could not
+- **`rules_text`** — The rules, as the optimizer prompt shows them (without `INTERNAL_RULES`).
 - **`template_facts`** — The run facts an agent's prompts fill in: their ``{{name}}`` slots, less the knobs
 - **`template_names`** — Every run value a template reads when rendered: its ``{{name}}`` slots and the
 - **`unfilled_slot_issues`** — V20: a ``{{name}}`` slot an edit leaves where nothing fills it.

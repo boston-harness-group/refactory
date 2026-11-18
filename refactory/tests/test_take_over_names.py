@@ -140,20 +140,97 @@ def test_select_whose_names_matter_refuses_a_renamed_read():
         reason
 
 
-def test_a_renamed_read_an_op_would_match_by_its_built_name_is_refused():
-    """With precision taken out, decide_prompt reads two of its three notes and finds
-    them by their built names (`nn.declared_files`); hypotheses' notes renamed would be
-    found by none, so the check -- resolving the reads as the run does -- refuses it. A
-    take over decide_prompt does not read under a renamed name is still taken."""
-    state = nn_edits.apply({"op": "remove", "step": "precision"}, _applier().seed_state)
-    assert state["graph"]["nodes"]["decide_prompt"]["reads"] == [
-        "compare_notes.txt", "hypotheses_notes.txt"]
-    for target in ("hypotheses", "compare"):
-        reason = nn_edits.precheck({"op": "insert", "after": "decide", "kind": "code",
-                                    "takes_over": target}, state)
-        assert reason and "'decide_prompt' reads" in reason, (target, reason)
-    assert nn_edits.precheck({"op": "insert", "after": "hypotheses", "kind": "code",
-                              "takes_over": "hypotheses"}, state) is None
+#: A take over the steps before the new one read under a new name, then a step taken out
+#: that one of them read: its read count changes after the rename.
+RENAMED_THEN_REMOVED = {
+    "compare taken over, precision removed": ("compare", "precision"),
+    "hypotheses taken over, precision removed": ("hypotheses", "precision"),
+    "compare taken over, hypotheses removed": ("compare", "hypotheses"),
+    "precision taken over, hypotheses removed": ("precision", "hypotheses"),
+}
+
+
+def _renamed_then_removed(target: str, removed: str) -> list[dict]:
+    return [{"op": "insert", "after": "decide_prompt", "kind": "code", "takes_over": target},
+            {"op": "remove", "step": removed}]
+
+
+@pytest.mark.parametrize("name", sorted(RENAMED_THEN_REMOVED))
+def test_a_rename_then_a_removal_still_runs_on_the_walker(name):
+    """decide_prompt finds each note by name -- its renames say what each built note is
+    read under (`nn.declared_files`) -- never by position, so taking a step out after a
+    rename leaves it knowing which note is which (once: every item failed)."""
+    applier = _applier()
+    target, removed = RENAMED_THEN_REMOVED[name]
+    state = _accepted(applier, _renamed_then_removed(target, removed))
+    node = state["graph"]["nodes"]["decide_prompt"]
+    assert len(node["reads"]) == 2 and node["renames"]["reads"] == {
+        f"{target}_notes.txt": f"{target}.txt"}
+    assert sf.check_state(applier, state, walker=True, only=CHECKED) == []
+
+
+@needs_spine
+def test_a_rename_then_a_removal_runs_on_the_spine_as_on_the_walker():
+    applier = _applier()
+    _on_both(applier, _accepted(applier, _renamed_then_removed("compare", "precision")))
+
+
+def test_files_are_found_by_name_whatever_the_reads_count_or_order():
+    """Adding, removing or reordering a node's reads never changes which file is which."""
+    from refactory_dsh.nn import declared_files
+
+    roles = ("a.txt", "b.txt", "c.txt")
+    renames = {"a.txt": "a2.txt"}
+    assert declared_files(["a2.txt", "b.txt", "c.txt"], roles, renames) == ["a2.txt", "b.txt", "c.txt"]
+    assert declared_files(["c.txt", "a2.txt"], roles, renames) == ["a2.txt", None, "c.txt"]
+    assert declared_files(["a2.txt", "x.txt", "c.txt", "b.txt"], roles, renames) == [
+        "a2.txt", "b.txt", "c.txt"]
+    assert declared_files(["a.txt", "b.txt", "c.txt"], roles, renames) == [None, "b.txt", "c.txt"]
+
+
+def test_v21_refuses_a_required_read_its_op_cannot_find():
+    """The whole-graph check (V21, after every edit): a required read decide_prompt would
+    not find, or a renamed role it was not built with, is refused."""
+    from refactory_dsh.nn.validate import validate_state
+
+    state = _accepted(_applier(), [{"op": "insert", "after": "decide_prompt", "kind": "code",
+                                    "takes_over": "compare"}])
+    assert not [i for i in validate_state(state) if i.code == "V21"]
+    lost = json.loads(json.dumps(state))
+    lost["graph"]["nodes"]["decide_prompt"].pop("renames")
+    assert [i for i in validate_state(lost) if i.code == "V21" and "compare.txt" in i.message]
+    foreign = json.loads(json.dumps(state))
+    foreign["graph"]["nodes"]["decide_prompt"]["renames"]["reads"]["other.txt"] = "compare.txt"
+    assert [i for i in validate_state(foreign) if i.code == "V21" and "other.txt" in i.message]
+
+
+def test_collect_shows_a_renamed_file_under_the_name_it_was_built_with(tmp_path):
+    """A collect step before the new one reads compare's notes under their new name, and
+    shows them under the old one: the step after it is sent the same text."""
+    from refactory_dsh.nn import operators
+    from refactory_dsh.nn.executor import RunContext
+
+    state = _accepted(_applier(), [
+        {"op": "insert", "after": "compare", "kind": "op", "id": "gather",
+         "call": operators.COLLECT_CALL},
+        {"op": "insert", "after": "decide", "kind": "code", "takes_over": "compare"}])
+    gather = state["graph"]["nodes"]["gather"]
+    assert gather["reads"] == ["compare.txt"]
+    assert gather["renames"] == {"reads": {"compare_notes.txt": "compare.txt"}}
+    (tmp_path / "compare.txt").write_text("NOTES")
+    ctx = RunContext(tmp_path)
+    ctx._declared_reads, ctx._declared_facts = ("compare.txt",), ("gather",)
+    ctx.read_renames = gather["renames"]["reads"]
+    assert operators.collect(ctx) == {"gather": "### compare_notes.txt\nNOTES"}
+
+
+def test_code_returning_an_output_under_both_names_is_refused():
+    from refactory_dsh import snippet
+
+    renames = {"facts": {"x": "x_new"}}
+    with pytest.raises(snippet.SnippetError, match="same name 'x_new'"):
+        snippet._renamed_result({"facts": {"x": 1, "x_new": 2}}, renames)
+    assert snippet._renamed_result({"facts": {"x": 1}}, renames) == {"facts": {"x_new": 1}}
 
 
 def test_renames_is_the_edit_layer_s_own_field():
@@ -270,7 +347,7 @@ def test_the_ops_reading_their_declaration_send_the_same_prompts_on_both_runtime
 
 
 SHAPES = ("parallelize", "serialize", "branch", "loop", "back_to", "route", "fallback",
-          "split", "merge")
+          "split", "merge", "remove")
 WALKS = 240
 
 
@@ -324,10 +401,28 @@ def test_taking_over_mixed_with_every_shape_keeps_every_invariant():
             continue
         taken += 1
         found = sf.check_state(applier, current.state, walker=True, only=CHECKED)
+        found += [f"unresolved: {problem}" for problem in _unresolved(current.state)]
         if found:
             bad.append((applier.seed.name, edits, [str(v) for v in found]))
     assert taken > WALKS // 3, taken
     assert not bad, bad[:3]
+
+
+def _unresolved(state: dict) -> list[str]:
+    """Each required read a step that finds its files by role would not find, as its run
+    resolves them (`nn.declared_files`): the property every accepted graph keeps."""
+    from refactory_dsh.nn import declared_files
+    from refactory_dsh.nn.resolve import resolve
+
+    out = []
+    for node_id, node in sf._graph_of(state).nodes.items():
+        call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+        roles = getattr(resolve(call), "declared_files", None) if call else None
+        if roles is None or not node.reads:
+            continue
+        found = declared_files(node.reads, roles, (node.renames or {}).get("reads"))
+        out += [f"{node_id}: {name}" for name in node.required_reads if name not in found]
+    return out
 
 
 def _fallbacks_and_loops(state: dict) -> list[dict]:

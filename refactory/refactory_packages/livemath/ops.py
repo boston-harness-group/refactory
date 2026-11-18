@@ -88,7 +88,8 @@ def declared_io(ctx: Any, files: Sequence[str], facts: Sequence[str]
     from refactory_dsh.nn import declared_files
 
     made = list(getattr(ctx, "_declared_facts", ()) or ())
-    chosen = declared_files(getattr(ctx, "declared_reads", ()) or (), files)
+    chosen = declared_files(getattr(ctx, "declared_reads", ()) or (), files,
+                            getattr(ctx, "read_renames", None))
     return chosen, made if len(made) == len(facts) else list(facts)
 
 

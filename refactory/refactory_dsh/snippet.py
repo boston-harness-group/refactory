@@ -877,9 +877,20 @@ def _renamed_result(result: Any, renames: Mapping[str, Mapping[str, str | None]]
     out = dict(result)
     for key, table in renames.items():
         given = result.get(key)
-        if isinstance(given, dict):
-            out[key] = {table.get(name, name): value for name, value in given.items()
-                        if table.get(name, name) is not None}
+        if key not in ("facts", "files") or not isinstance(given, dict):
+            continue
+        recorded: dict[str, str] = {}
+        for name in given:
+            under = table.get(name, name)
+            if under is not None and under in recorded:
+                raise SnippetError(
+                    f"code op returned {key} {recorded[under]!r} and {name!r}, which the run "
+                    f"records under the same name {under!r} (its outputs were renamed by an "
+                    "edit); return one of them")
+            if under is not None:
+                recorded[under] = name
+        out[key] = {table.get(name, name): value for name, value in given.items()
+                    if table.get(name, name) is not None}
     return out
 
 

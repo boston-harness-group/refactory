@@ -27,7 +27,7 @@ import traceback as traceback_mod
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
 
 from .graph import PROCEED, Edge, Graph, Node, op_io
 from .loops import loop_edges
@@ -244,6 +244,8 @@ class RunContext:
         self._declared: tuple[str, ...] = ()
         self._declared_reads: tuple[str, ...] = ()
         self._declared_facts: tuple[str, ...] = ()
+        #: The name each built file is read under (`graph.Node.renames` ``reads``).
+        self.read_renames: dict[str, str] = {}
         self._produced: set[str] = set()
         self.writes_made: list[str] = []
         #: A code or verdict node's declaration (`refactory_dsh.snippet.spec`): its code,
@@ -451,18 +453,18 @@ def by_declaration(fn: Callable[..., Any] | None = None, *,
     return mark(fn) if fn is not None else mark
 
 
-def declared_files(reads: Sequence[str], files: Sequence[str]) -> list[str | None]:
+def declared_files(reads: Sequence[str], files: Sequence[str],
+                   renames: Mapping[str, str] | None = None) -> list[str | None]:
     """Each role's file among a node's declared ``reads``, for a callable built to read
-    ``files`` (one per role, `by_declaration`): the reads in order when there is one per
-    role (an edit may have renamed them), else each role's built name when it is among
-    them and None when not (an edit took out the step that wrote it). No reads at all (a
-    context with no declaration): the built names."""
+    ``files`` (one per role, `by_declaration`): the name the node reads that built file
+    under (``renames``, its `graph.Node.renames` ``reads``; else the built name), or None
+    when the node does not read it (an edit took out the step that wrote it). Never by
+    position or count. No reads at all (a context with no declaration): the built names."""
     reads = list(reads)
     if not reads:
         return list(files)
-    if len(reads) == len(files):
-        return list(reads)
-    return [name if name in reads else None for name in files]
+    named = [(renames or {}).get(name, name) for name in files]
+    return [name if name in reads else None for name in named]
 
 
 def names_matter(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -767,6 +769,7 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             ctx._declared = tuple(args_dict.get("writes", ()))
             ctx._declared_reads = tuple(args_dict.get("reads", ()))
             ctx._declared_facts = tuple(args_dict.get("produces", ()))
+            ctx.read_renames = dict(args_dict.get("read_renames") or {})
             ctx.snippet = args_dict.get("snippet")
 
             # Open the same shared ledger the parent holds, so an op that records usage
@@ -1861,6 +1864,7 @@ class Executor:
             "writes": op_io(node)[0],
             "reads": op_io(node)[1],
             "produces": op_io(node)[2],
+            "read_renames": dict((node.renames or {}).get("reads") or {}),
             "memory": self.ctx.memory,
             "iteration": self.ctx.iteration,
             "verdicts": dict(self.ctx.verdicts),

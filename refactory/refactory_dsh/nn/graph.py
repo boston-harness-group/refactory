@@ -316,16 +316,29 @@ def _knob_outputs(node: "Node") -> dict[str, tuple[str, ...]]:
 
 
 def _renames(node: "Node") -> dict[str, dict[str, str | None]] | None:
-    """``node.renames`` in its canonical form (``facts`` and ``files``, each present only
-    when not empty; None when both are), or a `GraphError`: only an op with code declares
-    it, and each name it records under is one the op declares, once."""
+    """``node.renames`` in its canonical form (each key present only when not empty; None
+    when none is), or a `GraphError`: ``facts`` and ``files`` only on an op with code, each
+    name it records under one the op declares, once; ``reads`` only on an op or a gate,
+    each built name mapped to a file name."""
     value = node.renames
-    if node.kind != "op" or not node.code and not any(f == "code" for f, _k in node.field_bindings):
-        raise GraphError(f"node {node.id!r} is a {node.kind} without code and declares renames; "
-                         "only a code op does")
-    if not isinstance(value, Mapping) or set(value) - {"facts", "files"}:
-        raise GraphError(f"node {node.id!r}: renames is {{'facts': {{...}}, 'files': {{...}}}}")
+    if not isinstance(value, Mapping) or set(value) - {"facts", "files", "reads"}:
+        raise GraphError(f"node {node.id!r}: renames is {{'facts': {{...}}, 'files': {{...}}, "
+                         "'reads': {...}}")
+    has_code = bool(node.code) or any(f == "code" for f, _k in node.field_bindings)
+    if (value.get("facts") or value.get("files")) and not (node.kind == "op" and has_code):
+        raise GraphError(f"node {node.id!r} is a {node.kind} without code and renames what it "
+                         "returns; only a code op does")
+    if value.get("reads") and node.kind not in ("op", "gate"):
+        raise GraphError(f"node {node.id!r} is a {node.kind} and renames what it reads; only an "
+                         "op or a gate does")
     out: dict[str, dict[str, str | None]] = {}
+    reads = value.get("reads") or {}
+    if not isinstance(reads, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in reads.items()):
+        raise GraphError(f"node {node.id!r}: renames['reads'] maps a built file name to the "
+                         "name it is read under")
+    if reads:
+        out["reads"] = dict(reads)
     for key, declared in (("facts", node.produces), ("files", node.writes)):
         table = value.get(key) or {}
         if not isinstance(table, Mapping) or not all(
@@ -511,12 +524,14 @@ class Node:
     #: carrying it in every output (`operators.carried_knobs`), so a step told to see the
     #: task's own input (``"sees": ["task"]``) never gets another step's instructions.
     knob_outputs: dict[str, tuple[str, ...]] | None = None
-    #: `op` code node: the names its code returns that the run records under another
-    #: name, ``{"facts": {returned: declared}, "files": {returned: declared}}`` (a
-    #: declared name of its own, or None to drop it). Set by edits that give a step's
-    #: outputs new names (a copy of code, ``insert``'s 'takes_over'), so the code stays as
-    #: written -- and stays right when it is rewritten -- on both runtimes
-    #: (`refactory_dsh.snippet.run`, through the node's declaration).
+    #: `op` or `gate`: names the edit layer gave this step's files, so what it runs stays
+    #: as written on both runtimes: for a code op, the outputs its code returns that the
+    #: run records under another name, ``{"facts": {returned: declared}, "files":
+    #: {returned: declared}}`` (None drops one; `refactory_dsh.snippet.run`); for a
+    #: callable that finds its files by role (`nn.by_declaration` with ``files``), the
+    #: name each built file is read under, ``{"reads": {built: read as}}``
+    #: (`nn.declared_files`). Set by edits that rename a step's files (a copy of code,
+    #: ``insert``'s 'takes_over'), never by a proposal.
     renames: dict[str, dict[str, str | None]] | None = None
 
     def __post_init__(self) -> None:

@@ -1130,23 +1130,39 @@ def _by_declaration(node: Node) -> bool:
     return _marked(node, "by_declaration")
 
 
-def _lost_by_role(node: Node, name: str, names: Mapping[tuple[str, str], str]) -> bool:
-    """Whether ``node``'s callable, which finds each role's file among its reads by
-    `nn.declared_files` (a ``files`` given to `nn.by_declaration`), would lose ``name``
-    once its reads are renamed: it reads fewer files than it was built for (an edit took
-    one out), so it matches them by their built names, and the new name is none of them.
-    The check resolves the reads exactly as the run does."""
-    from .executor import declared_files
+def _roles(node: Node) -> tuple[str, ...] | None:
+    """The files ``node``'s callable was built to read, one per role, when it finds them by
+    role (`nn.by_declaration` with ``files``, `nn.declared_files`); else None."""
     from .resolve import resolve
 
+    call = node.call if node.kind == "op" else node.evaluator if node.kind == "gate" else ""
+    if not call:
+        return None
     try:
-        roles = getattr(resolve(node.call or node.evaluator), "declared_files", None)
+        roles = getattr(resolve(call), "declared_files", None)
     except Exception:  # noqa: BLE001 - an unresolvable call is V8's to report
-        return False
+        return None
+    return tuple(roles) if roles is not None else None
+
+
+def _read_renames(node: Node, files: Mapping[str, str]) -> dict[str, str] | None:
+    """For a step that finds its files by role (`_roles`) or shows their names (collect),
+    its ``renames`` ``reads`` once the files in ``files`` (old -> new) are renamed: each
+    built name mapped to the name it is read under, so the step still knows which file is
+    which whatever else changes in its reads (`nn.declared_files`), and shows each under
+    the name it was built with. None for any other step, or when nothing changes."""
+    roles = _roles(node)
+    before = dict((node.renames or {}).get("reads") or {})
+    if roles is None and _marked(node, "shows_names"):
+        # It shows each file under its name (collect): the names it was built with.
+        built_as = {read: built for built, read in before.items()}
+        roles = tuple(built_as.get(read, read) for read in node.reads)
     if roles is None:
-        return False
-    renamed = [names.get(("file", read), read) for read in node.reads]
-    return names[("file", name)] not in declared_files(renamed, roles)
+        return None
+    after = {built: files.get(before.get(built, built), before.get(built, built))
+             for built in roles}
+    after = {built: name for built, name in after.items() if name != built}
+    return after if after != before else None
 
 
 def _names_itself(node: Node, code: str | None, name: str) -> bool:
@@ -1228,8 +1244,9 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             texts[knob] = renamed
         named = sorted(facts & set(node.feedback_keys))
         code = _code_text(node, state)
+        # A fact an op or gate reads, it reads by name unless its code says otherwise.
         named += [fact for fact in sorted(facts & set(node.inputs))
-                  if _names_itself(node, code, fact)]
+                  if code is None or re.search(rf"\b{re.escape(fact)}\b", code)]
         if node.kind == "op" or (node.kind == "gate" and node.gate_kind == "fn"):
             # An op or fn gate opens its files in its code: a renamed read reaches it only
             # when it opens what it declares (LiveMath's notes_prompts opens
@@ -1237,8 +1254,7 @@ def _take_over_plan(graph: Graph, state: Mapping[str, Any], target_id: Any, side
             # One whose names matter (`nn.names_matter`: select matches a label against
             # them) would act differently on a renamed read.
             named += [name for name in sorted(files & {*node.reads, *node.required_reads})
-                      if _names_itself(node, code, name) or _marked(node, "names_matter")
-                      or _lost_by_role(node, name, names)]
+                      if _names_itself(node, code, name) or _marked(node, "names_matter")]
         if named:
             raise _Refused(f"{node_id!r} reads {target_id!r}'s output {', '.join(map(repr, named))} "
                            "in its code or feedback keys, which 'takes_over' cannot rename; take "
@@ -1333,10 +1349,16 @@ def _expand_insert(edit: dict, state: dict) -> list[dict]:
             "writes": [names[("file", n)] for n in target.writes],
             "produces": [names[("fact", n)] for n in target.produces],
             **({"renames": renames} if renames else {})}))
+        files = {old: new for (kind, old), new in names.items() if kind == "file"}
         for reader in sorted(readers):
             node = build.graph.nodes[reader]
             before = node.to_state()
             after = _renamed_refs(before, names)
+            roles = _read_renames(node, files)
+            if roles is not None:
+                # It finds its files by role: it is told the new name of each it reads.
+                after["renames"] = {**dict(node.renames or {}), "reads": roles} if roles \
+                    else {k: v for k, v in dict(node.renames or {}).items() if k != "reads"}
             if after != before:
                 build.add(_respec(build.state, reader, after))
         for knob, text in sorted(texts.items()):
