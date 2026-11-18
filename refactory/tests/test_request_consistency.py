@@ -284,11 +284,30 @@ def _map() -> None:
         assert isinstance(refused, list) and "from 2 to 8" in refused[0], refused
 
 
+def _fallback() -> None:
+    """'a step run instead when 'step' (one run per item) fails ... it writes that step's
+    outputs, so what reads them still gets an answer; ... it sees what 'step' sees'"""
+    line = core_ops.OPERATORS["fallback"]["line"]
+    assert "never for time or a harness fault" in line
+    before = _seed("fuzz_data_pass")
+    _a, out = _ok("fuzz_data_pass", {"op": "fallback", "step": "solve"})
+    graph = _graph(out)
+    [new] = [n for n in _new(before, graph) if graph.nodes[n].kind == "agent"]
+    assert _outputs(graph, new) == _outputs(before, "solve")
+    gate = graph.fallback_gate("solve")
+    assert {(e.target, e.condition) for e in graph.out_edges(gate)} == {
+        (new, "fallback"), (next(iter(_succ(before, "solve"))), "proceed")}
+    assert _succ(graph, new) == _succ(before, "solve")
+    assert _consumed(out, new) == _consumed(Candidate.from_state(_a.seed_state), "solve")
+    _a, refused = _apply("fuzz_data_pass", {"op": "fallback", "step": "report"})
+    assert isinstance(refused, list) and "outside any per-item pass" in refused[0], refused
+
+
 #: Each core operator's line, checked against what it builds.
 CLAIMS: dict[str, Callable[[], None]] = {
     "insert": _insert, "remove": _remove, "parallelize": _parallelize,
     "serialize": _serialize, "branch": _branch, "rewire": _rewire, "loop": _loop,
-    "route": _route, "split": _split, "merge": _merge, "map": _map}
+    "route": _route, "split": _split, "merge": _merge, "fallback": _fallback, "map": _map}
 
 
 def test_every_core_operator_s_line_is_checked():
@@ -486,3 +505,27 @@ def test_a_map_agrees_across_the_operator_section_the_legend_and_the_view(tmp_pa
         "list", "compare_notes.txt@compare").replace("max N", "max 3")
     assert any(row.strip().startswith(drawn) for row in view.splitlines()), view
     assert text.count(core_ops.OPERATORS["map"]["line"]) == 1 and text.count(form) == 1
+
+
+def test_a_fallback_agrees_across_the_operator_section_the_legend_and_the_view(tmp_path):
+    """The request's operator line for ``fallback``, the legend's form and the drawn line
+    say the same: the step it answers for and the step that answers, in the form's words,
+    the fallback writing that step's outputs."""
+    text, state = _request(tmp_path, "livemath/skill_graph",
+                           {"op": "fallback", "step": "decide", "kind": "agent",
+                            "text": "Answer with just the letter."})
+    section = _section(text, "## Structural operators")
+    line = next(row for row in section.splitlines() if row.startswith("- `fallback` ("))
+    assert core_ops.OPERATORS["fallback"]["line"] in line
+    form = pipeline_view.FORMS["fallback"]
+    assert f"`{form}`" in text  # the legend
+    view = _fenced(_section(text, "## The pipeline you may edit"))
+    drawn = form.replace("step fails", "decide fails").replace("-> step", "-> decide_fallback")
+    assert drawn in [row.strip() for row in view.splitlines()], view
+    outputs = {re.search(r"-> (\S+)$", row.strip()).group(1)
+               for row in view.splitlines()
+               if re.match(r"\s*decide(_fallback)? agent ", row)}
+    assert outputs == {"answer.txt"}, view
+    # Said once: the line and the form, nowhere else in the request.
+    assert text.count("never for time or a harness fault") == 1
+    assert text.count(form) == 1

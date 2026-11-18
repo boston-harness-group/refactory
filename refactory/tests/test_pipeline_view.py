@@ -277,7 +277,8 @@ def test_every_input_gate_fork_and_edge_is_shown_on_seeds_and_random_edits(seed)
                 for _kind, name in consumed(node, view.values):
                     assert f"{name}@" in line or f"{name} (via " in line, (seed, node_id, name)
             if node.kind == "gate":
-                assert re.match(r"(loop|route)\(", text.get(node_id, "")), (seed, node_id)
+                assert re.match(r"(loop|route|fallback)\(", text.get(node_id, "")), (seed,
+                                                                                    node_id)
             if node.kind == "fork" and not map_of(graph, node_id):
                 assert text.get(node_id) == f"parallel {node_id} {{", (seed, node_id)
         reached = set(view.reach(graph.start))

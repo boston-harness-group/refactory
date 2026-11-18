@@ -549,6 +549,7 @@ DEFAULTS = [
     ("fuzz_draft_review", {"op": "split", "step": "finalize"}),
     ("fuzz_draft_review", {"op": "merge", "steps": ["review", "finalize"]}),
     ("fuzz_draft_review", {"op": "map", "after": "draft", "over": "draft"}),
+    ("fuzz_data_pass", {"op": "fallback", "step": "solve"}),
 ]
 
 

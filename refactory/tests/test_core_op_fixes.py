@@ -495,3 +495,22 @@ def test_a_step_whose_inputs_cannot_be_read_is_said_not_skipped(monkeypatch):
     monkeypatch.setattr(validate, "template_facts", unreadable)
     said = core_ops.lost_inputs(state, after)
     assert said and "inputs cannot be read (ValueError: bad template)" in said
+
+
+# ── a judge's reply is a verdict: default code cannot take it over ─────────
+
+
+def test_a_judge_is_not_split_into_code_that_cannot_answer_its_verdict():
+    """The fuzz found it: a loop's judge split into code steps with no text left the
+    verdict gate reading what the default code joins, which never starts with a verdict, so
+    every run failed. Refused, saying what to give; code with its own text is taken."""
+    state = nn_edits.apply({"op": "loop", "step": "left", "judge": "agent"},
+                           sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
+    edit = {"op": "split", "step": "left_check_judge", "into": [{"kind": "code"}, {"kind": "code"}]}
+    assert nn_edits.precheck(edit, state) == (
+        "'left_check' reads its verdict from what 'left_check_judge' writes; a code step "
+        "taking that over needs its own 'text' (code whose output starts with the verdict), "
+        "or make it an agent")
+    own = "def main(inp):\n    return {'files': {'left_check_judge.txt': 'proceed'}}\n"
+    assert nn_edits.precheck({**edit, "into": [{"kind": "code"}, {"kind": "code", "text": own}]},
+                             state) is None

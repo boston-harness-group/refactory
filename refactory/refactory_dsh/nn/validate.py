@@ -40,7 +40,9 @@ RULES: dict[str, str] = {
     "V5": "a gate has at least two out-edges, each with its own condition, and no "
           "unconditional out-edge (one is 'proceed' when it declares on_exhausted "
           "'continue'); a code or verdict gate's conditions are single words "
-          "(no spaces or punctuation), as its answer is read as one word",
+          "(no spaces or punctuation), as its answer is read as one word; a fallback "
+          "gate follows one step in a data pass, its only way in, and leads on by "
+          "'proceed' and 'fallback'",
     "V6": "every file a node reads must be written by a node on a path from the "
           "start node to a terminal; a map's element files are read by its runs alone",
     "V7": "every knob a node consumes must be declared, and every declared knob "
@@ -349,6 +351,7 @@ def validate(
 
     issues.extend(gate_label_issues(graph))
     issues.extend(answer_label_issues(graph))
+    issues.extend(fallback_gate_issues(graph))
 
     # V12 the nodes a fork, a join or a data node names.
     #
@@ -1039,6 +1042,30 @@ def answer_label_issues(graph: Graph) -> list[Issue]:
             issues.append(Issue("V5", f"out-edge condition(s) {bad} cannot be this gate's answer: "
                                 "a code or verdict gate answers one word, so each condition is "
                                 "a single word with no spaces or punctuation", node=node_id))
+    return issues
+
+
+def fallback_gate_issues(graph: Graph) -> list[Issue]:
+    """V5 for a fallback gate (`graph.FALLBACK_GATE_CALL`): it reads whether the one step
+    before it failed, so that step -- an agent or op in a data pass whose one out-edge is
+    this gate's only way in (`Graph.fallback_gate`) -- is the step it answers for, and it
+    leads on by exactly ``proceed`` and ``fallback``."""
+    from .graph import FALLBACK, FALLBACK_GATE_CALL, PROCEED
+
+    issues: list[Issue] = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        if node.kind != "gate" or node.evaluator != FALLBACK_GATE_CALL:
+            continue
+        before = graph.in_edges(node_id)
+        if len(before) != 1 or graph.fallback_gate(before[0].source) != node_id:
+            issues.append(Issue("V5", "a fallback gate's only way in is the one out-edge of "
+                                      "the step it answers for, an agent or op in a data "
+                                      "pass", node=node_id))
+        labels = sorted(str(e.condition) for e in graph.out_edges(node_id))
+        if labels != sorted((FALLBACK, PROCEED)):
+            issues.append(Issue("V5", f"a fallback gate leads on by {PROCEED!r} and "
+                                      f"{FALLBACK!r}, not {labels}", node=node_id))
     return issues
 
 

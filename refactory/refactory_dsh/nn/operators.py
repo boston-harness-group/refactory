@@ -20,6 +20,9 @@ same way on both runtimes (the walker in its forkserver child, the spine through
   fact; `list_elements`) into one prompt per element -- its one text knob, filled from
   the run's facts, then the element -- written to its i-th write; a ``map``'s branch
   reads its own (`map_of`).
+- ``step_failed`` (`graph.FALLBACK_GATE_CALL`): a fallback gate's verdict, ``fallback``
+  when the step before it is missing because it failed (``items.missing_steps``) and not
+  because it ran out of time (`node_retry.TIMEOUT_KINDS`), else ``proceed``.
 
 The helpers describe and wire data without a model:
 
@@ -247,9 +250,11 @@ def list_elements(raw: Any) -> list[str]:
             for item in items]
 
 
-#: The cause a map's unused run is recorded under (`items.missing_steps` leaves it out):
-#: the list had fewer elements than the map has runs, so it had nothing to do.
-NOT_NEEDED = "not_needed"
+#: Where a map's run with no element this time is marked not needed (`<run>.txt`, why),
+#: which `items.missing_steps` reads to leave it out: the list had fewer elements than the
+#: map has runs, so it had nothing to do. Apart from the missing records, which each visit
+#: of a step rewrites (`node_retry.record_spent`).
+NOT_NEEDED_DIR = ".refactory/not-needed"
 
 
 def elements(ctx: Any) -> dict[str, Any]:
@@ -259,11 +264,9 @@ def elements(ctx: Any) -> dict[str, Any]:
     (``task_knob``) filled from the run's facts, then the element, is written to its i-th
     declared write. First every element file, and every output of the map's runs
     (``runs``), is taken away, so a pass run again (a loop) never shows a run an element or
-    a result from before. A run with no element this time is recorded as not needed
-    (`NOT_NEEDED`), never as a step that failed. Its fact says how many ran: ``ran K of N
+    a result from before. A run with no element this time is marked not needed
+    (`NOT_NEEDED_DIR`), never a step that failed. Its fact says how many ran: ``ran K of N
     elements (max M)``, which the combine step sees."""
-    import json
-
     from refactory_dsh.node_retry import MISSING_DIR
 
     from .executor import ExecutionError, render
@@ -282,7 +285,7 @@ def elements(ctx: Any) -> dict[str, Any]:
     workdir = Path(ctx.workdir)
     for run in runs:
         for name in (*run.get("writes", ()), f"reviews/{run['id']}-missing.txt",
-                     f"{MISSING_DIR}/{run['id']}.json"):
+                     f"{MISSING_DIR}/{run['id']}.json", f"{NOT_NEEDED_DIR}/{run['id']}.txt"):
             (workdir / name).unlink(missing_ok=True)
     for name in writes:
         (workdir / name).unlink(missing_ok=True)
@@ -292,11 +295,9 @@ def elements(ctx: Any) -> dict[str, Any]:
         ctx.write_text(writes[index],
                        f"{instruction}\n\n## Element {index + 1} of {len(used)}\n{item}\n")
     for run in runs[len(used):]:
-        marker = workdir / MISSING_DIR / f"{run['id']}.json"
+        marker = workdir / NOT_NEEDED_DIR / f"{run['id']}.txt"
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({"cause": NOT_NEEDED, "sessions": 0,
-                                      "error": f"not needed: the list had {len(items)} "
-                                               "element(s)"}) + "\n")
+        marker.write_text(f"not needed: the list had {len(items)} element(s)\n")
     facts = list(getattr(ctx, "_declared_facts", ()) or ())
     said = f"ran {len(used)} of {len(items)} elements (max {len(writes)})"
     return {facts[0]: said} if facts else {}
@@ -318,6 +319,32 @@ def map_of(graph: Graph, fork_id: str) -> str | None:
         return None
     op = graph.nodes.get(before[0].source)
     return op.id if op is not None and op.kind == "op" and op.call == MAP_CALL else None
+
+
+def step_failed(ctx: Any) -> Any:
+    """`graph.FALLBACK_GATE_CALL`: ``fallback`` when the step before this gate (its
+    declaration's ``step``, `lowering.snippet_spec`) was recorded missing in this run
+    directory -- the item's pass -- for a failure that is not a timeout (its cause, from
+    ``items.missing_steps``, outside `node_retry.TIMEOUT_KINDS`), with that failure as the
+    reason; ``proceed`` otherwise: the step answered, or ran out of time and the item goes
+    on without its answer as it would with no fallback."""
+    from refactory_dsh.items import missing_steps
+    from refactory_dsh.node_retry import TIMEOUT_KINDS
+
+    from .executor import ExecutionError, Verdict
+    from .graph import FALLBACK, PROCEED
+
+    step = str((getattr(ctx, "snippet", None) or {}).get("step") or "")
+    if not step:
+        raise ExecutionError(f"fallback gate {ctx.node_id!r}: the runtime named no step for "
+                             "it to read")
+    info = missing_steps(Path(ctx.workdir)).get(step)
+    if info is None:
+        return Verdict(PROCEED, reason=f"{step} answered")
+    cause = str(info.get("cause") or "failed")
+    if cause in TIMEOUT_KINDS:
+        return Verdict(PROCEED, reason=f"{step} ran out of time ({cause}); no fallback")
+    return Verdict(FALLBACK, reason=f"{step} failed ({cause}): {info.get('error') or ''}"[:2000])
 
 
 # ── what a graph's data is made of ────────────────────────────────────────

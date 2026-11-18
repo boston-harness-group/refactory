@@ -140,6 +140,10 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             entry["retry"] = {**node.retry, "on": list(node.retry["on"])}
         if graph.missing_on_crash(node_id):
             entry["missing_on_crash"] = True
+        if graph.falls_back(node_id):
+            # A genuine failure leaves it missing for its fallback gate (`run.run_node`,
+            # `worker_node.main`), as the walker records it.
+            entry["falls_back"] = True
         if node.workspace is not None:
             # Where the node works, for a reader of the run directory; the worker spec
             # carries the same declaration to the node's dispatch.
@@ -164,19 +168,24 @@ def needs_snippet_spec(node: Any) -> bool:
     runtime."""
     from refactory_dsh import snippet
 
+    from refactory_dsh.nn.graph import FALLBACK_GATE_CALL
     from refactory_dsh.nn.operators import MAP_CALL
 
     target = node.call if node.kind == "op" else (node.evaluator if node.kind == "gate" else "")
-    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT, MAP_CALL)
+    return target in (snippet.RUN, snippet.GATE, snippet.VERDICT, FALLBACK_GATE_CALL, MAP_CALL)
 
 
 def snippet_spec(graph: Graph, node: Any, knob_values: dict[str, Any]) -> dict[str, Any]:
     """A code or verdict node's declaration (`snippet.spec`), the same on both runtimes:
     the walker builds it for its child, the lowering writes it for the spine's runner."""
     from refactory_dsh import snippet
+    from refactory_dsh.nn.graph import FALLBACK_GATE_CALL
     from refactory_dsh.nn.operators import MAP_CALL, map_of
 
     found = snippet.spec(node, [edge.condition for edge in graph.out_edges(node.id)], knob_values)
+    if node.kind == "gate" and node.evaluator == FALLBACK_GATE_CALL:
+        # The step whose failure the fallback gate reads (`nn.operators.step_failed`).
+        found["step"] = next((edge.source for edge in graph.in_edges(node.id)), "")
     if node.kind == "op" and node.call == MAP_CALL:
         # The text knob a map's elements step fills, and the map's runs with what each
         # writes, which it clears before a pass (`nn.operators.elements`).
@@ -276,6 +285,8 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 **({"knob_outputs": {out: list(k) for out, k in node.knob_outputs.items()},
                     "knobs": list(node.knobs), "produces": list(node.produces)}
                    if node.knob_outputs is not None else {}),
+                # The spine lets it fail and go on when its runner records it missing.
+                **({"falls_back": True} if graph.falls_back(node_id) else {}),
             )
         elif node.kind == "gate":
             # Who answers it decides whether there is a command at all. `fn` runs its
@@ -368,6 +379,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # Spent retries leave the step missing, not failed: the worker records
                 # it so and the spine lets it fail and go on, as the walker does.
                 **({"missing_on_crash": True} if graph.missing_on_crash(node_id) else {}),
+                # A genuine failure (never a timeout) leaves a step with a fallback missing,
+                # for its fallback gate, as the walker records it.
+                **({"falls_back": True} if graph.falls_back(node_id) else {}),
                 # Where the node works. Only a dispatched worker can give it one
                 # (`workers.lower_workflow` refuses it on the CEO-subagent route).
                 **({"workspace": dict(node.workspace)} if node.workspace is not None else {}),

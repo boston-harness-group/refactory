@@ -59,3 +59,168 @@ def note_unless_first(ctx: Any) -> dict[str, Any]:
     if str((ctx.read_json("current_item.json", {}) or {}).get("id")) != "0":
         ctx.write_text("notes.txt", "noted\n")
     return {}
+
+
+def right_unless_first(ctx: Any) -> dict[str, Any]:
+    """A solving op that answers ``right`` -- except on item ``0``, where it raises (the
+    ``fallback`` operator's genuine failure)."""
+    if str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0":
+        raise ValueError("item 0 breaks the solver")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def _first_item(ctx: Any) -> bool:
+    return str((ctx.read_json("current_item.json", {}) or {}).get("id")) == "0"
+
+
+def _tries(ctx: Any) -> int:
+    """How many times this op has run in the item's pass, this run included (a file of
+    its own in the pass directory, which both runtimes run it in)."""
+    from pathlib import Path
+
+    counter = Path(ctx.workdir) / f".{ctx.node_id}-tries"
+    tries = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(tries))
+    return tries
+
+
+def right_from_second_try(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its first run raises (the runner's one op retry
+    answers it)."""
+    if _first_item(ctx) and _tries(ctx) < 2:
+        raise ValueError("item 0 breaks the solver once")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def right_from_third_try(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its first visit (two runs, with the op retry)
+    raises, so its fallback answers, and a gate's reloop back to it finds it working."""
+    if _first_item(ctx) and _tries(ctx) < 3:
+        raise ValueError("item 0 breaks the solver on its first visit")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def partial_unless_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` it writes a partial answer, then raises."""
+    if _first_item(ctx):
+        ctx.write_text("answer.txt", "partial\n")
+        raise ValueError("item 0 breaks the solver half way")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def snippet_timeout_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` it runs over a code step's wall."""
+    from refactory_dsh.snippet import SnippetTimeout
+
+    if _first_item(ctx):
+        raise SnippetTimeout("the code ran over its 10 s limit")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def sandbox_down_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` the sandbox does not start."""
+    from refactory_dsh.snippet import SandboxUnavailable
+
+    if _first_item(ctx):
+        raise SandboxUnavailable("the sandbox did not start within 60 s")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def own_timeout(ctx: Any) -> dict[str, Any]:
+    """An op whose own subprocess runs over its limit on item ``0``."""
+    import subprocess
+
+    if _first_item(ctx):
+        raise subprocess.TimeoutExpired(["slow-tool"], 1)
+    ctx.write_text("a.txt", "right\n")
+    return {}
+
+
+def right_b(ctx: Any) -> dict[str, Any]:
+    ctx.write_text("b.txt", "right\n")
+    return {}
+
+
+def draft_right(ctx: Any) -> dict[str, Any]:
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def rewrite_unless_first(ctx: Any) -> dict[str, Any]:
+    """Reads the draft and rewrites it; on item ``0`` it rewrites it badly, then raises."""
+    draft = ctx.read_text("answer.txt")
+    if _first_item(ctx):
+        ctx.write_text("answer.txt", "garbled\n")
+        raise ValueError("item 0 breaks the solver after rewriting")
+    ctx.write_text("answer.txt", draft)
+    return {}
+
+
+def keep_answer(ctx: Any) -> dict[str, Any]:
+    """A fallback that keeps the draft it is given (and notes what it saw in kept.txt)."""
+    from pathlib import Path
+
+    draft = ctx.read_text("answer.txt") if ctx.exists("answer.txt") else "(not written)\n"
+    (Path(ctx.workdir) / "kept.txt").write_text(draft)
+    ctx.write_text("answer.txt", draft)
+    return {}
+
+
+def _listing(ctx: Any) -> str:
+    from pathlib import Path
+
+    out = Path(ctx.workdir) / "out"
+    if not out.is_dir():
+        return "(no out)"
+    return ",".join(sorted(str(p.relative_to(out)) for p in out.rglob("*"))) or "(empty)"
+
+
+def prep_out(ctx: Any) -> dict[str, Any]:
+    """Makes ``out/`` with ``keep.txt`` before the solver runs."""
+    from pathlib import Path
+
+    (Path(ctx.workdir) / "out").mkdir(exist_ok=True)
+    (Path(ctx.workdir) / "out/keep.txt").write_text("kept\n")
+    return {}
+
+
+def dir_solve_unless_first(ctx: Any) -> dict[str, Any]:
+    """Writes ``answer.txt`` and ``out/``; on item ``0`` it half-fills ``out/`` (making it
+    when it is not there) and raises."""
+    from pathlib import Path
+
+    out = Path(ctx.workdir) / "out"
+    out.mkdir(exist_ok=True)
+    (out / "partial.txt").write_text("half\n")
+    if _first_item(ctx):
+        (out / "deep").mkdir(exist_ok=True)
+        (out / "deep/more.txt").write_text("half\n")
+        raise ValueError("item 0 breaks the solver half way through out/")
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def dir_fallback(ctx: Any) -> dict[str, Any]:
+    """A fallback that notes what ``out/`` held when it began (in seen.txt), then answers."""
+    from pathlib import Path
+
+    (Path(ctx.workdir) / "seen.txt").write_text(_listing(ctx) + "\n")
+    (Path(ctx.workdir) / "out").mkdir(exist_ok=True)
+    ctx.write_text("answer.txt", "right\n")
+    return {}
+
+
+def own_subprocess_timeout_on_first(ctx: Any) -> dict[str, Any]:
+    """Answers ``right``; on item ``0`` its own subprocess runs over its limit."""
+    import subprocess
+
+    if _first_item(ctx):
+        raise subprocess.TimeoutExpired(["slow-tool"], 1)
+    ctx.write_text("answer.txt", "right\n")
+    return {}

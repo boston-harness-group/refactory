@@ -746,3 +746,21 @@ def test_only_a_map_s_runs_read_its_element_files():
                                      "writes": ["peek.txt"]}}, _s4())
     assert [(i.code, i.node) for i in validate_state(state)
             if "map step" in i.message] == [("V6", "peek")]
+
+
+def test_a_fallback_goes_on_a_map_s_combine_and_never_inside_the_map():
+    """As COMBINE_OPS says: a fallback for the combine (after it) is taken, and the map
+    still comes out whole with it; one for the elements step or a run is refused."""
+    state = _s4()
+    for step in ("options_map", "options_map_2"):
+        assert _refused({"op": "fallback", "step": step}, state).startswith(
+            f"'{step}' is part of the map 'options_map'")
+    fell = nn_edits.apply({"op": "fallback", "step": "options_map_combine",
+                           "kind": "agent", "text": "Weigh them simply."}, state)
+    assert validate_state(fell) == [] and _graph(fell).falls_back("options_map_combine")
+    removed = nn_edits.apply({"op": "remove", "step": "options_map"}, fell)
+    assert validate_state(removed) == []
+    assert _same(removed, nn_edits.apply(
+        {"op": "insert", "before": "compare", "kind": "code", "id": "options",
+         "sees": ["current_item.json"], "text": OPTIONS}, _state("livemath/skill_graph")))
+

@@ -19,6 +19,8 @@ or a reader no operation names, fails ``tests/test_pipeline_view.py``:
   ``loop(back_to … step, ...)`` when it judges ``step`` and sends back to an earlier step;
 - ``route``: a gate choosing a way on, ``route(after step, judge ..., {label: step})``,
   each label's steps until the ways meet;
+- ``fallback``: a step that answers when the one before it fails,
+  ``fallback(step fails -> fallback step)``, the fallback's steps on its way;
 - ``map``: a step run once per element of a list, its runs one line,
   ``map(step … step over list, max N)``, then what it sees and is told;
 - ``edges``: the order of the lines; what the walk cannot place is a fallback line.
@@ -37,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from .graph import Graph
+from .graph import FALLBACK as FALLBACK_VERDICT, FALLBACK_GATE_CALL, Graph
 from .operators import carried_knobs, made_by, map_of
 from .validate import consumed
 
@@ -59,6 +61,9 @@ EXHAUSTED = ", past the cap: {policy}"
 #: A step on a route of its own (`Node.route`): the fields it sets, which differ from the
 #: run's for it (`workers.StepRoutes.refusal`). The legend's form is made from it.
 ROUTE_LINE = "on {fields}"
+#: A fallback gate's line (`Graph.fallback_gate`): the step it answers for and the step
+#: that answers instead. The legend's form is made from it.
+FALLBACK_LINE = "fallback({step} fails -> {to})"
 #: A map's line (`operators.map_of`): its runs, the list they run over and the most
 #: elements. The legend's form is made from it.
 MAP_LINE = "map({steps} over {over}, max {cap})"
@@ -137,6 +142,9 @@ class _View:
         # that gate's line, so it is never folded away.
         # (A collect step in front of one is looked through, so it may still fold.)
         gated = {e.target for e in self.graph.edges if e.condition}
+        # So is the step a fallback gate answers for, named in that gate's line.
+        gated |= {e.source for e in self.graph.edges
+                  if self.graph.nodes[e.target].evaluator == FALLBACK_GATE_CALL}
         candidates = {n for n, node in self.graph.nodes.items()
                       if node.kind == "op" and n not in self.code and not node.tools
                       and n not in self.protected and n not in self.graders}
@@ -324,6 +332,12 @@ class _View:
         return (f"route(after {', '.join(before) or '-'}, {self.judge(gate_id)}, "
                 f"{{{labels}}})")
 
+    def fallback(self, gate_id: str) -> str:
+        to = [self._shown_from(e.target) for e in self.graph.out_edges(gate_id)
+              if e.condition == FALLBACK_VERDICT]
+        return FALLBACK_LINE.format(step=", ".join(sorted(self._shown_before(gate_id))) or "-",
+                                    to=", ".join(to) or "-")
+
     def map(self, fork_id: str) -> str:
         """A map's fork as one line: its runs (one per element, the first and the last),
         the list, the most elements; then what its runs see and are told besides their
@@ -495,7 +509,9 @@ class _View:
         if self._hidden(node_id):
             return
         if node.kind == "gate":
-            if any((node_id, e.target) in self.back for e in self.graph.out_edges(node_id)):
+            if node.evaluator == FALLBACK_GATE_CALL:
+                out.append(Line(node_id, depth, self.fallback(node_id), within, "fallback"))
+            elif any((node_id, e.target) in self.back for e in self.graph.out_edges(node_id)):
                 out.append(Line(node_id, depth, self.loop(node_id), within, "loop"))
             elif len([e for e in self.graph.out_edges(node_id) if e.condition]) > 1:
                 out.append(Line(node_id, depth, self.route(node_id), within, "route"))
@@ -591,6 +607,7 @@ class _View:
 READERS: dict[str, Callable[..., str]] = {
     "step": _View.step, "sees": _View.sees, "told": _View.told, "loop": _View.loop,
     "route": _View.route, "parallel": _View.parallel, "edges": _View.edges,
+    "fallback": _View.fallback,
     "map": _View.map,
 }
 
@@ -607,6 +624,7 @@ FORMS = {
     "loop back": LOOP_LINE.format(step=LOOP_SPAN.format(back_to="back_to", step="step"),
                                   judge="judge ...", cap="N", runs="N+1", knob="", exhausted=""),
     "route": "route(after step, judge ..., {label: step})",
+    "fallback": FALLBACK_LINE.format(step="step", to="step"),
     "map": MAP_LINE.format(steps="step … step", over="list", cap="N"),
     "per item": "per item (data) { ... }",
     "step route": "step agent " + ROUTE_LINE.format(fields="model=M effort=E "

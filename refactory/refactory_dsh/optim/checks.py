@@ -151,6 +151,14 @@ def code_dry_run(parent_id: str, parent_state: Mapping[str, Any], state: Mapping
                 else:
                     snippet.checked_result(node_id, result, node.writes, node.produces)
             except snippet.SandboxUnavailable as exc:
+                if isinstance(exc, snippet.NoSandbox):
+                    # No sandbox at all refuses, as any failure does; a busy machine
+                    # that did not start one in time only skips the item.
+                    refusals.append(
+                        f"E-code-run: code node {node_id!r} could not be run on the parent's "
+                        f"recorded inputs: this machine has no sandbox for code nodes "
+                        f"({str(exc)[:500]}); not the code's fault")
+                    break
                 skipped.append(f"{folder.name}: {exc}")
                 continue
             except Exception as exc:  # noqa: BLE001 - any failure is what the dry run is for
