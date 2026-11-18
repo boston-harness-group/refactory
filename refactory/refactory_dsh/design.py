@@ -719,7 +719,7 @@ class DesignMode(Mode):
                 "to report any further reach in the footprint: the run widens the research "
                 "when it finds some. Spawn "
                 "one subagent per question{% if graph_context %}, telling each the code "
-                "context lines its question needs{% endif %}, and have each write its findings to "
+                "context lines its question needs,{% endif %} and have each write its findings to "
                 "`research/<slug>.md` under the run directory, then write "
                 "`research-plan.json` yourself.\n\n"
                 "## Footprint\n"

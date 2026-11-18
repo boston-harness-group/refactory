@@ -940,9 +940,9 @@ _USAGE_TEMPLATE = (
 
 _FOLLOWUP_TEMPLATE = (
     "## Code graph follow-ups\n"
-    "For code the code context above does not cover, the code graph answers in about a "
-    "second: " + _USAGE_TEMPLATE + " A graph answer is a lead, not evidence: confirm it in "
-    "the code."
+    "For code the code context above does not cover, run `{cmd} graph "
+    "query|explain|path|callers ... --graph {dir}` (about a second each). A graph answer is "
+    "a lead, not evidence: confirm it in the code."
 )
 
 

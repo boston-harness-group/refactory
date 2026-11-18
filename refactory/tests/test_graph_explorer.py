@@ -95,10 +95,16 @@ def _graph_dir(tmp_path: Path, status: dict | None = None) -> Path:
 # ── query ─────────────────────────────────────────────────────────────────────
 
 def test_query_finds_the_code_first_and_walks_code_edges(tmp_path):
-    out = query_graph(_graph_dir(tmp_path), "price order", depth=1)
+    graph_dir = _graph_dir(tmp_path)
+    # test_price_order_tax() matches all three words, the code at most two: the code still
+    # comes first, as tests repeat the words of what they test.
+    ranked = query_graph(graph_dir, "price order tax", depth=1).splitlines()
+    assert ranked[1].strip().startswith("price_order()  shop/pricing.py:20")
+    assert "test_price_order_tax()" in "\n".join(ranked[1:6])
+    out = query_graph(graph_dir, "price order", depth=1)
     lines = out.splitlines()
     best = lines[1:lines.index("")] if "" in lines else lines[1:]
-    # The code before the tests that repeat its words; a comment node is never a match.
+    # A comment node is never a match.
     assert best[0].strip().startswith("price_order()  shop/pricing.py:20")
     assert not any("rationale" in line for line in lines)
     assert "price_order() -> calls -> apply_tax()  shop/tax.py:5" in out
