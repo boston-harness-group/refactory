@@ -633,3 +633,25 @@ def test_the_skillopt_strategy_builds_its_own_requests_from_none_of_this():
                 assert not any(a.name.startswith(("refactory_dsh.optim.base",
                                                   "refactory_dsh.optim.analysts"))
                                for a in node.names), path
+
+
+def test_the_modes_guidance_and_preferred_edits_reach_the_request(tmp_path):
+    """What the mode's author says is worth doing (``Mode.guidance``) and the edits to
+    try first (``Mode.preferred_edits``) are in the loop's proposal context and so in its
+    request; the request once said the author offered none, whatever the mode said."""
+    from pathlib import Path
+
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    loop = Loop("circle_packing/adaptive", LoopConfig(
+        epochs=1, batch_size=3, optimizer="random", seed=5, runs_root=tmp_path / "run"),
+        project=Path("."))
+    loop.init()
+    ctx = loop._context()  # noqa: SLF001 - the context is the subject
+    assert ctx.guidance == loop.mode.guidance() and "restart_on_stall" in ctx.guidance
+    assert ctx.preferred_edits == list(loop.mode.preferred_edits()) == ["set_knob", "insert_after"]
+    text = ctx.render()
+    worth = text.split("## What the author says is worth doing", 1)[1]
+    assert worth.lstrip().startswith(loop.mode.guidance()[:60])
+    assert "offered no guidance" not in text
+    assert "Operations the author suggests trying first: `set_knob`, `insert_after`" in text

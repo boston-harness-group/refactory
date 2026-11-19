@@ -5681,6 +5681,10 @@ class Loop(OuterLoop):
             memory=dict(self._memory) if self.config.lessons else {},
             added_steps=self._added_steps() if self.config.step_review else [],
             structure_guidance=bool(self.config.structure_guidance),
+            # What the mode's author says is worth doing, and the edits to try first
+            # (``Mode.guidance``/``preferred_edits``): the request has their sections.
+            guidance=self.mode.guidance(),
+            preferred_edits=list(self.mode.preferred_edits()),
             analysts=self._analyst_settings(),
             integrity=self._integrity_feedback(),
             max_edits=MAX_EDITS_PER_PROPOSAL,
