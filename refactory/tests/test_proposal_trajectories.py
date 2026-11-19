@@ -699,6 +699,100 @@ def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
     assert "chars omitted" not in _section(text)
 
 
+_CITING = [
+    {"group": 1, "items": [],
+     "failure_patterns": [
+         {"pattern": "A", "step": "s", "items": ["w20"], "evidence": ["qa"]},
+         {"pattern": "B", "step": "s", "items": ["w23"], "evidence": ["qb"]},
+         {"pattern": "C", "step": "s", "items": ["w24"], "evidence": ["qc"]}],
+     "success_patterns": [{"pattern": "S", "step": "s", "items": ["p09"], "evidence": ["qs"]}]},
+]
+
+
+def _whole_size(records: list[dict[str, Any]], *ids: str) -> int:
+    by_id = {r["id"]: r for r in records}
+    return sum(len(base._trajectory(by_id[i])) + 2 for i in ids)
+
+
+def test_without_a_room_every_item_the_rule_picks_is_shown_whatever_their_size():
+    """``shown_items_room`` 0 (the default, the run's ``proposer_evidence_chars`` unset)
+    is the rule unchanged: one item per finding, nothing named as left out."""
+    records = _sized_records()
+    text = _render(records, reader_findings=_CITING)
+    assert _full(text) == ["w20", "w23", "w24", "p09"]
+    assert "left out to keep these within" not in text
+
+
+def test_a_room_keeps_the_picked_items_that_fit_in_turn_and_names_the_rest():
+    """With a room, the picked items are taken failure, success, failure, ... in rank
+    order until the next would not fit; the rest are named by id (each is still in the
+    table), and the section's own count says how many are shown."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09") + 10
+    text = _render(records, reader_findings=_CITING, shown_items_room=room)
+    assert _full(text) == ["w20", "p09"]
+    section = text.split("### Some items in full", 1)[1]
+    assert section.startswith("\n1 failing item(s)")
+    note = next(l for l in section.splitlines() if "left out to keep these within" in l)
+    assert f"within {room} characters" in note and "proposer_evidence_chars" in note
+    assert "w23 (failed), w24 (failed)" in note
+    table = text.split("### Every item", 1)[1].split("### Some items in full", 1)[0]
+    assert all(f"| {i} |" in table for i in ("w23", "w24"))
+
+
+def test_a_room_smaller_than_one_item_still_shows_the_first():
+    records = _sized_records()
+    text = _render(records, reader_findings=_CITING, shown_items_room=1)
+    assert _full(text) == ["w20"]
+
+
+def test_the_room_is_not_the_reader_findings_room():
+    """A room larger than the reader findings' share of the budget is the room used (the
+    findings block's own room once shadowed it)."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09", "w23", "w24") + 10
+    assert room > int(base.TRAJECTORY_BUDGET * base.READER_FINDINGS_SHARE)
+    text = _render(records, reader_findings=_CITING, shown_items_room=room)
+    assert _full(text) == ["w20", "w23", "w24", "p09"]
+
+
+def test_another_section_names_only_the_items_the_room_kept_as_shown_below():
+    """``trajectories_whole`` (what other sections point to as shown under
+    "Trajectories") follows the same room, so nothing points at an item left out."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09") + 10
+    kept = base.trajectories_whole(records, findings=_CITING, shown_room=room)
+    assert [r["id"] for r in kept] == ["w20", "p09"]
+    assert [r["id"] for r in base.trajectories_whole(records, findings=_CITING)] == [
+        "w20", "w23", "w24", "p09"]
+
+
+def test_the_run_setting_sets_the_proposers_evidence_budget_and_room(tmp_path):
+    from refactory_dsh import profiles
+
+    def context(name: str, **config: Any) -> ProposalContext:
+        loop = Loop("circle_packing/adaptive", LoopConfig(
+            epochs=1, batch_size=3, optimizer="random", seed=5,
+            runs_root=tmp_path / name, **config), project=Path("."))
+        loop.init()
+        return loop._context()  # noqa: SLF001 - the context is the subject
+
+    off = context("off")
+    assert (off.evidence_budget, off.shown_items_room) == (base.TRAJECTORY_BUDGET, 0)
+    on = context("on", proposer_evidence_chars=50000)
+    assert (on.evidence_budget, on.shown_items_room) == (50000, 50000)
+    assert profiles.normalize({"proposer_evidence_chars": 50000})[
+        "proposer_evidence_chars"] == 50000
+    for bad in (-1, "big", True):
+        with pytest.raises(profiles.ProfileError):
+            profiles.normalize({"proposer_evidence_chars": bad})
+    unset = profiles.resolve(tmp_path, "circle_packing/adaptive",
+                             overrides={"optimizer": "random"})
+    capped = profiles.resolve(tmp_path, "circle_packing/adaptive", overrides={
+        "optimizer": "random", "proposer_evidence_chars": 50000})
+    assert unset["context_hash"] == capped["context_hash"], "what is shown, not how it is scored"
+
+
 def test_without_cited_items_failures_by_id_then_passes_for_contrast():
     """No findings, or findings that cite no known item: one failure per kind of failure
     (its outcome and declared kind), then a passing item of each kind for contrast."""

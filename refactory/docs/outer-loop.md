@@ -621,7 +621,7 @@ spine through its runner, the walker in memory).
   its first repeat.
 - **Full detail, one call's budget.** Items are shown whole, every step output
   unclipped. One call's evidence budget is 120000 characters (`TRAJECTORY_BUDGET`;
-  the context's `evidence_budget`). When every item fits, they all go inline into the
+  the context's `evidence_budget`; the run's `proposer_evidence_chars` when set). When every item fits, they all go inline into the
   one proposal call.
 - **Readers, when they do not fit.** The items are split into as few balanced groups
   of whole items as fit the budget, in the same order, each item in exactly one group.
@@ -647,9 +647,16 @@ spine through its runner, the walker in memory).
   quotes of at most 240 characters and 40 item ids, and the whole findings block at
   most 40% of the budget (`READER_*`). Then a
   table of every item: outcome, expected, predicted, the grader's reason, the error.
-  Then as many items in full as the rest of the budget holds: first the items the
+  Then items in full: first the items the
   readers cited, one per pattern in turn (failure patterns first), so every pattern has
-  an item in full before any has a second; then failures and passes alternating. A reader call that fails is noted, with its items, and the proposal
+  an item in full before any has a second; then failures and passes alternating. These
+  are chosen by rule, not size: by default every item the rule picks is shown, whatever
+  their total. With `proposer_evidence_chars` set, they are taken failure, success,
+  failure, ... in rank order until the next would pass that many characters (the first
+  is always shown), and the rest are named by id under "Some items in full"; each is
+  still in the table. Set it when long traces push the request past the optimizer
+  model's context: HoVer's 150 train items (about 12k characters each) gave 46 items in
+  full, about 590k characters, and every proposal failed "Prompt is too long". A reader call that fails is noted, with its items, and the proposal
   goes ahead with the findings it has. An optimizer that calls no reader gets the
   table and the items in full.
 - **Clipping.** Only an item longer than the whole budget on its own is clipped, head

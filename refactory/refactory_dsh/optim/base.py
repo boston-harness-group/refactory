@@ -21,6 +21,7 @@ from __future__ import annotations
 from concurrent.futures import CancelledError
 
 import hashlib
+import itertools
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -1032,8 +1033,14 @@ class ProposalContext:
     node_states: list[dict[str, Any]] = field(default_factory=list)
     node_spec_text_chars: int = NODE_SPEC_TEXT_CHARS
     node_spec_section_chars: int = NODE_SPEC_SECTION_CHARS
-    #: One call's evidence budget (``TRAJECTORY_BUDGET``).
+    #: One call's evidence budget (``TRAJECTORY_BUDGET``; the run's
+    #: ``proposer_evidence_chars`` when set).
     evidence_budget: int = TRAJECTORY_BUDGET
+    #: The most characters the items "Trajectories" shows whole take together when not
+    #: every item fits (`_fit_shown`); 0, the default, is no limit. The run's
+    #: ``proposer_evidence_chars``: one picked item per finding is otherwise shown whatever
+    #: their total, which on long traces outgrows the optimizer model's context.
+    shown_items_room: int = 0
     #: The latest children of the edited candidate with their parents' train records
     #: (``Loop._edit_pairs``), for "What the last edit changed".
     edit_pairs: list[dict[str, Any]] = field(default_factory=list)
@@ -1180,7 +1187,8 @@ class ProposalContext:
         whole = trajectories_whole(
             self.item_records, budget=self.evidence_budget, findings=self.reader_findings,
             analysed=(None if self.analysis is None
-                      else list(self.analysis.get("findings") or ())))
+                      else list(self.analysis.get("findings") or ())),
+            shown_room=self.shown_items_room)
         return shown_whole(whole, f"under \"{TRAJECTORIES_HEADING.lstrip('# ')}\" below")
 
     def _leaderboard_lines(self) -> list[str]:
@@ -1376,7 +1384,8 @@ class ProposalContext:
                 findings=self.reader_findings, failures=self.reader_failures,
                 analysed=(None if self.analysis is None
                           else list(self.analysis.get("findings") or ())),
-                omissions=self.omissions, settled=self._settled())]
+                omissions=self.omissions, settled=self._settled(),
+                shown_room=self.shown_items_room)]
         # 7: the reference, last: every node in full, the schemas, the validator's rules.
         sections += [
             "",
@@ -3472,6 +3481,31 @@ def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, A
     return failing, passing, by_findings
 
 
+def _fit_shown(failing: Sequence[dict[str, Any]], passing: Sequence[dict[str, Any]],
+               room: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
+                                   list[dict[str, Any]]]:
+    """The items `_shown_items` picked that fit ``room`` characters together, chosen, never
+    cut: failures and their contrasting successes in turn (failure 1, success 1, failure 2,
+    ...), each in its rank order, stopping at the first that does not fit. The first item
+    is kept whatever its size, so the section never shows none. ``room`` 0 is no limit
+    (`ProposalContext.shown_items_room`). The third value is what was left out."""
+    if room <= 0:
+        return list(failing), list(passing), []
+    turns = [r for pair in itertools.zip_longest(failing, passing) for r in pair
+             if r is not None]
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for record in turns:
+        size = len(_trajectory(record)) + 2
+        if kept and used + size > room:
+            break
+        kept.append(record)
+        used += size
+    keep = {id(r) for r in kept}
+    return ([r for r in failing if id(r) in keep], [r for r in passing if id(r) in keep],
+            [r for r in turns if id(r) not in keep])
+
+
 TRAJECTORIES_HEADING = "## Trajectories of the candidate being edited"
 
 
@@ -3488,16 +3522,18 @@ def _analysed_findings(analysed: Sequence[dict[str, Any]]) -> list[dict[str, Any
 
 def trajectories_whole(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                        findings: Sequence[dict[str, Any]] | None = None,
-                       analysed: Sequence[dict[str, Any]] | None = None
-                       ) -> list[dict[str, Any]]:
+                       analysed: Sequence[dict[str, Any]] | None = None,
+                       shown_room: int = 0) -> list[dict[str, Any]]:
     """The records "Trajectories of the candidate being edited" shows whole, by the same
     rule `_trajectories` applies: every item when they all fit, else the items
-    `_shown_items` picks. Another section names these by item instead of repeating them."""
+    `_shown_items` picks that fit ``shown_room`` (`_fit_shown`). Another section names these by
+    item instead of repeating them."""
     items = _ordered_items(records)
     if not items or _all_whole(items, budget):
         return items
     failing, passing, _cited = _shown_items(
         items, _analysed_findings(analysed) if analysed is not None else findings)
+    failing, passing, _left = _fit_shown(failing, passing, shown_room)
     return [*failing, *passing]
 
 
@@ -3506,7 +3542,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   failures: Sequence[dict[str, Any]] = (),
                   analysed: Sequence[dict[str, Any]] | None = None,
                   omissions: list[dict[str, Any]] | None = None,
-                  settled: Collection[str] | None = None) -> list[str]:
+                  settled: Collection[str] | None = None,
+                  shown_room: int = 0) -> list[str]:
     """Every train item of the candidate being edited, each as `ITEM_FORM` says; an item's
     error is said where "Item results" lists its cause (`error_refs`).
 
@@ -3514,7 +3551,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     smaller ``budget``), every item is shown in full here. When not, readers went through
     them in groups of ``budget`` (``AutoresearchOptimizer``): their findings come first,
     then a table of every item, then the items the rule picks (`_shown_items`), each
-    whole. Train records only.
+    whole -- with ``shown_room`` (0: no limit), those of them that fit it together, in rank
+    order (`_fit_shown`), the rest named. Train records only.
 
     ``analysed``: the analysts' ranked findings (`optim.analysts`), shown before this
     section, which take the readers' place: no reader findings are shown, and the
@@ -3593,6 +3631,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
     failing, passing, cited = _shown_items(items, findings)
+    failing, passing, left_out = _fit_shown(failing, passing, shown_room)
     chosen = [*failing, *passing]
     # An item shown in full below says its expected choice's text there (its choice
     # line): the table gives only the label for it.
@@ -3613,6 +3652,12 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                    "one per finding in rank order" if cited else ", one per kind of failure")
                 + (f", then {len(passing)} passing item(s) for contrast" if passing else "")
                 + f" (of {len(items)}; the table above has every one). {ITEM_FORM}"]
+    if left_out:
+        examples.append(
+            f"The rule picked {len(left_out)} more, left out to keep these within {shown_room} "
+            "characters (the run's `proposer_evidence_chars`): "
+            + ", ".join(f"{r.get('id')} ({'passed' if r.get('passed') else 'failed'})"
+                        for r in left_out) + ". Each is in the table above.")
     for record in chosen:
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
