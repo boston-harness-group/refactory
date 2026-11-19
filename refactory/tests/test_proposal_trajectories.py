@@ -699,6 +699,178 @@ def test_items_the_readers_cited_are_shown_in_full_first_one_per_pattern():
     assert "chars omitted" not in _section(text)
 
 
+_CITING = [
+    {"group": 1, "items": [],
+     "failure_patterns": [
+         {"pattern": "A", "step": "s", "items": ["w20"], "evidence": ["qa"]},
+         {"pattern": "B", "step": "s", "items": ["w23"], "evidence": ["qb"]},
+         {"pattern": "C", "step": "s", "items": ["w24"], "evidence": ["qc"]}],
+     "success_patterns": [{"pattern": "S", "step": "s", "items": ["p09"], "evidence": ["qs"]}]},
+]
+
+
+def _whole_size(records: list[dict[str, Any]], *ids: str) -> int:
+    by_id = {r["id"]: r for r in records}
+    return sum(base._shown_size(by_id[i], None, None) for i in ids)
+
+
+def test_without_a_room_every_item_the_rule_picks_is_shown_whatever_their_size():
+    """A request within its room is the rule unchanged: one item per finding, nothing
+    named as left out."""
+    records = _sized_records()
+    text = _render(records, reader_findings=_CITING)
+    assert len(text) < base.PROPOSAL_ROOM
+    assert _full(text) == ["w20", "w23", "w24", "p09"]
+    assert "left out so this request fits" not in text
+
+
+def test_a_room_keeps_the_picked_items_that_fit_in_turn_and_names_the_rest():
+    """With a room, the picked items are taken failure, success, failure, ... in rank
+    order until the next would not fit; the rest are named by id (each is still in the
+    table), and the section's own count says how many are shown."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09") + 10
+    text = _render(records, reader_findings=_CITING, shown_items_room=room)
+    assert _full(text) == ["w20", "p09"]
+    section = text.split("### Some items in full", 1)[1]
+    assert section.startswith("\n1 failing item(s)")
+    note = next(l for l in section.splitlines() if "left out so this request fits" in l)
+    assert f"({room} characters were left for items in full)" in note
+    assert "w23 (failed), w24 (failed)" in note
+    table = text.split("### Every item", 1)[1].split("### Some items in full", 1)[0]
+    assert all(f"| {i} |" in table for i in ("w23", "w24"))
+
+
+def test_a_room_smaller_than_one_item_still_shows_the_first():
+    records = _sized_records()
+    text = _render(records, reader_findings=_CITING, shown_items_room=1)
+    assert _full(text) == ["w20"]
+
+
+def test_the_room_is_not_the_reader_findings_room():
+    """A room larger than the reader findings' share of the budget is the room used (the
+    findings block's own room once shadowed it)."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09", "w23", "w24") + 10
+    assert room > int(base.TRAJECTORY_BUDGET * base.READER_FINDINGS_SHARE)
+    text = _render(records, reader_findings=_CITING, shown_items_room=room)
+    assert _full(text) == ["w20", "w23", "w24", "p09"]
+
+
+def test_another_section_names_only_the_items_the_room_kept_as_shown_below():
+    """``trajectories_whole`` (what other sections point to as shown under
+    "Trajectories") follows the same room, so nothing points at an item left out."""
+    records = _sized_records()
+    room = _whole_size(records, "w20", "p09") + 10
+    kept = base.trajectories_whole(records, findings=_CITING, shown_room=room)
+    assert [r["id"] for r in kept] == ["w20", "p09"]
+    assert [r["id"] for r in base.trajectories_whole(records, findings=_CITING)] == [
+        "w20", "w23", "w24", "p09"]
+
+
+def test_the_proposal_room_is_the_analysts_room():
+    """Both are the whole request's size for the same optimizer model's context."""
+    from refactory_dsh.optim import analysts
+
+    assert base.PROPOSAL_ROOM == analysts.ANALYST_ROOM
+
+
+def _before(text: str, heading: str = "### Every item") -> str:
+    return text.split(heading, 1)[0]
+
+
+def test_a_request_over_its_room_shows_fewer_items_whole_and_nothing_else_changes():
+    """Over ``request_room``, the request is made again with only the items that fit what
+    the rest of it leaves, whole, in turn, the rest named: it then fits. What comes
+    before (the readers' findings, at their own budget) is the same text."""
+    records = _sized_records()
+    unbounded = _render(records, reader_findings=_CITING, request_room=0)
+    assert _full(unbounded) == ["w20", "w23", "w24", "p09"]
+    # Room for about two of the four.
+    room = len(unbounded) - _whole_size(records, "w23", "w24") + 200
+    fitted = _render(records, reader_findings=_CITING, request_room=room)
+    assert len(fitted) <= room < len(unbounded)
+    assert _full(fitted) == ["w20", "p09"]
+    # Measured as shown: the next the rule picked would not have fit.
+    shown = ProposalContext(nodes=NODES, item_records=records)
+    w23 = next(r for r in records if r["id"] == "w23")
+    assert len(fitted) + base._shown_size(w23, shown._settled(), None) > room
+    assert "left out so this request fits the optimizer model's context" in fitted
+    assert "w23 (failed), w24 (failed)" in fitted
+    assert _before(fitted) == _before(unbounded)
+    assert ProposalContext(nodes=NODES, item_records=records,
+                           request_room=room).evidence_budget == base.TRAJECTORY_BUDGET
+
+
+def test_a_request_within_its_room_is_the_unbounded_request():
+    records = _sized_records()
+    unbounded = _render(records, reader_findings=_CITING, request_room=0)
+    assert _render(records, reader_findings=_CITING,
+                   request_room=len(unbounded)) == unbounded
+
+
+def test_a_tiny_room_still_shows_one_item_whole():
+    records = _sized_records()
+    text = _render(records, reader_findings=_CITING, request_room=1000)
+    assert _full(text) == ["w20"]
+
+
+class _TooLongOnce(_ReaderClient):
+    """The first proposal call is refused as longer than the model's context."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.systems: list[str] = []
+        self.refused = False
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        from refactory_dsh.optim.random_optimizer import READER_SYSTEM
+
+        if system != READER_SYSTEM:
+            self.systems.append(system)
+            if not self.refused:
+                self.refused = True
+                self.proposals.append(prompt)
+                raise RuntimeError("invalid_request_error: prompt is too long: 230000 tokens")
+        return super().complete(prompt, system=system)
+
+
+def test_the_proposer_fits_the_whole_call_in_the_room_system_prompt_included():
+    client = _ReaderClient()
+    records = _sized_records()
+    optimizer = AutoresearchOptimizer(client)
+    room = 60000  # under the request the readers' findings make, system prompt aside
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=records,
+                                      request_room=room), 1, [])
+    assert len(client.proposals[-1]) + len(optimizer._system) <= room  # noqa: SLF001
+    assert _full(client.proposals[-1]) == ["w00", "p00"]  # of 5 picked unbounded
+
+
+def test_a_proposal_refused_as_too_long_is_asked_once_more_at_half_its_length(tmp_path):
+    """As the analysts' calls are: only the items shown whole give way, the retry is
+    traced as one, and its answer is read."""
+    client = _TooLongOnce()
+    records = _sized_records()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(nodes=NODES, item_records=records), 1, [])
+    first, second = client.proposals[-2:]
+    assert len(second) <= len(first) // 2 < len(first)
+    assert len(_full(second)) < len(_full(first))
+    rows = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    proposals = [r for r in rows if r["kind"] == "proposal"]
+    assert "prompt is too long" in proposals[0]["error"]
+    assert proposals[-1].get("context_retry") is True and not proposals[-1].get("error")
+
+
+def test_a_proposal_refused_as_too_long_with_nothing_to_give_way_is_not_asked_again():
+    client = _TooLongOnce()
+    with pytest.raises(RuntimeError, match="prompt is too long"):
+        AutoresearchOptimizer(client).propose(
+            ProposalContext(nodes=NODES, item_records=[_record("w1")]), 1, [])
+    assert len(client.systems) == 1
+
+
 def test_without_cited_items_failures_by_id_then_passes_for_contrast():
     """No findings, or findings that cite no known item: one failure per kind of failure
     (its outcome and declared kind), then a passing item of each kind for contrast."""

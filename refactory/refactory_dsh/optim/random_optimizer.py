@@ -964,17 +964,43 @@ class AutoresearchOptimizer(Optimizer):
         if len(groups) > 1 and ctx.analysis is None:
             findings, failures = self._read(ctx, groups)
             ctx = replace(ctx, reader_findings=findings, reader_failures=failures)
-        ctx = replace(ctx, proposals=max(1, n))
-        question = (
-            f"{ctx.render()}\n\nPropose at most {max(1, n)} update(s). "
-            "Reply with the JSON object described under 'Answer' and nothing else."
-        )
-        call = {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
-                "system": self._system, "prompt": question,
-                # What the request left out of items' texts (item, step, chars): ours to
-                # read; the request itself says only "[… N chars omitted]".
-                **({"omissions": list(ctx.omissions)} if ctx.omissions else {})}
-        text, payload, malformed, attempt = self._ask_proposal(call, question)
+        suffix = (f"\n\nPropose at most {max(1, n)} update(s). "
+                  "Reply with the JSON object described under 'Answer' and nothing else.")
+        # The request's room (``PROPOSAL_ROOM``) is the whole call's: the system prompt
+        # and this closing line come off it before the context fits itself in.
+        ctx = replace(ctx, proposals=max(1, n), request_room=(
+            max(1, ctx.request_room - len(self._system or "") - len(suffix))
+            if ctx.request_room else 0))
+
+        def proposal_call(ctx: ProposalContext, question: str, **extra: Any) -> dict[str, Any]:
+            return {"kind": "proposal", "epoch": ctx.epoch, "generation": ctx.generation,
+                    "system": self._system, "prompt": question, **extra,
+                    # What the request left out of items' texts (item, step, chars): ours
+                    # to read; the request itself says only "[… N chars omitted]".
+                    **({"omissions": list(ctx.omissions)} if ctx.omissions else {})}
+
+        from . import analysts
+
+        question = f"{ctx.render()}{suffix}"
+        call = proposal_call(ctx, question)
+        try:
+            answer = self._ask_proposal(call, question)
+        except Exception as exc:
+            # Refused as longer than the model's context, though within its room (a
+            # smaller window, denser text): asked once more at half its length, as the
+            # analysts' calls are (`_ask`). Only the items shown whole give way.
+            if (isinstance(exc, _fatal())
+                    or not analysts.context_overflow(f"{type(exc).__name__}: {exc}")):
+                raise
+            smaller = replace(ctx, request_room=max(1, len(question) // 2 - len(suffix)),
+                              shown_items_room=0)
+            shorter = f"{smaller.render()}{suffix}"
+            if len(shorter) >= len(question):
+                raise  # nothing gave way: the same request would be refused again
+            ctx, question = smaller, shorter
+            call = proposal_call(ctx, question, context_retry=True)
+            answer = self._ask_proposal(call, question)
+        text, payload, malformed, attempt = answer
         call["attempt"] = attempt
         if malformed:
             # Nothing of a broken answer is read: an object nested in it is a fragment
