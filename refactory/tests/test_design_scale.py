@@ -20,6 +20,7 @@ import sys
 
 import pytest
 
+from refactory_dsh.code_graph import EXPLORER_MARK
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import (
     REFINE_SCOPE_REASON,
@@ -1271,7 +1272,8 @@ def test_sizer_node_bounds(tmp_path):
     assert node.kind == "agent" and node.tool_policy is None and node.tools == ()
     assert node.timeout_s == SIZER_TIMEOUT_S == 600
     assert node.retry is None and node.workspace is None
-    assert node.reads == ("brief.json",) and node.writes == ("sizing.json",)
+    # It reads the explorer's code context, written before it (`explore_code`).
+    assert node.reads == ("brief.json", "graph-context.md") and node.writes == ("sizing.json",)
     assert "size_change" in PLANNING_STEPS
     assert graph.nodes["fork_size"].optional_targets == ("size_change",)
     workflow = lowering.to_workflow(DesignMode().state_dict())
@@ -1301,7 +1303,10 @@ def test_sizer_prompt_investigates_the_checkout(tmp_path):
                    "code read within the time, answer `unknown`.",
                    "Test files, test functions and docs are neither touched functions nor added items",
                    "claim to check against the code, never a footprint",
-                   "is a cross-cutting sign"):
+                   "is a cross-cutting sign only when this change forces a change in that "
+                   "caller's code or its tests",
+                   "a caller that keeps working as written is not one",
+                   "a caller search too broad to finish is: list each sign"):
         assert clause in prompt, clause
     for mark in ("research director", "strategy director", "pitfalls researcher",
                  "Write intent-audit.json as", "Write the design document",
@@ -1316,7 +1321,9 @@ def test_one_function_brief_is_sized_scoped_before_research(tmp_path):
                              [SCOPED_PLAN, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER],
                              sizer=[_sizing()], to_gate=True)
     [sizer] = _asked(model, SIZER_MARK)
-    assert model.prompts.index(sizer) == 0, "the sizer runs before research"
+    # The sizer runs before research, after the code explorer.
+    assert model.prompts.index(sizer) == 1, "the sizer runs before research"
+    assert EXPLORER_MARK in model.prompts[0]
     assert (run.facts["presize_scope"], run.facts["presize_scope_reason"]) == ("scoped", ONE_FUNCTION)
     [research] = _asked(model, RESEARCH_DIRECTOR)
     assert "## Research scope\nscoped\n" in research
@@ -1532,12 +1539,15 @@ def test_a_graph_without_the_sizer_runs_as_today(tmp_path):
         graph["edges"] = [edge for edge in graph["edges"]
                           if edge["source"] not in sizing_nodes and edge["target"] not in sizing_nodes]
         graph["edges"] += [
-            {"source": "route_refine_design", "target": "research_director", "condition": "proceed"},
+            # The code explorer stays: research declares its file.
+            {"source": "route_refine_design", "target": "await_code_graph", "condition": "proceed"},
+            {"source": "record_graph_context", "target": "research_director", "condition": None},
             {"source": "classify_scale", "target": "pitfalls_researcher", "condition": None}]
-        # The sizer's own knobs (its system prompt) go with it, and the code_graph knobs
-        # with build_code_graph, which is removed with the sizing chain.
+        # The sizer's own knobs (its system prompt) go with it, and build_code_graph's
+        # knobs with it; the explorer keeps the two it reads.
         for knob in [knob for knob in state["knobs"]
-                     if knob.startswith("size_change__") or knob.startswith("code_graph")]:
+                     if knob.startswith("size_change__")
+                     or knob in ("code_graph_timeout_s", "code_graph_max_files")]:
             del state["knobs"][knob]
         assert validate_state(state) == []
 

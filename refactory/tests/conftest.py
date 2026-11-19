@@ -57,6 +57,16 @@ def _isolate_home(patch: pytest.MonkeyPatch, home: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_graphify(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A design run builds no code graph with a graphify the machine happens to have: one
+    would start a real background build, and the explorer step would wait for it
+    (`code_graph.await_code_graph`). A test of the build stubs graphify itself, or is
+    marked ``real_graphify``."""
+    if request.node.get_closest_marker("real_graphify") is None:
+        monkeypatch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+
+
+@pytest.fixture(autouse=True)
 def _optimizer_retries_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """An optimizer call that fails is attempted again after SkillOpt's wait (1, 2, 4 s,
     `optim.random_optimizer.retry_delay`); the suite does not sleep through it. A test of
@@ -422,6 +432,9 @@ def pytest_configure(config: pytest.Config) -> None:
             config.option.dist = "loadscope"
     config.addinivalue_line(
         "markers", "integration: slow tests that spawn a real DSH CEO run"
+    )
+    config.addinivalue_line(
+        "markers", "real_graphify: runs the machine's graphify (others never see it)"
     )
     config.addinivalue_line(
         "markers", "structure_fuzz_long: the structure-edit harness's long tier; runs only "

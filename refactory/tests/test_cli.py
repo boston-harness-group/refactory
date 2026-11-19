@@ -187,6 +187,12 @@ def test_the_command_reference_matches_the_command_line():
         helped = helps[verb]
         assert helped.returncode == 0, f"the reference documents `refactory {verb}`, which has no help: {helped.stderr}"
         declared[verb] = set(_OPTION.findall(helped.stdout))
+        # A verb with subcommands (`refactory graph query ... --depth`) declares their
+        # options in each subcommand's own help.
+        usage = helped.stdout.split("\n\n", 1)[0]
+        for group in re.findall(r"\{([a-z,-]+)\}", usage):
+            for sub in group.split(","):
+                declared[verb] |= set(_OPTION.findall(_run(verb, sub, "--help").stdout))
     named = set(re.findall(r"--[a-z][a-z0-9-]*", reference))
 
     # Walker commands (python -m refactory_dsh.*) are documented in their own

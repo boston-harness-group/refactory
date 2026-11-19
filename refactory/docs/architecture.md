@@ -704,15 +704,22 @@ perspectives step.
 
 **Sizing before research.** On `route_refine_design`'s `proceed` edge the change is
 sized before research, so a small fix gets a lean research plan (a refine never reaches
-it: `route_refine_design` sends a refine straight to `design_doc`). `clear_sizing` removes
+it: `route_refine_design` sends a refine straight to `design_doc`). First the code is
+mapped: `build_code_graph` starts the background graph build, `await_code_graph` waits up
+to `code_graph_wait_s` for it, `fork_explore` starts `explore_code` (optional, 600 s, read
+only), which maps the code the brief names with `refactory graph query|explain|path`, or
+the files when there is no graph, into `graph-context.md`, and `record_graph_context`
+heads that file with which it was made from and gives the later prompts its `## Code
+context` (cut at 6000 characters there; the file keeps all of it). `clear_sizing` removes
 an earlier visit's verdict; `fork_size` starts `size_change`, its only and optional
 branch: a tool-using agent bounded by `SIZER_TIMEOUT_S` (600 s), told to read only, to
 spawn no subagents and to use no web. It locates where a bug's behaviour lives, or where
-a feature plugs in, reads that code, greps its callers and looks at the tests that pin
-it, and writes `sizing.json`: `[{size, why, footprint, cross_cutting}]`. `presize_scale`
+a feature plugs in, starting from the code context and confirming it in the code, reads
+that code, greps its callers and looks at the tests that pin it, and writes `sizing.json`: `[{size, why, footprint, cross_cutting}]`. `presize_scale`
 turns it into `research_scope` and `presize_scope` with the same rule
 (`scale_from_footprints`, which `classify_scale` applies to the research plan): the scale
-is full unless the sizer answered `scoped`, saw no cross-cutting sign, and cited code that
+is full unless the sizer answered `scoped`, saw no cross-cutting sign (an outside caller
+counts only when the change forces a change in its code or tests), and cited code that
 resolves in the target's checkout and passes the rule; a sizer that failed or timed out is
 missing, and full. The research and strategy directors are given the scale and its reason
 as context, never as a cap; only a change sized scoped before research tells the strategy
