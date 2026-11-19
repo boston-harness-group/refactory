@@ -3399,8 +3399,9 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
                   else "")
     if probe_text:
         body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
-                 "A failing probe is a defect the QA gate sends back; a PROBED claim with no "
-                 "probe file of its own is UNVERIFIED.\n\n" + probe_text + "\n")
+                 "A failing probe is a defect the QA gate sends back unless the QA judge names "
+                 "it a brief conflict; a PROBED claim with no probe file of its own is "
+                 "UNVERIFIED.\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)

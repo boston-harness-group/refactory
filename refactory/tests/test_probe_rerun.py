@@ -588,15 +588,41 @@ def test_a_conflict_dismissal_of_one_probe_leaves_the_others_blocking(tmp_path):
     assert verdict == "reloop" and "reviews/probes/r3-1.py" in verdict.reason
 
 
-def test_a_conflict_still_reaches_the_person_when_the_judge_redoes_for_something_else(
-        tmp_path):
-    must_fix = [{"source": "reviews/code-review.md", "where": "app.py:3", "what": "crashes",
-                 "kind": "defect", "severity": "high", "breaks": "ask"}]
+ANOTHER_MUST_FIX = [{"source": "reviews/code-review.md", "where": "app.py:3", "what": "crashes",
+                     "kind": "defect", "severity": "high", "breaks": "ask"}]
+
+
+def test_a_redo_for_another_item_leaves_the_conflicting_probe_out_of_its_feedback(tmp_path):
     ctx = _qa_round(tmp_path, CLI_PROBE, _dismissal(CLI_PROBE, conflicts_with=CLI_ASK),
-                    must_fix=must_fix)
+                    must_fix=ANOTHER_MUST_FIX)
     verdict = design_ops.gate_qa(ctx)
     assert verdict == "reloop" and "crashes" in verdict.reason
     assert "reviews/probes/r2-1.py" not in verdict.reason
+
+
+def test_at_the_review_limit_the_draft_still_lists_the_brief_conflict(tmp_path, monkeypatch):
+    """The judge dismisses one probe as a brief conflict and redoes for another item, at
+    the review limit: the change goes on as a draft, and the conflict is in its follow-ups."""
+    from refactory_dsh import create_ops
+    from refactory_dsh.run import BuildLoopStop
+
+    def at_the_limit(ctx, problems, *, kind):
+        raise BuildLoopStop("review reloop limit reached after 1 review cycle(s)")
+
+    def draft(ctx, stop, *, check_failing=None, restore=True, into="draft_delivery"):
+        fact = {"reason": str(stop)}
+        ctx.set_fact(into, fact)
+        return fact
+
+    monkeypatch.setattr(create_ops, "repair", at_the_limit)
+    monkeypatch.setattr(design_ops, "_draft_for_stop", draft)
+    ctx = _qa_round(tmp_path, CLI_PROBE, _dismissal(CLI_PROBE, conflicts_with=CLI_ASK),
+                    must_fix=ANOTHER_MUST_FIX)
+    assert design_ops.gate_qa(ctx) == "proceed"
+    assert ctx.read_text("reviews/qa-gate.txt").startswith("draft: review reloop limit")
+    [line] = [item for item in json.loads(ctx.read_text("reviews/follow-ups.json"))["qa"]
+              if "brief conflict" in item]
+    assert "reviews/probes/r2-1.py" in line and f'conflicts with the ask "{CLI_ASK}"' in line
 
 
 def test_the_qa_judge_is_told_how_to_dismiss_a_failing_probe_once():
