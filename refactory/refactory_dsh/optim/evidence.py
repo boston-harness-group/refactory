@@ -214,8 +214,8 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     ``expected_label`` (the label of the expected answer's choice), the expected answer is
     only that label when the item's choices are shown here, since its choice line says
     the rest. ``errors_said`` maps an error text the request lists elsewhere to where:
-    the item's error is said as that. A failing record's ``item_history`` (`item_history`)
-    ends its heading."""
+    the item's error is said as that. A record's ``item_history`` (`item_history`: the loop
+    sets it on a failing item, and on a passing one that failed before) ends its heading."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, Mapping)]
     item = record.get("id")
@@ -226,8 +226,9 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     def cut(value: Any, step: str, limit: int) -> str:
         return clip(value, limit, item=item, step=step, omissions=omissions)
 
-    # A failing item's history in the run (``item_history``, set by the loop).
-    history = str(record.get("item_history") or "") if not record.get("passed") else ""
+    # The item's history in the run (``item_history``: the loop sets it on a failing item
+    # and on a flaky pass, never on a pass that never failed).
+    history = str(record.get("item_history") or "")
     lines = [f"{heading} Item {item}{f' ({label})' if label else ''} — {outcome} "
              f"(score {_fmt_score(record.get('score'))})"
              + (f" — {metadata}" if metadata else "") + (f" — {history}" if history else "")]

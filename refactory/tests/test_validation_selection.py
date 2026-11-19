@@ -763,7 +763,10 @@ def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val
     assert report["best"]["id"] == loop._gate().current_id
     assert not early_tests, "test is scored only in the final evaluation"
     assert proposer.prompts, "setup: the proposer was asked"
-    assert "Train score of the candidate the validation gate ranks first" in proposer.prompts[-1]
+    header = ("Train score of the current candidate, the one being trained"
+              if strategy == "default" else
+              "Train score of the candidate the validation gate ranks first")
+    assert header in proposer.prompts[-1]
     judged = list(loop._gate().cache.values())
     for prompt in proposer.prompts:
         leaked = _leaked(prompt, judged, items=4)

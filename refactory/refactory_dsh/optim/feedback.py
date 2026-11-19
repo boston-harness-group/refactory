@@ -524,14 +524,16 @@ def change_cell(entry: Mapping[str, Any], chars: int = CHANGE_LABEL_CHARS) -> st
 
 
 def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROWS,
-                 chars: int = LEDGER_CHARS, in_full: Sequence[str] = ()) -> list[str]:
+                 chars: int = LEDGER_CHARS, in_full: Sequence[str] = (),
+                 selection: str = "") -> list[str]:
     """"Every change so far": the newest candidates, one row per change (`change_cell`:
     what its edits did, the kind only as a label), oldest first, within ``rows`` and
     ``chars``; before them, a tally line per change tried more than once or only in
     rows older than the table -- grouped by the change itself, never by its kind --
     within ``LEDGER_TALLY_CHARS``. A candidate whose reasoning the request shows in full
     (``in_full``, under "Your earlier reasoning") points there instead of repeating its
-    rationale. Nothing for no entries."""
+    rationale. Under ``selection`` ``checkpoint`` the ``gate`` column says whether the
+    change was applied. Nothing for no entries."""
     if not entries:
         return []
     gated = any(entry.get("gate") for entry in entries)
@@ -570,7 +572,9 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
              "its parent on the train items both were scored with the same seed, in the "
              "round the candidate was evaluated (parent wrong and child right / the reverse; "
              "`n/a (different seed)` when the parent was not scored in that round)"
-             + ("; `gate` is what the validation gate decided" if gated else "")
+             + ("; `gate` is whether it was applied, by its train run (current, kept or "
+                "not applied)" if gated and selection == "checkpoint" else
+                "; `gate` is what the validation gate decided" if gated else "")
              + ("; `integrity` is the integrity review's verdict on the change (does its "
                 "benefit depend on how the data, grader or environment happen to be built?)"
                 if judged else "")

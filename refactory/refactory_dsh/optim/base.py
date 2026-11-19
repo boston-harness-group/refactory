@@ -1248,7 +1248,8 @@ class ProposalContext:
                 f"{len(self.history)} candidate(s), best "
                 f"{fmt_score(max((c.get('score') or 0.0) for c in self.history))}"
                 if self.history and not _gate_column(self.history)
-                else f"{len(self.history)} candidate(s); {_current_line(self.history)}"
+                else (f"{len(self.history)} candidate(s); "
+                      f"{_current_line(self.history, self.selection)}")
                 if self.history
                 else "(nothing evaluated yet)"
             )
@@ -1354,6 +1355,10 @@ class ProposalContext:
             "",
             f"Mode: `{self.mode_name}`. "
             + (f"Best score so far: {fmt_score(self.best_score)}. " if not self.selection else
+               # Under checkpoint the current candidate's: which one is best on val only
+               # picks the winner, and is never said.
+               f"Train score of the current candidate, the one being trained: "
+               f"{fmt_score(self.best_score)}. " if self.selection == "checkpoint" else
                f"Train score of the candidate the validation gate ranks first: "
                f"{fmt_score(self.best_score)}. ")
             + (f"Mean over the {self.mean_over} candidate(s) scored so far: "
@@ -1651,7 +1656,7 @@ def _feedback_sections(ctx: "ProposalContext") -> list[str]:
 
     out: list[str] = []
     above = [str(e.get("id")) for e in reasoning_shown(ctx.reasoning or [])]
-    for lines in (feedback.ledger_lines(ctx.ledger, in_full=above),
+    for lines in (feedback.ledger_lines(ctx.ledger, in_full=above, selection=ctx.selection),
                   feedback.step_review_lines(ctx.added_steps),
                   memory.request_lines(ctx.memory),
                   integrity.feedback_lines(ctx.integrity)):
@@ -3707,8 +3712,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     # An item shown in full below says its expected choice's text there (its choice
     # line): the table gives only the label for it.
     full = {id(r) for r in chosen}
-    # A failing item's history in the run (`evidence.item_history`); an item shown in full
-    # below says it in its heading. Like every empty column, left out when no item has one.
+    # An item's history in the run (`evidence.item_history`: a failing item's, or a flaky
+    # pass's); an item shown in full below says it in its heading. Like every empty column,
+    # left out when no item has one.
     lines += ["", "### Every item",
               _table_filled(["item", "outcome", "expected", "predicted", "grader", "error",
                              "history"],
@@ -3742,9 +3748,10 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
 
 
 def _history_cell(record: Mapping[str, Any], below: bool) -> str:
-    """A failing item's history for the "Every item" table, without the heading's label;
-    "(below)" when the item is shown in full below; empty for a passing item."""
-    said = str(record.get("item_history") or "") if not record.get("passed") else ""
+    """An item's history for the "Every item" table, without the heading's label; "(below)"
+    when the item is shown in full below; empty when it has none (a pass that never
+    failed)."""
+    said = str(record.get("item_history") or "")
     if not said:
         return ""
     return "(below)" if below else said.removeprefix("history: ")
@@ -4007,17 +4014,20 @@ def _gate_column(rows: Sequence[dict[str, Any]]) -> list[str]:
     return ["gate"] if any("gate" in row for row in rows) else []
 
 
-def _current_line(history: Sequence[dict[str, Any]]) -> str:
+def _current_line(history: Sequence[dict[str, Any]], selection: str = "") -> str:
     """What "What this run has already tried" says of the validation gate's choice: the
     train score of the candidate marked ``current`` (a train score, labelled so; the
-    val score that made it current is never shown)."""
+    val score that made it current is never shown). Under ``checkpoint`` the current
+    candidate is the last one applied, and no gate is named."""
+    whose = ("the current candidate" if selection == "checkpoint"
+             else "the validation gate's current candidate")
     current = next((c for c in history if c.get("gate") == "current"), None)
     if current is None:
         return ("none judged by the validation gate yet"
                 if all(c.get("gate") in (None, "not gated") for c in history)
-                else "the validation gate's current candidate is older than this list")
+                else f"{whose} is older than this list")
     score = current.get("score")
-    return ("train score of the validation gate's current candidate "
+    return (f"train score of {whose} "
             + (fmt_score(score) if isinstance(score, (int, float)) else "n/a (its train run failed)"))
 
 

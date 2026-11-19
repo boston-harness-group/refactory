@@ -446,6 +446,36 @@ def test_item_history_format():
     assert len(" — " + longest) <= 45, longest
 
 
+def test_a_flaky_pass_shows_its_history_and_a_solid_pass_none():
+    """A passing item that failed before in the run (a flaky pass) gets its history in
+    its heading and the table of every item; a pass that never failed gets none; a
+    failing item's is as before."""
+    from types import SimpleNamespace
+
+    runs = SimpleNamespace(_train_runs=[
+        ("g1", [("a", True), ("b", True), ("c", False), ("d", False)]),
+        ("g2", [("a", False), ("b", True), ("c", False), ("d", True)]),
+        ("g3", [("a", True), ("b", True), ("c", False)])])
+    records = [{"id": item, "passed": passed, "score": float(passed)}
+               for item, passed in (("a", True), ("b", True), ("c", False), ("d", True))]
+    shown = {r["id"]: r for r in Loop._with_item_history(runs, records)}  # type: ignore[arg-type]
+    expected = {"a": "history: solved 2/3 in 3 graphs, flaky", "b": "",
+                "c": "history: solved 0/3 in 3 graphs", "d": "history: solved 1/2 in 2 graphs"}
+    assert {item: r.get("item_history", "") for item, r in shown.items()} == expected
+    for item, said in expected.items():
+        heading = analysts.item_text(shown[item]).splitlines()[0]
+        assert (heading.endswith(f" — {said}") if said else "history" not in heading), heading
+    text = "\n".join(base._trajectories(list(shown.values()), budget=50))
+    table = text.split("### Every item", 1)[1].split("\n###", 1)[0]
+    rows = dict(re.findall(r"^\| (\w) \|(.*)$", table, re.M))
+    assert set(rows) == set(expected), table
+    for item, said in expected.items():
+        if said:
+            assert said.removeprefix("history: ") in rows[item] or "(below)" in rows[item]
+        else:
+            assert "solved" not in rows[item] and "(below)" not in rows[item], rows[item]
+
+
 def _three_rounds(tmp_path: Path, monkeypatch: Any) -> tuple[Loop, Scripted]:
     monkeypatch.setenv(PASS_IDS_ENV, "t2")
     _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.7, 3: 0.8}, {0: 0.5, 1: 0.6, 2: 0.7, 3: 0.8})
@@ -672,3 +702,111 @@ def test_a_person_reads_what_was_applied_and_a_failed_smoke_check():
     assert events.render(failed) == ("epoch 1 · smoke check of abc on 2 train item(s): failed "
                                      "(KeyError at work)")
     assert events.render({**failed, "outcome": "passed", "errors": []}) is None
+
+
+# ── what the requests may say: train information only ─────────────────────
+
+
+class Telling(Scripted):
+    """A model proposer recording every proposal request and memory request it is sent."""
+
+    def __init__(self, plan):  # type: ignore[no-untyped-def]
+        super().__init__(plan, model=True)
+        self.memory_prompts: list[str] = []
+
+    def write_memory(self, *, epoch, generation, build):  # type: ignore[no-untyped-def]
+        self.memory_prompts.append(build()[0])
+        return {"note": {"text": f"note of epoch {epoch}", "reasoning": ""}}
+
+
+#: The seed is the best checkpoint on val by far; every later one is applied anyway.
+CHECKPOINT_VAL = {0: 0.913771, **{n: round(0.5 + n * 0.0101 + 0.000771, 6) for n in range(1, 11)}}
+CHECKPOINT_TRAIN = {n: round(0.3 + n * 0.0137, 4) for n in range(11)}
+
+
+def test_a_checkpoint_request_says_no_val_score_and_does_not_mark_the_val_best(
+        tmp_path, monkeypatch):
+    """Ten checkpoints, the seed the best on val. No proposal or memory request holds a
+    val score; the header gives the current candidate's train score (never the val
+    best's) and names no validation gate; "Recent results" lists the current one and the
+    newest checkpoints, so the val-best seed drops out of it as later ones arrive."""
+    from refactory_dsh.optim.base import fmt_score
+
+    _scores(monkeypatch, CHECKPOINT_TRAIN, CHECKPOINT_VAL)
+    proposer = Telling([[(n, n + 1)] for n in range(9)])
+    loop, _, report = _run(tmp_path, monkeypatch, [], proposer=proposer, epochs=10)
+    seed = loop.population[0].id
+    assert loop._gate().best_id == seed == report["best"]["id"], "setup: the seed wins on val"
+    assert len(proposer.prompts) == 10 and proposer.memory_prompts
+    for prompt in [*proposer.prompts, *proposer.memory_prompts]:
+        for value in CHECKPOINT_VAL.values():
+            assert fmt_score(value) not in prompt and str(value) not in prompt, value
+        assert "validation gate" not in prompt
+    for number, prompt in enumerate(proposer.prompts):
+        header = prompt.split("\n## ", 1)[0]
+        # Round n's current candidate is level n (each round applies its child).
+        assert (f"Train score of the current candidate, the one being trained: "
+                f"{fmt_score(CHECKPOINT_TRAIN[number] - 0.01 * 3)}") in header, header
+        recent = prompt.split("## Recent results", 1)[1].split("\n## ", 1)[0]
+        rows = re.findall(r"^\| ([0-9a-f]{12}) \|", recent, re.M)
+        assert _levels(loop, rows) == [number, *range(number - 1, -1, -1)][:8]
+    last = proposer.prompts[-1]
+    recent = last.split("## Recent results", 1)[1].split("\n## ", 1)[0]
+    assert seed not in recent, "the val-best seed is no longer among the newest checkpoints"
+    assert not any("best" in line for line in last.splitlines() if seed in line)
+
+
+# ── the built-in strategies and population optimizers get both ────────────
+
+
+@pytest.mark.parametrize("strategy,optimizer,picker", [
+    *((name, "random", "") for name in strategies.names() if name != "default"),
+    ("default", "archive", ""), ("default", "random", "islands")])
+def test_every_built_in_strategy_is_smoked_and_shows_item_history(
+        tmp_path, monkeypatch, strategy, optimizer, picker):
+    """Every built-in strategy, and the default loop with a population optimizer or
+    picker, under its default selection (pool): each new candidate is smoked on its
+    parent's train items, and the request every strategy builds (``Loop._context``)
+    heads a failing item with its history once it has more than one train run."""
+    from refactory_dsh.loop import Loop as _Loop
+
+    monkeypatch.setenv(PASS_IDS_ENV, "t2")
+    monkeypatch.setattr(ValidationGate, "val_score",
+                        staticmethod(lambda run, cand: 0.5 + _level(cand) / 1000))
+    monkeypatch.setattr(FitProbe, "TRAIN", {level: 0.2 + level / 1000 for level in range(100)})
+    monkeypatch.setattr(_Loop, "_seed_population", lambda self, seed: None)
+
+    class Climber(Scripted):
+        """One child of the pipeline it is shown, a level up, per proposal asked for."""
+
+        def propose(self, ctx, n, parents):  # type: ignore[no-untyped-def]
+            parent = next((p for p in parents if p.id == ctx.parent), parents[0])
+            out = []
+            for _ in range(max(1, n)):
+                self.level = max(getattr(self, "level", 0), _level(parent)) + 1
+                out.append(Proposal(edit={"op": "set_knob", "name": "level",
+                                          "value": self.level}, parent=parent.id))
+            return out
+
+    with _patch_mode(FitProbe):
+        loop = strategies.create(strategy, MODE_ID, _config(
+            tmp_path, test=True, epochs=3, batch_size=2, optimizer=optimizer,
+            parent_picker=picker), project=Path("."))
+        climber = Climber([], model=True)
+        if picker:
+            from refactory_dsh.optim import PickedParent
+
+            loop.optimizer = PickedParent(loop.optimizer.picker, climber)
+        else:
+            loop.optimizer = climber
+        if hasattr(loop, "per_stage"):
+            loop.per_stage = 1
+        loop.run()
+    assert loop.selection_mode() == "pool"
+    smoked = _events(loop, "smoke")
+    children = [c for c in loop.population if c.parent]
+    assert children and {e["id"] for e in smoked} >= {c.id for c in children}
+    assert all(e["items"] == ["t1", "t2"] for e in smoked)
+    failing = [r for r in loop._context().item_records if not r.get("passed")]
+    assert failing and all(r["item_history"].startswith("history: solved 0/")
+                           for r in failing), failing[:1]

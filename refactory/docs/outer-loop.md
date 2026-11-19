@@ -577,13 +577,14 @@ digest and whether all of it was empty) and each code-gate visit (its verdict an
 reason); `exchanges` stays one entry per model call. Both runtimes record them (the
 spine through its runner, the walker in memory).
 
-A failing item's heading ends with its **history** in the run, for the proposer and the
-analysts alike: `history: solved k/n in g graphs`, with `, flaky` when its outcome flipped
+A failing item's heading, and a passing item's when it failed at least once in the run (a
+flaky pass), ends with its **history** in the run, for the proposer and the analysts alike:
+`history: solved k/n in g graphs`, with `, flaky` when its outcome flipped
 at least twice in scoring order or one graph both solved and failed it. It counts every
 train run's record of the item (each repeat once, re-scores included), from the journal's
 `train_records`, so a resume rebuilds it; smoke and memory runs, val, harness incidents
-and harness timeouts are left out. An item with no run but the one shown, or a passing
-one, says nothing. When not every item is shown whole, the table of every item has a
+and harness timeouts are left out. An item with no run but the one shown, or a pass that
+never failed, says nothing. When not every item is shown whole, the table of every item has a
 `history` column (`(below)` for an item shown in full). It is information only: which
 items are shown, picked or analysed does not change.
 
@@ -646,8 +647,12 @@ items are shown, picked or analysed does not change.
   round's change is applied unless its train run fails (of several, the one with the
   highest train score), and that the validation score only picks the winner and when the
   run stops; the results' gate note says what `current`, `kept` and `not applied` mean,
-  and "Your earlier reasoning" shows the latest not-applied candidate where it would show
-  the latest rejected one. The proposal request (not the analyst,
+  "Every change so far" says its `gate` column is whether a change was applied, and "Your
+  earlier reasoning" shows the latest not-applied candidate where it would show the latest
+  rejected one. Nothing val-derived reaches the proposer, the analysts, the memory pass or
+  the step review: the request's first line gives the current candidate's train score
+  (not the best checkpoint's), and "Recent results" lists the current candidate and the
+  newest checkpoints, never the val ranking. The proposal request (not the analyst,
   merge or memory calls) adds the run's **compute policy**, only what the score text
   does not already say: with `parsimony` 0, cost is not a reason for or against a change
   (and, when the score is the items' mean, per-item cost is reported separately). With
@@ -1956,7 +1961,10 @@ incident, and a spent budget are inconclusive and pass; with no evaluation left
 (`max_evaluations`) it does not run. Its items count as rollouts (toward `max_rollouts`,
 which it never exceeds), not as an evaluation; its records are no
 train records (no item history, no traces). Journaled (`smoke`), so a resumed run never
-smokes a graph twice. A custom strategy's proposals (the SkillOpt port's) are not smoked.
+smokes a graph twice. It covers every built-in strategy and the population optimizers and
+pickers (their proposals all go through `Run.attempt`); a custom strategy's proposals
+(the SkillOpt port's) are not smoked. The item history below reaches every strategy that
+builds the default request (`Loop._context`).
 
 **The slim repair call.** A proposal refused for how it is written -- a validator rule, a
 precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering,

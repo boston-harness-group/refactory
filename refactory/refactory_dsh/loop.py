@@ -5805,8 +5805,10 @@ class Loop(OuterLoop):
 
     # ── context ────────────────────────────────────────────────────────────
     def _context(self) -> ProposalContext:
-        # Under ``pool`` the whole pool: every parent a proposal may name is shown.
-        board = self.leaderboard(None if self.selection_mode() == "pool" else 8)
+        # Under ``pool`` the whole pool: every parent a proposal may name is shown. Under
+        # ``checkpoint``, the checkpoints chosen and ordered by nothing val decided.
+        board = (self._checkpoint_board(8) if self.selection_mode() == "checkpoint"
+                 else self.leaderboard(None if self.selection_mode() == "pool" else 8))
         described, graph_note = self._describe_parent(board)
         sandbox = self._sandbox_answer()
         return ProposalContext(
@@ -5893,6 +5895,18 @@ class Loop(OuterLoop):
                          if getattr(self.optimizer, "step_routes", None) is not None else {}),
             time_facts=self._time_facts(board),
         )
+
+    def _checkpoint_board(self, n: int) -> list[Candidate]:
+        """Under ``checkpoint``, the candidates a request is built from and lists under
+        "Recent results": the current one, then the other checkpoints newest first, at most
+        ``n``. The leaderboard (the best on val first, then by val) would tell the proposer
+        which pipeline scored best on val, through its train score and the rows it keeps;
+        val only picks the winner and the stop."""
+        gate = self._gate()
+        applied = set(self._gate_accepted)
+        held = [c for c in self._evaluated() if c.id in applied and c.id not in self.rejected]
+        current = [c for c in held if c.id == gate.current_id]
+        return (current + [c for c in reversed(held) if c.id != gate.current_id])[:n]
 
     def _time_facts(self, board: list[Candidate]) -> dict[str, Any]:
         """Time in numbers for the request (`optim.base.time_lines`): for the candidate
@@ -6648,25 +6662,27 @@ class Loop(OuterLoop):
         return [{**record, "item_meta": self._item_meta(record)} for record in records]
 
     def _with_item_history(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Each failing record with its item's history in this run (``item_history``,
-        `optim.evidence.item_history`), for its heading: how often the item was solved in
-        the run's train runs and on how many graphs. Information only: it selects nothing.
+        """Each failing record, and each passing one whose item failed at least once in
+        this run (a flaky pass), with its item's history (``item_history``,
+        `optim.evidence.item_history`), for its heading and the table of every item: how
+        often the item was solved in the run's train runs and on how many graphs.
+        Information only: it selects nothing.
 
         Read from every train run's records (`_note_recorded`, the ``train_records``
         events, so a resume rebuilds it exactly), each repeat once; smoke and memory runs,
-        val, harness incidents and harness timeouts are left out. A passing record, or an
-        item with no run but this one, gets none."""
+        val, harness incidents and harness timeouts are left out. A pass that never failed,
+        or an item with no run but this one, gets none."""
         from refactory_dsh.optim.evidence import item_history
 
-        if all(r.get("passed") for r in records):
-            return records
         runs: dict[str, list[tuple[str, bool]]] = {}
         for cid, outcomes in self.__dict__.get("_train_runs") or ():
             for item, passed in outcomes:
                 runs.setdefault(item, []).append((cid, passed))
         out = []
         for record in records:
-            said = "" if record.get("passed") else item_history(runs.get(str(record.get("id")), ()))
+            seen = runs.get(str(record.get("id")), [])
+            solid = record.get("passed") and all(passed for _cid, passed in seen)
+            said = "" if solid else item_history(seen)
             out.append({**record, "item_history": said} if said else record)
         return out
 
