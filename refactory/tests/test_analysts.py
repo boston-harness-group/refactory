@@ -777,7 +777,7 @@ def test_the_memory_note_reaches_every_analyst_and_merge_and_the_proposal():
     assert len(shown) == 4 + 3, "every analyst, every merge"
     for prompt in shown:
         assert "## Optimizer memory" in prompt and "NOTE-TEXT: prefer checks" in prompt
-        assert "do not force it if the current traces clearly contradict it" in prompt
+        assert memory.MEMORY_WEIGHT in prompt
     assert "NOTE-TEXT: prefer checks" in client.proposal()
     stale = Client()
     AutoresearchOptimizer(stale).propose(replace(ctx, memory={
@@ -925,7 +925,8 @@ def test_a_batch_over_the_room_has_its_longest_items_clipped_to_one_length():
     # Both long items are cut to the same length (within one clipped text's rounding),
     # and together they use the room the short ones leave.
     assert abs(len(blocks["f6"]) - len(blocks["f7"])) <= 200
-    assert len(prompt) > analysts.ANALYST_ROOM - 2000
+    # The room holds the system prompt too.
+    assert len(prompt) + len(analysts.system("failure")) > analysts.ANALYST_ROOM - 2000
     wholes = {r["id"]: len(_whole(r, ctx, "PIPE")) for r in longs}
     assert clip["items"] == 2
     left_out = sum(wholes.values()) - sum(len(prompt.split(f"### Item {i} ")[1]

@@ -451,9 +451,10 @@ class LoopConfig:
     #: scores, plus any tied with the last of them.
     pool_size: int = 8
     #: The model proposer's request lists every evaluated candidate of the run, not only
-    #: the recent ones, under "Every change so far, by kind": the kind of change it made
-    #: (`optim.feedback.change_kind`), what it touched, its train fixed/broken counts
-    #: against its parent and the gate's word, after a tally per kind. On by default.
+    #: the recent ones, under "Every change so far": what its own edits did
+    #: (`optim.feedback.change_label`, the kind only as a label), its train fixed/broken
+    #: counts against its parent and the gate's word, after a tally per change (never per
+    #: kind). On by default.
     run_ledger: bool = True
     #: The memory pass (`optim.memory`, SkillOpt's optimizer meta skill): once per
     #: epoch from epoch 2, before a model proposer's proposal, one optimizer-model call
@@ -5943,8 +5944,25 @@ class Loop(OuterLoop):
                 "fixed": len(change["fixed"]) if change and change["shared"] else None,
                 "broken": len(change["broken"]) if change and change["shared"] else None,
                 "errors": pipeline_item_errors(records), "items": len(records),
+                # How a structural change moved the items it changed (`optim.edit_effect`),
+                # for building on a rejected one; whether it added a step (reviewed under
+                # "Did the added steps contribute?").
+                **(self._reasoning_effect(parent, candidate, parent_records, records)
+                   if parent is not None and candidate.evaluated and same
+                   and candidate.is_structural() else {}),
             })
         return entries
+
+    def _reasoning_effect(self, parent: Candidate, candidate: Candidate,
+                          parent_records: list[dict[str, Any]],
+                          records: list[dict[str, Any]]) -> dict[str, Any]:
+        from refactory_dsh.optim.edit_effect import edit_effect
+        from refactory_dsh.optim.feedback import added_steps
+
+        effect = edit_effect(parent_records, records, self._reply_judge(),
+                             new_steps=_new_steps(parent, candidate))
+        return {**({"effect": effect} if effect else {}),
+                "added": bool(added_steps(parent.state, candidate.state))}
 
     # ── the memory pass (``LoopConfig.lessons``; `optim.memory`) ──────────────
     def _stopped_inside(self, exc: BaseException) -> None:
@@ -6097,15 +6115,27 @@ class Loop(OuterLoop):
         return {"common": common, "prev": path(before), "curr": path(after)}
 
     def _make_memory(self, epoch: int, prev: Candidate, current: Candidate) -> None:
-        """The pass itself (`_memory_pass`): sample, gather or roll out both sides, ask,
-        keep and journal."""
-        from concurrent.futures import CancelledError
-
-        from refactory_dsh.budgets import BudgetExhausted
-        from refactory_dsh.model import ModelChoiceError
-        from refactory_dsh.optim import analysts, memory
+        """The pass itself (`_memory_pass`): sample, gather or roll out both sides (or,
+        with nothing kept, take the round's rejected change, `_rejected_side`), then ask,
+        keep and journal (`_make_memory_pass`)."""
+        from refactory_dsh.optim import memory
 
         same = prev.id == current.id
+        tried, refused = self._tried_in_round(epoch - 1)
+        # Nothing kept: the incumbent against the round's rejected change that moved the
+        # most items, on the items it moved, both traces from the round it was evaluated
+        # in (one seed), so the note can say why the tried change failed rather than
+        # read two rollouts of one pipeline (`_rejected_side`). Without one, SkillOpt's
+        # two rollouts of the unchanged pipeline.
+        rejected = self._rejected_side(current, tried) if same else None
+        if rejected is not None:
+            self._make_memory_pass(epoch, current, rejected[0], same=False,
+                                   sample=rejected[1], records=rejected[2:4],
+                                   sides=[(current, 0, "", rejected[4]),
+                                          (rejected[0], 0, "", rejected[5])],
+                                   evaluated=0, rolled=0, tried=tried, refused=refused,
+                                   rejected=rejected[6])
+            return
         # The two rollouts, each (candidate, the epoch whose seed it used, its key, what it
         # is). Under the gate: both candidates' rollouts of this epoch, or, when nothing
         # replaced the current, its previous epoch's and this epoch's. Without the gate
@@ -6135,9 +6165,77 @@ class Loop(OuterLoop):
                 evaluated += 1 if made else 0
                 rolled += made
                 held = self._side_records(candidate.id, at, key)
-            records.append({item: dict(rec, item_meta=self._item_meta(rec))
-                            if self._item_meta_reader() is not None else dict(rec)
-                            for item, rec in held.items()})
+            records.append(self._with_meta(held))
+        self._make_memory_pass(epoch, prev, current, same=same, sample=sample,
+                               records=records, sides=sides, evaluated=evaluated,
+                               rolled=rolled, tried=tried, refused=refused)
+
+    def _with_meta(self, held: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        """Records by item, each with its declared metadata when the mode reads any."""
+        return {item: dict(rec, item_meta=self._item_meta(rec))
+                if self._item_meta_reader() is not None else dict(rec)
+                for item, rec in held.items()}
+
+    def _rejected_side(self, incumbent: Candidate, tried: Sequence[Mapping[str, Any]]
+                       ) -> tuple[Any, ...] | None:
+        """For a memory pass whose incumbent nothing replaced: the round's evaluated,
+        not-kept child of the incumbent that fixed or broke the most train items (the
+        newest on a tie), with the items it changed (broken first, at most
+        ``memory.MEMORY_SAMPLES``), both sides' records from its evaluation round (one
+        seed, `_round_records`), each side's label, and what the request says of it
+        (``{"child", "changed", "shown", "others"}``: the other rejected changes are
+        under "What was tried this epoch", with their edits and how they moved their
+        items, not compared here). ``None`` when no such child changed an item under a
+        shared seed."""
+        from refactory_dsh.optim import memory
+        from refactory_dsh.optim.base import _by_item, edit_change
+        from refactory_dsh.optim.feedback import KEPT_WORDS
+
+        by_id = {c.id: c for c in self.population}
+        best = None
+        others = []
+        for entry in tried:
+            child = by_id.get(str(entry.get("id")))
+            if (child is None or child.parent != incumbent.id or not entry.get("evaluated", True)
+                    or entry.get("gate") in KEPT_WORDS):
+                continue
+            parent_records, child_records, same_seed = self._round_records(incumbent.id,
+                                                                           child.id)
+            if not same_seed or not child_records:
+                continue
+            moved = edit_change(parent_records, child_records)
+            changed = [*moved["broken"], *moved["fixed"]]
+            if not changed:
+                continue
+            others.append(child.id)
+            if best is None or len(changed) >= len(best[1]):
+                best = (child, changed, parent_records, child_records, moved)
+        if best is None:
+            return None
+        child, changed, parent_records, child_records, moved = best
+        shown = changed[:memory.MEMORY_SAMPLES]
+        at = "its rollout in the round the change was evaluated in (one train seed for both)"
+        return (child, shown, self._with_meta(_by_item(parent_records)),
+                self._with_meta(_by_item(child_records)), at, at,
+                {"child": child.id, "noun": memory.REJECTED_NOUN if self.config.val_gate
+                 else memory.NOT_KEPT_NOUN, "changed": len(changed), "shown": len(shown),
+                 "broken": len(moved["broken"]), "fixed": len(moved["fixed"]),
+                 "shared": moved["shared"], "others": [c for c in others if c != child.id]})
+
+    def _make_memory_pass(self, epoch: int, prev: Candidate, current: Candidate, *,
+                          same: bool, sample: list[str], records: Sequence[Mapping[str, Any]],
+                          sides: Sequence[tuple[Any, ...]], evaluated: int, rolled: int,
+                          tried: list[dict[str, Any]], refused: list[dict[str, Any]],
+                          rejected: Mapping[str, Any] | None = None) -> None:
+        """Ask for the note from the two sides' ``records`` on ``sample``, keep and
+        journal it. ``rejected`` (`_rejected_side`): ``current`` is a rejected child of
+        the unchanged incumbent ``prev``, compared on the items it changed."""
+        from concurrent.futures import CancelledError
+
+        from refactory_dsh.budgets import BudgetExhausted
+        from refactory_dsh.model import ModelChoiceError
+        from refactory_dsh.optim import analysts, memory
+
         entries, missing = memory.pairs(records[0], records[1], sample)
 
         view = {c.id: analysts.pipeline_text(memory.state_view(c.state),
@@ -6147,17 +6245,25 @@ class Loop(OuterLoop):
         record: dict[str, Any] = {
             "epoch": epoch, "generation": self.generation, "prev": prev.id, "curr": current.id,
             "same": same, "sample": sample, "pairs": len(entries), "missing": missing,
-            "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled}
+            "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled,
+            **({"rejected": dict(rejected)} if rejected else {})}
 
-        tried, refused = self._tried_in_round(epoch - 1)
         gated = bool(self.selection_mode())
-        # The tally of each kind tried against the noise (`memory.kind_tally_lines`): one
-        # source for this call and, with the note it writes, the proposer's request.
-        tally = memory.kind_tally_lines(tried, val_items=len(self._manifest_val_ids()),
-                                        spread=self._rescore_spread(prev.id), gated=gated)
+        # The tally of each change tried against the noise (`memory.change_tally_lines`):
+        # one source for this call and, with the note it writes, the proposer's request.
+        tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
+                                          spread=self._rescore_spread(prev.id), gated=gated)
         self._pending_tally = tally
-        tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1, current=current.id,
-                                         gated=gated, tally=tally)
+        lineage = self._lineage_edits(prev, current)
+        # The candidates whose edits the changes section shows whole (`memory.changes_lines`).
+        section = (memory.changes_heading(rejected.get("noun") if rejected else None)
+                   if not same else None)
+        shown_in = ({str(step.get("id")): section
+                     for step in [*(lineage.get("prev") or ()), *(lineage.get("curr") or ())]}
+                    if section else {})
+        tried_lines = memory.tried_lines(tried, refused, round_=epoch - 1,
+                                         current=prev.id if rejected else current.id,
+                                         gated=gated, tally=tally, shown_in=shown_in)
         objective = self._objective()
 
         # The request: one call when it fits the room whole, else split into comparison
@@ -6165,8 +6271,15 @@ class Loop(OuterLoop):
         build = memory.MemoryRequest(
             epoch=epoch, mode_name=self.mode_id,
             prev={"id": prev.id, "pipeline": view[prev.id], "rollout": sides[0][3]},
-            curr={"id": current.id, "pipeline": view[current.id], "rollout": sides[1][3]},
-            changes=memory.changes_lines(self._lineage_edits(prev, current)),
+            curr={"id": current.id, "pipeline": view[current.id], "rollout": sides[1][3],
+                  **({"rejected": dict(rejected)} if rejected else {})},
+            changes=memory.changes_lines(lineage, homes={
+                "prev": (memory.pipeline_homes(prev.state),
+                         "the pipeline at the start of this epoch" if not rejected
+                         else "the incumbent pipeline"),
+                "curr": (memory.pipeline_homes(current.state),
+                         f"the {memory.noun({'rejected': rejected})}'s pipeline" if rejected
+                         else "the pipeline now")}),
             previous_note=previous, entries=entries, tried=tried_lines, objective=objective)
 
         outcome: dict[str, Any] = {}
@@ -6206,14 +6319,18 @@ class Loop(OuterLoop):
     def _tried_in_round(self, round_: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Every change the optimizer proposed in epoch ``round_``'s proposal round, for
         the memory pass (`optim.memory.tried_lines`): the candidates it made, oldest
-        first, each with its kind, its own edits in short, its train score and fixed/
-        broken counts against its parent (`optim.feedback.ledger_entry`), the gate's word
+        first, each with what it was (its own edits with the text they gave a new step or
+        judge, and a knob's changed lines against its parent, `optim.memory.edits_text`;
+        where each step it added sits, `optim.feedback.placement_lines`; its kind as a
+        label), its train score and fixed/broken counts against its parent
+        (`optim.feedback.ledger_entry`), the gate's word
         and the integrity verdict; and the proposals refused before they ran, with why.
         The facts the proposal request's history, change ledger, integrity and refusal
         sections show: train records and the gate's word, never a validation score."""
         from refactory_dsh.optim import memory
         from refactory_dsh.optim.base import Proposal, _structural_edit
-        from refactory_dsh.optim.feedback import change_kind, ledger_entry
+        from refactory_dsh.optim.feedback import (change_kind, knob_values, ledger_entry,
+                                                  placement_lines)
 
         by_id = {c.id: c for c in self.population}
         tried = []
@@ -6237,8 +6354,11 @@ class Loop(OuterLoop):
                                   new_steps=_new_steps(by_id.get(candidate.parent or ""),
                                                        candidate))
                       if candidate.is_structural() else {})
+            before = knob_values(parent.state if parent is not None else None)
             tried.append({**entry, "structural": candidate.is_structural(),
-                          "edits": memory.edits_text(candidate.own_edits()),
+                          "edits": memory.edits_text(candidate.own_edits(), before),
+                          "placed": placement_lines(parent.state, candidate.state)
+                          if parent is not None and candidate.is_structural() else [],
                           "score": candidate.score, "exit_ok": candidate.exit_ok,
                           "evaluated": candidate.evaluated,
                           **({"effect": effect} if effect else {})})
@@ -6260,6 +6380,8 @@ class Loop(OuterLoop):
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
                             "curr": record.get("curr"),
+                            **({"rejected": dict(record["rejected"])}
+                               if record.get("rejected") else {}),
                             **({"tally": list(self._pending_tally)}
                                if getattr(self, "_pending_tally", None) else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
@@ -6653,7 +6775,7 @@ class Loop(OuterLoop):
         return out
 
     def _ledger(self) -> list[dict[str, Any]]:
-        """Every evaluated candidate of the run as "Every change so far, by kind" lists
+        """Every evaluated candidate of the run as "Every change so far" lists
         it (`optim.feedback.ledger_entry`): train records against its parent's from the
         same epoch, and the gate's word. Never a val score."""
         from refactory_dsh.optim.feedback import ledger_entry

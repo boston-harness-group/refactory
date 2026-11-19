@@ -362,11 +362,15 @@ class RunStopped(CancelledError):
 #: a structural edit and the edits that only connect it are one. A constant, not a run
 #: setting.
 MAX_EDITS_PER_PROPOSAL = 4
+#: The most edits one proposal may carry however they count (three times the cap): a
+#: guard against runaway bundles, not the cap itself.
+MAX_RAW_EDITS_PER_PROPOSAL = 12
 #: How the cap counts, as a refusal and the bundling instructions say it.
-COUNTING_RULE = ("A structural edit and the edits that only connect it count as one change: "
-                 "the new step's own prompt and settings, its direct neighbours' prompt "
-                 "lines that name it or what it writes, and edges between it and them. "
-                 "Every other edit counts as one more.")
+COUNTING_RULE = ("The limit counts changes, not edits: a structural edit plus its own "
+                 "prompt and settings, edges to it, and set_knob edits of steps that read "
+                 "its output or name it count as one change (e.g. a new branch and the "
+                 "tuning of the step that reads it). Every other edit counts as one more. "
+                 f"At most {MAX_RAW_EDITS_PER_PROPOSAL} edits in all.")
 
 
 @dataclass(frozen=True)
@@ -533,6 +537,10 @@ def proposal_refusal(proposal: Proposal, *, permitted: Sequence[str] | None = No
         return [f"E-proposal-shape: {steps[0][UNREADABLE_PROPOSAL]}. Write each proposal "
                 'as {"edit": {"op": ...}} or {"edits": [{"op": ...}, ...]}, with '
                 "rationale, prediction and confidence beside it"]
+    if max_edits is not None and int(max_edits) > 1 and len(steps) > MAX_RAW_EDITS_PER_PROPOSAL:
+        return [f"E-too-many-edits: the proposal bundles {len(steps)} edits and no proposal "
+                f"may carry more than {MAX_RAW_EDITS_PER_PROPOSAL}, however they count; "
+                "split it, or keep the edits the fix needs together"]
     if max_edits is not None and len(steps) > max(1, int(max_edits)):
         limit = max(1, int(max_edits))
         # A limit of one asks for single edits only; a bundle counts by logical change.
@@ -1106,9 +1114,9 @@ class ProposalContext:
     #: candidates run headless, so the default leaves the person-answered gate kind out
     #: of the node schemas (`node_schema.render_schema`).
     person_gates: bool = False
-    #: Every evaluated candidate of the run with the kind of change it made, its train
+    #: Every evaluated candidate of the run with what its own edits did, its train
     #: fixed/broken counts against its parent and the gate's word (``Loop._ledger``,
-    #: ``LoopConfig.run_ledger``), for "Every change so far, by kind"; empty says nothing.
+    #: ``LoopConfig.run_ledger``), for "Every change so far"; empty says nothing.
     ledger: list[dict[str, Any]] = field(default_factory=list)
     #: The loop's memory note (`optim.memory`; ``LoopConfig.lessons``): ``{"text",
     #: "epoch", ...}`` and, when the epoch's pass failed, ``not_updated``; for
@@ -1250,7 +1258,9 @@ class ProposalContext:
                 room=int(self.evidence_budget * EDIT_CHANGE_SHARE))]
         if self.reasoning:
             predicted = [str(p.get("child")) for p in self.edit_pairs or () if p.get("prediction")]
-            lines += ["", *_reasoning_lines(self.reasoning, below, predicted, homes)]
+            lines += ["", *_reasoning_lines(
+                self.reasoning, below, predicted, homes,
+                reviewed={str(e.get("candidate")) for e in self.added_steps or ()})]
         lines += _feedback_sections(self)
         if self.prior_runs:
             lines += [
@@ -1581,7 +1591,7 @@ def _evidence_rows(rows: Sequence[tuple[str, Any]],
 
 
 def _feedback_sections(ctx: "ProposalContext") -> list[str]:
-    """The run-wide feedback sections (`optim.feedback`): every change by kind, whether
+    """The run-wide feedback sections (`optim.feedback`): every change so far, whether
     the last round's added steps contributed, the loop's memory note (`optim.memory`),
     and the integrity judge's verdicts on its proposals (`optim.integrity`); each only
     when its field holds something."""
@@ -3909,20 +3919,13 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
                 "scores; held-out scores are never shown. You edit the pipeline shown below. A `rejected` "
                 "candidate was not shown better than the current one on validation; that is "
                 "all a rejection says. " + resolution + "A change that was rejected must not "
-                "be proposed again unchanged, but when its train fixed/broken counts against "
-                "its parent (when shown below) were strongly positive, its direction may still "
-                "be right: you may build on it or combine it with edits to other steps in the "
-                "same failure path."]
+                "be proposed again unchanged. " + REJECTED_BUILD_TEXT]
     return ["This run has a validation gate (its rule is under \"What the score "
             "measures\"). Scores here are train scores; "
             "held-out scores are never shown. You edit the candidate marked `current`. A "
             "`rejected` candidate was not shown better on validation; that is all a "
             "rejection says. " + resolution + "A rejected candidate is never kept, and its "
-            "change must not be proposed again unchanged. When its train fixed/broken counts "
-            "against its parent (when shown below) were strongly positive, its direction may "
-            "still be right: "
-            "you may build on its change or combine it with edits to other steps in the "
-            "same failure path."]
+            "change must not be proposed again unchanged. " + REJECTED_BUILD_TEXT]
 
 
 #: The most score changes in each direction listed for graded items.
@@ -3930,10 +3933,19 @@ EDIT_CHANGE_GRADED = 3
 #: Entries in "Your earlier reasoning", and how much of each text it keeps.
 REASONING_ENTRIES = 6
 REASONING_TEXT_CHARS = 600
-#: The full edits of the latest rejected candidate that fixed more train items than
-#: it broke, shown under "Your earlier reasoning" so it can be built on, at most this
-#: many characters.
-REJECTED_EDITS_CHARS = 4000
+#: The full edits of the latest rejected candidate, whatever its net count, shown under
+#: "Your earlier reasoning" with what went wrong in it so it can be built on: every text
+#: whole (a new step's instructions, a judge's criteria), the whole within this many
+#: characters, head and tail with the cut said past it.
+REJECTED_EDITS_CHARS = 20000
+#: What the gate note says of building on a rejected change: by its mechanism, not its
+#: net count.
+REJECTED_BUILD_TEXT = (
+    "A rejected change can hold the right idea with a fixable mechanism, whatever its net "
+    "count: read how it moved its items (the latest one's full edits and what went wrong in "
+    "it are under \"Your earlier reasoning\"), and you may fix what went wrong -- its "
+    "instructions or criteria, its place, what it sends back, its limit -- or combine it "
+    "with edits to other steps in the same failure path.")
 
 
 def _by_item(records: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -4230,20 +4242,29 @@ def describe_edits(edits: Any, field_chars: int = EDIT_FIELD_CHARS,
 
 def whole_edits(edits: Any, before: Mapping[str, Any] | None = None,
                 homes: Mapping[str, str] | None = None) -> str:
-    """A candidate's own edits as their home section shows them: every text whole, never
-    clipped, with its wiring. A text ``set_knob`` whose earlier value is known (``before``:
-    the parent's values) is shown as its change -- the lines it added and removed, whole --
-    not as the new value's unchanged start; a text a current knob holds (``homes``) is
-    named by that knob, whose text "Each step's settings" shows whole."""
+    """`whole_edit_parts`, one edit after another."""
+    return "\n".join(whole_edit_parts(edits, before, homes)) or "(none)"
+
+
+def whole_edit_parts(edits: Any, before: Mapping[str, Any] | None = None,
+                     homes: Mapping[str, str] | None = None) -> list[str]:
+    """A candidate's own edits as their home section shows them, one text per edit (so a
+    bound can cut each and drop none): every text whole, never clipped, with its wiring.
+    A text ``set_knob`` whose earlier value is known (``before``: the parent's values,
+    then each earlier edit's) is shown as its change -- the lines it added and removed,
+    whole -- not as the new value's unchanged start; a text a current knob holds
+    (``homes``) is named by that knob, whose text "Each step's settings" shows whole."""
     import difflib
 
     homes = homes or {}
     values: dict[str, Any] = dict(before or {})
-    lines: list[str] = []
+    parts: list[str] = []
     steps = list(edits) if isinstance(edits, (list, tuple)) else [edits]
     for index, edit in enumerate(steps, 1):
+        lines: list[str] = []
+        parts.append("")
         if not isinstance(edit, dict):
-            lines.append(f"{index}. {json.dumps(edit, default=str, ensure_ascii=False)}")
+            parts[-1] = f"{index}. {json.dumps(edit, default=str, ensure_ascii=False)}"
             continue
         head = " ".join(f"{key}={json.dumps(edit[key], default=str)}"
                         for key in EDIT_NAMING_FIELDS if key in edit)
@@ -4268,9 +4289,10 @@ def whole_edits(edits: Any, before: Mapping[str, Any] | None = None,
             tail = "; ".join(f"{key}: {json.dumps(value, default=str, ensure_ascii=False)}"
                              for key, value in rest.items())
             lines.append(f"{index}. {head}" + (f" -- {tail}" if tail else ""))
+        parts[-1] = "\n".join(lines)
         if edit.get("op") == "set_knob" and isinstance(name, str):
             values[name] = new
-    return "\n".join(lines) if lines else "(none)"
+    return parts
 
 
 #: How much of one edit "What this run has already tried" shows: a ``set_knob``'s
@@ -5062,17 +5084,18 @@ def reasoning_shown(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _promising(entries: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    """The latest rejected candidate that fixed more train items than it broke, whose
-    edits a request shows whole so they can be built on; ``None`` when there is none."""
-    promising = [entry for entry in entries if entry.get("gate") == "rejected"
-                 and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)
-                 and entry["fixed"] > entry["broken"]]
-    return promising[-1] if promising else None
+    """The latest rejected candidate with train counts against its parent, whatever its
+    net count, whose edits a request shows whole with what went wrong in it, so it can be
+    built on; ``None`` when there is none."""
+    rejected = [entry for entry in entries if entry.get("gate") == "rejected"
+                and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)]
+    return rejected[-1] if rejected else None
 
 
 def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (),
                      predicted: Sequence[str] = (),
-                     homes: Mapping[str, str] | None = None) -> list[str]:
+                     homes: Mapping[str, str] | None = None,
+                     reviewed: Collection[str] = ()) -> list[str]:
     """'Your earlier reasoning': what the optimizer said about recent candidates,
     beside what happened to them, with each one's item errors (``item_errors``). A
     candidate in ``above`` ("What the last edit changed" shows its edits, its flow change
@@ -5111,24 +5134,63 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
                     if entry.get("considered") else [])]
     entry = _promising(entries)
     if entry is not None:
-        head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate that "
-                f"fixed more train items than it broke ({entry['fixed']} fixed / "
-                f"{entry['broken']} broken)")
+        from .edit_effect import effect_lines
+
+        head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate "
+                f"({entry['fixed']} fixed / {entry['broken']} broken)")
+        # How it moved the items it changed (`optim.edit_effect`): the mechanism to fix. A
+        # change that added no step has no such account; its counts are what there is.
+        went = effect_lines(entry.get("effect") or {})
+        wrong = ([f"What went wrong in it (how it moved the items it changed): {went[0]}",
+                  *went[1:]] if went else
+                 [f"What went wrong in it: it broke {entry['broken']} train item(s) and fixed "
+                  f"{entry['fixed']} against its parent; no step-by-step account of how it "
+                  "moved them is available (it added no step that ran on them), so compare "
+                  "its text with the failures shown in this request."])
+        # Pointed to only when that section reviews a step of this very candidate.
+        review = ("A step it added is reviewed under \"Did the added steps contribute?\"."
+                  if str(entry.get("id")) in set(reviewed) else "")
         shown = [str(e.get("id")) for e in reasoning_shown(entries)]
         if str(entry.get("id")) in above or str(entry.get("id")) in shown:
             # Its edits are whole in its own block already (`whole_edits`).
             where = ("under \"What the last edit changed\" above"
                      if str(entry.get("id")) in above else "in its block above")
-            lines += ["", head, f"Whole {where}, to be built on or combined with edits to "
-                      "other steps; not to be re-proposed unchanged."]
+            lines += ["", head, f"Whole {where}, to be built on (fix what went wrong in it) "
+                      "or combined with edits to other steps; not to be re-proposed "
+                      "unchanged.", *wrong, *([review] if review else [])]
         else:
+            parts = whole_edit_parts(entry.get("edit"), entry.get("before"), homes)
+            # Past the bound, the longest edits are cut to one length (each its middle,
+            # said in it); no edit is dropped.
+            from .analysts import item_cap
+
+            cap = item_cap([len(p) for p in parts], REJECTED_EDITS_CHARS, floor=200)
+            # A cut edit is one line (its fence, if any, folded): head and tail around the
+            # cut, so no part of it can open a fence or read as a heading.
+            shown = [p if cap is None or len(p) <= cap else _one_line_cut(p, cap)
+                     for p in parts]
+            cut = sum(1 for p, q in zip(parts, shown) if p != q)
             lines += ["", head,
-                      f"Every step's wiring whole, its text shortened to fit {REJECTED_EDITS_CHARS} "
-                      "characters, so it can be built on "
-                      "or combined with edits to other steps; not to be re-proposed unchanged.",
-                      describe_edits(entry.get("edit"), text_budget=REJECTED_EDITS_CHARS,
-                                     homes=homes)]
+                      "Every edit whole, a new step's instructions and a judge's criteria "
+                      "included" + (f" (past {REJECTED_EDITS_CHARS} characters, {cut} of "
+                                    f"its {len(parts)} edits have their middle cut, each "
+                                    "cut said in it; none is left out)" if cut else "")
+                      + ", so it can be built on (fix what went wrong in it) or combined "
+                      "with edits to other steps; not to be re-proposed unchanged.",
+                      "\n".join(shown) if shown else "(none)",
+                      *wrong, *([review] if review else [])]
     return lines
+
+
+def _one_line_cut(text: str, limit: int) -> str:
+    """``text`` on one line (newlines as ``DIFF_LINE_SEPARATOR``) within ``limit``: its
+    head and tail around ``[... N characters omitted ...]``."""
+    flat = text.replace("\n", DIFF_LINE_SEPARATOR)
+    if len(flat) <= limit:
+        return flat
+    mark = f" [... {len(flat) - limit} characters omitted ...] "
+    keep = max(0, limit - len(mark))
+    return flat[:(keep + 1) // 2] + mark + (flat[len(flat) - keep // 2:] if keep // 2 else "")
 
 
 def _rules_text() -> str:

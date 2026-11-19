@@ -3,11 +3,14 @@
 Two request sections, each behind a ``LoopConfig`` switch (the loop's memory note,
 ``lessons``, is `optim.memory`'s):
 
-- **Every change so far, by kind** (``run_ledger``): every judged candidate of the run
-  with the kind of change it made (``change_kind``), what it touched, its train
-  fixed/broken counts against its parent and the gate's outcome word, after a tally by
-  kind. Without it the optimizer sees only its last few candidates and cannot tell that
-  a kind of change has failed every time it was tried.
+- **Every change so far** (``run_ledger``): every judged candidate of the run with
+  what its own edits did (``change_label``: the op, the steps and settings it names, the
+  head of the text it set; its kind, ``change_kind``, only as a label), its train
+  fixed/broken counts against its parent and the gate's outcome word, after a tally of
+  each change tried more than once or only in older rows. Grouped by the change itself,
+  never by kind: two loops whose judges check different things are two changes, and one
+  failing is no verdict on the other. Without it the optimizer sees only its last few
+  candidates and cannot tell that a change has failed every time it was tried.
 - **Did the added steps contribute?** (``step_review``): for each step a candidate of
   the last round added, the train items it fixed and broke, how often the final answer
   (what the grader read) changed, and a reviewer's verdict on whether the step's output holds anything
@@ -42,12 +45,15 @@ _NODE_OPS = {"insert_after", "insert_before", "add_node", "wrap", "duplicate"}
 #: current one, or -- under a pool -- in it or once in it).
 KEPT_WORDS = ("kept", "current", "in pool", "left pool")
 
-#: Rows "Every change so far, by kind" lists in full, newest kept; older ones are only
+#: Rows "Every change so far" lists in full, newest kept; older ones are only
 #: counted in the tally. And the most characters its table may take.
 LEDGER_ROWS = 40
 LEDGER_CHARS = 9000
 LEDGER_RATIONALE_CHARS = 140
-LEDGER_TOUCHED = 4
+#: How much of a change's label a ledger row or tally line shows (`change_cell`), and
+#: the most characters the per-change tally before the table takes.
+LEDGER_CHANGE_CHARS = 160  # a label's bound where the ledger shows it (`change_label`)
+LEDGER_TALLY_CHARS = 3000
 
 #: Steps reviewed per request and train items each review reads. A review reads each
 #: item's texts (the step's input as sent, its output, the next reader's output) whole;
@@ -156,6 +162,310 @@ def touched(edits: Any) -> list[str]:
     return out
 
 
+# ── what a change was ───────────────────────────────────────────────────────
+
+
+#: The most characters a change's label (`change_label`) takes, and how much of the
+#: text it changed (a new step's instructions, a judge's criteria, a knob's new lines)
+#: it quotes: enough to tell two changes of one kind apart.
+CHANGE_LABEL_CHARS = LEDGER_CHANGE_CHARS
+CHANGE_TEXT_HEAD = 60
+#: The fields of an edit, or of a new step it carries, that hold free text: a step's
+#: instructions or a judge's criteria (``text``, ``prompt_template``), its system
+#: prompt, code, a knob's value or a patch's text.
+_TEXT_FIELDS = ("text", "value", "patch", "prompt", "prompt_template", "system",
+                "system_prompt_template", "code", "replace", "find")
+#: The fields of an edit holding new steps: one, a list, or a label -> step map.
+_STEP_FIELDS = ("node", "gate", "into", "branches", "new", "combine", "to")
+#: Fields a label leaves out: the op (said first), descriptions and positions.
+_UNLABELLED = ("op", "rationale", "notes", "description", "position", "spec")
+#: A field value a label shows whole as a name or a setting, not as text.
+_NAME_CHARS = 40
+
+
+def _fold(text: Any) -> str:
+    return " ".join(str(text).split())
+
+
+def knob_values(state: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A state's knob values by name (what a ``set_knob`` replaced)."""
+    return {str(name): entry.get("value") if isinstance(entry, Mapping) else entry
+            for name, entry in ((state or {}).get("knobs") or {}).items()}
+
+
+def _first_text(value: Any) -> str:
+    """The first free text in an edit or a step it carries, at any depth: its own text
+    fields (``_TEXT_FIELDS``) first, then its new steps' (``_STEP_FIELDS``)."""
+    if isinstance(value, str):
+        return value if value.strip() else ""
+    if isinstance(value, (list, tuple)):
+        return next((found for found in map(_first_text, value) if found), "")
+    if not isinstance(value, Mapping):
+        return ""
+    for key in (*_TEXT_FIELDS, *_STEP_FIELDS):
+        found = _first_text(value.get(key))
+        if found:
+            return found
+    return ""
+
+
+def _changed_line(old: str, new: str) -> str:
+    """The first line a knob edit added (else the first it removed, said so)."""
+    import difflib
+
+    added, removed = [], []
+    for line in list(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                          lineterm="", n=0))[2:]:
+        if line.startswith("+") and line[1:].strip():
+            added.append(line[1:])
+        elif line.startswith("-") and line[1:].strip():
+            removed.append(line[1:])
+    return added[0] if added else (f"removed: {removed[0]}" if removed else "")
+
+
+def _setting(key: str, value: Any) -> str | None:
+    """``key=value`` for a name or a setting (a short scalar or a list of them)."""
+    if isinstance(value, (bool, int, float)):
+        return f"{key}={value}"
+    if isinstance(value, str) and value and len(value) <= _NAME_CHARS:
+        return f"{key}={value}"
+    if isinstance(value, (list, tuple)) and value and all(
+            isinstance(v, str) and len(v) <= _NAME_CHARS for v in value):
+        return f"{key}={','.join(value)}"
+    return None
+
+
+def _new_steps(edit: Mapping[str, Any]) -> list[str]:
+    """The new steps an edit carries, each as ``<field>: <kind> <id>``."""
+    out = []
+    for key in _STEP_FIELDS:
+        value = edit.get(key)
+        nodes = (list(value.values()) if isinstance(value, Mapping) and key == "to"
+                 else [value] if isinstance(value, Mapping)
+                 else list(value) if isinstance(value, (list, tuple)) else [])
+        for node in nodes:
+            if isinstance(node, Mapping):
+                said = " ".join(str(node[f]) for f in ("kind", "id") if node.get(f))
+                out.append(f"{key}: {said or 'step'}")
+    return out
+
+
+#: The fields that name what an edit touches: a label keeps them whatever else it cuts.
+_NAME_FIELDS = ("name", "step", "steps", "target", "after", "before", "fork", "first",
+                "second", "id", "new_id", "over", "source")
+
+
+def change_label(edits: Any, before: Mapping[str, Any] | None = None,
+                 chars: int = CHANGE_LABEL_CHARS) -> str:
+    """A change in one line, by what it did rather than its kind: each edit's op, the
+    steps, knobs and settings it names (``step=solve``, ``back_to=…``,
+    ``max_iterations=1``), the new steps it carries, and the head of the text it set (a
+    new step's instructions or a judge's criteria, ``CHANGE_TEXT_HEAD`` characters; for
+    a knob whose old value ``before`` holds, its first changed line). Whitespace folded,
+    so it is one line wherever it is shown and nothing in it can read as a heading.
+
+    Within ``chars``, every edit's op and the names it touches are kept first, then its
+    other settings and new steps, then the text heads, in edit order, as far as they fit:
+    no edit of a multi-edit change goes unnamed, even past ``chars``. Two changes of one
+    kind -- two loops whose judges check different things -- get different labels."""
+    before = before or {}
+    levels: list[list[str]] = []  # per edit: names only, + settings, + text head
+    for edit in edits if isinstance(edits, (list, tuple)) else [edits]:
+        if not isinstance(edit, Mapping) or not edit.get("op"):
+            levels.append(["(no readable edit)"] * 3)
+            continue
+        names = [str(edit["op"]), *(s for key in _NAME_FIELDS
+                                    for s in [_setting(key, edit.get(key))] if s)]
+        rest = [s for key, value in edit.items()
+                if key not in (*_UNLABELLED, *_TEXT_FIELDS, *_STEP_FIELDS, *_NAME_FIELDS)
+                for s in [_setting(key, value)] if s]
+        rest += _new_steps(edit)
+        if "value" in edit and not isinstance(edit["value"], (str, list, dict)):
+            rest.append(f"value={edit['value']}")
+        old, new = before.get(str(edit.get("name"))), edit.get("value")
+        text = _fold(_changed_line(old, new) if edit.get("op") == "set_knob"
+                     and isinstance(old, str) and isinstance(new, str) else _first_text(edit))
+        head = ([json.dumps(text[:CHANGE_TEXT_HEAD] + ("…" if len(text) > CHANGE_TEXT_HEAD
+                                                       else ""), ensure_ascii=False)]
+                if text else [])
+        levels.append([_fold(" ".join(names)), _fold(" ".join([*names, *rest])),
+                       _fold(" ".join([*names, *rest, *head]))])
+    if not levels:
+        return "(none)"
+    chosen = [0] * len(levels)
+
+    def joined() -> str:
+        return "; ".join(level[c] for level, c in zip(levels, chosen))
+
+    # Raise each edit one level at a time, in order, while the label fits.
+    for step in (1, 2):
+        for index, level in enumerate(levels):
+            was = chosen[index]
+            chosen[index] = step
+            if len(joined()) > chars:
+                chosen[index] = was
+    return joined()
+
+
+#: How much of a change's folded text `change_identity` keeps, to tell two changes whose
+#: labels collide apart where they differ.
+CHANGE_TEXT_KEPT = 4000
+
+
+def change_identity(edits: Any, before: Mapping[str, Any] | None = None) -> dict[str, str]:
+    """What tells one change from another: ``key``, a hash of its full edits (what the
+    tallies group by; the label is display only), and ``text``, all the text it set,
+    folded (a knob's changed lines against ``before``), within ``CHANGE_TEXT_KEPT``, so
+    two changes whose labels collide can be shown where they differ (`distinguish`)."""
+    import hashlib
+
+    before = before or {}
+    listed = list(edits) if isinstance(edits, (list, tuple)) else [edits]
+    key = hashlib.sha256(json.dumps(listed, sort_keys=True, default=str).encode()).hexdigest()
+    texts = []
+    for edit in listed:
+        if not isinstance(edit, Mapping):
+            continue
+        old, new = before.get(str(edit.get("name"))), edit.get("value")
+        if edit.get("op") == "set_knob" and isinstance(old, str) and isinstance(new, str):
+            texts.append(" ".join(_changed_lines(old, new)))
+        else:
+            texts.append(_all_text(edit))
+    shape = json.dumps([_without_text(edit) for edit in listed], sort_keys=True, default=str)
+    return {"key": key[:16], "text": _fold(" | ".join(t for t in texts if t))[:CHANGE_TEXT_KEPT],
+            "shape": shape[:CHANGE_TEXT_KEPT]}
+
+
+def _without_text(value: Any) -> Any:
+    """An edit with its free text left out (``_TEXT_FIELDS``, at any depth): its op,
+    names, wiring and settings, to say where two changes differ outside their text."""
+    if isinstance(value, Mapping):
+        return {str(k): _without_text(v) for k, v in value.items() if k not in _TEXT_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [_without_text(v) for v in value]
+    return value
+
+
+def _shape_difference(shape: str, other: str) -> str:
+    """The first field (by edit, then name) whose value differs between two changes'
+    shapes, as ``reads: [...]``; empty when none is found."""
+    try:
+        mine, theirs = json.loads(shape), json.loads(other)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(mine, list) or not isinstance(theirs, list):
+        return ""
+    if len(mine) != len(theirs):
+        return f"edit count: {len(mine)}"
+    for edit, them in zip(mine, theirs):
+        if not isinstance(edit, dict) or not isinstance(them, dict):
+            continue
+        for field in sorted(set(edit) | set(them)):
+            if edit.get(field) != them.get(field):
+                shown = json.dumps(edit.get(field), default=str, ensure_ascii=False)
+                other = json.dumps(them.get(field), default=str, ensure_ascii=False)
+                # From where the two values first differ, as "differs at" does for texts.
+                at = next((n for n, (a, b) in enumerate(zip(shown, other)) if a != b),
+                          min(len(shown), len(other)))
+                start = max(0, at - 10)
+                piece = shown[start:start + CHANGE_TEXT_HEAD]
+                return (f"{field}: " + ("…" if start else "") + piece
+                        + ("…" if start + CHANGE_TEXT_HEAD < len(shown) else ""))
+    return ""
+
+
+def _all_text(value: Any) -> str:
+    """Every free text in an edit or the steps it carries, in order."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(filter(None, map(_all_text, value)))
+    if not isinstance(value, Mapping):
+        return ""
+    return " ".join(filter(None, (_all_text(value.get(key))
+                                  for key in (*_TEXT_FIELDS, *_STEP_FIELDS))))
+
+
+def _changed_lines(old: str, new: str) -> list[str]:
+    import difflib
+
+    return [line[1:] for line in list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(), lineterm="", n=0))[2:]
+        if line[:1] in "+-" and line[1:].strip()]
+
+
+def distinguish(groups: Sequence[tuple[str, str, str]]) -> list[str]:
+    """For each ``(label, text, shape)`` group, a suffix telling it from every other
+    group with the same label: ``""`` when its label is unique; else where its text first
+    differs from theirs (``differs at: "…"``, ``CHANGE_TEXT_HEAD`` characters), or, when
+    the texts do not tell them apart, the first field outside the text that does
+    (``differs in reads: [...]``)."""
+    out = []
+    for index, (label, text, shape) in enumerate(groups):
+        others = [(t, h) for i, (l, t, h) in enumerate(groups) if i != index and l == label]
+        if not others:
+            out.append("")
+            continue
+        texts_differ = [t for t, _h in others if t != text]
+        if texts_differ:
+            at = min(next((n for n, (a, b) in enumerate(zip(text, other)) if a != b),
+                          min(len(text), len(other))) for other in texts_differ)
+            piece = text[at:at + CHANGE_TEXT_HEAD]
+            if piece:
+                out.append(f' -- differs at: "…{piece}…"')
+                continue
+        fields = [d for d in (_shape_difference(shape, h) for _t, h in others) if d]
+        out.append(f" -- differs in {fields[0]}" if fields
+                   else " -- (its text ends where the other's goes on)")
+    return out
+
+
+#: The most new steps `placement_lines` says, per change.
+PLACEMENT_STEPS = 6
+
+
+def placement_lines(parent_state: Mapping[str, Any] | None,
+                    child_state: Mapping[str, Any] | None) -> list[str]:
+    """Where each step a change added sits in the child's graph and what it can send
+    back: the steps that feed it, and each labelled way out (``reloop -> `solve```),
+    with its limit (``max_iterations``). Read from the graph, so it holds for any op
+    that adds a step, a judge or a gate. Ops that only route (no score effect) are left
+    out; at most ``PLACEMENT_STEPS``, the rest counted."""
+    graph = (child_state or {}).get("graph") or {}
+    nodes = graph.get("nodes") or {}
+    edges = [e for e in graph.get("edges") or () if isinstance(e, Mapping)]
+    added = added_steps(parent_state, child_state)
+    plumbing = {step for step, kind in added
+                if kind == "op" and (nodes.get(step) or {}).get("score_effect") == "none"}
+
+    def feeding(step: str, seen: frozenset[str] = frozenset()) -> list[str]:
+        # Through the plumbing it added (a step that only hands files on), to a real step.
+        out: list[str] = []
+        for source in (str(e.get("source")) for e in edges if e.get("target") == step):
+            found = (feeding(source, seen | {source}) if source in plumbing
+                     and source not in seen else [source])
+            out += [s for s in found if s not in out]
+        return out
+
+    out = []
+    for step, kind in added:
+        node = nodes.get(step) or {}
+        if step in plumbing:
+            continue
+        feeds = feeding(step)
+        ways = [f"{e.get('condition')} -> `{e.get('target')}`" for e in edges
+                if e.get("source") == step and e.get("condition")]
+        cap = node.get("max_iterations") if kind == "gate" else None
+        out.append(f"new {kind or 'step'} `{step}`"
+                   + (f" after {', '.join(f'`{s}`' for s in feeds)}" if feeds else "")
+                   + (f": {', '.join(ways)}" if ways else "")
+                   + (f"; sends back at most {cap} time{'' if cap == 1 else 's'}"
+                      if isinstance(cap, int) and ways else ""))
+    if len(out) > PLACEMENT_STEPS:
+        out = [*out[:PLACEMENT_STEPS], f"(+{len(out) - PLACEMENT_STEPS} more new steps)"]
+    return out
+
+
 # ── the run ledger ──────────────────────────────────────────────────────────
 
 
@@ -164,7 +474,8 @@ def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | Non
                  child_records: Sequence[Mapping[str, Any]] | None,
                  gate: str | None, same_seed: bool = True,
                  integrity: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """One row of "Every change so far, by kind": train records and the gate's word
+    """One row of "Every change so far": what the change was (``change``, its label
+    against the parent's knob values), train records and the gate's word
     only. A child whose parent was not scored with its round's seed (``same_seed``
     false) gets no fixed/broken counts: the difference would be partly the seed's.
     ``integrity`` is the integrity judge's verdict on it (`optim.integrity`), when the
@@ -176,6 +487,9 @@ def ledger_entry(candidate: Any, parent: Any, *, record: Mapping[str, Any] | Non
     return {
         "id": candidate.id, "round": (record or {}).get("epoch"),
         "parent": candidate.parent, "kind": change_kind(edits, candidate.state),
+        "change": change_label(edits, knob_values(getattr(parent, "state", None))),
+        **{f"change_{k}": v for k, v in change_identity(
+            edits, knob_values(getattr(parent, "state", None))).items()},
         "touched": touched(edits),
         "fixed": len(change["fixed"]) if shared else None,
         "broken": len(change["broken"]) if shared else None,
@@ -201,16 +515,21 @@ def _signed(value: int | None) -> str:
     return "n/a" if value is None else f"{value:+d}"
 
 
-def _touched_text(names: Sequence[str]) -> str:
-    shown = ", ".join(names[:LEDGER_TOUCHED])
-    return shown + (f" +{len(names) - LEDGER_TOUCHED} more" if len(names) > LEDGER_TOUCHED else "")
+def change_cell(entry: Mapping[str, Any], chars: int = CHANGE_LABEL_CHARS) -> str:
+    """A ledger entry's change as one cell or line: its label (`change_label`), the kind
+    after it as a label only; the kind alone for an entry made before labels."""
+    label, kind = str(entry.get("change") or ""), str(entry.get("kind") or "other")
+    # The label is bounded already, every edit named (`change_label`); never cut here.
+    return f"{label} ({kind})" if label else kind
 
 
 def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROWS,
                  chars: int = LEDGER_CHARS, in_full: Sequence[str] = ()) -> list[str]:
-    """"Every change so far, by kind": a tally line per kind over the whole run, then the
-    newest candidates in full, oldest first, within ``rows`` and ``chars``; the older
-    ones are only in the tally. A candidate whose reasoning the request shows in full
+    """"Every change so far": the newest candidates, one row per change (`change_cell`:
+    what its edits did, the kind only as a label), oldest first, within ``rows`` and
+    ``chars``; before them, a tally line per change tried more than once or only in
+    rows older than the table -- grouped by the change itself, never by its kind --
+    within ``LEDGER_TALLY_CHARS``. A candidate whose reasoning the request shows in full
     (``in_full``, under "Your earlier reasoning") points there instead of repeating its
     rationale. Nothing for no entries."""
     if not entries:
@@ -218,39 +537,20 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
     gated = any(entry.get("gate") for entry in entries)
     # The integrity judge's column, only when it judged something (`optim.integrity`).
     judged = any("integrity" in entry for entry in entries)
-    tally: list[str] = []
-    for kind in CHANGE_KINDS:
-        of_kind = [entry for entry in entries if entry.get("kind") == kind]
-        if not of_kind:
-            continue
-        nets = [net for net in map(_net, of_kind) if net is not None]
-        parts = [f"tried {len(of_kind)}"]
-        if gated:
-            parts.append(f"kept {sum(1 for e in of_kind if e.get('gate') in KEPT_WORDS)}")
-        parts.append(f"best train fixed-broken {_signed(max(nets) if nets else None)}")
-        tally.append(f"- {kind}: " + ", ".join(parts))
-    lines = ["## Every change so far, by kind",
-             "Every candidate this run has evaluated, by the kind of change its own edits "
-             "made. `fixed/broken` compares it with its parent on the train items both were "
-             "scored with the same seed, in the round the candidate was evaluated (parent "
-             "wrong and child right / the reverse; `n/a (different seed)` when the parent was "
-             "not scored in that round)"
-             + ("; `gate` is what the validation gate decided" if gated else "")
-             + ("; `integrity` is the integrity review's verdict on the change (does its "
-                "benefit depend on how the data, grader or environment happen to be built?)"
-                if judged else "")
-             + ". Read it for which kinds of change have paid off in this pipeline and which "
-             "have not, before choosing yours.",
-             *tally]
-    headers = ["id", "round", "parent", "kind", "touched", "train fixed/broken",
+    headers = ["id", "round", "parent", "change", "train fixed/broken",
                *(["gate"] if gated else []), *(["integrity"] if judged else []), "rationale"]
+
+    # Each row's change as the tally names it: two different changes whose labels collide
+    # say where they differ, in the table too (`group_changes`).
+    cells = {id(entry): cell for cell, group in group_changes(entries, LEDGER_CHANGE_CHARS)
+             for entry in group}
 
     def row(entry: Mapping[str, Any]) -> list[Any]:
         counts = (f"{entry['fixed']}/{entry['broken']} of {entry.get('shared')}"
                   if _net(entry) is not None else
                   "n/a (different seed)" if entry.get("same_seed") is False else "n/a")
-        return [entry.get("id"), entry.get("round", ""), entry.get("parent"), entry.get("kind"),
-                _touched_text(list(entry.get("touched") or ())), counts,
+        return [entry.get("id"), entry.get("round", ""), entry.get("parent"),
+                cells.get(id(entry)) or change_cell(entry, LEDGER_CHANGE_CHARS), counts,
                 *([entry.get("gate") or ""] if gated else []),
                 *([entry.get("integrity") or "not judged"] if judged else []),
                 ("(in full under \"Your earlier reasoning\")" if str(entry.get("id")) in in_full
@@ -262,10 +562,76 @@ def ledger_lines(entries: Sequence[Mapping[str, Any]], *, rows: int = LEDGER_ROW
         shown = shown[1:]
         table = _table(headers, [row(entry) for entry in shown])
     older = len(entries) - len(shown)
+    lines = ["## Every change so far",
+             "Every candidate this run has evaluated, one row per change: `change` is what "
+             "its own edits did -- the op, the steps and settings it names, and the head of "
+             "the text it set (a new step's instructions, a judge's criteria, a prompt's "
+             "changed line) -- with its kind in brackets. `fixed/broken` compares it with "
+             "its parent on the train items both were scored with the same seed, in the "
+             "round the candidate was evaluated (parent wrong and child right / the reverse; "
+             "`n/a (different seed)` when the parent was not scored in that round)"
+             + ("; `gate` is what the validation gate decided" if gated else "")
+             + ("; `integrity` is the integrity review's verdict on the change (does its "
+                "benefit depend on how the data, grader or environment happen to be built?)"
+                if judged else "")
+             + ". Read it for which changes have paid off in this pipeline and how, before "
+             "choosing yours. A row's result is that change's: two changes of one kind (two "
+             "loops whose judges check different things, two new steps told different "
+             "things) are different changes, and one that failed says little about another.",
+             *_change_tally(entries, shown, gated)]
     if older:
-        lines.append(f"The {older} oldest are counted in the tally above only; the newest "
+        lines.append(f"The {older} oldest are only in the tally above; the newest "
                      f"{len(shown)} follow, oldest first.")
     return [*lines, table]
+
+
+def group_changes(entries: Sequence[Mapping[str, Any]], chars: int = CHANGE_LABEL_CHARS
+                  ) -> list[tuple[str, list[Mapping[str, Any]]]]:
+    """Entries grouped by the change itself (``change_key``: a hash of its full edits;
+    an entry without one by its label), in first-seen order, each with its display cell
+    (`change_cell`) -- and, where two different changes share a cell, where their texts
+    differ (`distinguish`), so they never read as one."""
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault(str(entry.get("change_key") or change_cell(entry, chars)),
+                          []).append(entry)
+    cells = [(change_cell(group[0], chars), str(group[0].get("change_text") or ""),
+              str(group[0].get("change_shape") or "")) for group in groups.values()]
+    return [(cell + suffix, group) for (cell, _t, _h), suffix, group
+            in zip(cells, distinguish(cells), groups.values())]
+
+
+def _change_tally(entries: Sequence[Mapping[str, Any]], shown: Sequence[Mapping[str, Any]],
+                  gated: bool) -> list[str]:
+    """A line per change (by its label) tried more than once, or with a try only in the
+    rows older than the table: tries, kept, best train fixed-broken. A change tried once
+    and in the table is said there only. Within ``LEDGER_TALLY_CHARS``, the rest
+    counted."""
+    in_table = {id(entry) for entry in shown}
+    groups = group_changes(entries, LEDGER_CHANGE_CHARS)
+    listed = [(cell, group) for cell, group in groups
+              if len(group) > 1 or any(id(e) not in in_table for e in group)]
+    if not listed:
+        return []
+    out = ["Each change tried more than once, or only in rows older than the table, by "
+           "the change itself:"]
+    used, left = 0, 0
+    for cell, group in listed:
+        nets = [net for net in map(_net, group) if net is not None]
+        parts = [f"tried {len(group)}"]
+        if gated:
+            parts.append(f"kept {sum(1 for e in group if e.get('gate') in KEPT_WORDS)}")
+        parts.append(f"best train fixed-broken {_signed(max(nets) if nets else None)}")
+        line = f"- {cell}: " + ", ".join(parts)
+        if used + len(line) > LEDGER_TALLY_CHARS:
+            left += 1
+            continue
+        out.append(line)
+        used += len(line) + 1
+    if left:
+        out.append(f"[{left} more change(s) not listed, to keep this tally within "
+                   f"{LEDGER_TALLY_CHARS} characters]")
+    return out
 
 
 # ── added steps ─────────────────────────────────────────────────────────────
@@ -632,7 +998,11 @@ def _review_text(entry: Mapping[str, Any], mode_name: str,
         "Compare the step's output with what it was given: does it contain facts, checks, "
         "computations or alternatives its inputs lacked? Then look at the next step's "
         "output: does it use what this step wrote? Judge the step's own contribution, not "
-        "whether the final answer is right, and do not solve the items yourself.",
+        "whether the final answer is right, and do not solve the items yourself. A step "
+        "whose job is to check, verify or vote (a judge, a verifier, a selector among "
+        "attempts) and that confirms a right answer, or parallel attempts that agree, adds "
+        "that confirmation: that is adds_new_work when it checked something, not "
+        "restates_inputs.",
         *blocks,
         "## Answer\nWrite one JSON object and nothing else:\n\n"
         '{"verdict": "adds_new_work" | "restates_inputs" | "contradicts_inputs" | "no_effect",\n'
@@ -640,7 +1010,8 @@ def _review_text(entry: Mapping[str, Any], mode_name: str,
         ' "note": "<one sentence>"}\n\n'
         "- adds_new_work: its output holds facts, checks, computations or alternatives its "
         "inputs lacked.\n"
-        "- restates_inputs: its output mostly repeats or rephrases what it was given.\n"
+        "- restates_inputs: its job was to produce something new (an analysis, an attempt, "
+        "a revision) and its output mostly repeats or rephrases what it was given.\n"
         "- contradicts_inputs: its output disagrees with what it was given (say what about "
         "in the note).\n"
         "- no_effect: the next step does not use what it wrote, or there is nothing to "
@@ -771,8 +1142,10 @@ def step_review_lines(entries: Sequence[Mapping[str, Any]], *,
              "with its parent: the candidate's fixed/broken items, how often the final answer "
              "(what the grader read) changed, and a reviewer's verdict (one call per step, on up to "
              f"{STEP_REVIEW_ITEMS} train items) on whether the step's output holds facts, "
-             "checks, computations or alternatives its inputs lacked. A step that only "
-             "restates its inputs adds a model call and little else. A step that makes the "
+             "checks, computations or alternatives its inputs lacked. A step whose job was to "
+             "produce something new and that only restates its inputs adds little; a check, "
+             "verify or vote step that confirms an answer, or parallel attempts that agree, "
+             "is not restating. A step that makes the "
              "decision (no later model step reads it) is judged instead by how often it "
              "decides as its inputs recommended. A code step or gate gets no reviewer: its "
              "measured behaviour is shown (on which items a code step gave output or a gate "
