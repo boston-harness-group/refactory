@@ -364,9 +364,10 @@ def test_the_gate_note_states_its_resolution_and_when_a_rejected_change_may_be_b
     assert ("the mean over 25 validation items, so one item is 1/25 = 0.04 of it, and a "
             "rejection can come down to a single item") in known
     assert "must not be proposed again unchanged" in known
-    assert ("When its train fixed/broken counts against its parent (when shown below) were "
-            "strongly positive, its direction may still be right: you may build on its change "
-            "or combine it with edits to other steps in the same failure path") in known
+    # Building on a rejected change is about a fixable mechanism, not its net count.
+    assert ("A rejected change can hold the right idea with a fixable mechanism, whatever its "
+            "net count") in known
+    assert "strongly positive" not in known
     assert "did not generalise" not in known and "do not build on" not in known
     unknown = ProposalContext(history=rows, leaderboard=rows[:1]).render()
     assert "not shown better on validation" in unknown and "validation items, so one" not in unknown
@@ -407,10 +408,11 @@ def test_the_loop_hands_the_seeds_knob_values(tmp_path, monkeypatch):
         name: entry["value"] for name, entry in root.state["knobs"].items()}
 
 
-def test_the_latest_train_positive_rejected_candidate_is_shown_in_full():
+def test_the_latest_rejected_candidate_is_shown_in_full_whatever_its_net():
     """Under "Your earlier reasoning", the full edits of the most recent rejected
-    candidate with more fixed than broken train items, within the cap; not those of an
-    older one, nor of one that broke as many as it fixed."""
+    candidate with train counts, whatever its net (a change that broke more than it
+    fixed can hold a fixable mechanism); not those of an older one or a kept one. Its
+    texts are whole: a new step's instructions are never shortened."""
     from refactory_dsh.optim import ProposalContext
     from refactory_dsh.optim.base import REJECTED_EDITS_CHARS
 
@@ -420,29 +422,76 @@ def test_the_latest_train_positive_rejected_candidate_is_shown_in_full():
                 "edit": [{"op": "set_knob", "name": "k", "value": value}]}
 
     long = "HEAD " + "y" * 1500 + " TAIL"
-    entries = [entry("old", 5, 1, "OLDVALUE " + "o" * 900), entry("mine", 8, 1, long),
-               entry("even", 2, 2, "EVENVALUE " + "e" * 900),
+    entries = [entry("old", 5, 1, "OLDVALUE " + "o" * 900), entry("even", 2, 2, "E" * 900),
+               entry("mine", 1, 7, long),
                entry("kept", 9, 0, "KEPTVALUE " + "k" * 900, gate="kept")]
     text = ProposalContext(reasoning=entries).render()
     section = text[text.index("## Your earlier reasoning"):]
     full = section[section.index("### Full edits of"):]
-    assert full.startswith("### Full edits of mine, the latest rejected candidate that fixed "
-                           "more train items than it broke (8 fixed / 1 broken)")
+    assert full.startswith("### Full edits of mine, the latest rejected candidate "
+                           "(1 fixed / 7 broken)")
     # Its edits are whole once, in its own block, which the full-edits heading points to.
     assert text.count(long) == 1 and long not in full and "Whole in its block above" in full
-    assert "OLDVALUE" not in full and "EVENVALUE" not in full and "KEPTVALUE" not in full
+    assert "OLDVALUE" not in full and "KEPTVALUE" not in full
     huge = [entry("big", 3, 0, "Z" * 9000)]
     big = ProposalContext(reasoning=huge).render()
     assert big.count("Z" * 9000) == 1, "whole once, never cut"
     # One not shown in a block of its own keeps the bounded full edits.
     hidden = [{**entry("hid", 3, 0, "Z" * 9000), "epoch": 1},
-              *({**entry(f"n{i}", 0, 0, "v"), "epoch": 2} for i in range(2))]
+              *({**entry(f"n{i}", 0, 0, "v", gate="kept"), "epoch": 2} for i in range(2))]
     block = ProposalContext(reasoning=hidden).render()
     block = block[block.index("### Full edits of hid"):].split("\n## ", 1)[0]
-    assert "Z" * 9000 not in block and "more chars)" in block
-    assert len(block) < REJECTED_EDITS_CHARS + 600
-    none = [entry("x", 1, 3, "v"), entry("y", None, None, "w")]
+    assert "Z" * 9000 in block, "a new step's or knob's text is whole, not shortened"
+    assert "its middle is cut" not in block
+    # Past the generous bound the middle is cut, and said.
+    vast = [{**entry("vast", 3, 0, "W" * (REJECTED_EDITS_CHARS + 5000)), "epoch": 1},
+            *({**entry(f"n{i}", 0, 0, "v", gate="kept"), "epoch": 2} for i in range(2))]
+    cut = ProposalContext(reasoning=vast).render()
+    cut = cut[cut.index("### Full edits of vast"):].split("\n## ", 1)[0]
+    assert "have their middle cut, each cut said in it; none is left out" in cut
+    assert "characters omitted" in cut
+    assert len(cut) < REJECTED_EDITS_CHARS + 1200
+    none = [entry("y", None, None, "w")]
     assert "### Full edits of" not in ProposalContext(reasoning=none).render()
+
+
+def test_the_latest_rejected_change_says_what_went_wrong_in_it():
+    """A rejected structural change's block says how it moved the items it changed
+    (`optim.edit_effect`), the mechanism to fix, and points to its step's review."""
+    from refactory_dsh.optim import ProposalContext
+
+    from test_edit_effect import _tried
+
+    # The real S1-s45 loop's records (`fixtures/edit_effect`): 8 broken, 1 fixed.
+    effect = _tried("s1_s45_loop.json")[0]["effect"]
+    rows = [{"id": "loopy", "epoch": 1, "gate": "rejected", "score": 0.4, "fixed": 1,
+             "broken": 7, "rationale": "r", "prediction": "p", "diagnosis": "d",
+             "edit": [{"op": "loop", "step": "solve", "judge": "agent",
+                       "text": "CHECK-CRITERIA", "max_iterations": 1}],
+             "effect": effect, "added": True},
+            *({"id": f"n{i}", "epoch": 2, "gate": "kept", "score": 0.5, "fixed": 0,
+               "broken": 0, "edit": [{"op": "set_knob", "name": "k", "value": "v"}]}
+              for i in range(2))]
+    text = ProposalContext(reasoning=rows, added_steps=[{"candidate": "loopy", "step": "j"}]
+                           ).render()
+    block = text[text.index("### Full edits of loopy"):].split("\n## ", 1)[0]
+    assert "CHECK-CRITERIA" in block
+    assert "What went wrong in it (how it moved the items it changed):" in block
+    assert "gate solve_check gave" in block and "first reply was already right" in block
+    assert 'reviewed under "Did the added steps contribute?"' in block
+    # Pointed to only when that section reviews this candidate's step.
+    other = ProposalContext(reasoning=rows, added_steps=[{"candidate": "else", "step": "j"}]
+                            ).render()
+    other = other[other.index("### Full edits of loopy"):].split("\n## ", 1)[0]
+    assert "Did the added steps contribute?" not in other
+    # A text-only rejected change says what there is: its counts, and that no step-level
+    # account is available.
+    knob = [{**rows[0], "id": "words", "effect": {}, "added": False,
+             "edit": [{"op": "set_knob", "name": "k", "value": "NEW"}]}, *rows[1:]]
+    words = ProposalContext(reasoning=knob).render()
+    words = words[words.index("### Full edits of words"):].split("\n## ", 1)[0]
+    assert ("What went wrong in it: it broke 7 train item(s) and fixed 1 against its parent; "
+            "no step-by-step account") in words
 
 
 #: A child whose structural edit made items fail mechanically (LiveMath B-s42, round 2):
@@ -565,11 +614,11 @@ def test_the_reasoning_section_shows_a_rejected_childs_item_errors(tmp_path, mon
 
 def test_a_rationale_shown_in_full_is_not_repeated_in_every_change_so_far(tmp_path, monkeypatch):
     """The latest round's rationale is in full under "Your earlier reasoning"; its row in
-    "Every change so far, by kind" points there; an older round's row keeps its own."""
+    "Every change so far" points there; an older round's row keeps its own."""
     _loop_, proposer = _run_reasoning(tmp_path, monkeypatch)
     text = proposer.contexts[2].render()
     assert text.count("RATIONALE-2") == 1
-    ledger = text[text.index("## Every change so far, by kind"):].split("\n## ", 1)[0]
+    ledger = text[text.index("## Every change so far"):].split("\n## ", 1)[0]
     assert '(in full under "Your earlier reasoning")' in ledger and "RATIONALE-1" in ledger
 
 

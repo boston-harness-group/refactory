@@ -350,15 +350,20 @@ important COMMON failure patterns across the batch.
 4. Say how the steps took part, as far as the items show it: the step where things
    first went wrong for these items (in a loop or a long multi-turn run, the first step
    that did), any later step whose output replaced good work from an earlier step with
-   worse, and any step whose output repeated another step's output -- an earlier step,
-   a parallel branch, or its own earlier attempt in a loop -- without adding to it.
+   worse, and any step whose job was to produce something new (an analysis, an
+   attempt, a revision) but whose output repeated another step's output -- an earlier
+   step, a parallel branch, or its own earlier attempt in a loop -- without adding to
+   it. A check, verify or vote step confirming an answer, or parallel attempts agreeing,
+   is not repetition: agreement is what such a step reports.
    Leave out what the items cannot show.
 5. Say what change to the pipeline would fix it: a prompt or setting change, or a
    structural change (add, remove, rewire, split, loop or parallelise steps).
 6. Address the COMMON patterns, not individual edge cases. A change must hold across
    items; do not hardcode item-specific values.
-7. Do not ask for what the pipeline already does, for retries, or for a change aimed at
-   timeouts: a timeout is the harness's, not the pipeline's, and no such item is here.
+7. Do not ask for what the pipeline already does, or for retries or any other change
+   aimed at harness timeouts: a timeout is the harness's, not the pipeline's, and no
+   such item is here. A retry, a check or a loop aimed at a wrong answer is a change
+   like any other.
 
 You reply with JSON only."""
 
@@ -391,9 +396,10 @@ def system(kind: str) -> str:
 STEP_ROLES = ("first_wrong", "overrode", "repeated")
 _STEPS = ('"steps": {"first_wrong": "<the step where things first went wrong for these '
           'items>", "overrode": ["<a later step whose output replaced good work from an '
-          'earlier step with worse>", ...], "repeated": ["<a step whose output repeated '
-          'another step\'s output (an earlier step, a parallel branch, its own earlier '
-          'attempt) without adding to it>", ...]}')
+          'earlier step with worse>", ...], "repeated": ["<a step meant to produce something '
+          'new whose output repeated another step\'s output (an earlier step, a parallel '
+          'branch, its own earlier attempt) without adding to it; not a check, vote or '
+          'agreeing attempt>", ...]}')
 
 _WHERE = ('"where": {"nodes": ["<step id>", ...], "edges": ["<source> -> <target>", ...], '
           '"knobs": ["<setting name>", ...], "structure": "<what about the pipeline\'s '

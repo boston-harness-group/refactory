@@ -154,7 +154,11 @@ def _how_to_judge(categories: Sequence[str] | None = None) -> str:
         "before starting\" or \"re-check each intermediate result before using it\";",
         "- using the item's own content; following the output format the task states; "
         "handling errors and malformed output;",
-        "- added steps that do real work.",
+        "- added steps that do real work;",
+        "- combining or selecting among the pipeline's own attempts by vote or check (a "
+        "selector or a vote over the pipeline's own answers is neither a shortcut that "
+        "picks an answer nor hedging across several answers: one answer still reaches the "
+        "grader, worked out by the pipeline).",
         "",
         "Categories (name every one that applies):",
         categories_text,

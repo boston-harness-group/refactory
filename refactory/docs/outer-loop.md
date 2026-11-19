@@ -169,12 +169,18 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   counts, for each value, how many of its candidates had each decision. The request
   says it edits the `current` candidate, and that a `rejected` one was not shown better
   on validation (with the gate's resolution, one item = 1/N of the val score, when the
-  score is the items' mean); a rejected change is never re-proposed unchanged, but one
-  whose train fixed/broken counts (when shown) were strongly positive may be built on or
-  combined with edits to other steps in the same failure path. "Your earlier reasoning"
-  shows the full edits of the latest such rejected candidate (more fixed than broken):
-  every step's wiring whole, its free text sharing 4000 characters
-  (`REJECTED_EDITS_CHARS`).
+  score is the items' mean); a rejected change is never re-proposed unchanged, but it can
+  hold the right idea with a fixable mechanism whatever its net count: the proposer may
+  fix what went wrong (its instructions or criteria, its place, what it sends back, its
+  limit) or combine it with edits to other steps in the same failure path. "Your earlier
+  reasoning" shows the full edits of the latest rejected candidate with train counts,
+  whatever its net: every text whole (a new step's instructions, a judge's criteria, a
+  knob's changed lines), within 20000 characters (`REJECTED_EDITS_CHARS`; past it the
+  longest edits have their middle cut, each cut said in it, and no edit is left out),
+  then what went wrong in it -- how a structural change moved the items it changed
+  (`optim.edit_effect`), or for a change that added no step its fixed/broken counts and
+  that no step-level account is available -- and, only when "Did the added steps
+  contribute?" reviews a step of that candidate, a pointer there.
   The history's best is the best kept candidate. Val scores are never shown to it;
   scores there are train scores. That includes "Previous runs of this mode": a gated
   sibling run's report gives its winner's val score as `best_score`, so the summary
@@ -402,10 +408,20 @@ sections at once; this is the default loop's equivalent.
   `set_knob` of a knob a step one hop away binds or reads -- reading what it writes,
   writing what it reads, or on an edge with it, in the graph the structural edit itself
   leaves -- whose every changed line names the
-  step or a file or fact it writes), and edges between it and those neighbours. Every
-  other edit counts as one more, and two structural edits are two changes. Only one-hop
-  neighbours qualify, so one change cannot sprawl over the pipeline. A limit of one (a
-  caller's `max_edits=1`) still means single edits.
+  step or a file or fact it writes), a `set_knob` of any step that, in the proposal's
+  final graph, reads what the new step writes or produces (a file it reads, a `{{fact}}`
+  in its prompt or in a text knob it fills, as S4's `decide_prompt` fills `decide_task`)
+  -- the tuning that makes an existing step use the new one, whatever its lines say --
+  and edges between it and those neighbours. Every other edit counts as one more (a
+  text tune of a step that does not read the new step is its own change), and two
+  structural edits are two changes. The readers' tuning folds only into an edit that
+  adds steps (a reorder or rewire folds none), and only for a knob that every step
+  binding it reads the new steps or is new (a shared style or token setting counts on
+  its own). Only one-hop neighbours and the new step's readers qualify, so one change cannot sprawl over the pipeline. However they count, a proposal
+  carries at most 12 edits (`MAX_RAW_EDITS_PER_PROPOSAL`, three times the cap), a guard
+  against runaway bundles. A limit of one (a caller's `max_edits=1`) still means single
+  edits. The request's counting rule (`COUNTING_RULE`) gives the example of a new branch
+  and the tuning of the step that reads it counting as one change.
 - **Counts per candidate.** Each candidate's proposal record (journal `proposal`,
   report.json `proposal_outcomes`) carries `edit_count`: its changes (`logical`), raw
   edits (`raw`), structural and knob edits, and the knob text characters it changed
@@ -896,7 +912,7 @@ imports the writer, and the TypeScript sources do not name them. They add no jou
 event, and the journal stays the run's record. They are there for people and for a
 later trace-reading analyst.
 
-### Run-wide feedback: changes by kind, the memory note, added-step reviews
+### Run-wide feedback: every change so far, the memory note, added-step reviews
 
 Three more request sections (`optim/feedback.py`, `optim/memory.py`) carry what the run has taught so
 far, beyond the recent candidates above. Each has a switch (a profile setting, or `0`/`1`
@@ -907,21 +923,31 @@ request (the default loop, `reflective`, `best_of_n`, `autoscientists`, a parent
 picker paired with `autoresearch`); SkillOpt builds its own requests and is unchanged.
 The Python walker and the optimizer only; nothing here touches the TypeScript spine.
 
-- **Every change so far, by kind** (`run_ledger`, default `1`). Every candidate the
-  run has evaluated (under the gate, every one it judged), oldest first: id, round,
-  parent, the kind of change its own edits made, the knobs and steps they touched, its
-  train fixed/broken counts against its parent on shared items, the gate's word and its
-  rationale (140 characters). Under the gate the counts compare the candidate's records
+- **Every change so far** (`run_ledger`, default `1`). Every candidate the run has
+  evaluated (under the gate, every one it judged), oldest first: id, round, parent,
+  what its own edits did (the change's label: each edit's op, the steps, knobs and
+  settings it names such as `step=solve max_iterations=1`, the new steps it carries,
+  and the first 60 characters of the text it set -- a new step's instructions, a
+  judge's criteria, or a prompt's first changed line against the parent -- within 160
+  characters, every edit's op and names first and text heads only as far as they fit,
+  so no edit of a multi-edit change goes unnamed; its kind in brackets), its train fixed/broken counts against its parent
+  on shared items, the gate's word and its rationale (140 characters). Under the gate the counts compare the candidate's records
   from the round it was evaluated in (not a later re-score of it as the edited
   candidate) with its parent's from that same round, so both share a seed; when the
   parent was not scored in that round the row says `n/a (different seed)` and the
-  tally leaves it out. The kind comes from the edit ops and the kinds of node
-  they add: `prompt/setting` (knob edits only), `added agent step`, `added code step`
-  (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
+  tally leaves it out. The kind, a label only, comes from the edit ops and the kinds of
+  node they add: `prompt/setting` (knob edits only), `added agent step`, `added code
+  step` (an op whose code the edit wrote), `split`, `loop/gate`, `parallel`,
   `removal/rewire` (bypass, remove, reorder, edges) or `other`; a proposal that makes
-  several is filed under its most specific structure. A tally line per kind comes
-  first (tried, kept, best train fixed−broken). The newest 40 rows (within 9000
-  characters) are listed; older ones are only in the tally.
+  several is filed under its most specific structure. Results are grouped by the
+  change itself (a hash of its full edits; the label is display only, and where two
+  changes' labels collide the tally line and the table row say where their texts differ,
+  or, when their texts agree, the field that differs), never by kind: two loops whose judges check different things are two
+  changes, and the section says a row's result is that change's, not its kind's. A
+  tally line comes first for each change tried more than once or only in rows older
+  than the table (tried, kept, best train fixed−broken; within 3000 characters, the
+  rest counted); a change tried once and listed is said in its row only. The newest
+  40 rows (within 9000 characters) are listed; older ones are only in the tally.
 - **Optimizer memory** (`lessons`, default `1`). The memory pass's note (below, "The
   memory pass"): the loop's cross-round memory, shown in the request, to every analyst
   and to every merge. The proposer writes no `lessons` any more; the answer format has
@@ -947,7 +973,10 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   they are cut too; a call the provider refuses as too long is retried once at half its
   length, never when that request would be no shorter), and answers
   `adds_new_work`, `restates_inputs`, `contradicts_inputs` or `no_effect` with a short
-  quote and a note. A step that makes the decision -- something reads what it writes
+  quote and a note. `restates_inputs` is for a step whose job was to produce something
+  new; a check, verify or vote step confirming a right answer, or parallel attempts that
+  agree, is not restating (agreement is what such a step reports), and the section no
+  longer says a restating step "adds a model call" (the compute policy prices calls). A step that makes the decision -- something reads what it writes
   (or it ends the data pass, for the grader) but no model step does, not even one a
   code gate's reloop hands it to -- is asked instead, item by item, what its
   inputs recommended and what it decided, and is shown as `follows_inputs`,
@@ -1030,9 +1059,10 @@ paired with a parent picker), on the train records the request carries:
   the steps took part (`steps`), as far as the items show it: `first_wrong` (the step
   where things first went wrong; in a loop or a long multi-turn run, the first step that
   did), `overrode` (later steps whose output replaced good work from an earlier step
-  with worse) and `repeated` (steps whose output repeated another step's output without
-  adding to it: an earlier step, a parallel branch, or their own earlier attempt in a
-  loop). These describe what happened, not why. It assumes
+  with worse) and `repeated` (steps meant to produce something new whose output
+  repeated another step's output without adding to it: an earlier step, a parallel
+  branch, or their own earlier attempt in a loop; a check, verify or vote step
+  confirming an answer, or parallel attempts agreeing, is not repetition). These describe what happened, not why. It assumes
   no graph shape: any node id (an agent with or without tools, a code op, a gate, a
   branch) may fill a role, and a part the items cannot show is left out. Only string
   step ids are kept (backticks and spaces stripped); a missing or malformed `steps` is
@@ -1163,8 +1193,18 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   `epoch_current`) and the one current now -- the validation gate's current, or without
   the gate the train leader. Each epoch scores and gates what the one before proposed,
   then the pass runs, then the proposal, so the note is read by the proposal it precedes
-  and every later one until the next pass. When nothing replaced the current, SkillOpt
-  rolls the same skill out twice; here the two rollouts are, under the gate, that
+  and every later one until the next pass. When nothing replaced the current but the
+  round tried changes, the pass sets the current against the round's rejected child of
+  it that fixed or broke the most train items (the newest on a tie), on the items that
+  child changed (broken first, at most 20), both sides' records from the child's
+  evaluation round (one train seed), so the note can say why the tried change failed;
+  the request labels the sides `Incumbent` and `Rejected change` (without the gate, where
+  the current is only the train leader, `Unkept change`, and it says why), shows both pipelines
+  and what the rejected change changed, says how many it fixed and broke and that the
+  items it left alone are not shown, and names the other rejected changes that moved
+  items (under "What was tried this epoch", their traces not shown). The journal's pass
+  carries `rejected`. When no tried change moved an item, SkillOpt's behaviour holds:
+  SkillOpt rolls the same skill out twice; here the two rollouts are, under the gate, that
   candidate's previous-epoch rollout and this epoch's, and without the gate (one seed
   for the run) its rollout when it was scored and a fresh one made for the pass; each
   side is labelled with which it is (the comparison then shows run-to-run noise, and the
@@ -1188,16 +1228,25 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   ancestor, each candidate on the way to either with its own edits and rationale (said
   plainly when they are on different branches, as a sibling train leader or a pool's
   pick can be, or share no ancestor), or the one pipeline when unchanged; what the score
-  measures (as every optimizer request says it, below); "What was tried this epoch":
+  measures (as every optimizer request says it, below); with two pipelines shown, how
+  a pipeline and its settings read is said once (the second points to the first), and
+  a text a shown pipeline's knob holds is named by that knob in what changed; "What was tried this epoch":
   every change the optimizer proposed in the round the start-of-epoch pipeline opened,
-  newest first -- each candidate evaluated, with its kind (structural or knob, and the
-  change kind of the run ledger), its edits in short (each op and what it touches, no
-  values), its train score, its train fixed/broken counts against its parent and the
+  newest first -- each candidate evaluated, with its kind as a label (structural or
+  knob, and the change kind of the run ledger), what the change was (its edits whole on
+  one line: the text it gave a new step or judge -- its instructions, its criteria --
+  and a knob's changed lines against the value before it, within 1500 characters: past
+  that no edit is dropped -- the longest are cut to one length, each keeping its op and
+  wiring whole (the steps it names, what it sees, reads and writes, where it sends back)
+  with only its long text cut in the middle, the cut said as `[cut: N edits / M chars]` -- and a candidate whose edits the
+  changes section shows whole points there instead of repeating them), where each step it added sits and what it sends back
+  (the steps feeding it, each labelled way out such as `reloop -> solve`, its limit),
+  its train score, its train fixed/broken counts against its parent and the
   gate's word (with the integrity verdict when the judge is on), then each proposal
   refused before it ran (`E-integrity` with its verdict and categories,
   `E-proposal-shape`, `E-noop`, `E-too-many-edits` and the rest) with why. These are
   the facts the proposal request's history, change ledger, integrity and refusal
-  sections already show; never a validation score. The section is at most 8000
+  sections already show; never a validation score. The section is at most 16000
   characters (`TRIED_CHARS`); past it the entries listed last are cut -- refusals first,
   then the oldest evaluated -- and the cut says how many. So a pass in an epoch that
   kept nothing sees what was tried rather than "no changes" (a round that proposed
@@ -1222,9 +1271,10 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
     measures and the counts over all items, and writes up to 8 observations for the
     future optimizer: what regressed, improved or still fails, and why, each citing its
     items with short quotes. Its prompt is the memory prompt's, adapted: address the
-    future optimizer, use the traces' evidence, report what the traces show without
-    judging kinds of change in general (the synthesis weighs them against what was
-    tried), no instructions for the pipeline's steps. Domain-free.
+    future optimizer, use the traces' evidence, report what the traces show and leave
+    verdicts on the changes tried to the synthesis (which weighs each against them),
+    judging no kind of change in general, no instructions for the pipeline's steps.
+    Domain-free.
   - **One synthesis call.** The single call's request -- both pipelines, what changed,
     what was tried, the objective, the previous note with SkillOpt's reflect wording
     -- with every comparison call's observations in place of the traces. It writes
@@ -1244,19 +1294,27 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   is retried once at half the length (a
   comparison call with its traces cut to fit, counted; the synthesis with its pipeline
   texts clipped, the observations whole). The prompt is SkillOpt's `meta_skill.md` for a graph: address
-  the future optimizer, what changes help or hurt here, regression risks, revise or drop
-  what did not help, no instructions for the pipeline's own steps -- plus one line
-  SkillOpt needs no counterpart of, having one kind of edit: judge only kinds of change
-  with evidence in front of it (this epoch's tries, or what the previous note records
-  of earlier ones); any other kind is untested, with no advice for or against it and
-  no list of them. Domain-free; train items only.
+  the future optimizer, regression risks, revise or drop what did not help, no
+  instructions for the pipeline's own steps -- with what SkillOpt needs no counterpart
+  of, having one kind of edit: lessons about each change tried (what it was -- the step
+  it changed or added, what a new step or judge was told to do or check, where it sits
+  and sends work back, its limits, the text it changed -- how it moved the items and
+  why) and what to try next given that, in place of SkillOpt's "which kinds of edit
+  help"; a statement about a kind of change in general only when several different
+  designs of that kind were tried and agree, never from one design whatever its effect;
+  a result inside the tally's noise is weak evidence even about that change; advice
+  only on changes with evidence in front of it (this epoch's tries, or what the
+  previous note records), none for or against changes nobody tried. Domain-free; train
+  items only.
 - **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
   wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
   a longer one cut with the cut said.
 - **Who reads it.** Every analyst call and every merge call (with SkillOpt's
-  `format_meta_skill_context` wording: prefer it when the evidence is ambiguous, do not
-  force it where the traces contradict it) and the proposal request ("Optimizer
-  memory"). It replaces the proposer's former `lessons`; the run ledger and the step
+  `format_meta_skill_context` wording, its "prefer it when the evidence is ambiguous"
+  replaced so an early note cannot become sticky: weigh it as evidence about the changes
+  it names, follow it where the current traces agree or say nothing, let them override
+  it, and never let it rule out a change nobody has tried or a different design of one
+  that failed; `memory.MEMORY_WEIGHT`) and the proposal request ("Optimizer memory"). It replaces the proposer's former `lessons`; the run ledger and the step
   reviews stay. It never edits the graph.
 - **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
   note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
@@ -1328,7 +1386,9 @@ prompt names no dataset, task or answer format.
   on a property of how the data, the grader or the environment was built, which the
   judge names (`property`), and whose trigger has nothing to do with doing the task; an
   exploit that names no property is read as `suspect`. The judge is told to say
-  `suspect` when unsure, and given legitimate counter-examples (general know-how such as
+  `suspect` when unsure, and given legitimate counter-examples (combining or selecting
+  among the pipeline's own attempts by vote or check, which is neither a shortcut that
+  picks an answer nor hedging across answers; general know-how such as
   "re-check each intermediate result before using it"). Evidence items that
   are not strings are kept as JSON text; a reply that is not valid JSON is read field
   by field and marked `salvaged` -- also when the first object a reply holds is not the
@@ -1965,11 +2025,34 @@ validation items is 0.059 of the validation mean, so a single try is inside the 
 either way. The memory call now gets, per kind tried, the tries and each one's train
 fixed/broken counts and the gate's word, with the noise they sit in: one validation item's
 share (`1/|val|`, from the split) and, when the run re-scored the parent, how far its train
-score moved (`memory.kind_tally_lines`). The counts are said there once; the tried entries
-keep their edits and score. `MEMORY_SYSTEM` says a kind tried once inside that noise is no
-evidence against the kind: the note says what went wrong in that try, from how it moved its
-items, never "avoid" it. The untested-kinds rule stands. The proposer sees the same tally,
+score moved (`memory.kind_tally_lines` then; now `memory.change_tally_lines`, per change,
+below). The counts are said there once; the tried entries keep their edits and score.
+`MEMORY_SYSTEM` then said a kind tried once inside that noise is no evidence against the
+kind (now: lessons per change, below). The proposer sees the same tally,
 kept with the note it was written from, beside the note (`memory.request_lines`).
+
+**Each change tried, not each kind.** The noise rule did not cover a clear single
+result. In S1-s45 round 3 one loop (an agent judge after `solve` checking for a
+"maximalist trap / fabricated authority", at most one send-back) fixed 1 train item and
+broke 7; the note then filed "Verification loop (judge that sends solver back): NET
+HARMFUL", and the next proposal cited the memory against keeping any loop. A loop is a
+shape: what it does depends on what its judge checks, which step it sends back, its
+limit. So the memory call now reads each change by what it was: "What was tried this
+epoch" gives each change's edits whole, the text it gave a new step or judge included,
+and a knob's changed lines against its parent (`memory.edits_text`, one line, at most
+1500 characters per change, the section at most 16000), plus where each step it added
+sits and what it sends back (`feedback.placement_lines`: `new gate solve_check after
+solve: reloop -> solve, proceed -> ...; sends back at most 1 time`). The tally groups by
+the change itself (`memory.change_tally_lines`, by `feedback.change_label`), the kind
+only a label in its line, as the run ledger does. `MEMORY_SYSTEM` asks for lessons about
+each change tried -- what it was, how it moved the items and why -- and what to try next
+given that; a statement about a kind of change in general only when several different
+designs of that kind were tried and agree, never from one design whatever its effect
+size; a result inside the noise is weak evidence even about the change itself. The
+"which kinds help / which kinds are harmful" bullets are gone, and a previous note that
+judges a kind from one design is to be revised. The proposer's tally line says the same
+(`memory.TALLY_NOISE_RULE`). SkillOpt's own port (`refactory_packages/skillopt`) builds
+its own prompts and is unchanged.
 
 **How a structural edit moved its items.** A child's counts ("1 fixed, 8 broken") say
 that an edit moved items, not how. For a child whose graph has steps its parent's lacks,
@@ -2018,7 +2101,8 @@ session still writing at the backstop, `backstop`, is the model's failure and a 
 never read from an error's text) still scores what it scored, 0, but no request reads it as the
 pipeline's doing. "Item results" lists it once, by id, as `HARNESS_TIMEOUT`; it is in no
 error row, no item shown in full, no time and no analyst's batch, and the analysts are told
-not to propose changes aimed at timeouts or retries for them. A wall a step declares
+not to propose retries or any other change aimed at harness timeouts (a retry, check or
+loop aimed at a wrong answer is not restricted). A wall a step declares
 (`timeout_s`, `declared_timeout`) is the pipeline's design and an ordinary failure. "How nodes compose" says it
 in one sentence. The SkillOpt port's own requests are SkillOpt's and unchanged.
 
