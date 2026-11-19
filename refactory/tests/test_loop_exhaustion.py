@@ -502,3 +502,27 @@ def test_the_outer_loop_scores_a_candidate_whose_loop_runs_out(tmp_path, mode_cl
 
     assert child.exit_ok, child.error
     assert child.raw_score == pytest.approx((1.0 + 1.0 + 1.0 + 0.25) / 4)
+
+
+@needs_spine
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_the_reloop_a_cap_refused_is_marked_alike_on_both_runtimes(tmp_path, parallelism):
+    """[both runtimes] The stuck item's last reloop is refused at the cap: the walker
+    and the real spine drain mark that same gate visit (``exhausted``, ``cap``) on its
+    record, and no other."""
+    graph = _loop_graph(parallelism=parallelism, on_exhausted="continue")
+    walker = _walker(graph, tmp_path / "walker")
+    assert walker.exit_ok, walker.error
+    rc, status = _spine(graph, tmp_path / "spine", tmp_path)
+    assert (rc, status) == (0, "done")
+    spine = json.loads((tmp_path / "spine" / "facts.json").read_text())["item_scores"]
+
+    def gates(records: list[dict[str, Any]]) -> dict[str, list[tuple[Any, ...]]]:
+        return {str(r["id"]): [(s.get("verdict"), bool(s.get("exhausted")), s.get("cap"))
+                               for s in r.get("steps") or () if s.get("kind") == "gate"]
+                for r in records}
+
+    walked = gates(walker.facts["item_scores"])
+    assert walked == gates(spine)
+    assert walked["3"][-1] == ("reloop", True, 2)
+    assert sum(v[1] for visits in walked.values() for v in visits) == 1

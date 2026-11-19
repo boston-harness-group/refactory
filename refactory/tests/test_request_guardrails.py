@@ -182,7 +182,7 @@ def test_no_request_repeats_itself_or_lets_an_item_pose_as_a_section(kind, reque
         assert not planted & set(headings), (kind, sorted(planted & set(headings))[:3])
         for record in records:
             for exchange in record.get("exchanges") or ():
-                body = evidence._demoted(str(exchange.get("response") or "").strip())
+                body = evidence.escape_headings(str(exchange.get("response") or "").strip())
                 if len(body) >= LONG_REPLY:
                     assert text.count(body) <= 1, (kind, record["id"], exchange.get("node"))
 

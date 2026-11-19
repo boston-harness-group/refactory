@@ -736,10 +736,39 @@ optimizer, at no extra compute (train records only):
   batch), or the edited candidate itself when it has none yet, are compared with their
   parent item by item, on the train items both were scored on. It shows how many items
   were fixed (parent wrong, child right) and broken (the reverse), and the largest score
-  rises and drops among the rest. Every changed item is shown whole, parent beside
-  child: the parent's trajectory, then the child's verdict and each step's reply, a reply
-  the same as the parent's said so and the input not repeated; size is never a reason to
-  leave one out (only a single text over `ITEM_TEXT_MAX` is cut, and said). It also
+  rises and drops among the rest. Every changed item is named with both scores, each
+  side's answer (a long one clipped, its length said) and how its steps moved, from the
+  records (`step_facts`): each step whose reply changed, is new, runs more or fewer
+  times, or no longer runs at all ("gone"), with its runs on parent and child
+  (`solve 1 -> 2 run(s)`), and each gate whose verdicts moved, both said (`check: parent
+  proceed; child reloop, reloop (refused: cap of 1 reached), 1 rerun taken`): a refused
+  reloop is said where it happened, and the reruns the gate took (its accepted reloops)
+  once per gate. A reloop its cap refused is marked on the item's record by both
+  runtimes (`items.refused_at_cap`, verdicts read whatever their case, as both route:
+  the walker's `_visit_gate`, the spine's node runner from the gate's declared reloop
+  verdicts and cap), so it is never read as a rerun. Up to `EDIT_ITEMS_WHOLE` (4) of
+  them show how the edit moved them (`_moved_block`): each side's verdict, the gates'
+  verdicts, the steps with the same reply named, and each changed, new or gone step's
+  reply whole, the parent's beside the child's. They are picked one per child and per
+  kind in turn (broken, fixed, score dropped, score rose). The first broken and the
+  first fixed pick are always shown (`EDIT_FORCED_KINDS`): the child's moved replies
+  whole, the parent's whole unless the block would pass what is left of the room --
+  `EDIT_CHANGE_SHARE` (a quarter) of the call's evidence budget -- when each is cut to
+  fit, head and tail, at least `EDIT_PARENT_FLOOR` characters (a cut that would save
+  fewer than `EDIT_CUT_MIN`, 500, is not made). Such a block can pass the room: the
+  section says so, with its size against what was left, and the run's omissions record
+  it. The blocks shown whole are kept within a ceiling of `EDIT_CEILING_ROOMS` (3)
+  rooms: a forced pick past its share of it (the forced picks still to come sharing it
+  evenly) has its child's moved replies cut head and tail too, never below
+  `EDIT_CHILD_FLOOR` (8,000) characters each, every cut marked in place and recorded,
+  and the section says so. With many moved replies (a step in a map counts each run)
+  the floor can keep the blocks past the ceiling: the section then says by how much and
+  why, and the run's omissions record it (`over ceiling`). Every other pick -- a score drop or rise included -- is
+  shown only when it fits what is left whole; one that does not is skipped for the
+  next, and its line says why (its size against the room left, or that the most shown
+  whole came first). A trace or input "Trajectories" shows whole, or a reply this
+  section already showed (a sibling's same parent), is named by where it is, never
+  repeated; blocks print in the section's order, so a reference points back. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
   noise. Without a parent (the seed) or without shared items, it says so. When some of
@@ -2014,7 +2043,7 @@ cited and same-kind ones first), or, with no success findings, one per kind of f
 shown, each marked as a success. Without findings, one failure per kind of failure (its
 outcome and declared kind) and a success beside each kind. Each
 item gives its verdict, what was expected and what it gave, the grader's reason, then its
-input and each step's output, each fenced with its headings demoted, so nothing in an item
+input and each step's output, each fenced with its heading lines escaped, so nothing in an item
 reads as a section of the request. Only a single text too large to send whole
 (`ITEM_TEXT_MAX`, 60k characters) is cut, and it says so in place,
 "[… N chars omitted]", never a path (the proposer has no tools); each cut (item, step,
@@ -2029,7 +2058,7 @@ grew with the square of its steps (61% of an S4 analyst batch was repeated text)
 input appears once per item; a step says by name what its prompt took from what is already
 shown (`Sees: the input, compare's reply`) and only the part of its prompt the request does
 not show elsewhere (`Also in its prompt`: a reason a judge sent it back with, say), then its
-full reply, each fenced with headings demoted. A step's instructions are its settings,
+full reply, each fenced with its heading lines escaped. A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
 analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
 settings as shown, clipping and table cells included, `analysts.shown_settled`). Across the
@@ -2043,8 +2072,18 @@ by cause", which a full item points to. The repeat guard reads inside fences too
 step's instructions in its settings and again in an item fail it. Two renderings of the same
 item -- memory's two rollouts -- show the input and the expected answer once (the first),
 and each is headed by its rollout, so "same as item X (Start of epoch), step Y" says which;
-"What the last edit changed" shows the parent's item whole and the child's verdict and
-replies beside it, a reply the child kept said as "same as the parent's". Generic: lines of
+"What the last edit changed" shows only the steps an edit moved, a reply the child kept
+named, and names a trace shown elsewhere by where it is. Every quoted text of several
+lines sits in a code fence longer than any run of backticks in it, so nothing in it --
+a heading, a setext underline, a fence -- reads as the request's Markdown. Evidence (a
+step's output, a trace, a prompt) also has its heading lines escaped
+(`evidence.escape_headings`: `\## Answer`). A text the optimizer may copy into a prompt
+-- a knob text, an analyst's finding or proposed change, the memory note, a reviewer's
+note or example -- is never escaped: it sits in its fence as it is (`evidence.exact_block`,
+`evidence.quoted`), a one-line one mid-line, where nothing reads as a heading. The
+proposer's own knob texts are byte-exact, since a patch quotes them; the analysts' view
+of them may say a line an earlier knob showed by where it is, or clip a long text to fit
+the analyst's room, each marked, never by adding an escape. Generic: lines of
 text are compared, with no knowledge of the task or the pipeline.
 
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per

@@ -2325,6 +2325,7 @@ class Executor:
         return str(verdict)
 
     def _visit_gate(self, node: Node, answer: str | None = None) -> tuple[str, str]:
+        kept: dict[str, Any] | None = None  # this visit, when the item's record keeps it
         if answer is not None:
             verdict = answer
         elif node.gate_kind != "fn":
@@ -2334,7 +2335,10 @@ class Executor:
             # Forkserver child: per-process stdout capture, thread-safe,
             # no global sys.stdout swap.
             verdict = self._run_op_timed(node.evaluator, node, timeout)
+            before = len(self._item_exchanges)
             self._keep_visit(node, verdict)
+            if len(self._item_exchanges) > before:
+                kept = self._item_exchanges[-1]
             # A reloop to a step that cannot see what the gate read hands it those
             # files, as the spine's runner does (`run.with_unseen_reads`).
             from refactory_dsh.nn.loops import blind_reloops
@@ -2390,6 +2394,12 @@ class Executor:
         _eff_mi = self._effective_max_iterations(node)
         if retry and visits.get(node.id, 0) + 1 > _eff_mi:
             # Out of reloops: the gate's `on_exhausted` decides, as `Spine.verdict` does.
+            # The item's record says this reloop was refused at the cap (`items.
+            # refused_at_cap`, as the spine's runner marks it), not taken.
+            if kept is not None:
+                from refactory_dsh import items
+
+                items.mark_refused(kept, _eff_mi)
             exhausted = self.graph.on_exhausted(node.id)
             if exhausted == "continue":
                 # The item goes on with the last attempt: the gate's proceed edge.
