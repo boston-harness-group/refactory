@@ -215,13 +215,15 @@ QA_JUDGE_PROMPT = (
     "after failing.\n\n"
     + _JUDGE_RULE
     + "A finding that is wrong (it does not hold against the code) is dismissed, with the "
-    "reason. Two reviewers reporting the same defect is one must_fix item.\n\n"
+    "reason. Two reviewers reporting the same defect is one must_fix item. A failing probe "
+    "blocks; dismiss one only when meeting it breaks another brief ask, naming its file in "
+    "`probe` and that ask in `conflicts_with`: the person settles the conflict.\n\n"
     "Write `" + judges.QA_JUDGE + "` in the run directory holding one JSON object and "
     "nothing else that is JSON:\n"
     '{"verdict": "proceed" | "redo", "must_fix": [' + _MUST_FIX_SHAPE + '], '
     '"follow_ups": ["<a real finding that does not hold the change back>"], '
     '"dismissed": [{"source": "<the review>", "finding": "<what it said>", '
-    '"why": "<why it does not hold, or is not a finding>"}]}\n'
+    '"why": "<why it does not hold, or is not a finding>", "probe": "", "conflicts_with": ""}]}\n'
     "`redo` names at least one must_fix item that holds the change back; `proceed` names "
     "none. " + _JUDGE_UNAVAILABLE + "\n\n"
     "The evidence map below is the overwatch's starting point once you proceed: when your "

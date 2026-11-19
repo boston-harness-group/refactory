@@ -3403,8 +3403,9 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
                   else "")
     if probe_text:
         body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
-                 "A failing probe is a defect the QA gate sends back; a PROBED claim with no "
-                 "probe file of its own is UNVERIFIED.\n\n" + probe_text + "\n")
+                 "A failing probe is a defect the QA gate sends back unless the QA judge names "
+                 "it a brief conflict; a PROBED claim with no probe file of its own is "
+                 "UNVERIFIED.\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3852,13 +3853,22 @@ def gate_qa(ctx: Any) -> Any:
         ctx.write_text("reviews/qa-gate.txt", f"reread: {reread.reason}\n")
         return reread
     advisory = _review_questions_advisory(ctx)
-    # A verifier probe that fails when the runtime reruns it is a blocking defect, whatever
-    # the judge said (`probe_rerun.defects`).
+    # A verifier probe that fails when the runtime reruns it is a blocking defect
+    # (`probe_rerun.defects`), unless the judge dismissed it as conflicting with another
+    # brief ask: then the person settles it from the pull request (`judges.brief_conflicts`).
     from dataclasses import replace
 
     from refactory_dsh import probe_rerun
 
     failing = probe_rerun.defects(probe_rerun.read_results(ctx))
+    conflicts = judges.brief_conflicts(judgment) if judgment is not None else {}
+    settle = [(item, conflicts[Path(item["where"]).name]) for item in failing
+              if Path(item["where"]).name in conflicts]
+    failing = [item for item in failing if Path(item["where"]).name not in conflicts]
+    brief_conflicts = [f"brief conflict for the person to settle: {item['where']} "
+                       f"({item['what']}) conflicts with the ask \"{why['conflicts_with']}\""
+                       + (f" — {why['why']}" if why.get("why") else "")
+                       for item, why in settle]
     if failing:
         judgment = (judges.Judgment("redo", must_fix=tuple(failing)) if judgment is None else
                     replace(judgment, verdict="redo", must_fix=(*judgment.must_fix, *failing)))
@@ -3874,14 +3884,14 @@ def gate_qa(ctx: Any) -> Any:
                                 "reloop: " + judges.feedback(judgment, "QA judge"), into=QA_DRAFT)
             if isinstance(ctx.facts.get(QA_DRAFT), dict):
                 # On as a draft: the judge's non-blocking items still go to the pull request.
-                record_follow_ups(ctx, "qa", list(judgment.follow_ups))
+                record_follow_ups(ctx, "qa", [*judgment.follow_ups, *brief_conflicts])
             return routed
         # Nothing holds the change back. The items the judge named go to the pull request.
         held = ("the QA judge asked for a redo, but nothing it named holds the change back: "
                 "no unbuilt ask or correction, no failing check, no critical or high defect in "
                 "product code")
         suffix = f" ({held})" if judgment.verdict == "redo" else " (the QA judge proceeded with this listed as must-fix)"
-        follow = [*judgment.follow_ups,
+        follow = [*judgment.follow_ups, *brief_conflicts,
                   *(f"{judges.must_fix_line(item)}{suffix}" for item in judgment.must_fix)]
         summary = held if judgment.verdict == "redo" else "the QA judge found nothing that must be fixed"
         dismissed = [f"dismissed [{item['source']}] {item['finding']} — {item['why']}"
