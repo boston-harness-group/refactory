@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 #: What the QA judge writes, and the verdicts it may give.
@@ -63,6 +64,10 @@ BLOCKING_KINDS = ("ask", "check")
 FOLLOW_UP_KINDS = ("test", "docs", "style")
 
 
+#: The fields of a dismissed finding (`Judgment.dismissed`).
+DISMISSED_KEYS = ("source", "finding", "why", "probe", "conflicts_with")
+
+
 class Unreadable(ValueError):
     """The judge's file is missing, is not one JSON object, or is not a verdict."""
 
@@ -96,7 +101,8 @@ class Judgment:
     #: Each item: ``source``, ``where``, ``what``, ``why``, ``kind``, ``severity``, ``breaks``.
     must_fix: tuple[dict[str, str], ...] = ()
     follow_ups: tuple[str, ...] = ()
-    #: Findings the judge set aside: ``source``, ``finding``, ``why``.
+    #: Findings the judge set aside: ``source``, ``finding``, ``why``; a failing probe it
+    #: sets aside also names its ``probe`` file and the brief ask it ``conflicts_with``.
     dismissed: tuple[dict[str, str], ...] = ()
     #: The overwatch's account of each gate correction: ``id``, ``met``, ``evidence``.
     corrections: tuple[dict[str, Any], ...] = field(default=())
@@ -222,8 +228,7 @@ def parse(text: str, verdicts: tuple[str, ...], *, name: str = "the judge's file
         verdict=verdict.strip().lower(),
         must_fix=tuple(_must_fix(item) for item in lists["must_fix"]),
         follow_ups=tuple(text for text in (_follow_up(item) for item in lists["follow_ups"]) if text),
-        dismissed=tuple(_record(item, ("source", "finding", "why"), "finding")
-                        for item in lists["dismissed"]),
+        dismissed=tuple(_record(item, DISMISSED_KEYS, "finding") for item in lists["dismissed"]),
         corrections=tuple(corrections),
     )
     if (judgment.verdict == "redo" and not judgment.must_fix and not judgment.unmet
@@ -262,6 +267,16 @@ def unavailable(judgment: Judgment) -> str:
         if item.get("what", "").startswith(UNAVAILABLE):
             return item["what"]
     return ""
+
+
+def brief_conflicts(judgment: Judgment) -> dict[str, dict[str, str]]:
+    """The failing probes the judge dismissed as a brief conflict, by probe file name.
+
+    Only a dismissal that names both the ``probe`` file and the other brief ask it
+    ``conflicts_with`` counts; the QA gate then lists the probe for the person to settle
+    instead of sending the change back. Any other failing probe still blocks."""
+    return {Path(item["probe"]).name: item for item in judgment.dismissed
+            if item.get("probe") and item.get("conflicts_with")}
 
 
 def must_fix_line(item: dict[str, str]) -> str:

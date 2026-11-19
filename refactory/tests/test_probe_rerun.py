@@ -12,6 +12,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from refactory_dsh import clones, design_ops, judges, nn, probe_rerun, worktree
 from refactory_dsh.design import DesignMode
 from refactory_dsh.verification import DESIGN_VERIFIER_PROMPT
@@ -491,3 +493,147 @@ def test_a_probe_importing_refactory_dsh_runs_from_the_scratch_checkout(tmp_path
                                      check=check, roots=[repo])
     [entry] = results["probes"]
     assert entry["status"] == "pass", entry["tail"]
+
+
+
+def _failing(file: str, requirement: str, header: str, tail: str) -> dict:
+    return {"file": file, "requirement": requirement, "status": "fail", "exit_code": 1,
+            "existing_tests": [], "header": header, "tail": tail}
+
+
+#: A recorded run's first QA round: the judge proceeded, and the one probe that failed
+#: tests an ask that, the judge found, cannot be met without breaking another ask.
+REPLAY_PROBE = _failing("r1-1.py", "r1", "R1: a wrapped line never starts a finding",
+                        "AssertionError: expected no findings, got 1")
+REPLAY_ASK = "every form accepted today is still accepted (keep the existing tests passing)"
+#: A brief whose two asks conflict: the output must stay byte-identical, and gain a field.
+CLI_PROBE = _failing("r2-1.py", "r2", "R2: `tool list --json` output is unchanged",
+                     "AssertionError: output differs: new key 'owner'")
+CLI_ASK = "add an owner field to the output"
+#: A probe that fails because the change is wrong, with no conflict behind it.
+DEFECT_PROBE = _failing("r3-1.py", "r3", "R3: parse('') returns []",
+                        "TypeError: 'NoneType' object is not iterable")
+
+
+def _qa_round(tmp_path, probe: dict, dismissal: dict | None = None,
+              must_fix: list | None = None) -> nn.RunContext:
+    """A QA round after the reviews: ``probe`` failed on rerun and the judge proceeded
+    (or, with ``must_fix``, asked for a redo), dismissing what ``dismissal`` names."""
+    ctx = nn.RunContext(tmp_path, facts={})
+    for name, _ in design_ops.DESIGN_QA_REVIEWS:
+        ctx.write_text(name, "ran it; fine\n")
+    ctx.write_text(probe_rerun.RESULTS_JSON,
+                   json.dumps({"per_probe_s": 120, "probes": [probe], "unverified": []}))
+    ctx.write_text(judges.QA_JUDGE, json.dumps({
+        "verdict": "redo" if must_fix else "proceed", "must_fix": must_fix or [],
+        "follow_ups": [], "dismissed": [dismissal] if dismissal else []}))
+    return ctx
+
+
+def _dismissal(failing: dict, **fields: str) -> dict:
+    return {"source": "reviews/probe-results.md", "finding": f"{failing['file']} fails",
+            "why": "meeting it breaks the other ask",
+            "probe": f"reviews/probes/{failing['file']}", **fields}
+
+
+def _conflict_line(ctx: nn.RunContext) -> str:
+    [line] = [line for line in ctx.read_text("reviews/qa-gate.txt").splitlines()
+              if "brief conflict" in line]
+    return line
+
+
+def test_the_recorded_rounds_probe_dismissed_as_a_brief_conflict_goes_to_the_person(tmp_path):
+    ctx = _qa_round(tmp_path, REPLAY_PROBE, _dismissal(REPLAY_PROBE, conflicts_with=REPLAY_ASK))
+    assert design_ops.gate_qa(ctx) == "proceed"
+    line = _conflict_line(ctx)
+    assert line.startswith("follow-up: brief conflict for the person to settle: "
+                           "reviews/probes/r1-1.py (the verifier's probe for r1 exits 1")
+    assert f'conflicts with the ask "{REPLAY_ASK}"' in line
+    assert "meeting it breaks the other ask" in line
+
+
+def test_any_two_conflicting_asks_go_to_the_person_the_same_way(tmp_path):
+    ctx = _qa_round(tmp_path, CLI_PROBE, _dismissal(CLI_PROBE, probe="r2-1.py",
+                                                    conflicts_with=CLI_ASK))
+    assert design_ops.gate_qa(ctx) == "proceed"
+    line = _conflict_line(ctx)
+    assert "reviews/probes/r2-1.py" in line and f'conflicts with the ask "{CLI_ASK}"' in line
+
+
+def test_a_failing_probe_without_a_dismissal_still_sends_the_change_back(tmp_path):
+    for probe in (REPLAY_PROBE, CLI_PROBE, DEFECT_PROBE):
+        verdict = design_ops.gate_qa(_qa_round(tmp_path / probe["file"], probe))
+        assert verdict == "reloop" and f"reviews/probes/{probe['file']}" in verdict.reason
+
+
+def test_a_probe_dismissal_that_names_no_conflicting_ask_still_sends_it_back(tmp_path):
+    """A real defect: the judge set the probe aside but named no ask it conflicts with
+    (whether a claimed conflict is real is the judge's call; the gate checks the field)."""
+    for index, blank in enumerate(({}, {"conflicts_with": ""}, {"conflicts_with": "  "})):
+        ctx = _qa_round(tmp_path / str(index), DEFECT_PROBE, _dismissal(DEFECT_PROBE, **blank))
+        verdict = design_ops.gate_qa(ctx)
+        assert verdict == "reloop" and "reviews/probes/r3-1.py" in verdict.reason
+        assert "brief conflict" not in verdict.reason
+
+
+def test_a_conflict_dismissal_that_names_no_probe_file_still_sends_it_back(tmp_path):
+    dismissal = _dismissal(DEFECT_PROBE, probe="", conflicts_with=CLI_ASK)
+    verdict = design_ops.gate_qa(_qa_round(tmp_path, DEFECT_PROBE, dismissal))
+    assert verdict == "reloop" and "reviews/probes/r3-1.py" in verdict.reason
+
+
+def test_a_conflict_dismissal_of_one_probe_leaves_the_others_blocking(tmp_path):
+    ctx = _qa_round(tmp_path, DEFECT_PROBE, _dismissal(CLI_PROBE, conflicts_with=CLI_ASK))
+    verdict = design_ops.gate_qa(ctx)
+    assert verdict == "reloop" and "reviews/probes/r3-1.py" in verdict.reason
+
+
+def test_a_conflict_still_reaches_the_person_when_the_judge_redoes_for_something_else(
+        tmp_path):
+    must_fix = [{"source": "reviews/code-review.md", "where": "app.py:3", "what": "crashes",
+                 "kind": "defect", "severity": "high", "breaks": "ask"}]
+    ctx = _qa_round(tmp_path, CLI_PROBE, _dismissal(CLI_PROBE, conflicts_with=CLI_ASK),
+                    must_fix=must_fix)
+    verdict = design_ops.gate_qa(ctx)
+    assert verdict == "reloop" and "crashes" in verdict.reason
+    assert "reviews/probes/r2-1.py" not in verdict.reason
+
+
+def test_the_qa_judge_is_told_how_to_dismiss_a_failing_probe_once():
+    from refactory_dsh.design import QA_JUDGE_PROMPT
+
+    assert QA_JUDGE_PROMPT.count("`conflicts_with`") == 1
+    assert '"probe": "", "conflicts_with": ""' in QA_JUDGE_PROMPT
+
+
+def _gate_on(runtime: str, ctx: nn.RunContext) -> str:
+    """``gate_qa``'s verdict on ``runtime``: the walker calls it in-process; the spine runs
+    the gate's lowered command (`python -m refactory_dsh.run ...:gate_qa`) and routes on the
+    last stdout line."""
+    if runtime == "walker":
+        return str(design_ops.gate_qa(ctx))
+    import os
+    import sys
+
+    from refactory_dsh import lowering
+    from refactory_dsh.run import NODE_ENV, WORKDIR_ENV
+
+    state = DesignMode().state_dict()
+    lowering.write_declarations(state, Path(ctx.workdir))
+    command = lowering.to_workflow(state).nodes["gate_qa"].evaluator_command
+    assert command.split()[:3] == ["python", "-m", "refactory_dsh.run"]
+    env = {**os.environ, WORKDIR_ENV: str(ctx.workdir),
+           NODE_ENV: json.dumps({"id": "gate_qa", "type": "GateNode"})}
+    proc = subprocess.run([sys.executable, *command.split()[1:]], cwd=ctx.workdir, env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return [line for line in proc.stdout.splitlines() if line.strip()][-1]
+
+
+@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def test_brief_conflict_dismissal_routes_the_same_on_both_runtimes(tmp_path, runtime):
+    honoured = _qa_round(tmp_path / "a", CLI_PROBE, _dismissal(CLI_PROBE, conflicts_with=CLI_ASK))
+    assert _gate_on(runtime, honoured) == "proceed"
+    assert "brief conflict for the person to settle" in honoured.read_text("reviews/qa-gate.txt")
+    defect = _qa_round(tmp_path / "b", DEFECT_PROBE, _dismissal(DEFECT_PROBE))
+    assert _gate_on(runtime, defect) == "reloop"
