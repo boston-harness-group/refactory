@@ -64,16 +64,22 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     loop, _ = _run(tmp_path, monkeypatch, plan, proposer=proposer)
     by_level = {_level(c): c for c in loop.population}
     passes = _events(loop, "optimizer_memory")
-    assert [p["same"] for p in passes] == [False, True]
+    assert [p["same"] for p in passes] == [False, False]
     prompt = proposer.asked[1]["prompt"]
     tried = _section(prompt, "## What was tried this epoch")
     assert "proposed in round 2" in tried
-    assert "Nothing this epoch replaced it (what was tried and not kept" in prompt
+    # Nothing kept: the incumbent 7 is set against the rejected 6 on the item 6 broke.
+    assert "Nothing this epoch replaced it; the comparison below sets it against" in prompt
+    assert passes[1]["rejected"]["child"] == by_level[6].id
     six = by_level[6].id
     (line,) = [l for l in tried.splitlines() if l.startswith(f"- `{six}`")]
     assert f"from `{by_level[7].id}`" in line and "knob change: prompt/setting" in line
-    assert "set_knob: level" in line and f"train score {by_level[6].score}" in line
-    # Its counts and the gate's word are in the per-kind tally, said once there.
+    # Its edits are whole in the changes section; the tried line points there, said once.
+    assert 'its edits are under "What the rejected change changed" above' in line
+    assert prompt.count('{"op": "set_knob", "name": "level", "value": 6}') == 1
+    assert '"value": 6' in _section(prompt, "## What the rejected change changed")
+    assert f"train score {by_level[6].score}" in line
+    # Its counts and the gate's word are in the per-change tally, said once there.
     (tally,) = [l for l in tried.splitlines() if f"`{six}`" in l and l is not line
                 and not l.startswith(f"- `{six}`")]
     # 7 passes t1-t5, 6 passes t1-t4: one broken, none fixed.
@@ -83,7 +89,7 @@ def test_a_pass_with_nothing_kept_lists_what_was_tried_and_refused(tmp_path, mon
     assert len(refusals) == 2
     # Newest first: the bypass was refused after the unreadable entry.
     assert "E-policy" in refusals[0] and "structural change" in refusals[0]
-    assert "bypass: work" in refusals[0]
+    assert '{"op": "bypass", "target": "work"}' in refusals[0]
     assert "E-proposal-shape" in refusals[1]
     assert "attempt 1; no readable edit)" in refusals[1] and "change:" not in refusals[1]
     assert tried.index(f"`{six}`") < tried.index("- refused"), "evaluated ones first"
@@ -143,7 +149,7 @@ def test_the_section_is_bounded_newest_first_with_the_cut_said():
                                round_=4, current="c59", gated=True)
     text = "\n".join(lines)
     assert len(text) <= memory.TRIED_CHARS
-    assert memory.TRIED_CHARS == 8000
+    assert memory.TRIED_CHARS == 16000
     assert "`c59`" in text and "`c0`" not in text, "the newest kept, the oldest cut"
     assert text.index("`c59`") < text.index("`c58`")
     assert lines[-1].startswith("[cut: ") and lines[-1].endswith(
@@ -191,13 +197,20 @@ def test_with_nothing_tried_the_unchanged_pipeline_points_nowhere():
     assert "Nothing this epoch replaced it (what was tried and not kept is under" in some
 
 
-def test_edits_in_short_name_the_op_and_what_it_touches_never_a_value():
-    text = memory.edits_text([{"op": "set_knob", "name": "a", "value": "SECRET-TEXT"},
+def test_edits_say_what_each_change_was_its_text_included():
+    # S1-s45: "loop" alone could not tell this judge's criteria from loops in general.
+    text = memory.edits_text([{"op": "set_knob", "name": "a", "value": "NEW-TEXT"},
                               {"op": "insert_after", "target": "solve",
-                               "node": {"id": "check", "kind": "agent"}}])
-    assert text == "set_knob: a; insert_after: check, solve"
+                               "node": {"id": "check", "kind": "agent",
+                                        "prompt_template": "CHECK-CRITERIA"}}])
+    assert "NEW-TEXT" in text and "CHECK-CRITERIA" in text and "solve" in text
+    # A knob's change against the parent's value is its diff, not the whole text.
+    diff = memory.edits_text([{"op": "set_knob", "name": "a", "value": "one\nTWO\nthree"}],
+                             {"a": "one\nthree"})
+    assert diff.startswith("set_knob a: 9 -> 13 chars; diff: ") and "+TWO" in diff
+    assert "\n" not in text and "\n" not in diff, "one line: nothing in it reads as a heading"
     assert memory.edits_text({UNREADABLE_PROPOSAL: "x"}) == "(no readable edit)"
-    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 900}])) == \
+    assert len(memory.edits_text([{"op": "set_knob", "name": "k" * 9000}])) <= \
         memory.TRIED_EDITS_CHARS
 
 
@@ -288,3 +301,50 @@ def test_the_memory_request_is_told_the_objective_and_the_run_keeps_the_cost(
     _, proposer2 = _run(tmp_path / "b", monkeypatch, [[(5, 7)], []], parsimony=0.05)
     assert "size cost of 0.05 per node" in proposer2.asked[0]["prompt"]
     assert "| cost |" in proposer2.contexts[-1].render()
+
+
+def test_no_edit_is_dropped_and_the_cut_is_said():
+    """Past the bound every edit keeps its head (op and what it names) and the cut is said
+    in edits and characters; successive set_knobs of one knob are diffed against the
+    value in between."""
+    many = [{"op": "set_knob", "name": f"k{i}", "value": "V" * 400} for i in range(12)]
+    text = memory.edits_text(many)
+    assert all(f"k{i}" in text for i in range(12)), "no edit vanishes"
+    assert "[cut: 12 edits /" in text and "chars]" in text
+    wide = {"op": "insert_after", "target": "solve",
+            "node": {"id": "check", "kind": "agent", "reads": [f"f{i}.txt" for i in range(400)]}}
+    late = memory.edits_text([wide, {"op": "set_knob", "name": "LATE", "value": "x"}])
+    assert "LATE" in late and "[cut: 1 edits /" in late
+    twice = memory.edits_text([{"op": "set_knob", "name": "a", "value": "one\ntwo"},
+                               {"op": "set_knob", "name": "a", "value": "one\ntwo\nthree"}],
+                              {"a": "one"})
+    assert twice.count("+two") == 1 and "+three" in twice, "the second diffs against the first"
+
+
+def test_a_cut_edit_keeps_its_wiring_and_cuts_its_text_in_the_middle():
+    """Past the bound a cut edit keeps its op, the step it names, where it sends back, what
+    it sees and its limit whole; only its long text is cut, head and tail kept; and the
+    whole stays within ``TRIED_EDITS_CHARS``."""
+    # Texts first and last, the wiring between: a cut of the whole line would lose it.
+    loop = {"text": "HEAD-OF-CRITERIA " + "c" * 6000 + " TAIL-OF-CRITERIA", "op": "loop",
+            "step": "solve", "back_to": "plan", "judge": "agent", "sees": ["task", "solve"],
+            "max_iterations": 2, "system": "SYSTEM-HEAD " + "s" * 3000 + " SYSTEM-TAIL"}
+    knobs = [{"op": "set_knob", "name": f"k{i}", "value": "V" * 900} for i in range(3)]
+    text = memory.edits_text([loop, *knobs])
+    assert len(text) <= memory.TRIED_EDITS_CHARS
+    for wiring in ('"step": "solve"', '"back_to": "plan"', '"sees": ["task", "solve"]',
+                   '"max_iterations": 2', '"op": "loop"'):
+        assert wiring in text, wiring
+    assert "HEAD-OF-CRITERIA" in text and "TAIL-OF-CRITERIA" in text and "middle cut" in text
+    assert all(f"k{i}" in text for i in range(3)) and "[cut: " in text
+
+
+def test_a_tiny_room_keeps_the_cut_marker_whole():
+    """With room for little more than the cut's marker, the marker is kept whole (and the
+    edit's head), the text before it dropped, never the marker sliced."""
+    from refactory_dsh.optim.memory import _shrunk_edit
+
+    part = "set_knob k: 10 -> 9000 chars; diff: " + "x" * 9000
+    short = _shrunk_edit(None, part, "[set_knob k]", 30)
+    assert short.endswith("middle cut]…") and short.startswith("[set_knob k]")
+    assert f"[{len(part)} chars, middle cut]" in short

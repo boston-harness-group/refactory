@@ -838,7 +838,7 @@ def test_the_analysts_read_no_harness_timeout():
     failures, successes = analysts.split([_record("w1"), _timed_out("t1"),
                                           _record("p1", passed=True)], seed=1)
     assert [r["id"] for r in failures] == ["w1"] and [r["id"] for r in successes] == ["p1"]
-    assert "a change aimed at\n   timeouts" in analysts.FAILURE_SYSTEM
+    assert "any other change\n   aimed at harness timeouts" in analysts.FAILURE_SYSTEM
 
 
 def test_how_nodes_compose_says_a_timeout_in_one_sentence():

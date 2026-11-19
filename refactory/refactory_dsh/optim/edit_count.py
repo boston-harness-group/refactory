@@ -11,12 +11,22 @@ edits that only connect it count as ONE change:
   direct neighbour binds or reads (a step that reads what it writes, writes what it
   reads, or sits next to it on an edge) whose changed lines each name the step or a
   file or fact it writes;
+- its readers' tuning: for an edit that ADDS steps, a ``set_knob`` of a knob that, in
+  the proposal's final graph, only steps reading what the new steps write or produce (a
+  file in their reads, a ``{{fact}}`` in their prompt or a text knob they fill) or the
+  new steps themselves bind or read -- the edit that makes an existing step use or
+  account for the new one, whatever its lines say. A knob another step binds too (a
+  shared style or token setting) counts on its own, and an edit that adds no step (a
+  reorder, a rewire) folds no reader's tuning. Decided from the graph after every edit
+  is applied, never from edit order or names;
 - edges to it: an ``add_edge``/``remove_edge`` from or to the step whose other end is
   the step or a direct neighbour.
 
-Any other edit counts as one more change. Only direct neighbours (one hop on the data
+Any other edit counts as one more change: text tuning of a step that does not read the
+new step counts one per knob, as before. Only direct neighbours (one hop on the data
 flow or an edge) qualify, so one change cannot sprawl over the pipeline. Two structural
-edits are two changes.
+edits are two changes. However it counts, a proposal has at most
+``MAX_RAW_EDITS_PER_PROPOSAL`` edits (`optim.base`), a guard against runaway bundles.
 """
 
 from __future__ import annotations
@@ -60,6 +70,11 @@ def _inputs(node: Mapping[str, Any], state: Mapping[str, Any] | None) -> set[str
     texts = [str(node.get(key) or "") for key in _PROMPT_FIELDS]
     texts += [str(_knob_value(state, knob) or "") for field, knob in _bound(node)
               if field in _PROMPT_FIELDS]
+    # A text knob an op lists itself: it fills its facts into it (a prompt it builds for
+    # the step after it, as LiveMath S4's decide_prompt builds decide's).
+    if node.get("kind") == "op":
+        texts += [value for knob in node.get("knobs") or ()
+                  for value in [_knob_value(state, str(knob))] if isinstance(value, str)]
     for text in texts:
         names |= set(_FACT.findall(text))
     return names
@@ -128,6 +143,22 @@ def _references(state: Mapping[str, Any] | None, ids: set[str]) -> set[str]:
     return {ref for ref in refs if ref}
 
 
+def readers(state: Mapping[str, Any] | None, ids: set[str]) -> set[str]:
+    """The steps outside ``ids`` that read what ``ids`` write or produce (a file in their
+    reads, a ``{{fact}}`` in their prompt or a prompt knob), in ``state``."""
+    nodes = _nodes(state)
+    out: set[str] = set()
+    for step in ids:
+        node = nodes.get(step)
+        if isinstance(node, Mapping):
+            out |= _outputs(node)
+    if not out:
+        return set()
+    return {str(other_id) for other_id, other in nodes.items()
+            if other_id not in ids and isinstance(other, Mapping)
+            and _inputs(other, state) & out}
+
+
 def _connects(edit: Mapping[str, Any], group: Mapping[str, Any], before: Mapping[str, Any],
               after: Mapping[str, Any], final: Mapping[str, Any]) -> bool:
     op = edit.get("op")
@@ -137,6 +168,13 @@ def _connects(edit: Mapping[str, Any], group: Mapping[str, Any], before: Mapping
         held = owners(final, name) | owners(before, name) | owners(after, name)
         if held and held <= subject:
             return True  # the step's own: no other step binds or reads it
+        added = group.get("added") or set()
+        if op == "set_knob" and added:
+            reading = readers(final, added)
+            # A reader of the new step tuned to use it: only a knob every step binding it
+            # reads the new step (or is new), so a shared knob counts on its own.
+            if owners(final, name) & reading and held <= reading | added:
+                return True
         if op != "set_knob" or not held & near:
             return False
         lines = changed_lines(_knob_value(before, name), _knob_value(after, name))
@@ -185,7 +223,7 @@ def count(steps: Sequence[Any], parent_state: Mapping[str, Any] | None) -> dict[
                 | neighbours(before, (removed | (subject - added)) & set(_nodes(before)))) - subject
         refs = _references(after, added) | _references(before, subject - added)
         groups.append({"anchor": index, "subject": subject, "near": near, "refs": refs,
-                       "members": [index]})
+                       "added": added & set(_nodes(final)), "members": [index]})
     alone: list[int] = []
     for index in range(len(steps)):
         if any(index == g["anchor"] for g in groups):

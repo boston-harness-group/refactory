@@ -1,8 +1,9 @@
 """What the model proposer learns across a run (`optim.feedback`), each behind a switch.
 
-- ``run_ledger``: "Every change so far, by kind" lists every evaluated candidate of the
-  run (not only the recent ones), with the kind of change it made, train fixed/broken
-  against its parent and the gate's word, after a tally per kind; bounded.
+- ``run_ledger``: "Every change so far" lists every evaluated candidate of the run (not
+  only the recent ones), with what its edits did (its kind only a label), train
+  fixed/broken against its parent and the gate's word, after a tally per change (never
+  per kind); bounded.
 - ``lessons``: the memory note (`optim.memory`; its tests are test_optimizer_memory.py).
 - ``step_review``: each step the last round added gets its train counts and one review
   call (``step_review``), cached, whose failure is shown and never fatal.
@@ -119,16 +120,15 @@ def test_the_ledger_lists_every_candidate_of_the_run_with_a_tally(tmp_path, monk
     assert len(made) > REASONING_ENTRIES, "setup: more than the recent candidates"
     assert [entry["id"] for entry in ctx.ledger] == [c.id for c in made]
     text = ctx.render()
-    section = _section(text, "## Every change so far, by kind")
+    section = _section(text, "## Every change so far")
     assert all(f"| {c.id} |" in section for c in made), "every candidate, not only recent"
-    kept = sum(1 for e in ctx.ledger if e["gate"] in feedback.KEPT_WORDS)
-    nets = [e["fixed"] - e["broken"] for e in ctx.ledger if e["fixed"] is not None]
-    assert (f"- prompt/setting: tried {len(made)}, kept {kept}, best train fixed-broken "
-            f"{max(nets):+d}") in section
+    # Each change is its own (a different level each), tried once and in the table: no
+    # tally line, and never one per kind.
+    assert "- prompt/setting:" not in section and "tried more than once" not in section
     ids = {_level(c): c.id for c in loop.population}
     row = next(line for line in section.splitlines() if line.startswith(f"| {ids[4]} |"))
     # 4 (from 8) breaks t3-t6 against 8: passes t1-t2 only.
-    assert "| prompt/setting | level | 0/4 of 8 | rejected |" in row
+    assert "| set_knob name=level value=4 (prompt/setting) | 0/4 of 8 | rejected |" in row
     _no_val(section, loop)
 
 
@@ -136,18 +136,19 @@ def test_without_the_ledger_switch_there_is_no_ledger(tmp_path, monkeypatch):
     _loop_, proposer = _ledger_run(tmp_path, monkeypatch, run_ledger=False)
     ctx = proposer.contexts[-1]
     assert ctx.ledger == []
-    assert "## Every change so far, by kind" not in ctx.render()
+    assert "## Every change so far" not in ctx.render()
 
 
 def _entry(index: int, kind: str = "prompt/setting", gate: str = "rejected",
-           rationale: str = "R" * 1000, touched: list[str] | None = None) -> dict[str, Any]:
+           rationale: str = "R" * 1000, change: str = "set_knob name=decide__task",
+           fixed: int = 1, broken: int = 2) -> dict[str, Any]:
     return {"id": f"c{index:04d}", "round": index, "parent": "p", "kind": kind,
-            "touched": touched or ["decide__task"], "fixed": 1, "broken": 2, "shared": 30,
-            "gate": gate, "rationale": rationale}
+            "change": change, "touched": ["decide__task"], "fixed": fixed, "broken": broken,
+            "shared": 30, "gate": gate, "rationale": rationale}
 
 
 def test_the_ledger_keeps_the_newest_rows_and_counts_the_older_in_the_tally():
-    entries = [_entry(i, kind="added agent step" if i % 2 else "prompt/setting",
+    entries = [_entry(i, change=f"set_knob name=k{i % 3}",
                       gate="kept" if i % 10 == 0 else "rejected", rationale="short")
                for i in range(300)]
     lines = feedback.ledger_lines(entries)
@@ -155,18 +156,136 @@ def test_the_ledger_keeps_the_newest_rows_and_counts_the_older_in_the_tally():
     rows = [line for line in lines[-1].splitlines() if line.startswith("| c")]
     assert len(rows) == feedback.LEDGER_ROWS
     assert rows[-1].startswith("| c0299 |"), "the newest are kept"
-    assert "- prompt/setting: tried 150, kept 30, best train fixed-broken -1" in text
-    assert "- added agent step: tried 150, kept 0, best train fixed-broken -1" in text
-    assert f"The {300 - len(rows)} oldest are counted in the tally above only" in text
+    # By the change itself: k0 is tried at i = 0, 3, ..., 297, kept at every 30th.
+    assert ("- set_knob name=k0 (prompt/setting): tried 100, kept 10, best train "
+            "fixed-broken -1") in text
+    assert "- set_knob name=k1 (prompt/setting): tried 100" in text
+    assert "- prompt/setting:" not in text, "never a line per kind"
+    assert f"The {300 - len(rows)} oldest are only in the tally above" in text
+
+
+def test_two_loops_with_different_judges_are_two_changes_in_the_tally():
+    """S1-s45: one loop that broke 7 and fixed 1 was read as every loop's verdict. Two
+    loops whose judges check different things are tallied apart; a change tried once and
+    shown in the table has no tally line."""
+    harsh = feedback.change_label([{"op": "loop", "step": "solve", "judge": "agent",
+                                    "text": "Check for a maximalist trap", "max_iterations": 1}])
+    units = feedback.change_label([{"op": "loop", "step": "solve", "judge": "agent",
+                                    "text": "Check the units of the answer",
+                                    "max_iterations": 2}])
+    assert harsh != units
+    assert "maximalist trap" in harsh and "step=solve" in harsh and "max_iterations=1" in harsh
+    old = [_entry(i, kind="loop/gate", change=harsh, fixed=1, broken=7) for i in range(2)]
+    new = [_entry(2, kind="loop/gate", change=units, fixed=3, broken=0)]
+    lines = feedback.ledger_lines([*old, *new], rows=2)
+    text = "\n".join(lines)
+    assert f"- {harsh} (loop/gate): tried 2, kept 0, best train fixed-broken -6" in text
+    assert f"- {units}" not in text, "tried once, in the table: said in its row only"
+    assert f"| {units} (loop/gate) |" in lines[-1]
+    assert "loop/gate: tried" not in text
+
+
+def test_two_changes_whose_labels_collide_are_tallied_apart_where_they_differ():
+    """Two loops whose judges share a long preamble get one label (60 characters of text);
+    the tally still groups by the full edits and says where each differs."""
+    pre = "You are a careful reviewer of the solver's answer and you check it closely: "
+    loops = [{"op": "loop", "step": "solve", "judge": "agent", "max_iterations": 1,
+              "text": pre + rest} for rest in ("check the units.", "check every claim.")]
+    assert feedback.change_label([loops[0]]) == feedback.change_label([loops[1]])
+    entries = []
+    for index, edit in enumerate([loops[0], loops[0], loops[1], loops[1]]):
+        identity = feedback.change_identity([edit])
+        entries.append({**_entry(index, kind="loop/gate", change=feedback.change_label([edit])),
+                        "change_key": identity["key"], "change_text": identity["text"]})
+    text = "\n".join(feedback.ledger_lines(entries))
+    tally = [line for line in text.splitlines() if line.startswith("- loop")]
+    assert len(tally) == 2 and all("tried 2" in line for line in tally)
+    assert 'differs at: "…the units.' in tally[0] and 'differs at: "…every claim.' in tally[1]
+    from refactory_dsh.optim import memory
+
+    tried = [{**e, "id": e["id"], "evaluated": True} for e in entries]
+    lines = memory.change_tally_lines(tried)
+    assert len([line for line in lines if line.startswith("- loop")]) == 2
+
+
+def test_colliding_labels_are_told_apart_in_the_table_and_by_a_field_outside_the_text():
+    """The table's rows say where two changes with one label differ, as the tally does;
+    two inserts that differ only in what they read say so by that field."""
+    pre = "You are a careful reviewer of the solver's answer and you check it closely: "
+    loops = [{"op": "loop", "step": "solve", "judge": "agent", "max_iterations": 1,
+              "text": pre + rest} for rest in ("check the units.", "check every claim.")]
+    inserts = [{"op": "insert_after", "target": "solve",
+                "node": {"id": "check", "kind": "agent", "reads": reads,
+                         "prompt_template": "Check it."}}
+               for reads in (["a.txt"], ["b.txt"])]
+
+    def entry(index: int, edit: dict[str, Any]) -> dict[str, Any]:
+        identity = feedback.change_identity([edit])
+        return {**_entry(index, change=feedback.change_label([edit])),
+                "change_key": identity["key"], "change_text": identity["text"],
+                "change_shape": identity["shape"]}
+
+    table = feedback.ledger_lines([entry(0, loops[0]), entry(1, loops[1])])[-1]
+    rows = [line for line in table.splitlines() if line.startswith("| c")]
+    assert 'differs at: "…the units.' in rows[0] and 'differs at: "…every claim.' in rows[1]
+    lines = "\n".join(feedback.ledger_lines([entry(i, e) for i, e in
+                                             enumerate([*inserts, *inserts])]))
+    tally = [line for line in lines.splitlines() if line.startswith("- insert_after")]
+    assert len(tally) == 2
+    assert 'differs in node: …reads": ["a.txt"]}' in tally[0]
+    assert 'reads": ["b.txt"]' in tally[1] and "its text ends" not in lines
+
+
+def test_a_multi_edit_label_names_every_edit_even_when_long():
+    """S4-s44 r3: a branch plus two long prompt tunes; the old 160-character cut ended on
+    the second tune's text and named `decide_task` nowhere. Every edit's op and name comes
+    first; text heads only as far as they fit."""
+    edits = [{"op": "branch", "fork": "step_fork", "id": "independent", "kind": "agent",
+              "text": "Solve the problem independently before reading the notes " * 3},
+             {"op": "set_knob", "name": "hypotheses_task",
+              "value": "Using the notes above, list every hypothesis each option needs " * 3},
+             {"op": "set_knob", "name": "decide_task",
+              "value": "Weigh the independent solution against the notes " * 3}]
+    label = feedback.change_label(edits)
+    for name in ("branch", "fork=step_fork", "id=independent", "name=hypotheses_task",
+                 "name=decide_task"):
+        assert name in label, name
+    assert len(label) <= feedback.LEDGER_CHANGE_CHARS
+    row = feedback.ledger_lines([{**_entry(0, change=label)}])[-1]
+    assert "name=decide_task" in row
+    many = feedback.change_label([{"op": "set_knob", "name": f"knob_{i:02d}_" + "x" * 20,
+                                   "value": "v"} for i in range(8)])
+    assert all(f"knob_{i:02d}_" in many for i in range(8)), "past the bound, still all named"
+
+
+def test_a_differing_field_is_shown_from_where_the_values_differ():
+    """Two inserts whose `reads` differ only in a late entry: the suffix starts where the
+    two lists first differ, so the two lines do not print the same prefix."""
+    reads = [f"file_{i:02d}.txt" for i in range(10)]
+    inserts = [{"op": "insert_after", "target": "solve",
+                "node": {"id": "check", "kind": "agent", "reads": [*reads, last],
+                         "prompt_template": "Check it."}} for last in ("a.txt", "b.txt")]
+    groups = []
+    for edit in inserts:
+        identity = feedback.change_identity([edit])
+        groups.append((feedback.change_label([edit]), identity["text"], identity["shape"]))
+    first, second = feedback.distinguish(groups)
+    assert "a.txt" in first and "b.txt" in second and first != second
+    assert '"file_00.txt"' not in first, "shown from where they differ, not from the start"
 
 
 def test_the_ledger_table_stays_within_its_characters():
-    entries = [_entry(i, touched=[f"{'k' * 80}_{n}" for n in range(6)]) for i in range(300)]
+    label = feedback.change_label([{"op": "insert", "after": "solve", "kind": "agent",
+                                    "text": "k" * 400}])
+    entries = [_entry(i, change=label) for i in range(300)]
     lines = feedback.ledger_lines(entries)
     rows = [line for line in lines[-1].splitlines() if line.startswith("| c")]
     assert len(lines[-1]) <= feedback.LEDGER_CHARS < len(rows[0]) * feedback.LEDGER_ROWS
-    assert rows[-1].startswith("| c0299 |") and "+2 more" in rows[-1]
+    assert rows[-1].startswith("| c0299 |")
+    assert "k" * (feedback.LEDGER_CHANGE_CHARS + 1) not in "\n".join(lines)
     assert "R" * (feedback.LEDGER_RATIONALE_CHARS + 1) not in "\n".join(lines)
+    tally = [line for line in lines if line.startswith("- insert")]
+    assert len(tally) == 1 and "tried 300" in tally[0]
 
 
 def test_without_the_gate_the_ledger_has_no_gate_column():
@@ -522,7 +641,9 @@ def test_a_rescored_child_is_compared_in_the_round_it_was_evaluated(tmp_path, mo
     section = "\n".join(feedback.ledger_lines(ctx.ledger))
     row = next(line for line in section.splitlines() if line.startswith(f"| {older.id} |"))
     assert "| n/a (different seed) |" in row
-    assert "added agent step: tried 2, kept 0, best train fixed-broken +0" in section
+    # Two added steps (old_step, think) are two changes, each in its row: no line per kind.
+    assert "added agent step: tried" not in section
+    assert "insert_after target=work node: agent old_step (added agent step)" in row
 
 
 def test_without_the_parents_round_an_added_step_shows_no_counts(tmp_path, monkeypatch):
@@ -690,7 +811,7 @@ def test_the_live_sequence_pairs_every_row_on_one_seed(tmp_path, monkeypatch):
             for level in expected} == expected
     assert all(rows[ids[level]]["same_seed"] for level in expected)
     table = feedback.ledger_lines(proposer.contexts[-1].ledger)[-1]
-    assert table.count("| prompt/setting |") == 4 and "n/a" not in table
+    assert table.count("(prompt/setting) |") == 4 and "n/a" not in table
 
 
 def test_the_parents_rescore_takes_one_of_the_concurrent_slots(tmp_path, monkeypatch):

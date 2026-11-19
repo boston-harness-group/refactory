@@ -314,7 +314,7 @@ def test_flag_records_shows_and_still_evaluates_an_exploit(tmp_path, monkeypatch
         ("proposal", "exploit", False), ("proposal", "exploit", False), ("final", "exploit", False)]
     # The next request: the ledger's column and its own section.
     text = proposer.contexts[-1].render()
-    ledger = _section(text, "## Every change so far, by kind")
+    ledger = _section(text, "## Every change so far")
     assert "| integrity |" in ledger and "| exploit: dataset_artifact |" in ledger
     review = _section(text, "## Integrity review of your proposals")
     assert "2 of your proposals were reviewed: 0 clean, 0 suspect, 2 exploit." in review

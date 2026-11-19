@@ -120,10 +120,9 @@ def test_the_coach_is_told_not_to_rule_on_kinds_of_change_never_tried():
     # steps -- the pipeline is sound" and proposers cited them; SkillOpt, one edit kind,
     # never meets this. The rule is symmetric: no advice either way on an untried kind.
     flat = " ".join(memory.MEMORY_SYSTEM.split())
-    assert ("Judge only kinds of change with evidence in front of you: this epoch's tries, "
-            "or what the previous memory records of earlier ones.") in flat
-    assert ("Any other kind is untested: do not advise for or against it, and do not list "
-            "the untested kinds.") in flat
+    assert ("Advise only on changes with evidence in front of you: this epoch's tries, or "
+            "what the previous memory records of earlier ones. Do not advise for or against "
+            "changes nobody tried, and do not list them.") in flat
 
 
 def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted():
@@ -535,12 +534,12 @@ def test_the_synthesis_keeps_the_memory_rules_and_the_comparison_prompt_is_domai
     flat = " ".join(memory.SYNTHESIS_SYSTEM.split())
     assert memory.SYNTHESIS_SYSTEM != memory.MEMORY_SYSTEM
     assert "read in parts by comparison calls" in flat
-    assert ("Any other kind is untested: do not advise for or against it, and do not list "
-            "the untested kinds.") in flat
+    assert ("Do not advise for or against changes nobody tried, and do not list them.") in flat
+    assert "Never from one design, however large its effect." in flat
     assert "Address the FUTURE OPTIMIZER directly" in memory.COMPARE_SYSTEM
-    assert ("Report what these traces show; do not judge kinds of change in general "
-            "(another call weighs them against what was tried).") in " ".join(
-        memory.COMPARE_SYSTEM.split())
+    assert ("Report what these traces show; leave verdicts on the changes tried to the call "
+            "that weighs each of them against these observations, and judge no kind of "
+            "change in general.") in " ".join(memory.COMPARE_SYSTEM.split())
     assert "Do not output instructions for the pipeline's own steps." in memory.COMPARE_SYSTEM
     assert memory.parse_observations({"findings": []}) is None
     kept = memory.parse_observations({"observations": [
@@ -595,18 +594,28 @@ def test_the_pass_runs_from_epoch_two_compares_the_currents_and_reuses_the_epoch
     passes = _events(loop, "optimizer_memory")
     assert [p["epoch"] for p in passes] == [2, 3, 4] == [a["epoch"] for a in proposer.asked]
     levels = [(_level(by_id[p["prev"]]), _level(by_id[p["curr"]])) for p in passes]
-    # 7 kept in epoch 2, 8 in epoch 3; 6 rejected in epoch 4: unchanged, 8 against itself.
-    assert levels == [(5, 7), (7, 8), (8, 8)]
-    assert [p["same"] for p in passes] == [False, False, True]
-    assert all(p["pairs"] == len(TRAIN_IDS) and not p["missing"] for p in passes)
+    # 7 kept in epoch 2, 8 in epoch 3; 6 rejected in epoch 4: nothing replaced 8, so the
+    # pass sets 8 against the rejected 6 on the items 6 changed.
+    assert levels == [(5, 7), (7, 8), (8, 6)]
+    assert [p["same"] for p in passes] == [False, False, False]
+    assert "rejected" not in passes[0] and "rejected" not in passes[1]
+    assert passes[2]["rejected"]["child"] == passes[2]["curr"]
+    assert all(p["pairs"] == len(TRAIN_IDS) and not p["missing"] for p in passes[:2])
+    # 8 passes t1-t6, 6 passes t1-t4: the two it broke, and only those.
+    assert passes[2]["sample"] == ["t5", "t6"] and passes[2]["pairs"] == 2
+    assert passes[2]["counts"] == {"regressed": 2, "persistent_fail": 0, "improved": 0,
+                                   "stable_success": 0}
     assert all(p["evaluated"] == 0 for p in passes), "the epoch's own rollouts are reused"
     assert not _events(loop, "memory_rollout")
     # 5 passes t1-t3, 7 passes t1-t5: two improved, none regressed.
     assert passes[0]["counts"] == {"regressed": 0, "persistent_fail": 3, "improved": 2,
                                    "stable_success": 3}
-    assert "rollout of epoch 3" in proposer.asked[2]["prompt"]
-    assert "rollout of epoch 4" in proposer.asked[2]["prompt"]
-    assert "two rollouts of this one pipeline" in proposer.asked[2]["prompt"]
+    prompt = proposer.asked[2]["prompt"]
+    assert "two rollouts of this one pipeline" not in prompt
+    assert "## The rejected change's pipeline" in prompt
+    assert "the rejected change against the incumbent, on the items it changed" in prompt
+    assert "It fixed 0 and broke 2 of" in prompt
+    assert "Rejected change `" in prompt and "Incumbent `" in prompt
 
 
 def test_the_note_reaches_the_request_it_precedes_and_replaces_the_lessons(tmp_path, monkeypatch):
@@ -652,7 +661,8 @@ def test_a_resume_replays_the_note_and_does_not_redo_a_pass(tmp_path, monkeypatc
 def test_without_the_gate_an_unchanged_current_is_rolled_out_again_and_counted(
         tmp_path, monkeypatch):
     # Ungated, the train leader is current: 7 scores below 5 (kept current), 3 above.
-    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 3)], []], val_gate=False)
+    # Round 1 proposes nothing, so epoch 2's pass has no rejected change to compare.
+    loop, proposer = _run(tmp_path, monkeypatch, [[], [(5, 3)], []], val_gate=False)
     passes = _events(loop, "optimizer_memory")
     by_id = {c.id: c for c in loop.population}
     assert [(_level(by_id[p["prev"]]), _level(by_id[p["curr"]])) for p in passes] == [
@@ -1309,3 +1319,90 @@ def test_memory_shows_each_item_s_input_once_and_names_the_rollout_it_refers_to(
             later = "Second rollout" if same else "Now"
             first = "First rollout" if same else "Start of epoch"
             assert f"same as item q1 ({first}), step solve" in text.split(f"({later})", 1)[1]
+
+
+# ── S1-s45: a rejected loop, nothing kept ───────────────────────────────────
+
+
+def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
+    """S1-s45 round 3: one loop (a judge after `solve`, at most one send-back) broke 8
+    train items (and fixed one whose parent timed out), nothing was kept, and the note ruled on every loop. Now the
+    request sets the unchanged incumbent against that rejected change on the items it
+    moved, with both real traces; says what the loop was -- its judge's criteria, where
+    it sits, what it sends back, its limit -- and asks for lessons about that change,
+    not verdicts on kinds of change."""
+    from refactory_dsh import registry
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_dsh.optim.base import _by_item, edit_change
+    from refactory_dsh.optim.feedback import knob_values, placement_lines
+    from test_edit_effect import S45_LOOP, _tried
+
+    entry, fixture = _tried("s1_s45_loop.json")
+    parent, child = _by_item(fixture["parent"]), _by_item(fixture["child"])
+    moved = edit_change(fixture["parent"], fixture["child"])
+    changed = [*moved["broken"], *moved["fixed"]]
+    entries, missing = memory.pairs(parent, child, changed)
+    assert not missing and memory.counts(entries)["regressed"] == len(moved["broken"]) == 8
+    state = registry.resolve(Path("."), "livemath/solver")[1]().state_dict()
+    loop_state = nn_edits.apply(S45_LOOP, state)
+    entry = {**entry, "edits": memory.edits_text([S45_LOOP], knob_values(state)),
+             "placed": placement_lines(state, loop_state)}
+    tally = memory.change_tally_lines([entry], val_items=17, gated=True)
+    tried = memory.tried_lines([entry], [], round_=3, current=fixture["parent_id"], gated=True,
+                               tally=tally)
+    at = "its rollout in the round the change was evaluated in (one train seed for both)"
+    rejected = {"child": fixture["child_id"], "changed": len(changed), "shown": len(changed),
+                "broken": len(moved["broken"]), "fixed": len(moved["fixed"]),
+                "shared": moved["shared"], "others": []}
+    build = memory.MemoryRequest(
+        epoch=4, mode_name="livemath/solver",
+        prev={"id": fixture["parent_id"], "pipeline": "PIPE-INCUMBENT", "rollout": at},
+        curr={"id": fixture["child_id"], "pipeline": "PIPE-REJECTED", "rollout": at,
+              "rejected": rejected},
+        changes=["- the loop above"], previous_note="", entries=entries, tried=tried)
+    assert build.parts(memory.MEMORY_ROOM) is None, "one call"
+    text, clip = build(memory.MEMORY_ROOM)
+    assert clip == {"items": 0, "chars": 0}
+    # What the loop was: its judge's criteria, its place, what it sends back, its limit.
+    assert "maximalist trap or fabricated authority" in text
+    assert '"step": "solve"' in text and '"max_iterations": 1' in text
+    assert "new agent `solve_check_judge` after `solve`" in text
+    assert "new gate `solve_check` after `solve_check_judge`: reloop -> `solve`" in text
+    assert "sends back at most 1 time" in text
+    # The comparison: the incumbent against the rejected change, on the items it moved.
+    assert "## The rejected change's pipeline" in text and "PIPE-REJECTED" in text
+    assert f"Rejected change `{fixture['child_id']}`" in text
+    # (Its one fixed item's parent hit a harness timeout, so it is not counted as fixed.)
+    assert f"It fixed 0 and broke 8 of {moved['shared']} shared train items" in text
+    for item in moved["broken"]:
+        replies = [e["response"] for e in child[item]["exchanges"] if e.get("response")]
+        assert replies and replies[-1].strip()[:200] in text, item
+    judged = [e for item in changed for e in child[item]["exchanges"]
+              if e.get("node") == "solve_check_judge"]
+    assert judged and any(e["response"].strip()[:120] in text for e in judged)
+    # Asked about this change, never verdicts on kinds of change.
+    system = " ".join(memory.MEMORY_SYSTEM.split())
+    assert "Which kinds of changes" not in system and "tend to help" not in system
+    assert "For each change tried: what it was" in system
+    assert "Never from one design, however large its effect." in system
+    assert f"- {_tried('s1_s45_loop.json')[0]['change']} (loop/gate): 1 try" in text
+    assert "- loop/gate:" not in text
+
+
+def test_without_the_gate_a_change_not_leading_is_compared_but_never_called_rejected(
+        tmp_path, monkeypatch):
+    """Ungated, the train leader is current: 7 scores below 5, so nothing replaced 5. The
+    pass sets 5 against 7 on the items 7 moved -- called the unkept change, since no gate
+    rejected it -- and makes no fresh rollout."""
+    loop, proposer = _run(tmp_path, monkeypatch, [[(5, 7)], []], val_gate=False)
+    (first,) = _events(loop, "optimizer_memory")
+    by_id = {c.id: c for c in loop.population}
+    assert (_level(by_id[first["prev"]]), _level(by_id[first["curr"]])) == (5, 7)
+    assert first["rejected"]["noun"] == memory.NOT_KEPT_NOUN and first["evaluated"] == 0
+    assert not _events(loop, "memory_rollout")
+    prompt = proposer.asked[0]["prompt"]
+    assert "Rejected change" not in prompt and "rejected change" not in prompt
+    assert f"Unkept change `{first['curr']}`" in prompt
+    assert "## The unkept change's pipeline" in prompt
+    assert "## What the unkept change changed" in prompt
+    assert "without a validation gate the current is the train leader" in prompt
