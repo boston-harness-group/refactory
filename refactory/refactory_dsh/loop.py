@@ -63,8 +63,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    MAX_EDITS_PER_PROPOSAL, TRAJECTORY_BUDGET, RunStopped, available_before, edit_level,
-    proposal_refusal,
+    MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
     refused_entries,
     repair_losses,
     summarise_reasons,
@@ -490,13 +489,6 @@ class LoopConfig:
     #: The most analyst calls per round, failure batches first; 0 (the default, as
     #: SkillOpt) is no limit.
     analyst_max_batches: int = 0
-    #: The model proposer's evidence budget in characters (``optim.base``): the size of the
-    #: reader groups, the room "What the last edit changed" shows items whole in, and the
-    #: most the items "Trajectories" shows whole take together when not all fit (one per
-    #: finding otherwise, whatever their size). 0 (the default) keeps
-    #: ``TRAJECTORY_BUDGET`` and no limit on those items. Set it when long traces outgrow
-    #: the optimizer model's context ("Prompt is too long" on every proposal).
-    proposer_evidence_chars: int = 0
     #: The integrity judge (`optim.integrity`): one call of the optimizer's model per
     #: proposal that became a valid candidate, asking whether its benefit would hold if
     #: the dataset, grader or environment had been built differently, and at the end one
@@ -5684,8 +5676,6 @@ class Loop(OuterLoop):
             parent_item_records=self._with_item_meta(self._parent_train_records(board)),
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
-            evidence_budget=int(self.config.proposer_evidence_chars) or TRAJECTORY_BUDGET,
-            shown_items_room=int(self.config.proposer_evidence_chars),
             reasoning=self._reasoning_entries(board),
             ledger=self._ledger() if self.config.run_ledger else [],
             memory=dict(self._memory) if self.config.lessons else {},

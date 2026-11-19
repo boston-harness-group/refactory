@@ -171,7 +171,7 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
         result[key] = bool(result.get(key))
     # The analyst stage's sizes (optim.analysts), SkillOpt's by default.
     for key, least in (("analyst_group_size", 1), ("analyst_merge_batch_size", 2),
-                       ("analyst_max_batches", 0), ("proposer_evidence_chars", 0)):
+                       ("analyst_max_batches", 0)):
         value = result.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
             raise ProfileError(f"{key} must be an integer of at least {least}")
@@ -433,7 +433,6 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         # optim.analysts).
         "run_ledger", "lessons", "step_review", "structure_guidance",
         "analysts", "analyst_group_size", "analyst_merge_batch_size", "analyst_max_batches",
-        "proposer_evidence_chars",
         # Judges proposals and shows or refuses them; it scores nothing (optim.integrity).
         "integrity_judge")}
     # A run that sets no settings sources digests as it did before the field existed,
@@ -540,11 +539,6 @@ SETTING_HELP = {
                                 "8, SkillOpt's; at least 2)",
     "analyst_max_batches": "with --analysts 1: the most analyst calls per round, failure "
                            "batches first (default: 0, no limit, as SkillOpt)",
-    "proposer_evidence_chars": "the model proposer's evidence budget in characters: reader "
-                               "group size, and the most the items shown whole take "
-                               "together (rank order, the rest named). Set it when "
-                               "proposals fail 'Prompt is too long' (default: 0, the "
-                               "built-in 120000 and no limit on items shown whole)",
     "integrity_judge": "off (default), on, flag or a JSON object: one optimizer-model call per "
                        "proposal asks whether its benefit depends on how the data, grader "
                        "or environment happen to be built. on (or veto): an exploit or "

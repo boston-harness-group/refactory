@@ -48,6 +48,15 @@ REASONS_PER_CODE = 2
 #: proposal call inline; when not, readers go through them in groups that each fit it,
 #: and the proposal call gets their findings, a table of every item and some in full.
 TRAJECTORY_BUDGET = 120000
+#: The whole proposal request's room in characters, tied to the optimizer model's context
+#: as ``analysts.ANALYST_ROOM`` is (same size, same reasoning: Opus 4.6 reads 200k
+#: tokens, Claude Code's own system prompt and the reserved reply take 30-40k, and traces
+#: run 2.5-3.5 characters a token). Only "Some items in full" gives way to it: when a
+#: request would pass it, the items shown whole are those that fit what the rest of the
+#: request leaves (`_fit_shown`), whole and in rank order, the rest named. Nothing else is
+#: cut for it. A request the provider still refuses as too long is asked again once at
+#: half its length (``AutoresearchOptimizer.propose``).
+PROPOSAL_ROOM = 400000
 #: How many reader calls run at once.
 READER_CONCURRENCY = 4
 #: A reader's findings as the proposal call shows them: at most this many patterns
@@ -1033,13 +1042,15 @@ class ProposalContext:
     node_states: list[dict[str, Any]] = field(default_factory=list)
     node_spec_text_chars: int = NODE_SPEC_TEXT_CHARS
     node_spec_section_chars: int = NODE_SPEC_SECTION_CHARS
-    #: One call's evidence budget (``TRAJECTORY_BUDGET``; the run's
-    #: ``proposer_evidence_chars`` when set).
+    #: One call's evidence budget (``TRAJECTORY_BUDGET``).
     evidence_budget: int = TRAJECTORY_BUDGET
+    #: The whole request's room in characters (``PROPOSAL_ROOM``; the proposer takes its
+    #: system prompt and closing line off it). ``render`` keeps within it by showing
+    #: fewer items whole; 0 is no room (every picked item shown, whatever their size).
+    request_room: int = PROPOSAL_ROOM
     #: The most characters the items "Trajectories" shows whole take together when not
-    #: every item fits (`_fit_shown`); 0, the default, is no limit. The run's
-    #: ``proposer_evidence_chars``: one picked item per finding is otherwise shown whatever
-    #: their total, which on long traces outgrows the optimizer model's context.
+    #: every item fits (`_fit_shown`); 0 is no limit. ``render`` sets it from
+    #: ``request_room`` when the request would pass that, never otherwise.
     shown_items_room: int = 0
     #: The latest children of the edited candidate with their parents' train records
     #: (``Loop._edit_pairs``), for "What the last edit changed".
@@ -1188,7 +1199,7 @@ class ProposalContext:
             self.item_records, budget=self.evidence_budget, findings=self.reader_findings,
             analysed=(None if self.analysis is None
                       else list(self.analysis.get("findings") or ())),
-            shown_room=self.shown_items_room)
+            shown_room=self.shown_items_room, settled=self._settled())
         return shown_whole(whole, f"under \"{TRAJECTORIES_HEADING.lstrip('# ')}\" below")
 
     def _leaderboard_lines(self) -> list[str]:
@@ -1304,7 +1315,39 @@ class ProposalContext:
         """The request, as text, for a model optimizer: the score, the pipeline (once, as
         the view), what this run has tried, what the analysts found, the edits it may
         make, the items, then the reference, and the answer's form last. Fills
-        ``omissions`` with any text it had to leave out of an item."""
+        ``omissions`` with any text it had to leave out of an item.
+
+        Within ``request_room``: a request that would pass it is made again with the
+        items shown whole limited to what the rest of it leaves (``shown_items_room``),
+        whole and in rank order, at least one (`_fit_shown`); nothing else gives way."""
+        text = self._render_request()
+        if not self.request_room or self.shown_items_room or len(text) <= self.request_room:
+            return text
+        items = _ordered_items(self.item_records or ())
+        if not items or _all_whole(items, self.evidence_budget):
+            return text  # every item whole: nothing is picked, so nothing gives way
+        settled = self._settled()
+        picked = trajectories_whole(
+            self.item_records, budget=self.evidence_budget, findings=self.reader_findings,
+            analysed=(None if self.analysis is None
+                      else list(self.analysis.get("findings") or ())), settled=settled)
+        refs = error_refs(_pipeline_items(self.item_records))
+        room = self.request_room - (len(text) - sum(_shown_size(r, settled, refs)
+                                                     for r in picked))
+        # What else the request says about an item can depend on whether it is shown
+        # whole (another section points to it, or says it itself), so the room is
+        # narrowed by any overshoot, a few times.
+        for _ in range(3):
+            fitted = replace(self, shown_items_room=max(1, room))
+            text = fitted._render_request()
+            if len(text) <= self.request_room or room <= 1:
+                break
+            room -= len(text) - self.request_room
+        # ``omissions`` is the same list in both (``replace`` keeps it), filled by the last.
+        return text
+
+    def _render_request(self) -> str:
+        """`render`'s request at the context's ``shown_items_room``."""
         self.omissions.clear()
         sections = [
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
@@ -3481,14 +3524,22 @@ def _shown_items(items: Sequence[dict[str, Any]], findings: Sequence[dict[str, A
     return failing, passing, by_findings
 
 
+def _shown_size(record: dict[str, Any], settled: Collection[str] | None,
+                refs: Mapping[str, int] | None) -> int:
+    """The characters ``record`` takes under "Some items in full", as `_trajectories` shows
+    it (its steps' prompt lines with ``settled``, its error as a cause number)."""
+    return len(_trajectory(record, ITEM_TEXT_MAX, None, settled, refs)) + 2
+
+
 def _fit_shown(failing: Sequence[dict[str, Any]], passing: Sequence[dict[str, Any]],
-               room: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
-                                   list[dict[str, Any]]]:
+               room: int, size: Callable[[dict[str, Any]], int]
+               ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """The items `_shown_items` picked that fit ``room`` characters together, chosen, never
     cut: failures and their contrasting successes in turn (failure 1, success 1, failure 2,
-    ...), each in its rank order, stopping at the first that does not fit. The first item
-    is kept whatever its size, so the section never shows none. ``room`` 0 is no limit
-    (`ProposalContext.shown_items_room`). The third value is what was left out."""
+    ...), each in its rank order, stopping at the first that does not fit, each measured
+    as shown (``size``, `_shown_size`). The first item is kept whatever its size, so the
+    section never shows none. ``room`` 0 is no limit (`ProposalContext.shown_items_room`).
+    The third value is what was left out."""
     if room <= 0:
         return list(failing), list(passing), []
     turns = [r for pair in itertools.zip_longest(failing, passing) for r in pair
@@ -3496,11 +3547,11 @@ def _fit_shown(failing: Sequence[dict[str, Any]], passing: Sequence[dict[str, An
     kept: list[dict[str, Any]] = []
     used = 0
     for record in turns:
-        size = len(_trajectory(record)) + 2
-        if kept and used + size > room:
+        chars = size(record)
+        if kept and used + chars > room:
             break
         kept.append(record)
-        used += size
+        used += chars
     keep = {id(r) for r in kept}
     return ([r for r in failing if id(r) in keep], [r for r in passing if id(r) in keep],
             [r for r in turns if id(r) not in keep])
@@ -3523,17 +3574,21 @@ def _analysed_findings(analysed: Sequence[dict[str, Any]]) -> list[dict[str, Any
 def trajectories_whole(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
                        findings: Sequence[dict[str, Any]] | None = None,
                        analysed: Sequence[dict[str, Any]] | None = None,
-                       shown_room: int = 0) -> list[dict[str, Any]]:
+                       shown_room: int = 0,
+                       settled: Collection[str] | None = None) -> list[dict[str, Any]]:
     """The records "Trajectories of the candidate being edited" shows whole, by the same
     rule `_trajectories` applies: every item when they all fit, else the items
-    `_shown_items` picks that fit ``shown_room`` (`_fit_shown`). Another section names these by
+    `_shown_items` picks that fit ``shown_room`` (`_fit_shown`; ``settled`` as
+    `_trajectories` has it, so each is measured as shown). Another section names these by
     item instead of repeating them."""
     items = _ordered_items(records)
     if not items or _all_whole(items, budget):
         return items
     failing, passing, _cited = _shown_items(
         items, _analysed_findings(analysed) if analysed is not None else findings)
-    failing, passing, _left = _fit_shown(failing, passing, shown_room)
+    refs = error_refs(_pipeline_items(records))
+    failing, passing, _left = _fit_shown(failing, passing, shown_room,
+                                         lambda r: _shown_size(r, settled, refs))
     return [*failing, *passing]
 
 
@@ -3631,7 +3686,8 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
     failing, passing, cited = _shown_items(items, findings)
-    failing, passing, left_out = _fit_shown(failing, passing, shown_room)
+    failing, passing, left_out = _fit_shown(failing, passing, shown_room,
+                                            lambda r: _shown_size(r, settled, refs))
     chosen = [*failing, *passing]
     # An item shown in full below says its expected choice's text there (its choice
     # line): the table gives only the label for it.
@@ -3654,8 +3710,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                 + f" (of {len(items)}; the table above has every one). {ITEM_FORM}"]
     if left_out:
         examples.append(
-            f"The rule picked {len(left_out)} more, left out to keep these within {shown_room} "
-            "characters (the run's `proposer_evidence_chars`): "
+            f"The rule picked {len(left_out)} more, left out so this request fits the "
+            f"optimizer model's context ({shown_room} characters were left for items in "
+            "full): "
             + ", ".join(f"{r.get('id')} ({'passed' if r.get('passed') else 'failed'})"
                         for r in left_out) + ". Each is in the table above.")
     for record in chosen:

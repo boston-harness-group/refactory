@@ -621,7 +621,7 @@ spine through its runner, the walker in memory).
   its first repeat.
 - **Full detail, one call's budget.** Items are shown whole, every step output
   unclipped. One call's evidence budget is 120000 characters (`TRAJECTORY_BUDGET`;
-  the context's `evidence_budget`; the run's `proposer_evidence_chars` when set). When every item fits, they all go inline into the
+  the context's `evidence_budget`). When every item fits, they all go inline into the
   one proposal call.
 - **Readers, when they do not fit.** The items are split into as few balanced groups
   of whole items as fit the budget, in the same order, each item in exactly one group.
@@ -650,13 +650,20 @@ spine through its runner, the walker in memory).
   Then items in full: first the items the
   readers cited, one per pattern in turn (failure patterns first), so every pattern has
   an item in full before any has a second; then failures and passes alternating. These
-  are chosen by rule, not size: by default every item the rule picks is shown, whatever
-  their total. With `proposer_evidence_chars` set, they are taken failure, success,
-  failure, ... in rank order until the next would pass that many characters (the first
-  is always shown), and the rest are named by id under "Some items in full"; each is
-  still in the table. Set it when long traces push the request past the optimizer
-  model's context: HoVer's 150 train items (about 12k characters each) gave 46 items in
-  full, about 590k characters, and every proposal failed "Prompt is too long". A reader call that fails is noted, with its items, and the proposal
+  are chosen by rule, not size, as long as the whole request fits the optimizer
+  model's context. The proposal request has a room of 400000 characters
+  (`PROPOSAL_ROOM`, the analysts' `ANALYST_ROOM`: Opus 4.6's 200k tokens less Claude
+  Code's system prompt and the reply), the system prompt and closing line included.
+  A request that would pass it is made again with only the items in full giving way:
+  they are taken failure, success, failure, ... in rank order until the next would
+  pass what the rest of the request leaves (the first is always shown), and the rest
+  are named by id under "Some items in full"; each is still in the table. The
+  readers' groups, their findings and "What the last edit changed" keep their own
+  budgets. A proposal the provider still refuses as too long is asked once more at
+  half its length, the analysts' retry; the trace marks it `context_retry`. HoVer's
+  150 train items (about 12k characters each) once gave 46 items in full, about 590k
+  characters, and every proposal failed "Prompt is too long".
+  A reader call that fails is noted, with its items, and the proposal
   goes ahead with the findings it has. An optimizer that calls no reader gets the
   table and the items in full.
 - **Clipping.** Only an item longer than the whole budget on its own is clipped, head
