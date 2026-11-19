@@ -235,9 +235,18 @@ def _item_sources(state: Mapping[str, Any]) -> dict[str, tuple[Any, ...]]:
 POPULATION_OPTIMIZERS = ("archive", "evolutionary", "islands", "map_elites")
 
 #: ``LoopConfig.selection`` values under ``val_gate``: empty picks the default
-#: (``default_selection``); ``single`` is SkillOpt's line; ``pool`` keeps the best
-#: candidates on validation as parents.
-SELECTIONS = ("", "single", "pool")
+#: (``default_selection``); ``checkpoint`` applies every change whose graph is not broken
+#: and keeps the best on validation as the winner; ``single`` is SkillOpt's line;
+#: ``pool`` keeps the best candidates on validation as parents.
+SELECTIONS = ("", "single", "pool", "checkpoint")
+
+#: Why a change is not applied under ``checkpoint`` (``Loop._apply_round``), short for a
+#: request's gate column: its train run failed, or a sibling scored higher on train.
+NOT_APPLIED = "not applied"
+
+#: The refusal code of a change whose graph failed its smoke check (``Loop._smoke_check``);
+#: a mechanics refusal, so the slim repair call may fix it (`optim.repair.MECHANICS_CODES`).
+SMOKE_CODE = "E-smoke"
 
 
 #: What a run without validation items says, in its log and its report, when it
@@ -249,13 +258,19 @@ PORTFOLIOS = ("", "prompt+pipeline")
 
 
 def default_selection(strategy: str, optimizer: str, picker: str = "") -> str:
-    """The ``selection`` a ``val_gate`` run gets when it names none: ``single`` for the
-    default loop with a single-parent optimizer (the SkillOpt-matched setting, as before
-    pools existed), ``pool`` for every other strategy, optimizer or parent picker."""
-    if (strategy == "default" and optimizer not in POPULATION_OPTIMIZERS
-            and picker not in POPULATION_OPTIMIZERS):
-        return "single"
+    """The ``selection`` a ``val_gate`` run gets when it names none: ``checkpoint`` for
+    the default loop with a single-parent optimizer, ``pool`` for every other strategy,
+    optimizer or parent picker. A SkillOpt-gate parity run names ``single``."""
+    if single_parent(strategy, optimizer, picker):
+        return "checkpoint"
     return "pool"
+
+
+def single_parent(strategy: str, optimizer: str, picker: str = "") -> bool:
+    """Whether a run is the default loop with a single-parent optimizer and no
+    population picker: the only runs ``checkpoint`` may select."""
+    return (strategy == "default" and optimizer not in POPULATION_OPTIMIZERS
+            and picker not in POPULATION_OPTIMIZERS)
 
 
 def _train_key(candidate: Candidate) -> float:
@@ -383,8 +398,10 @@ class LoopConfig:
     #: the parents, the pool and the winner; the last epoch's proposals are scored
     #: before the run ends; and with a test part ``outerloop.FinalEvaluation`` runs at
     #: the end. The winner is the incumbent: the best on val, replaced only by a
-    #: strictly higher val score. Needs a manifest with a val part; a custom strategy
-    #: (SkillOpt) keeps its own gate instead.
+    #: strictly higher val score. Under ``selection`` ``checkpoint`` (the default for
+    #: a single-parent optimizer) the train seed is fixed instead, and only the applied
+    #: candidates are rolled out on val (see ``selection``). Needs a manifest with a val
+    #: part; a custom strategy (SkillOpt) keeps its own gate instead.
     #:
     #: Not a setting: the run decides it (``Loop._resolve_val_gate``). On when the parts
     #: manifest has val items and the strategy is a built-in one, off otherwise: a run
@@ -434,6 +451,15 @@ class LoopConfig:
     portfolio: str = ""
     #: With ``val_gate``, how the validation average selects (``SELECTIONS``):
     #:
+    #: - ``checkpoint``: training as in ML. Each round's change is applied (of several,
+    #:   the one with the highest train score, the earlier on a tie) unless its graph is
+    #:   broken: refused by the validator, vetoed by the integrity judge, failing the
+    #:   smoke check after repair, or failing its train run. Only the applied candidate
+    #:   is rolled out on val, once: a checkpoint. The winner is the best checkpoint on
+    #:   val (a tie goes to the earlier one); the early stop counts rounds without a new
+    #:   best. No parent is re-scored: train rollouts use one seed for the whole run (the
+    #:   first epoch's), so a child and its parent are compared on the same shuffle.
+    #:   The default loop with a single-parent optimizer only.
     #: - ``single``: SkillOpt's line. A candidate is kept only if its val score strictly
     #:   beats the incumbent's (the gate's current candidate), and the incumbent (with
     #:   any candidate a person kept) is the only parent.
@@ -443,8 +469,8 @@ class LoopConfig:
     #:   on a strictly higher val score (a tie goes to the higher train score, then the
     #:   earlier candidate), and it is the winner.
     #:
-    #: Empty (the default) picks ``default_selection``: ``single`` for the default loop
-    #: with a single-parent optimizer, ``pool`` for every other strategy and for the
+    #: Empty (the default) picks ``default_selection``: ``checkpoint`` for the default
+    #: loop with a single-parent optimizer, ``pool`` for every other strategy and for the
     #: population optimizers and pickers. No effect without ``val_gate``.
     selection: str = ""
     #: The pool's size under ``selection`` ``pool``: the candidates with the best val
@@ -759,6 +785,15 @@ class Loop(OuterLoop):
         if self.config.selection not in SELECTIONS:
             raise LoopError(f"unknown selection {self.config.selection!r}; known: "
                             f"{', '.join(s for s in SELECTIONS if s)}")
+        picker_name = getattr(getattr(self.optimizer, "picker", None), "name", "")
+        if (self.config.selection == "checkpoint"
+                and not single_parent(self.name, self.config.optimizer, picker_name)):
+            raise LoopError(
+                "selection checkpoint trains one line of candidates, so it needs the default "
+                f"strategy and a single-parent optimizer; this run has the {self.name} "
+                f"strategy, the {self.config.optimizer} optimizer"
+                + (f" and the {picker_name} parent picker" if picker_name else "")
+                + "; use selection single or pool")
         pool_size = self.config.pool_size
         if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
             raise LoopError("pool_size must be a positive integer")
@@ -895,6 +930,14 @@ class Loop(OuterLoop):
         self._recorded_evaluations: dict[str, int] = {}
         #: Loop-private per-candidate train item records.
         self._train_item_records: dict[str, list[dict[str, Any]]] = {}
+        #: Every train run's outcomes, ``(candidate id, [(item id, passed), ...])`` in
+        #: scoring order, from the ``train_records`` events live and on replay
+        #: (`_note_recorded`): what an item's history is read from (`_with_item_history`).
+        self.__dict__.setdefault("_train_runs", [])
+        #: The smoke check's verdict on each candidate it ran (``smoke`` events, live and
+        #: replayed), so no graph is smoked twice, and how many smoke runs each had.
+        self._smoke_verdicts: dict[str, dict[str, Any]] = {}
+        self._smoke_runs: dict[str, int] = {}
         #: The loop-level parts manifest (train/val/test id lists), loaded from
         #: config.parts_manifest or the run root.
         self._parts_manifest: dict[str, list[str]] | None = None
@@ -1348,8 +1391,10 @@ class Loop(OuterLoop):
         defaults = LoopConfig()
         for key in self.RESUME_KEEPS:
             value = recorded.get(key)
-            if key == "selection" and value not in SELECTIONS:
-                continue
+            if key == "selection":
+                value = self._recorded_selection(recorded)
+                if value not in SELECTIONS:
+                    continue
             if key == "pool_size" and (isinstance(value, bool) or not isinstance(value, int)
                                        or value < 1):
                 continue
@@ -1367,6 +1412,19 @@ class Loop(OuterLoop):
             self._resumed_shape[key] = value
             Run(_loop=self).log(f"resume: keeping the run's recorded {key} {value!r} "
                                 f"(this launch said {current!r})")
+
+    def _recorded_selection(self, recorded: Mapping[str, Any]) -> Any:
+        """The ``selection`` a resumed run's ``config.json`` records. One that records the
+        gate on and no selection (or an empty one) selected by the default of its day,
+        which for the shape that now defaults to ``checkpoint`` was ``single``: it
+        resumes as ``single``, so its later epochs select by the rule its earlier ones
+        did."""
+        value = recorded.get("selection")
+        if value in (None, "") and recorded.get("val_gate") is True:
+            picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
+            if default_selection(self.name, self.config.optimizer, picker) == "checkpoint":
+                return "single"
+        return value
 
     def _note_removed_settings(self) -> None:
         """On resume, say in the run's log when its recorded ``config.json`` held a
@@ -1799,11 +1857,20 @@ class Loop(OuterLoop):
         A Task that shuffles per (item, seed) -- LiveMath's answer choices -- meets
         that seed. Without ``val_gate`` it is the run's seed, so every candidate of
         the run meets the same shuffle; with it, SkillOpt's per-epoch train seed
-        (``train_batch_seed``), as SkillOpt's train rollouts use.
+        (``train_batch_seed``), as SkillOpt's train rollouts use; under ``checkpoint``
+        the first epoch's for the whole run (``_epoch_seeds``), so a child and its
+        parent meet the same shuffle without a re-score.
         """
-        if self.config.val_gate:
+        if self._epoch_seeds():
             return train_batch_seed(self.config.seed, epoch)
+        if self.config.val_gate:
+            return train_batch_seed(self.config.seed, 1)
         return self.config.seed
+
+    def _epoch_seeds(self) -> bool:
+        """Whether train rollouts take a seed per epoch: under ``val_gate``, but not under
+        ``checkpoint``, whose fixed seed pairs every child with its parent's own run."""
+        return bool(self.config.val_gate and self.selection_mode() != "checkpoint")
 
     def _train_ids(self) -> list[str]:
         """The train part's item ids: the manifest's, else the Task's train split."""
@@ -1832,8 +1899,10 @@ class Loop(OuterLoop):
 
     def _fresh_evidence(self) -> bool:
         """Whether the edited candidate is re-scored each epoch on the whole train part:
-        always under ``val_gate``, the default loop's own gate."""
-        return bool(self.config.val_gate and self._custom_strategy is None)
+        under ``val_gate``, the default loop's own gate, but not under ``checkpoint``
+        (one train seed: a candidate's own run is its evidence)."""
+        return bool(self.config.val_gate and self._custom_strategy is None
+                    and self.selection_mode() != "checkpoint")
 
     def _refresh_edited_records(self) -> None:
         """Fresh evidence: score the edited candidate on this epoch's train sample with
@@ -1846,6 +1915,10 @@ class Loop(OuterLoop):
         scored again; a resumed run reads the epoch from the journal, so it does not
         either. Its score is left alone: only the records the optimizer reads change.
         """
+        if self.selection_mode() == "checkpoint":
+            # No re-score: a candidate's own train run is its evidence, on a minibatch
+            # too (comparisons then cover the items both runs scored).
+            return
         batch = self._minibatch(self.epoch)
         if not batch and not self._fresh_evidence():
             return
@@ -2327,8 +2400,13 @@ class Loop(OuterLoop):
         item_gate: threading.BoundedSemaphore | None = None,
         item_slots: bool = False,
         stop_event: threading.Event | None = None,
+        repeats: int | None = None,
+        traces: bool = True,
     ) -> tuple[Any, dict[str, Any]]:
-        """Independent bounded trials; any failed contract makes a candidate ineligible."""
+        """Independent bounded trials; any failed contract makes a candidate ineligible.
+
+        ``repeats`` (default ``LoopConfig.repeats``) is how many trials; ``traces`` False
+        writes no trace files (the smoke check's runs, `_smoke_check`)."""
         from refactory_dsh.nn.mode import RunResult
         from refactory_dsh.budgets import BudgetExhausted
 
@@ -2345,15 +2423,17 @@ class Loop(OuterLoop):
         cached = self._cached_measure(candidate, workdir, part, expected_ids, seed,
                                       gold_feedback=gold_feedback)
         if cached is not None:
-            self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
+            if traces:
+                self._write_traces(candidate, workdir, part, seed, cached[0].item_records)
             return cached
 
+        wanted = self.config.repeats if repeats is None else max(1, int(repeats))
         trials = []
         budget_cut = False  # a time or token budget refused or cut a trial
         all_item_records: list[dict[str, Any]] = []  # accumulate across repeats
         last = RunResult(exit_ok=False, error="no measurement completed")
         required = (self.config.resolved_profile.get("contract") or {}).get("required_artifacts", [])
-        for index in range(self.config.repeats):
+        for index in range(wanted):
             trial_dir = workdir if index == 0 else workdir / "trials" / str(index + 1)
             self._carry_ledger(trial_dir)
             self._write_subset(trial_dir, part, seed=seed, gold_feedback=gold_feedback)
@@ -2439,11 +2519,11 @@ class Loop(OuterLoop):
             if not result.exit_ok:
                 break
             if budget_exhausted_after_trial:
-                budget_cut = budget_cut or len(trials) < self.config.repeats
+                budget_cut = budget_cut or len(trials) < wanted
                 break
         scores = [t["score"] for t in trials if t["score"] is not None]
-        complete = len(trials) == self.config.repeats and all(t["exit_ok"] for t in trials)
-        summary = {"requested": self.config.repeats, "count": len(trials), "successful": len(scores),
+        complete = len(trials) == wanted and all(t["exit_ok"] for t in trials)
+        summary = {"requested": wanted, "count": len(trials), "successful": len(scores),
                    "mean": statistics.mean(scores) if scores else None,
                    "stdev": statistics.stdev(scores) if len(scores) > 1 else None,
                    "min": min(scores) if scores else None, "max": max(scores) if scores else None,
@@ -2466,7 +2546,8 @@ class Loop(OuterLoop):
         last.item_records = all_item_records
         workdir.mkdir(parents=True, exist_ok=True)
         (workdir / "measurements.json").write_text(json.dumps(summary, indent=2))
-        self._write_traces(candidate, workdir, part, seed, all_item_records)
+        if traces:
+            self._write_traces(candidate, workdir, part, seed, all_item_records)
         return last, summary
 
     def _settle_incidents(
@@ -2721,6 +2802,14 @@ class Loop(OuterLoop):
         occasion folder every time, and the holdout once, so they need no count. Called
         for every event written (`_journal`) and replayed, so a resume counts alike."""
         cid = record.get("id")
+        if event == "train_records" and cid is not None:
+            # Each train run's outcomes for the item history (`_with_item_history`): an
+            # item a harness incident or timeout kept from an outcome has none.
+            from refactory_dsh.optim.base import harness_timeout
+
+            self.__dict__.setdefault("_train_runs", []).append((str(cid), [
+                (str(r.get("id")), bool(r.get("passed"))) for r in record.get("records") or ()
+                if not r.get("not_scored") and not harness_timeout(r)]))
         if cid is None or event not in ("score", "rescore", "rescore_failed", "memory_rollout"):
             return
         cid = str(cid)
@@ -2966,6 +3055,8 @@ class Loop(OuterLoop):
         first: dict[str, dict[str, str]] = {}
         frozen = set(self.config.frozen) | {
             name for name, knob in self.parameters.items() if getattr(knob, "frozen", False)}
+        # Under ``checkpoint`` a change is not rejected: it is applied or not.
+        refused = NOT_APPLIED if self.selection_mode() == "checkpoint" else "rejected"
         for candidate in evaluated:
             decision = self._gate_decision(candidate.id)
             for name, entry in (candidate.state.get("knobs") or {}).items():
@@ -2979,7 +3070,7 @@ class Loop(OuterLoop):
                 )
                 if decision is not None:
                     counts = decisions.setdefault(name, {}).setdefault(
-                        str(entry["value"]), {"kept": 0, "rejected": 0, "not gated": 0})
+                        str(entry["value"]), {"kept": 0, refused: 0, "not gated": 0})
                     counts["kept" if decision in ("kept", "current") else decision] += 1
         attribution: dict[str, Any] = {}
         for name, values in sorted(buckets.items()):
@@ -3410,11 +3501,12 @@ class Loop(OuterLoop):
     def _selection_report(self) -> dict[str, Any]:
         """How this run selected, what its pool holds, and what the search cost.
 
-        ``setting``: ``single`` or ``pool`` under ``val_gate``, ``train`` without it.
-        ``pool``: the candidates the next round would choose parents from (the pool;
-        under ``single`` the incumbent and what a person kept; without the gate the
-        ``pool_size`` best by train score). ``lines_of_descent``: how many distinct
-        lines the pool holds, a line being the seed's child a candidate descends from
+        ``setting``: ``checkpoint``, ``single`` or ``pool`` under ``val_gate``, ``train``
+        without it. ``pool``: the candidates the next round would choose parents from (the
+        pool; under ``single`` and ``checkpoint`` the current candidate and what a person
+        kept; without the gate the ``pool_size`` best by train score).
+        ``lines_of_descent``: how many distinct lines the pool holds, a line being the
+        seed's child a candidate descends from
         (the seed is a line of its own), with ``largest_line_share``. ``edit_kinds``:
         the pool's candidates by the level of the edit that made each one (``seed``,
         ``prompt_knob``, ``pipeline``). ``parents_from_incumbent``: of the candidates
@@ -3430,7 +3522,7 @@ class Loop(OuterLoop):
         warning = NO_VALIDATION if setting == "train" else ""
         if setting == "pool":
             members = self._judged_ranked() if self._population_policy() else self._pool()
-        elif setting == "single":
+        elif setting in ("single", "checkpoint"):
             members = self._gated_parents()
         else:
             members = self.leaderboard(int(self.config.pool_size))
@@ -3799,8 +3891,14 @@ class Loop(OuterLoop):
         `n`. That is the whole of `keep`: without it, elite selection is a cull and a
         person's "follow this one up" would be silently dropped the moment a newer
         batch outscores it.
+
+        Under ``checkpoint`` the current candidate comes first (``_gated_parents``): it is
+        the one being trained, while the leaderboard's first, the best checkpoint, is
+        only the winner.
         """
-        chosen = self.leaderboard(n)
+        chosen = (self._gated_parents()[:n]
+                  if self.config.val_gate and self.selection_mode() == "checkpoint"
+                  else self.leaderboard(n))
         pinned = [
             candidate
             for candidate in self.leaderboard()
@@ -4361,19 +4459,26 @@ class Loop(OuterLoop):
 
         The val rollouts are rolled out first, up to ``max_concurrent_evaluations`` at
         once (``_prefetch_val``), and the decisions are then taken from the gate's cache.
+
+        Under ``checkpoint`` the seed starts the gate the same way, and every later round
+        is applied instead (``_apply_round``): only the applied candidate is rolled out.
         """
         from refactory_dsh.outerloop import RoundStopped
 
         gate = self._gate()
         judged = set(self._gate_accepted) | set(self._gate_rejected)
         pending = [c for c in self.population if c.evaluated and c.id not in judged]
+        checkpoint = self.selection_mode() == "checkpoint"
         cached = len(gate.cache)
-        self._prefetch_val(run, gate, pending)
+        if not checkpoint:
+            self._prefetch_val(run, gate, pending)
         if len(gate.cache) != cached:
             # Journaled now, so a run killed before the decisions rolls none again.
             self._store_gate_state()
             self._save_strategy_state()
         if pending and gate.best_id is None:
+            if checkpoint:
+                self._journaled_val(run, gate, pending[0])
             try:
                 gate.start(run, pending[0])
             except OuterLoopError as error:
@@ -4386,6 +4491,9 @@ class Loop(OuterLoop):
             self._save_strategy_state()
             pending = pending[1:]
         if not pending:
+            return
+        if checkpoint:
+            self._apply_round(run, pending)
             return
         try:
             accepted, rejected = gate.judge_round(run, pending)
@@ -4401,6 +4509,58 @@ class Loop(OuterLoop):
             self._gate_rounds.append([c.id for c in pending if c.id in decided])
         self._store_gate_state()
         self._save_strategy_state()
+
+    def _apply_round(self, run: Run, pending: Sequence[Candidate]) -> None:
+        """One ``checkpoint`` round: apply the change. Of the candidates whose train run
+        succeeded, the one with the highest train score (the earlier on a tie) is
+        applied: it alone is rolled out on val, once, becomes current, and becomes the
+        best when its val score beats the best's (``ValidationGate.offer_best``: a tie
+        keeps the earlier). The rest are not applied, a failed train run included, and
+        get no val run. A val rollout the harness refuses (a spent budget) leaves the
+        round unjudged, as under ``single``. Journaled (``checkpoint``)."""
+        gate = self._gate()
+        parent = gate.current_id
+        order = {c.id: index for index, c in enumerate(pending)}
+        trained = [c for c in pending if c.exit_ok and c.score is not None]
+        chosen = (max(trained, key=lambda c: (float(c.score or 0.0), -order[c.id]))
+                  if trained else None)
+        best = False
+        if chosen is not None:
+            self._journaled_val(run, gate, chosen)
+            try:
+                score, _cached = gate.score(run, chosen)
+            except OuterLoopError as error:
+                run.log(f"val gate stopped: {error}")
+                return
+            gate.current_id, gate.current_score = chosen.id, score
+            best = gate.offer_best(chosen.id, score, run=run)
+        applied = [chosen] if chosen is not None else []
+        others = [c for c in pending if c is not chosen]
+        self._gate_accepted.extend(c.id for c in applied)
+        self._gate_rejected.extend(c.id for c in others)
+        self._gate_rounds.append([c.id for c in pending])
+        self._journal("checkpoint", epoch=self.epoch, parent=parent,
+                      applied=chosen.id if chosen is not None else None,
+                      not_applied=[c.id for c in others],
+                      val=gate.cache.get(chosen.id) if chosen is not None else None,
+                      new_best=best, best=gate.best_id, best_val=gate.best_score)
+        self._progress("checkpoint", applied=chosen.id if chosen is not None else None,
+                       not_applied=len(others),
+                       val=gate.cache.get(chosen.id) if chosen is not None else None,
+                       new_best=best, best_val=gate.best_score)
+        self._store_gate_state()
+        self._save_strategy_state()
+
+    def _journaled_val(self, run: Run, gate: ValidationGate, candidate: Candidate) -> None:
+        """Under ``checkpoint``, a val score the journal already holds for ``candidate``
+        (a run killed after the rollout and before the decision) goes into the gate's
+        cache, so a resumed run does not roll it out again."""
+        if candidate.id in gate.cache:
+            return
+        held = [s for s in (self._part_results.get(candidate.id) or {}).get(task_module.VAL) or ()
+                if not s.get("budget_stopped")]
+        if held:
+            gate.cache[candidate.id] = gate.val_score(run, candidate)
 
     def _prefetch_val(self, run: Run, gate: ValidationGate, pending: Sequence[Candidate]) -> None:
         """Roll the candidates the gate will judge out on val, in waves of up to
@@ -4470,8 +4630,8 @@ class Loop(OuterLoop):
 
     def selection_mode(self) -> str:
         """How the validation average selects in this run (``LoopConfig.selection``):
-        ``single`` or ``pool`` under the default loop's ``val_gate``; empty without it
-        (train scores select) or with a custom strategy (which keeps its own gate).
+        ``checkpoint``, ``single`` or ``pool`` under the default loop's ``val_gate``; empty
+        without it (train scores select) or with a custom strategy (which keeps its own gate).
         An explicit setting wins; then the one the run's gate state recorded (so a
         reader that rebuilds a finished run as a plain ``Loop`` reads the run's own
         rule); then ``default_selection``."""
@@ -4480,7 +4640,7 @@ class Loop(OuterLoop):
         if self.config.selection:
             return self.config.selection
         stored = (self._strategy_state.get("val_gate") or {}).get("selection")
-        if stored in ("single", "pool"):
+        if stored in ("single", "pool", "checkpoint"):
             return str(stored)
         picker = getattr(getattr(self.optimizer, "picker", None), "name", "")
         return default_selection(self.name, self.config.optimizer, picker)
@@ -4696,7 +4856,24 @@ class Loop(OuterLoop):
         if not run.has_part(task_module.TEST):
             final.skip(run, "the parts manifest has no 'test' part", save)
             return
+        self._reuse_final_selection(final, save)
         final.run(run, self._gate(), seed=self.config.seed, save=save)
+
+    def _reuse_final_selection(self, final: FinalEvaluation, save: Any) -> None:
+        """Under ``checkpoint`` the final candidate is a checkpoint, already scored on
+        val once: ``final_selection`` takes that score from the gate's cache rather than
+        a second rollout (``FinalEvaluation`` would roll it again when it is not the
+        best)."""
+        gate = self._gate()
+        if (self.selection_mode() != "checkpoint" or final.completed
+                or gate.current_id not in gate.cache):
+            return
+        score = gate.cache[gate.current_id]
+        final.result = {"status": "running", "final_selection": score}
+        final.record("final_selection_eval", action="reused", score=score,
+                     best_score=gate.best_score)
+        final.completed.add("final_selection")
+        save()
 
     def final_evaluation(self) -> dict[str, Any]:
         """The post-training evaluation's figures, for the report (``val_gate``)."""
@@ -4748,7 +4925,9 @@ class Loop(OuterLoop):
             self._gate_population(run or Run(_loop=self))
             # What this epoch's gating decided, for the epoch's progress line.
             self._epoch_gate = {"kept": len(self._gate_accepted) - before[0],
-                                "rejected": len(self._gate_rejected) - before[1]}
+                                "rejected": len(self._gate_rejected) - before[1],
+                                **({"selection": "checkpoint"}
+                                   if self.selection_mode() == "checkpoint" else {})}
             # SkillOpt's early stop, checked right after the epoch's gating so a
             # stopping run proposes nothing it will not score.
             self._count_stale_epoch()
@@ -4795,6 +4974,16 @@ class Loop(OuterLoop):
             # The pool, the incumbent first: what every choice under ``pool`` reads.
             pool = self._pool()
             return pool[:limit] if limit else pool
+        if self.config.val_gate and self.selection_mode() == "checkpoint":
+            # The checkpoints (every applied candidate), the best on val first (the
+            # winner; of a val tie, the earlier), then by val score, then population order.
+            gate = self._gate()
+            accepted = set(self._gate_accepted)
+            order = {c.id: index for index, c in enumerate(self.population)}
+            ordered = sorted(
+                [c for c in self._evaluated() if c.id in accepted and c.id not in self.rejected],
+                key=lambda c: (c.id != gate.best_id, -gate.cache.get(c.id, 0.0), order[c.id]))
+            return ordered[:limit] if limit else ordered
         if self.config.val_gate:
             # The candidates the gate accepted, a failed train run included, ranked
             # by their val score: what the gate selects on, not the train score.
@@ -4866,7 +5055,8 @@ class Loop(OuterLoop):
         (in it now), ``left pool`` (in it after the gating that judged it, pushed out
         since), ``rejected`` (never in it, or rejected by a person) or ``below pool``
         (never in it, but a population policy still breeds from every judged
-        candidate)."""
+        candidate). Under ``checkpoint``: ``current`` (the last applied), ``kept``
+        (applied, since replaced) or ``not applied`` (`NOT_APPLIED`), else ``not gated``."""
         if not self.config.val_gate or self._custom_strategy is not None:
             return None
         gate = self._gate()
@@ -4886,7 +5076,7 @@ class Loop(OuterLoop):
         if candidate_id in self._gate_accepted:
             return "kept"
         if candidate_id in self._gate_rejected:
-            return "rejected"
+            return NOT_APPLIED if self.selection_mode() == "checkpoint" else "rejected"
         return "not gated"
 
     def scoring(self) -> dict[str, Any]:
@@ -5672,8 +5862,10 @@ class Loop(OuterLoop):
             # Read now, not at construction: the point of steering a search is that a
             # note added while it runs reaches the next proposal.
             steering=self._steering_block(),
-            item_records=self._with_item_meta(self._parent_train_records(board)),
-            parent_item_records=self._with_item_meta(self._parent_train_records(board)),
+            item_records=self._with_item_history(
+                self._with_item_meta(self._parent_train_records(board))),
+            parent_item_records=self._with_item_history(
+                self._with_item_meta(self._parent_train_records(board))),
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
@@ -5854,10 +6046,10 @@ class Loop(OuterLoop):
     def _records_like(self, parent_id: str, child_id: str) -> tuple[list[dict[str, Any]], bool]:
         """The parent's train records to compare with the child's: from the child's
         epoch (the same seed) when the parent was scored then, else its latest; and
-        whether the two share a seed. Without ``val_gate`` every train rollout uses the
-        run's seed, so they always do."""
+        whether the two share a seed. Without ``val_gate``, or under ``checkpoint``, every
+        train rollout uses one seed, so they always do."""
         latest = list(self._train_item_records.get(parent_id, []))
-        if not self.config.val_gate:
+        if not self._epoch_seeds():
             return latest, True
         at = self._records_epoch.get(child_id)
         history = self._records_by_epoch.get(parent_id, {})
@@ -5876,10 +6068,11 @@ class Loop(OuterLoop):
         that round share its seed. Without ``val_gate`` every train rollout uses the
         run's seed, so the latest records of both always do. When the parent has no
         records from the child's round the pair does not share a seed (``False``) and
-        the parent's latest are returned for a caller that still wants them."""
+        the parent's latest are returned for a caller that still wants them. Under
+        ``checkpoint`` (one seed, no re-score) each one's own run is its only one."""
         child_latest = list(self._train_item_records.get(child_id, []))
         parent_latest = list(self._train_item_records.get(parent_id, []))
-        if not self.config.val_gate:
+        if not self._epoch_seeds():
             return parent_latest, child_latest, True
         rounds = self._records_by_epoch.get(child_id) or {}
         at = min(rounds) if rounds else self._records_epoch.get(child_id)
@@ -5904,8 +6097,9 @@ class Loop(OuterLoop):
             line.append(node)
             node = by_id.get(node.parent)
         line.reverse()
+        # The latest refused children: rejected by the gate, or (``checkpoint``) not applied.
         rejected = [c for c in self.population if c.evaluated and c not in line
-                    and self._gate_decision(c.id) == "rejected"]
+                    and self._gate_decision(c.id) in ("rejected", NOT_APPLIED)]
         chosen = (line + rejected[-REASONING_ENTRIES:])
         chosen.sort(key=lambda c: self.population.index(c))
         entries = []
@@ -6026,7 +6220,7 @@ class Loop(OuterLoop):
         found: dict[str, dict[str, Any]] = {}
         if not key.startswith("fresh"):
             held = (self._records_by_epoch.get(cid) or {}).get(epoch)
-            if held is None and not self.config.val_gate:
+            if held is None and not self._epoch_seeds():
                 held = self._train_item_records.get(cid)
             found.update(_by_item(held or ()))
         for item, record in (self._memory_rollouts.get((cid, key)) or {}).items():
@@ -6136,6 +6330,10 @@ class Loop(OuterLoop):
                                    evaluated=0, rolled=0, tried=tried, refused=refused,
                                    rejected=rejected[6])
             return
+        if self.selection_mode() == "checkpoint":
+            self._make_checkpoint_memory(epoch, prev, current, same=same, tried=tried,
+                                         refused=refused)
+            return
         # The two rollouts, each (candidate, the epoch whose seed it used, its key, what it
         # is). Under the gate: both candidates' rollouts of this epoch, or, when nothing
         # replaced the current, its previous epoch's and this epoch's. Without the gate
@@ -6169,6 +6367,33 @@ class Loop(OuterLoop):
         self._make_memory_pass(epoch, prev, current, same=same, sample=sample,
                                records=records, sides=sides, evaluated=evaluated,
                                rolled=rolled, tried=tried, refused=refused)
+
+    def _make_checkpoint_memory(self, epoch: int, prev: Candidate, current: Candidate, *,
+                                same: bool, tried: list[dict[str, Any]],
+                                refused: list[dict[str, Any]]) -> None:
+        """The memory pass under ``checkpoint``: the candidate current when the last epoch
+        proposed against the one applied since, each from its own train run (one seed for
+        the run), on items sampled from those both ran; nothing is rolled out. With
+        nothing applied and no change that was not applied moving an item
+        (`_rejected_side`), there is nothing to compare: no call is made and the note is
+        kept, marked not updated."""
+        from refactory_dsh.optim import memory
+        from refactory_dsh.optim.base import _by_item
+
+        if same:
+            self._keep_memory({"epoch": epoch, "generation": self.generation, "prev": prev.id,
+                               "curr": current.id, "same": True, "evaluated": 0, "rollouts": 0,
+                               "error": "nothing was applied this epoch and no change that "
+                                        "was not applied moved an item"}, None)
+            return
+        held = [_by_item(self._train_item_records.get(c.id) or ()) for c in (prev, current)]
+        sample = memory.sample_ids(sorted(set(held[0]) & set(held[1])), int(self.config.seed),
+                                   epoch)
+        self._make_memory_pass(epoch, prev, current, same=False, sample=sample,
+                               records=[self._with_meta(h) for h in held],
+                               sides=[(prev, 0, "", "its own train run"),
+                                      (current, 0, "", "its own train run (the same train seed)")],
+                               evaluated=0, rolled=0, tried=tried, refused=refused)
 
     def _with_meta(self, held: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         """Records by item, each with its declared metadata when the mode reads any."""
@@ -6217,8 +6442,11 @@ class Loop(OuterLoop):
         at = "its rollout in the round the change was evaluated in (one train seed for both)"
         return (child, shown, self._with_meta(_by_item(parent_records)),
                 self._with_meta(_by_item(child_records)), at, at,
-                {"child": child.id, "noun": memory.REJECTED_NOUN if self.config.val_gate
-                 else memory.NOT_KEPT_NOUN, "changed": len(changed), "shown": len(shown),
+                {"child": child.id,
+                 "noun": (memory.NOT_KEPT_NOUN if not self.config.val_gate
+                          else memory.NOT_APPLIED_NOUN if not self._epoch_seeds()
+                          else memory.REJECTED_NOUN),
+                 "changed": len(changed), "shown": len(shown),
                  "broken": len(moved["broken"]), "fixed": len(moved["fixed"]),
                  "shared": moved["shared"], "others": [c for c in others if c != child.id]})
 
@@ -6248,7 +6476,7 @@ class Loop(OuterLoop):
             "counts": memory.counts(entries), "evaluated": evaluated, "rollouts": rolled,
             **({"rejected": dict(rejected)} if rejected else {})}
 
-        gated = bool(self.selection_mode())
+        gated = self.selection_mode() or False
         # The tally of each change tried against the noise (`memory.change_tally_lines`):
         # one source for this call and, with the note it writes, the proposer's request.
         tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
@@ -6314,7 +6542,7 @@ class Loop(OuterLoop):
 
         return objective_with_policy(float(self.config.parsimony),
                                      item_mean=bool(self._score_is_item_mean),
-                                     gated=bool(self.selection_mode()))
+                                     gated=self.selection_mode() or False)
 
     def _tried_in_round(self, round_: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Every change the optimizer proposed in epoch ``round_``'s proposal round, for
@@ -6418,6 +6646,29 @@ class Loop(OuterLoop):
         if self._item_meta_reader() is None:
             return records
         return [{**record, "item_meta": self._item_meta(record)} for record in records]
+
+    def _with_item_history(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each failing record with its item's history in this run (``item_history``,
+        `optim.evidence.item_history`), for its heading: how often the item was solved in
+        the run's train runs and on how many graphs. Information only: it selects nothing.
+
+        Read from every train run's records (`_note_recorded`, the ``train_records``
+        events, so a resume rebuilds it exactly), each repeat once; smoke and memory runs,
+        val, harness incidents and harness timeouts are left out. A passing record, or an
+        item with no run but this one, gets none."""
+        from refactory_dsh.optim.evidence import item_history
+
+        if all(r.get("passed") for r in records):
+            return records
+        runs: dict[str, list[tuple[str, bool]]] = {}
+        for cid, outcomes in self.__dict__.get("_train_runs") or ():
+            for item, passed in outcomes:
+                runs.setdefault(item, []).append((cid, passed))
+        out = []
+        for record in records:
+            said = "" if record.get("passed") else item_history(runs.get(str(record.get("id")), ()))
+            out.append({**record, "item_history": said} if said else record)
+        return out
 
     def _edit_count(self, candidate: Candidate) -> dict[str, int] | None:
         """``candidate``'s own edits counted by logical change (`optim.edit_count`) against
@@ -6663,6 +6914,101 @@ class Loop(OuterLoop):
                        categories=found.get("categories"), vetoed=vetoed,
                        error=found.get("error"))
         return [integrity.refusal(found, policy)] if vetoed else candidate
+
+    # ── the smoke check (``Run.attempt``, the default loop's own proposals) ───────
+    def _smoke_items(self, parent: Candidate) -> list[str]:
+        """The train items a child of ``parent`` is smoked on: the first (by item id) its
+        parent answered wrong (no error, not a harness timeout or incident) and the first it
+        passed, from the parent's latest train records; fewer when it has neither. By id,
+        so the pick does not follow the order a seed shuffled the items into."""
+        from refactory_dsh.optim.base import harness_timeout
+
+        records = sorted((r for r in self._train_item_records.get(parent.id) or ()
+                          if not r.get("not_scored") and not harness_timeout(r)),
+                         key=lambda r: (str(r.get("id")), int(r.get("repeat") or 1)))
+        wrong = next((r for r in records if not r.get("passed") and not r.get("error_text")),
+                     None)
+        right = next((r for r in records if r.get("passed")), None)
+        return list(dict.fromkeys(str(r.get("id")) for r in (wrong, right) if r is not None))
+
+    def _smoke_check(self, parent: Candidate, candidate: Candidate) -> Candidate | list[str]:
+        """Run a new candidate on up to two train items (`_smoke_items`) before it is
+        evaluated: ``candidate``, or an ``E-smoke`` refusal when an item failed with an
+        error (`optim.base.pipeline_item_errors`) or the run failed before any item. A
+        mechanics refusal: the slim repair call may fix it, and its fix is smoked again.
+
+        One trial, gold feedback off, the seed the candidate's train run will use, in
+        ``runs/<id>/occasions/smoke_<n>``. An interrupted run, a harness timeout or
+        incident, and a spent budget are inconclusive and pass; with no evaluation left
+        (``max_evaluations``), or no room in ``max_rollouts``, it does not run. Its records
+        are no train records (no item history, no traces); its items count as rollouts,
+        not as an evaluation. Journaled (``smoke``), so a resumed run never smokes a graph twice.
+        The default loop's proposals only: a custom strategy (SkillOpt) is not smoked."""
+        if self._custom_strategy is not None:
+            return candidate
+        held = self._smoke_verdicts.get(candidate.id)
+        if held is not None:
+            return [self._smoke_refusal(held)] if held.get("outcome") == "failed" else candidate
+        items = self._smoke_items(parent)
+        if not items or self.evaluations >= self.config.max_evaluations:
+            # Nothing to run it on, or a candidate the evaluation budget cannot score.
+            return candidate
+        cap = self.config.max_rollouts
+        if cap is not None and self.rollouts + len(items) > cap:
+            return candidate
+        seed = self._train_seed(self.epoch + 1)
+        with self._state_lock:
+            number = self._smoke_runs.get(candidate.id, 0) + 1
+        workdir = self.root / "runs" / candidate.id / "occasions" / f"smoke_{number}"
+        self._archive_unfinished(candidate.id, workdir)
+        task_module.make_manifest(workdir, train_ids=items)
+        result, measurements = self._measure(candidate, workdir, task_module.TRAIN, seed=seed,
+                                             items=items, repeats=1, traces=False)
+        outcome, errors = self._smoke_outcome(result, measurements)
+        rolled = ((len(result.item_records or ()) or 1)
+                  if measurements.get("count") and not measurements.get("cached_from") else 0)
+        record = {"id": candidate.id, "parent": parent.id, "epoch": self.epoch,
+                  "items": items, "seed": seed, "outcome": outcome, "errors": errors,
+                  **({"error": result.error} if outcome == "failed" and not errors else {}),
+                  "rollouts": rolled, "measurements": measurements}
+        with self._state_lock:
+            self._smoke_runs[candidate.id] = number
+            self._smoke_verdicts[candidate.id] = record
+            self.rollouts += rolled
+            self._journal("smoke", **record)
+            self._journal("rollouts", rollouts=self.rollouts)
+        self._progress("smoke", candidate=candidate.id, parent=parent.id, items=len(items),
+                       outcome=outcome, errors=errors, error=record.get("error"))
+        return [self._smoke_refusal(record)] if outcome == "failed" else candidate
+
+    def _smoke_outcome(self, result: Any, measurements: Mapping[str, Any]
+                       ) -> tuple[str, list[dict[str, Any]]]:
+        """``("failed", errors)``, ``("passed", [])`` or ``("inconclusive", [])`` for a
+        smoke run (`_smoke_check`)."""
+        from refactory_dsh.optim.base import pipeline_item_errors
+
+        if (measurements.get("budget_stopped") or not measurements.get("count")
+                or self._interruption(result)):
+            return "inconclusive", []
+        errors = pipeline_item_errors(result.item_records or ())
+        if errors:
+            return "failed", errors
+        if not result.exit_ok and not result.item_records:
+            return "failed", []
+        return "passed", []
+
+    @staticmethod
+    def _smoke_refusal(record: Mapping[str, Any]) -> str:
+        """The ``E-smoke`` reason: what failed, where, on which item."""
+        from refactory_dsh.optim.base import _clip
+
+        items = len(record.get("items") or ())
+        said = "; ".join(
+            f"{e.get('kind')}" + (f" at node {e['node']}" if e.get("node") else "")
+            + f" (item {e.get('item')}): {e.get('first')}"
+            for e in list(record.get("errors") or ())[:2])
+        return (f"{SMOKE_CODE}: a smoke run on {items} train item(s) the parent ran without an "
+                "error failed: " + (said or f"before any item: {_clip(record.get('error'), 300)}"))
 
     def _integrity_of(self, candidate_id: str) -> dict[str, Any] | None:
         """The latest proposal verdict on ``candidate_id`` (the change ledger's column);
@@ -7241,6 +7587,13 @@ class Loop(OuterLoop):
             elif event in ("rescore", "rescore_failed"):
                 rescores += 1
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 1))
+            elif event == "smoke":
+                # A smoke run is a measurement, never an evaluation; its verdict is kept so
+                # a resumed run does not smoke the same graph again.
+                cid = str(record.get("id"))
+                rescore_measurements += int((record.get("measurements") or {}).get("count", 0))
+                self._smoke_verdicts[cid] = {k: v for k, v in record.items() if k != "event"}
+                self._smoke_runs[cid] = self._smoke_runs.get(cid, 0) + 1
             elif event == "train_minibatch":
                 self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
             elif event == "train_records_epoch":
@@ -7571,26 +7924,31 @@ def _portfolio_section(portfolio: dict[str, Any]) -> list[str]:
     if not portfolio:
         return []
     pool = portfolio.get("selection") == "pool"
+    checkpoint = portfolio.get("selection") == "checkpoint"
     rows = [[level, entry["proposed"], entry["evaluated"], entry["kept"],
              *([entry.get("in_pool", 0)] if pool else []), entry["evaluations"]]
             for level, entry in portfolio["by_level"].items()]
     lines = ["## Portfolio", "",
              f"`{portfolio['setting']}`: {portfolio['rounds']} round(s) asked for one candidate "
              f"per edit level; the candidates beyond the batch size of {portfolio['batch_size']} "
-             f"cost {portfolio['extra_evaluations']} evaluation(s) (train and val runs). The "
-             "gate judges a round's candidates together, each against the current candidate "
-             "as the round starts, and accepts the one with the highest val score (ties: higher "
-             "train score, then the one proposed first)"
-             + (" as the new incumbent, if it beats the current one strictly" if pool else "")
-             + ": a candidate that beat its parent on val but lost to a sibling is marked "
-             "shadowed."
+             f"cost {portfolio['extra_evaluations']} evaluation(s) (train and val runs). "
+             + ("Of a round's candidates whose train run succeeded, the one with the highest "
+                "train score (ties: the one proposed first) is applied; only it is scored on "
+                "val." if checkpoint else
+                "The gate judges a round's candidates together, each against the current "
+                "candidate as the round starts, and accepts the one with the highest val score "
+                "(ties: higher train score, then the one proposed first)"
+                + (" as the new incumbent, if it beats the current one strictly" if pool else "")
+                + ": a candidate that beat its parent on val but lost to a sibling is marked "
+                "shadowed.")
              + (" Under pool selection every judged candidate may also enter the pool of the "
                 "best on val: `in pool` is in it now, `left pool` was in it when judged and "
                 "was pushed out since, `rejected` never entered it (`below pool` when the "
                 "parent picker still breeds from every judged candidate). `accepted` marks a "
                 "former incumbent." if pool else ""), "",
              _md_table(["level", "proposed", "evaluated",
-                        "accepted as incumbent" if pool else "kept by the gate",
+                        "accepted as incumbent" if pool else "applied" if checkpoint
+                        else "kept by the gate",
                         *(["in pool now"] if pool else []), "evaluations"], rows),
              ""]
     round_rows = []
@@ -7622,6 +7980,10 @@ def _selection_section(selection: dict[str, Any]) -> list[str]:
                  "strictly higher validation score."),
         "single": ("`single`: SkillOpt's line; a candidate is kept only on a strictly higher "
                    "validation score than the incumbent's, and the incumbent is the only parent."),
+        "checkpoint": ("`checkpoint`: each round's change is applied unless its graph is broken "
+                       "(refused, vetoed, failing the smoke check or its train run); each applied "
+                       "candidate is scored on validation once, and the winner is the best of "
+                       "these checkpoints."),
         "train": "`train`: no validation gate, so train scores choose the parents and the winner.",
     }.get(setting, f"`{setting}`")
     budget = selection.get("budget") or {}

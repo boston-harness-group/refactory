@@ -127,11 +127,19 @@ class Run:
         With ``integrity_judge`` on, a proposal that became a valid candidate is also
         judged (``Loop._integrity_check``): one call of the optimizer's model, charged
         to the run's token and time budgets; under ``veto`` an ``exploit`` is refused
-        here (``E-integrity``), so every strategy's proposals pass the same judge."""
+        here (``E-integrity``), so every strategy's proposals pass the same judge.
+
+        Then, in the default loop, the smoke check (``Loop._smoke_check``): the candidate
+        is run on up to two of its parent's train items, and a run that fails with an
+        error is refused (``E-smoke``), a mechanics refusal a repair may fix. A custom
+        strategy's proposals are not smoked."""
         outcome = self.mechanics(proposal, parent)
         check = getattr(self._loop, "_integrity_check", None)
         if not isinstance(outcome, list) and callable(check):
             outcome = check(proposal, parent, outcome)
+        smoke = getattr(self._loop, "_smoke_check", None)
+        if not isinstance(outcome, list) and callable(smoke):
+            outcome = smoke(parent, outcome)
         if isinstance(outcome, list) and record:
             self._loop.rejections.append(
                 Rejection(attempt=1, edit=proposal.edit, reasons=outcome,

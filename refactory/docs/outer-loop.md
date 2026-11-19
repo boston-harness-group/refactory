@@ -49,8 +49,9 @@ loads: the key is dropped.
   command that gives one of them explicitly with another value is refused, naming both.
   A run that recorded `val_gate` false although it had val items (started with the old
   `--val-gate 0`) is refused on resume: start a new run.
-  A launch that leaves `selection` unset records the rule it resolved (`single` or
-  `pool`).
+  A launch that leaves `selection` unset records the rule it resolved (`checkpoint`,
+  `single` or `pool`). A run recorded before `checkpoint` existed (the gate on and no
+  `selection` in its `config.json`) resumes as `single`, the rule it selected by.
 - **Custom strategies** (SkillOpt) keep their own gate: the default loop's stays off
   for them.
 
@@ -59,11 +60,33 @@ once at the end. The validation average is the fitness for the parents, the pool
 the winner, in every strategy, optimizer and parent picker; the proposer never sees a
 val score. `selection` says how it selects:
 
+- **`checkpoint`**: training as in ML. Each round's change is applied unless its graph
+  is broken: refused by the validator, vetoed by the integrity judge, failing the smoke
+  check after repair (`E-smoke`, below), or failing its train run. Of several children
+  (a batch, a portfolio round) the one with the highest train score is applied, the
+  earlier on a tie. Only the applied candidate is rolled out on val, once: a checkpoint.
+  It becomes current (the next round's only parent, and the candidate the request shows),
+  and the best when its val score beats the best's (a tie keeps the earlier). The winner is the best checkpoint: the
+  leaderboard lists the checkpoints, the best first, then by val score, then by age,
+  and the report, `adopt` and the final evaluation's best name it. The early stop is
+  unchanged: `early_stop_patience` counts rounds without a new best. No parent is
+  re-scored: every train rollout uses the first epoch's seed (`seed + 1001`), so a
+  child is compared with its parent's own run on the same shuffle, and each graph is
+  scored once on train and once on val (a val rollout already journaled is read back on
+  resume, and the final val check reuses the final checkpoint's score). The memory pass
+  compares the two candidates' own train runs on items both ran and rolls nothing out;
+  when nothing was applied it compares the unchanged current with a not-applied change
+  that moved items, and with none it makes no call (the note is kept, marked not
+  updated). The default for the default loop with a single-parent optimizer (`random`,
+  `autoresearch`, `hill_climb`, alone or as `parent_picker: hill_climb`), and refused
+  with any other strategy, optimizer or picker. A round costs its children's train runs
+  and one val run: on LiveMath's 35/17 parts, 52 rollouts instead of `single`'s 87
+  (plus the smoke check's 2 train items per proposal).
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
-  parent. The default for the default loop with a single-parent optimizer (`random`,
-  `autoresearch`, `hill_climb`, alone or as `parent_picker: hill_climb`), the
-  SkillOpt-matched setting; its decisions are those of the gate before pools existed.
+  parent. The SkillOpt-matched setting, and the default for a single-parent optimizer
+  before `checkpoint`: a run meant as SkillOpt-gate parity names it. Its decisions are
+  those of the gate before pools existed. The bullets below describe it and `pool`.
 - **`pool`**: entry is permissive. Every judged candidate may enter a pool of the
   `pool_size` (8 by default) best by val score, with any tied with the last of them.
   Parents come from the pool, the incumbent first, and each strategy chooses among
@@ -89,7 +112,8 @@ of children bred from the incumbent, and the budget (train, val and test scoring
 rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
 
 - **Train seed.** Train rollouts in epoch `e` use SkillOpt's seed, `seed + e*1000 + 1`
-  (`outerloop.train_batch_seed`). Val and test rollouts use `seed`.
+  (`outerloop.train_batch_seed`); under `checkpoint`, epoch 1's for the whole run. Val
+  and test rollouts use `seed`.
 - **Gate.** Every candidate evaluated on train is rolled out on val, including one whose
   train run failed, and must strictly beat the gate's current candidate (the last one
   accepted), not its parent. The candidates of one round (`--batch-size` above 1, or a
@@ -107,9 +131,10 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   `pool` the leaderboard is the pool, the incumbent first. Its first is the winner: the
   report, the held-out audit and `adopt` all name it, and the report's `best_score` is
   its val score (`best_score_basis`), with its train score in `best_train_score`.
-- **Fresh evidence.** As SkillOpt rolls out its current candidate on the train part
-  every epoch, the candidate the optimizer edits is scored again at the start of each
-  epoch's proposal step, on that epoch's train sample (the whole train part, or the
+- **Fresh evidence** (`single` and `pool`; not `checkpoint`). As SkillOpt rolls out its
+  current candidate on the train part every epoch, the candidate the optimizer edits is
+  scored again at the start of each epoch's proposal step, on that epoch's train sample
+  (the whole train part, or the
   `train_minibatch` sample) with that epoch's seed. A candidate created and scored
   this epoch is not scored twice. The optimizer, and every reader, reads these fresh
   records; the reader cache is keyed by the records' text, so new records are read
@@ -552,6 +577,16 @@ digest and whether all of it was empty) and each code-gate visit (its verdict an
 reason); `exchanges` stays one entry per model call. Both runtimes record them (the
 spine through its runner, the walker in memory).
 
+A failing item's heading ends with its **history** in the run, for the proposer and the
+analysts alike: `history: solved k/n in g graphs`, with `, flaky` when its outcome flipped
+at least twice in scoring order or one graph both solved and failed it. It counts every
+train run's record of the item (each repeat once, re-scores included), from the journal's
+`train_records`, so a resume rebuilds it; smoke and memory runs, val, harness incidents
+and harness timeouts are left out. An item with no run but the one shown, or a passing
+one, says nothing. When not every item is shown whole, the table of every item has a
+`history` column (`(below)` for an item shown in full). It is information only: which
+items are shown, picked or analysed does not change.
+
 - **Order: the pipeline first.** The request leads with what the optimizer may change:
   after the score line and what the score measures, "The pipeline you may edit" (one
   line saying the structure and each step's settings are levers of the same standing, or
@@ -607,7 +642,12 @@ spine through its runner, the walker in memory).
   gate note of their own): on the task's validation score, which carries no size cost,
   keeping a candidate only when it beats the current one; a train score only breaks a
   tie between candidates that beat the current one by the same validation score, and a
-  tie with the current candidate is rejected. The proposal request (not the analyst,
+  tie with the current candidate is rejected. Under `checkpoint` it says instead that each
+  round's change is applied unless its train run fails (of several, the one with the
+  highest train score), and that the validation score only picks the winner and when the
+  run stops; the results' gate note says what `current`, `kept` and `not applied` mean,
+  and "Your earlier reasoning" shows the latest not-applied candidate where it would show
+  the latest rejected one. The proposal request (not the analyst,
   merge or memory calls) adds the run's **compute policy**, only what the score text
   does not already say: with `parsimony` 0, cost is not a reason for or against a change
   (and, when the score is the items' mean, per-item cost is reported separately). With
@@ -1902,9 +1942,25 @@ the entry and its target, unless the patch says what to do then (`config.on_miss
 SkillOpt's patches do); before, it was skipped and the rest applied. None of these fixes
 has a switch; they act only on proposals that would otherwise be refused.
 
+**The smoke check** (`E-smoke`, the default loop, every selection). After the validator
+and the integrity judge, a new candidate is run on up to two of its parent's train items --
+the first (by item id) the parent answered wrong without an error, and the first it
+passed -- with one trial,
+gold feedback off and the seed its train run will use, in `runs/<id>/occasions/smoke_<n>`,
+through the run's evaluator (the walker, or the spine through the lowering). An item that
+fails with an error (`optim.base.pipeline_item_errors`: `<node>: <Kind>: <message>` on
+both runtimes), or a run that fails before any item, refuses the candidate `E-smoke`,
+naming the error, the step and the item; it is a mechanics refusal, so the slim repair call
+below may fix it, and the fix is smoked again. An interrupted run, a harness timeout or
+incident, and a spent budget are inconclusive and pass; with no evaluation left
+(`max_evaluations`) it does not run. Its items count as rollouts (toward `max_rollouts`,
+which it never exceeds), not as an evaluation; its records are no
+train records (no item history, no traces). Journaled (`smoke`), so a resumed run never
+smokes a graph twice. A custom strategy's proposals (the SkillOpt port's) are not smoked.
+
 **The slim repair call.** A proposal refused for how it is written -- a validator rule, a
 precondition, an edit's shape, node text, a binding, a knob, a patch target, lowering,
-`E-gate-kind` or `E-code-run` -- goes back to the model proposer with the
+`E-gate-kind`, `E-code-run` or `E-smoke` -- goes back to the model proposer with the
 reasons and only what fixing it needs: the proposal as written (rationale and prediction
 included), the pipeline's nodes, edges and what each node has, the current text of each
 knob it edits, the node schemas, the rules and the operations. No trajectories, history

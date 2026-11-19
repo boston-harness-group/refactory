@@ -124,6 +124,9 @@ def _loop(tmp_path: Path, strategy: OuterLoop | None = None, **overrides: Any) -
         parts_manifest=str(_write_parts_without_val(tmp_path) if without_gate
                            else _write_parts(tmp_path, test=True)),
     )
+    if strategy is None and not without_gate and "parts_manifest" not in overrides:
+        # These tests are about SkillOpt's strict gate: pinned, as the default is checkpoint.
+        base["selection"] = "single"
     base.update(overrides)
     loop = Loop(MODE_ID, LoopConfig(**base), project=Path("."))
     if strategy is not None:
@@ -712,7 +715,7 @@ def test_full_val_seed_still_gets_one_batch_gated(tmp_path, monkeypatch):
     assert six.id in loop._gate_rejected
 
 
-def test_val_gate_budget_endings_skip_the_final_scoring(tmp_path, monkeypatch):
+def test_val_gate_budget_endings_skip_the_final_scoring(tmp_path, monkeypatch, no_smoke):
     """As SkillOpt: a spent evaluation budget, or a time/token budget a measurement
     found spent, ends the search without scoring the last proposals or running the
     final evaluation; the report keeps the real reason and says why it skipped."""
@@ -743,7 +746,7 @@ def test_val_gate_budget_endings_skip_the_final_scoring(tmp_path, monkeypatch):
     assert tests == []
 
 
-def test_a_budget_stop_wins_over_an_early_stop_in_the_same_epoch(tmp_path, monkeypatch):
+def test_a_budget_stop_wins_over_an_early_stop_in_the_same_epoch(tmp_path, monkeypatch, no_smoke):
     """The epoch whose gating exhausts the patience also finds the time budget
     spent: the budget is the stop reason, and nothing more is scored."""
     tests = _record_test_rollouts(monkeypatch)

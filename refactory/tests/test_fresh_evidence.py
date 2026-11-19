@@ -36,7 +36,8 @@ def _tag_seeds(monkeypatch: Any) -> list[tuple[int, str, int | None]]:
 
     def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
         result, summary = original(self, candidate, workdir, part, **kwargs)
-        if part == "train":
+        # A smoke check's run (`Loop._smoke_check`) is no train evaluation.
+        if part == "train" and not workdir.name.startswith("smoke_"):
             measured.append((self.epoch, candidate.id, kwargs.get("seed")))
             result.item_records = [{**r, "prediction": f"seed {kwargs.get('seed')}"}
                                    for r in result.item_records]

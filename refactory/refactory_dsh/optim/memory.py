@@ -345,8 +345,10 @@ def _answer(record: Mapping[str, Any]) -> str:
 
 
 #: What a pass calls the change it sets against the unchanged incumbent: under the
-#: validation gate it was rejected; without it, it was only not the train leader.
+#: validation gate it was rejected; without it, it was only not the train leader; under
+#: ``checkpoint`` it was not applied (its train run failed, or a sibling scored higher).
 REJECTED_NOUN, NOT_KEPT_NOUN = "rejected change", "unkept change"
+NOT_APPLIED_NOUN = "not-applied change"
 
 
 def noun(curr: Mapping[str, Any]) -> str:
@@ -391,7 +393,9 @@ def _sides(prev: Mapping[str, Any], curr: Mapping[str, Any]) -> str:
     if not rejected:
         return f"Start of the epoch: {prev.get('rollout')}. Now: {curr.get('rollout')}."
     others, name = list(rejected.get("others") or ()), noun(curr)
-    why = ("" if name == REJECTED_NOUN else " (without a validation gate the current is the "
+    why = ("" if name == REJECTED_NOUN else
+           " (it was not applied: its train run failed or a sibling scored higher on train)"
+           if name == NOT_APPLIED_NOUN else " (without a validation gate the current is the "
            "train leader; this change scored below it on train)")
     return (f"Nothing this epoch replaced the incumbent; this compares it with the {name} "
             f"that moved the most items{why}. Incumbent: {prev.get('rollout')}. "
@@ -974,7 +978,7 @@ TALLY_HEADING = "Each change tried this epoch, against the noise"
 
 
 def change_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0,
-                       spread: float | None = None, gated: bool = False) -> list[str]:
+                       spread: float | None = None, gated: bool | str = False) -> list[str]:
     """Per change tried, grouped by the change itself (`feedback.group_changes`: by a hash
     of its full edits, shown by what they did, its kind only as a label, two changes
     whose labels collide told apart where their texts differ), never by kind: how many tries, and each one's
@@ -1018,7 +1022,7 @@ TALLY_NOISE_RULE = ("Each line is one change: its result is evidence about that 
 
 
 def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
-                round_: int | None, current: str | None, gated: bool,
+                round_: int | None, current: str | None, gated: bool | str,
                 chars: int = TRIED_CHARS, tally: Sequence[str] = (),
                 shown_in: Mapping[str, str] | None = None) -> list[str]:
     """"What was tried this epoch": every change the optimizer proposed in ``round_`` (the
@@ -1042,7 +1046,9 @@ def tried_lines(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[st
              "them), newest first: the ones evaluated, then the ones refused before they ran. `fixed/broken` compares a candidate with its parent on the "
              "train items both were scored on with the same seed (parent wrong and child "
              "right / the reverse)"
-             + ("; `gate` is what the validation gate decided (kept, rejected, or current: "
+             + ("; `gate` says whether it was applied (kept, not applied, or current: the "
+                "pipeline now)" if gated == "checkpoint" else
+                "; `gate` is what the validation gate decided (kept, rejected, or current: "
                 "the pipeline now)" if gated else "")
              + ". A change tried and not kept, or refused, is evidence too."]
     if not tried and not refused:
@@ -1080,7 +1086,7 @@ def _change_text(entry: Mapping[str, Any]) -> str:
             else f"knob change: {kind}")
 
 
-def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool,
+def _tried_line(entry: Mapping[str, Any], current: str | None, gated: bool | str,
                 counted: bool = False, shown_in: str | None = None) -> str:
     fixed, broken = entry.get("fixed"), entry.get("broken")
     if not entry.get("evaluated", True):

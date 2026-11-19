@@ -1361,7 +1361,7 @@ class ProposalContext:
              if self.mean_over else f"Mean score so far: {fmt_score(self.mean_score)}."),
             "",
             *objective_lines(self.parsimony, item_mean=self.score_is_item_mean,
-                             gated=bool(self.selection)),
+                             gated=self.selection),
             *time_lines(self.time_facts),
             *([self.steering, ""] if self.steering.strip() else []),
             *_strategy_section(self.strategy, self.strategy_name),
@@ -2775,10 +2775,21 @@ _GATE_RULE = ("The validation gate decides on the task's score on the validation
               "a train score{train} only breaks a tie between candidates that beat the "
               "current one by the same validation score; a tie with the current candidate "
               "is rejected.")
+#: How ``selection`` ``checkpoint`` decides (``Loop._apply_round``), said in its place.
+_CHECKPOINT_RULE = ("Each round's change is applied unless its train run fails (of several, "
+                    "the one with the highest train score{train}); the validation score of "
+                    "each applied pipeline{none} only picks the winner, the best of them, and "
+                    "when the run stops.")
+
+
+def _gate_rule(gated: bool | str, *, none: str, train: str) -> str:
+    """The gate's rule for ``gated`` (a selection, or True for the strict gate)."""
+    rule = _CHECKPOINT_RULE if gated == "checkpoint" else _GATE_RULE
+    return rule.format(none=none, train=train)
 
 
 def objective_text(parsimony: float | None, *, item_mean: bool = False,
-                   gated: bool = False, cost_line: bool = True) -> str:
+                   gated: bool | str = False, cost_line: bool = True) -> str:
     """What the score measures, said from the run's own settings (``LoopConfig.parsimony``,
     whether the score is the items' mean and whether a validation gate decides), so the
     optimizer does not trade task score for a cost the run does not count. Empty when
@@ -2791,7 +2802,9 @@ def objective_text(parsimony: float | None, *, item_mean: bool = False,
     the validation gate (either way) the gate's own comparison is the task's validation
     score, which carries no size cost; a train score only breaks a tie between
     candidates that beat the current one by the same validation score, and a tie with
-    the current one is rejected (``ValidationGate.judge_round``)."""
+    the current one is rejected (``ValidationGate.judge_round``). ``gated`` is the run's
+    selection (``ProposalContext.selection``; True is the strict gate): under
+    ``checkpoint`` the rule is that every change is applied unless its train run fails."""
     if parsimony is None:
         return ""
     task = "the task's own score" + (" (the mean of the items' scores)" if item_mean else "")
@@ -2800,7 +2813,7 @@ def objective_text(parsimony: float | None, *, item_mean: bool = False,
         text = (f"The score is {task} and nothing else. This run adds no cost term to it "
                 f"(parsimony is 0): {_UNSCORED} are not part of the score {unless}. A "
                 "change is judged only by the task score it reaches.")
-        return text + (" " + _GATE_RULE.format(none="", train="") if gated else "")
+        return text + (" " + _gate_rule(gated, none="", train="") if gated else "")
     size = (f"a size cost of {parsimony:g} per node of the pipeline's graph (score = raw "
             f"score - {parsimony:g} x nodes)")
     # Said by the compute policy instead when one follows (``cost_line=False``).
@@ -2808,14 +2821,16 @@ def objective_text(parsimony: float | None, *, item_mean: bool = False,
             f"calls are not part of the score {unless}." if cost_line else "")
     if gated:
         return (f"The train scores shown are {task} minus {size}. "
-                + _GATE_RULE.format(none=", and that score carries no size cost",
-                                    train=", size cost included,")
+                + _gate_rule(gated,
+                             none=(" (no size cost)" if gated == "checkpoint"
+                                   else ", and that score carries no size cost"),
+                             train=", size cost included" + ("" if gated == "checkpoint" else ","))
                 + rest)
     return f"The score is {task} minus {size}.{rest}"
 
 
 def objective_lines(parsimony: float | None, *, item_mean: bool = False,
-                    gated: bool = False) -> list[str]:
+                    gated: bool | str = False) -> list[str]:
     """"What the score measures" (`objective_with_policy`) as request lines; none when not
     known."""
     text = objective_with_policy(parsimony, item_mean=item_mean, gated=gated)
@@ -2823,7 +2838,7 @@ def objective_lines(parsimony: float | None, *, item_mean: bool = False,
 
 
 def objective_with_policy(parsimony: float | None, *, item_mean: bool = False,
-                          gated: bool = False) -> str:
+                          gated: bool | str = False) -> str:
     """What the score measures (`objective_text`) and, on its own line, the run's compute
     policy (`compute_policy`): what every optimizer call that recommends or weighs a
     change is told (the proposer, the analysts and their merges, the memory pass), from
@@ -2834,7 +2849,7 @@ def objective_with_policy(parsimony: float | None, *, item_mean: bool = False,
 
 
 def compute_policy(parsimony: float | None, *, item_mean: bool = False,
-                   gated: bool = False) -> str:
+                   gated: bool | str = False) -> str:
     """The run's compute policy in one sentence, from its scoring settings: with
     parsimony 0, cost is not a reason for or against a change (extra steps and model
     calls per item are not penalised, so a change that adds them is weighed like any
@@ -3692,14 +3707,18 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
     # An item shown in full below says its expected choice's text there (its choice
     # line): the table gives only the label for it.
     full = {id(r) for r in chosen}
+    # A failing item's history in the run (`evidence.item_history`); an item shown in full
+    # below says it in its heading. Like every empty column, left out when no item has one.
     lines += ["", "### Every item",
-              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error"],
+              _table_filled(["item", "outcome", "expected", "predicted", "grader", "error",
+                             "history"],
                      [[r.get("id"), _outcome(r),
                        _clip(_expected(r, label_only=id(r) in full), _TABLE_CELL_CHARS),
                        _clip(r.get("prediction"), _TABLE_CELL_CHARS),
                        _clip(r.get("fail_reason") if not r.get("passed") else "", _TABLE_CELL_CHARS),
                        "(below)" if id(r) in full and r.get("error_text") else
-                       _clip(r.get("error_text"), _TABLE_CELL_CHARS)] for r in items])]
+                       _clip(r.get("error_text"), _TABLE_CELL_CHARS),
+                       _history_cell(r, id(r) in full)] for r in items])]
     if not chosen:
         return lines
     examples = ["", "### Some items in full",
@@ -3720,6 +3739,15 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
             examples += ["", "(A success, for contrast.)"]
         examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled, refs)]
     return lines + examples
+
+
+def _history_cell(record: Mapping[str, Any], below: bool) -> str:
+    """A failing item's history for the "Every item" table, without the heading's label;
+    "(below)" when the item is shown in full below; empty for a passing item."""
+    said = str(record.get("item_history") or "") if not record.get("passed") else ""
+    if not said:
+        return ""
+    return "(below)" if below else said.removeprefix("history: ")
 
 
 #: The fields of a core operator's older written-out form (`core_ops`: 'target' and a
@@ -4000,9 +4028,16 @@ def _gate_note(*tables: Sequence[dict[str, Any]], val_items: int = 0,
     A rejection says only that the candidate was not shown better on validation; with
     ``val_items`` (the validation items the gate's score is the mean of) the note says
     what one item is worth, so a one-item loss is read as the gate's resolution. Under
-    ``selection`` ``pool`` it says what the pool is instead of SkillOpt's single line."""
+    ``selection`` ``pool`` it says what the pool is instead of SkillOpt's single line;
+    under ``checkpoint``, what applied means instead of a rejection."""
     if not any(_gate_column(rows) for rows in tables):
         return []
+    if selection == "checkpoint":
+        # Nothing is rejected on validation: what the column's three words mean, once.
+        return ["The gate column says what this run did with each change (the rule is under "
+                "\"What the score measures\"): `current` is the last one applied, which you "
+                "edit; `kept` was applied and later replaced; `not applied` was not. Scores "
+                "here are train scores; held-out scores are never shown."]
     resolution = (f"The gate's score is the mean over {val_items} validation items, so one "
                   f"item is 1/{val_items} = {1 / val_items:.3g} of it, and a rejection can come "
                   "down to a single item. " if val_items > 0 else "")
@@ -5185,11 +5220,16 @@ def reasoning_shown(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(recent)[-REASONING_ENTRIES:]
 
 
+#: The gate words of a change that did not become the current candidate (``rejected``, or
+#: under ``checkpoint`` ``not applied``), as "Your earlier reasoning" names one.
+REFUSED_GATE_WORDS = {"rejected": "rejected", "not applied": "not-applied"}
+
+
 def _promising(entries: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    """The latest rejected candidate with train counts against its parent, whatever its
-    net count, whose edits a request shows whole with what went wrong in it, so it can be
-    built on; ``None`` when there is none."""
-    rejected = [entry for entry in entries if entry.get("gate") == "rejected"
+    """The latest rejected (or, under ``checkpoint``, not-applied) candidate with train
+    counts against its parent, whatever its net count, whose edits a request shows whole
+    with what went wrong in it, so it can be built on; ``None`` when there is none."""
+    rejected = [entry for entry in entries if entry.get("gate") in REFUSED_GATE_WORDS
                 and isinstance(entry.get("fixed"), int) and isinstance(entry.get("broken"), int)]
     return rejected[-1] if rejected else None
 
@@ -5238,7 +5278,8 @@ def _reasoning_lines(entries: Sequence[dict[str, Any]], above: Sequence[str] = (
     if entry is not None:
         from .edit_effect import effect_lines
 
-        head = (f"### Full edits of {entry.get('id')}, the latest rejected candidate "
+        head = (f"### Full edits of {entry.get('id')}, the latest "
+                f"{REFUSED_GATE_WORDS[str(entry.get('gate'))]} candidate "
                 f"({entry['fixed']} fixed / {entry['broken']} broken)")
         # How it moved the items it changed (`optim.edit_effect`): the mechanism to fix. A
         # change that added no step has no such account; its counts are what there is.

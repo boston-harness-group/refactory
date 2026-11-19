@@ -179,7 +179,8 @@ def best(run_root: Path) -> dict[str, Any]:
 
 def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The winner of a default-loop run with ``val_gate``: the best on val among the
-    candidates the gate accepted and no person rejected.
+    candidates the gate accepted (under ``checkpoint``, the applied ones: the gate's best
+    checkpoint) and no person rejected.
 
     The report names that candidate (``Loop.leaderboard``'s first), so adopting takes
     the same one, whatever its train score (it has none when its train run failed).
@@ -209,7 +210,14 @@ def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any
             f"{run_root} ran with the validation gate, which accepted no candidate that a "
             "person has not rejected and whose state was recorded; there is nothing to adopt"
         )
-    if pool:
+    if gate.get("selection") == "checkpoint":
+        # Loop.leaderboard's order under checkpoint: the best checkpoint on val (of a val
+        # tie, the earlier), then val score descending, then the earlier candidate.
+        order = {cid: index for index, cid in enumerate(states)}
+        best_id = str(gate.get("best_candidate_id") or "")
+        winner_id = min(eligible, key=lambda cid: (
+            cid != best_id, -cache.get(cid, 0.0), order.get(cid, len(order))))
+    elif pool:
         # Loop._pool's order: the incumbent first, then val score descending, a tie by
         # the higher train score (a failed train run lowest), then the earlier candidate.
         trains = _score_by_id(entries)

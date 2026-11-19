@@ -25,7 +25,8 @@ are the repaired ones, so they replay to its state), in the optimizer trace (kin
 Anything else is refused with the exact reason, as before.
 
 **The slim repair call.** A proposal refused for its mechanics (`repairable`: an edit's
-shape, a precondition, a validator rule, lowering, a dry run; not the ideas behind it,
+shape, a precondition, a validator rule, lowering, a dry run, a smoke run that failed with
+an error, ``E-smoke``; not the ideas behind it,
 ``E-integrity``, ``E-noop``, ``E-duplicate``, nor a run's policy, the grader-side rule
 V17 or the change cap) is sent back to the
 model with the reasons and only what fixing it needs (`repair_request`): the proposal as
@@ -57,7 +58,7 @@ GUARD_RULES = ("V17",)
 #: the cap means choosing which changes to drop, which is the proposer's call.
 MECHANICS_CODES = ("E-precondition", "E-shape", "E-node-text", "E-binding",
                    "E-lowering", "E-node", "E-edge", "E-knob", "E-patch",
-                   "E-op", "E-gate-kind", "E-code-run", "E-wiring")
+                   "E-op", "E-gate-kind", "E-code-run", "E-wiring", "E-smoke")
 #: The most characters the slim request spends on the nodes in full and the schemas.
 REPAIR_NODE_CHARS = 14000
 #: The most characters of one touched knob's current value the slim request shows.

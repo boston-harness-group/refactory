@@ -970,7 +970,8 @@ def test_the_rescore_never_passes_the_evaluation_budget(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("cap", [14, 24, 32, 36, 40, 44, 52])
-def test_the_rescore_only_starts_where_the_rollout_budget_holds_it(tmp_path, monkeypatch, cap):
+def test_the_rescore_only_starts_where_the_rollout_budget_holds_it(tmp_path, monkeypatch, cap,
+                                                                  no_smoke):
     """8 train and 4 val items each; before epoch 2 the seed's train (8) and val (4)
     rollouts are spent. The re-score goes in only when the rollout cap holds both
     children, train and val, and it (12 + 2 x 12 + 8 = 44), so it never crowds out a

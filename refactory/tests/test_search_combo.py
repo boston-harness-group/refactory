@@ -27,7 +27,7 @@ import pytest
 
 from refactory_dsh import nn, snippet, strategies
 from refactory_dsh import task as task_module
-from refactory_dsh.loop import Loop, LoopConfig, LoopError
+from refactory_dsh.loop import Loop, LoopConfig, LoopError, default_selection
 from refactory_dsh import optim
 from refactory_dsh.optim import Candidate
 
@@ -250,6 +250,12 @@ def _config(root: Path, **overrides: Any) -> LoopConfig:
 
 
 def _run(name: str, root: Path, model: ComboModel, **overrides: Any) -> Loop:
+    if overrides.get("val_gate") and default_selection(
+            name, overrides.get("optimizer", "autoresearch"),
+            overrides.get("parent_picker", "")) == "checkpoint":
+        # SkillOpt's strict gate, as these tests were written for: the default loop with a
+        # single-parent optimizer now defaults to checkpoint (test_checkpoint_selection).
+        overrides.setdefault("selection", "single")
     with _combo_mode():
         config = _config(root, strategy=name, **overrides)
         loop = strategies.create(name, "fake/combo", config, project=Path("."), model=model)
@@ -519,7 +525,9 @@ def test_an_ungated_run_scores_its_last_proposals(tmp_path, picker):
     assert last in _children(loop) and last.evaluated and last.exit_ok
     assert loop._unevaluated() == []
     assert loop.evaluations == len(loop.population)
-    assert loop.rollouts == sum(len(loop._train_item_records[c.id]) for c in loop.population)
+    # The smoke check's runs are rollouts, not evaluations.
+    assert loop.rollouts == sum(len(loop._train_item_records[c.id]) for c in loop.population) + sum(
+        int(v["rollouts"]) for v in loop._smoke_verdicts.values())
 
 
 @pytest.mark.parametrize("name", strategies.names())
@@ -543,12 +551,13 @@ def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, n
     else:
         assert unscored == set(), f"{name} left its last round unscored"
     # The memory pass's own rollouts (an unchanged current rolled out again, ungated)
-    # are evaluations too.
+    # are evaluations too; the smoke check's are rollouts only.
     remembered = sum(int(p.get("evaluated") or 0) for p in loop._memory_passes)
     assert loop.evaluations == len(loop.population) - len(unscored) + remembered
     assert loop.rollouts == sum(len(loop._train_item_records[c.id])
                                 for c in loop.population if c.evaluated) + sum(
-        int(p.get("rollouts") or 0) for p in loop._memory_passes)
+        int(p.get("rollouts") or 0) for p in loop._memory_passes) + sum(
+        int(v["rollouts"]) for v in loop._smoke_verdicts.values())
 
 
 @pytest.mark.parametrize("name", GATED_STRATEGIES)
@@ -812,8 +821,9 @@ def test_a_cli_run_of_the_default_loop_shows_no_decision_section(tmp_path):
                                       for r in model.requests)
 
 
-def test_tree_search_debugs_a_failed_candidate(tmp_path):
-    """The action follows the tree: a failed leaf is expanded next, as ``debug``."""
+def test_tree_search_debugs_a_failed_candidate(tmp_path, no_smoke):
+    """The action follows the tree: a failed leaf is expanded next, as ``debug``. (Without
+    the smoke check, which would refuse the exploding step before its train run.)"""
     broken = {"op": "insert_after", "target": "solve",
               "node": {"id": "broken", "kind": "op", "call": "combo_ops:explode"}}
 
@@ -839,7 +849,7 @@ def _failed_events(loop: Loop) -> list[dict[str, Any]]:
     return [e for e in map(json.loads, lines) if e.get("step") == "proposal_failed"]
 
 
-def test_a_failed_round_names_the_parent_the_strategy_chose(tmp_path):
+def test_a_failed_round_names_the_parent_the_strategy_chose(tmp_path, no_smoke):
     """tree_search names a failed leaf (not the leader) as the node to debug; when the
     model then fails, the proposal_failed event names that node."""
     broken = {"op": "insert_after", "target": "solve",

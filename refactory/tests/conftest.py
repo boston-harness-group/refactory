@@ -66,6 +66,16 @@ def _no_real_graphify(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         monkeypatch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
 
 
+@pytest.fixture
+def no_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default loop's smoke check (`Loop._smoke_check`) left out, for a test of a
+    budget edge or a measurement order its two extra train items would only move:
+    `test_checkpoint_selection` tests the check itself."""
+    from refactory_dsh.loop import Loop
+
+    monkeypatch.setattr(Loop, "_smoke_check", lambda self, parent, candidate: candidate)
+
+
 @pytest.fixture(autouse=True)
 def _optimizer_retries_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """An optimizer call that fails is attempted again after SkillOpt's wait (1, 2, 4 s,

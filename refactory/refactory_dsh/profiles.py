@@ -511,11 +511,12 @@ SETTING_HELP = {
     "parent_picker": "pair a parent picker (archive, evolutionary, islands, hill_climb, "
                      "map_elites) with --optimizer: the picker chooses the candidate each "
                      "step edits, the optimizer writes the edits (default: none)",
-    "selection": "with val items (the validation gate): pool keeps the --pool-size best "
-                 "candidates on validation "
+    "selection": "with val items (the validation gate): checkpoint applies every change "
+                 "whose graph is not broken, scores each applied one on val once and picks "
+                 "the best of them; pool keeps the --pool-size best candidates on validation "
                  "as parents, the incumbent (the winner) changing only on a strictly higher "
                  "val score; single is SkillOpt's line, the incumbent the only parent "
-                 "(default: single for the default loop with a single-parent optimizer, "
+                 "(default: checkpoint for the default loop with a single-parent optimizer, "
                  "pool otherwise)",
     "pool_size": "with --selection pool: how many candidates the pool keeps by val score, "
                  "ties at the edge kept (default: 8)",

@@ -278,7 +278,8 @@ def test_the_speedup_needs_room_in_the_item_limit(tmp_path, monkeypatch, one_see
     assert peaks == {"serial": 2, "default limit": 2, "raised limit": 8}, peaks
 
 
-def test_a_rollout_cap_starts_only_what_one_at_a_time_would(tmp_path, monkeypatch, one_seed):
+def test_a_rollout_cap_starts_only_what_one_at_a_time_would(tmp_path, monkeypatch, one_seed,
+                                                           no_smoke):
     """With max_rollouts, a round starts only the evaluations the one-at-a-time
     order would start: here two of three children (the cap falls inside the second),
     in both widths, with the same rollout count."""
@@ -500,7 +501,8 @@ def test_the_end_of_run_scoring_may_spend_the_validation_reserve(tmp_path, monke
     assert not loop._final_scoring
 
 
-def test_a_search_stopped_at_the_reserve_still_runs_the_final_evaluation(tmp_path, monkeypatch, one_seed):
+def test_a_search_stopped_at_the_reserve_still_runs_the_final_evaluation(tmp_path, monkeypatch,
+                                                                       one_seed, no_smoke):
     """A time budget that stops the search at the reserve leaves the last proposals
     unscored and runs the final evaluation on the reserve; without a reserve the
     final evaluation is skipped, as before (test_val_gate_budget_endings_skip_...)."""

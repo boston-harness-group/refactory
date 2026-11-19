@@ -176,6 +176,22 @@ def prompt_lines(seen: "_Seen", prompt: Any, settled: Collection[str] | None,
     return lines
 
 
+def item_history(outcomes: Sequence[tuple[str, bool]]) -> str:
+    """An item's history in a run, from its train outcomes ``(graph id, solved)`` in
+    scoring order: ``history: solved k/n in g graphs``, with ``, flaky`` when the
+    outcome flipped at least twice in that order or one graph both solved and failed it.
+    Empty with fewer than two outcomes (the one shown is all there is)."""
+    if len(outcomes) < 2:
+        return ""
+    solved = sum(1 for _graph, passed in outcomes if passed)
+    graphs = len({graph for graph, _passed in outcomes})
+    flips = sum(1 for (_a, x), (_b, y) in zip(outcomes, outcomes[1:]) if x != y)
+    mixed = {graph for graph, passed in outcomes if passed} & {
+        graph for graph, passed in outcomes if not passed}
+    return (f"history: solved {solved}/{len(outcomes)} in {graphs} "
+            f"graph{'' if graphs == 1 else 's'}" + (", flaky" if flips >= 2 or mixed else ""))
+
+
 def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
                 outcome: str, expected: str, metadata: str, choices: Sequence[str],
                 prompts: bool = True, prompt_chars: int = _WHOLE, reply_chars: int = _WHOLE,
@@ -198,7 +214,8 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     ``expected_label`` (the label of the expected answer's choice), the expected answer is
     only that label when the item's choices are shown here, since its choice line says
     the rest. ``errors_said`` maps an error text the request lists elsewhere to where:
-    the item's error is said as that."""
+    the item's error is said as that. A failing record's ``item_history`` (`item_history`)
+    ends its heading."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, Mapping)]
     item = record.get("id")
@@ -209,9 +226,11 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     def cut(value: Any, step: str, limit: int) -> str:
         return clip(value, limit, item=item, step=step, omissions=omissions)
 
+    # A failing item's history in the run (``item_history``, set by the loop).
+    history = str(record.get("item_history") or "") if not record.get("passed") else ""
     lines = [f"{heading} Item {item}{f' ({label})' if label else ''} — {outcome} "
              f"(score {_fmt_score(record.get('score'))})"
-             + (f" — {metadata}" if metadata else "")]
+             + (f" — {metadata}" if metadata else "") + (f" — {history}" if history else "")]
     said = [part for part in (
         f"Expected: {cut(expected, 'expected', reply_chars)}"
         if expected and show_expected else "",

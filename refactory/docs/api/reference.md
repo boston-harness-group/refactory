@@ -483,18 +483,20 @@ The optimizer loop, named like one.
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
+| function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'bool'` |
 
 - **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
 - **`EvaluationInterrupted`** — An evaluation whose items died with the run's own processes, not on their answers.
 - **`Loop`** — The default outer loop: the eight steps over one mode.
 - **`LoopConfig`** — How a run is shaped.
 - **`LoopError`** — The run cannot proceed. Always names what is wrong with the mode.
-- **`default_selection`** — The ``selection`` a ``val_gate`` run gets when it names none: ``single`` for the
+- **`default_selection`** — The ``selection`` a ``val_gate`` run gets when it names none: ``checkpoint`` for
 - **`gap_standard_error`** — The standard error of a gap between two scores, for information only.
 - **`item_time_spread`** — How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
 - **`run`** — Build a loop and run it to its bound.
+- **`single_parent`** — Whether a run is the default loop with a single-parent optimizer and no
 
 
 <a id="refactory_dsh-history"></a>
