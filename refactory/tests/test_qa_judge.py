@@ -745,6 +745,23 @@ def test_the_judge_prompts_state_the_bar_and_ask_for_each_items_kind():
         assert "merely missing test" in prompt
 
 
+def test_the_overwatch_is_told_a_judged_brief_conflict_is_the_persons_to_settle():
+    """The QA gate passes a failing probe the judge dismissed as a brief conflict on to the
+    person. The overwatch reads the same dismissal in qa-judge.json, by the same field
+    names the gate keys on, and is told its unmet side alone is no redo once it has
+    checked the conflict is real, so the round the gate saved is not spent again there."""
+    from refactory_dsh import design
+    prompt = " ".join(design.OVERWATCH_PROMPT.split())
+    assert "dismissed as a brief conflict" in prompt
+    assert "`probe` and `conflicts_with`" in prompt
+    assert "Check the conflict is real; if both asks can be met, the unmet one is unbuilt." in prompt
+    assert "alone never makes `redo`" in prompt
+    conflict = judges.Judgment("proceed", dismissed=(
+        {"source": "verifier", "finding": "f", "why": "w",
+         "probe": "probes/edge.py", "conflicts_with": "the other ask"},))
+    assert set(judges.brief_conflicts(conflict)) == {"edge.py"}
+
+
 def test_a_weakened_test_does_not_cost_a_build_round(tmp_path):
     """A weakened test with breaks='correction' is reported, not sent back.
 

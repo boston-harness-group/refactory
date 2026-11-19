@@ -303,6 +303,11 @@ OVERWATCH_PROMPT = (
     "the tests whether the correction is met. Decide every correction yourself, with "
     "evidence. A correction you find not met (`\"met\": false`) sends the change back "
     "whatever your verdict.\n\n"
+    "A failing probe the QA judge dismissed as a brief conflict (a `dismissed` item in "
+    "`qa-judge.json` naming `probe` and `conflicts_with`) marks two asks the brief cannot "
+    "both meet: the person settles which one wins at the pull request. Check the conflict "
+    "is real; if both asks can be met, the unmet one is unbuilt. A real conflict's unmet "
+    "side is not an unbuilt ask and alone never makes `redo`.\n\n"
     + _JUDGE_RULE
     + "Write `" + judges.OVERWATCH_VERDICT + "` in the run directory holding one JSON "
     "object and nothing else that is JSON:\n"
