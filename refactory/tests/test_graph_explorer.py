@@ -341,9 +341,57 @@ def test_no_context_carries_nothing_and_the_file_says_why(tmp_path, missing, why
 
 def test_a_long_context_is_cut_and_points_at_the_file(tmp_path):
     body = "".join(f"- line {i} shop/pricing.py:{i}\n" for i in range(2000))
-    _, out = _record_run(tmp_path, READY, body=body)
+    run, out = _record_run(tmp_path, READY, body=body)
     assert len(out["graph_context"]) < GRAPH_CONTEXT_MAX_CHARS + 300
-    assert out["graph_context"].rstrip().endswith(f"the rest is in {GRAPH_CONTEXT})")
+    assert out["graph_context"].rstrip().endswith(f"all of it is in {GRAPH_CONTEXT})")
+    # Only the prompts' copy is cut: the file the builder and subagents read keeps it all.
+    kept = (run / GRAPH_CONTEXT).read_text()
+    assert kept.startswith("Made from ") and kept.endswith(body)
+    assert "cut at" not in kept
+
+
+def test_a_ready_graph_with_no_context_is_offered_without_pointing_at_one(tmp_path):
+    _, out = _record_run(tmp_path, READY, body=None, facts={"code_graph_paragraph": "build's"})
+    assert out["graph_context"] == ""
+    paragraph = out["code_graph_paragraph"]
+    assert paragraph.startswith("## Code graph\n") and "code context" not in paragraph
+    assert "graph query|explain|path|callers" in paragraph
+
+
+def test_queries_with_no_node_count_when_the_explorer_was_the_one_node_running(tmp_path):
+    """The spine's CEO-subagent route sets no REFACTORY_NODE_ID: its queries count by when
+    they were made, as `usage` counts them."""
+    from datetime import datetime, timezone
+
+    def at(seconds):
+        return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+
+    run = tmp_path / "run"
+    (run / ".refactory").mkdir(parents=True)
+    events = [{"at": at(100), "node_id": "explore_code", "kind": "node_started"},
+              {"at": at(200), "node_id": "explore_code", "kind": "node_completed"},
+              {"at": at(300), "node_id": "size_change", "kind": "node_started"},
+              {"at": at(300), "node_id": "pitfalls_researcher", "kind": "node_started"},
+              {"at": at(400), "node_id": "size_change", "kind": "node_completed"},
+              {"at": at(400), "node_id": "pitfalls_researcher", "kind": "node_completed"}]
+    (run / ".refactory" / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    queries = [{"node": None, "at": 150, "status": "ready"},
+               {"node": None, "at": 160, "status": "ready"},
+               {"node": None, "at": 170, "status": "failed: x"},
+               {"node": None, "at": 350, "status": "ready"},  # two nodes running: neither
+               {"node": None, "at": 500, "status": "ready"}]  # no node running
+    run, out = _record_run(tmp_path, READY, queries, facts={"code_graph_state": "ready"})
+    assert out["graph_context"].startswith("Made from the code graph (ready; 2 explorer queries).")
+
+
+def test_the_wait_fits_inside_the_spine_s_op_limit():
+    from refactory_dsh.design import CODE_GRAPH_WAIT_MAX_S
+
+    knob = DesignMode.declare()["code_graph_wait_s"]
+    state = DesignMode().state_dict()
+    workflow = lowering.to_workflow(state)
+    limit = getattr(workflow.nodes["await_code_graph"], "command_timeout_s", None) or 600
+    assert knob.hi == CODE_GRAPH_WAIT_MAX_S and knob.hi + 30 <= limit
 
 
 def test_the_context_s_headings_nest_under_the_prompts_heading(tmp_path):
@@ -354,7 +402,11 @@ def test_the_context_s_headings_nest_under_the_prompts_heading(tmp_path):
 
 
 def test_recording_twice_keeps_one_heading(tmp_path):
-    run, first = _record_run(tmp_path, READY, [EXPLORER_QUERY], facts={"code_graph_state": "ready"})
+    body = "###### six\n## Relevant modules\n- a.py:1\n"
+    run, first = _record_run(tmp_path, READY, [EXPLORER_QUERY], body=body,
+                             facts={"code_graph_state": "ready"})
+    # A level-6 heading cannot nest further and stays as written, on every visit.
+    assert first["graph_context"].endswith("###### six\n### Relevant modules\n- a.py:1\n")
     second = record_graph_context(_ctx(run, facts={"code_graph_state": "ready"}))
     assert second["graph_context"] == first["graph_context"]
     assert second["graph_context"].count("Made from ") == 1

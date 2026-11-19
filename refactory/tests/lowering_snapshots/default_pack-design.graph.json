@@ -1542,7 +1542,7 @@
       "default": 120,
       "kind": "int",
       "lo": 0,
-      "hi": 3600,
+      "hi": 540,
       "enum": [],
       "values": [],
       "frozen": true,

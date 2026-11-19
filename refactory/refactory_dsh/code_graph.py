@@ -752,8 +752,6 @@ def _is_test(node: dict) -> bool:
 
 
 def _terms(text: str) -> list[str]:
-    import re
-
     seen: list[str] = []
     for word in re.split(r"[^A-Za-z0-9_]+", text.lower()):
         for part in [word, *word.split("_")] if "_" in word else [word]:
@@ -940,12 +938,15 @@ _USAGE_TEMPLATE = (
     "{dir}` lists only the callers."
 )
 
-_FOLLOWUP_TEMPLATE = (
-    "## Code graph follow-ups\n"
-    "For code the code context above does not cover, run `{cmd} graph "
-    "query|explain|path|callers ... --graph {dir}` (about a second each). A graph answer is "
-    "a lead, not evidence: confirm it in the code."
+_GRAPH_HINT = (
+    "run `{cmd} graph query|explain|path|callers ... --graph {dir}` (about a second each). "
+    "A graph answer is a lead, not evidence: confirm it in the code."
 )
+#: After a code context: for what it does not cover.
+_FOLLOWUP_TEMPLATE = (
+    "## Code graph follow-ups\nFor code the code context above does not cover, " + _GRAPH_HINT)
+#: A ready graph with no code context (the explorer failed or wrote nothing).
+_GRAPH_ONLY_TEMPLATE = "## Code graph\nTo find code and its callers, " + _GRAPH_HINT
 
 
 def _knob(ctx: Any, name: str, default: Any) -> Any:
@@ -995,38 +996,48 @@ def await_code_graph(ctx: Any) -> dict[str, Any]:
 
 
 def _explorer_queries(graph_dir: Path) -> int:
+    """The answered queries the explorer made, counted as `usage` counts them: under the
+    node its worker named, or, for a query with no name (a route that sets none, such as
+    the spine's CEO subagents), when the explorer was the one node running."""
     try:
         lines = (graph_dir / QUERY_LOG).read_text(encoding="utf-8").splitlines()
     except OSError:
         return 0
-    count = 0
+    entries = []
     for line in lines:
         try:
-            entry = json.loads(line)
+            entries.append(json.loads(line))
         except ValueError:
             continue
-        if entry.get("node") == EXPLORER_NODE and entry.get("status") == "ready":
+    windows = (_node_windows(graph_dir.parent.parent)
+               if any(not entry.get("node") for entry in entries) else [])
+    count = 0
+    for entry in entries:
+        if entry.get("status") != "ready":
+            continue
+        node = entry.get("node")
+        if not node:
+            at = entry.get("at", 0)
+            inside = {w[2] for w in windows if w[0] <= at <= w[1]}
+            node = inside.pop() if len(inside) == 1 else None
+        if node == EXPLORER_NODE:
             count += 1
     return count
 
 
 def record_graph_context(ctx: Any) -> dict[str, Any]:
-    """Deterministic op: the explorer's code context as the later prompts get it, headed by
-    what it was made from: the code graph (with the explorer's query count), or file
-    exploration and why. Never fails; with no file the later prompts carry nothing.
+    """Deterministic op: the explorer's code context, headed by what it was made from: the
+    code graph (with the explorer's query count), or file exploration and why. The file
+    keeps all of it; the prompts' fact is cut at ``GRAPH_CONTEXT_MAX_CHARS`` and points at
+    the file. Never fails; with no file the later prompts carry nothing.
 
-    It also settles the on-demand query paragraph for the steps after it: a follow-up form
-    that points at the code context when the graph is ready, none when the graph failed or
-    is off, and the build's own paragraph while the build is still running.
+    It also settles the on-demand query paragraph for the steps after it: one that points
+    past the code context when the graph is ready (or offers the graph alone when there is
+    no context), none when the graph failed or is off, and the build's own paragraph while
+    the build is still running.
     """
     graph_dir = _run_dir(ctx) / GRAPH_SUBDIR
     state, _ = _graph_state(graph_dir) if graph_dir.is_dir() else ("absent", {})
-    paragraph = str(ctx.facts.get("code_graph_paragraph", ""))
-    if state == "ready":
-        cmd = _find_refactory_cmd() or "refactory"
-        paragraph = _FOLLOWUP_TEMPLATE.format(cmd=cmd, dir=graph_dir)
-    elif state != "building":
-        paragraph = ""
 
     body = ""
     if ctx.exists(GRAPH_CONTEXT):
@@ -1034,6 +1045,14 @@ def record_graph_context(ctx: Any) -> dict[str, Any]:
             body = ctx.read_text(GRAPH_CONTEXT).strip()
         except (OSError, UnicodeDecodeError):
             body = ""
+
+    paragraph = str(ctx.facts.get("code_graph_paragraph", ""))
+    if state == "ready":
+        template = _FOLLOWUP_TEMPLATE if body else _GRAPH_ONLY_TEMPLATE
+        paragraph = template.format(cmd=_find_refactory_cmd() or "refactory", dir=graph_dir)
+    elif state != "building":
+        paragraph = ""
+
     if not body:
         why = "the explorer step wrote nothing"
         if ctx.exists(EXPLORER_MISSING):
@@ -1044,10 +1063,12 @@ def record_graph_context(ctx: Any) -> dict[str, Any]:
                 "code_graph_paragraph": paragraph}
 
     if body.startswith("Made from "):
-        # Recorded already (a resumed visit): the heading is this op's to write, and its
-        # headings were nested.
+        # Recorded already (a resumed visit): the heading is this op's to write, and the
+        # headings below it are nested already.
         body = body.split("\n\n", 1)[1].strip() if "\n\n" in body else ""
-        body = re.sub(r"(?m)^#(#{1,5}) ", r"\1 ", body)
+    else:
+        # The prompts carry it under their own `## Code context` heading: its headings nest.
+        body = re.sub(r"(?m)^(#{1,5}) ", r"#\1 ", body)
     queries = _explorer_queries(graph_dir)
     asked = str(ctx.facts.get("code_graph_state", state))
     if queries:
@@ -1056,13 +1077,13 @@ def record_graph_context(ctx: Any) -> dict[str, Any]:
         source = "file exploration: the code graph was ready, but the explorer ran no queries"
     else:
         source = f"file exploration: no code graph ({asked})"
+    full = f"Made from {source}.\n\n{body}\n"
+    ctx.write_text(GRAPH_CONTEXT, full)
+    text = full
     if len(body) > GRAPH_CONTEXT_MAX_CHARS:
-        body = (body[:GRAPH_CONTEXT_MAX_CHARS].rsplit("\n", 1)[0]
-                + f"\n\n(cut at {GRAPH_CONTEXT_MAX_CHARS} characters; the rest is in "
-                f"{GRAPH_CONTEXT})")
-    # The prompts carry it under their own `## Code context` heading: its headings nest.
-    body = re.sub(r"(?m)^(#{1,5}) ", r"#\1 ", body)
-    text = f"Made from {source}.\n\n{body}\n"
-    ctx.write_text(GRAPH_CONTEXT, text)
+        text = (f"Made from {source}.\n\n"
+                + body[:GRAPH_CONTEXT_MAX_CHARS].rsplit("\n", 1)[0]
+                + f"\n\n(cut at {GRAPH_CONTEXT_MAX_CHARS} characters; all of it is in "
+                f"{GRAPH_CONTEXT})\n")
     return {"graph_context": text, "graph_context_source": source,
             "code_graph_paragraph": paragraph}

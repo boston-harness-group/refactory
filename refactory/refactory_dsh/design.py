@@ -51,6 +51,9 @@ SIZER_TIMEOUT_S = 600
 #: The code explorer's wall (`explore_code`), as the sizer's: one that does not finish is
 #: missing, and the later steps go on without its context.
 EXPLORER_TIMEOUT_S = 600
+#: The most `code_graph_wait_s` may be: under the spine's default op command limit
+#: (600 s), with room for the op's own start and the status reads around the wait.
+CODE_GRAPH_WAIT_MAX_S = 540
 
 #: The builder's timeout retry: one fresh session on the same limits (factor 1). A stuck
 #: session is retried on inactivity, so the retry needs no longer limit, and the hard maximum
@@ -529,7 +532,9 @@ class DesignMode(Mode):
                             "stopped; the run never waits for it",
             ),
             "code_graph_wait_s": Knob(
-                120, "int", lo=0, hi=3600, frozen=True,
+                # At most CODE_GRAPH_WAIT_MAX_S: await_code_graph is an op, and the spine
+                # stops an op's command at its default limit (600 s, `commandTimeoutMs`).
+                120, "int", lo=0, hi=CODE_GRAPH_WAIT_MAX_S, frozen=True,
                 description="how long the explorer step waits for a code graph still "
                             "being built before it explores the files instead",
             ),
@@ -682,7 +687,9 @@ class DesignMode(Mode):
             reads=("brief.json",),
             writes=(GRAPH_CONTEXT,),
             notes="map the code the brief names with the code graph's query, explain and "
-                  "path, or the files without a graph; read only, no subagents, no web",
+                  "path, or the files without a graph; read only, no subagents, no web. The "
+                  "spine's CEO-subagent route does not enforce timeout_s: there the bound is "
+                  "the prompt's",
         ))
         graph.add(Node("join_explore", "join", sources=("explore_code",),
                        notes="wait for the code explorer"))
