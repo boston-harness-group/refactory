@@ -90,9 +90,10 @@ def _writes(model) -> list[str]:
 
 
 @pytest.mark.parametrize("research, head", [
-    # The change sizer runs first (it answers nothing here, so the change is sized full).
-    (RESEARCH_ANSWER, ["sizing", "research", "pitfalls", "perspectives", "plan"]),
-    (SCOPED_RESEARCH_ANSWER, ["sizing", "research", "pitfalls", "plan"]),
+    # The code explorer runs first (it answers nothing here: no code context), then the
+    # change sizer (nothing either, so the change is sized full).
+    (RESEARCH_ANSWER, ["explorer", "sizing", "research", "pitfalls", "perspectives", "plan"]),
+    (SCOPED_RESEARCH_ANSWER, ["explorer", "sizing", "research", "pitfalls", "plan"]),
 ], ids=["full", "scoped"])
 def test_no_reviewer_runs_between_the_design_and_the_gate(tmp_path, research, head):
     answers = [research, PITFALLS_ANSWER, *(["perspectives"] if "perspectives" in head else []),

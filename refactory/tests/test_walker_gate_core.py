@@ -117,9 +117,10 @@ def test_proceed_with_note(tmp_path, monkeypatch, capsys):
     code3 = design.main(["--resume", RUN])
     assert code3 == 0
 
-    # 4. The first prompt after the gate contains PROBE-NOTE.
-    assert "PROBE-NOTE" in fake.prompts[6], (
-        f"prompts[6] does not contain PROBE-NOTE: {fake.prompts[6][:200]}"
+    # 4. The first prompt after the gate contains PROBE-NOTE (the code explorer and the
+    # sizer come before research).
+    assert "PROBE-NOTE" in fake.prompts[7], (
+        f"prompts[7] does not contain PROBE-NOTE: {fake.prompts[7][:200]}"
     )
 
 

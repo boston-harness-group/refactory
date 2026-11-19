@@ -27,6 +27,7 @@ from refactory_dsh.code_graph import (
     cli_graph,
     explain_node,
 )
+from refactory_dsh.code_graph import EXPLORER_MARK
 from refactory_dsh.design import DesignMode
 from refactory_dsh.design_ops import SIZER_MARK
 from tests_support import (
@@ -185,6 +186,7 @@ def test_references_links_ignored(tmp_path):
     assert "Any" not in result
 
 
+@pytest.mark.real_graphify
 @pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
 def test_real_graphify_output(tmp_path):
     repo = tmp_path / "tiny"
@@ -401,6 +403,7 @@ def test_op_returns_empty_paragraph_when_graphify_missing(tmp_path, monkeypatch)
     assert "graphify" in status["status"]
 
 
+@pytest.mark.real_graphify
 @pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
 def test_op_writes_ready_on_tiny_repo(tmp_path):
     source = git_repo(tmp_path / "repo")
@@ -459,6 +462,7 @@ def test_op_writes_failed_when_graphify_missing(tmp_path, monkeypatch):
     assert "graphify" in status["status"]
 
 
+@pytest.mark.real_graphify
 @pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
 def test_worktree_stays_clean(tmp_path):
     source = git_repo(tmp_path / "repo")
@@ -502,6 +506,7 @@ def test_worktree_stays_clean(tmp_path):
     assert before2 == after_reuse, f"Worktree polluted after cache-reuse build: {after_reuse}"
 
 
+@pytest.mark.real_graphify
 @pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
 def test_second_build_same_target_reuses_cache(tmp_path):
     source1 = git_repo(tmp_path / "repo")
@@ -639,18 +644,16 @@ def _prompt(model, mark: str) -> str:
 _SCOPED_RUN = [SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER, *BUILD]
 
 
-@pytest.mark.parametrize("mark", [SIZER_MARK, "You are the research director", "pitfalls researcher"])
-def test_graph_on_prompts_carry_the_paragraph(tmp_path, stub_graphify, mark):
+def test_a_graph_that_failed_is_never_offered_to_a_later_prompt(tmp_path, stub_graphify):
     run, model = _design_run_with_knobs(tmp_path, "Make tool.py print built.", list(_SCOPED_RUN),
                                         extra_knobs={"code_graph": True})
     assert run.exit_ok, run.error
-    paragraph = run.facts["code_graph_paragraph"]
-    assert paragraph and paragraph in _prompt(model, mark)
-    assert "$VENV_BIN" not in paragraph
-    command = paragraph.split("run `", 1)[1].split(" graph callers", 1)[0]
-    assert Path(command).is_absolute() and Path(command).is_file()
-    for word in ("limit", "maximum", "at most", "no more than"):
-        assert word not in paragraph.lower()
+    # The stub's build writes no graph: the explorer is told so and explores the files,
+    # and no step after it is told to query the graph (`record_graph_context`).
+    assert "## No code graph (failed: " in _prompt(model, EXPLORER_MARK)
+    assert run.facts["code_graph_paragraph"] == ""
+    for mark in (SIZER_MARK, "You are the research director", "pitfalls researcher"):
+        assert "graph callers" not in _prompt(model, mark)
 
 
 def test_the_graph_is_on_by_default(tmp_path, stub_graphify):

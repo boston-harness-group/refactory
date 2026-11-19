@@ -617,6 +617,17 @@ def build_parser() -> argparse.ArgumentParser:
     graph_callers = graph_sub.add_parser("callers", help="show calls edges into a node")
     graph_callers.add_argument("name", help="the function or symbol name to look up")
     graph_callers.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
+    graph_query = graph_sub.add_parser(
+        "query", help="find the code nodes matching some terms, with their neighbours")
+    graph_query.add_argument("terms", nargs="+", help="words to match against names and paths")
+    graph_query.add_argument("--depth", type=int, default=1, choices=(1, 2, 3),
+                             help="how many hops of neighbours to show (default 1)")
+    graph_query.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
+    graph_path = graph_sub.add_parser(
+        "path", help="show the shortest chain of code edges between two nodes")
+    graph_path.add_argument("start", help="the first function or symbol name")
+    graph_path.add_argument("end", help="the second function or symbol name")
+    graph_path.add_argument("--graph", default=argparse.SUPPRESS, help=graph_help)
 
     ui = sub.add_parser("ui", help="the Web GUI (the tool, the panel, the conversation)")
     ui.add_argument("--port", type=int, default=0, help="default: the launcher's own")

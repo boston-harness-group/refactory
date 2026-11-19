@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from refactory_dsh import delivery, repo_change, sandbox, unbuilt_check, worktree
+from refactory_dsh.code_graph import GRAPH_CONTEXT
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECORD
 from refactory_dsh.nn import Verdict
 
@@ -549,6 +550,8 @@ def route_refine_design(ctx: Any) -> Any:
     ctx.set_fact("strategy_plan", refine_context)
     ctx.set_fact("strategy", LIGHT_REFINE_PLAN)
     ctx.set_fact("refine_context", refine_context)
+    # No code context: the explorer step is skipped with research.
+    ctx.set_fact("graph_context", "")
 
     # Write sentinel files.
     ctx.write_text("research-plan.json", "[]\n")
@@ -558,6 +561,7 @@ def route_refine_design(ctx: Any) -> Any:
     ctx.write_text("strategy.json", json.dumps({"strategy": LIGHT_REFINE_PLAN}, indent=2) + "\n")
     ctx.write_text("research-review.txt", "(light refine: research was skipped)\n")
     ctx.write_text("pitfalls-review.txt", "(light refine: pitfalls review was skipped)\n")
+    ctx.write_text(GRAPH_CONTEXT, "(light refine: the code explorer was skipped)\n")
     ctx.path("research").mkdir(parents=True, exist_ok=True)
     ctx.path("strategy").mkdir(parents=True, exist_ok=True)
 

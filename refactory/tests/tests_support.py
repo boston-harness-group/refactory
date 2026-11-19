@@ -16,6 +16,7 @@ from typing import Any
 from typing import Iterator
 
 from refactory_dsh import dsh_profile
+from refactory_dsh.code_graph import EXPLORER_MARK
 from refactory_dsh.design_ops import SIZER_MARK
 
 
@@ -700,7 +701,7 @@ class FakeModel:
     """
 
     def __init__(self, answers: list[str], early_asks: list[str] | None = None,
-                 sizer: list | None = None) -> None:
+                 sizer: list | None = None, explorer: list | None = None) -> None:
         self.answers = list(answers)
         self.early_asks = list(early_asks or [])
         #: The change sizer's answers, in order (`design.SIZER_PROMPT`): an exception is
@@ -708,6 +709,10 @@ class FakeModel:
         #: nothing, which sizes the change full, so a script written before the sizer
         #: keeps today's prompts.
         self.sizer = list(sizer or [])
+        #: The code explorer's answers, in order (`design.EXPLORER_PROMPT`), as the
+        #: sizer's: with none left it answers nothing, so the later prompts carry no code
+        #: context and a script written before the explorer keeps today's prompts.
+        self.explorer = list(explorer or [])
         self.prompts: list[str] = []
         #: The directory each completion was told to run in; see the walker's `_ask_model`.
         self.workdirs: list[object] = []
@@ -737,6 +742,12 @@ class FakeModel:
         if EARLY_ASKS_JUDGE_MARK in prompt:
             queue = getattr(self, "early_asks", None)
             return queue.pop(0) if queue else early_asks_judgment(prompt=prompt)
+        if EXPLORER_MARK in prompt:
+            queue = getattr(self, "explorer", None)
+            answer = queue.pop(0) if queue else ""
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         if SIZER_MARK in prompt:
             queue = getattr(self, "sizer", None)
             answer = queue.pop(0) if queue else ""

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from refactory_dsh import delivery, design_contract, judges, pitfalls, repo_change
+from refactory_dsh.code_graph import EXPLORER_MARK, EXPLORER_MISSING, GRAPH_CONTEXT
 from refactory_dsh.create_ops import API, MARKER_RULE, RESEARCH_SCHEMA, SEVERITY_RULE
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECORD
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
@@ -47,6 +48,12 @@ BUILDER_TIMEOUT_S = 14400
 #: research, and must finish in a few minutes. A sizer that does not is missing, and the
 #: change is sized full (`design_ops.presize_scale`).
 SIZER_TIMEOUT_S = 600
+#: The code explorer's wall (`explore_code`), as the sizer's: one that does not finish is
+#: missing, and the later steps go on without its context.
+EXPLORER_TIMEOUT_S = 600
+#: The most `code_graph_wait_s` may be: under the spine's default op command limit
+#: (600 s), with room for the op's own start and the status reads around the wait.
+CODE_GRAPH_WAIT_MAX_S = 540
 
 #: The builder's timeout retry: one fresh session on the same limits (factor 1). A stuck
 #: session is retried on inactivity, so the retry needs no longer limit, and the hard maximum
@@ -375,13 +382,20 @@ DESIGN_RESEARCH_SCHEMA = RESEARCH_SCHEMA.replace(
     "Usually three to five directions for a full design; a scoped change often needs "
     "only one. You decide how many.")
 
+#: The code context, as the sizer, research, strategy and design are given it (once per
+#: prompt; `code_graph.record_graph_context` nests its headings under this one).
+CODE_CONTEXT = "{% if graph_context %}## Code context\n{{graph_context}}\n{% endif %}"
+
 #: The change sizer's prompt (`size_change`): it sizes the change by reading the code,
 #: before research, so a small change gets a lean research plan.
 SIZER_PROMPT = (
     SIZER_MARK + "\n\n"
     "Artifact name: {{name}}\nBrief: {{brief}}\n"
     "The target's checkout: {{source}}\n\n"
-    "Size this change before it is researched, by investigating {{source}} yourself. "
+    + CODE_CONTEXT +
+    "Size this change before it is researched, by investigating {{source}} yourself"
+    "{% if graph_context %}, starting from the code context above: confirm what it "
+    "cites in the code, never take it or the brief on trust{% endif %}. "
     "For a bug, locate where the behaviour lives; for a feature, find where the change "
     "plugs in. Read that code, trace its callers with grep, and look at the tests that "
     "pin its current behaviour. Go only as far as sizing needs: do not survey the "
@@ -393,8 +407,11 @@ SIZER_PROMPT = (
     "- Cite every claim as path:line from code you read.\n\n"
     "## Footprint\n"
     + FOOTPRINT_DEFINITIONS
-    + "A caller in another module that relies on the changed behaviour, or a caller "
-    "search too broad to finish, is a cross-cutting sign: list it in `cross_cutting`.\n\n"
+    + "A caller in another module is a cross-cutting sign only when this change forces a "
+    "change in that caller's code or its tests (its signature, the return shape it reads, "
+    "or a result it asserts on), and its entry says which; a caller that keeps working as "
+    "written is not one, and a caller search too broad to finish is: list each sign in "
+    "`cross_cutting`.\n\n"
     "## Your answer\n"
     "Write `" + SIZING + "` in the run directory as exactly one JSON array holding one "
     "object, and nothing else:\n"
@@ -408,6 +425,39 @@ SIZER_PROMPT = (
     "- `cross_cutting` lists every cross-cutting sign you saw, each with its path:line; "
     "empty when you saw none.\n"
     "{% if code_graph_paragraph %}{{code_graph_paragraph}}\n\n{% endif %}"
+)
+
+
+#: The code explorer's prompt (`explore_code`): before sizing, it maps the code the brief
+#: names into `graph-context.md`, from the code graph when there is one and from the files
+#: when there is not, and the sizer and the later steps start from that file.
+EXPLORER_PROMPT = (
+    EXPLORER_MARK + "\n\n"
+    "Artifact name: {{name}}\nBrief: {{brief}}\n"
+    "The target's checkout: {{source}}\n\n"
+    "Map the code this change touches, starting from the names, files and behaviour the "
+    "brief gives, for the sizing, research, strategy, design and build steps after you. "
+    "Go only as far as the brief reaches: do not survey the repository.\n\n"
+    "## Rules\n"
+    "- Read only: change nothing in {{source}}.\n"
+    "- Spawn no subagents.\n"
+    "- No web: no search, no fetch.\n\n"
+    "{% if code_graph_usage %}## The code graph ({{code_graph_state}})\n"
+    "{{code_graph_usage}}\n"
+    "1. `query` the brief's key words with `--depth 2`.\n"
+    "2. `explain` the few nodes that matter most.\n"
+    "3. `path` between the key components the change connects.\n"
+    "Then read the cited lines that matter to confirm them.\n\n"
+    "{% else %}## No code graph ({{code_graph_state}})\n"
+    "Explore the files instead: find the source files near the footprint, grep for the "
+    "brief's key names, their definitions, callers and imports, and read what matters.\n\n"
+    "{% endif %}"
+    "## Your answer\n"
+    "Write `" + GRAPH_CONTEXT + "` in the run directory, at most 60 lines, with these "
+    "sections: `## Relevant modules`; `## Key functions` (each as `path:line name`, with "
+    "its callers and callees); `## Dependency paths`; `## Risks` (callers, tests and "
+    "modules a change here could break). Cite path:line for every entry, and nothing you "
+    "did not see in the graph or the code.\n"
 )
 
 
@@ -480,6 +530,13 @@ class DesignMode(Mode):
                 300, "int", lo=10, hi=3600, frozen=True,
                 description="how long the background code graph build may run before it is "
                             "stopped; the run never waits for it",
+            ),
+            "code_graph_wait_s": Knob(
+                # At most CODE_GRAPH_WAIT_MAX_S: await_code_graph is an op, and the spine
+                # stops an op's command at its default limit (600 s, `commandTimeoutMs`).
+                120, "int", lo=0, hi=CODE_GRAPH_WAIT_MAX_S, frozen=True,
+                description="how long the explorer step waits for a code graph still "
+                            "being built before it explores the files instead",
             ),
             "code_graph_max_files": Knob(
                 20000, "int", lo=1, hi=10_000_000, frozen=True,
@@ -557,11 +614,12 @@ class DesignMode(Mode):
             writes=("research-plan.json", "pitfalls.json", "pitfalls.md",
                     "strategy-plan.json", "strategy.json",
                     "research-review.txt", "pitfalls-review.txt",
-                    "research/", "strategy/"),
+                    "research/", "strategy/", GRAPH_CONTEXT),
             produces=("research", "findings_recorded", "research_review",
                       "research_attempts_used", "research_advisory",
                       "pitfalls", "pitfalls_review", "pitfalls_attempts_used",
-                      "pitfalls_advisory", "strategy_plan", "strategy", "refine_context"),
+                      "pitfalls_advisory", "strategy_plan", "strategy", "refine_context",
+                      "graph_context"),
             max_iterations=2,
             notes="on a refine, skip research and strategy and go straight to design_doc",
         ))
@@ -591,7 +649,7 @@ class DesignMode(Mode):
             "size_change", "agent",
             prompt_template=SIZER_PROMPT,
             timeout_s=SIZER_TIMEOUT_S,
-            reads=("brief.json",),
+            reads=("brief.json", GRAPH_CONTEXT),
             writes=(SIZING,),
             notes="size the change by reading the code it touches, before research; read "
                   "only, no subagents, no web. The spine's CEO-subagent route does not "
@@ -608,6 +666,42 @@ class DesignMode(Mode):
                   "same rule as classify_scale; full unless the verdict proves it scoped",
         ))
 
+        # ── the explorer, before sizing: it maps the code the brief names into
+        # graph-context.md, from the code graph or, without one, from the files ──
+        graph.add(Node(
+            "await_code_graph", "op", call="refactory_dsh.code_graph:await_code_graph",
+            knobs=("code_graph", "code_graph_wait_s"),
+            writes=(GRAPH_CONTEXT, EXPLORER_MISSING),
+            produces=("code_graph_state", "code_graph_usage"),
+            notes="wait a bounded time for the background graph build; say whether the "
+                  "explorer has a graph",
+        ))
+        graph.add(Node("fork_explore", "fork", targets=("explore_code",),
+                       optional_targets=("explore_code",),
+                       notes="start the code explorer; one that fails or times out is "
+                             "missing, and the later steps go on without its context"))
+        graph.add(Node(
+            "explore_code", "agent",
+            prompt_template=EXPLORER_PROMPT,
+            timeout_s=EXPLORER_TIMEOUT_S,
+            reads=("brief.json",),
+            writes=(GRAPH_CONTEXT,),
+            notes="map the code the brief names with the code graph's query, explain and "
+                  "path, or the files without a graph; read only, no subagents, no web. The "
+                  "spine's CEO-subagent route does not enforce timeout_s: there the bound is "
+                  "the prompt's",
+        ))
+        graph.add(Node("join_explore", "join", sources=("explore_code",),
+                       notes="wait for the code explorer"))
+        graph.add(Node(
+            "record_graph_context", "op", call="refactory_dsh.code_graph:record_graph_context",
+            reads=(GRAPH_CONTEXT, EXPLORER_MISSING),
+            writes=(GRAPH_CONTEXT,),
+            produces=("graph_context", "graph_context_source", "code_graph_paragraph"),
+            notes="head the code context with what it was made from (the graph, or the "
+                  "files and why) for the later prompts",
+        ))
+
         # ── design-v2's head: research, perspectives, then the design itself ──
         graph.add(Node(
             "research_director", "agent",
@@ -619,6 +713,7 @@ class DesignMode(Mode):
                 "{% if presize_scope %}{% if presize_scope_reason %}Sized before research "
                 "by reading the code: {{presize_scope}} — {{presize_scope_reason}}. This is "
                 "context; you decide how many questions you need.\n\n{% endif %}{% endif %}"
+                + CODE_CONTEXT +
                 "You are the research director. Decide what has to be learned before "
                 "this artifact can be designed: usually three to five questions for a "
                 "full design, while a scoped change often needs only one focused question "
@@ -632,7 +727,8 @@ class DesignMode(Mode):
                 "repository or search the web, to write a short note citing file:line, and "
                 "to report any further reach in the footprint: the run widens the research "
                 "when it finds some. Spawn "
-                "one subagent per question and have each write its findings to "
+                "one subagent per question{% if graph_context %}, telling each the code "
+                "context lines its question needs,{% endif %} and have each write its findings to "
                 "`research/<slug>.md` under the run directory, then write "
                 "`research-plan.json` yourself.\n\n"
                 "## Footprint\n"
@@ -641,7 +737,7 @@ class DesignMode(Mode):
                 "## What was wrong with the last plan\n{{research_review}}\n\n"
                 "## The plan's shape\n" + DESIGN_RESEARCH_SCHEMA
             ),
-            reads=("brief.json", "research-review.txt"),
+            reads=("brief.json", "research-review.txt", GRAPH_CONTEXT),
             writes=("research-plan.json",),
             produces=("research",),
             notes="choose the research directions and have a subagent answer each one",
@@ -673,6 +769,7 @@ class DesignMode(Mode):
                 "Repository: {{source}}\n\n"
                 "## Research scope\n{{research_scope}}\n\n"
                 "## What the research found\n{{research}}\n\n"
+                + CODE_CONTEXT +
                 "{% if code_graph_paragraph %}{{code_graph_paragraph}}\n\n{% endif %}"
                 "## What was wrong with the last attempt\n{{pitfalls_review}}\n\n"
                 "You are the pitfalls researcher. Before any strategy or design exists, "
@@ -707,7 +804,7 @@ class DesignMode(Mode):
                 "of the same list. Do not read strategy.json or design.md — this step "
                 "is independent of them."
             ),
-            reads=("brief.json", "research-plan.json"),
+            reads=("brief.json", "research-plan.json", GRAPH_CONTEXT),
             writes=("pitfalls.json", "pitfalls.md"),
             produces=("pitfalls",),
             notes="identify risk-ranked pitfalls before strategy, independent of any design",
@@ -736,6 +833,7 @@ class DesignMode(Mode):
                 "Artifact name: {{name}}\nBrief: {{brief}}\n"
                 "It is built in {{source}}; read what is there before choosing.\n\n"
                 "## Pitfalls\n{{pitfalls}}\n\n"
+                + CODE_CONTEXT +
                 "## What the research found\n{{research}}\n\n"
                 "## Research scope\n{{research_scope}}\n\n"
                 "{% if presize_scope %}{% if presize_scope_reason %}Before research: "
@@ -765,7 +863,7 @@ class DesignMode(Mode):
                 "`FND-<slug>-<n>` ids from that perspective's file. Every ask must "
                 "be covered."
             ),
-            reads=("brief.json", "research-plan.json", "pitfalls.json"),
+            reads=("brief.json", "research-plan.json", "pitfalls.json", GRAPH_CONTEXT),
             writes=("strategy-plan.json", "strategy/"),
             produces=("strategy_plan",),
             notes="choose the perspectives and record what each one covers",
@@ -776,6 +874,7 @@ class DesignMode(Mode):
                 "Artifact name: {{name}}\nBrief: {{brief}}\nIt is built in {{source}}.\n"
                 "The check, run from {{check_root}}:\n    {{check}}\n\n"
                 "## Pitfalls\n{{pitfalls}}\n\n"
+                + CODE_CONTEXT +
                 "## What the research found\n{{research}}\n\n"
                 "## The perspectives\n{{strategy_plan}}\n\n"
                 + _ACCEPTANCE_BASELINE
@@ -795,7 +894,7 @@ class DesignMode(Mode):
                 "citing their ids; the rest stay in those files for the design to read."
             ),
             reads=("brief.json", "research-plan.json", "strategy-plan.json", "pitfalls.json",
-                   "research/", "strategy/"),
+                   "research/", "strategy/", GRAPH_CONTEXT),
             writes=("strategy.json",),
             produces=("strategy",),
             notes="compile the perspectives into one plan",
@@ -811,6 +910,7 @@ class DesignMode(Mode):
                 # Empty except on a light refine: the pull request it follows up.
                 "{{refine_context}}"
                 "## Pitfalls\n{{pitfalls}}\n\n"
+                + CODE_CONTEXT +
                 "## What the design checks found\n{{design_review_feedback}}\n\n"
                 "\n## Strategy gate feedback\n{{gate_strategy_feedback}}\n\n"
                 "{{gate_revision_instruction}}\n\n"
@@ -849,7 +949,7 @@ class DesignMode(Mode):
                 "\n\n## Claims check feedback\n{{claims_check_feedback}}"
             ),
             reads=("brief.json", "strategy.json", "reviews/design-review-feedback.txt",
-                   "pitfalls.json", "research/", "strategy/"),
+                   "pitfalls.json", "research/", "strategy/", GRAPH_CONTEXT),
             writes=("design.md",),
             produces=("design",),
             notes="write the design document the code is written from",
@@ -944,7 +1044,9 @@ class DesignMode(Mode):
                 "Write the artifact `{{name}}` so that it is complete and runnable.\n\n"
                 "Brief: {{brief}}\n"
                 "It will be checked by running: {{check}}\n\n"
-                "## The design\nRead the approved design from `design.md` in the run directory.\n\n"
+                "## The design\nRead the approved design from `design.md` in the run directory"
+                "{% if graph_context %}, and the map of the code it touches from `"
+                + GRAPH_CONTEXT + "`{% endif %}.\n\n"
                 "## What went wrong last time\n{{validation}}\n\n"
                 "## What the reviews refused\n{{qa_gate}}\n{{overwatch_review}}\n\n"
                 + _ACCEPTANCE_BASELINE
@@ -952,7 +1054,7 @@ class DesignMode(Mode):
                 + UPDATED_TESTS_COMPLETION
                 + EMIT_CHECKLIST
             ),
-            reads=("brief.json", "design.md", "check.txt", "check-record.json"),
+            reads=("brief.json", "design.md", "check.txt", "check-record.json", GRAPH_CONTEXT),
             writes=(repo_change.EMIT_FILE,),
             produces=("emit",),
             feedback_keys=("validation", "qa_gate", "overwatch_review"),
@@ -1370,9 +1472,15 @@ class DesignMode(Mode):
 
         graph.connect("prepare", "route_refine_design")
         graph.connect("route_refine_design", "build_code_graph", condition="proceed")
-        graph.connect("build_code_graph", "clear_sizing")
+        # The explorer maps the code first, so the sizer starts from it.
+        graph.connect("build_code_graph", "await_code_graph")
+        graph.connect("await_code_graph", "fork_explore")
+        # No edge from explore_code to join_explore, as fork_qa's branches have none.
+        graph.connect("fork_explore", "join_explore")
+        graph.connect("join_explore", "record_graph_context")
+        graph.connect("record_graph_context", "clear_sizing")
         graph.connect("clear_sizing", "fork_size")
-        # No edge from size_change to join_size, as fork_qa's branches have none.
+        # No edge from size_change to join_size, for the same reason.
         graph.connect("fork_size", "join_size")
         graph.connect("join_size", "presize_scale")
         graph.connect("presize_scale", "research_director")
