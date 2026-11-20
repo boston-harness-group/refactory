@@ -51,11 +51,13 @@ TRAJECTORY_BUDGET = 120000
 #: The whole proposal request's room in characters, tied to the optimizer model's context
 #: as ``analysts.ANALYST_ROOM`` is (same size, same reasoning: Opus 4.6 reads 200k
 #: tokens, Claude Code's own system prompt and the reserved reply take 30-40k, and traces
-#: run 2.5-3.5 characters a token). Only "Some items in full" gives way to it: when a
-#: request would pass it, the items shown whole are those that fit what the rest of the
-#: request leaves (`_fit_shown`), whole and in rank order, the rest named. Nothing else is
-#: cut for it. A request the provider still refuses as too long is asked again once at
-#: half its length (``AutoresearchOptimizer.propose``).
+#: run 2.5-3.5 characters a token). Only the items' texts give way to it, whatever their
+#: sizes (`ProposalContext.render`): "Some items in full" and the blocks of "What the last
+#: edit changed" share what the rest of the request leaves, items whole while they fit
+#: and in rank order, the rest named; an item or block that alone passes its share has
+#: its longest texts cut to fit (marked), or is named. Nothing else is cut for it. A
+#: request the provider still refuses as too long is asked again once at half its length
+#: (``AutoresearchOptimizer.propose``), which these then always make shorter.
 PROPOSAL_ROOM = 400000
 #: How many reader calls run at once.
 READER_CONCURRENCY = 4
@@ -1052,6 +1054,16 @@ class ProposalContext:
     #: every item fits (`_fit_shown`); 0 is no limit. ``render`` sets it from
     #: ``request_room`` when the request would pass that, never otherwise.
     shown_items_room: int = 0
+    #: The most characters the blocks of "What the last edit changed" take together
+    #: (`_edit_change_lines`' ``limit``); 0 is the section's own rules. ``render`` sets it
+    #: when the request would pass ``request_room``, never otherwise.
+    edit_change_limit: int = 0
+    #: What the last ``render`` measured of its sections (``blocks``: the characters
+    #: "What the last edit changed" shows in blocks), for ``render`` to fit them.
+    fit_sizes: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    #: What one ``render`` works out once and reads again while it renders (its copies
+    #: share it); emptied when it starts and when it ends.
+    rendering: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     #: The latest children of the edited candidate with their parents' train records
     #: (``Loop._edit_pairs``), for "What the last edit changed".
     edit_pairs: list[dict[str, Any]] = field(default_factory=list)
@@ -1182,12 +1194,18 @@ class ProposalContext:
 
     def _settled(self) -> frozenset[str]:
         """The lines an item's step does not repeat (`settled_for`) over this request's
-        items, the edited candidate's children included."""
-        return settled_for(self.knobs, self.node_states,
-                           [*self.item_records,
-                            *(r for pair in self.edit_pairs or ()
-                              for side in ("parent_records", "child_records")
-                              for r in pair.get(side) or ())])
+        items, the edited candidate's children included; within one ``render``, worked
+        out once (``fit_sizes`` aside, nothing it reads changes while it renders)."""
+        held = self.rendering.get("settled")
+        if held is None:
+            held = settled_for(self.knobs, self.node_states,
+                               [*self.item_records,
+                                *(r for pair in self.edit_pairs or ()
+                                  for side in ("parent_records", "child_records")
+                                  for r in pair.get(side) or ())])
+            if self.rendering.get("on"):
+                self.rendering["settled"] = held
+        return held
 
     def _trajectories_shown(self) -> dict[str, str]:
         """What "Trajectories of the candidate being edited" shows whole
@@ -1201,6 +1219,18 @@ class ProposalContext:
                       else list(self.analysis.get("findings") or ())),
             shown_room=self.shown_items_room, settled=self._settled())
         return shown_whole(whole, f"under \"{TRAJECTORIES_HEADING.lstrip('# ')}\" below")
+
+    def _edit_change(self, omissions: list[dict[str, Any]] | None = None,
+                     sizes: dict[str, int] | None = None) -> list[str]:
+        """"What the last edit changed" (`_edit_change_lines`), its blocks within
+        ``edit_change_limit``; ``sizes`` gets what they take."""
+        return _edit_change_lines(
+            self.edit_pairs, omissions=omissions, settled=self._settled(),
+            homes=knob_homes(self.knobs), shown=self._trajectories_shown(),
+            room=int(self.evidence_budget * EDIT_CHANGE_SHARE),
+            limit=self.edit_change_limit, sizes=sizes,
+            named_at=(self.rendering.setdefault("named", {}) if self.rendering.get("on")
+                      else None))
 
     def _leaderboard_lines(self) -> list[str]:
         """The leaderboard: id, parent, score, structural, gate and cost. A candidate's edits
@@ -1272,10 +1302,7 @@ class ProposalContext:
                 [] if self.history_truncated else self.history)),
         ]
         if self.edit_pairs:
-            lines += ["", *_edit_change_lines(
-                self.edit_pairs, omissions=self.omissions, settled=self._settled(),
-                homes=homes, shown=self._trajectories_shown(),
-                room=int(self.evidence_budget * EDIT_CHANGE_SHARE))]
+            lines += ["", *self._edit_change(self.omissions, self.fit_sizes)]
         if self.reasoning:
             predicted = [str(p.get("child")) for p in self.edit_pairs or () if p.get("prediction")]
             lines += ["", *_reasoning_lines(
@@ -1318,38 +1345,85 @@ class ProposalContext:
         make, the items, then the reference, and the answer's form last. Fills
         ``omissions`` with any text it had to leave out of an item.
 
-        Within ``request_room``: a request that would pass it is made again with the
-        items shown whole limited to what the rest of it leaves (``shown_items_room``),
-        whole and in rank order, at least one (`_fit_shown`); nothing else gives way."""
+        Within ``request_room``, whatever the items' sizes: a request that would pass it
+        is made again with the items' texts giving way -- the items "Some items in full"
+        shows (``shown_items_room``, `_fit_shown`) and the blocks of "What the last edit
+        changed" (``edit_change_limit``, `_edit_change_lines`) -- sharing what the rest
+        of the request leaves (`_fair_shares`: either is whole when it needs no more
+        than half, the other then has the remainder; one named in one line asks for
+        nothing, so the other has its room). Items stay whole while they fit,
+        in rank order, the rest named; the first, when it alone passes its share, has its
+        longest texts cut to fit, or is named. A block past its share is cut the same
+        way, or listed in one line. Each cut is marked in place and in ``omissions``.
+        Nothing else gives way: the rest of the request is never cut.
+
+        What one render reads again is worked out once (``rendering``)."""
+        from . import evidence
+
+        self.rendering.clear()
+        self.rendering["on"] = True
+        try:
+            with evidence.keeping():
+                return self._render_fitted()
+        finally:
+            self.rendering.clear()
+
+    def _render_fitted(self) -> str:
+        """`render`'s work: the request, fitted to ``request_room``."""
         text = self._render_request()
-        if not self.request_room or self.shown_items_room or len(text) <= self.request_room:
+        if (not self.request_room or self.shown_items_room or self.edit_change_limit
+                or len(text) <= self.request_room):
             return text
         items = _ordered_items(self.item_records or ())
-        if not items or _all_whole(items, self.evidence_budget):
-            return text  # every item whole: nothing is picked, so nothing gives way
         settled = self._settled()
-        picked = trajectories_whole(
-            self.item_records, budget=self.evidence_budget, findings=self.reader_findings,
-            analysed=(None if self.analysis is None
-                      else list(self.analysis.get("findings") or ())), settled=settled)
-        refs = error_refs(_pipeline_items(self.item_records))
-        room = self.request_room - (len(text) - sum(_shown_size(r, settled, refs)
-                                                     for r in picked))
-        # What else the request says about an item can depend on whether it is shown
-        # whole (another section points to it, or says it itself), so the room is
-        # narrowed by any overshoot, a few times.
-        for _ in range(3):
-            fitted = replace(self, shown_items_room=max(1, room))
+        picked = [] if not items or _all_whole(items, self.evidence_budget) else (
+            trajectories_whole(
+                self.item_records, budget=self.evidence_budget,
+                findings=self.reader_findings,
+                analysed=(None if self.analysis is None
+                          else list(self.analysis.get("findings") or ())), settled=settled))
+        refs = error_refs(_pipeline_items(self.item_records or []))
+        shown = sum(_shown_size(r, settled, refs) for r in picked)
+        if not shown and not self.fit_sizes.get("demand"):
+            return text  # nothing of the items' texts can give way
+        # Each render measures what the items in full and the blocks took and what the
+        # blocks would take (`fit_sizes`). The rest of the request and the blocks' demand
+        # change with what is shown (a block names a trace "Trajectories" shows whole, and
+        # shows it itself once it is cut there), so the shares are made again from the
+        # last render, a few times, and the fullest request within the room is kept.
+        # A part named in one line (no item in full, or a block) asks for nothing more, so
+        # the other may have the room it leaves; the most the blocks asked for is kept as
+        # their limit's measure, so a named block stays limited.
+        best: tuple[str, list[dict[str, Any]]] | None = None
+        sizes = dict(self.fit_sizes)
+        demand = need = sizes.get("demand", 0)
+        wanted = shown
+        for _ in range(5):
+            rest = len(text) - sizes.get("items", 0) - sizes.get("blocks", 0)
+            items_room, blocks_room = _fair_shares([wanted, demand], self.request_room - rest)
+            fitted = replace(
+                self, shown_items_room=max(1, items_room) if items_room < shown else 0,
+                edit_change_limit=max(1, blocks_room) if blocks_room < need else 0)
             text = fitted._render_request()
-            if len(text) <= self.request_room or room <= 1:
-                break
-            room -= len(text) - self.request_room
-        # ``omissions`` is the same list in both (``replace`` keeps it), filled by the last.
-        return text
+            sizes = dict(self.fit_sizes)
+            if len(text) <= self.request_room:
+                if best is None or len(text) > len(best[0]):
+                    best = (text, list(self.omissions))
+                if self.request_room - len(text) <= self.request_room // 50:
+                    break
+            demand = sizes.get("demand", 0)
+            need = max(need, demand)
+            wanted = shown if sizes.get("items", 0) or not fitted.shown_items_room else 0
+        if best is None:
+            return text  # as far as the items' texts give way; the rest is never cut
+        # ``omissions`` is the same list in each (``replace`` keeps it): the kept request's.
+        self.omissions[:] = best[1]
+        return best[0]
 
     def _render_request(self) -> str:
         """`render`'s request at the context's ``shown_items_room``."""
         self.omissions.clear()
+        self.fit_sizes.clear()
         sections = [
             f"# Update request — generation {self.generation}, epoch {self.epoch}",
             "",
@@ -1433,7 +1507,7 @@ class ProposalContext:
                 analysed=(None if self.analysis is None
                           else list(self.analysis.get("findings") or ())),
                 omissions=self.omissions, settled=self._settled(),
-                shown_room=self.shown_items_room)]
+                shown_room=self.shown_items_room, sizes=self.fit_sizes)]
         # 7: the reference, last: every node in full, the schemas, the validator's rules.
         sections += [
             "",
@@ -3462,15 +3536,23 @@ ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the gr
              "took from the input or an earlier step's reply, by name (`Sees:`), any part of "
              "its prompt that is not in its settings (`" + "Also in its prompt (not in its "
              "settings)" + "`: a reason a judge sent it back with, say), and its reply. A "
-             "step's own instructions are its settings, under \"Each step's settings\".")
+             "step's own instructions are its settings, under \"Each step's settings\". A "
+             "step run again says in place what its prompt has exactly as the run of it "
+             "that fed it had, counted as that run's block and reply show them (`[same as "
+             "solve's prompt (step 3), all but its last shown line]`, `[same as solve's reply "
+             "(step 3), lines 1-6]`).")
 #: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
 #: every item when all of them together are under this many characters. It only decides
 #: that switch; it never cuts an item.
 SHOW_ALL_BELOW = 120000
 #: A single text of an item shown in full (a step's reply, the input) is cut only past
-#: this many characters -- one text too large to send whole; the items themselves are
-#: never cut to fit a size.
+#: this many characters -- one text too large to send whole; an item is otherwise cut
+#: only when it alone passes what the request's room leaves it (`SHOWN_TEXT_FLOOR`).
 ITEM_TEXT_MAX = 60000
+#: The least a text of an item is cut to (head and tail, marked) when the item must give
+#: way to fit the request's room (`_fit_shown`, the forced picks of "What the last edit
+#: changed"): an item that does not fit even then is named instead of shown.
+SHOWN_TEXT_FLOOR = 200
 
 
 def _contrast_items(items: Sequence[dict[str, Any]], shown: Sequence[dict[str, Any]],
@@ -3552,29 +3634,82 @@ def _shown_size(record: dict[str, Any], settled: Collection[str] | None,
 
 
 def _fit_shown(failing: Sequence[dict[str, Any]], passing: Sequence[dict[str, Any]],
-               room: int, size: Callable[[dict[str, Any]], int]
-               ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """The items `_shown_items` picked that fit ``room`` characters together, chosen, never
-    cut: failures and their contrasting successes in turn (failure 1, success 1, failure 2,
-    ...), each in its rank order, stopping at the first that does not fit, each measured
-    as shown (``size``, `_shown_size`). The first item is kept whatever its size, so the
-    section never shows none. ``room`` 0 is no limit (`ProposalContext.shown_items_room`).
-    The third value is what was left out."""
+               room: int, size: Callable[[dict[str, Any]], int],
+               cut: Callable[[dict[str, Any], int], int | None] | None = None,
+               ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
+                          dict[int, int]]:
+    """The items `_shown_items` picked that fit ``room`` characters together: failures and
+    their contrasting successes in turn (failure 1, success 1, failure 2, ...), each in its
+    rank order, stopping at the first that does not fit, each measured as shown (``size``,
+    `_shown_size`), each whole. Only the first, when it alone passes ``room``, gives way
+    rather than the section showing none: shown with its longest texts cut to the
+    longest one length at which it fits (``cut``, `_cut_to_fit`), or, when it does not
+    fit even at `SHOWN_TEXT_FLOOR`, named with the rest. ``room`` 0 is no limit
+    (`ProposalContext.shown_items_room`). The third value is what was left out, the
+    fourth each cut item's length (by ``id``)."""
     if room <= 0:
-        return list(failing), list(passing), []
+        return list(failing), list(passing), [], {}
     turns = [r for pair in itertools.zip_longest(failing, passing) for r in pair
              if r is not None]
     kept: list[dict[str, Any]] = []
+    cuts: dict[int, int] = {}
     used = 0
     for record in turns:
         chars = size(record)
-        if kept and used + chars > room:
-            break
+        if used + chars > room:
+            limit = None if kept or cut is None else cut(record, room)
+            if limit is None:
+                break
+            cuts[id(record)] = limit
+            chars = room
         kept.append(record)
         used += chars
     keep = {id(r) for r in kept}
     return ([r for r in failing if id(r) in keep], [r for r in passing if id(r) in keep],
-            [r for r in turns if id(r) not in keep])
+            [r for r in turns if id(r) not in keep], cuts)
+
+
+def _fair_shares(demands: Sequence[int], room: int) -> list[int]:
+    """Each of ``demands``' share of ``room``: a demand within an even share of what is
+    left is met whole, smallest first; the others split what is left evenly."""
+    shares = [0] * len(demands)
+    left = max(0, room)
+    waiting = sorted(range(len(demands)), key=lambda i: demands[i])
+    while waiting:
+        even = left // len(waiting)
+        if demands[waiting[0]] > even:
+            for index in waiting:
+                shares[index] = even
+            break
+        index = waiting.pop(0)
+        shares[index] = max(0, demands[index])
+        left -= shares[index]
+    return shares
+
+
+def _longest_fitting(fits: Callable[[int], bool], low: int, high: int = ITEM_TEXT_MAX) -> int:
+    """The longest length in [``low``, ``high``] that ``fits`` (which holds at ``low``,
+    and the shorter a cut the more it holds), to within 2%: the ratio between a length
+    that fits and one that does not is halved, so about ten tries cover 200 to 60000."""
+    if fits(high):
+        return high
+    while high - low > 1 and high > low * 1.02:
+        middle = min(max(int((low * high) ** 0.5), low + 1), high - 1)
+        low, high = (middle, high) if fits(middle) else (low, middle)
+    return low
+
+
+def _cut_to_fit(record: dict[str, Any], room: int, settled: Collection[str] | None,
+                refs: Mapping[str, str] | None) -> int | None:
+    """The longest length every text of ``record`` may keep (head and tail, marked) for it
+    to fit ``room`` as "Some items in full" shows it (`_longest_fitting`): only its texts
+    longer than that are cut, so its longest go first. ``None`` when it does not fit even
+    at `SHOWN_TEXT_FLOOR`."""
+
+    def fits(limit: int) -> bool:
+        return len(_trajectory(record, limit, None, settled, refs)) + 2 <= room
+
+    return _longest_fitting(fits, SHOWN_TEXT_FLOOR) if fits(SHOWN_TEXT_FLOOR) else None
 
 
 TRAJECTORIES_HEADING = "## Trajectories of the candidate being edited"
@@ -3607,9 +3742,11 @@ def trajectories_whole(records: Sequence[dict[str, Any]], *, budget: int = TRAJE
     failing, passing, _cited = _shown_items(
         items, _analysed_findings(analysed) if analysed is not None else findings)
     refs = error_refs(_pipeline_items(records))
-    failing, passing, _left = _fit_shown(failing, passing, shown_room,
-                                         lambda r: _shown_size(r, settled, refs))
-    return [*failing, *passing]
+    failing, passing, _left, cuts = _fit_shown(
+        failing, passing, shown_room, lambda r: _shown_size(r, settled, refs),
+        lambda r, room: _cut_to_fit(r, room, settled, refs))
+    # An item cut to fit is not whole: no other section points to it as shown.
+    return [r for r in (*failing, *passing) if id(r) not in cuts]
 
 
 def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY_BUDGET,
@@ -3618,9 +3755,10 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                   analysed: Sequence[dict[str, Any]] | None = None,
                   omissions: list[dict[str, Any]] | None = None,
                   settled: Collection[str] | None = None,
-                  shown_room: int = 0) -> list[str]:
+                  shown_room: int = 0, sizes: dict[str, int] | None = None) -> list[str]:
     """Every train item of the candidate being edited, each as `ITEM_FORM` says; an item's
-    error is said where "Item results" lists its cause (`error_refs`).
+    error is said where "Item results" lists its cause (`error_refs`). ``sizes`` gets the
+    characters the items picked and shown in full take (``items``).
 
     When all of them together are under ``SHOW_ALL_BELOW`` characters (or the call's
     smaller ``budget``), every item is shown in full here. When not, readers went through
@@ -3706,8 +3844,9 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                          f"not be read: {_clip(failure.get('error'), 300)}; those items are in "
                          "the table.)")
     failing, passing, cited = _shown_items(items, findings)
-    failing, passing, left_out = _fit_shown(failing, passing, shown_room,
-                                            lambda r: _shown_size(r, settled, refs))
+    failing, passing, left_out, cuts = _fit_shown(
+        failing, passing, shown_room, lambda r: _shown_size(r, settled, refs),
+        lambda r, room: _cut_to_fit(r, room, settled, refs))
     chosen = [*failing, *passing]
     # An item shown in full below says its expected choice's text there (its choice
     # line): the table gives only the label for it.
@@ -3725,7 +3864,7 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
                        "(below)" if id(r) in full and r.get("error_text") else
                        _clip(r.get("error_text"), _TABLE_CELL_CHARS),
                        _history_cell(r, id(r) in full)] for r in items])]
-    if not chosen:
+    if not chosen and not left_out:
         return lines
     examples = ["", "### Some items in full",
                 f"{len(failing)} failing item(s)"
@@ -3737,13 +3876,24 @@ def _trajectories(records: Sequence[dict[str, Any]], *, budget: int = TRAJECTORY
         examples.append(
             f"The rule picked {len(left_out)} more, left out so this request fits the "
             f"optimizer model's context ({shown_room} characters were left for items in "
-            "full): "
+            "full"
+            + ("; even the first, with every text cut to "
+               f"{SHOWN_TEXT_FLOOR} characters, would not fit" if not chosen else "")
+            + "): "
             + ", ".join(f"{r.get('id')} ({'passed' if r.get('passed') else 'failed'})"
                         for r in left_out) + ". Each is in the table above.")
     for record in chosen:
+        if id(record) in cuts:
+            examples += ["", f"Item {record.get('id')} alone is longer than the {shown_room} "
+                         "characters left for items in full, so its longest texts are cut to "
+                         f"{cuts[id(record)]} characters each, head and tail around a marked "
+                         "count; everything else in it is whole."]
         if record.get("passed"):
             examples += ["", "(A success, for contrast.)"]
-        examples += ["", _trajectory(record, ITEM_TEXT_MAX, omissions, settled, refs)]
+        examples += ["", _trajectory(record, cuts.get(id(record), ITEM_TEXT_MAX), omissions,
+                                     settled, refs)]
+        if sizes is not None:
+            sizes["items"] = sizes.get("items", 0) + len(examples[-1]) + 2
     return lines + examples
 
 
@@ -4669,7 +4819,8 @@ EDIT_CHANGE_SHARE = 0.25
 #: The least of each of the first pick's parent replies the section keeps (head and
 #: tail) when its block would pass the room: the reply the child's is compared with.
 EDIT_PARENT_FLOOR = 2000
-#: The kinds of changed item whose first pick is always shown whole.
+#: The kinds of changed item whose first pick is always shown (cut to fit, or named,
+#: only when the request would pass its room).
 EDIT_FORCED_KINDS = ("broken", "fixed")
 #: The section's ceiling, in rooms: past it, a forced pick's child replies are cut too.
 EDIT_CEILING_ROOMS = 3
@@ -4769,10 +4920,19 @@ class _Quoted:
     def __init__(self, shown: Mapping[str, str] | None) -> None:
         self.shown = dict(shown or {})
         self.texts: dict[tuple[str, ...], str] = {}
+        # Each record's `record_key`, computed once for the section (copies share it):
+        # the record is held beside its key, so an id is never another record's.
+        self.keys: dict[int, tuple[Mapping[str, Any], str]] = {}
+
+    def key(self, record: Mapping[str, Any]) -> str:
+        held = self.keys.get(id(record))
+        if held is None or held[0] is not record:
+            held = self.keys[id(record)] = (record, record_key(record))
+        return held[1]
 
     def where(self, record: Mapping[str, Any], *part: str) -> str | None:
-        found = self.shown.get(record_key(record))
-        return found or self.texts.get((record_key(record), *part))
+        key = self.key(record)
+        return self.shown.get(key) or self.texts.get((key, *part))
 
     def input_where(self, record: Mapping[str, Any]) -> str | None:
         text = _input_text(record)
@@ -4783,18 +4943,21 @@ class _Quoted:
     def copy(self) -> "_Quoted":
         other = _Quoted(self.shown)
         other.texts = dict(self.texts)
+        other.keys = self.keys
         return other
 
 
 def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child_id: Any,
                  quoted: _Quoted, omissions: list[dict[str, Any]] | None = None,
                  settled: Collection[str] | None = None,
-                 parent_chars: int = ITEM_TEXT_MAX, child_chars: int = ITEM_TEXT_MAX) -> str:
+                 parent_chars: int = ITEM_TEXT_MAX, child_chars: int = ITEM_TEXT_MAX,
+                 text_chars: int = ITEM_TEXT_MAX) -> str:
     """How the edit moved one changed item: each side's verdict and answer, the input
     once, the steps whose reply stayed the same named, and each step whose reply changed,
     is new in the child or is gone from it shown whole -- the parent's reply beside the
     child's. A text already shown (``quoted``) is named by where it is instead; what this
-    block shows is added to ``quoted``. Each text over ``ITEM_TEXT_MAX`` is cut, each
+    block shows is added to ``quoted``. Each text over ``text_chars`` (``ITEM_TEXT_MAX``,
+    or less for a block cut to fit what the request's room leaves) is cut, each
     parent's reply over ``parent_chars`` (an item that must fit the section's room) and
     each child's moved reply over ``child_chars`` (one past the section's ceiling), head
     and tail around a marked count, each cut recorded in ``omissions``; a cut that would
@@ -4803,9 +4966,10 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
 
     item = str(child.get("id"))
     here = f"under child {child_id}'s item {item} in this section"
+    text_chars = min(text_chars, ITEM_TEXT_MAX)
 
     def cut(text: Any, step: str) -> str:
-        return evidence.clip(text, ITEM_TEXT_MAX, item=item, step=step, omissions=omissions)
+        return evidence.clip(text, text_chars, item=item, step=step, omissions=omissions)
 
     lines = [f"#### Item {item} -- {kind} (child {child_id})"]
     expected = _expected(child)
@@ -4841,6 +5005,10 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
     before = dict(_runs(parent))
     total = len(_runs(child))
 
+    # The child's replies shown here, by run (stripped, and what of a clipped one is shown
+    # complete): a later run may repeat what it shows.
+    shown_whole: dict[tuple[str, int], tuple[str, tuple[int, int] | None]] = {}
+
     def reply(record: Mapping[str, Any], exchange: Mapping[str, Any], node: str, run: int,
               whose: str) -> list[str]:
         where = quoted.where(record, node, str(run))
@@ -4848,7 +5016,7 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
             return [f"{whose} reply: as {where}, step `{node}`"
                     + (f" (run {run})" if counts.get(node, 0) > 1 else "") + "."]
         whole = str(exchange.get("response") or "").strip()
-        limit = min(parent_chars if record is parent else child_chars, ITEM_TEXT_MAX)
+        limit = min(parent_chars if record is parent else child_chars, text_chars)
         if limit < ITEM_TEXT_MAX and len(whole) - limit < EDIT_CUT_MIN:
             limit = ITEM_TEXT_MAX  # a cut this small saves nothing worth a mark
         text = evidence.clip(exchange.get("response"), limit, item=item,
@@ -4856,7 +5024,11 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
                              omissions=omissions)
         if text == str(exchange.get("response") or "").strip():
             # Only a whole reply is a reference's target.
-            quoted.texts[(record_key(record), node, str(run))] = here
+            quoted.texts[(quoted.key(record), node, str(run))] = here
+            if record is child:
+                shown_whole[(node, run)] = (whole, None)
+        elif record is child:
+            shown_whole[(node, run)] = (whole, evidence._complete(whole, text))
         return [f"{whose} reply:", *evidence.fenced(text)]
 
     for number, ((node, run), exchange) in enumerate(_runs(child), 1):
@@ -4868,13 +5040,23 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
                   f"new: the parent ran it {_counts_in(parent, node)} time(s)")
         lines.append(f"##### Step `{node}` ({number} of {total} in the child"
                      + (f", run {run}" if counts.get(node, 0) > 1 else "") + f"; {status})")
+        ranges, visible = None, None
         if settled is not None:
-            lines += evidence.prompt_lines(seen, exchange.get("prompt"), settled,
-                                           lambda text, node=node: cut(text, node))
+            # What it repeats exactly of what the shown run of the step that fed it shows
+            # is said in place as those lines (`evidence._Seen.view`).
+            block, ranges, visible = evidence.prompt_lines(
+                seen, exchange.get("prompt"), settled,
+                lambda text, node=node: cut(text, node), node)
+            lines += block
         if (node, run) in moves["changed"]:
             lines += reply(parent, before[(node, run)], node, run, "Parent's")
         lines += reply(child, exchange, node, run, "Child's")
         seen.add(exchange.get("response"), f"{node}'s reply")
+        shown_reply, shown_part = shown_whole.get((node, run), (None, None))
+        seen.ran(node, (f"{node}'s reply (step {number})", exchange.get("response"),
+                        shown_reply, shown_part),
+                 (f"{node}'s prompt (step {number})", exchange.get("prompt"), ranges, visible)
+                 if settled is not None else None)
     for node, run in moves["gone"]:
         lines.append(f"##### Step `{node}`"
                      + (f" (run {run})" if counts.get(node, 0) > 1 else "")
@@ -5004,7 +5186,9 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                        settled: Collection[str] | None = None,
                        homes: Mapping[str, str] | None = None,
                        shown: Mapping[str, str] | None = None,
-                       room: int | None = None) -> list[str]:
+                       room: int | None = None, limit: int = 0,
+                       sizes: dict[str, int] | None = None,
+                       named_at: dict[tuple[str, str], int] | None = None) -> list[str]:
     """'What the last edit changed': each recent child of the edited candidate
     against its parent, on train items only. Every child is listed with its counts and
     every changed item (fixed, broken, and the largest score rises and drops) is named:
@@ -5019,7 +5203,19 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     repeated. This is the home of each child's edits and prediction, shown whole
     (`whole_edits`: a ``set_knob`` as the lines it changed against the pair's ``before``
     values): other sections point here. A text a current knob holds (``homes``) is named
-    by that knob."""
+    by that knob.
+
+    ``limit`` (0: none) is the most characters the blocks may take together, which the
+    request sets only when it would pass its room (`ProposalContext.render`): then no pick
+    passes it, a forced one included. A forced pick that would is shown with every text
+    of its block cut to the longest one length that fits its share of what the limit
+    leaves beside the forced picks still to come (`_fair_shares`: one that needs less
+    than an even share leaves the rest), each cut marked and in ``omissions``; one that
+    does not fit even at `SHOWN_TEXT_FLOOR` is listed in one line, saying why. ``sizes``
+    gets the characters the blocks take (``blocks``) and would take without ``limit``
+    (``demand``: a forced pick the limit cut at most its size at the section's own floors;
+    one it named, nothing, as its one line is not a block). ``named_at`` keeps, by child
+    and item, the share a pick was first named at, which its line and omission say."""
     if not pairs:
         return []
     room = int(TRAJECTORY_BUDGET * EDIT_CHANGE_SHARE) if room is None else room
@@ -5027,7 +5223,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     records = [(_by_item(p.get("parent_records")), _by_item(p.get("child_records")))
                for p in pairs]
 
-    def render(index: int, key: str, item: str, quoted: _Quoted, chars: tuple[int, int],
+    def render(index: int, key: str, item: str, quoted: _Quoted, chars: tuple[int, int, int],
                found: list[dict[str, Any]] | None) -> str:
         parent, child = records[index]
         return _moved_block(parent[item], child[item], labels[key], pairs[index].get("child"),
@@ -5042,14 +5238,16 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     # least ``EDIT_CHILD_FLOOR``. Every other pick only when it fits
     # what is left whole; one that does not is skipped for the next, its line saying why.
     ceiling = EDIT_CEILING_ROOMS * room
-    picks: dict[tuple[int, str], tuple[int, int]] = {}
+    picks: dict[tuple[int, str], tuple[int, int, int]] = {}
     skipped: dict[tuple[int, str], str] = {}
     forced: set[str] = set()
     over: list[tuple[int, str, int]] = []
     capped: list[tuple[int, str, int]] = []
     past: list[tuple[int, str, int]] = []
+    limited: list[tuple[int, str, int]] = []
+    named: list[tuple[int, str, int]] = []
     quoted = _Quoted(shown)
-    used = 0
+    used = demanded = 0
 
     def longest(fits: Callable[[int], bool], low: int) -> int:
         high = ITEM_TEXT_MAX
@@ -5058,39 +5256,91 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
             low, high = (middle, high) if fits(middle) else (low, middle - 1)
         return low
 
+    whole = (ITEM_TEXT_MAX, ITEM_TEXT_MAX, ITEM_TEXT_MAX)
     order = _changed_items(pairs)
     present = [kind for kind in EDIT_FORCED_KINDS if any(key == kind for _i, key, _t in order)]
+    # With a ``limit``, each forced pick's whole block, for its share of it
+    # (`_fair_shares`): one that needs less than an even share leaves the rest to the
+    # others.
+    firsts: dict[str, tuple[int, str]] = {}
+    for index, key, item in order:
+        if key in EDIT_FORCED_KINDS:
+            firsts.setdefault(key, (index, item))
+    demand = {key: len(render(index, key, item, _Quoted(shown), whole, None)) + 2
+              for key, (index, item) in firsts.items()} if limit else {}
     for index, key, item in order:
         if len(picks) >= EDIT_ITEMS_WHOLE:
             skipped[(index, item)] = (f"not shown whole: {EDIT_ITEMS_WHOLE} items, the most "
                                       "shown whole, came first")
             continue
         must = key in EDIT_FORCED_KINDS and key not in forced
-        chars = (ITEM_TEXT_MAX, ITEM_TEXT_MAX)
+        chars = whole
         trial = quoted.copy()
         block = render(index, key, item, trial, chars, None)
-        if used + len(block) + 2 > room:
+        over_room = used + len(block) + 2 > room
+        if over_room or (limit and used + len(block) + 2 > limit):
             if not must:
-                skipped[(index, item)] = (f"not shown whole: its block is {len(block):,} "
-                                          f"chars, {max(0, room - used):,} of the "
-                                          f"{room:,}-char room left")
+                skipped[(index, item)] = (
+                    f"not shown whole: its block is {len(block):,} chars, "
+                    + (f"{max(0, room - used):,} of the {room:,}-char room left" if over_room
+                       else f"{max(0, limit - used):,} chars left of what this request's "
+                       "room leaves for this section"))
                 continue
-            # A cut that would save fewer than `EDIT_CUT_MIN` characters is not made.
-            parent_chars = ITEM_TEXT_MAX if used + len(block) + 2 - room < EDIT_CUT_MIN else (
-                longest(lambda n: used + len(render(
-                    index, key, item, quoted.copy(), (n, ITEM_TEXT_MAX), None)) + 2 <= room,
-                    EDIT_PARENT_FLOOR))
-            chars = (parent_chars, ITEM_TEXT_MAX)
-            block = render(index, key, item, quoted.copy(), chars, None)
-            # Its share of what is left under the ceiling, the forced picks still to come
-            # each getting the same.
-            share = (ceiling - used) // max(1, len([k for k in present if k not in forced]))
-            if len(block) + 2 > share:
-                child_chars = longest(lambda n: len(render(
-                    index, key, item, quoted.copy(), (parent_chars, n), None)) + 2 <= share,
-                    EDIT_CHILD_FLOOR)
-                chars = (parent_chars, child_chars)
-                capped.append((index, item, child_chars))
+            # With a ``limit``, its share of what the limit leaves beside the forced picks
+            # still to come (`_fair_shares`). When even the section's own floors pass it,
+            # its own cuts are moot: the cut to the limit below decides.
+            to_come = max(1, len([k for k in present if k not in forced]))
+            hard = _fair_shares(
+                [len(block) + 2, *(demand[k] for k in present if k not in forced and k != key)],
+                limit - used)[0] if limit else 0
+            floors = len(render(index, key, item, quoted.copy(),
+                                (EDIT_PARENT_FLOOR, EDIT_CHILD_FLOOR, ITEM_TEXT_MAX),
+                                None)) + 2 if limit and over_room else 0
+            binding = floors > hard
+            if over_room and not binding:
+                # A cut that would save fewer than `EDIT_CUT_MIN` characters is not made.
+                parent_chars = ITEM_TEXT_MAX if used + len(block) + 2 - room < EDIT_CUT_MIN \
+                    else longest(lambda n: used + len(render(
+                        index, key, item, quoted.copy(), (n, ITEM_TEXT_MAX, ITEM_TEXT_MAX),
+                        None)) + 2 <= room, EDIT_PARENT_FLOOR)
+                chars = (parent_chars, ITEM_TEXT_MAX, ITEM_TEXT_MAX)
+                block = render(index, key, item, quoted.copy(), chars, None)
+                # Its share of what is left under the ceiling, the forced picks still to
+                # come each getting the same.
+                share = (ceiling - used) // to_come
+                if len(block) + 2 > share:
+                    child_chars = longest(lambda n: len(render(
+                        index, key, item, quoted.copy(), (parent_chars, n, ITEM_TEXT_MAX),
+                        None)) + 2 <= share, EDIT_CHILD_FLOOR)
+                    chars = (parent_chars, child_chars, ITEM_TEXT_MAX)
+                    capped.append((index, item, child_chars))
+                block = render(index, key, item, quoted.copy(), chars, None)
+            # What the block would take by the section's own rules (at most its floors).
+            wanted = floors if binding else len(block) + 2
+            if limit and len(block) + 2 > hard:
+                # The request would pass its room: the block keeps within its share of
+                # what the limit leaves, every text of it cut to one length, or it is
+                # listed in one line.
+                def fits(n: int, chars: tuple[int, int, int] = chars, hard: int = hard) -> bool:
+                    return len(render(index, key, item, quoted.copy(),
+                                      (min(chars[0], n), min(chars[1], n), n), None)) + 2 <= hard
+
+                if not fits(SHOWN_TEXT_FLOOR):
+                    # Said with the share it was first named at: once named it asks for
+                    # no room, so a later limit is no measure of it (`render`).
+                    share = hard if named_at is None else named_at.setdefault(
+                        (str(pairs[index].get("child")), item), hard)
+                    skipped[(index, item)] = (
+                        f"not shown whole: even with every text cut to {SHOWN_TEXT_FLOOR:,} "
+                        f"chars its block passes the {share:,} chars this request's room "
+                        "left it")
+                    named.append((index, item, share))
+                    forced.add(key)
+                    continue  # named in one line: it asks for no room of the blocks
+                n = _longest_fitting(fits, SHOWN_TEXT_FLOOR)
+                chars = (min(chars[0], n), min(chars[1], n), n)
+                limited.append((index, item, n))
+                capped = [c for c in capped if c[:2] != (index, item)]
             trial = quoted.copy()
             block = render(index, key, item, trial, chars, None)
             if used + len(block) + 2 > room:
@@ -5099,11 +5349,17 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                 # Even at the floor the child's moved replies pass the ceiling: kept, and
                 # said so, never claimed to fit.
                 past.append((index, item, used + len(block) + 2))
+            demanded += max(wanted, len(block) + 2)
+        else:
+            demanded += len(block) + 2
         forced.add(key)
         picks[(index, item)] = chars
         quoted, used = trial, used + len(block) + 2
+    if sizes is not None:
+        sizes["blocks"], sizes["demand"] = used, demanded
     # Rendered again in the order they are printed, so a reference only points back.
-    quoted = _Quoted(shown)
+    keys, quoted = quoted.keys, _Quoted(shown)
+    quoted.keys = keys
     blocks = {(index, item): render(index, key, item, quoted, picks[(index, item)], omissions)
               for index, pair in enumerate(pairs) if pair.get("parent")
               for key, _label in EDIT_KINDS
@@ -5120,6 +5376,14 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
         omissions += [{"item": item, "step": "what the last edit changed: over ceiling",
                        "chars": 0, "blocks": total, "ceiling": ceiling,
                        "child_floor": EDIT_CHILD_FLOOR} for _index, item, total in past]
+        # The request would pass its room (``limit``): a forced pick cut to fit it, or
+        # named in one line.
+        omissions += [{"item": item, "step": "what the last edit changed: cut to the "
+                       "request's room", "chars": 0, "text_chars": n, "limit": limit}
+                      for _index, item, n in limited]
+        omissions += [{"item": item, "step": "what the last edit changed: named only, past "
+                       "the request's room", "chars": 0, "room_left": left, "limit": limit}
+                      for _index, item, left in named]
     lines = ["## What the last edit changed",
              "The latest children of the candidate you edit (every child of its last round, "
              "siblings included), or that "
@@ -5140,6 +5404,10 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
              "ones before it, and an item not shown whole says why. A trace shown whole elsewhere in this "
              "request is named by where it is, not repeated."]
     def said_cut(at: int, item: str) -> str:
+        fitted = next((n for at2, item2, n in limited if (at2, item2) == (at, item)), None)
+        if fitted is not None:
+            return (f"every text in it cut to at most {fitted:,} chars (head and tail, marked) "
+                    "so that this request fits the optimizer model's context.")
         parent, child = (side[item] for side in records[at])
         moves = step_moves(parent, child)
         keys = {*moves["changed"], *moves["new"]}
@@ -5209,6 +5477,10 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                     f"Item {item}'s block is {len(blocks[(at, item)]):,} chars, past the "
                     f"{left:,} chars left of the {room:,}-char room: as the first pick of "
                     "its kind it is shown all the same, " + said_cut(at, item))
+        for at, item, _n in limited:
+            if at == index and all((a, i) != (at, item) for a, i, _left in over):
+                lines.append(f"Item {item}'s block is {len(blocks[(at, item)]):,} chars, "
+                             + said_cut(at, item))
         for key, item in changed:
             if (index, item) in blocks:
                 lines += ["", blocks[(index, item)]]

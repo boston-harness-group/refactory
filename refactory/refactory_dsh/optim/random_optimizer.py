@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 
+from .evidence import keeping
 from .base import (
     READER_CONCURRENCY, UNREADABLE_PROPOSAL, Candidate, Optimizer, Proposal, ProposalContext,
     considered_text, trajectory_groups, unreadable_proposal,
@@ -628,6 +629,8 @@ class AutoresearchOptimizer(Optimizer):
                 pass
         return found, None, retried, False
 
+    # What its renderings read again is kept for the pass only (`evidence.keeping`).
+    @keeping()
     def write_memory(self, *, epoch: int, generation: int,
                      build: Callable[[int], tuple[str, dict[str, int]]]) -> dict[str, Any]:
         """The epoch's memory pass (`optim.memory`): ``build(room)`` makes the single
@@ -771,6 +774,8 @@ class AutoresearchOptimizer(Optimizer):
 
         return run
 
+    # What its renderings read again is kept for the round only (`evidence.keeping`).
+    @keeping()
     def _round_analysis(self, ctx: ProposalContext) -> dict[str, Any] | None:
         """The analysis of this proposal step, made once: keyed by the epoch, the
         generation, the edited candidate, its train records, the stage's settings and
@@ -995,7 +1000,9 @@ class AutoresearchOptimizer(Optimizer):
         except Exception as exc:
             # Refused as longer than the model's context, though within its room (a
             # smaller window, denser text): asked once more at half its length, as the
-            # analysts' calls are (`_ask`). Only the items shown whole give way.
+            # analysts' calls are (`_ask`). The items' texts give way: the items in full
+            # and the last edit's blocks (`ProposalContext.render`), each cut to fit or
+            # named, whatever their sizes.
             if (isinstance(exc, _fatal())
                     or not analysts.context_overflow(f"{type(exc).__name__}: {exc}")):
                 raise
