@@ -169,14 +169,28 @@ def _data_roots() -> list[str]:
     return [str(Path(root).expanduser())] if root else []
 
 
+class NoReply(RuntimeError):
+    """The solve step left no reply: its model call ended without an answer (every
+    session crashed, or it ran out of output), so the step is missing
+    (`refactory_dsh.node_retry.leaves_no_answer`) and its output was set aside. The item
+    ends here: a failed call is never read as an empty reply. Its message names `REPLY`,
+    so both runtimes record the item as having no answer, with the step's failure
+    (`refactory_dsh.items.no_answer`)."""
+
+
 def run_turn(ctx: Any) -> dict[str, Any]:
     """One turn after the model's reply (codegen_agent.py:713-761): the cooldown, the
-    code, its run, and the execution feedback."""
+    code, its run, and the execution feedback. A turn whose model call failed has no
+    reply at all (`NoReply`), unlike an empty reply, which gets SkillOpt's no-code
+    message."""
+    if not ctx.exists(REPLY):
+        raise NoReply(f"the solve step left no {REPLY}: its model call ended without an "
+                      "answer, so the item ends here")
     time.sleep(float(ctx.knob("turn_pause_s", 3)))  # codegen_agent.py:713
     item = _item(ctx)
     history = ctx.read_json(HISTORY, []) or []
     turn = ctx.read_json(TURN, {}) or {}
-    raw = ctx.read_text(REPLY) if ctx.exists(REPLY) else ""
+    raw = ctx.read_text(REPLY)
     code = port.extract_code(raw)
     history.append({"role": "assistant", "content": raw})
     turn["turn"] = int(turn.get("turn", 0)) + 1

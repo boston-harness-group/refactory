@@ -348,20 +348,183 @@ class _CrashesFirst(FakeModel):
         return _good(7)
 
 
+def _no_answer(record: dict[str, Any]) -> None:
+    """The item's solve call failed in all 5 sessions: it has no answer (score 0, no
+    error), its record names the failed step, and no reply was made up for it."""
+    assert (record["passed"], record["score"], record["error_kind"], record["error_text"]) \
+        == (False, 0.0, None, None), record
+    assert record["fail_reason"].startswith("no answer: solve crashed"), record
+    assert record["missing_steps"]["solve"]["cause"] == "crash", record
+    assert record["missing_steps"]["solve"]["sessions"] == 5, record
+    # The analysts see no conversation for it, as for an item that failed.
+    assert skillopt_view.rollout_result(record, {})["conversation"] is None
+
+
 @pytest.mark.parametrize("crashes", [4, 5])
 def test_a_crashed_solve_call_gets_five_attempts(tmp_path, sb_env, crashes):
     """SkillOpt's wrapper attempts each call 5 times: after 4 crashes the fifth attempt
-    answers the first turn; after 5 the turn is left unanswered and the next turn asks
-    again."""
+    answers the first turn; after 5 the item ends with no answer -- the failed call is
+    never read as an empty reply, so no "No Python code block" turn follows."""
     assert sb_mode.Solver().build().retry_rule("solve")["times"] == 4
     model = _CrashesFirst(crashes)
     result, prompts = _walk(tmp_path, "val", model)
     (record,) = result.item_records
-    assert record["passed"], record
-    assert len(set(prompts[:5])) == 1  # one turn's prompt, attempted five times
-    assert len(prompts) == (5 if crashes == 4 else 6)
-    if crashes == 5:
-        assert prompts[5] != prompts[0]
+    assert len(prompts) == 5 and len(set(prompts)) == 1  # one turn, attempted five times
+    if crashes == 4:
+        assert record["passed"], record
+    else:
+        _no_answer(record)
+
+
+def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                   expect_ok: bool = True) -> tuple[list[dict], str]:
+    """A part on the walker through the real model client and a scripted ``dsh``: its
+    records and the run's error (empty when the run succeeded)."""
+    mode, state = _state()
+    work = tmp_path / "walk-dsh"
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=list(train))
+    task_module.write_subset(work, part, 0.0, gold_feedback=False)
+    result = WalkerEvaluator(model=dsh.client(), project=Path("."), max_steps=4000) \
+        .evaluate(mode, state, work)
+    assert result.exit_ok is expect_ok, result.error
+    return result.item_records, "" if result.exit_ok else str(result.error)
+
+
+def _scripted_spine(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                    expect_ok: bool = True) -> tuple[list[dict], str]:
+    """A part on the spine, its solve step dispatched to the real worker (`worker_node`)
+    with the same scripted ``dsh``, as a run on DSH lowers it: its records and the run's
+    error (its last failure; empty when the run succeeded)."""
+    from refactory_dsh import lowering, workers
+
+    mode, state = _state()
+    work = tmp_path / "spine-dsh"
+    work.mkdir(parents=True)
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=list(train))
+    task_module.write_subset(work, part, 0.0, gold_feedback=False)
+    lowering.write_declarations(state, work)
+
+    def dispatched(workflow: Any) -> Any:
+        return workers.lower_workflow(workflow, tmp_path / "specs", dsh.client().context(),
+                                      lowering.node_declarations(state))
+
+    graph_path, _ = lowering.write_mode_graph(state, tmp_path / "graphs-dsh", name="sb",
+                                              transform=dispatched)
+    (tmp_path / "responses.json").write_text("{}")
+    env = {key: value for key, value in os.environ.items() if key != "REFACTORY_WORKER_CONTEXT"}
+    env.update(lowering.knob_environment(state), REFACTORY_WORKDIR=str(work),
+               PATH=f"{REPO_ROOT / '.venv/bin'}:{env.get('PATH', '')}")
+    proc = subprocess.run(
+        [str(NODE), "--import", "tsx/esm", str(DRAIN), str(graph_path), str(work),
+         str(REPO_ROOT / ".venv/bin/python"), "120000", str(tmp_path / "responses.json")],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, env=env)
+    assert (proc.returncode == 0) is expect_ok, proc.stdout[-2000:] + proc.stderr[-3000:]
+    records = json.loads((work / "facts.json").read_text())["item_scores"]
+    if proc.returncode == 0:
+        return records, ""
+    events = [json.loads(line) for line in
+              (work / ".refactory/events.jsonl").read_text().splitlines()]
+    failures = [e["last_failure"]["error"] for e in events if e.get("last_failure")]
+    return records, failures[-1] if failures else proc.stdout + proc.stderr
+
+
+#: What the lab's claude_code worker said for every call while it was logged out.
+NOT_LOGGED_IN = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
+                 "query-run; category: invalid-result; exit code: 1): the result was an error "
+                 "after 0 output tokens: Not logged in · Please run /login")
+
+needs_spine = pytest.mark.skipif(
+    shutil.which("node") is None or not (Path(__file__).resolve().parents[2] / "packages/"
+                                         "workflow/workflow-spine/node_modules/"
+                                         "@deepseek-ai/cordis").exists(),
+    reason="the spine drain needs Node and the installed workspace")
+RUNTIMES = ["walker", pytest.param("spine", marks=needs_spine)]
+
+
+def _scripted(runtime: str, tmp_path: Path, dsh: Any, **kwargs: Any) -> tuple[list[dict], str]:
+    run = _scripted_walk if runtime == "walker" else _scripted_spine
+    return run(tmp_path, dsh, **kwargs)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_failed_model_call_ends_the_item_and_an_empty_reply_does_not(tmp_path, sb_env,
+                                                                       runtime):
+    """[both runtimes] The first call answers with nothing: SkillOpt's no-code message is
+    the next turn. Every session of the second call crashes (a product failure): the item
+    ends with no answer, its first turn's reply is not run again, and no "No Python code
+    block" turn is made up from the failure."""
+    from test_crashed_step_retry import WORKER_CRASH, Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"": ["", *[WORKER_CRASH] * 5, _good(7)]})
+    (record,), _ = _scripted(runtime, tmp_path, dsh)
+    _no_answer(record)
+    prompts = dsh.prompts()
+    assert len(prompts) == 6, prompts
+    assert port.NO_CODE not in prompts[0]
+    # The empty reply's turn: SkillOpt's message, then the five failed sessions of one call.
+    assert len(set(prompts[1:])) == 1 and port.NO_CODE in prompts[1]
+    assert prompts[1].count(port.NO_CODE) == 1
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_earlier_turns_output_is_not_graded_after_a_failed_call(tmp_path, sb_env, runtime):
+    """[both runtimes] The first turn saves the right answer, then raises; every session
+    of the next call crashes. As in SkillOpt (rollout.py:763-767, ``llm-call-failed``
+    before grading), the item has no answer: the saved file is not graded."""
+    from test_crashed_step_retry import WORKER_CRASH, Scripted
+
+    saves_then_raises = _good(7).replace("wb.save(OUTPUT_PATH)\n",
+                                         "wb.save(OUTPUT_PATH)\nraise ValueError('after saving')\n")
+    assert "after saving" in saves_then_raises
+    dsh = Scripted(tmp_path / "dsh", {"": [saves_then_raises, *[WORKER_CRASH] * 5]})
+    (record,), _ = _scripted(runtime, tmp_path, dsh)
+    _no_answer(record)
+    prompts = dsh.prompts()
+    assert len(prompts) == 6 and "after saving" in prompts[1], prompts
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_logged_out_worker_fails_the_item_at_once(tmp_path, sb_env, runtime):
+    """[both runtimes] A logged-out worker (the lab's Claude Code with no login) is a
+    setup failure, not a crash: the next session would be refused the same way, so it is
+    not retried. t1's item fails with an error naming it, and no "No Python code block"
+    turn is made up; t2, whose call answers, is graded as usual."""
+    from test_crashed_step_retry import Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"Put 42 in B1": [NOT_LOGGED_IN], "": [_good(9)]})
+    records, _ = _scripted(runtime, tmp_path, dsh, part="train", train=("t1", "t2"))
+    by_id = {r["id"]: r for r in records}
+    assert set(by_id) == {"t1", "t2"}, records
+    t1 = by_id["t1"]
+    assert len(dsh.prompts("Put 42 in B1")) == 1  # one session: never retried
+    assert (t1["passed"], t1["score"]) == (False, 0.0), t1
+    assert "Not logged in" in (t1["error_text"] or ""), t1
+    assert t1["error_text"].startswith("solve: CompletionFailed: "), t1
+    assert t1["error_kind"] == "RuntimeError", t1
+    assert not t1.get("missing_steps"), t1
+    assert port.NO_CODE not in json.dumps(t1)
+    assert by_id["t2"]["passed"] and by_id["t2"]["error_kind"] is None, by_id["t2"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_run_whose_worker_is_logged_out_fails(tmp_path, sb_env, runtime):
+    """[both runtimes] With every item refused by a logged-out worker, the run fails
+    ("all ... items failed"), so the outer loop counts a run failure, after one session."""
+    from test_crashed_step_retry import Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"": [NOT_LOGGED_IN]})
+    records, error = _scripted(runtime, tmp_path, dsh, expect_ok=False)
+    assert "all 1 items failed" in error, error[-2000:]
+    assert len(dsh.prompts()) == 1
+    assert not any(port.NO_CODE in p for p in dsh.prompts())
+    if runtime == "walker":
+        # On the spine, a drain that asks again after the all-items-failed end runs the
+        # pass's normal end, which grades it over the error record (a separate spine
+        # matter, seen here: index.ts returns before endPass); the walker's is the error.
+        (record,) = records
+        assert "Not logged in" in (record["error_text"] or ""), record
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"),
@@ -1101,6 +1264,74 @@ def test_a_workbook_libreoffice_cannot_recalculate_is_the_models_fault(tmp_path,
                              t1.metadata["answer_position_eval"])
     assert graded["ok"] is False and graded["recalc_failed"] is True, graded
     assert "could not recalculate this workbook" in graded["reason"]
+
+
+def _array_formula_pred(path: Path) -> Path:
+    """t1's answer (B1 = 42) as an array formula, written by openpyxl as model code would
+    write one: no cached value, so only a recalculation can grade it."""
+    import openpyxl
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = 1
+    ws["B1"] = ArrayFormula("B1", "=SUM(A1:A1*42)")
+    wb.save(path)
+    return path
+
+
+def test_an_array_formula_answer_is_a_formula_answer(tmp_path):
+    """An answer cell holding an array formula counts as a formula (lo_grader.py counts
+    only ``=`` strings, so it was graded on its empty cached value); a value does not."""
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    pred = _array_formula_pred(tmp_path / "pred.xlsx")
+    import openpyxl
+
+    assert isinstance(openpyxl.load_workbook(pred)["Sheet1"]["B1"].value, ArrayFormula)
+    assert recalc.has_formula_answer(str(pred), "Sheet1!B1")
+    assert recalc.has_formula_answer(str(pred), "B1")
+    assert not recalc.has_formula_answer(str(pred), "A1")
+    # A position the grader cannot parse falls back to every cell, array formulas included.
+    assert recalc.has_formula_answer(str(pred), "Sheet1!B1:")
+
+
+def test_an_array_formula_answer_is_graded_on_its_recalculated_copy(tmp_path, sb_data,
+                                                                    monkeypatch):
+    """Under the recalc grader an array-formula answer goes to LibreOffice, and passes when
+    the recalculated copy holds the answer (a stand-in LibreOffice that computes it)."""
+    fake = tmp_path / "soffice"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, openpyxl\n"
+        "src = sys.argv[-1]; out = sys.argv[sys.argv.index('--outdir') + 1]\n"
+        "os.makedirs(out, exist_ok=True)\n"
+        "wb = openpyxl.load_workbook(src)\n"
+        "if os.path.basename(src) != 'reference.xlsx':\n"
+        "    wb.active['B1'] = 42  # what SUM(A1:A1*42) computes\n"
+        "wb.save(os.path.join(out, os.path.basename(src)))\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv(recalc.SOFFICE_ENV, str(fake))
+    t1 = tasks.SpreadsheetBenchTask().instances()[0]
+    pred = _array_formula_pred(tmp_path / "pred.xlsx")
+    args = (str(pred), t1.metadata["gold_path"], "Cell-Level Manipulation",
+            t1.metadata["answer_position_eval"])
+    assert not recalc.evaluate(*args, choice="cached")["ok"]  # SkillOpt's grader: no value
+    graded = recalc.evaluate(*args, choice="recalc")
+    assert graded["ok"] and graded.get("recalculated"), graded
+
+
+@pytest.mark.skipif(not os.environ.get(recalc.SOFFICE_ENV) and recalc.soffice() is None,
+                    reason="needs LibreOffice (SB_SOFFICE, or soffice on the PATH)")
+def test_libreoffice_computes_an_array_formula_openpyxl_wrote(tmp_path, sb_data):
+    """The real LibreOffice computes an openpyxl-written array formula, as Excel does, so
+    the recalc grader passes it."""
+    t1 = tasks.SpreadsheetBenchTask().instances()[0]
+    pred = _array_formula_pred(tmp_path / "pred.xlsx")
+    graded = recalc.evaluate(str(pred), t1.metadata["gold_path"], "Cell-Level Manipulation",
+                             t1.metadata["answer_position_eval"], choice="recalc")
+    assert graded["ok"] and graded.get("recalculated"), graded
 
 
 def _failing_setup(*args: Any, ready_fd: int | None = None) -> str:

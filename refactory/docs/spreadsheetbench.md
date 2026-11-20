@@ -19,9 +19,11 @@ Two test items are known by name:
 - **42930 can never pass.** The release pairs `1_42930_init.xlsx` with
   `1_43930_golden.xlsx`, so no test case is found: the item scores 0 with
   `no-test-cases` and no model call, as in SkillOpt. A test pass scores at most 279/280.
-- **56225 passes if the input comes back unchanged.** The release marks it
-  `exclude: "ignore, initial file already passes verification"`; SkillOpt ignores the
-  field, and so does this port.
+- **56225 passes only with a written value.** The release marks it
+  `exclude: "ignore, initial file already passes verification"`, but the input does not
+  pass: its O3 is 0, the gold's 1.8019. Nor can LibreOffice reproduce the gold's SUMIFS,
+  so a formula answer fails under `recalc` too. SkillOpt ignores the field, and so does
+  this port.
 
 ## The graph
 
@@ -42,7 +44,24 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
 - `solve` is one model call with no tools; its reply is the node's output.
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
   is none, so prose comes back as a SyntaxError, not as "no code"), and runs it with
-  SkillOpt's runner. An error is the next user message.
+  SkillOpt's runner. An error is the next user message. A solve call that ended without
+  an answer is not a reply, and only a call that answered with nothing gets SkillOpt's
+  "No Python code block" message:
+  - all 5 sessions crashed (a worker or product failure): the item ends there with no
+    answer (score 0, `fail_reason` `no answer: solve crashed in all 5 sessions`, the
+    failure under `missing_steps`), as a crashed step does in any mode;
+  - it ran out of output (only possible with `max_completion_tokens` set; not retried):
+    the same, `no answer: solve reached its output limit without answering`;
+  - the worker was refused for its setup (a key, a model name, a Claude Code worker that
+    is not logged in): not retried, the item fails with that error (`error_text`
+    `solve: CompletionFailed: ...`, on both runtimes); a run whose every item fails so
+    fails ("all N items failed").
+
+  Either way the prediction an earlier turn wrote is not graded, as in SkillOpt: a call
+  that fails after its retries raises out of `run_multi`, and `process_one_codegen`
+  returns `llm-call-failed` before grading (rollout.py:763-767). SkillOpt retries a
+  logged-out call as it does any other; here it is not retried, since the next session
+  is refused the same way.
 - `gold_check` is the train-only gold feedback node (below); `next_turn` ends the item on
   a clean run, unless that node says the output is wrong.
 - `turn_gate` loops while turns (30) remain and more than 10 s remain before the harness
@@ -125,6 +144,12 @@ Where neither can run, code is not run.
    (`recalc_failed`); if not, the grader is broken, a harness incident (`error_kind`
    `harness_incident`), not a wrong answer: the outer loop runs the item again and, still one, leaves it out of the score
    (outer-loop.md, "A harness incident is rerun"). So is a sandbox setup that fails.
+   An answer cell holding an array formula (openpyxl's `ArrayFormula`) counts as a
+   formula and is recalculated; the lab's `lo_grader.py` counts only strings starting
+   with `=`, so it graded an array formula on its cached value (none, in a workbook
+   openpyxl wrote) and failed it even when right. Excel computes array formulas, so this
+   departs from `lo_grader.py`. Formulas are never repaired: a function saved without
+   the `_xlfn.` prefix Excel needs (AGGREGATE, say) fails, as it would in Excel.
 7. **Analysts' view**: a feedback message after the last model call (a loop that ended on
    turns or the backstop) is not in the conversation the analysts see; `n_turns` counts
    model calls; each message is shown stripped, as the History framing sends it.

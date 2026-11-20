@@ -13,9 +13,11 @@ Two items are known by name, as they are in SkillOpt's runs:
   ``1_43930_golden.xlsx`` (an upstream typo), so no test case is found and the item
   scores 0 with ``no-test-cases``, without a model call. The most a test pass can score
   is 279/280.
-- **test 56225 passes if the input is returned unchanged.** The release marks it
-  ``exclude: "ignore, initial file already passes verification"``; SkillOpt reads no
-  ``exclude`` field, so neither does this Task.
+- **test 56225 passes only with a written value.** The release marks it
+  ``exclude: "ignore, initial file already passes verification"``, but the input does
+  not pass (its O3 is 0, the gold's 1.8019), and LibreOffice cannot reproduce the gold's
+  SUMIFS, so a formula answer fails under ``recalc`` too. SkillOpt reads no ``exclude``
+  field, so neither does this Task.
 
 The golden file and the input's path in the dataset are grader-only
 (``grader_fields``): the nodes see the input as a copy in their pass, and model code

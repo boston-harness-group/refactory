@@ -449,7 +449,7 @@ since its tools may still be running. Any other
 failure the client does not replay is raised as `CompletionFailed`, whose `kind` says what
 happened: `output_limit` (`dsh: max-tokens:`, or Claude Code's `category: output-limit`,
 which names the tokens spent and the per-response cap), `setup` (a key, model name or prompt
-the provider refuses), `transport` or `worker`. A node's retry rule may answer `worker` as a
+the provider refuses, or a Claude Code worker that is not logged in), `transport` or `worker`. A node's retry rule may answer `worker` as a
 `crash`, and `output_limit` only when the node opts in (`architecture.md`). A worker spec or run configuration saved before `retry_window_s` existed
 carries `backoff_s`, which keeps its old meaning: the first wait, doubling. On POSIX, a deadline or caller
 `KeyboardInterrupt` raised in the thread calling `complete()` sends one SIGTERM
