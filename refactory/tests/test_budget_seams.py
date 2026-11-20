@@ -151,7 +151,7 @@ def test_budget_finished_trial_preserved(tmp_path):
 
 # ── test_budget_counts_rollouts ────────────────────────────────────────────
 
-def test_budget_counts_rollouts(tmp_path):
+def test_budget_counts_rollouts(tmp_path, no_smoke):
     """The loop counts per-item rollouts, and max_rollouts binds the run.
 
     The batch holds three candidates; the cap admits two evaluations' worth of

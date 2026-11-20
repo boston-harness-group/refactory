@@ -93,6 +93,10 @@ def _scores(monkeypatch: Any, train: dict[int, float], val: dict[int, float]) ->
 def _run(tmp_path: Path, monkeypatch: Any, plan: list[list[tuple[int, int]]], *,
          strategy: str = "default", model: bool = False, **overrides: Any):
     monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    if strategy == "default" and overrides.get("val_gate", True) and not overrides.get("resume"):
+        # SkillOpt's strict gate, pinned: the default loop now defaults to checkpoint. A
+        # resume keeps the run's recorded selection.
+        overrides.setdefault("selection", "single")
     proposer = Scripted(plan, model=model)
     with _patch_mode(FitProbe):
         loop = strategies.create(strategy, MODE_ID, _config(tmp_path, **overrides),
@@ -212,7 +216,7 @@ def _manifest(tmp_path: Path, **parts: list[str]) -> str:
 
 
 def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_path):
-    """A parts manifest with val items turns the gate on (single for
+    """A parts manifest with val items turns the gate on (checkpoint for
     the default loop), config.json records it, adopt and the report agree, and the
     audit says its items are the val part the search selected on when there is no
     test part."""
@@ -220,7 +224,7 @@ def test_validation_selection_is_on_by_default_when_the_run_has_val_items(tmp_pa
         loop = Loop(MODE_ID, _config(tmp_path, val_gate=None, holdout=0.3, parts_manifest=_manifest(
             tmp_path, train=["t1", "t2", "t3"], val=["v1", "v2"])), project=Path("."))
         report = loop.run()
-    assert loop.config.val_gate is True and loop.selection_mode() == "single"
+    assert loop.config.val_gate is True and loop.selection_mode() == "checkpoint"
     assert json.loads((loop.root / "config.json").read_text())["val_gate"] is True
     assert report["selection"]["val_gate_basis"] == "the parts manifest has val items"
     assert "warning" not in report["selection"]
@@ -296,11 +300,11 @@ def test_profiles_and_the_command_line_have_no_val_gate():
     assert "val_gate" not in profiles.cli_overrides(parser.parse_args([]))
 
 
-def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_else(tmp_path):
-    assert default_selection("default", "autoresearch") == "single"
-    assert default_selection("default", "random") == "single"
-    assert default_selection("default", "hill_climb") == "single"
-    assert default_selection("default", "autoresearch", "hill_climb") == "single"
+def test_defaults_checkpoint_for_the_single_parent_loop_and_pool_for_everything_else(tmp_path):
+    assert default_selection("default", "autoresearch") == "checkpoint"
+    assert default_selection("default", "random") == "checkpoint"
+    assert default_selection("default", "hill_climb") == "checkpoint"
+    assert default_selection("default", "autoresearch", "hill_climb") == "checkpoint"
     for optimizer in ("archive", "evolutionary", "islands", "map_elites"):
         assert default_selection("default", optimizer) == "pool"
         assert default_selection("default", "autoresearch", optimizer) == "pool"
@@ -308,7 +312,8 @@ def test_defaults_single_for_the_skillopt_matched_loop_and_pool_for_everything_e
         if name != "default":
             assert default_selection(name, "autoresearch") == "pool", name
     with _patch_mode(FitProbe):
-        assert Loop(MODE_ID, _config(tmp_path)).selection_mode() == "single"
+        assert Loop(MODE_ID, _config(tmp_path)).selection_mode() == "checkpoint"
+        assert Loop(MODE_ID, _config(tmp_path, selection="single")).selection_mode() == "single"
         assert Loop(MODE_ID, _config(tmp_path, selection="pool")).selection_mode() == "pool"
         assert strategies.create("reflective", MODE_ID, _config(tmp_path),
                                  project=Path(".")).selection_mode() == "pool"
@@ -753,12 +758,15 @@ def test_every_strategy_selects_on_val_scores_test_only_at_the_end_and_hides_val
         if hasattr(loop, "per_stage"):
             loop.per_stage = 1
         report = loop.run()
-    assert loop.selection_mode() == ("single" if strategy == "default" else "pool")
+    assert loop.selection_mode() == ("checkpoint" if strategy == "default" else "pool")
     assert report["strategy_report"]["test_eval"] == "done", report["strategy_report"]
     assert report["best"]["id"] == loop._gate().current_id
     assert not early_tests, "test is scored only in the final evaluation"
     assert proposer.prompts, "setup: the proposer was asked"
-    assert "Train score of the candidate the validation gate ranks first" in proposer.prompts[-1]
+    header = ("Train score of the current candidate, the one being trained"
+              if strategy == "default" else
+              "Train score of the candidate the validation gate ranks first")
+    assert header in proposer.prompts[-1]
     judged = list(loop._gate().cache.values())
     for prompt in proposer.prompts:
         leaked = _leaked(prompt, judged, items=4)
@@ -822,13 +830,14 @@ def _recorded() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("run_name", sorted(_recorded()))
-@pytest.mark.parametrize("selection", ["", "single", "pool"])
+@pytest.mark.parametrize("selection", ["single", "pool"])
 def test_recorded_livemath_runs_replay_to_the_same_gate_decisions(
         tmp_path, monkeypatch, run_name, selection):
     """Each recorded arm A/B run, replayed on its recorded parents, train and val scores:
-    the default setting and ``single`` reproduce its accepted and rejected candidates, its
-    incumbent, its winner and its stop exactly. ``pool`` keeps the same incumbent line
-    (the reported best moves by the same strict rule), with more parents on offer."""
+    ``single`` (the arms' setting; the default before checkpoint) reproduces its accepted
+    and rejected candidates, its incumbent, its winner and its stop exactly. ``pool``
+    keeps the same incumbent line (the reported best moves by the same strict rule), with
+    more parents on offer."""
     run = _recorded()[run_name]
     ids = [c["id"] for c in run["candidates"]]
     level = {cid: index for index, cid in enumerate(ids)}
@@ -839,13 +848,11 @@ def test_recorded_livemath_runs_replay_to_the_same_gate_decisions(
             for e in range(1, rounds + 1)]
     _scores(monkeypatch, train, val)
     config = run["config"]
-    # The empty setting is the whole default: val_gate unset too, on for a val part.
     loop, proposer, report = _run(
         tmp_path, monkeypatch, plan, epochs=config["epochs"],
         batch_size=2 if config["portfolio"] else 1,
         early_stop_patience=config["early_stop_patience"],
-        early_stop_at_full_val=config["early_stop_at_full_val"], selection=selection,
-        **({"val_gate": None} if not selection else {}))
+        early_stop_at_full_val=config["early_stop_at_full_val"], selection=selection)
     assert loop.config.val_gate is True
     by_level = {_level(c): c.id for c in loop.population}
 
@@ -1176,7 +1183,7 @@ def test_a_loop_whose_launch_names_another_selection_on_resume_is_refused(tmp_pa
 
 
 def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):
-    """Launched with no --selection, the run records the rule it resolved (single for
+    """Launched with no --selection, the run records the rule it resolved (checkpoint for
     the default loop here), so a resume compares real values."""
     monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
     _scores(monkeypatch, {}, {})
@@ -1186,7 +1193,7 @@ def test_a_launch_records_the_selection_it_resolved(tmp_path, monkeypatch):
         "parts_manifest": str(_write_parts(tmp_path, test=True))}})
     assert _cli(tmp_path, "--epochs", "1") == 0
     config = json.loads((tmp_path / "run" / "config.json").read_text())
-    assert (config["selection"], config["pool_size"]) == ("single", 8)
+    assert (config["selection"], config["pool_size"]) == ("checkpoint", 8)
 
 
 def test_a_loop_built_in_code_resumes_with_its_recorded_selection(tmp_path, monkeypatch):

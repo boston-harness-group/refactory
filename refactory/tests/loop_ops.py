@@ -853,3 +853,35 @@ class ForkBranchTaskTen(ForkBranchTask):
 
     def instances(self, **kw: Any) -> list[TaskInstance]:
         return [TaskInstance(id=str(i), metadata={}) for i in range(10)]
+
+
+#: The ``level`` knob values at which `break_at_level` fails every item: the smoke check's
+#: broken graph (`test_checkpoint_selection`).
+BROKEN_LEVELS = {13}
+
+
+def break_at_level(ctx: Any) -> dict[str, Any]:
+    """Like record_item, but every item fails with a KeyError while the ``level`` knob is
+    one of `BROKEN_LEVELS`, as a step reading a field its input lacks does."""
+    if int(ctx.knobs.get("level", 0)) in BROKEN_LEVELS:
+        raise KeyError("choice")
+    return record_item(ctx)
+
+
+class SmokeTask(Task):
+    """Train items ``s1``-``s4`` and val items ``v1``, ``v2``; ``s2``, ``s4`` and ``v1``
+    pass, the rest are answered wrong, whatever the pipeline did: the smoke check's items
+    are ``s1`` (the first wrong) and ``s2`` (the first passed)."""
+
+    name = "smoke_task"
+    PASSED = {"s2", "s4", "v1"}
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        return [TaskInstance(id=i, metadata={}) for i in ("s1", "s2", "s3", "s4", "v1", "v2")]
+
+    def setup(self, instance: TaskInstance, workspace: Any, **kw: Any) -> None:
+        pass
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        passed = instance.id in self.PASSED
+        return VerifyResult(passed=passed, score=1.0 if passed else 0.0)

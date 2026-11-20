@@ -329,7 +329,7 @@ def _objective_text(ctx: Any) -> str:
 
     text = objective_with_policy(getattr(ctx, "parsimony", None),
                                  item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
-                                 gated=bool(getattr(ctx, "selection", "")))
+                                 gated=getattr(ctx, "selection", "") or False)
     return f"## What the score measures\n{text}\n\n" if text else ""
 
 

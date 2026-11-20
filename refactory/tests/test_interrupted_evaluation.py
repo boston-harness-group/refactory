@@ -193,9 +193,12 @@ def quick_retries(monkeypatch):  # type: ignore[no-untyped-def]
 
 
 def _loop(tmp_path: Path, dsh: Dsh, plan: list[list[tuple[int, int]]], **overrides: Any) -> Loop:
+    # SkillOpt's strict gate (its rejections and re-scores), pinned: the default loop now
+    # defaults to checkpoint.
     config = dict(epochs=2, batch_size=1, optimizer="random", seed=7, runs_root=tmp_path / "run",
                   allowed_ops=("set_knob",), max_evaluations=60, holdout=0.0, val_gate=True,
-                  parts_manifest=str(_write_parts(tmp_path, test=True)))
+                  parts_manifest=str(_write_parts(tmp_path, test=True)),
+                  **({} if overrides.get("resume") else {"selection": "single"}))
     config.update(overrides)
     loop = Loop(MODE_ID, LoopConfig(**config), project=Path("."), model=dsh.client())
     loop.optimizer = ScriptedLevels(plan)
@@ -385,7 +388,8 @@ def test_a_run_error_outside_any_item_is_an_interruption_too(tmp_path):
     assert "summarize" in entry["error"] and not _child(loop).evaluated
 
 
-def test_a_run_stopped_mid_pass_keeps_its_receipts_and_evaluates_again(tmp_path, monkeypatch):
+def test_a_run_stopped_mid_pass_keeps_its_receipts_and_evaluates_again(tmp_path, monkeypatch,
+                                                                    no_smoke):
     """The run's own process is stopped (SIGTERM becomes SystemExit) once half of the
     child's model calls were made, so some items finished and the rest never did. The
     resume evaluates the child from the start, and the finished items' receipts from
@@ -570,10 +574,12 @@ def test_a_budget_stopped_rollout_is_a_budget_stop_not_an_interruption(tmp_path,
 
 
 @pytest.mark.parametrize("answer", ["garbage", "SLEEP", "ABORT", CAPPED_429])
-def test_a_models_own_failure_is_still_the_candidates_result(tmp_path, answer):
+def test_a_models_own_failure_is_still_the_candidates_result(tmp_path, answer, no_smoke):
     """Every item answers wrongly, outlives its wall, has its runtime abort (SIGABRT, as
     a runtime out of heap does), or stops at its output limit with "429" in its
-    reasoning: the child is scored 0 or recorded failed, as before, and the run goes on."""
+    reasoning: the child is scored 0 or recorded failed, as before, and the run goes on.
+    (Without the smoke check: a step outliving its wall on the smoke items is an error
+    there, so the child would be refused E-smoke before its train run.)"""
     dsh = Dsh(tmp_path / "dsh")
     dsh.plan(level5="right", level6=answer)
     loop = _run(tmp_path, dsh, [[(5, 6)], []])

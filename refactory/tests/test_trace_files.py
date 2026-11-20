@@ -325,7 +325,7 @@ def test_a_gated_run_writes_a_folder_per_evaluation(tmp_path):
     with _patch_mode(TraceProbe):
         loop = Loop("trace_probe/probe", LoopConfig(
             epochs=3, batch_size=1, optimizer="random", seed=3, runs_root=root,
-            allowed_ops=("set_knob",), holdout=0.0, val_gate=True,
+            allowed_ops=("set_knob",), holdout=0.0, val_gate=True, selection="single",
             parts_manifest=str(parts)), project=Path("."), model=_Model())
         loop.optimizer = recorder
         loop.run()

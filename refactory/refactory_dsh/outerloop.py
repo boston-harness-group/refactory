@@ -65,6 +65,11 @@ class EvalRequest:
     #: A train request whose passes may be told how their attempt compares with the
     #: answer (`refactory_dsh.feedback`); refused for any other part.
     gold_feedback: bool = False
+    #: A val or test request that runs beside the batch's other requests for the same
+    #: candidate rather than after them (a group of its own): ``selection: checkpoint``
+    #: rolls a candidate out on val while it runs on train. Refused for train, whose
+    #: records are kept per candidate. The default loop's own requests only.
+    beside: bool = False
 
 
 class OuterLoopError(RuntimeError):
@@ -127,11 +132,19 @@ class Run:
         With ``integrity_judge`` on, a proposal that became a valid candidate is also
         judged (``Loop._integrity_check``): one call of the optimizer's model, charged
         to the run's token and time budgets; under ``veto`` an ``exploit`` is refused
-        here (``E-integrity``), so every strategy's proposals pass the same judge."""
+        here (``E-integrity``), so every strategy's proposals pass the same judge.
+
+        Then, in the default loop, the smoke check (``Loop._smoke_check``): the candidate
+        is run on up to two of its parent's train items, and a run that fails with an
+        error is refused (``E-smoke``), a mechanics refusal a repair may fix. A custom
+        strategy's proposals are not smoked."""
         outcome = self.mechanics(proposal, parent)
         check = getattr(self._loop, "_integrity_check", None)
         if not isinstance(outcome, list) and callable(check):
             outcome = check(proposal, parent, outcome)
+        smoke = getattr(self._loop, "_smoke_check", None)
+        if not isinstance(outcome, list) and callable(smoke):
+            outcome = smoke(parent, outcome)
         if isinstance(outcome, list) and record:
             self._loop.rejections.append(
                 Rejection(attempt=1, edit=proposal.edit, reasons=outcome,
@@ -275,7 +288,8 @@ class Run:
 
         Returns results in request order regardless of completion order.
         Requests naming the same candidate id run sequentially in request order;
-        requests with distinct candidate ids run concurrently.  Budget is
+        requests with distinct candidate ids run concurrently, as does a val or test
+        request marked ``beside`` (``EvalRequest.beside``) with its candidate's others.  Budget is
         reserved atomically for the whole batch before any evaluation starts.
         The rollout check is all-or-nothing too: the batch is refused when the
         rollouts of all its requests together would pass ``max_rollouts``, which
@@ -316,6 +330,11 @@ class Run:
             if req.gold_feedback and req.part != "train":
                 raise OuterLoopError(
                     f"request {i}: gold feedback is for train evaluations only, not {req.part!r}"
+                )
+            if req.beside and req.part == "train":
+                raise OuterLoopError(
+                    f"request {i}: only a val or test request runs beside its candidate's "
+                    "other requests, not a train one"
                 )
             if req.part == "train" and req.items is not None:
                 if manifest is not None:
@@ -493,10 +512,10 @@ class Run:
             # ── group requests by candidate id ────────────────────────────
             # Requests with the same candidate id (at most one train, plus any
             # val/test occasions) run sequentially in request order; distinct
-            # candidate ids run concurrently.
-            groups: dict[str, list[int]] = defaultdict(list)
+            # candidate ids run concurrently, and so does a ``beside`` request.
+            groups: dict[Any, list[int]] = defaultdict(list)
             for i, req in enumerate(requests):
-                groups[req.candidate.id].append(i)
+                groups[(req.candidate.id, i) if req.beside else req.candidate.id].append(i)
             group_list = list(groups.values())
             max_workers = getattr(loop.config, 'max_concurrent_evaluations', 4)
 

@@ -27,6 +27,7 @@ MEANINGFUL = frozenset({
     "init",
     "forward",
     "rescore",
+    "checkpoint",
     "optimizer",
     "scheduler",
     "report",
@@ -91,6 +92,28 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         if record.get("duration_s") is not None:
             line += f" · {float(record['duration_s']):.1f}s"
         return line
+    if step == "checkpoint":
+        # ``selection`` ``checkpoint``: the change applied this round, with its one val run.
+        if not record.get("applied"):
+            return (f"epoch {epoch} · checkpoint: nothing applied "
+                    f"({record.get('not_applied', 0)} not applied) · val best "
+                    f"{_score(record.get('best_val'))}")
+        return (f"epoch {epoch} · checkpoint: applied {record['applied']} · val "
+                f"{_score(record.get('val'))} · "
+                + ("new best" if record.get("new_best")
+                   else f"best {_score(record.get('best_val'))}")
+                + (f" · {record['not_applied']} not applied" if record.get("not_applied") else ""))
+    if step == "smoke":
+        # A failed smoke check is shown: the change is refused (E-smoke) and goes to repair.
+        if record.get("outcome") == "failed" or verbose:
+            errors = record.get("errors") or []
+            first = errors[0] if errors else {}
+            why = (f"{first.get('kind')}" + (f" at {first['node']}" if first.get("node") else "")
+                   if first else str(record.get("error") or "")[:160])
+            return (f"epoch {epoch} · smoke check of {record.get('candidate', '?')} on "
+                    f"{record.get('items', '?')} train item(s): {record.get('outcome', '?')}"
+                    + (f" ({why})" if why else ""))
+        return None
     if step == "optimizer":
         # Each count says what it counts: this epoch's proposals, each either accepted
         # for evaluation or refused, so the first is the sum of the other two (dm-265).
@@ -123,6 +146,13 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return line
     if step == "scheduler":
         gate = record.get("gate")
+        if isinstance(gate, dict) and gate.get("selection") == "checkpoint":
+            return (
+                f"epoch {record.get('epoch', epoch)} done · applied {gate.get('kept', 0)}, "
+                f"not applied {gate.get('rejected', 0)} · val best "
+                f"{_score(record.get('val_best'))} (current {_score(record.get('val_current'))}) · "
+                f"train best {_score(record.get('best'))} · bound {record.get('bound') or 'no'}"
+            )
         if isinstance(gate, dict):
             # With the validation gate: what it decided this epoch and its val scores;
             # the train scores are labelled as such, and train "improved" is not shown.
@@ -136,6 +166,16 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             f"epoch {record.get('epoch', epoch)} done · best {_score(record.get('best'))} · "
             f"mean {_score(record.get('mean'))} · improved {record.get('improved', '?')} · "
             f"bound {record.get('bound') or 'no'}"
+        )
+    if step == "report" and "seed_val" in record:
+        # ``checkpoint``: the val checkpoints compared, then the train scores.
+        return (
+            f"done · best val {_score(record.get('best_score'))} "
+            f"(seed val {_score(record.get('seed_val'))}) · train "
+            + ("(different samples) " if record.get("train_samples_differ") else "") +
+            f"{_score(record.get('best_train_score'))} (seed {_score(record.get('seed_score'))}, "
+            f"raw {_score(record.get('raw_best_score'))}) · "
+            f"{record.get('evaluations', '?')} evaluations · bound {record.get('bound') or 'no'}"
         )
     if step == "report":
         return (
