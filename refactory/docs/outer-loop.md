@@ -90,9 +90,10 @@ val score. `selection` says how it selects:
   result reaches no decision or request). Val runs after train instead with several
   children in a round, `max_concurrent_evaluations` 1, a time or token budget
   (`max_elapsed_s`, `max_tokens`), too little `max_rollouts` room for both runs and their
-  reruns, a val result already held for the child (a resumed run), or a model client
-  other than `DshModelClient` (whose calls leave no worker receipt to tell the two runs'
-  spend apart). The report's headline compares the seed's val checkpoint (`seed_val`,
+  reruns, a val result already held for the child (a resumed run), another candidate
+  still waiting for a gate decision (a resumed run), a parts manifest with no val, or a
+  model client other than `DshModelClient` (whose calls leave no worker receipt to tell
+  the two runs' spend apart). The report's headline compares the seed's val checkpoint (`seed_val`,
   `n/a` when it has none) with the winner's (`best_score`), and the seed's train score
   (`seed_score`) with the winner's (`best_train_score`), said to be on different samples
   when `train_minibatch` scored them on different epochs' items.

@@ -461,8 +461,9 @@ class LoopConfig:
     #:   run goes beside its train run, sharing ``max_items_in_flight`` (a round takes
     #:   about the slower of the two when the limit fits both); val runs after train with
     #:   several children, ``max_concurrent_evaluations`` 1, a time or token budget, too
-    #:   little ``max_rollouts`` room, its val result already held (a resume), or a model
-    #:   client other than ``DshModelClient``. Each run's tokens and cost leave out what
+    #:   little ``max_rollouts`` room, its val result already held (a resume), another
+    #:   candidate still waiting for a gate decision (a resume), a parts manifest with no
+    #:   val, or a model client other than ``DshModelClient``. Each run's tokens and cost leave out what
     #:   the other spent, for workers that write receipts. The winner is
     #:   the best checkpoint on val (a tie goes to the earlier one); the early stop counts
     #:   rounds without a new best. No parent is re-scored: train rollouts use one seed
