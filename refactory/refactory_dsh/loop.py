@@ -376,8 +376,9 @@ class LoopConfig:
     validation_reserve_tokens: int = 0
     max_rollouts: int | None = None
     #: How many evaluations run at once: in evaluate_many, and in the default loop's
-    #: rounds (a round's train evaluations, then its val-gate rollouts). 1 runs them
-    #: one at a time. Default 4.
+    #: rounds (a round's train evaluations, then its val-gate rollouts; under
+    #: ``selection`` ``checkpoint`` a lone child's val rollout runs beside its train run).
+    #: 1 runs them one at a time. Default 4.
     max_concurrent_evaluations: int = 4
     #: Run-wide cap on items evaluated concurrently across all concurrent
     #: evaluations.  ``None`` means use the mode's data_parallelism.
@@ -455,10 +456,12 @@ class LoopConfig:
     #:   the one with the highest train score, the earlier on a tie) unless its graph is
     #:   broken: refused by the validator, vetoed by the integrity judge, failing the
     #:   smoke check after repair, or failing its train run. Only the applied candidate
-    #:   is rolled out on val, once: a checkpoint. The winner is the best checkpoint on
-    #:   val (a tie goes to the earlier one); the early stop counts rounds without a new
-    #:   best. No parent is re-scored: train rollouts use one seed for the whole run (the
-    #:   first epoch's), so a child and its parent are compared on the same shuffle.
+    #:   is rolled out on val, once: a checkpoint (a round's lone child, and the seed, on
+    #:   val beside its train run, so a round takes the slower of the two). The winner is
+    #:   the best checkpoint on val (a tie goes to the earlier one); the early stop counts
+    #:   rounds without a new best. No parent is re-scored: train rollouts use one seed
+    #:   for the whole run (the first epoch's), so a child and its parent are compared on
+    #:   the same shuffle.
     #:   The default loop with a single-parent optimizer only.
     #: - ``single``: SkillOpt's line. A candidate is kept only if its val score strictly
     #:   beats the incumbent's (the gate's current candidate), and the incumbent (with
@@ -924,6 +927,10 @@ class Loop(OuterLoop):
         self._harness_incidents: list[dict[str, Any]] = []
         #: Loop-private per-candidate, per-part occasion counters.
         self._occasion_counters: dict[str, dict[str, int]] = {}
+        #: Under ``checkpoint``, the candidates whose val rollout beside their train run
+        #: (``_train_beside_val``) a budget stopped in this process, with the stop's
+        #: message: the gate takes it as the refused rollout rather than rolling again.
+        self._val_stopped_beside: dict[str, str] = {}
         #: How many evaluations the journal records per evaluation folder (relative to
         #: the root), counted from its events live and on replay (`_note_recorded`); it
         #: numbers the trace folders (`_write_traces`) and is never journaled.
@@ -1712,6 +1719,9 @@ class Loop(OuterLoop):
         # those comparisons.
         parent = self._round_parent(batch, at) if epoch is None and batch else None
         gold = self._train_gold_feedback()
+        # Under ``checkpoint`` the round's one candidate is rolled out on val beside its
+        # train run (`_val_beside`).
+        with_val = self._val_beside(batch, at)
         index = 0
         while index < len(batch):
             if self.evaluations >= self.config.max_evaluations:
@@ -1755,6 +1765,9 @@ class Loop(OuterLoop):
                             self._forwarded(candidate, start + position, len(batch), at, items)
                             if position < len(wave) else None),
                     )
+                elif with_val is not None and wave == [with_val]:
+                    self._train_beside_val(with_val, seed=seed, items=items, gold=gold,
+                                           of=len(batch), epoch=at)
                 elif len(wave) == 1:
                     self._evaluate(wave[0], seed=seed, items=items, gold_feedback=gold)
                     self._forwarded(wave[0], index, len(batch), at, items)
@@ -1777,6 +1790,71 @@ class Loop(OuterLoop):
             if parent is not None:
                 self._rescore_after(parent, at, seed)
         return len(batch)
+
+    def _val_beside(self, batch: Sequence[Candidate], epoch: int) -> Candidate | None:
+        """Under ``checkpoint``, the candidate ``forward`` rolls out on val beside its
+        train run, as one ``Run.evaluate_many`` batch, so a round costs the longer of the
+        two runs instead of both; ``None`` when there is none (the order before).
+
+        The round's only candidate, when the gate's next decision rolls only it out on
+        val whatever its train score: the seed (``ValidationGate.start``), or a round's
+        one child (applied unless its train run fails). Not with several children, as
+        their train scores pick the one rolled out; not when another candidate waits
+        for a decision; not when its val result is already held (a resume); and not
+        with ``max_concurrent_evaluations`` 1 or a parts manifest without val. With
+        ``max_rollouts``, only where neither run, nor their harness-incident reruns,
+        can meet the cap in either order, so both are run exactly as one after the
+        other would run them. The val rollout is the one the gate would make, with the
+        gate's seed; the gate then reads it from the journal (`_journaled_val`). A
+        child whose train run fails has been rolled out on val for nothing: its val
+        result reaches no decision or request."""
+        if (self.selection_mode() != "checkpoint" or len(batch) != 1
+                or int(self.config.max_concurrent_evaluations or 1) < 2
+                or task_module.VAL not in (self._parts_manifest or {})):
+            return None
+        candidate = batch[0]
+        gate = self._gate()
+        judged = set(self._gate_accepted) | set(self._gate_rejected)
+        if any(c.evaluated and c.id not in judged for c in self.population):
+            return None
+        held = [s for s in (self._part_results.get(candidate.id) or {}).get(task_module.VAL)
+                or () if not s.get("budget_stopped")]
+        if candidate.id in gate.cache or held:
+            return None
+        cap = self.config.max_rollouts
+        if cap is not None:
+            items = self._minibatch(epoch)
+            train = len(items) if items is not None else len(self._train_ids())
+            val = len((self._parts_manifest or {}).get(task_module.VAL) or ())
+            most = ((max(train, 1) + max(val, 1)) * max(int(self.config.repeats or 1), 1)
+                    * (1 + INCIDENT_RERUNS))
+            if self.rollouts + most > cap:
+                return None
+        return candidate
+
+    def _train_beside_val(self, candidate: Candidate, *, seed: int, items: list[str] | None,
+                          gold: bool, of: int, epoch: int) -> None:
+        """``candidate``'s train run and its val rollout at once (`_val_beside`): one
+        ``Run.evaluate_many`` batch, under the run-wide item limit and stop signal. What
+        the train run records is ``forward``'s; the val result is journaled as the
+        gate's own rollout would be, and a val rollout a budget stopped is kept as the
+        gate's refused rollout (``_val_stopped_beside``)."""
+        val = task_module.VAL
+        before = len((self._part_results.get(candidate.id) or {}).get(val) or ())
+        try:
+            Run(_loop=self).evaluate_many(
+                [EvalRequest(candidate=candidate, part=task_module.TRAIN, items=items,
+                             seed=seed, gold_feedback=gold),
+                 EvalRequest(candidate=candidate, part=val, seed=self._gate().seed,
+                             beside=True)],
+                on_result=lambda position, done: (
+                    self._forwarded(done, 0, of, epoch, items) if position == 0 else None),
+            )
+        finally:
+            for entry in ((self._part_results.get(candidate.id) or {}).get(val) or [])[before:]:
+                if entry.get("budget_stopped"):
+                    self._val_stopped_beside[candidate.id] = (
+                        f"the budget stopped {candidate.id}'s {val} rollout: {entry.get('error')}")
 
     def _rescore_after(self, parent: Candidate, epoch: int, seed: int) -> None:
         """The round's parent re-score when its children filled every concurrent slot:
@@ -2501,6 +2579,11 @@ class Loop(OuterLoop):
                      **({"harness_incidents": incidents} if incidents else {})}
             trial["workers"] = []
             for receipt_path in sorted(trial_dir.glob("**/.refactory/workers/*.json")):
+                inside = receipt_path.relative_to(trial_dir).parts
+                if inside[0] == "occasions" and inside[1].startswith(("val_", "test_")):
+                    # The candidate's val or test rollout (under ``checkpoint`` one runs
+                    # beside its train run): its workers are not this trial's.
+                    continue
                 try:
                     receipt = json.loads(receipt_path.read_text())
                     trial["workers"].append({key: receipt.get(key) for key in ("worker_id", "node_id", "role", "state", "actual_route", "runtime", "usage")})
@@ -4477,9 +4560,9 @@ class Loop(OuterLoop):
             self._store_gate_state()
             self._save_strategy_state()
         if pending and gate.best_id is None:
-            if checkpoint:
-                self._journaled_val(run, gate, pending[0])
             try:
+                if checkpoint:
+                    self._journaled_val(run, gate, pending[0])
                 gate.start(run, pending[0])
             except OuterLoopError as error:
                 run.log(f"val gate stopped: {error}")
@@ -4526,8 +4609,8 @@ class Loop(OuterLoop):
                   if trained else None)
         best = False
         if chosen is not None:
-            self._journaled_val(run, gate, chosen)
             try:
+                self._journaled_val(run, gate, chosen)
                 score, _cached = gate.score(run, chosen)
             except OuterLoopError as error:
                 run.log(f"val gate stopped: {error}")
@@ -4553,10 +4636,15 @@ class Loop(OuterLoop):
 
     def _journaled_val(self, run: Run, gate: ValidationGate, candidate: Candidate) -> None:
         """Under ``checkpoint``, a val score the journal already holds for ``candidate``
-        (a run killed after the rollout and before the decision) goes into the gate's
-        cache, so a resumed run does not roll it out again."""
+        (rolled out beside its train run, or a run killed after the rollout and before
+        the decision) goes into the gate's cache, so it is not rolled out again. A
+        rollout beside the train run that a budget stopped in this process is the
+        refused rollout: ``BudgetStopped``, as the gate's own rollout would raise."""
         if candidate.id in gate.cache:
             return
+        stopped = self._val_stopped_beside.pop(candidate.id, None)
+        if stopped is not None:
+            raise BudgetStopped(stopped, reason=self.bound or stopped)
         held = [s for s in (self._part_results.get(candidate.id) or {}).get(task_module.VAL) or ()
                 if not s.get("budget_stopped")]
         if held:

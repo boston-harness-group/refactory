@@ -628,20 +628,21 @@ def _drain(graphs: Path):  # type: ignore[no-untyped-def]
     return run_on_dsh, runs
 
 
-@pytest.mark.parametrize("runtime", [
+#: The walker, and the TS spine through the lowering where Node and the workspace are there.
+RUNTIMES = [
     "walker",
     pytest.param("spine", marks=pytest.mark.skipif(
         NODE is None or not (REPO_ROOT / "packages/workflow/workflow-spine/node_modules/"
                              "@deepseek-ai/cordis").exists(),
-        reason="the spine drain needs Node and the installed workspace (pnpm install)"))])
-def test_a_smoke_failure_is_refused_repaired_and_smoked_again(tmp_path, monkeypatch, runtime):
-    """[walker] / [spine] The proposal sets level 13, whose step fails on every item: its
-    smoke run on the parent's first wrong item (s1) and first passed one (s2) fails, so
-    it is refused E-smoke, naming the error and the step; the repair call fixes it (14),
-    the fix is smoked again and passes, and only the fix is evaluated. The smoke runs
-    count as rollouts and never as train records or evaluations."""
+        reason="the spine drain needs Node and the installed workspace (pnpm install)"))]
+
+
+def _smoke_run(tmp_path: Path, monkeypatch: Any, runtime: str):  # type: ignore[no-untyped-def]
+    """One epoch of SmokeProbe with the Fixer on ``runtime``: (loop, fixer, the run
+    directories the spine ran, empty on the walker)."""
     from refactory_dsh import dsh_runtime
 
+    runs: list[Path] = []
     if runtime == "spine":
         drain, runs = _drain(tmp_path / "graphs")
         monkeypatch.setattr(dsh_runtime, "run_on_dsh", drain)
@@ -660,6 +661,17 @@ def test_a_smoke_failure_is_refused_repaired_and_smoked_again(tmp_path, monkeypa
             project=Path("."))
         loop.optimizer = fixer = Fixer()
         loop.run()
+    return loop, fixer, runs
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_smoke_failure_is_refused_repaired_and_smoked_again(tmp_path, monkeypatch, runtime):
+    """[walker] / [spine] The proposal sets level 13, whose step fails on every item: its
+    smoke run on the parent's first wrong item (s1) and first passed one (s2) fails, so
+    it is refused E-smoke, naming the error and the step; the repair call fixes it (14),
+    the fix is smoked again and passes, and only the fix is evaluated. The smoke runs
+    count as rollouts and never as train records or evaluations."""
+    loop, fixer, runs = _smoke_run(tmp_path, monkeypatch, runtime)
     smokes = _events(loop, "smoke")
     assert [(e["items"], e["outcome"]) for e in smokes] == [
         (["s1", "s2"], "failed"), (["s1", "s2"], "passed")]
@@ -810,3 +822,273 @@ def test_every_built_in_strategy_is_smoked_and_shows_item_history(
     failing = [r for r in loop._context().item_records if not r.get("passed")]
     assert failing and all(r["item_history"].startswith("history: solved 0/")
                            for r in failing), failing[:1]
+
+
+# ── a graph's train and val runs together ─────────────────────────────────
+
+
+def _overlaps(monkeypatch: Any, wait_s: float = 10.0) -> dict[str, list[str]]:
+    """Make each candidate's own train run (``runs/<id>``) and its val runs
+    (``occasions/val_<n>``) wait for each other inside ``Loop._measure``: the result
+    says, per candidate id, which of them met the other (``"together"``) and which
+    waited ``wait_s`` in vain (``"alone"``). Smoke runs pass straight through."""
+    import threading
+
+    original = Loop._measure
+    barriers: dict[str, threading.Barrier] = {}
+    lock = threading.Lock()
+    met: dict[str, list[str]] = {}
+
+    def measure(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        own = workdir.name == candidate.id and part == "train"
+        val = part == "val" and workdir.name.startswith("val_")
+        if own or val:
+            with lock:
+                barrier = barriers.setdefault(candidate.id, threading.Barrier(2))
+            try:
+                barrier.wait(timeout=wait_s)
+                outcome = "together"
+            except threading.BrokenBarrierError:
+                outcome = "alone"
+            with lock:
+                met.setdefault(candidate.id, []).append(f"{part} {outcome}")
+            if val:
+                # A worker receipt of the val run's, as an agent node leaves one.
+                receipt = workdir / ".refactory" / "workers" / "val-worker.json"
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                receipt.write_text(json.dumps({"worker_id": "val-worker", "role": "val"}))
+        return original(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", measure)
+    return met
+
+
+def _batches(monkeypatch: Any) -> list[list[tuple[str, str]]]:
+    """Every ``Run.evaluate_many`` call, as its requests' ``(candidate id, part)``."""
+    from refactory_dsh.outerloop import Run
+
+    calls: list[list[tuple[str, str]]] = []
+    original = Run.evaluate_many
+
+    def evaluate_many(self, requests, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append([(r.candidate.id, r.part) for r in requests])
+        return original(self, requests, **kwargs)
+
+    monkeypatch.setattr(Run, "evaluate_many", evaluate_many)
+    return calls
+
+
+def test_a_rounds_train_and_val_runs_run_together(tmp_path, monkeypatch):
+    """The seed's and each applied child's train run and val checkpoint are one
+    ``evaluate_many`` batch, run at once: each waits inside its measurement until the other
+    has started, so a round costs the longer of the two, not both. The train run's record
+    lists none of the val run's workers."""
+    _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.7}, {0: 0.5, 1: 0.6, 2: 0.7})
+    met = _overlaps(monkeypatch)
+    calls = _batches(monkeypatch)
+    loop, _, _ = _run(tmp_path / "together", monkeypatch, [[(0, 1)], [(1, 2)]])
+    ids = _by_level(loop)
+    assert {_levels(loop, [cid])[0]: sorted(m) for cid, m in met.items()} == {
+        level: ["train together", "val together"] for level in (0, 1, 2)}
+    assert [call for call in calls if len(call) == 2] == [
+        [(ids[level], "train"), (ids[level], "val")] for level in (0, 1, 2)]
+    assert all(len(call) == 2 for call in calls), "no other batch: each round is one"
+    workers = [w for e in _events(loop, "score") for t in e["measurements"]["trials"]
+               for w in t["workers"]]
+    assert not [w for w in workers if w["worker_id"] == "val-worker"], "not the train run's"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_train_and_val_run_together_on_both_runtimes(tmp_path, monkeypatch, runtime):
+    """[walker] / [spine] The seed's and the applied fix's train and val runs meet inside
+    their measurements on either runtime (on the spine, as two drains of the lowered
+    graph)."""
+    met = _overlaps(monkeypatch)
+    loop, _, runs = _smoke_run(tmp_path, monkeypatch, runtime)
+    levels = _by_level(loop)
+    assert {cid: sorted(m) for cid, m in met.items()} == {
+        levels[level]: ["train together", "val together"] for level in (0, 14)}
+    assert [e["applied"] for e in _events(loop, "checkpoint")] == [levels[14]]
+    if runtime == "spine":
+        for level in (0, 14):
+            root = loop.root / "runs" / levels[level]
+            assert root in runs and root / "occasions" / "val_0" in runs
+
+
+#: The fields that hold a time, not a result.
+TIMINGS = {"duration_s", "measurements", "ts", "time", "at", "_last_active", "elapsed_s",
+           "started_at", "finished_at"}
+
+
+def _normalized(loop: Loop) -> dict[str, Any]:
+    """What a run decided and recorded, without timings."""
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items()
+                    if k not in TIMINGS}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+
+    keep = ("score", "train_records", "part_result", "checkpoint", "occasion_counter",
+            "final_evaluation")
+    def ordered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # The final evaluation's test runs finish in either order (`FinalEvaluation`'s
+        # own concurrent batch, whatever the rounds do): sorted, the rest as written.
+        test = sorted((r for r in rows if r.get("part") == "test"), key=json.dumps)
+        return [r for r in rows if r.get("part") != "test"] + test
+
+    return {
+        **{name: ordered([strip(e) for e in _events(loop, name)]) for name in keep},
+        "rollouts_per_epoch": _rollouts_per_epoch(loop),
+        "accepted": list(loop._gate_accepted), "rejected": list(loop._gate_rejected),
+        "best": loop._gate().best_id, "cache": dict(loop._gate().cache),
+        "evaluations": loop.evaluations, "rollouts": loop.rollouts,
+    }
+
+
+def test_together_decides_and_records_what_one_after_the_other_does(tmp_path, monkeypatch):
+    """The same run with the train and val runs together and one after the other
+    (``max_concurrent_evaluations`` 1, the order before): the same scores, seeds, val
+    results, checkpoints, early stop, winner and test scores; only timings differ."""
+    _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.4, 3: 0.7, 4: 0.2},
+            {0: 0.7, 1: 0.6, 2: 0.8, 3: 0.5, 4: 0.4})
+    plan = [[(0, 1)], [(1, 2)], [(2, 3)], [(3, 4)], [(4, 5)]]
+    together, _, report = _run(tmp_path / "together", monkeypatch, plan, epochs=6,
+                               test=True, early_stop_patience=2)
+    apart, _, report_apart = _run(tmp_path / "apart", monkeypatch, plan, epochs=6,
+                                  test=True, early_stop_patience=2,
+                                  max_concurrent_evaluations=1)
+    assert report["bound"] == report_apart["bound"] == "patience_exhausted"
+    mine, theirs = _normalized(together), _normalized(apart)
+    for key in mine:
+        assert mine[key] == theirs[key], key
+    assert report["best"]["id"] == report_apart["best"]["id"]
+    final = together.final_evaluation()
+    assert final == apart.final_evaluation() and final["test_eval"] == "done"
+    assert report["best_score"] == report_apart["best_score"]
+    assert {r["seed"] for r in _events(together, "score")} == {train_batch_seed(SEED, 1)}
+    assert {r["seed"] for r in _events(together, "part_result") if r["part"] == "val"} == {SEED}
+
+
+@pytest.mark.parametrize("killed", ["train", "val"])
+def test_a_run_killed_mid_round_resumes_with_one_val_run(tmp_path, monkeypatch, killed):
+    """Killed in the child's round while its train and val runs are running: its train
+    run after its val run finished, or its val run after its train run finished. The
+    resumed run scores the unfinished one only: one train score and one val result per
+    graph, the finished run's result read back from the journal, and the child applied."""
+    import time
+
+    _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.7}, {0: 0.5, 1: 0.6, 2: 0.7})
+    evaluate, part = Loop._evaluate, Loop._evaluate_part
+    saw: list[bool] = []
+
+    def wait_for(done) -> bool:  # type: ignore[no-untyped-def]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if done():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def train(self, candidate, **kwargs):  # type: ignore[no-untyped-def]
+        if _level(candidate) == 1 and killed == "train":
+            saw.append(wait_for(lambda: bool(
+                (self._part_results.get(candidate.id) or {}).get("val"))))
+            raise KeyboardInterrupt("killed")
+        return evaluate(self, candidate, **kwargs)
+
+    def held_out(self, candidate, which, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if _level(candidate) == 1 and killed == "val":
+            saw.append(wait_for(lambda: candidate.evaluated))
+            raise KeyboardInterrupt("killed")
+        return part(self, candidate, which, *args, **kwargs)
+
+    monkeypatch.setattr(Loop, "_evaluate", train)
+    monkeypatch.setattr(Loop, "_evaluate_part", held_out)
+    with pytest.raises(KeyboardInterrupt):
+        _run(tmp_path, monkeypatch, [[(0, 1)]], epochs=2)
+    assert saw == [True], f"the other run finished while the {killed} run ran"
+    monkeypatch.setattr(Loop, "_evaluate", evaluate)
+    monkeypatch.setattr(Loop, "_evaluate_part", part)
+    loop, _, report = _run(tmp_path, monkeypatch, [[(1, 2)]], epochs=2, resume=True)
+    assert _vals(loop) == {0: 1, 1: 1, 2: 1}
+    assert Counter(_levels(loop, [e["id"] for e in _events(loop, "score")])) == {
+        0: 1, 1: 1, 2: 1}
+    assert _levels(loop, loop._gate_accepted) == [0, 1, 2]
+    assert [e["applied"] for e in _events(loop, "checkpoint")] == [
+        _by_level(loop)[1], _by_level(loop)[2]]
+    assert report["bound"] == "epochs"
+
+
+class TrainFails(FitProbe):
+    """FitProbe whose level 1 fails on train items and scores ``VAL_OF_ONE`` on val."""
+
+    name = "train_fails"
+
+    def score(self, run):  # type: ignore[no-untyped-def]
+        ids = [str(e.get("id")) for e in run.facts.get("item_scores", []) if isinstance(e, dict)]
+        if int(self.values()["level"]) == 1:
+            if any(i.startswith("t") for i in ids):
+                raise RuntimeError("no train score for level 1")
+            return VAL_OF_ONE
+        return super().score(run)
+
+
+VAL_OF_ONE = 0.913771
+
+
+def test_a_failed_childs_val_run_reaches_no_decision_or_request(tmp_path, monkeypatch):
+    """The child's val run ran beside its train run, which failed: the child is not
+    applied, its val result is in no decision (not the gate's cache, not the val scores a
+    parent policy reads) and in no proposal or memory request, and the next round edits
+    the seed."""
+    from refactory_dsh.optim.base import fmt_score
+
+    monkeypatch.setattr(FitProbe, "TRAIN", {0: 0.5, 1: 0.6, 2: 0.7})
+    monkeypatch.setattr(Loop, "_seed_population", lambda self, seed: None)
+    proposer = Telling([[(0, 1)], [(0, 2)]])
+    with _patch_mode(TrainFails):
+        loop = Loop(MODE_ID, _config(tmp_path, epochs=3), project=Path("."))
+        loop.optimizer = proposer
+        loop.run()
+    one = _by_level(loop)[1]
+    results = [r["result"] for r in _events(loop, "part_result")
+               if r["id"] == one and r["part"] == "val"]
+    assert [r["score"] for r in results] == [pytest.approx(VAL_OF_ONE)], "setup: rolled out"
+    assert loop._gate_decision(one) == "not applied"
+    assert one not in loop._gate().cache and one not in loop._val_scores()
+    assert proposer.handed == [[0], [0], [2]]
+    assert proposer.prompts and proposer.memory_prompts
+    for prompt in [*proposer.prompts, *proposer.memory_prompts]:
+        assert fmt_score(VAL_OF_ONE) not in prompt and str(VAL_OF_ONE) not in prompt
+
+
+@pytest.mark.parametrize("concurrent", [4, 1])
+def test_a_budget_stopped_val_run_leaves_the_round_unjudged_once(tmp_path, monkeypatch,
+                                                                 concurrent):
+    """A time or token budget stops the child's val run: no val score, the child is
+    neither applied nor refused, and its val run is not tried again in the round, with
+    the runs together or (``max_concurrent_evaluations`` 1) one after the other."""
+    from refactory_dsh.nn.mode import RunResult
+
+    _scores(monkeypatch, {0: 0.5, 1: 0.6}, {0: 0.5, 1: 0.6})
+    measure = Loop._measure
+
+    def stopped(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        if part == "val" and _level(candidate) == 1:
+            self.bound = "elapsed-time budget exhausted"
+            return (RunResult(exit_ok=False, error="elapsed-time budget exhausted"),
+                    {"budget_stopped": True})
+        return measure(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", stopped)
+    loop, _, _ = _run(tmp_path, monkeypatch, [[(0, 1)]], epochs=2,
+                      max_concurrent_evaluations=concurrent)
+    one = _by_level(loop)[1]
+    vals = [r["result"] for r in _events(loop, "part_result")
+            if r["id"] == one and r["part"] == "val"]
+    assert [v.get("budget_stopped") for v in vals] == [True]
+    assert one not in loop._gate_accepted and one not in loop._gate_rejected
+    assert one not in loop._gate().cache
+    assert not [e for e in _events(loop, "checkpoint") if e["applied"] == one]

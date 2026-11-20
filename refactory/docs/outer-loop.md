@@ -81,7 +81,13 @@ val score. `selection` says how it selects:
   `autoresearch`, `hill_climb`, alone or as `parent_picker: hill_climb`), and refused
   with any other strategy, optimizer or picker. A round costs its children's train runs
   and one val run: on LiveMath's 35/17 parts, 52 rollouts instead of `single`'s 87
-  (plus the smoke check's 2 train items per proposal).
+  (plus the smoke check's 2 train items per proposal). With one child a round (and for
+  the seed) the val run runs beside the train run, as one `evaluate_many` batch under
+  the run-wide item limit, so a round takes as long as the slower of the two; the
+  decisions are those of running them one after the other, and a child whose train run
+  fails has been rolled out on val for nothing (its val result reaches no decision or
+  request). With several children, or `max_concurrent_evaluations` 1, val runs after
+  train.
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
   parent. The SkillOpt-matched setting, and the default for a single-parent optimizer

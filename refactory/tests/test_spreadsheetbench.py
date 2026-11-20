@@ -757,9 +757,11 @@ def test_the_default_loop_asks_gold_feedback_on_train_only(tmp_path, sb_env):
     seed.state = state
     assert loop._train_gold_feedback()  # noqa: SLF001
     loop.forward(epoch=0)
-    train_prompts = list(model.prompts)
-    told = [p for p in train_prompts if EVAL_FEEDBACK_HEAD in p]
-    assert len(told) == 2 and len(train_prompts) == 4
+    # Under ``checkpoint`` the seed's val run runs beside its train run: the train item's
+    # four prompts, two of them told, and the val item's one, not told.
+    prompts = list(model.prompts)
+    told = [p for p in prompts if EVAL_FEEDBACK_HEAD in p]
+    assert len(told) == 2 and len(prompts) == 5
     assert json.loads((tmp_path / "run" / "runs" / seed.id / task_module.SUBSET)
                       .read_text()).get(task_module.GOLD_FEEDBACK) is True
     before = len(model.prompts)
