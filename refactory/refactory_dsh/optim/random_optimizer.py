@@ -127,6 +127,12 @@ class RandomOptimizer(Optimizer):
     """
 
     name = "random"
+    #: Spend every other proposal on the mode's ``preferred_edits``. Off: the loop's
+    #: proposal context never carried them before the mode's guidance was wired to the
+    #: model proposer, so this prior has never run in a real loop, and turning it on
+    #: moves every seeded random-optimizer result (the tutorial's documented numbers
+    #: among them).
+    author_prior = False
 
     def __init__(self, *, k: int = 3, seed: int = 0) -> None:
         super().__init__(k=k)
@@ -153,7 +159,8 @@ class RandomOptimizer(Optimizer):
         # were and stops widening the pool from silently changing every run.
         parents = _elite(parents, ctx)
         rng = self.rng(ctx, n)
-        preferred = [name for name in ctx.preferred_edits if name in set(nn_edits.enabled(ctx.preset))]
+        preferred = ([name for name in ctx.preferred_edits if name in set(nn_edits.enabled(ctx.preset))]
+                     if self.author_prior else [])
         proposals: list[Proposal] = []
         for index in range(max(1, n)):
             parent = parents[index % len(parents)]

@@ -133,7 +133,9 @@ def test_the_sampler_favours_the_preferred_operations(tmp_path):
     ctx = _ctx(mode)
     ops: list[str] = []
     for seed in range(30):
-        candidates, _rejections = RandomOptimizer(seed=seed).propose_valid(
+        sampler = RandomOptimizer(seed=seed)
+        sampler.author_prior = True  # off by default (see ``RandomOptimizer.author_prior``)
+        candidates, _rejections = sampler.propose_valid(
             ctx, 2, parents=[parent], invariants=mode.invariants()
         )
         for candidate in candidates:
