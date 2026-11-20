@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from refactory_dsh.items import NO_ANSWER
+
 from refactory_packages.skillopt.claude_backend import unframe_claude_backend_messages
 
 from . import skillopt_port as port
@@ -55,8 +57,10 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
         "conversation": None,
     }
     exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
-    if record.get("error_text") is not None or not exchanges:
-        # An item that failed or timed out, or had no case, saved no conversation.
+    if record.get("error_text") is not None or not exchanges \
+            or str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        # An item that failed or timed out, or had no case, saved no conversation; nor
+        # did one whose model call failed (no answer): its last reply is not its end.
         return result
     history = unframe_claude_backend_messages(str(exchanges[-1].get("prompt") or "")) or []
     user = history[0]["content"] if history else ""

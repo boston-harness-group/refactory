@@ -24,6 +24,7 @@ import time
 from typing import Any
 
 import openpyxl
+from openpyxl.worksheet.formula import ArrayFormula
 
 from refactory_dsh.model import HARNESS_INCIDENT_TEXT, HarnessIncident
 
@@ -99,8 +100,18 @@ def _cells(answer_position: str):
         yield sheet, list(port.generate_cell_names(rng.strip().strip("'\"")))
 
 
-# lo_grader.py:64-82. The sheet falls back to the *prediction's* first sheet when the
-# position names none or one it lacks (the evaluator uses gold's); copied as it is.
+def is_formula(value: Any) -> bool:
+    """Whether a cell value (as openpyxl loads it) is a formula: a string starting with
+    ``=``, or an array formula, which openpyxl loads as an `ArrayFormula` object.
+    lo_grader.py counts only the string; an array formula, which Excel computes, would
+    then be graded on its cached value (none, in a workbook openpyxl wrote) and always
+    fail, so it counts here too (docs/spreadsheetbench.md, "Differences")."""
+    return (isinstance(value, str) and value.startswith("=")) or isinstance(value, ArrayFormula)
+
+
+# lo_grader.py:64-82, with array formulas counted (`is_formula`). The sheet falls back
+# to the *prediction's* first sheet when the position names none or one it lacks (the
+# evaluator uses gold's); copied as it is.
 def has_formula_answer(pred_path: str, answer_position: str) -> bool:
     try:
         wb = openpyxl.load_workbook(pred_path)
@@ -110,11 +121,11 @@ def has_formula_answer(pred_path: str, answer_position: str) -> bool:
         try:
             for sheet, names in _cells(answer_position):
                 ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.worksheets[0]
-                if any(isinstance(ws[n].value, str) and ws[n].value.startswith("=") for n in names):
+                if any(is_formula(ws[n].value) for n in names):
                     return True
             return False
         except Exception:
-            return any(isinstance(c.value, str) and c.value.startswith("=")
+            return any(is_formula(c.value)
                        for ws in wb.worksheets for row in ws.iter_rows() for c in row)
     finally:
         wb.close()
