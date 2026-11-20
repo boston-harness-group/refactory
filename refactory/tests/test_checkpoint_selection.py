@@ -602,15 +602,20 @@ def _drain(graphs: Path):  # type: ignore[no-untyped-def]
     from refactory_dsh import lowering
     from refactory_dsh.dsh_runtime import FACTS, DshRun
 
+    import threading
+
     runs: list[Path] = []
+    lock = threading.Lock()  # a train run and its val run start drains at once
 
     def run_on_dsh(state, workdir, *, name="mode", timeout_s=900, **_kwargs):  # type: ignore[no-untyped-def]
         workdir = Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
-        runs.append(workdir)
+        with lock:
+            runs.append(workdir)
+            number = len(runs)
         lowering.write_declarations(state, workdir)
-        graph_path, _ = lowering.write_mode_graph(state, graphs / str(len(runs)), name="smoke")
-        responses = graphs / f"responses-{len(runs)}.json"
+        graph_path, _ = lowering.write_mode_graph(state, graphs / str(number), name="smoke")
+        responses = graphs / f"responses-{number}.json"
         responses.write_text("{}")
         # The knobs as run_on_dsh hands them to the spine (``--knobs``): every command's env.
         env = {**os.environ, "REFACTORY_WORKDIR": str(workdir), "PYTHONPATH": str(HERE),
@@ -915,20 +920,25 @@ def test_train_and_val_run_together_on_both_runtimes(tmp_path, monkeypatch, runt
             assert root in runs and root / "occasions" / "val_0" in runs
 
 
-#: The fields that hold a time, not a result.
-TIMINGS = {"duration_s", "measurements", "ts", "time", "at", "_last_active", "elapsed_s",
-           "started_at", "finished_at"}
+#: The fields that hold a time, not a result; ``resources``: the walker's copy of the
+#: run-wide ledger as a run ends (`nn.executor`), whose totals depend on what else ran;
+#: ``context_hash``: the settings' hash, which the two runs' concurrency setting changes.
+TIMINGS = {"duration_s", "ts", "time", "at", "_last_active", "elapsed_s", "started_at",
+           "finished_at", "resources", "context_hash"}
 
 
 def _normalized(loop: Loop) -> dict[str, Any]:
     """What a run decided and recorded, without timings."""
     def strip(value: Any) -> Any:
         if isinstance(value, dict):
-            return {k: strip(v) for k, v in value.items()
-                    if k not in TIMINGS}
+            # A cost is a sum of floats, taken in another order when a run beside it
+            # is left out: equal to a billionth of a dollar.
+            return {k: round(v, 9) if k == "cost" and isinstance(v, float) else strip(v)
+                    for k, v in value.items() if k not in TIMINGS}
         if isinstance(value, list):
             return [strip(v) for v in value]
-        return value
+        # The two runs' folders differ only in their root.
+        return value.replace(str(loop.root), "<root>") if isinstance(value, str) else value
 
     keep = ("score", "train_records", "part_result", "checkpoint", "occasion_counter",
             "final_evaluation")
@@ -947,12 +957,44 @@ def _normalized(loop: Loop) -> dict[str, Any]:
     }
 
 
+def _spending(monkeypatch: Any) -> None:
+    """Every walker evaluation spends tokens as an agent node does: a worker receipt in
+    its folder and the worker's usage in the run's ledger, 100000 + level tokens on train
+    and 10 + level on val (a millionth of a dollar each). A train run spends late, so a
+    val run beside it has spent by then."""
+    import hashlib
+    import time
+
+    from refactory_dsh.evaluators import WalkerEvaluator
+
+    evaluate = WalkerEvaluator.evaluate
+
+    def spending(self, mode, state, workdir, **kwargs):  # type: ignore[no-untyped-def]
+        where = str(workdir).split("/runs/", 1)[-1]
+        val = "/occasions/val_" in where
+        if not val:
+            time.sleep(0.3)
+        tokens = (10 if val else 100000) + int(state["knobs"]["level"]["value"])
+        worker = "worker-" + hashlib.sha1(where.encode()).hexdigest()[:16]
+        receipt = Path(workdir) / ".refactory" / "workers" / f"{worker}.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({"worker_id": worker, "role": "fake",
+                                       "usage": {"tokens": tokens, "status": "measured"}}))
+        self.budget.record_usage(worker, tokens, estimated_cost_usd=tokens / 1e6)
+        return evaluate(self, mode, state, workdir, **kwargs)
+
+    monkeypatch.setattr(WalkerEvaluator, "evaluate", spending)
+
+
 def test_together_decides_and_records_what_one_after_the_other_does(tmp_path, monkeypatch):
     """The same run with the train and val runs together and one after the other
     (``max_concurrent_evaluations`` 1, the order before): the same scores, seeds, val
-    results, checkpoints, early stop, winner and test scores; only timings differ."""
+    results, checkpoints, early stop, winner and test scores, and the same measurements,
+    tokens and cost of each run among them (each run's own, not the other's spent beside
+    it); only timings differ."""
     _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.4, 3: 0.7, 4: 0.2},
             {0: 0.7, 1: 0.6, 2: 0.8, 3: 0.5, 4: 0.4})
+    _spending(monkeypatch)
     plan = [[(0, 1)], [(1, 2)], [(2, 3)], [(3, 4)], [(4, 5)]]
     together, _, report = _run(tmp_path / "together", monkeypatch, plan, epochs=6,
                                test=True, early_stop_patience=2)
@@ -969,6 +1011,70 @@ def test_together_decides_and_records_what_one_after_the_other_does(tmp_path, mo
     assert report["best_score"] == report_apart["best_score"]
     assert {r["seed"] for r in _events(together, "score")} == {train_batch_seed(SEED, 1)}
     assert {r["seed"] for r in _events(together, "part_result") if r["part"] == "val"} == {SEED}
+    spent = {(_levels(together, [e["id"]])[0], t["tokens"])
+             for e in _events(together, "score") for t in e["measurements"]["trials"]}
+    assert spent == {(level, 100000 + level) for level in range(5)}, spent
+
+
+def test_a_trials_usage_is_the_ledgers_difference_unless_another_ran_beside_it(tmp_path):
+    """A trial's tokens and cost are the ledger's difference over the trial, exactly the
+    figures before, when no other trial ran beside it (whatever the snapshots hold); with
+    one beside it, that one's workers (their receipts in its folder) are left out, and
+    a worker of the trial's own in a folder holding it (a val run's, under its train
+    run's) is not."""
+    def snap(workers):  # type: ignore[no-untyped-def]
+        from refactory_dsh.budgets import RunBudget
+
+        return RunBudget._summary({"workers": workers, "started_at": None})
+
+    def old(before, after):  # type: ignore[no-untyped-def]
+        return (after.get("known_tokens", 0) - before.get("known_tokens", 0)
+                if after.get("token_status") in ("measured", "estimated") else None,
+                after["estimated_cost_usd"] - (before.get("estimated_cost_usd") or 0)
+                if after.get("estimated_cost_usd") is not None else None)
+
+    def worker(tokens, cost=None, status="measured"):  # type: ignore[no-untyped-def]
+        return {"tokens": tokens, "status": status if tokens is not None else "unavailable",
+                "estimated_cost_usd": cost}
+
+    loop = Loop.__new__(Loop)
+    pairs = [
+        ({}, {"a": worker(5, 0.5)}),
+        ({"a": worker(5, 0.5)}, {"a": worker(9, 0.9), "b": worker(3, 0.1)}),
+        ({"a": worker(5, None)}, {"a": worker(9, 0.9)}),
+        ({"a": worker(5, 0.5)}, {"a": worker(9, 0.9), "b": worker(None)}),
+        ({}, {}),
+        ({"a": worker(4, 0.4, "estimated")}, {"a": worker(7, 0.7, "estimated")}),
+    ]
+    for before, after in pairs:
+        assert loop._trial_usage(snap(before), snap(after), tmp_path / "t", set()) == old(
+            snap(before), snap(after))
+    train, other = tmp_path / "train", tmp_path / "o"
+    val = train / "occasions" / "val_0"
+    for folder, name in ((train, "w-train"), (val, "w-val"), (other, "w-other")):
+        (folder / ".refactory" / "workers").mkdir(parents=True)
+        (folder / ".refactory" / "workers" / f"{name}.json").write_text(
+            json.dumps({"worker_id": name}))
+    before = snap({"w-train": worker(1, 0.1), "w-val": worker(1, 0.1), "w-other": worker(1, 0.1)})
+    after = snap({"w-train": worker(11, 1.1), "w-val": worker(3, 0.3), "w-other": worker(101, 10.1),
+                  "w-other:unmetered-descendants": worker(5, 0.0)})
+    tokens, cost = loop._trial_usage(before, after, train, {val, other})
+    assert (tokens, cost) == (10, pytest.approx(1.0)), "train: neither the val run's nor o's"
+    tokens, cost = loop._trial_usage(before, after, val, {train})
+    assert (tokens, cost) == (2 + 100 + 5, pytest.approx(0.2 + 10.0)), "val: not train's own"
+
+
+@pytest.mark.parametrize("limit", [{"max_elapsed_s": 3600}, {"max_tokens": 10 ** 9}])
+def test_under_a_time_or_token_budget_val_runs_after_train(tmp_path, monkeypatch, limit):
+    """A time or token budget: the val run would spend beside the train run what one
+    after the other leaves to it, and could stop a train run that would have finished,
+    so it runs after train, in a batch of its own, and decides as before."""
+    _scores(monkeypatch, {0: 0.5, 1: 0.6, 2: 0.7}, {0: 0.5, 1: 0.6, 2: 0.7})
+    calls = _batches(monkeypatch)
+    loop, _, report = _run(tmp_path, monkeypatch, [[(0, 1)], [(1, 2)]], **limit)
+    assert not [call for call in calls if len(call) > 1], calls
+    assert _vals(loop) == {0: 1, 1: 1, 2: 1}
+    assert _levels(loop, loop._gate_accepted) == [0, 1, 2] and report["bound"] == "epochs"
 
 
 @pytest.mark.parametrize("killed", ["train", "val"])

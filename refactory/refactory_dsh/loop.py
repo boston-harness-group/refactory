@@ -457,7 +457,9 @@ class LoopConfig:
     #:   broken: refused by the validator, vetoed by the integrity judge, failing the
     #:   smoke check after repair, or failing its train run. Only the applied candidate
     #:   is rolled out on val, once: a checkpoint (a round's lone child, and the seed, on
-    #:   val beside its train run, so a round takes the slower of the two). The winner is
+    #:   val beside its train run, sharing ``max_items_in_flight``, so a round takes about
+    #:   the slower of the two when the limit fits both; not under a time or token
+    #:   budget). The winner is
     #:   the best checkpoint on val (a tie goes to the earlier one); the early stop counts
     #:   rounds without a new best. No parent is re-scored: train rollouts use one seed
     #:   for the whole run (the first epoch's), so a child and its parent are compared on
@@ -1800,8 +1802,12 @@ class Loop(OuterLoop):
         val whatever its train score: the seed (``ValidationGate.start``), or a round's
         one child (applied unless its train run fails). Not with several children, as
         their train scores pick the one rolled out; not when another candidate waits
-        for a decision; not when its val result is already held (a resume); and not
-        with ``max_concurrent_evaluations`` 1 or a parts manifest without val. With
+        for a decision; not when its val result is already held (a resume); not under
+        a time or token budget (``max_elapsed_s``, ``max_tokens``), whose spend the val
+        run would share; and not with ``max_concurrent_evaluations`` 1 or a parts
+        manifest without val. The two share the run-wide item limit
+        (``max_items_in_flight``), so the round takes about the slower of the two only
+        when the limit fits both. With
         ``max_rollouts``, only where neither run, nor their harness-incident reruns,
         can meet the cap in either order, so both are run exactly as one after the
         other would run them. The val rollout is the one the gate would make, with the
@@ -1811,6 +1817,13 @@ class Loop(OuterLoop):
         if (self.selection_mode() != "checkpoint" or len(batch) != 1
                 or int(self.config.max_concurrent_evaluations or 1) < 2
                 or task_module.VAL not in (self._parts_manifest or {})):
+            return None
+        limits = self.budget.limits if self.budget else None
+        if limits is not None and (limits.max_elapsed_s is not None
+                                   or limits.max_tokens is not None):
+            # A time or token budget: the val run would spend beside the train run what
+            # one after the other leaves to it, and could stop a train run that would
+            # have finished.
             return None
         candidate = batch[0]
         gate = self._gate()
@@ -1823,8 +1836,12 @@ class Loop(OuterLoop):
             return None
         cap = self.config.max_rollouts
         if cap is not None:
-            items = self._minibatch(epoch)
-            train = len(items) if items is not None else len(self._train_ids())
+            # The minibatch's size, without sampling (and journaling) it before forward's
+            # budget checks: ``_minibatch`` samples only a part larger than it.
+            ids = len(self._train_ids())
+            size = int(self.config.train_minibatch or 0)
+            train = (len(self._minibatches[epoch]) if epoch in self._minibatches
+                     else size if size and ids > size else ids)
             val = len((self._parts_manifest or {}).get(task_module.VAL) or ())
             most = ((max(train, 1) + max(val, 1)) * max(int(self.config.repeats or 1), 1)
                     * (1 + INCIDENT_RERUNS))
@@ -2522,6 +2539,7 @@ class Loop(OuterLoop):
                 trial_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(manifest, trial_dir / task_module.MANIFEST)
             before = self.budget.snapshot() if self.budget else {}
+            running = self._trial_started(trial_dir)
             try:
                 if self.budget:
                     final = part == task_module.HOLDOUT or getattr(self, "_final_scoring", False)
@@ -2545,10 +2563,14 @@ class Loop(OuterLoop):
                         trial_dir, **eval_kwargs,
                     )
             except BudgetExhausted as exc:
+                self._trial_ended(running)
                 last = RunResult(exit_ok=False, error=str(exc))
                 self.bound = str(exc)
                 budget_cut = True
                 break
+            except BaseException:
+                self._trial_ended(running)
+                raise
             budget_exhausted_after_trial = False
             if self.budget:
                 try:
@@ -2565,6 +2587,7 @@ class Loop(OuterLoop):
             budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
             # After the incident reruns, so their tokens and cost are the trial's.
             after = self.budget.snapshot() if self.budget else {}
+            tokens, cost = self._trial_usage(before, after, trial_dir, self._trial_ended(running))
             missing = [path for path in required if not (trial_dir / path).exists()]
             valid_score = isinstance(result.score, (int, float)) and math.isfinite(result.score)
             if missing or not valid_score:
@@ -2573,8 +2596,7 @@ class Loop(OuterLoop):
             trial = {"trial": index + 1, "score": result.score if result.exit_ok else None,
                      "exit_ok": result.exit_ok, "error": result.error, "duration_s": result.duration_s,
                      "model_calls": result.model_calls, "required_contract": {"passed": result.exit_ok, "missing_artifacts": missing},
-                     "tokens": after.get("known_tokens", 0) - before.get("known_tokens", 0) if after.get("token_status") in ("measured", "estimated") else None,
-                     "cost": after["estimated_cost_usd"] - (before.get("estimated_cost_usd") or 0) if after.get("estimated_cost_usd") is not None else None,
+                     "tokens": tokens, "cost": cost,
                      "workdir": str(trial_dir),
                      **({"harness_incidents": incidents} if incidents else {})}
             trial["workers"] = []
@@ -2632,6 +2654,67 @@ class Loop(OuterLoop):
         if traces:
             self._write_traces(candidate, workdir, part, seed, all_item_records)
         return last, summary
+
+    def _trial_started(self, trial_dir: Path) -> dict[str, Any]:
+        """Note a trial as running, with every other trial running beside it, now or
+        later (``Run.evaluate_many``): ``_trial_usage`` leaves their spend out of its.
+        Ended by ``_trial_ended``."""
+        entry: dict[str, Any] = {"dir": trial_dir, "met": set()}
+        with self._state_lock:
+            running = self.__dict__.setdefault("_running_trials", [])
+            for other in running:
+                other["met"].add(trial_dir)
+                entry["met"].add(other["dir"])
+            running.append(entry)
+        return entry
+
+    def _trial_ended(self, entry: dict[str, Any]) -> set[Path]:
+        """The trial is no longer running; the folders of the trials that ran beside it."""
+        with self._state_lock:
+            running = self.__dict__.get("_running_trials") or []
+            running[:] = [other for other in running if other is not entry]
+        return set(entry["met"])
+
+    def _trial_usage(self, before: dict[str, Any], after: dict[str, Any], trial_dir: Path,
+                     beside: set[Path]) -> tuple[int | None, float | None]:
+        """A trial's tokens and cost: what the run's ledger counted from ``before`` to
+        ``after``, less what the workers of the trials that ran ``beside`` it spent then.
+        Those are the workers whose receipts (``.refactory/workers/*.json``) lie in a
+        folder of theirs and not in the trial's own, as an agent node's and a model
+        call's do on both runtimes. A trial no other ran beside gets the ledger's
+        difference as it is. A worker that records usage with no receipt (a custom
+        client's own accounting) cannot be told apart and stays in every trial it ran
+        beside."""
+        tokens = (after.get("known_tokens", 0) - before.get("known_tokens", 0)
+                  if after.get("token_status") in ("measured", "estimated") else None)
+        cost = (after["estimated_cost_usd"] - (before.get("estimated_cost_usd") or 0)
+                if after.get("estimated_cost_usd") is not None else None)
+        if not beside:
+            return tokens, cost
+        own = trial_dir.resolve()
+        foreign: set[str] = set()
+        for folder in beside:
+            holds_own = own.is_relative_to(Path(folder).resolve())
+            for receipt in Path(folder).glob("**/.refactory/workers/*.json"):
+                if holds_own and receipt.resolve().is_relative_to(own):
+                    continue  # the trial's own worker, in a folder that holds its own
+                try:
+                    foreign.add(str(json.loads(receipt.read_text()).get("worker_id")
+                                    or receipt.stem))
+                except (OSError, ValueError):
+                    foreign.add(receipt.stem)
+        was = before.get("workers") or {}
+        for key, entry in (after.get("workers") or {}).items():
+            # A worker's own entry, or one it records beside it (``<id>:...``).
+            if key not in foreign and key.split(":", 1)[0] not in foreign:
+                continue
+            old = was.get(key) or {}
+            if tokens is not None:
+                tokens -= int(entry.get("tokens") or 0) - int(old.get("tokens") or 0)
+            if cost is not None:
+                cost -= (float(entry.get("estimated_cost_usd") or 0)
+                         - float(old.get("estimated_cost_usd") or 0))
+        return tokens, cost
 
     def _settle_incidents(
         self, candidate: Candidate, trial_dir: Path, part: str, seed: int | None,
