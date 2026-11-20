@@ -167,6 +167,15 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
             f"mean {_score(record.get('mean'))} · improved {record.get('improved', '?')} · "
             f"bound {record.get('bound') or 'no'}"
         )
+    if step == "report" and "seed_val" in record:
+        # ``checkpoint``: the val checkpoints compared, then the train scores.
+        return (
+            f"done · best val {_score(record.get('best_score'))} "
+            f"(seed val {_score(record.get('seed_val'))}) · train "
+            f"{_score(record.get('best_train_score'))} (seed {_score(record.get('seed_score'))}, "
+            f"raw {_score(record.get('raw_best_score'))}) · "
+            f"{record.get('evaluations', '?')} evaluations · bound {record.get('bound') or 'no'}"
+        )
     if step == "report":
         return (
             f"done · best {_score(record.get('best_score'))} "

@@ -88,8 +88,13 @@ val score. `selection` says how it selects:
   fits both runs' items. The decisions are those of running them one after the other,
   and a child whose train run fails has been rolled out on val for nothing (its val
   result reaches no decision or request). Each run's tokens and cost leave out what the
-  other spent meanwhile. With several children, `max_concurrent_evaluations` 1, or a
-  time or token budget (`max_elapsed_s`, `max_tokens`), val runs after train.
+  other spent meanwhile. With several children, `max_concurrent_evaluations` 1, a
+  time or token budget (`max_elapsed_s`, `max_tokens`), or a model client other than
+  `DshModelClient` (whose calls leave no worker receipt to tell the two runs' spend
+  apart), val runs after train. The report's headline compares the seed's val checkpoint
+  (`seed_val`) with the winner's (`best_score`), and the seed's train score
+  (`seed_score`) with the winner's (`best_train_score`). A checkpoint that exhausts the
+  patience ends the run at once: no backward pass, memory pass or proposal follows it.
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
   parent. The SkillOpt-matched setting, and the default for a single-parent optimizer

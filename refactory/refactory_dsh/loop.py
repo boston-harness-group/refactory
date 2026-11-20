@@ -29,6 +29,7 @@ import functools
 import json
 import math
 import random
+import re
 import shutil
 import statistics
 import sys
@@ -692,8 +693,10 @@ class Loop(OuterLoop):
                     self._journal("bound", bound=self.bound)
                     result = self.report()
                 # A same-bound resume stops before the scheduler. Persist that
-                # final reason too, so a later report-only replay retains it.
-                self._journal("bound", bound=self.bound)
+                # final reason too, so a later report-only replay retains it, unless
+                # the journal already ends on it (the scheduler or an early stop wrote it).
+                if self.__dict__.get("_journaled_bound", _UNSET) != self.bound:
+                    self._journal("bound", bound=self.bound)
                 return result
             finally:
                 if self._owns_resource_budget:
@@ -1804,7 +1807,9 @@ class Loop(OuterLoop):
         their train scores pick the one rolled out; not when another candidate waits
         for a decision; not when its val result is already held (a resume); not under
         a time or token budget (``max_elapsed_s``, ``max_tokens``), whose spend the val
-        run would share; and not with ``max_concurrent_evaluations`` 1 or a parts
+        run would share; not with a model client that writes no worker receipts (any
+        but ``DshModelClient``), whose spend could not be split between the two runs
+        (`_trial_usage`); and not with ``max_concurrent_evaluations`` 1 or a parts
         manifest without val. The two share the run-wide item limit
         (``max_items_in_flight``), so the round takes about the slower of the two only
         when the limit fits both. With
@@ -1818,6 +1823,14 @@ class Loop(OuterLoop):
                 or int(self.config.max_concurrent_evaluations or 1) < 2
                 or task_module.VAL not in (self._parts_manifest or {})):
             return None
+        model = getattr(self.evaluator, "model", None)
+        if model is not None:
+            from refactory_dsh.model import DshModelClient
+
+            if not isinstance(model, DshModelClient):
+                # A custom client records its usage without a worker receipt, so the
+                # two runs' tokens and cost could not be told apart (`_trial_usage`).
+                return None
         limits = self.budget.limits if self.budget else None
         if limits is not None and (limits.max_elapsed_s is not None
                                    or limits.max_tokens is not None):
@@ -2967,6 +2980,9 @@ class Loop(OuterLoop):
         ``rescore_failed``, ``memory_rollout``. A val or test rollout runs in a fresh
         occasion folder every time, and the holdout once, so they need no count. Called
         for every event written (`_journal`) and replayed, so a resume counts alike."""
+        if event == "bound":
+            # The bound the journal holds last, so the run's end does not write it again.
+            self.__dict__["_journaled_bound"] = record.get("bound")
         cid = record.get("id")
         if event == "train_records" and cid is not None:
             # Each train run's outcomes for the item history (`_with_item_history`): an
@@ -5104,7 +5120,10 @@ class Loop(OuterLoop):
             self._count_stale_epoch()
             early = self._early_stop_reason()
         self.loss_step()
-        self.backward()
+        if not (early and self.selection_mode() == "checkpoint"):
+            # Under ``checkpoint`` a run whose checkpoint just stopped it reads no
+            # gradient: nothing is proposed from it.
+            self.backward()
         candidates: list[Candidate] = []
         rejections: list[Rejection] = []
         if not early:
@@ -5411,6 +5430,12 @@ class Loop(OuterLoop):
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
+        checkpoint = gated and best is not None and self.selection_mode() == "checkpoint"
+        if checkpoint and self.population:
+            # Under ``checkpoint`` ``best_score`` is the winner's val checkpoint: the
+            # seed's own checkpoint beside it, so the headline compares val with val
+            # (and the seed's train score with the winner's, ``best_train_score``).
+            payload["seed_val"] = self._gate().cache.get(self.population[0].id)
         self._write("report.json", payload)
         self._write_text("report.md", self._render_report(payload))
         self._write("manifest.json", progress_file.artifact_manifest(self.root))
@@ -5418,6 +5443,8 @@ class Loop(OuterLoop):
             "report",
             best_score=payload["best_score"],
             raw_best_score=payload["raw_best_score"],
+            **({key: payload.get(key) for key in ("seed_val", "best_train_score", "seed_score")}
+               if "seed_val" in payload else {}),
             overfit=bool(audit.get("overfit")),
             evaluations=self.evaluations,
             bound=self.bound,
@@ -5818,10 +5845,7 @@ class Loop(OuterLoop):
             f"{payload['evaluations']} inner run(s). "
             f"Stopped because **{payload['bound']}** bound the run.",
             "",
-            f"Seed score **{payload['seed_score']}** → best **{payload['best_score']}**"
-            f" (raw {payload['seed_raw_score']} → {payload['raw_best_score']}). "
-            f"The compared score is the raw one minus "
-            f"{payload['scoring']['parsimony']} per node of the candidate's graph.",
+            *_headline(payload),
             *_incident_lines(payload.get("harness_incidents") or []),
             *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
                f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
@@ -8050,6 +8074,16 @@ def _holdout_line(audit: dict[str, Any]) -> str:
 #: The latest round's findings report.md lists.
 REPORT_ANALYST_FINDINGS = 5
 
+#: No value journaled yet (`_note_recorded`'s ``bound``).
+_UNSET = object()
+
+
+def _markdown_text(text: str) -> str:
+    """``text`` as one line of a markdown report: whitespace and line breaks collapsed,
+    and a run of backticks (a code fence a model wrote) made one, so it opens no block
+    that swallows the rest of the report."""
+    return re.sub(r"`{2,}", "`", " ".join(str(text).split()))
+
 
 def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> dict[str, Any]:
     """What report.json says of the analyst stage: its settings, the rounds it ran, the
@@ -8067,6 +8101,23 @@ def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> 
             "context_retries": sum(int(a.get("context_retries") or 0) for a in analyses),
             "stopped": sum(1 for a in analyses if a.get("error")),
             "latest": dict(analyses[-1]) if analyses else None}
+
+
+def _headline(payload: dict[str, Any]) -> list[str]:
+    """The report's score line. Under ``checkpoint`` (``seed_val`` is there) like with
+    like: the seed's val checkpoint against the winner's, and the seed's train score
+    against the winner's; otherwise the seed's score against the best's, as before."""
+    parsimony = (f"The compared score is the raw one minus "
+                 f"{payload['scoring']['parsimony']} per node of the candidate's graph.")
+    if "seed_val" not in payload:
+        return [f"Seed score **{payload['seed_score']}** → best **{payload['best_score']}**"
+                f" (raw {payload['seed_raw_score']} → {payload['raw_best_score']}). "
+                + parsimony]
+    return [f"Val checkpoint: seed **{payload['seed_val']}** → best "
+            f"**{payload['best_score']}** (the winner is the best checkpoint on val). "
+            f"Train: seed **{payload['seed_score']}** → winner "
+            f"**{payload.get('best_train_score')}** (raw {payload['seed_raw_score']} → "
+            f"{payload['raw_best_score']}). " + parsimony]
 
 
 def _analysts_section(report: dict[str, Any]) -> list[str]:
@@ -8101,7 +8152,7 @@ def _analysts_section(report: dict[str, Any]) -> list[str]:
                   f"failed and {latest.get('passed_items')} passed item(s)), the top "
                   "findings:", ""]
         found = list(latest.get("findings") or ())
-        lines += [finding_line(rank, entry) for rank, entry in
+        lines += [_markdown_text(finding_line(rank, entry)) for rank, entry in
                   enumerate(found[:REPORT_ANALYST_FINDINGS], 1)] or ["_No common pattern._"]
         lines.append("")
     return lines

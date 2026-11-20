@@ -1198,3 +1198,122 @@ def test_a_budget_stopped_val_run_leaves_the_round_unjudged_once(tmp_path, monke
     assert one not in loop._gate_accepted and one not in loop._gate_rejected
     assert one not in loop._gate().cache
     assert not [e for e in _events(loop, "checkpoint") if e["applied"] == one]
+
+
+class _OwnAccounting:
+    """A custom model client: it would record its usage itself, with no worker receipt.
+    Never called here (the toy mode asks no model)."""
+
+    def complete(self, prompt, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("not called")
+
+
+@pytest.mark.parametrize("client", ["none", "dsh", "custom"])
+def test_val_runs_beside_train_only_where_each_runs_spend_can_be_told_apart(
+        tmp_path, monkeypatch, client):
+    """No model client, or ``DshModelClient`` (every call leaves a worker receipt in the
+    run's folder): the train and val runs go together. A custom client, whose usage has
+    no receipt, would leave the two runs' tokens and cost mixed: val runs after train."""
+    from refactory_dsh.model import DshModelClient
+
+    _scores(monkeypatch, {0: 0.5, 1: 0.6}, {0: 0.5, 1: 0.6})
+    calls = _batches(monkeypatch)
+    bind = Loop.bind_budget
+
+    def bound(self, budget):  # type: ignore[no-untyped-def]
+        bind(self, budget)
+        if client != "none":
+            self.evaluator.model = DshModelClient() if client == "dsh" else _OwnAccounting()
+
+    monkeypatch.setattr(Loop, "bind_budget", bound)
+    loop, _, _ = _run(tmp_path, monkeypatch, [[(0, 1)]], epochs=2)
+    together = [call for call in calls if len(call) == 2]
+    assert len(together) == (0 if client == "custom" else 2), calls
+    assert _vals(loop) == {0: 1, 1: 1} and _levels(loop, loop._gate_accepted) == [0, 1]
+
+
+def test_the_headline_compares_val_with_val_and_train_with_train(tmp_path, monkeypatch):
+    """Under ``checkpoint`` ``best_score`` is the winner's val checkpoint: the report and
+    the console set it beside the seed's val checkpoint (``seed_val``), and the seed's
+    train score beside the winner's. ``seed_score`` stays the seed's train score. Under
+    ``single`` the headline and the fields are as before."""
+    from refactory_dsh import events
+
+    _scores(monkeypatch, {0: 0.5, 1: 0.4, 2: 0.6}, {0: 0.5, 1: 0.8, 2: 0.6})
+    loop, _, report = _run(tmp_path / "checkpoint", monkeypatch, [[(0, 1)], [(1, 2)]])
+    assert report["best"]["id"] == _by_level(loop)[1]
+    assert report["seed_val"] == pytest.approx(0.5) and report["best_score"] == pytest.approx(0.8)
+    assert report["seed_score"] == pytest.approx(0.47)
+    assert report["best_train_score"] == pytest.approx(0.37)
+    text = (loop.root / "report.md").read_text()
+    assert "Val checkpoint: seed **0.5** → best **0.8**" in text
+    assert "Train: seed **0.47** → winner **0.37** (raw 0.5 → 0.4)" in text
+    assert "Seed score **" not in text
+    steps = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    [done] = [s for s in steps if s.get("step") == "report"]
+    line = events.render(done)
+    assert line.startswith("done · best val 0.800 (seed val 0.500) · train 0.370 (seed 0.470, "
+                           "raw 0.400)"), line
+    single, _, plain = _run(tmp_path / "single", monkeypatch, [[(0, 1)], [(1, 2)]],
+                            selection="single")
+    assert "seed_val" not in plain
+    assert "Seed score **0.47** → best **" in (single.root / "report.md").read_text()
+    steps = [json.loads(line) for line in (single.root / "progress.jsonl").read_text().splitlines()]
+    [done] = [s for s in steps if s.get("step") == "report"]
+    assert "seed_val" not in done and events.render(done).startswith("done · best ")
+    assert "best val" not in events.render(done)
+
+
+def test_a_patience_stop_at_a_checkpoint_reads_no_gradient_and_asks_no_model(
+        tmp_path, monkeypatch):
+    """The checkpoint that exhausts the patience stops the run there: that epoch runs no
+    backward pass, no memory pass and no proposal, and the stop epoch, the bound and the
+    winner are as before."""
+    _scores(monkeypatch, {level: 0.5 for level in range(9)},
+            {0: 0.7, 1: 0.6, 2: 0.5, 3: 0.4, 4: 0.3})
+    backward = Loop.backward
+    passes: list[int] = []
+
+    def counted(self):  # type: ignore[no-untyped-def]
+        passes.append(self.epoch)
+        return backward(self)
+
+    monkeypatch.setattr(Loop, "backward", counted)
+    proposer = Telling([[(n, n + 1)] for n in range(6)])
+    loop, _, report = _run(tmp_path, monkeypatch, [], proposer=proposer, epochs=8,
+                           early_stop_patience=2)
+    assert report["bound"] == "patience_exhausted" and loop.epoch == 3
+    assert _levels(loop, loop._gate_accepted) == [0, 1, 2]
+    assert report["best"]["id"] == loop.population[0].id
+    assert passes == [1, 2], "no backward pass after the stopping checkpoint"
+    assert len(proposer.prompts) == 2 and len(proposer.memory_prompts) <= 2
+    assert [e["epoch"] for e in _events(loop, "checkpoint")] == [2, 3]
+
+
+def test_the_bound_is_journaled_once(tmp_path, monkeypatch):
+    """The run's bound is written once at its end, under any selection: by the early stop
+    or the scheduler, not again by the run."""
+    _scores(monkeypatch, {level: 0.5 for level in range(9)},
+            {0: 0.7, 1: 0.6, 2: 0.5, 3: 0.4, 4: 0.3})
+    loop, _, _ = _run(tmp_path / "patience", monkeypatch, [[(n, n + 1)] for n in range(6)],
+                      epochs=8, early_stop_patience=2)
+    assert [e["bound"] for e in _events(loop, "bound")] == ["patience_exhausted"]
+    single, _, _ = _run(tmp_path / "single", monkeypatch, [[(0, 1)]], epochs=2,
+                        selection="single")
+    assert [e["bound"] for e in _events(single, "bound")] == ["epochs"]
+
+
+def test_analyst_findings_cannot_break_the_report():
+    """A finding's text with line breaks, a code fence and quotes renders as one line of
+    the report, with no fence left to open a code block."""
+    from refactory_dsh.loop import _analysts_section
+
+    finding = {"source": "failure", "items": ["t1"], "finding": "the step answers\n```\n"
+               "\"proceed\"\n```", "where": {}, "evidence": ['he said:\n```python\nx = 1', " | "]}
+    report = {"rounds": 1, "calls": 1, "cached": 0, "group_size": 4, "merge_batch_size": 4,
+              "latest": {"epoch": 2, "generation": 1, "candidate": "abc", "failed_items": 1,
+                         "passed_items": 0, "findings": [finding]}}
+    lines = _analysts_section(report)
+    [line] = [text for text in lines if text.startswith("1. ")]
+    assert "```" not in "\n".join(lines) and "\n" not in line
+    assert '"proceed"' in line and "x = 1" in line
