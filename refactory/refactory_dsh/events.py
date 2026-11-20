@@ -172,6 +172,7 @@ def render(record: dict[str, Any], *, verbose: bool = False) -> str | None:
         return (
             f"done · best val {_score(record.get('best_score'))} "
             f"(seed val {_score(record.get('seed_val'))}) · train "
+            + ("(different samples) " if record.get("train_samples_differ") else "") +
             f"{_score(record.get('best_train_score'))} (seed {_score(record.get('seed_score'))}, "
             f"raw {_score(record.get('raw_best_score'))}) · "
             f"{record.get('evaluations', '?')} evaluations · bound {record.get('bound') or 'no'}"

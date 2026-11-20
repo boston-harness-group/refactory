@@ -1310,11 +1310,103 @@ def test_analyst_findings_cannot_break_the_report():
     from refactory_dsh.loop import _analysts_section
 
     finding = {"source": "failure", "items": ["t1"], "finding": "the step answers\n```\n"
-               "\"proceed\"\n```", "where": {}, "evidence": ['he said:\n```python\nx = 1', " | "]}
+               "\"proceed\"\n```", "where": {},
+               "evidence": ['he said:\n```python\nx = 1', " | ", "~~~~\ny = 2\n~~~"]}
     report = {"rounds": 1, "calls": 1, "cached": 0, "group_size": 4, "merge_batch_size": 4,
               "latest": {"epoch": 2, "generation": 1, "candidate": "abc", "failed_items": 1,
                          "passed_items": 0, "findings": [finding]}}
     lines = _analysts_section(report)
     [line] = [text for text in lines if text.startswith("1. ")]
-    assert "```" not in "\n".join(lines) and "\n" not in line
-    assert '"proceed"' in line and "x = 1" in line
+    assert "```" not in "\n".join(lines) and "~~~" not in "\n".join(lines)
+    assert "\n" not in line and '"proceed"' in line and "x = 1" in line and "y = 2" in line
+
+
+def test_a_trial_that_raises_after_its_run_is_no_longer_running(tmp_path, monkeypatch):
+    """A trial is noted as running (`Loop._trial_started`) until it ends, however it ends:
+    one whose incident settling raises is not left among the running trials, where it
+    would be taken as running beside every later one."""
+    _scores(monkeypatch, {0: 0.5}, {0: 0.5})
+    seen: list[Loop] = []
+
+    def raising(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(self)
+        raise RuntimeError("settling failed")
+
+    monkeypatch.setattr(Loop, "_settle_incidents", raising)
+    with pytest.raises(RuntimeError, match="settling failed"):
+        _run(tmp_path, monkeypatch, [], epochs=1)
+    assert seen and seen[0].__dict__.get("_running_trials") == []
+
+
+def test_a_trial_is_noted_as_running_before_the_ledger_is_read(tmp_path, monkeypatch):
+    """Each trial is noted as running before its measurement reads the ledger, so a trial
+    that starts and ends in between counts as one beside it: per trial, start, then the
+    ledger before and after."""
+    import inspect
+
+    from refactory_dsh.budgets import RunBudget
+
+    _scores(monkeypatch, {0: 0.5, 1: 0.6}, {0: 0.5, 1: 0.6})
+    order: list[str] = []
+    started, snapshot = Loop._trial_started, RunBudget.snapshot
+
+    def start(self, trial_dir):  # type: ignore[no-untyped-def]
+        order.append("start")
+        return started(self, trial_dir)
+
+    def snap(self):  # type: ignore[no-untyped-def]
+        caller = inspect.currentframe().f_back  # type: ignore[union-attr]
+        if caller is not None and caller.f_code.co_name == "_measure":
+            order.append("ledger")
+        return snapshot(self)
+
+    monkeypatch.setattr(Loop, "_trial_started", start)
+    monkeypatch.setattr(RunBudget, "snapshot", snap)
+    _run(tmp_path, monkeypatch, [[(0, 1)]], epochs=1, max_concurrent_evaluations=1)
+    assert order and order == ["start", "ledger", "ledger"] * (len(order) // 3), order
+
+
+def test_the_headline_says_n_a_and_different_train_samples(tmp_path, monkeypatch):
+    """The seed with no val checkpoint reads n/a; with ``train_minibatch`` the seed and the
+    winner were scored on different epochs' samples, and the headline and the console
+    say so."""
+    from refactory_dsh import events
+    from refactory_dsh.loop import _headline
+
+    line = _headline({"seed_val": None, "best_score": 0.8, "seed_score": 0.5,
+                      "best_train_score": 0.6, "seed_raw_score": 0.5, "raw_best_score": 0.6,
+                      "scoring": {"parsimony": 0.0}})[0]
+    assert line.startswith("Val checkpoint: seed **n/a** → best **0.8**") and "Train: " in line
+    _scores(monkeypatch, {0: 0.5, 1: 0.4, 2: 0.6}, {0: 0.5, 1: 0.8, 2: 0.6})
+    loop, _, report = _run(tmp_path, monkeypatch, [[(0, 1)], [(1, 2)]], train_minibatch=4)
+    assert report["best"]["id"] == _by_level(loop)[1]
+    assert loop._minibatches[1] != loop._minibatches[2], "setup: two samples"
+    assert report["train_samples_differ"] is True
+    text = (loop.root / "report.md").read_text()
+    assert "Train, on different samples (each epoch's own `train_minibatch` items): seed" in text
+    steps = [json.loads(line) for line in (loop.root / "progress.jsonl").read_text().splitlines()]
+    [done] = [step for step in steps if step.get("step") == "report"]
+    assert "· train (different samples) " in events.render(done)
+
+
+def test_a_train_trial_lists_none_of_its_candidates_smoke_workers(tmp_path, monkeypatch):
+    """A child's smoke run (``occasions/smoke_<n>``) runs before its train run, in a folder
+    under the train run's: its workers are not the train trial's."""
+    _scores(monkeypatch, {0: 0.5, 1: 0.6}, {0: 0.5, 1: 0.6})
+    measure = Loop._measure
+
+    def smoke_worker(self, candidate, workdir, part, **kwargs):  # type: ignore[no-untyped-def]
+        if workdir.name.startswith("smoke_"):
+            receipt = workdir / ".refactory" / "workers" / "smoke-worker.json"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(json.dumps({"worker_id": "smoke-worker", "role": "smoke"}))
+        return measure(self, candidate, workdir, part, **kwargs)
+
+    monkeypatch.setattr(Loop, "_measure", smoke_worker)
+    loop, _, _ = _run(tmp_path, monkeypatch, [[(0, 1)]], epochs=2)
+    child = _by_level(loop)[1]
+    assert list((loop.root / "runs" / child / "occasions").glob(
+        "smoke_*/.refactory/workers/smoke-worker.json")), "setup: the smoke run's receipt"
+    workers = [w for e in _events(loop, "score") for t in e["measurements"]["trials"]
+               for w in t["workers"]]
+    assert not [w for w in workers if w["worker_id"] == "smoke-worker"]

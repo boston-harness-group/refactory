@@ -87,13 +87,15 @@ val score. `selection` says how it selects:
   parallelism), so a round takes about as long as the slower of the two when the limit
   fits both runs' items. The decisions are those of running them one after the other,
   and a child whose train run fails has been rolled out on val for nothing (its val
-  result reaches no decision or request). Each run's tokens and cost leave out what the
-  other spent meanwhile. With several children, `max_concurrent_evaluations` 1, a
-  time or token budget (`max_elapsed_s`, `max_tokens`), or a model client other than
-  `DshModelClient` (whose calls leave no worker receipt to tell the two runs' spend
-  apart), val runs after train. The report's headline compares the seed's val checkpoint
-  (`seed_val`) with the winner's (`best_score`), and the seed's train score
-  (`seed_score`) with the winner's (`best_train_score`).
+  result reaches no decision or request). Val runs after train instead with several
+  children in a round, `max_concurrent_evaluations` 1, a time or token budget
+  (`max_elapsed_s`, `max_tokens`), too little `max_rollouts` room for both runs and their
+  reruns, a val result already held for the child (a resumed run), or a model client
+  other than `DshModelClient` (whose calls leave no worker receipt to tell the two runs'
+  spend apart). The report's headline compares the seed's val checkpoint (`seed_val`,
+  `n/a` when it has none) with the winner's (`best_score`), and the seed's train score
+  (`seed_score`) with the winner's (`best_train_score`), said to be on different samples
+  when `train_minibatch` scored them on different epochs' items.
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
   parent. The SkillOpt-matched setting, and the default for a single-parent optimizer
@@ -185,6 +187,14 @@ rollouts, tokens, wall-clock). The SkillOpt strategy keeps its own gate.
   that runs epochs, and a parent picker, pays about one extra train evaluation per
   round that keeps a child; under a fixed `--max-evaluations` the run then gets fewer
   rounds. `best_of_n` and `autoscientists` are unchanged.
+- **Each evaluation's tokens and cost** (its `measurements.json` trials, the `score`
+  event, the request's `cost_per_item`), under every selection: the run's ledger counted
+  over the evaluation, less what the evaluations running beside it spent then (a wave's
+  siblings, a parent re-score beside them, a val run beside its train run, the final
+  evaluation's test runs). Their workers are told apart by their receipts, so this holds
+  for workers that write one (agent nodes and `DshModelClient` calls, on both runtimes);
+  a worker that records usage without a receipt stays in every evaluation it ran beside.
+  An evaluation nothing ran beside gets the ledger's difference as before.
 - **Last epoch.** The batch proposed in the last epoch is evaluated on train (with the
   next epoch's seed) and gated before the run ends, so N epochs gate N proposed batches.
 - **What the optimizer reads.** Every row it sees (recent results, the history, the

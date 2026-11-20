@@ -457,10 +457,13 @@ class LoopConfig:
     #:   the one with the highest train score, the earlier on a tie) unless its graph is
     #:   broken: refused by the validator, vetoed by the integrity judge, failing the
     #:   smoke check after repair, or failing its train run. Only the applied candidate
-    #:   is rolled out on val, once: a checkpoint (a round's lone child, and the seed, on
-    #:   val beside its train run, sharing ``max_items_in_flight``, so a round takes about
-    #:   the slower of the two when the limit fits both; not under a time or token
-    #:   budget). The winner is
+    #:   is rolled out on val, once: a checkpoint. The seed's and a round's lone child's val
+    #:   run goes beside its train run, sharing ``max_items_in_flight`` (a round takes
+    #:   about the slower of the two when the limit fits both); val runs after train with
+    #:   several children, ``max_concurrent_evaluations`` 1, a time or token budget, too
+    #:   little ``max_rollouts`` room, its val result already held (a resume), or a model
+    #:   client other than ``DshModelClient``. Each run's tokens and cost leave out what
+    #:   the other spent, for workers that write receipts. The winner is
     #:   the best checkpoint on val (a tie goes to the earlier one); the early stop counts
     #:   rounds without a new best. No parent is re-scored: train rollouts use one seed
     #:   for the whole run (the first epoch's), so a child and its parent are compared on
@@ -2551,56 +2554,57 @@ class Loop(OuterLoop):
             if trial_dir != workdir and manifest.exists():
                 trial_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(manifest, trial_dir / task_module.MANIFEST)
-            before = self.budget.snapshot() if self.budget else {}
+            # Noted as running before the ledger is read, so a trial that starts and ends
+            # in between is one beside it (`_trial_usage`); ended however the trial ends.
             running = self._trial_started(trial_dir)
             try:
-                if self.budget:
-                    final = part == task_module.HOLDOUT or getattr(self, "_final_scoring", False)
-                    self.budget.checkpoint(("final_validation" if final else "work")
-                                           if self._owns_resource_budget else None)
-                with self.budget.retain_validation_reserve() if self.budget else nullcontext():
-                    eval_kwargs: dict[str, Any] = {}
-                    if stop_event is not None and self.evaluator.out_of_process:
-                        eval_kwargs["stop_event"] = stop_event
-                    if item_gate is not None:
-                        eval_kwargs["item_gate"] = item_gate
-                    elif (item_slots and self.evaluator.out_of_process
-                          and hasattr(self, '_resolved_max_items_in_flight')):
-                        # Spine, under evaluate_many only: the shared slot
-                        # directory. A plain Run.evaluate launches as before.
-                        slot_dir = self.root / ".refactory" / "item-slots"
-                        eval_kwargs["item_slots_dir"] = str(slot_dir)
-                        eval_kwargs["item_slots"] = self._resolved_max_items_in_flight
-                    result = self.evaluator.evaluate(
-                        self.mode_class(state=candidate.state), candidate.state,
-                        trial_dir, **eval_kwargs,
-                    )
-            except BudgetExhausted as exc:
-                self._trial_ended(running)
-                last = RunResult(exit_ok=False, error=str(exc))
-                self.bound = str(exc)
-                budget_cut = True
-                break
-            except BaseException:
-                self._trial_ended(running)
-                raise
-            budget_exhausted_after_trial = False
-            if self.budget:
+                before = self.budget.snapshot() if self.budget else {}
                 try:
-                    self.budget.checkpoint()
+                    if self.budget:
+                        final = part == task_module.HOLDOUT or getattr(self, "_final_scoring", False)
+                        self.budget.checkpoint(("final_validation" if final else "work")
+                                               if self._owns_resource_budget else None)
+                    with self.budget.retain_validation_reserve() if self.budget else nullcontext():
+                        eval_kwargs: dict[str, Any] = {}
+                        if stop_event is not None and self.evaluator.out_of_process:
+                            eval_kwargs["stop_event"] = stop_event
+                        if item_gate is not None:
+                            eval_kwargs["item_gate"] = item_gate
+                        elif (item_slots and self.evaluator.out_of_process
+                              and hasattr(self, '_resolved_max_items_in_flight')):
+                            # Spine, under evaluate_many only: the shared slot
+                            # directory. A plain Run.evaluate launches as before.
+                            slot_dir = self.root / ".refactory" / "item-slots"
+                            eval_kwargs["item_slots_dir"] = str(slot_dir)
+                            eval_kwargs["item_slots"] = self._resolved_max_items_in_flight
+                        result = self.evaluator.evaluate(
+                            self.mode_class(state=candidate.state), candidate.state,
+                            trial_dir, **eval_kwargs,
+                        )
                 except BudgetExhausted as exc:
+                    last = RunResult(exit_ok=False, error=str(exc))
                     self.bound = str(exc)
-                    budget_exhausted_after_trial = True
-            # Post-trial item-ownership verification (works with both evaluators).
-            self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
-            incidents, budget_hit = self._settle_incidents(
-                candidate, trial_dir, part, seed, result, eval_kwargs,
-                rerun=not budget_exhausted_after_trial,
-                pending=len(all_item_records) + len(result.item_records or ()))
-            budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
-            # After the incident reruns, so their tokens and cost are the trial's.
-            after = self.budget.snapshot() if self.budget else {}
-            tokens, cost = self._trial_usage(before, after, trial_dir, self._trial_ended(running))
+                    budget_cut = True
+                    break
+                budget_exhausted_after_trial = False
+                if self.budget:
+                    try:
+                        self.budget.checkpoint()
+                    except BudgetExhausted as exc:
+                        self.bound = str(exc)
+                        budget_exhausted_after_trial = True
+                # Post-trial item-ownership verification (works with both evaluators).
+                self._verify_item_set(expected_ids, seed_declares_item_scores, trial_dir, part, result)
+                incidents, budget_hit = self._settle_incidents(
+                    candidate, trial_dir, part, seed, result, eval_kwargs,
+                    rerun=not budget_exhausted_after_trial,
+                    pending=len(all_item_records) + len(result.item_records or ()))
+                budget_exhausted_after_trial = budget_exhausted_after_trial or budget_hit
+                # After the incident reruns, so their tokens and cost are the trial's.
+                after = self.budget.snapshot() if self.budget else {}
+            finally:
+                beside = self._trial_ended(running)
+            tokens, cost = self._trial_usage(before, after, trial_dir, beside)
             missing = [path for path in required if not (trial_dir / path).exists()]
             valid_score = isinstance(result.score, (int, float)) and math.isfinite(result.score)
             if missing or not valid_score:
@@ -2614,10 +2618,10 @@ class Loop(OuterLoop):
                      **({"harness_incidents": incidents} if incidents else {})}
             trial["workers"] = []
             for receipt_path in sorted(trial_dir.glob("**/.refactory/workers/*.json")):
-                inside = receipt_path.relative_to(trial_dir).parts
-                if inside[0] == "occasions" and inside[1].startswith(("val_", "test_")):
-                    # The candidate's val or test rollout (under ``checkpoint`` one runs
-                    # beside its train run): its workers are not this trial's.
+                if receipt_path.relative_to(trial_dir).parts[0] == "occasions":
+                    # The candidate's other evaluations (`occasions/`: val_<n>, test_<n>,
+                    # smoke_<n>, train_epoch_<n>, memory_epoch_<n>_<key>; under
+                    # ``checkpoint`` a val run beside this one): not this trial's workers.
                     continue
                 try:
                     receipt = json.loads(receipt_path.read_text())
@@ -5432,7 +5436,14 @@ class Loop(OuterLoop):
             # Under ``checkpoint`` ``best_score`` is the winner's val checkpoint: the
             # seed's own checkpoint beside it, so the headline compares val with val
             # (and the seed's train score with the winner's, ``best_train_score``).
-            payload["seed_val"] = self._gate().cache.get(self.population[0].id)
+            seed = self.population[0]
+            payload["seed_val"] = self._gate().cache.get(seed.id)
+            # With ``train_minibatch`` each epoch samples its own train items: the seed's
+            # train score and the winner's are then on different samples.
+            epochs = (self._records_epoch.get(seed.id), self._records_epoch.get(best.id))
+            if None not in epochs and (self._minibatches.get(epochs[0])
+                                       != self._minibatches.get(epochs[1])):
+                payload["train_samples_differ"] = True
         self._write("report.json", payload)
         self._write_text("report.md", self._render_report(payload))
         self._write("manifest.json", progress_file.artifact_manifest(self.root))
@@ -5440,7 +5451,8 @@ class Loop(OuterLoop):
             "report",
             best_score=payload["best_score"],
             raw_best_score=payload["raw_best_score"],
-            **({key: payload.get(key) for key in ("seed_val", "best_train_score", "seed_score")}
+            **({key: payload[key] for key in ("seed_val", "best_train_score", "seed_score",
+                                               "train_samples_differ") if key in payload}
                if "seed_val" in payload else {}),
             overfit=bool(audit.get("overfit")),
             evaluations=self.evaluations,
@@ -8078,8 +8090,9 @@ _UNSET = object()
 def _markdown_text(text: str) -> str:
     """``text`` as one line of a markdown report: whitespace and line breaks collapsed,
     and a run of backticks (a code fence a model wrote) made one, so it opens no block
-    that swallows the rest of the report."""
-    return re.sub(r"`{2,}", "`", " ".join(str(text).split()))
+    that swallows the rest of the report; a run of tildes (the other fence) likewise."""
+    one = re.sub(r"`{2,}", "`", " ".join(str(text).split()))
+    return re.sub(r"~{3,}", "~", one)
 
 
 def _analysts_report(analyses: Sequence[dict[str, Any]], config: LoopConfig) -> dict[str, Any]:
@@ -8110,9 +8123,12 @@ def _headline(payload: dict[str, Any]) -> list[str]:
         return [f"Seed score **{payload['seed_score']}** → best **{payload['best_score']}**"
                 f" (raw {payload['seed_raw_score']} → {payload['raw_best_score']}). "
                 + parsimony]
-    return [f"Val checkpoint: seed **{payload['seed_val']}** → best "
+    seed_val = "n/a" if payload["seed_val"] is None else payload["seed_val"]
+    train = ("Train, on different samples (each epoch's own `train_minibatch` items)"
+             if payload.get("train_samples_differ") else "Train")
+    return [f"Val checkpoint: seed **{seed_val}** → best "
             f"**{payload['best_score']}** (the winner is the best checkpoint on val). "
-            f"Train: seed **{payload['seed_score']}** → winner "
+            f"{train}: seed **{payload['seed_score']}** → winner "
             f"**{payload.get('best_train_score')}** (raw {payload['seed_raw_score']} → "
             f"{payload['raw_best_score']}). " + parsimony]
 
