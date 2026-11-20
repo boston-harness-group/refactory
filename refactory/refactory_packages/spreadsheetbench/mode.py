@@ -169,6 +169,6 @@ class Solver(nn.Mode):
 
     def guidance(self) -> str:
         return ("The skill is appended to the solver's system prompt for every item; the "
-                "graph around the solve loop can be edited too (only the data pass, the "
-                "train-feedback check and the item's outcome are protected). Keep every "
-                "change general -- it must help on items no rollout saw.")
+                "graph can be edited too -- the solve loop and the steps before it (only "
+                "data, gold_check and finalize are protected). Keep every change general -- "
+                "it must help on items no rollout saw.")

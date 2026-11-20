@@ -1432,5 +1432,6 @@ def test_the_guidance_does_not_rule_out_structural_edits():
     guidance = mode.guidance()
     assert "only lever" not in guidance
     assert "graph" in guidance and "protected" in guidance
+    assert all(node in guidance for node in mode.protected_nodes())  # stays in sync
     editable = set(mode.build().nodes) - set(mode.protected_nodes())
     assert {"prepare", "frame", "solve", "run_turn", "next_turn", "turn_gate"} <= editable

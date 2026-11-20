@@ -14114,7 +14114,7 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 
 ## spreadsheetbench/solver
 
-solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill knob is the search target. Requires SB_DATA. Optimize only when scored; higher is better.
+solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
 
 ```json
 {
@@ -14181,7 +14181,7 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
       "user": false
     }
   ],
-  "guidance": "The skill is appended to the solver's system prompt for every item; the graph around the solve loop can be edited too (only the data pass, the train-feedback check and the item's outcome are protected). Keep every change general -- it must help on items no rollout saw.",
+  "guidance": "The skill is appended to the solver's system prompt for every item; the graph can be edited too -- the solve loop and the steps before it (only data, gold_check and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
   "id": "spreadsheetbench/solver",
   "nodes": [
     {
@@ -14372,8 +14372,8 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
       "cli": "refactory ceo spreadsheetbench/solver",
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
-    "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill knob is the search target. Requires SB_DATA. Optimize only when scored; higher is better.",
-    "reviewed_schema": "f3656b7428a861d4139b289bf1f918af31ad7d67c6016feac862c21dfc46363c"
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "1c86b068e599311e8cae50fde837f9f23bfef14e25026760a1de47abe7c9803e"
   }
 }
 ```
