@@ -1166,6 +1166,20 @@ def _confidence(value: Any) -> float:
         return 0.0
 
 
+#: A fenced block of a reply: its opening and its closing fence each start a line. A
+#: fence quoted inside a JSON string never starts a line (a JSON string holds no raw
+#: newline), so an answer that says "a single ```python``` block" is not cut there and
+#: no object nested in it is taken for the answer. The answer may start on the opening
+#: fence's line (```json{...); a fence written mid-line, or closing on the JSON's own
+#: line, is not counted, and the whole reply is read instead.
+_FENCED = re.compile(r"^[ \t]*```[\w+.#-]*[ \t]*(.*?)^[ \t]*```", re.DOTALL | re.MULTILINE)
+
+
+def _fenced_blocks(text: str) -> list[str]:
+    """The contents of ``text``'s fenced blocks, in order (`_FENCED`)."""
+    return _FENCED.findall(text)
+
+
 def extract_json(text: str) -> dict[str, Any]:
     """The first JSON object in ``text``, fenced or bare.
 
@@ -1174,7 +1188,7 @@ def extract_json(text: str) -> dict[str, Any]:
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
-    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    fenced = _fenced_blocks(text)
     for chunk in [*fenced, text]:
         found = _first_object(chunk)
         if found is not None:
@@ -1184,8 +1198,8 @@ def extract_json(text: str) -> dict[str, Any]:
 
 def reply_object(text: str) -> dict[str, Any]:
     """The JSON object a reader's, a step review's or the integrity judge's reply answers
-    with: the first top-level object of the first fenced block that has one, else of the
-    reply (`_top_object`: by its own braces, strings skipped; never one nested inside
+    with: the first top-level object of the first fenced block that has one (a fence
+    starts a line, `_fenced_blocks`), else of the reply (`_top_object`: by its own braces, strings skipped; never one nested inside
     another). A top-level span that starts like a JSON object and does not parse refuses
     the reply only when no earlier top-level object parsed, with the parser's message
     and where (the line, column and the text there): so an object nested inside a broken
@@ -1194,7 +1208,7 @@ def reply_object(text: str) -> dict[str, Any]:
     has its own rules (`answer_json`). No object at all raises as `extract_json` does."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("the model returned nothing")
-    for chunk in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+    for chunk in _fenced_blocks(text):
         found, _problem = _top_object(chunk)
         if found is not None:
             return found
@@ -1257,7 +1271,7 @@ def answer_json(text: str) -> tuple[dict[str, Any], str]:
     found, problem = _outermost_object(text)
     if _is_answer(found):
         return found, ""  # type: ignore[return-value]
-    for chunk in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL):
+    for chunk in _fenced_blocks(text):
         try:
             loaded = json.loads(chunk.strip())
         except json.JSONDecodeError:

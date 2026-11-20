@@ -1271,14 +1271,15 @@ def test_a_review_reads_each_text_whole_and_any_cut_the_room_forces_is_said():
 
 def test_a_code_fence_inside_a_proposed_prompt_does_not_cut_the_answer():
     """A fenced answer whose first proposal's prompt carries its own ```python example:
-    the fence pattern stops at that inner fence, so the answer is read by its braces."""
+    the inner fence is inside a string and starts no line, so it does not end the fence
+    (`_fenced_blocks`), and the answer is read whole."""
     from refactory_dsh.optim.random_optimizer import answer_json, extract_json
 
     answer = {"diagnosis": "d", "proposals": [
         {"edit": {"op": "set_knob", "name": "k", "value": "Use:\n```python\nprint(1)\n```\nDone."}},
         {"edit": {"op": "set_knob", "name": "k2", "value": 2}}]}
     reply = "```json\n" + json.dumps(answer, indent=1) + "\n```"
-    assert extract_json(reply) != answer, "the repro: the old reader lost the first proposal"
+    assert extract_json(reply) == answer  # the old fence split lost the first proposal
     assert answer_json(reply) == (answer, "")
     assert answer_json("Here:\n```json\n{\"proposals\": []}\n```\nthanks {") == ({"proposals": []}, "")
     # A fenced object counts only as its fence's whole content.
