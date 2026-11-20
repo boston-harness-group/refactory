@@ -5120,10 +5120,7 @@ class Loop(OuterLoop):
             self._count_stale_epoch()
             early = self._early_stop_reason()
         self.loss_step()
-        if not (early and self.selection_mode() == "checkpoint"):
-            # Under ``checkpoint`` a run whose checkpoint just stopped it reads no
-            # gradient: nothing is proposed from it.
-            self.backward()
+        self.backward()
         candidates: list[Candidate] = []
         rejections: list[Rejection] = []
         if not early:

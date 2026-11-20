@@ -1264,32 +1264,6 @@ def test_the_headline_compares_val_with_val_and_train_with_train(tmp_path, monke
     assert "best val" not in events.render(done)
 
 
-def test_a_patience_stop_at_a_checkpoint_reads_no_gradient_and_asks_no_model(
-        tmp_path, monkeypatch):
-    """The checkpoint that exhausts the patience stops the run there: that epoch runs no
-    backward pass, no memory pass and no proposal, and the stop epoch, the bound and the
-    winner are as before."""
-    _scores(monkeypatch, {level: 0.5 for level in range(9)},
-            {0: 0.7, 1: 0.6, 2: 0.5, 3: 0.4, 4: 0.3})
-    backward = Loop.backward
-    passes: list[int] = []
-
-    def counted(self):  # type: ignore[no-untyped-def]
-        passes.append(self.epoch)
-        return backward(self)
-
-    monkeypatch.setattr(Loop, "backward", counted)
-    proposer = Telling([[(n, n + 1)] for n in range(6)])
-    loop, _, report = _run(tmp_path, monkeypatch, [], proposer=proposer, epochs=8,
-                           early_stop_patience=2)
-    assert report["bound"] == "patience_exhausted" and loop.epoch == 3
-    assert _levels(loop, loop._gate_accepted) == [0, 1, 2]
-    assert report["best"]["id"] == loop.population[0].id
-    assert passes == [1, 2], "no backward pass after the stopping checkpoint"
-    assert len(proposer.prompts) == 2 and len(proposer.memory_prompts) <= 2
-    assert [e["epoch"] for e in _events(loop, "checkpoint")] == [2, 3]
-
-
 def test_the_bound_is_journaled_once(tmp_path, monkeypatch):
     """The run's bound is written once at its end, under any selection: by the early stop
     or the scheduler, not again by the run."""

@@ -93,8 +93,7 @@ val score. `selection` says how it selects:
   `DshModelClient` (whose calls leave no worker receipt to tell the two runs' spend
   apart), val runs after train. The report's headline compares the seed's val checkpoint
   (`seed_val`) with the winner's (`best_score`), and the seed's train score
-  (`seed_score`) with the winner's (`best_train_score`). A checkpoint that exhausts the
-  patience ends the run at once: no backward pass, memory pass or proposal follows it.
+  (`seed_score`) with the winner's (`best_train_score`).
 - **`single`**: SkillOpt's line. A candidate is kept only if its val score strictly
   beats the incumbent's (the gate's current candidate), and the incumbent is the only
   parent. The SkillOpt-matched setting, and the default for a single-parent optimizer
