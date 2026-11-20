@@ -509,6 +509,33 @@ def test_the_history_heads_each_failing_item_in_the_request_and_for_the_analysts
     assert 0 < grown <= 45 * failing
 
 
+def test_the_request_room_counts_the_history_and_the_checkpoint_sections(
+        tmp_path, monkeypatch):
+    """#709's room (``ProposalContext.request_room``) holds a checkpoint request whole: it
+    is measured on the rendered request, the item histories (in the table and in each
+    heading of an item shown in full) and the checkpoint rule included, so they leave
+    less room for the items shown whole, and only those give way (named, still in the
+    table)."""
+    loop, _ = _three_rounds(tmp_path, monkeypatch)
+    ctx = loop._context()
+    # The passing item gives a long answer, so leaving it out frees room; a small evidence
+    # budget, so the rule picks the items shown whole.
+    records = [{**r, "prediction": "x" * 4000} if r.get("passed") else r
+               for r in ctx.item_records]
+    ctx = dataclasses.replace(ctx, item_records=records, evidence_budget=200, request_room=0)
+    full = ctx.render()
+    history = re.compile(r"### Item t\d — answered wrong [^\n]* — history: solved 0/\d+ in "
+                         r"\d+ graphs")
+    rule = "Each round's change is applied unless its train run fails"
+    assert history.search(full) and "| history |" in full and rule in full
+    assert "### Item t2 — passed" in full
+    room = len(full) - 1000
+    fitted = dataclasses.replace(ctx, request_room=room).render()
+    assert len(fitted) <= room, (len(fitted), room)
+    assert "### Item t2 — passed" not in fitted and "left out so this request fits" in fitted
+    assert history.search(fitted) and "| history |" in fitted and rule in fitted
+
+
 def test_the_history_changes_no_item_shown_or_analysed(tmp_path, monkeypatch):
     """Information only: the same items are shown whole, picked for the table's full
     view and split for the analysts, with and without it."""
