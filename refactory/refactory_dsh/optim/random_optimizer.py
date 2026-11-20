@@ -995,7 +995,7 @@ class AutoresearchOptimizer(Optimizer):
                     or not analysts.context_overflow(f"{type(exc).__name__}: {exc}")):
                 raise
             smaller = replace(ctx, request_room=max(1, len(question) // 2 - len(suffix)),
-                              shown_items_room=0, edit_change_limit=0)
+                              shown_items_room=0)
             shorter = f"{smaller.render()}{suffix}"
             if len(shorter) >= len(question):
                 raise  # nothing gave way: the same request would be refused again

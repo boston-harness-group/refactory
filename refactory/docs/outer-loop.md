@@ -725,9 +725,10 @@ items are shown, picked or analysed does not change.
   A request that would pass it is made again with only the items' texts giving way,
   whatever their sizes: the items in full and the blocks of "What the last edit
   changed" share what the rest of the request leaves (`_fair_shares`: either is whole
-  when it needs no more than half, the other then has the remainder), the shares made
-  again from what each render took (a block names an item "Trajectories" shows whole,
-  and shows it itself once it is cut there), so no more is cut than does not fit. The items in
+  when it needs no more than half, the other then has the remainder; one named in one
+  line asks for nothing, so the other has its room), the shares made again from what
+  each render took (a block names an item "Trajectories" shows whole, and shows it
+  itself once it is cut there), so no more is cut than does not fit. The items in
   full are taken failure, success, failure, ... in rank order until the next would
   pass their share, and the rest are named by id under "Some items in full"; each is
   still in the table. The first is no longer kept whatever its size: when it alone
@@ -2272,17 +2273,27 @@ input appears once per item; a step says by name what its prompt took from what 
 shown (`Sees: the input, compare's reply`) and only the part of its prompt the request does
 not show elsewhere (`Also in its prompt`: a reason a judge sent it back with, say), then its
 full reply, each fenced with its heading lines escaped. A step run again (a loop's next
-turn, a judge's reloop) shows only what is new since its previous run
-(`evidence._Seen.split`): the opening its prompt repeats from that run's prompt or reply
-(the conversation so far) is said by name, `Sees: solve's prompt (step 3)`, and a text of
-that run it quotes whole (its last reply under a turn label) is said in place,
-`- Assistant: [solve's reply (step 3)]`; only openings and quotes of at least
-`REPEAT_MIN` (200) characters are named. Shown whole, each run's prompt carried the
-whole conversation so far, so an item grew with the square of its runs: two 30-turn
-SpreadsheetBench items were 462k characters (under "Some items in full") and 1.2M (under
-"What the last edit changed"); now 207k and 206k, about the item's replies once (192k for
-the first) plus each new turn once. Read in order, the runs still say the whole
-conversation, once. A step's instructions are its settings,
+turn, a judge's reloop) shows only what is new since the run of it that fed it
+(`evidence._Seen.split`). That run is the latest earlier run of the same step whose reply
+the prompt quotes whole (at least `FED_MIN`, 40, characters): being fed its output proves
+it came first on the same path, so same-named runs on parallel paths, which feed each
+other nothing, are never named. Against that run's prompt and reply the prompt is matched
+line by line, exactly (`evidence._blocks`): each run of lines it repeats, of at least
+`REPEAT_MIN` (200) characters, is said in place as those lines,
+`[same as solve's prompt (step 3), lines 1-40]`, or `[same as solve's reply (step 3)]`
+when the whole text is repeated; a quote is said with its label and line prefix,
+`- Assistant: [same as solve's reply (step 3), each line after the first prefixed "  "]`.
+Every other line stays in place, so each prompt reads back exactly from what is shown: a
+shared preamble with another task is named as those lines only, a sliding window names
+only the turns it kept, and a first line that changes every turn (`Tool calls left: N`)
+is shown while the conversation under it is named. Across the items of one request, a
+text holding such a repeat is never said as "same as item X" (it names this item's own
+runs), and a step that ran more than once is named by its run (`step solve (3 of 30)`).
+Shown whole, each run's prompt carried the whole conversation so far, so an item grew
+with the square of its runs: two 30-turn SpreadsheetBench items were 462k characters
+(under "Some items in full") and 1.2M (under "What the last edit changed"); now 211k and
+175k, about the item's replies once (192k for the first) plus each new turn once.
+A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
 analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
 settings as shown, clipping and table cells included, `analysts.shown_settled`). Across the

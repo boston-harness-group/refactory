@@ -1061,6 +1061,9 @@ class ProposalContext:
     #: What the last ``render`` measured of its sections (``blocks``: the characters
     #: "What the last edit changed" shows in blocks), for ``render`` to fit them.
     fit_sizes: dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    #: What one ``render`` works out once and reads again while it renders (its copies
+    #: share it); emptied when it starts and when it ends.
+    rendering: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     #: The latest children of the edited candidate with their parents' train records
     #: (``Loop._edit_pairs``), for "What the last edit changed".
     edit_pairs: list[dict[str, Any]] = field(default_factory=list)
@@ -1191,12 +1194,18 @@ class ProposalContext:
 
     def _settled(self) -> frozenset[str]:
         """The lines an item's step does not repeat (`settled_for`) over this request's
-        items, the edited candidate's children included."""
-        return settled_for(self.knobs, self.node_states,
-                           [*self.item_records,
-                            *(r for pair in self.edit_pairs or ()
-                              for side in ("parent_records", "child_records")
-                              for r in pair.get(side) or ())])
+        items, the edited candidate's children included; within one ``render``, worked
+        out once (``fit_sizes`` aside, nothing it reads changes while it renders)."""
+        held = self.rendering.get("settled")
+        if held is None:
+            held = settled_for(self.knobs, self.node_states,
+                               [*self.item_records,
+                                *(r for pair in self.edit_pairs or ()
+                                  for side in ("parent_records", "child_records")
+                                  for r in pair.get(side) or ())])
+            if self.rendering.get("on"):
+                self.rendering["settled"] = held
+        return held
 
     def _trajectories_shown(self) -> dict[str, str]:
         """What "Trajectories of the candidate being edited" shows whole
@@ -1339,11 +1348,26 @@ class ProposalContext:
         shows (``shown_items_room``, `_fit_shown`) and the blocks of "What the last edit
         changed" (``edit_change_limit``, `_edit_change_lines`) -- sharing what the rest
         of the request leaves (`_fair_shares`: either is whole when it needs no more
-        than half, the other then has the remainder). Items stay whole while they fit,
+        than half, the other then has the remainder; one named in one line asks for
+        nothing, so the other has its room). Items stay whole while they fit,
         in rank order, the rest named; the first, when it alone passes its share, has its
         longest texts cut to fit, or is named. A block past its share is cut the same
         way, or listed in one line. Each cut is marked in place and in ``omissions``.
-        Nothing else gives way: the rest of the request is never cut."""
+        Nothing else gives way: the rest of the request is never cut.
+
+        What one render reads again is worked out once (``rendering``)."""
+        from . import evidence
+
+        self.rendering.clear()
+        self.rendering["on"] = True
+        try:
+            return self._render_fitted()
+        finally:
+            self.rendering.clear()
+            evidence.clear_caches()
+
+    def _render_fitted(self) -> str:
+        """`render`'s work: the request, fitted to ``request_room``."""
         text = self._render_request()
         if (not self.request_room or self.shown_items_room or self.edit_change_limit
                 or len(text) <= self.request_room):
@@ -1365,21 +1389,29 @@ class ProposalContext:
         # change with what is shown (a block names a trace "Trajectories" shows whole, and
         # shows it itself once it is cut there), so the shares are made again from the
         # last render, a few times, and the fullest request within the room is kept.
+        # A part named in one line (no item in full, or a block) asks for nothing more, so
+        # the other may have the room it leaves; the most the blocks asked for is kept as
+        # their limit's measure, so a named block stays limited.
         best: tuple[str, list[dict[str, Any]]] | None = None
+        sizes = dict(self.fit_sizes)
+        demand = need = sizes.get("demand", 0)
+        wanted = shown
         for _ in range(5):
-            sizes = dict(self.fit_sizes)
-            demand = sizes.get("demand", 0)
             rest = len(text) - sizes.get("items", 0) - sizes.get("blocks", 0)
-            items_room, blocks_room = _fair_shares([shown, demand], self.request_room - rest)
+            items_room, blocks_room = _fair_shares([wanted, demand], self.request_room - rest)
             fitted = replace(
                 self, shown_items_room=max(1, items_room) if items_room < shown else 0,
-                edit_change_limit=max(1, blocks_room) if blocks_room < demand else 0)
+                edit_change_limit=max(1, blocks_room) if blocks_room < need else 0)
             text = fitted._render_request()
+            sizes = dict(self.fit_sizes)
             if len(text) <= self.request_room:
                 if best is None or len(text) > len(best[0]):
                     best = (text, list(self.omissions))
                 if self.request_room - len(text) <= self.request_room // 50:
                     break
+            demand = sizes.get("demand", 0)
+            need = max(need, demand)
+            wanted = shown if sizes.get("items", 0) or not fitted.shown_items_room else 0
         if best is None:
             return text  # as far as the items' texts give way; the rest is never cut
         # ``omissions`` is the same list in each (``replace`` keeps it): the kept request's.
@@ -3502,7 +3534,9 @@ ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the gr
              "took from the input or an earlier step's reply, by name (`Sees:`), any part of "
              "its prompt that is not in its settings (`" + "Also in its prompt (not in its "
              "settings)" + "`: a reason a judge sent it back with, say), and its reply. A "
-             "step's own instructions are its settings, under \"Each step's settings\".")
+             "step's own instructions are its settings, under \"Each step's settings\". A "
+             "step run again says in place, as those lines, what its prompt has exactly as "
+             "the run of it that fed it had (`[same as solve's prompt (step 3), lines 1-40]`).")
 #: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
 #: every item when all of them together are under this many characters. It only decides
 #: that switch; it never cuts an item.
@@ -4995,17 +5029,17 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
         lines.append(f"##### Step `{node}` ({number} of {total} in the child"
                      + (f", run {run}" if counts.get(node, 0) > 1 else "") + f"; {status})")
         if settled is not None:
-            # A run of a step shown before says the opening it repeats from that run
-            # by name (`evidence._Seen.split`): only what is new since then is shown.
+            # What it repeats exactly from the shown run of the step that fed it is said
+            # in place as those lines (`evidence._Seen.split`).
             lines += evidence.prompt_lines(seen, exchange.get("prompt"), settled,
                                            lambda text, node=node: cut(text, node), node)
         if (node, run) in moves["changed"]:
             lines += reply(parent, before[(node, run)], node, run, "Parent's")
         lines += reply(child, exchange, node, run, "Child's")
         seen.add(exchange.get("response"), f"{node}'s reply")
-        seen.ran(node, [*([(f"{node}'s prompt (step {number})", exchange.get("prompt"))]
-                          if settled is not None else []),
-                        (f"{node}'s reply (step {number})", exchange.get("response"))])
+        seen.ran(node, (f"{node}'s reply (step {number})", exchange.get("response")),
+                 (f"{node}'s prompt (step {number})", exchange.get("prompt"))
+                 if settled is not None else None)
     for node, run in moves["gone"]:
         lines.append(f"##### Step `{node}`"
                      + (f" (run {run})" if counts.get(node, 0) > 1 else "")
@@ -5161,7 +5195,8 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
     than an even share leaves the rest), each cut marked and in ``omissions``; one that
     does not fit even at `SHOWN_TEXT_FLOOR` is listed in one line, saying why. ``sizes``
     gets the characters the blocks take (``blocks``) and would take without ``limit``
-    (``demand``; a forced pick the limit cut, at most at the section's own floors)."""
+    (``demand``: a forced pick the limit cut at most its size at the section's own floors;
+    one it named, nothing, as its one line is not a block)."""
     if not pairs:
         return []
     room = int(TRAJECTORY_BUDGET * EDIT_CHANGE_SHARE) if room is None else room
@@ -5278,8 +5313,7 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
                         "leaves it")
                     named.append((index, item, hard))
                     forced.add(key)
-                    demanded += wanted
-                    continue
+                    continue  # named in one line: it asks for no room of the blocks
                 n = _longest_fitting(fits, SHOWN_TEXT_FLOOR)
                 chars = (min(chars[0], n), min(chars[1], n), n)
                 limited.append((index, item, n))
