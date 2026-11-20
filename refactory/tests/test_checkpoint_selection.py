@@ -783,8 +783,11 @@ def test_a_checkpoint_request_says_no_val_score_and_does_not_mark_the_val_best(
     assert loop._gate().best_id == seed == report["best"]["id"], "setup: the seed wins on val"
     assert len(proposer.prompts) == 10 and proposer.memory_prompts
     for prompt in [*proposer.prompts, *proposer.memory_prompts]:
+        # Wall-clock seconds (the cost block's ``"total_s": 0.521``) are not scores, and
+        # one can read like a val score to three places.
+        scores = re.sub(r'"\w+_s": [0-9.]+', "", prompt)
         for value in CHECKPOINT_VAL.values():
-            assert fmt_score(value) not in prompt and str(value) not in prompt, value
+            assert fmt_score(value) not in scores and str(value) not in prompt, value
         assert "validation gate" not in prompt
     for number, prompt in enumerate(proposer.prompts):
         header = prompt.split("\n## ", 1)[0]
