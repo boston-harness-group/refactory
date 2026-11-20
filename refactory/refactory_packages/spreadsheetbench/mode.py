@@ -168,5 +168,7 @@ class Solver(nn.Mode):
         return sum(scores) / len(scores) if scores else 0.0
 
     def guidance(self) -> str:
-        return ("The skill is the only lever: it is appended to the solver's system prompt "
-                "for every item. Keep it general -- it must help on items no rollout saw.")
+        return ("The skill is appended to the solver's system prompt for every item; the "
+                "graph can be edited too -- the solve loop and the steps before it (only "
+                "data, gold_check and finalize are protected). Keep every change general -- "
+                "it must help on items no rollout saw.")

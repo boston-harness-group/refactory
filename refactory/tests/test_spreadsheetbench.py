@@ -1422,3 +1422,16 @@ def test_startskill_takes_its_reference_as_input(tmp_path):
     assert parity.check_startskill(refs, [near], "selection_eval_baseline", 2.0)["ok"]
     result = parity.check_startskill(refs, [far], "selection_eval_baseline", 2.0)
     assert not result["ok"] and result["reference"] == [33 / 40, 31 / 40, 32 / 40]
+
+
+def test_the_guidance_does_not_rule_out_structural_edits():
+    """The author's guidance reaches the proposer (``Loop._context``), so it must say what
+    the surface allows: the graph around the solve loop is editable, and only the
+    protected nodes are not; it once said the skill was the only lever."""
+    mode = sb_mode.Solver()
+    guidance = mode.guidance()
+    assert "only lever" not in guidance
+    assert "graph" in guidance and "protected" in guidance
+    assert all(node in guidance for node in mode.protected_nodes())  # stays in sync
+    editable = set(mode.build().nodes) - set(mode.protected_nodes())
+    assert {"prepare", "frame", "solve", "run_turn", "next_turn", "turn_gate"} <= editable
