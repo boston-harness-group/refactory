@@ -12,10 +12,11 @@ half length re-raised because nothing could give way. Two causes:
   "What the last edit changed", were kept whatever their size.
 
 Now a step run again shows only what is new since the run of it that fed it: what it repeats
-exactly is said as those lines of that run's prompt or reply, every other line in place, so
-each prompt reads back exactly. And the items' texts give way to the room: cut to fit
-(their longest texts first, marked and recorded), or named. Nothing here is specific to a
-task: any step, any loop.
+exactly is said in place as those lines of what the request shows of that run -- its
+prompt's block, its reply as shown -- every other line in place, so each step's block
+reads back from the rendered request alone. And the items' texts give way to the room:
+cut to fit (their longest texts first, marked and recorded), or named. Nothing here is
+specific to a task: any step, any loop.
 """
 
 from __future__ import annotations
@@ -76,50 +77,146 @@ def _looped(item: str, turns: int, *, size: int = 0, offset: int = 0) -> dict[st
 
 # -- 1. A looped step's repeated history is shown once, exactly -------------------------
 
-#: A repeat said in place (`evidence._same`), parsed back.
-_SAME = re.compile(r'^(?P<lead>.*?)\[same as (?P<label>.+? \(step \d+\))'
-                   r'(?:, lines? (?P<a>\d+)(?:-(?P<b>\d+))?)?'
-                   r'(?:, each line after the first prefixed (?P<p>"(?:[^"\\]|\\.)*"))?\]$')
+_HEADING = re.compile(r"^#{4,6} Step `(?P<node>[^`]+)` \((?P<k>\d+) of \d+")
+_BLOCK = ("Rest of its prompt:", "Also in its prompt (not in its settings):")
+_REPLY = ("Reply:", "Child's reply:")
+#: A repeat said in place, parsed back (`evidence._same`, `evidence._shown_span`).
+_SAME = re.compile(
+    r'^(?P<lead>.*?)\[same as (?P<node>[^\]]+?)\'s (?P<kind>prompt|reply) \(step (?P<k>\d+)\)'
+    r'(?:, (?:lines? (?P<a>\d+)(?:-(?P<b>\d+))?'
+    r'|all but its (?P<side>first|last) (?:(?P<n>\d+) )?shown lines?'
+    r'|its shown lines? (?P<sa>\d+)(?:-(?P<sb>\d+))?))?'
+    r'(?:, each line after the first prefixed (?P<p>"(?:[^"\\]|\\.)*"))?\]$')
 
 
-def _read_back(rest: str, texts: dict[str, str]) -> str:
-    """A prompt read back from what `evidence._Seen.split` left of it: each repeat
-    replaced by the lines of the earlier text it names (``texts``: label -> text)."""
-    out: list[str] = []
-    for line in rest.splitlines():
+def _fence_after(lines: list[str], at: int) -> list[str]:
+    """The lines of the fenced block opening on ``lines[at]``, its headings unescaped
+    (`evidence.escape_headings` undone)."""
+    fence, out = lines[at], []
+    for line in lines[at + 1:]:
+        if line == fence:
+            return out
+        out.append(re.sub(r"^([ \t]{0,3})\\(#{1,6})(?=[ \t]|$)", r"\1\2", line))
+    raise AssertionError("unclosed fence")
+
+
+def _read_back(text: str) -> dict[int, list[str]]:
+    """Each step's prompt block as the rendered item ``text`` alone lets it be read: every
+    repeat expanded from the blocks and replies the item shows, recursively."""
+    lines = text.splitlines()
+    blocks: dict[int, list[str]] = {}
+    replies: dict[int, list[str]] = {}
+    step = None
+    for at, line in enumerate(lines):
+        found = _HEADING.match(line)
+        if found:
+            step = int(found["k"])
+        elif step is not None and line in _BLOCK:
+            blocks[step] = _fence_after(lines, at + 1)
+        elif step is not None and line in _REPLY:
+            replies[step] = _fence_after(lines, at + 1)
+
+    def expand(line: str) -> list[str]:
         found = _SAME.match(line)
         if not found:
-            out.append(line)
-            continue
-        earlier = texts[found["label"]].splitlines()
-        first = int(found["a"] or 1)
-        last = int(found["b"] or found["a"] or len(earlier))
-        part = earlier[first - 1:last]
+            return [line]
+        k = int(found["k"])
+        if found["kind"] == "prompt":
+            shown = blocks[k]
+            first, end = 0, len(shown)
+            if found["side"] == "last":
+                end -= int(found["n"] or 1)
+            elif found["side"] == "first":
+                first = int(found["n"] or 1)
+            elif found["sa"]:
+                first, end = int(found["sa"]) - 1, int(found["sb"] or found["sa"])
+            assert not found["lead"] and not found["p"], line
+            return [out for shown_line in shown[first:end] for out in expand(shown_line)]
+        shown = replies[k]
+        first, end = 0, len(shown)
+        if found["a"]:
+            first, end = int(found["a"]) - 1, int(found["b"] or found["a"])
         prefix = json.loads(found["p"]) if found["p"] else ""
-        out += [found["lead"] + part[0], *(prefix + line for line in part[1:])]
-    return "\n".join(out)
+        part = shown[first:end]
+        return [found["lead"] + part[0], *(prefix + line for line in part[1:])]
+
+    return {k: [out for line in block for out in expand(line)] for k, block in blocks.items()}
 
 
-def _split_all(exchanges: list[dict[str, Any]]) -> list[tuple[list[str], str]]:
-    """Each run split as an item's rendering splits it (`render_item`): what it repeats
-    from the run that fed it said in place, every run then recorded as shown. Each
-    prompt reads back exactly from what is left of it."""
-    seen, texts, out = evidence._Seen(), {}, []
-    for number, exchange in enumerate(exchanges, 1):
-        node = exchange["node"]
-        sources, rest = seen.split(exchange["prompt"], node)
-        assert _read_back(rest, texts) == exchange["prompt"].strip(), number
-        out.append((sources, rest))
-        prompt, reply = f"{node}'s prompt (step {number})", f"{node}'s reply (step {number})"
-        texts.update({prompt: exchange["prompt"], reply: exchange["response"]})
-        seen.ran(node, (reply, exchange["response"]), (prompt, exchange["prompt"]))
+def _shown_without_repeats(prompt: str, settled: frozenset[str] | None) -> list[str]:
+    """What a step's block shows of ``prompt`` with nothing said as a repeat (and nothing
+    named as an earlier reply or the input: the fixtures here quote no such line alone):
+    every line (`REST`), or, with ``settled`` (`ALSO`), those that are not blank and not
+    its settings'."""
+    lines = prompt.splitlines()
+    if settled is not None:
+        return [line for line in lines if line.strip() and evidence._norm(line) not in settled]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def _views(record: dict[str, Any], settled: frozenset[str]) -> dict[str, tuple[str, Any]]:
+    """The item rendered as each reader shows it: the proposer's (`base._trajectory`, its
+    settings shown), an analyst's with and without settings (`analysts.item_text`),
+    memory's comparison (`memory._trace`) and the last edit's block (`_moved_block`,
+    against a parent whose replies all differ)."""
+    from refactory_dsh.optim import memory
+
+    parent = {**record, "passed": not record.get("passed"), "exchanges": [
+        {**e, "response": "earlier " + e["response"]} for e in record["exchanges"]]}
+    pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
+            "child_records": [record]}
+    return {
+        "proposer": (base._trajectory(record, settled=settled), settled),
+        "analyst": (analysts.item_text(record, settled=settled), settled),
+        "analyst, no settings": (analysts.item_text(record), None),
+        "memory": (memory._trace({"prev": record}, "prev", False, settled), settled),
+        "last edit": ("\n".join(base._edit_change_lines([pair], settled=settled,
+                                                        room=10 ** 7)), settled)}
+
+
+def _assert_reads_back(record: dict[str, Any], settled: frozenset[str] = frozenset()) -> None:
+    """In every view, each step's block reads back, from the rendered text alone, as
+    exactly what it would show with nothing said as a repeat."""
+    prompts = {k: e["prompt"] for k, e in enumerate(record["exchanges"], 1)}
+    for view, (text, view_settled) in _views(record, settled).items():
+        # The fixtures quote no earlier reply's line on its own, which the older matching
+        # would name ("Sees: solve's reply") and leave out: every name is of a repeat.
+        for sees in re.findall(r"(?m)^Sees: (.*)$", text):
+            assert all(re.search(r"\(step \d+\)$", name) for name in sees.split(", ")), sees
+        read = _read_back(text)
+        assert read, view
+        for k, lines in read.items():
+            assert lines == _shown_without_repeats(prompts[k], view_settled), (view, k)
+
+
+def _record_of(exchanges: list[dict[str, Any]], item: str = "X1") -> dict[str, Any]:
+    return {"id": item, "passed": False, "score": 0.0, "prediction": "B2=11",
+            "label": "B2=10", "fail_reason": "wrong total", "exchanges": exchanges}
+
+
+def _blocks_of(record: dict[str, Any]) -> dict[int, tuple[str, list[str]]]:
+    """Each step's ``Sees:`` line and block lines, as an analyst's item text shows them."""
+    lines = analysts.item_text(record).splitlines()
+    out, step, sees = {}, None, ""
+    for at, line in enumerate(lines):
+        found = _HEADING.match(line)
+        if found:
+            step, sees = int(found["k"]), ""
+        elif line.startswith("Sees: "):
+            sees = line
+        elif step is not None and line in _BLOCK:
+            out[step] = (sees, _fence_after(lines, at + 1))
     return out
 
 
 @pytest.mark.parametrize("render", ["analyst", "proposer"])
 def test_a_looped_step_s_repeated_history_is_shown_once(render):
     """Each run shows only what is new since the run that fed it: the earlier
-    conversation and the reply it quotes are said as those lines, so every reply and every
+    conversation and the reply it quotes are said in place, so every reply and every
     feedback turn appears once, and the item grows with its runs, not their square."""
 
     def text(record: dict[str, Any]) -> str:
@@ -133,9 +230,9 @@ def test_a_looped_step_s_repeated_history_is_shown_once(render):
         assert shown.count(_reply(k)) == 1, k  # the reply, fenced, once
     for k in range(1, 30):  # the feedback on run k reaches run k + 1's prompt
         assert shown.count(f"Attempt {k} gave the wrong total in cell B{k + 1}") == 1, k
-    for k in range(3, 31):
+    for k in range(2, 31):
         assert f"Sees: solve's prompt (step {k - 1}), solve's reply (step {k - 1})" in shown
-        assert f"[same as solve's prompt (step {k - 1}), lines 1-" in shown
+        assert f"[same as solve's prompt (step {k - 1}), all but its last" in shown
         assert (f"- Assistant: [same as solve's reply (step {k - 1}), each line after the "
                 'first prefixed "  "]') in shown
     # The closing line is not part of a repeat: it is shown, in place, every run.
@@ -147,24 +244,80 @@ def test_a_looped_step_s_repeated_history_is_shown_once(render):
     assert len(shown) < prompts / 5, (len(shown), prompts)
 
 
-def test_a_looped_step_s_conversation_reads_back_exactly():
-    """A repeat stands only for text repeated exactly, says which lines, and every other
-    line stays in place: each prompt reads back from it, character for character."""
-    runs = _split_all(_looped("L1", 6)["exchanges"])
-    for number, (sources, rest) in enumerate(runs[2:], 3):
-        assert sources == [f"solve's prompt (step {number - 1})",
-                           f"solve's reply (step {number - 1})"]
-        lines = rest.splitlines()
-        assert re.fullmatch(rf"\[same as solve's prompt \(step {number - 1}\), lines 1-\d+\]",
-                            lines[0])
-        assert lines[-1] == "Answer the latest user request."
+def test_a_looped_step_reads_back_from_what_the_request_shows():
+    """Every repeat says lines the request shows -- of the earlier run's block as shown,
+    of its reply as shown -- so each step's block reads back from the rendered text alone,
+    in the proposer's, the analysts', memory's and the last edit's views."""
+    _assert_reads_back(_looped("L1", 8))
+
+
+def test_a_reply_s_lines_are_counted_as_shown():
+    """A reply shown stripped of its leading blank lines: a later run quoting it whole,
+    then its first six findings, says the lines of the reply as shown (findings 0-5),
+    never of the reply as written (the review's repro read findings 2-7)."""
+    findings = "\n".join(f"finding {k}: the column total for block {k} is off by one row"
+                         for k in range(10))
+    exchanges = [{"node": "solve", "prompt": "Check the totals, block by block.",
+                  "response": "\n\n" + findings},
+                 {"node": "solve", "response": "Fixed.", "prompt": "Your findings were:\n"
+                  + findings + "\nFix these first:\n"
+                  + "\n".join(findings.splitlines()[:6])}]
+    record = _record_of(exchanges)
+    sees, block = _blocks_of(record)[2]
+    assert block == ["Your findings were:", "[same as solve's reply (step 1)]",
+                     "Fix these first:", "[same as solve's reply (step 1), lines 1-6]"]
+    _assert_reads_back(record)
+
+
+def test_a_prompt_s_lines_are_counted_as_its_block_shows_them():
+    """Four instruction lines (its settings, not shown in its block), then the history,
+    then a closing line: a later run says the lines the earlier block shows, not the
+    lines of the prompt as written (the review's repro said "lines 1-6" of a two-line
+    block)."""
+    rules = [f"Rule {k}: totals are sums of the sales column, rounded to cents ({k})."
+             for k in range(4)]
+    record = _looped("S1", 5)
+    for exchange in record["exchanges"]:
+        exchange["prompt"] = "\n".join(rules) + "\n" + exchange["prompt"]
+    settled = frozenset(evidence._norm(line) for line in rules)
+    text = base._trajectory(record, settled=settled)
+    assert "[same as solve's prompt (step 1), all but its last shown line]" in text
+    _assert_reads_back(record, settled)
+
+
+def test_a_turn_repeated_from_an_earlier_turn_is_named_where_it_was_shown():
+    """Feedback that repeats word for word what an earlier turn said lies, in the run that
+    fed this one, inside that run's own repeat: it is named as the shown lines of the run
+    whose block showed it, through the chain, and reads back exactly."""
+    record = _looped("F1", 7)
+    same = "\n".join(f"  Sheet1!B{k}: your output = {300 + k} (WRONG), expected {400 + k}"
+                     for k in range(2, 12))
+    for exchange in record["exchanges"]:
+        exchange["prompt"] = re.sub(r"(Please check the rows again\.)", r"\1\n" + same.replace(
+            "\\", "\\\\"), exchange["prompt"])
+    text = base._trajectory(record, settled=frozenset())
+    assert re.search(r"\[same as solve's prompt \(step 2\), its shown lines \d+-\d+\]", text)
+    assert text.count("Sheet1!B5: your output = 305") == 1
+    _assert_reads_back(record)
+
+
+def test_a_reply_shown_clipped_is_named_as_shown():
+    """A reply too long to show whole is shown clipped (head and tail, the cut marked); a
+    later run quoting it whole names it, as shown, so the conversation is not shown again
+    run after run (one clipped reply once made every later block a full copy)."""
+    record = _looped("C2", 12, size=3000)
+    text = analysts.item_text(record, output_chars=1000)
+    for k in range(2, 12):
+        assert f"[same as solve's reply (step {k}), each line after the first prefixed" in text
+    half = analysts.item_text(_looped("C2", 6, size=3000), output_chars=1000)
+    assert len(text) < 2.3 * len(half), (len(text), len(half))
 
 
 def test_a_shared_preamble_is_never_said_as_the_earlier_task():
     """Two runs of one step share a five-line preamble and differ in their task. Unless
     the later run was fed the earlier one's reply, nothing of the earlier run is named
-    (they may be on parallel paths); when it was, only the preamble's five lines are, and
-    the later task is shown in place: the January task is never claimed for March."""
+    (they may be on parallel paths); when it was, only the preamble's lines are, and the
+    later task is shown in place: the January task is never claimed for March."""
     preamble = "\n".join(f"Rule {k}: totals are sums of the sales column of every row, "
                          f"rounded to cents, in the currency of the sheet ({k})."
                          for k in range(5))
@@ -173,33 +326,35 @@ def test_a_shared_preamble_is_never_said_as_the_earlier_task():
     march = f"{preamble}\nSubtask: compute the March totals for the summary table."
     alone = [{"node": "solve", "prompt": january, "response": reply},
              {"node": "solve", "prompt": march, "response": "March totals: 980.00."}]
-    sources, rest = _split_all(alone)[1]
-    assert sources == [] and rest == march
+    sees, block = _blocks_of(_record_of(alone))[2]
+    assert sees == "" and "\n".join(block) == march
     fed = [alone[0], {"node": "solve", "prompt": f"{march}\nEarlier: {reply}",
                       "response": "March totals: 980.00."}]
-    sources, rest = _split_all(fed)[1]
-    assert rest.splitlines()[0] == "[same as solve's prompt (step 1), lines 1-5]"
-    assert "Subtask: compute the March totals" in rest and "January" not in rest.replace(
-        f"Earlier: {reply}", "").replace(reply, "")
+    sees, block = _blocks_of(_record_of(fed))[2]
+    assert block[0] == "[same as solve's prompt (step 1), all but its last shown line]"
+    assert block[1] == "Subtask: compute the March totals for the summary table."
+    _assert_reads_back(_record_of(fed))
 
 
 def test_a_sliding_window_says_only_the_turns_it_kept():
     """A history of the last three turns: each run drops its oldest turn. The turns it
-    kept are said as those lines of the earlier prompt, the dropped one is never
-    claimed, and each prompt reads back exactly."""
+    kept are said as those shown lines of the earlier block, the dropped one is never
+    claimed, and each block reads back exactly. (A kept turn the earlier block names only
+    together with the dropped one is shown again: one turn a run, so the item still grows
+    with its runs.)"""
     turns, exchanges = [], []
     for k in range(1, 9):
-        window = turns[-3:]
-        exchanges.append({"node": "solve", "prompt": "Recent turns:\n" + "\n".join(window)
-                          + f"\nNow do step {k}.", "response": _reply(k)})
-        turns.append("- Assistant: " + _reply(k).replace("\n", "\n  ")
-                     + "\n- User: " + _feedback(k).replace("\n", "\n  "))
-    runs = _split_all(exchanges)
-    for number, (_sources, rest) in enumerate(runs[4:], 5):
-        dropped = f"Attempt {number - 4} gave the wrong total"
-        assert dropped not in rest  # neither shown nor claimed: not in this prompt
-        assert re.search(rf"\[same as solve's prompt \(step {number - 1}\), lines \d+-\d+\]",
-                         rest)
+        exchanges.append({"node": "solve", "prompt": "Recent turns:\n" + "\n".join(
+            turns[-3:]) + f"\nNow do step {k}.", "response": _reply(k)})
+        turns.append("- Assistant: " + _reply(k).replace("\n", "\n> ")
+                     + "\n- User: " + _feedback(k).replace("\n", "\n> "))
+    record = _record_of(exchanges)
+    blocks = _blocks_of(record)
+    for k in range(5, 9):
+        block = "\n".join(blocks[k][1])
+        assert f"Attempt {k - 4} gave the wrong total" not in block  # neither shown nor named
+        assert f"[same as solve's prompt (step {k - 1}), its shown lines " in block
+    _assert_reads_back(record)
 
 
 def test_interleaved_runs_of_one_step_name_only_the_run_that_fed_them():
@@ -211,9 +366,27 @@ def test_interleaved_runs_of_one_step_name_only_the_run_that_fed_them():
           + "\nPath A, try again.", "response": _reply(3)}
     b2 = {"node": "solve", "prompt": b1["prompt"] + "\nYou said:\n" + _reply(2)
           + "\nPath B, try again.", "response": _reply(4)}
-    runs = _split_all([a1, b1, a2, b2])
-    assert runs[2][0] == ["solve's prompt (step 1)", "solve's reply (step 1)"]
-    assert runs[3][0] == ["solve's prompt (step 2)", "solve's reply (step 2)"]
+    record = _record_of([a1, b1, a2, b2])
+    blocks = _blocks_of(record)
+    assert blocks[3][0] == "Sees: solve's prompt (step 1), solve's reply (step 1)"
+    assert blocks[4][0] == "Sees: solve's prompt (step 2), solve's reply (step 2)"
+    _assert_reads_back(record)
+
+
+def test_a_reply_two_runs_wrote_alike_names_the_run_whose_prompt_it_continues():
+    """Two earlier runs wrote the same reply, so the reply alone cannot say which fed the
+    later run: the one whose prompt the later prompt repeats is named (its own path's);
+    when both prompts are the same too, which fed it is not certain, and neither is."""
+    same = "The totals are written; the table now has one row per year, as asked."
+    a1 = {"node": "solve", "prompt": TASK + "\nPath A, the first sheet.", "response": same}
+    b1 = {"node": "solve", "prompt": TASK + "\nPath B, the second sheet.", "response": same}
+    a2 = {"node": "solve", "prompt": a1["prompt"] + "\nYou said: " + same + "\nCheck it.",
+          "response": "Checked."}
+    sees, block = _blocks_of(_record_of([a1, b1, a2]))[3]
+    assert sees == "Sees: solve's prompt (step 1)", sees
+    tie = [a1, {**a1}, a2]
+    sees, block = _blocks_of(_record_of(tie))[3]
+    assert sees == "" and "[same as" not in "\n".join(block)
 
 
 def test_a_first_line_that_changes_every_turn_does_not_defeat_it():
@@ -226,7 +399,7 @@ def test_a_first_line_that_changes_every_turn_does_not_defeat_it():
             exchange["prompt"] = f"Tool calls left: {31 - k}\n" + exchange["prompt"]
         return record
 
-    _split_all(counted(8)["exchanges"])  # reads back exactly
+    _assert_reads_back(counted(8))
     whole, half = base._trajectory(counted(30), settled=frozenset()), base._trajectory(
         counted(15), settled=frozenset())
     assert len(whole) < 2.3 * len(half), (len(whole), len(half))
@@ -243,13 +416,26 @@ def test_a_loop_whose_prompt_opens_with_its_last_reply_names_it():
                           "prompt": f"{replies[k - 2]}\nCritique {k}: the totals of attempt "
                                     f"{k - 1} are off by one row.",
                           "response": replies[k - 1]})
-    _split_all(exchanges)  # reads back exactly
-    text = analysts.item_text({"id": "R1", "passed": True, "score": 1.0,
-                               "exchanges": exchanges})
+    record = {"id": "R1", "passed": True, "score": 1.0, "exchanges": exchanges}
+    _assert_reads_back(record)
+    text = analysts.item_text(record)
     for k in range(2, 6):
         assert f"[same as refine's reply (step {k - 1})]" in text
         assert text.count(f"Critique {k}: the totals of attempt {k - 1}") == 1
     assert all(text.count(reply) == 1 for reply in replies)
+
+
+def test_a_one_line_quote_says_no_prefix():
+    """A reply of one line quoted under a label: the line says the label and the reply,
+    and no prefix for lines after the first (there are none)."""
+    reply = ("The totals for every year are written into the summary table, rows 2 to 9, "
+             "each the sum of the sales column over that year's rows, rounded to cents, and "
+             "every other cell of both sheets is left as it was.")
+    exchanges = [{"node": "solve", "prompt": "Write the totals.", "response": reply},
+                 {"node": "solve", "prompt": f"You said:  {reply}\nNow check them.",
+                  "response": "Checked."}]
+    _sees, block = _blocks_of(_record_of(exchanges))[2]
+    assert block[0] == "You said:  [same as solve's reply (step 1)]"
 
 
 def test_a_step_that_runs_once_reads_as_before():
@@ -273,12 +459,24 @@ def test_another_item_never_says_a_repeat_as_its_own():
     texts = evidence.dedup([analysts.item_text(one), analysts.item_text(two)])
     for k in (2, 3, 4):  # each holds a repeat of B's own earlier run
         assert f"same as item A, step solve ({k} of 4)" not in texts[1]
-    assert texts[1].count("[same as solve's prompt (step 3), lines 1-") == 1
+    assert texts[1].count("[same as solve's prompt (step 3), all but its last") == 1
     looped = [{"id": f"x{i}", "passed": False, "score": 0.0, "exchanges": [
         {"node": "solve", "prompt": f"Own text of run {k}, long enough to be kept whole.",
          "response": f"reply {i}.{k}"} for k in (1, 2)]} for i in (1, 2)]
     said = evidence.dedup([analysts.item_text(r) for r in looped])[1]
     assert "same as item x1, step solve (2 of 2)." in said
+
+
+def test_a_quote_keeps_its_label_as_written():
+    """The text before a quoted reply on its line is kept as written, its spacing too."""
+    first = {"node": "solve", "prompt": "Start the totals.", "response": _reply(1)}
+    second = {"node": "solve", "response": _reply(2),
+              "prompt": "Model  said:\t" + _reply(1).replace("\n", "\n    ") + "\nGo on."}
+    record = _record_of([first, second])
+    _sees, block = _blocks_of(record)[2]
+    assert block[0] == ("Model  said:\t[same as solve's reply (step 1), each line after the "
+                        'first prefixed "    "]')
+    _assert_reads_back(record)
 
 
 def test_the_last_edit_shows_a_looped_step_s_history_once():
@@ -477,26 +675,22 @@ def test_a_request_that_gives_way_still_fills_its_room():
     assert "Child's reply: as under" not in text  # cut there, so shown here
 
 
-def test_a_quote_keeps_its_label_as_written():
-    """The text before a quoted reply on its line is kept as written, its spacing too."""
-    first = {"node": "solve", "prompt": "Start the totals.", "response": _reply(1)}
-    second = {"node": "solve", "response": _reply(2),
-              "prompt": "Model  said:\t" + _reply(1).replace("\n", "\n    ") + "\nGo on."}
-    sources, rest = _split_all([first, second])[1]
-    assert rest.splitlines()[0] == ("Model  said:\t[same as solve's reply (step 1), each line "
-                                    'after the first prefixed "    "]')
-
-
 def test_a_block_named_in_one_line_leaves_its_room_to_the_items():
     """A broken item whose step ran 700 times does not fit even cut to the floor, so it
     is named in one line: it asks for no room then, and the items in full have it (the
     request was 207,873 of 400,000 characters when it kept its share)."""
-    text = ProposalContext(nodes=NODES, item_records=_records_with_huge_first(),
-                           reader_findings=_CITING, edit_pairs=[_edit_pair(runs=700)]).render()
+    ctx = ProposalContext(nodes=NODES, item_records=_records_with_huge_first(),
+                          reader_findings=_CITING, edit_pairs=[_edit_pair(runs=700)])
+    text = ctx.render()
     assert 0.9 * base.PROPOSAL_ROOM < len(text) <= base.PROPOSAL_ROOM, len(text)
+    left = [o["room_left"] for o in ctx.omissions if "named only" in o["step"]]
+    assert left and left[0] > 0.25 * base.PROPOSAL_ROOM, left
     named = next(line for line in text.splitlines() if line.startswith("- Item a -- broken"))
     assert "not shown whole: even with every text cut to" in named
     assert _full(text) == ["w20"]
+    # Said with the share it was first named at, not the limit it keeps once named.
+    share = int(re.search(r"passes the ([\d,]+) chars", named).group(1).replace(",", ""))
+    assert share > 0.25 * base.PROPOSAL_ROOM, named
 
 
 def test_an_item_named_leaves_its_room_to_the_last_edit():
@@ -522,3 +716,27 @@ def test_a_request_refused_with_only_an_oversized_last_edit_is_asked_again_short
     assert len(first) + len(optimizer._system) <= base.PROPOSAL_ROOM  # noqa: SLF001
     assert len(second) <= len(first) // 2
     assert "#### Item a -- broken (child c)" in second
+
+
+def test_what_renderings_keep_lasts_one_pass_and_is_bounded():
+    """What renderings read again is kept only while a request, an analysts' round or a
+    memory pass is made, within `KEPT_CHARS`, and dropped after: nothing is kept outside
+    one, so no record's text outlives the pass that showed it."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+
+    assert evidence._KEEP["store"] is None
+    analysts.item_text(_looped("K", 6))
+    assert evidence._KEEP["store"] is None
+    with evidence.keeping():
+        store = evidence._KEEP["store"]
+        analysts.item_text(_looped("K", 6))
+        assert store.used > 0
+    assert evidence._KEEP["store"] is None
+    small = evidence._Kept(1000)
+    for k in range(50):
+        small.get(k, lambda: "x" * 100, len)
+    assert small.used <= 1000 and len(small.held) < 50
+    ProposalContext(nodes=NODES, item_records=[_looped("K", 6)]).render()
+    assert evidence._KEEP["store"] is None
+    for method in (AutoresearchOptimizer.write_memory, AutoresearchOptimizer._round_analysis):
+        assert hasattr(method, "__wrapped__"), method  # made inside `evidence.keeping`

@@ -2277,22 +2277,40 @@ turn, a judge's reloop) shows only what is new since the run of it that fed it
 (`evidence._Seen.split`). That run is the latest earlier run of the same step whose reply
 the prompt quotes whole (at least `FED_MIN`, 40, characters): being fed its output proves
 it came first on the same path, so same-named runs on parallel paths, which feed each
-other nothing, are never named. Against that run's prompt and reply the prompt is matched
-line by line, exactly (`evidence._blocks`): each run of lines it repeats, of at least
-`REPEAT_MIN` (200) characters, is said in place as those lines,
-`[same as solve's prompt (step 3), lines 1-40]`, or `[same as solve's reply (step 3)]`
-when the whole text is repeated; a quote is said with its label and line prefix,
-`- Assistant: [same as solve's reply (step 3), each line after the first prefixed "  "]`.
-Every other line stays in place, so each prompt reads back exactly from what is shown: a
-shared preamble with another task is named as those lines only, a sliding window names
-only the turns it kept, and a first line that changes every turn (`Tool calls left: N`)
-is shown while the conversation under it is named. Across the items of one request, a
+other nothing, are never named. Against what the request shows of that run -- the lines
+its prompt's block shows, its
+reply as shown (stripped, and only when shown whole) -- the prompt is matched line by
+line, exactly (`evidence._blocks`), and each run of lines it repeats, of at least
+`REPEAT_MIN` (200) characters, is said in place as those lines, counted as shown: `[same
+as solve's prompt (step 3), all but its last shown line]` (or `its shown lines 2-5`,
+`all but its first shown line`, or the whole block: `[same as solve's prompt (step 3)]`);
+`[same as solve's reply (step 3), lines 1-6]`; a quote with its label and line prefix as
+written, `- Assistant: [same as solve's reply (step 3), each line after the first prefixed
+"  "]` (no prefix said for one line). A repeat that falls within a line of the earlier
+block that is itself a repeat is followed into what that line names, so it is said as the
+shown lines of the earlier run that showed it (a turn the feedback repeats word for word);
+what no shown line says whole is shown in place. A text shown clipped (head and tail, the
+cut marked) is named whole -- standing for it as shown, what it left out marked there --
+or by lines it shows complete at an end. Every other line stays in
+place, so each step's block reads back from what the request shows alone (a test rebuilds
+every block from the rendered text in the proposer's, the analysts', memory's and the
+last edit's views). A shared preamble with another task is named as those lines only, a
+sliding window names only the turns it kept (a kept turn the earlier block names only
+together with the dropped one is shown again, one turn a run), and a first line that
+changes every turn (`Tool calls left: N`) is shown while the conversation under it is
+named. When several earlier runs wrote the same reply, the one whose prompt the run's
+prompt continues furthest is named (the run on its path); none, when that ties. Across
+the items of one request, a
 text holding such a repeat is never said as "same as item X" (it names this item's own
 runs), and a step that ran more than once is named by its run (`step solve (3 of 30)`).
 Shown whole, each run's prompt carried the whole conversation so far, so an item grew
 with the square of its runs: two 30-turn SpreadsheetBench items were 462k characters
-(under "Some items in full") and 1.2M (under "What the last edit changed"); now 211k and
-175k, about the item's replies once (192k for the first) plus each new turn once.
+(under "Some items in full") and 1.2M (under "What the last edit changed"); now 205k and
+174k, about the item's replies once (192k for the first) plus each new turn once. What
+the renderings read again (a text's lines in normal form, a fenced text, a repeat found)
+is kept only while one request, one analysts' round or one memory pass is made
+(`evidence.keeping`, at most `KEPT_CHARS`, 64M characters, added only while there is
+room), then dropped, so no record's text outlives the pass that showed it.
 A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
 analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
