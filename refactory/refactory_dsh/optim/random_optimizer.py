@@ -1169,8 +1169,10 @@ def _confidence(value: Any) -> float:
 #: A fenced block of a reply: its opening and its closing fence each start a line. A
 #: fence quoted inside a JSON string never starts a line (a JSON string holds no raw
 #: newline), so an answer that says "a single ```python``` block" is not cut there and
-#: no object nested in it is taken for the answer.
-_FENCED = re.compile(r"^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", re.DOTALL | re.MULTILINE)
+#: no object nested in it is taken for the answer. The answer may start on the opening
+#: fence's line (```json{...); a fence written mid-line, or closing on the JSON's own
+#: line, is not counted, and the whole reply is read instead.
+_FENCED = re.compile(r"^[ \t]*```[\w+.#-]*[ \t]*(.*?)^[ \t]*```", re.DOTALL | re.MULTILINE)
 
 
 def _fenced_blocks(text: str) -> list[str]:

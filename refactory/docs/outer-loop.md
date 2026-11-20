@@ -1193,7 +1193,8 @@ paired with a parent picker), on the train records the request carries:
   said to be invalid JSON, with the parser's message and where (`reply_object`); it is
   not repaired, and no object nested inside it is read as the answer. A fenced block
   counts only when its opening and closing fences each start a line, so a fence quoted
-  inside a string of the answer ("a single ```python``` block") never cuts it. The readers, the step
+  inside a string of the answer ("a single ```python``` block") never cuts it. A fence written mid-line, or closing on the
+  JSON's own line, is not counted, and the reply is read by its braces. The readers, the step
 reviews and the integrity judge read replies the same way (the judge's own salvage of a
 broken reply, marked so it never vetoes, is unchanged). The analysts' item texts show an errored item's error once (not
   again as the grader's reason). The analysts take the readers' place: no

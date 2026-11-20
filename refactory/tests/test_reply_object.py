@@ -96,3 +96,13 @@ def test_a_proposer_answer_quoting_a_fence_in_a_fenced_reply_is_read_whole():
     found, problem = answer_json("```json\n" + answer + "\n```")
     assert problem == ""
     assert found["proposals"][0]["edits"][0]["knob"] == "skill"
+
+
+@pytest.mark.parametrize("reply", [
+    '```json{\n  "findings": [{"finding": "x"}],\n  "verdict": "ok"\n}\n```',
+    '```{\n  "findings": [{"finding": "x"}],\n  "verdict": "ok"\n}\n```',
+    '```json {"findings": [\n {"finding": "x"}],\n "verdict": "ok"}\n```',
+])
+def test_an_answer_starting_on_the_opening_fence_line_is_read_whole(reply):
+    for read in (reply_object, extract_json):
+        assert read(reply) == {"findings": [{"finding": "x"}], "verdict": "ok"}
