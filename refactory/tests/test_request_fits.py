@@ -736,7 +736,91 @@ def test_what_renderings_keep_lasts_one_pass_and_is_bounded():
     for k in range(50):
         small.get(k, lambda: "x" * 100, len)
     assert small.used <= 1000 and len(small.held) < 50
+    # A string's own cost counts, not only its characters: a thousand one-character lines
+    # (a thousand characters) take about 57k, more than a 10k store holds.
+    store = evidence._Kept(10_000)
+    evidence._KEEP["store"] = store
+    try:
+        evidence._norm_lines("a\n" * 1000)
+    finally:
+        evidence._KEEP["store"] = None
+    assert store.used == 0
     ProposalContext(nodes=NODES, item_records=[_looped("K", 6)]).render()
     assert evidence._KEEP["store"] is None
     for method in (AutoresearchOptimizer.write_memory, AutoresearchOptimizer._round_analysis):
         assert hasattr(method, "__wrapped__"), method  # made inside `evidence.keeping`
+
+
+#: Five shared rule lines (70 characters each, not in any setting) and an item's own task.
+_RULES = [f"Rule {k}: every total is the sum of the sales column of each row ({k:02d})."
+          for k in range(5)]
+
+
+def _ruled(item: str, detailed: bool) -> dict[str, Any]:
+    """An item whose first step's prompt is the shared rules (and, ``detailed``, four
+    lines of its own task and a closing line); its second step, fed the first's reply,
+    repeats the task's four lines: ``its shown lines 6-9`` of the first block."""
+    details = [f"Task {item} detail {k}: write the year {2020 + k} total into row {k + 2} "
+               "of the summary table." for k in range(1, 5)]
+    first = "\n".join(_RULES + (details + [f"End of task {item}."] if detailed else []))
+    reply = f"Item {item}: I wrote every yearly total into the summary table as asked."
+    exchanges = [{"node": "solve", "prompt": first, "response": reply}]
+    if detailed:
+        exchanges.append({"node": "solve", "response": "Rechecked.", "prompt":
+                          "Details again:\n" + "\n".join(details) + f"\nYou said: {reply}"})
+    return {**_record_of(exchanges, item), "id": item}
+
+
+def _items(text: str) -> dict[str, str]:
+    """Each item's part of a request that shows several, by id."""
+    parts = re.split(r"(?m)^(?=#{3,5} Item )", text)
+    return {re.match(r"#+ Item (\S+)", part).group(1): part for part in parts
+            if re.match(r"#+ Item ", part)}
+
+
+def test_items_shown_together_read_back_after_dedup():
+    """A request that shows several items says an earlier item's line once, by where it
+    was (`evidence.dedup`). An item whose later run counts the lines an earlier block
+    shows is left whole, so its count holds: through the analysts' batch and memory's
+    comparison, the item reads back from the request alone (the review's repro read
+    "End of task Y." for the four detail lines)."""
+    from refactory_dsh.optim import memory
+
+    x, y = _ruled("X", detailed=False), _ruled("Y", detailed=True)
+    assert "[same as solve's prompt (step 1), its shown lines 6-9]" in "\n".join(
+        _blocks_of(y)[2][1])
+    ctx = ProposalContext(nodes=NODES, item_records=[x, y])
+    batch, _clip = analysts.analyst_batch(ctx, "failure", 1, 1, [x, y],
+                                          analysts.pipeline_text(ctx))
+    texts = {(r["id"], side): memory._trace({side: r}, side, False)
+             for r in (x, y) for side in ("prev", "curr")}
+    compared = memory._deduped([{"id": r["id"], "category": "regressed", "prev": r,
+                                 "curr": r} for r in (x, y)], texts, False)
+    for text in (batch, compared[("Y", "prev")], compared[("Y", "curr")]):
+        read = _read_back(_items(text)["Y"])
+        assert read[2] == _shown_without_repeats(y["exchanges"][1]["prompt"], None) or \
+            read[2] == _shown_without_repeats(y["exchanges"][1]["prompt"], frozenset())
+        assert read[1] == _shown_without_repeats(y["exchanges"][0]["prompt"], None)
+    # Items with nothing said in place are still said once: X's rules are not repeated.
+    assert "as shown there]" not in _items(batch)["Y"]
+    assert batch.count(_RULES[0]) == 2  # once in X, once in Y (kept whole)
+
+
+def test_a_clipped_reply_s_hidden_lines_are_never_named():
+    """A reply shown clipped (head and tail around the cut): a later run quoting it whole
+    names it, as shown; quoting lines from its middle, which the request does not show,
+    shows them in place -- a span is named only over lines the reply shows complete."""
+    reply = "\n".join(f"Row {k}: the year {2000 + k} total was recomputed as {k * 37 % 997} units."
+                      for k in range(60))
+    middle = "\n".join(reply.splitlines()[25:31])
+    tail = "\n".join(reply.splitlines()[-6:])
+    assert len(middle) > evidence.REPEAT_MIN and len(tail) > evidence.REPEAT_MIN
+    exchanges = [{"node": "solve", "prompt": "Recompute the totals.", "response": reply},
+                 {"node": "solve", "response": "Checked.", "prompt": "You said:\n" + reply
+                  + "\nLook again at:\n" + middle + "\nAnd at:\n" + tail}]
+    text = analysts.item_text(_record_of(exchanges), output_chars=1000)
+    block = text.split("#### Step `solve` (2 of 2)", 1)[1]
+    assert "[same as solve's reply (step 1)]" in block  # whole, as shown
+    # Lines it does not show complete are never named as its lines (here the older
+    # matching names them by source, as it does any reply's line).
+    assert block.count("[same as solve's reply (step 1)") == 1, block

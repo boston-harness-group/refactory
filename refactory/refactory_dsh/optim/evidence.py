@@ -93,7 +93,7 @@ def _norm_lines(text: str) -> tuple[str, ...]:
     """Each line of ``text`` in its normal form (`_norm`), kept while `keeping` lasts (an
     item is rendered again and again to fit a request)."""
     return _kept("norm", text, lambda: tuple(_norm(line) for line in text.splitlines()),
-                 lambda found: sum(map(len, found)))
+                 lambda found: sum(map(len, found)) + KEPT_OVERHEAD * len(found))
 
 
 def _fence(text: str) -> str:
@@ -139,7 +139,7 @@ def fenced(text: str) -> list[str]:
     escaped (`escape_headings`): a quoted step output, trace or prompt, whose own headings
     cannot read as the request's at any level."""
     return list(_kept("fenced", text, lambda: _fenced(text),
-                      lambda found: len(found[1]) + len(text)))
+                      lambda found: len(found[1]) + len(text) + 3 * KEPT_OVERHEAD))
 
 
 def _fenced(text: str) -> tuple[str, str, str]:
@@ -350,7 +350,8 @@ def _matches(prompt: str, earlier: str) -> tuple[tuple[int, int, int, int, str, 
         return tuple(_blocks(lines, [False] * len(lines), earlier.splitlines(), REPEAT_MIN,
                              quoted=False))
 
-    return _kept("matches", (prompt, earlier), make, lambda found: 64 * len(found))
+    return _kept("matches", (prompt, earlier), make,
+                 lambda found: 4 * KEPT_OVERHEAD * len(found))
 
 
 def _pieces(source: _Source, first: int, end: int
@@ -717,14 +718,19 @@ def dedup(blocks: Sequence[str]) -> list[str]:
     """The items of one request, each text of a step's prompt it shows (`REST`, or `ALSO`:
     a reason a judge gave, the same in two rollouts of an item) that an earlier item
     showed said as "same as item X, step Y" instead of again; and in one that differs,
-    each long line an earlier one showed said as where it was."""
+    each long line an earlier one showed said as where it was. An item that says a repeat
+    in place (`SAME`) is left as it is: a later run's repeat counts the lines its blocks
+    show, which this would change; its texts are still where a later item's are said to
+    be."""
     first: dict[str, str] = {}
     lines_at: dict[str, str] = {}
     out = []
     for block in blocks:
         item = (_ITEM.search(block) or [None, "?"])[1]
+        kept_whole = SAME in block
 
-        def swap(match: re.Match[str], block: str = block, item: str = item) -> str:
+        def swap(match: re.Match[str], block: str = block, item: str = item,
+                 kept_whole: bool = kept_whole) -> str:
             name, fence, text = match.group(1), match.group(2), match.group(3)
             if SAME in text:
                 # It names this item's own earlier runs: in another item it would name
@@ -737,23 +743,25 @@ def dedup(blocks: Sequence[str]) -> list[str]:
             again = sum(1 for other, _n, _t in _STEP.findall(block) if other == step) > 1
             where = (f"item {item}, step {step}"
                      + (f" ({number} of {total})" if again and number else ""))
-            if body in first:
+            if body in first and not kept_whole:
                 said = f"{name}: same as {first[body]}."
                 # Only when saying so is shorter than the text itself.
                 return said if len(said) < len(match.group(0)) else match.group(0)
-            first[body] = where
+            first.setdefault(body, where)
             kept, last = [], None
             for line in text.splitlines():
                 key = _norm(line)
                 seen = lines_at.get(key) if len(key) >= DEDUP_LINE else None
-                if seen is None:
+                if seen is None or kept_whole:
                     kept.append(line)
                     last = None
                     if len(key) >= DEDUP_LINE:
-                        lines_at[key] = where
+                        lines_at.setdefault(key, where)
                 elif seen != last:
                     kept.append(f"[a line of {seen}'s instructions, as shown there]")
                     last = seen
+            if kept_whole:
+                return match.group(0)
             return f"{name}:\n{fence}\n" + "\n".join(kept) + f"\n{fence}"
 
         out.append(_REST_BLOCK.sub(swap, block))
@@ -781,14 +789,18 @@ def dedup_texts(texts: Sequence[str], labels: Sequence[str]) -> list[str]:
     return out
 
 
-#: The most characters what renderings keep to read again may hold at once (`keeping`):
-#: tens of megabytes at most while one pass lasts, none after it.
+#: About the most bytes what renderings keep to read again may hold at once (`keeping`):
+#: each entry counted as its characters plus `KEPT_OVERHEAD` a string it holds; tens of
+#: megabytes at most while one pass lasts, none after it.
 KEPT_CHARS = 64_000_000
+#: What a kept string costs beyond its characters (a Python string's header), in bytes.
+KEPT_OVERHEAD = 56
 
 
 class _Kept:
     """What renderings read again (a text's lines in normal form, a fenced text, a repeat
-    found), bounded by the characters it holds: once full, nothing more is added."""
+    found), bounded by about the bytes it holds (characters, and `KEPT_OVERHEAD` a
+    string): once full, nothing more is added."""
 
     def __init__(self, chars: int) -> None:
         self.chars = chars
@@ -802,7 +814,7 @@ class _Kept:
                 self.held.move_to_end(key)
                 return self.held[key][0]
         value = make()
-        cost = size(value) + 64
+        cost = size(value) + 2 * KEPT_OVERHEAD
         with self.lock:
             # Added only while there is room: a pass reads its texts again in the same
             # order, so evicting the oldest would miss every time; this keeps a part.

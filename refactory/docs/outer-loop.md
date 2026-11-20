@@ -2302,14 +2302,18 @@ named. When several earlier runs wrote the same reply, the one whose prompt the 
 prompt continues furthest is named (the run on its path); none, when that ties. Across
 the items of one request, a
 text holding such a repeat is never said as "same as item X" (it names this item's own
-runs), and a step that ran more than once is named by its run (`step solve (3 of 30)`).
+runs), an item that says any repeat in place is left as it is by `evidence.dedup` (a later
+run's repeat counts the lines its blocks show, which folding a line an earlier item showed
+would change), and a step that ran more than once is named by its run (`step solve (3 of
+30)`).
 Shown whole, each run's prompt carried the whole conversation so far, so an item grew
 with the square of its runs: two 30-turn SpreadsheetBench items were 462k characters
 (under "Some items in full") and 1.2M (under "What the last edit changed"); now 205k and
 174k, about the item's replies once (192k for the first) plus each new turn once. What
 the renderings read again (a text's lines in normal form, a fenced text, a repeat found)
 is kept only while one request, one analysts' round or one memory pass is made
-(`evidence.keeping`, at most `KEPT_CHARS`, 64M characters, added only while there is
+(`evidence.keeping`, about `KEPT_CHARS`, 64 MB, at most -- each string's characters
+and its own cost counted -- added only while there is
 room), then dropped, so no record's text outlives the pass that showed it.
 A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
