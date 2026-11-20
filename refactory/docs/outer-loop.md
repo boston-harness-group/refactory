@@ -722,15 +722,30 @@ items are shown, picked or analysed does not change.
   model's context. The proposal request has a room of 400000 characters
   (`PROPOSAL_ROOM`, the analysts' `ANALYST_ROOM`: Opus 4.6's 200k tokens less Claude
   Code's system prompt and the reply), the system prompt and closing line included.
-  A request that would pass it is made again with only the items in full giving way:
-  they are taken failure, success, failure, ... in rank order until the next would
-  pass what the rest of the request leaves (the first is always shown), and the rest
-  are named by id under "Some items in full"; each is still in the table. The
-  readers' groups, their findings and "What the last edit changed" keep their own
-  budgets. A proposal the provider still refuses as too long is asked once more at
-  half its length, the analysts' retry; the trace marks it `context_retry`. HoVer's
-  150 train items (about 12k characters each) once gave 46 items in full, about 590k
-  characters, and every proposal failed "Prompt is too long".
+  A request that would pass it is made again with only the items' texts giving way,
+  whatever their sizes: the items in full and the blocks of "What the last edit
+  changed" share what the rest of the request leaves (`_fair_shares`: either is whole
+  when it needs no more than half, the other then has the remainder), the shares made
+  again from what each render took (a block names an item "Trajectories" shows whole,
+  and shows it itself once it is cut there), so no more is cut than does not fit. The items in
+  full are taken failure, success, failure, ... in rank order until the next would
+  pass their share, and the rest are named by id under "Some items in full"; each is
+  still in the table. The first is no longer kept whatever its size: when it alone
+  passes its share, its longest texts are cut to the longest one length at which it
+  fits (head and tail, "[… N chars omitted]", each cut in `omissions`), its shorter
+  texts whole, and the section says so; when it does not fit even with every text cut
+  to `SHOWN_TEXT_FLOOR` (200 characters) it is named with the rest. Cutting keeps more
+  than naming: every step, what it saw and the opening and close of each text, where
+  a name keeps only the table's row. The last edit's blocks give way the same way
+  (below). The readers' groups and their findings keep their own budgets, and nothing
+  else is cut. A proposal the provider still refuses as too long is asked once more at
+  half its length, the analysts' retry, which these cuts always make shorter; the trace
+  marks it `context_retry`. HoVer's 150 train items (about 12k characters each) once
+  gave 46 items in full, about 590k characters, and every proposal failed "Prompt is
+  too long". SpreadsheetBench (`OL-s42`, `OL-s44`) failed the same way from epoch 2,
+  at 1.0-2.0M characters: one item of 30 turns was 1.2M characters under "What the last
+  edit changed" and another 462k under "Some items in full", each kept whatever its
+  size, and the retry at half length made the same request.
   A reader call that fails is noted, with its items, and the proposal
   goes ahead with the findings it has. An optimizer that calls no reader gets the
   table and the items in full.
@@ -869,7 +884,16 @@ optimizer, at no extra compute (train records only):
   repeated; blocks print in the section's order, so a reference points back. It also
   shows the edit that made the child and the gate's decision on it, and warns that the
   two were scored in different rounds with different seeds, so some changes may be
-  noise. Without a parent (the seed) or without shared items, it says so. When some of
+  noise. Without a parent (the seed) or without shared items, it says so. Only when the
+  whole request would pass its room (`ProposalContext.render`) do the blocks get a limit
+  (`edit_change_limit`): their share of what the rest of the request leaves. Then no
+  pick passes it, a forced one included: a forced pick past its share (the forced picks
+  still to come sharing the limit, one that needs less leaving the rest to the others)
+  has every text of its block cut to the longest one length that fits, the section
+  saying so ("every text in it cut to at most N chars ... so that this request fits")
+  and the omissions recording it (`cut to the request's room`); one that does not fit
+  even at `SHOWN_TEXT_FLOOR` is listed in one line, saying why, and recorded (`named
+  only, past the request's room`). When some of
   the child's train items failed with an error (the item's run failed, not a wrong
   answer), it counts them by kind and the node that raised them, with the first message
   of each kind (300 characters, `ITEM_ERROR_CHARS`). Both runtimes start a failed node's
@@ -2222,8 +2246,9 @@ analysts read -- how nodes compose, which apply to each step, the steps' setting
 author's guidance); the items; then a reference at the end (what each node has before it
 runs, each step in full with the node schema, the validator's rules; the nodes and edges
 only when the pipeline view could not be drawn); and the
-answer's form last. Items are chosen rather than cut, and size is never a reason to cut
-one: every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
+answer's form last. Items are chosen rather than cut, and size is a reason to cut one only
+when it alone passes what the request's room leaves it (see the request's room above):
+every item is shown when all of them together are under `SHOW_ALL_BELOW` (120k
 characters; it only decides that, and never cuts); otherwise a table lists every item,
 then items chosen by a rule (`_shown_items`), never by size, are shown whole -- one failure per failure finding that
 cites a known item, in rank order; then one contrasting success per success finding (the
@@ -2246,7 +2271,18 @@ grew with the square of its steps (61% of an S4 analyst batch was repeated text)
 input appears once per item; a step says by name what its prompt took from what is already
 shown (`Sees: the input, compare's reply`) and only the part of its prompt the request does
 not show elsewhere (`Also in its prompt`: a reason a judge sent it back with, say), then its
-full reply, each fenced with its heading lines escaped. A step's instructions are its settings,
+full reply, each fenced with its heading lines escaped. A step run again (a loop's next
+turn, a judge's reloop) shows only what is new since its previous run
+(`evidence._Seen.split`): the opening its prompt repeats from that run's prompt or reply
+(the conversation so far) is said by name, `Sees: solve's prompt (step 3)`, and a text of
+that run it quotes whole (its last reply under a turn label) is said in place,
+`- Assistant: [solve's reply (step 3)]`; only openings and quotes of at least
+`REPEAT_MIN` (200) characters are named. Shown whole, each run's prompt carried the
+whole conversation so far, so an item grew with the square of its runs: two 30-turn
+SpreadsheetBench items were 462k characters (under "Some items in full") and 1.2M (under
+"What the last edit changed"); now 207k and 206k, about the item's replies once (192k for
+the first) plus each new turn once. Read in order, the runs still say the whole
+conversation, once. A step's instructions are its settings,
 under "Each step's settings", in every call that shows items: the proposer's, the
 analysts' and memory's (`base.settled_for`; an analyst or memory request counts its
 settings as shown, clipping and table cells included, `analysts.shown_settled`). Across the

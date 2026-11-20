@@ -11,6 +11,11 @@ item. Here an item is shown with:
   step's reply) said by name -- ``sees: the input, compare's reply`` -- and only the rest
   of its prompt (its own instructions), then its full reply, each fenced with its heading
   lines escaped (`escape_headings`) so nothing in it reads as a section of the request;
+- for a step run again (a loop's next turn), what its prompt repeats from that step's
+  previous run -- the conversation so far as its opening, its last reply quoted whole --
+  said by name (``sees: solve's prompt (step 3)``), so only what is new since that run is
+  shown: an item whose step reruns with its whole history would otherwise grow with the
+  square of its runs (an item of 30 turns was 1.2M characters);
 - and, across the items of one request, an instruction text shown in an earlier item said
   as "same as item X" (`dedup`), so each distinct instruction appears once.
 
@@ -27,6 +32,10 @@ from typing import Any, Collection, Iterable, Mapping, Sequence
 #: A reply's line shorter than this (after stripping) is never matched as repeated text:
 #: a bare heading or label is not worth a reference. The task's input matches whole.
 MIN_LINE = 12
+#: What a step's prompt repeats from that step's previous run (`_Seen.split`: an opening,
+#: or a text quoted whole) is said by name only from this many characters: a shorter one
+#: is left to the line matching, as a marker would save little and say less.
+REPEAT_MIN = 200
 #: What heads the part of a step's prompt that is its own, which `dedup` looks for.
 REST = "Rest of its prompt"
 #: What heads the part of a step's prompt that its settings do not hold (`render_item`
@@ -41,7 +50,8 @@ def settled_lines(texts: Iterable[Any]) -> frozenset[str]:
                      for line in text.splitlines() if line.strip())
 #: How an item rendered here reads, said once for every call that shows items.
 TRACE_FORM = ("its input once, then each step in the order the steps ran -- what its prompt "
-              "took from the input or an earlier step's reply, said by name (`Sees:`), any "
+              "took from the input, an earlier step's reply or, for a step run again, what "
+              "its previous run's prompt or reply already showed, said by name (`Sees:`), any "
               "part of its prompt the request does not show elsewhere (`" + "Also in its "
               "prompt (not in its settings)" + "`: a reason a judge sent it back with, say; "
               "its own instructions are its settings, under the pipeline's \"Each step's "
@@ -123,10 +133,13 @@ def clip(text: Any, limit: int, *, item: Any = None, step: str = "",
 
 
 class _Seen:
-    """The lines already shown for one item, each with where it was shown."""
+    """The lines already shown for one item, each with where it was shown, and each step's
+    latest run as shown (its prompt and its reply), which that step's next run may repeat
+    as its opening."""
 
     def __init__(self) -> None:
         self.where: dict[str, str] = {}
+        self.runs: dict[str, list[tuple[str, list[str]]]] = {}
 
     def add(self, text: Any, label: str, shortest: int = MIN_LINE) -> None:
         for line in str(text or "").splitlines():
@@ -134,13 +147,98 @@ class _Seen:
             if key and len(key) >= shortest:
                 self.where.setdefault(key, label)
 
-    def split(self, prompt: Any) -> tuple[list[str], str]:
+    def ran(self, node: str, texts: Iterable[tuple[str, Any]]) -> None:
+        """Step ``node``'s run as shown: its texts (``(label, text)``: its prompt, its
+        reply), which the step's next run may open with or quote (`split` with
+        ``node``)."""
+        self.runs[node] = [(label, str(text).splitlines()) for label, text in texts if text]
+
+    def _repeat(self, lines: Sequence[str], node: str | None) -> tuple[str, int] | None:
+        """The text of step ``node``'s previous run that ``lines`` open with (its prompt
+        or its reply: the longer opening) and how many lines it covers; ``None`` when no
+        opening of at least `REPEAT_MIN` characters is repeated. Lines are compared as
+        `split` compares them, whitespace aside."""
+        best: tuple[str, int] | None = None
+        chars = 0
+        for label, earlier in self.runs.get(node, []) if node is not None else []:
+            count = 0
+            for line, before in zip(lines, earlier):
+                if line != before and _norm(line) != _norm(before):
+                    break
+                count += 1
+            # Blank lines closing the opening are left to the rest.
+            while count and not lines[count - 1].strip():
+                count -= 1
+            size = sum(map(len, lines[:count])) + count
+            if size >= REPEAT_MIN and size > chars:
+                best, chars = (label, count), size
+        return best
+
+    def _quoted(self, lines: Sequence[str], node: str | None) -> dict[int, tuple[str, int, str]]:
+        """Where ``lines`` quote a text of step ``node``'s previous run whole (its reply,
+        say, under a turn label: ``- Assistant: <its first line>``, indented or not), of
+        at least `REPEAT_MIN` characters: each start line -> (label, line count, the
+        label's text before the quote on that line)."""
+        texts = []
+        for label, earlier in self.runs.get(node, []) if node is not None else []:
+            first, last = 0, len(earlier)
+            while first < last and not earlier[first].strip():
+                first += 1
+            while last > first and not earlier[last - 1].strip():
+                last -= 1
+            body = earlier[first:last]
+            if body and sum(map(len, body)) + len(body) >= REPEAT_MIN:
+                texts.append((label, body, _norm(body[0])))
+        found: dict[int, tuple[str, int, str]] = {}
+        if not texts:
+            return found
+        normed = [_norm(line) for line in lines]
+        start = 0
+        while start < len(lines):
+            for label, body, head in texts:
+                if (start + len(body) > len(lines) or not head
+                        or not normed[start].endswith(head)):
+                    continue
+                if all(normed[start + offset] == _norm(want)
+                       for offset, want in enumerate(body[1:], 1)):
+                    lead = normed[start][:len(normed[start]) - len(head)].strip()
+                    found[start] = (label, len(body), lead)
+                    start += len(body) - 1
+                    break
+            start += 1
+        return found
+
+    def split(self, prompt: Any, node: str | None = None) -> tuple[list[str], str]:
         """What ``prompt`` took from what is shown (each source once, in order) and the
-        rest of it, its runs of shown lines said by name."""
+        rest of it, its runs of shown lines said by name. With ``node``, what the prompt
+        repeats from that step's previous run is said by that run's name: the opening it
+        repeats (the conversation so far, `_repeat`), and any text of that run it quotes
+        whole (its last reply under a turn label, `_quoted`), so a step run again shows
+        only what is new since its previous run."""
         sources: list[str] = []
         rest: list[str] = []
         last = None
-        for line in str(prompt or "").splitlines():
+        lines = str(prompt or "").splitlines()
+        repeat = self._repeat(lines, node)
+        if repeat is not None:
+            label, count = repeat
+            sources.append(label)
+            rest.append(f"[{label}]")
+            last = label
+            lines = lines[count:]
+        quoted = self._quoted(lines, node)
+        index = 0
+        while index < len(lines):
+            if index in quoted:
+                label, count, lead = quoted[index]
+                if label not in sources:
+                    sources.append(label)
+                rest.append(f"{lead} [{label}]" if lead else f"[{label}]")
+                last = None if lead else label
+                index += count
+                continue
+            line = lines[index]
+            index += 1
             label = self.where.get(_norm(line))
             if label is None:
                 rest.append(line)
@@ -159,11 +257,12 @@ class _Seen:
 
 
 def prompt_lines(seen: "_Seen", prompt: Any, settled: Collection[str] | None,
-                 cut: Any) -> list[str]:
+                 cut: Any, node: str | None = None) -> list[str]:
     """What a step's prompt took from what is shown, by name (``Sees:``), then the rest of
     it: whole (`REST`), or, with ``settled``, only what the request does not show
-    elsewhere (`ALSO`); ``cut`` clips that text."""
-    sources, rest = seen.split(prompt)
+    elsewhere (`ALSO`); ``cut`` clips that text. With ``node`` (the step), an opening
+    repeated from that step's previous run is said by that run's name (`_Seen.split`)."""
+    sources, rest = seen.split(prompt, node)
     lines = [f"Sees: {', '.join(sources)}"] if sources else []
     if settled is not None:
         rest = "\n".join(line for line in rest.splitlines()
@@ -202,8 +301,10 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
                 errors_said: Mapping[str, str] | None = None) -> str:
     """One item: its verdict, what was expected and what it gave, the grader's reason, the
     task's input once, then each step -- with ``prompts``, what it saw by name and the rest
-    of its prompt -- and its reply, every text fenced. ``prompt_chars``/``reply_chars``
-    clip (head and tail, marked, each cut in ``omissions``). ``label`` names this rendering
+    of its prompt (a step run again: what it repeats from its previous run said by that
+    run's name, `_Seen.split`) -- and its reply, every text fenced.
+    ``prompt_chars``/``reply_chars`` clip (head and tail, marked, each cut in
+    ``omissions``). ``label`` names this rendering
     of the item (a rollout) in its heading, so a "same as" reference says which one;
     without ``show_input``/``show_expected`` the input and the expected answer are left
     out (another rendering of the same item shows them), the input still read as what a
@@ -267,11 +368,16 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     for number, exchange in enumerate(exchanges, 1):
         node = str(exchange.get("node") or "agent")
         lines.append(f"{heading}# Step `{node}` ({number} of {len(exchanges)})")
-        if prompts or settled is not None:
+        shown = prompts or settled is not None
+        if shown:
             lines += prompt_lines(seen, exchange.get("prompt"), settled,
-                                  lambda text, node=node: cut(text, node, prompt_chars))
+                                  lambda text, node=node: cut(text, node, prompt_chars), node)
         lines += ["Reply:", *fenced(cut(exchange.get("response"), node, reply_chars))]
         seen.add(exchange.get("response"), f"{node}'s reply")
+        # What this run showed, which the step's next run may repeat as its opening.
+        seen.ran(node, [*([(f"{node}'s prompt (step {number})", exchange.get("prompt"))]
+                          if shown else []),
+                        (f"{node}'s reply (step {number})", exchange.get("response"))])
     if not exchanges:
         lines.append("(no step recorded a model call for this item)")
     return "\n".join(lines)

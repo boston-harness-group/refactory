@@ -741,10 +741,18 @@ def test_a_room_keeps_the_picked_items_that_fit_in_turn_and_names_the_rest():
     assert all(f"| {i} |" in table for i in ("w23", "w24"))
 
 
-def test_a_room_smaller_than_one_item_still_shows_the_first():
+def test_a_room_smaller_than_the_first_item_cuts_its_longest_texts_to_fit():
+    """The first item no longer stays whatever its size: it gives way, its longest texts
+    (the step replies) cut to one length, the input (shorter) whole; with less room than
+    it takes even at `SHOWN_TEXT_FLOOR`, it is named with the rest."""
     records = _sized_records()
-    text = _render(records, reader_findings=_CITING, shown_items_room=1)
+    room = _whole_size(records, "w20") - 4000
+    text = _render(records, reader_findings=_CITING, shown_items_room=room)
     assert _full(text) == ["w20"]
+    block = text.split("### Item w20", 1)[1]
+    assert len("### Item w20" + block.split("\n## ", 1)[0]) <= room
+    assert block.count("chars omitted]") == 4 and "Qw20 " + "q" * 1500 in block
+    assert _full(_render(records, reader_findings=_CITING, shown_items_room=1)) == []
 
 
 def test_the_room_is_not_the_reader_findings_room():
@@ -809,10 +817,12 @@ def test_a_request_within_its_room_is_the_unbounded_request():
                    request_room=len(unbounded)) == unbounded
 
 
-def test_a_tiny_room_still_shows_one_item_whole():
+def test_a_tiny_room_names_every_item_rather_than_keep_one_past_it():
     records = _sized_records()
     text = _render(records, reader_findings=_CITING, request_room=1000)
-    assert _full(text) == ["w20"]
+    assert _full(text) == []
+    assert "w20 (failed), p09 (passed), w23 (failed), w24 (failed)." in text.split(
+        "### Some items in full", 1)[1]
 
 
 class _TooLongOnce(_ReaderClient):

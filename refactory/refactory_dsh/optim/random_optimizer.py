@@ -988,12 +988,14 @@ class AutoresearchOptimizer(Optimizer):
         except Exception as exc:
             # Refused as longer than the model's context, though within its room (a
             # smaller window, denser text): asked once more at half its length, as the
-            # analysts' calls are (`_ask`). Only the items shown whole give way.
+            # analysts' calls are (`_ask`). The items' texts give way: the items in full
+            # and the last edit's blocks (`ProposalContext.render`), each cut to fit or
+            # named, whatever their sizes.
             if (isinstance(exc, _fatal())
                     or not analysts.context_overflow(f"{type(exc).__name__}: {exc}")):
                 raise
             smaller = replace(ctx, request_room=max(1, len(question) // 2 - len(suffix)),
-                              shown_items_room=0)
+                              shown_items_room=0, edit_change_limit=0)
             shorter = f"{smaller.render()}{suffix}"
             if len(shorter) >= len(question):
                 raise  # nothing gave way: the same request would be refused again
