@@ -376,30 +376,34 @@ def test_a_crashed_solve_call_gets_five_attempts(tmp_path, sb_env, crashes):
         _no_answer(record)
 
 
-def _scripted_walk(tmp_path: Path, dsh: Any) -> list[dict]:
-    """The val item on the walker through the real model client and a scripted ``dsh``."""
+def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                   expect_ok: bool = True) -> tuple[list[dict], str]:
+    """A part on the walker through the real model client and a scripted ``dsh``: its
+    records and the run's error (empty when the run succeeded)."""
     mode, state = _state()
     work = tmp_path / "walk-dsh"
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
-                                       if p != "train"}, train_ids=["t1"])
-    task_module.write_subset(work, "val", 0.0, gold_feedback=False)
+                                       if p != "train"}, train_ids=list(train))
+    task_module.write_subset(work, part, 0.0, gold_feedback=False)
     result = WalkerEvaluator(model=dsh.client(), project=Path("."), max_steps=4000) \
         .evaluate(mode, state, work)
-    assert result.exit_ok, result.error
-    return result.item_records
+    assert result.exit_ok is expect_ok, result.error
+    return result.item_records, "" if result.exit_ok else str(result.error)
 
 
-def _scripted_spine(tmp_path: Path, dsh: Any) -> list[dict]:
-    """The val item on the spine, its solve step dispatched to the real worker
-    (`worker_node`) with the same scripted ``dsh``, as a run on DSH lowers it."""
+def _scripted_spine(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                    expect_ok: bool = True) -> tuple[list[dict], str]:
+    """A part on the spine, its solve step dispatched to the real worker (`worker_node`)
+    with the same scripted ``dsh``, as a run on DSH lowers it: its records and the run's
+    error (its last failure; empty when the run succeeded)."""
     from refactory_dsh import lowering, workers
 
     mode, state = _state()
     work = tmp_path / "spine-dsh"
     work.mkdir(parents=True)
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
-                                       if p != "train"}, train_ids=["t1"])
-    task_module.write_subset(work, "val", 0.0, gold_feedback=False)
+                                       if p != "train"}, train_ids=list(train))
+    task_module.write_subset(work, part, 0.0, gold_feedback=False)
     lowering.write_declarations(state, work)
 
     def dispatched(workflow: Any) -> Any:
@@ -416,31 +420,45 @@ def _scripted_spine(tmp_path: Path, dsh: Any) -> list[dict]:
         [str(NODE), "--import", "tsx/esm", str(DRAIN), str(graph_path), str(work),
          str(REPO_ROOT / ".venv/bin/python"), "120000", str(tmp_path / "responses.json")],
         capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, env=env)
-    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-3000:]
-    return json.loads((work / "facts.json").read_text())["item_scores"]
+    assert (proc.returncode == 0) is expect_ok, proc.stdout[-2000:] + proc.stderr[-3000:]
+    records = json.loads((work / "facts.json").read_text())["item_scores"]
+    if proc.returncode == 0:
+        return records, ""
+    events = [json.loads(line) for line in
+              (work / ".refactory/events.jsonl").read_text().splitlines()]
+    failures = [e["last_failure"]["error"] for e in events if e.get("last_failure")]
+    return records, failures[-1] if failures else proc.stdout + proc.stderr
 
 
 #: What the lab's claude_code worker said for every call while it was logged out.
 NOT_LOGGED_IN = ("dsh: worker error: Product subagent failure (product: Claude Code; stage: "
-                 "query-run; category: invalid-result; exit code: 1): Not logged in · Please "
-                 "run /login")
+                 "query-run; category: invalid-result; exit code: 1): the result was an error "
+                 "after 0 output tokens: Not logged in · Please run /login")
+
+needs_spine = pytest.mark.skipif(
+    shutil.which("node") is None or not (Path(__file__).resolve().parents[2] / "packages/"
+                                         "workflow/workflow-spine/node_modules/"
+                                         "@deepseek-ai/cordis").exists(),
+    reason="the spine drain needs Node and the installed workspace")
+RUNTIMES = ["walker", pytest.param("spine", marks=needs_spine)]
 
 
-@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def _scripted(runtime: str, tmp_path: Path, dsh: Any, **kwargs: Any) -> tuple[list[dict], str]:
+    run = _scripted_walk if runtime == "walker" else _scripted_spine
+    return run(tmp_path, dsh, **kwargs)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_failed_model_call_ends_the_item_and_an_empty_reply_does_not(tmp_path, sb_env,
                                                                        runtime):
     """[both runtimes] The first call answers with nothing: SkillOpt's no-code message is
-    the next turn. Every session of the second call fails (the lab's logged-out worker):
-    the item ends with no answer, its first turn's reply is not run again, and no
-    "No Python code block" turn is made up from the failure."""
-    from test_crashed_step_retry import Scripted
+    the next turn. Every session of the second call crashes (a product failure): the item
+    ends with no answer, its first turn's reply is not run again, and no "No Python code
+    block" turn is made up from the failure."""
+    from test_crashed_step_retry import WORKER_CRASH, Scripted
 
-    if runtime == "spine" and (NODE is None or not (
-            REPO_ROOT / "packages/workflow/workflow-spine/node_modules/@deepseek-ai/cordis").exists()):
-        pytest.skip("the spine drain needs Node and the installed workspace")
-    dsh = Scripted(tmp_path / "dsh", {"": ["", *[NOT_LOGGED_IN] * 5, _good(7)]})
-    run = _scripted_walk if runtime == "walker" else _scripted_spine
-    (record,) = run(tmp_path, dsh)
+    dsh = Scripted(tmp_path / "dsh", {"": ["", *[WORKER_CRASH] * 5, _good(7)]})
+    (record,), _ = _scripted(runtime, tmp_path, dsh)
     _no_answer(record)
     prompts = dsh.prompts()
     assert len(prompts) == 6, prompts
@@ -448,6 +466,65 @@ def test_a_failed_model_call_ends_the_item_and_an_empty_reply_does_not(tmp_path,
     # The empty reply's turn: SkillOpt's message, then the five failed sessions of one call.
     assert len(set(prompts[1:])) == 1 and port.NO_CODE in prompts[1]
     assert prompts[1].count(port.NO_CODE) == 1
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_earlier_turns_output_is_not_graded_after_a_failed_call(tmp_path, sb_env, runtime):
+    """[both runtimes] The first turn saves the right answer, then raises; every session
+    of the next call crashes. As in SkillOpt (rollout.py:763-767, ``llm-call-failed``
+    before grading), the item has no answer: the saved file is not graded."""
+    from test_crashed_step_retry import WORKER_CRASH, Scripted
+
+    saves_then_raises = _good(7).replace("wb.save(OUTPUT_PATH)\n",
+                                         "wb.save(OUTPUT_PATH)\nraise ValueError('after saving')\n")
+    assert "after saving" in saves_then_raises
+    dsh = Scripted(tmp_path / "dsh", {"": [saves_then_raises, *[WORKER_CRASH] * 5]})
+    (record,), _ = _scripted(runtime, tmp_path, dsh)
+    _no_answer(record)
+    prompts = dsh.prompts()
+    assert len(prompts) == 6 and "after saving" in prompts[1], prompts
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_logged_out_worker_fails_the_item_at_once(tmp_path, sb_env, runtime):
+    """[both runtimes] A logged-out worker (the lab's Claude Code with no login) is a
+    setup failure, not a crash: the next session would be refused the same way, so it is
+    not retried. t1's item fails with an error naming it, and no "No Python code block"
+    turn is made up; t2, whose call answers, is graded as usual."""
+    from test_crashed_step_retry import Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"Put 42 in B1": [NOT_LOGGED_IN], "": [_good(9)]})
+    records, _ = _scripted(runtime, tmp_path, dsh, part="train", train=("t1", "t2"))
+    by_id = {r["id"]: r for r in records}
+    assert set(by_id) == {"t1", "t2"}, records
+    t1 = by_id["t1"]
+    assert len(dsh.prompts("Put 42 in B1")) == 1  # one session: never retried
+    assert (t1["passed"], t1["score"]) == (False, 0.0), t1
+    assert "Not logged in" in (t1["error_text"] or ""), t1
+    assert t1["error_text"].startswith("solve: CompletionFailed: "), t1
+    assert t1["error_kind"] == "RuntimeError", t1
+    assert not t1.get("missing_steps"), t1
+    assert port.NO_CODE not in json.dumps(t1)
+    assert by_id["t2"]["passed"] and by_id["t2"]["error_kind"] is None, by_id["t2"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_run_whose_worker_is_logged_out_fails(tmp_path, sb_env, runtime):
+    """[both runtimes] With every item refused by a logged-out worker, the run fails
+    ("all ... items failed"), so the outer loop counts a run failure, after one session."""
+    from test_crashed_step_retry import Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"": [NOT_LOGGED_IN]})
+    records, error = _scripted(runtime, tmp_path, dsh, expect_ok=False)
+    assert "all 1 items failed" in error, error[-2000:]
+    assert len(dsh.prompts()) == 1
+    assert not any(port.NO_CODE in p for p in dsh.prompts())
+    if runtime == "walker":
+        # On the spine, a drain that asks again after the all-items-failed end runs the
+        # pass's normal end, which grades it over the error record (a separate spine
+        # matter, seen here: index.ts returns before endPass); the walker's is the error.
+        (record,) = records
+        assert "Not logged in" in (record["error_text"] or ""), record
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"),

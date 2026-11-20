@@ -45,10 +45,23 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
   is none, so prose comes back as a SyntaxError, not as "no code"), and runs it with
   SkillOpt's runner. An error is the next user message. A solve call that ended without
-  an answer (all 5 sessions crashed, or it ran out of output) is not a reply: the item
-  ends there with no answer (score 0, `fail_reason` `no answer: solve crashed in all 5
-  sessions`, the failure under `missing_steps`), as a crashed step does in any mode. Only
-  a call that answered with nothing gets SkillOpt's "No Python code block" message.
+  an answer is not a reply, and only a call that answered with nothing gets SkillOpt's
+  "No Python code block" message:
+  - all 5 sessions crashed (a worker or product failure): the item ends there with no
+    answer (score 0, `fail_reason` `no answer: solve crashed in all 5 sessions`, the
+    failure under `missing_steps`), as a crashed step does in any mode;
+  - it ran out of output (only possible with `max_completion_tokens` set; not retried):
+    the same, `no answer: solve reached its output limit without answering`;
+  - the worker was refused for its setup (a key, a model name, a Claude Code worker that
+    is not logged in): not retried, the item fails with that error (`error_text`
+    `solve: CompletionFailed: ...`, on both runtimes); a run whose every item fails so
+    fails ("all N items failed").
+
+  Either way the prediction an earlier turn wrote is not graded, as in SkillOpt: a call
+  that fails after its retries raises out of `run_multi`, and `process_one_codegen`
+  returns `llm-call-failed` before grading (rollout.py:763-767). SkillOpt retries a
+  logged-out call as it does any other; here it is not retried, since the next session
+  is refused the same way.
 - `gold_check` is the train-only gold feedback node (below); `next_turn` ends the item on
   a clean run, unless that node says the output is wrong.
 - `turn_gate` loops while turns (30) remain and more than 10 s remain before the harness

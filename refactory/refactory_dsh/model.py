@@ -448,6 +448,8 @@ SETUP_FAILURE_MARKERS = (
     "not_found_error",
     "model not found",
     "prompt is too long",
+    # Claude Code with no login (no Vertex/API env): every session is refused the same way.
+    "not logged in",
 )
 
 

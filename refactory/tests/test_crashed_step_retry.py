@@ -548,6 +548,9 @@ def test_which_failures_are_crashes():
     assert cause_kind("dsh: max-tokens: the model reached its output token limit") == "output_limit"
     assert cause_kind(WORKER_CRASH) == "worker"
     assert cause_kind("dsh: provider error: 401 authentication failed") == "setup"
+    assert cause_kind("dsh: worker error: Product subagent failure (product: Claude Code; "
+                      "stage: query-run; category: invalid-result; exit code: 1): the result "
+                      "was an error after 0 output tokens: Not logged in · Please run /login") == "setup"
     assert cause_kind("TRANSPORT: socket hang up") == "transport"
     # A provider failure a product result reports is the wire's, not a crash.
     assert cause_kind("dsh: worker error: Product subagent failure (product: Claude Code; "
