@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from refactory_dsh.optim.random_optimizer import extract_json, reply_object
+from refactory_dsh.optim.random_optimizer import answer_json, extract_json, reply_object
 
 
 def test_a_fenced_answer_beats_a_prose_example_before_it():
@@ -65,3 +65,34 @@ def test_a_broken_fenced_answer_is_refused_not_read_for_a_nested_object():
     reply = '```json\n{"findings": [{"where": {"step": "a"}}, ], "verdict": "x"}\n```'
     with pytest.raises(ValueError, match="not valid JSON"):
         reply_object(reply)
+
+
+# A reply that quotes a code fence inside its strings, as SpreadsheetBench's analysts do
+# ("a single ```python``` block"): the fence in a string is not a fence (OL-s42, where
+# two analysts and the failure merge were refused for it).
+_QUOTED = ('{"findings": [{"finding": "returns a single ```python``` block",\n'
+           '  "where": {"nodes": ["solve"], "knobs": ["skill"]},\n'
+           '  "evidence": ["```python\\nimport openpyxl\\n```"]},\n'
+           ' {"finding": "keeps INPUT_PATH", "where": {"nodes": ["solve"]}}]}')
+
+
+@pytest.mark.parametrize("reply", [
+    "```json\n" + _QUOTED + "\n```",  # fenced, as the analysts answer
+    _QUOTED,  # bare, as the merges answer
+    # bare, with a lone quoted fence first: the old split read the "where" object
+    _QUOTED.replace("a single ```python``` block", "an unclosed ``` fence"),
+    "My answer:\n```json\n" + _QUOTED + "\n```\nDone.",
+])
+def test_a_fence_quoted_inside_a_string_does_not_cut_the_answer(reply):
+    for read in (reply_object, extract_json):
+        found = read(reply)
+        assert len(found["findings"]) == 2
+        assert found["findings"][1]["finding"] == "keeps INPUT_PATH"
+
+
+def test_a_proposer_answer_quoting_a_fence_in_a_fenced_reply_is_read_whole():
+    answer = ('{"proposals": [{"edits": [{"op": "set_knob", "knob": "skill", '
+              '"value": "Return one ```python``` block:\\n```python\\nx = 1\\n```"}]}]}')
+    found, problem = answer_json("```json\n" + answer + "\n```")
+    assert problem == ""
+    assert found["proposals"][0]["edits"][0]["knob"] == "skill"
