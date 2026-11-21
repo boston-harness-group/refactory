@@ -314,9 +314,11 @@ def test_the_spine_worker_reaches_claude_code_with_the_node_settings(tmp_path, f
 
 
 def _refused_sent(sent: dict, workdir: Path) -> Path:
-    """What every refused session sends: Claude Code's own tools and settings handling,
-    its dontAsk, no plan-mode tools, and a fresh empty directory that is gone after."""
-    assert sent["tools"] is None and sent["mcpServers"] is None and sent["strictMcpConfig"] is None
+    """What every refused session sends: Claude Code's own tools, its dontAsk, no
+    settings or MCP servers, no plan-mode tools, and a fresh empty directory that is gone
+    after."""
+    assert sent["tools"] is None
+    assert sent["settingSources"] == [] and sent["mcpServers"] == {} and sent["strictMcpConfig"] is True
     assert sent["permissionMode"] == "dontAsk"
     assert set(sent["disallowedTools"]) == {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}
     cwd = Path(sent["cwd"])
@@ -340,7 +342,7 @@ def test_refused_offers_claude_codes_tools_under_dont_ask_in_an_empty_directory(
     assert sent["prompt"] == "Say a fruit"
     assert sent["systemPrompt"] == {"type": "preset", "preset": "claude_code",
                                     "append": "Always answer with the word PINEAPPLE"}
-    assert sent["settingSources"] == ["project"] and sent["effort"] == "medium"
+    assert sent["effort"] == "medium"
     cwd = _refused_sent(sent, workdir)
     receipt = _receipt(workdir)
     assert receipt["requested_tool_policy"] == "refused"
@@ -348,15 +350,22 @@ def test_refused_offers_claude_codes_tools_under_dont_ask_in_an_empty_directory(
     assert receipt["tools_offered"] == ["Bash", "Read", "Write"]
     assert receipt["tool_policy_source"] == "claude-code-dont-ask"
     assert receipt["working_directory"] == str(cwd)
+    assert receipt["setting_sources_ignored"] == ["project"]
+    assert receipt["actual_route"]["setting_sources"] == []
     assert "tools_permitted" not in receipt
 
 
-def test_refused_loads_no_settings_unless_the_route_names_some(tmp_path, fake_sdk):
+def test_refused_loads_no_settings_whatever_the_route_names(tmp_path, fake_sdk):
+    """Project settings are found in the folders above the empty directory too (a shared
+    /tmp), so none load; with none asked for, none are recorded as ignored."""
     workdir = tmp_path / "run"
     _client(tmp_path).with_tool_policy("refused").complete("Say a fruit", workdir=workdir)
-    sent = json.loads(fake_sdk.read_text())
-    assert sent["settingSources"] == []
-    _refused_sent(sent, workdir)
+    _refused_sent(json.loads(fake_sdk.read_text()), workdir)
+    assert "setting_sources_ignored" not in _receipt(workdir)
+    _client(tmp_path, setting_sources="user,project").with_tool_policy("refused").complete(
+        "Say a fruit", workdir=tmp_path / "user")
+    _refused_sent(json.loads(fake_sdk.read_text()), tmp_path / "user")
+    assert _receipt(tmp_path / "user")["setting_sources_ignored"] == ["user", "project"]
 
 
 def test_the_spine_worker_reaches_claude_code_with_refused_tools(tmp_path, fake_sdk):
@@ -374,7 +383,6 @@ def test_the_spine_worker_reaches_claude_code_with_refused_tools(tmp_path, fake_
     sent = json.loads(fake_sdk.read_text())
     assert sent["prompt"].startswith("Say a fruit")
     assert sent["systemPrompt"]["append"] == "Always answer with the word PINEAPPLE"
-    assert sent["settingSources"] == ["project"]
     _refused_sent(sent, workdir)
     assert (workdir / "answer.txt").read_text().strip() == "PINEAPPLE"
     assert _receipt(workdir)["enforced_tool_policy"] == "refused"
@@ -382,7 +390,7 @@ def test_the_spine_worker_reaches_claude_code_with_refused_tools(tmp_path, fake_
 
 @pytest.mark.parametrize("route", [
     {"permission_mode": "acceptEdits"},
-    {"permission_mode": "dontAsk", "setting_sources": "user,project"},
+    {"permission_mode": "bypassPermissions"},
 ])
 def test_the_adapter_itself_refuses_a_refused_session_it_cannot_refuse(tmp_path, fake_sdk, monkeypatch,
                                                                      route):

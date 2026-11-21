@@ -19,9 +19,11 @@ a third of its turns.
 
 Run settings, as SkillOpt's runs used them, are not part of the graph: the
 ``claude_code`` worker, ``claude-opus-4-6`` at effort ``medium``, permission mode
-``dontAsk`` (which ``refused`` requires), setting sources ``project`` (never ``user``,
-which ``refused`` refuses). SkillOpt's ran the lab's own ``claude`` (2.1.299); a route's
-``claude_executable`` picks it over the SDK's bundled one.
+``dontAsk`` (which ``refused`` requires). A refused step loads no settings whatever the
+route names (SkillOpt's ``project`` found none in its empty directory). Its Claude Code
+is pinned to SkillOpt's, 2.1.299 (`Solver.claude_code_versions`): a run whose solve step
+would run another (the SDK's bundled 2.1.281, say) is refused before it starts, so name
+it with ``--claude-executable``.
 
 **Deviations from SkillOpt as shipped**, each recorded where it is decided:
 
@@ -45,7 +47,9 @@ which ``refused`` refuses). SkillOpt's ran the lab's own ``claude`` (2.1.299); a
    from reading the answer (none of so-s42's generated code mentions the golden
    file, ``listdir`` or ``glob``; port spec §3).
 5. *Tools*: refused, as SkillOpt's were (above), except that a tool which needs no
-   permission finds an empty directory where SkillOpt's found its system-prompt file.
+   permission finds an empty directory where SkillOpt's found its system-prompt file, and
+   a write to Claude Code's memory folder succeeds for the session (SkillOpt's home was
+   read-only, so it failed there); the folder goes with the session.
 """
 from __future__ import annotations
 
@@ -61,6 +65,9 @@ from . import skillopt_port as port
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
 
+#: The Claude Code SkillOpt's runs used (the lab's ``claude --version``): its system
+#: prompt and tool text are what the solve call is compared with.
+SKILLOPT_CLAUDE_CODE = "2.1.299"
 #: SkillOpt's ``max_turns`` (configs/spreadsheetbench/default.yaml:31).
 MAX_TURNS = 30
 #: The solve node's system prompt: the system file, then the skill section.
@@ -156,6 +163,10 @@ class Solver(nn.Mode):
         g.connect("turn_gate", "frame", condition="reloop")
         g.connect("turn_gate", "finalize", condition="proceed")
         return g
+
+    def claude_code_versions(self) -> dict[str, str]:
+        """The solve step runs on SkillOpt's Claude Code (`SKILLOPT_CLAUDE_CODE`)."""
+        return {"solve": SKILLOPT_CLAUDE_CODE}
 
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass, the train-feedback node (V17's channel) and the item's outcome."""

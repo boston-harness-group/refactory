@@ -1006,7 +1006,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `capabilities` | `(backend: 'str') -> 'dict[str, Any]'` |
 | function | `claude_code_compaction` | `(runtime_root: 'Path \| str') -> 'dict[str, Any] \| None'` |
 | function | `claude_code_minimum` | `(model: 'str') -> 'str'` |
-| function | `claude_code_preflight` | `(model: 'Any', runtime_root: 'Path \| str \| None' = None, *, roles: 'dict[str, str] \| None' = None) -> 'None'` |
+| function | `claude_code_preflight` | `(model: 'Any', runtime_root: 'Path \| str \| None' = None, *, roles: 'dict[str, str] \| None' = None, pins: 'dict[str, str] \| None' = None) -> 'None'` |
 | function | `claude_code_version` | `(executable: 'str') -> 'str'` |
 | function | `claude_executable_choice` | `(route: 'dict[str, Any]') -> 'str'` |
 | function | `environment` | `(context: 'dict[str, Any] \| None') -> 'dict[str, str]'` |

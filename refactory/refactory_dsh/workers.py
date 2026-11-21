@@ -302,7 +302,8 @@ _CLAUDE_EXECUTABLE_FIX = (f'--claude-executable /path/to/claude, {CLAUDE_EXECUTA
 
 
 def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
-                          roles: dict[str, str] | None = None) -> None:
+                          roles: dict[str, str] | None = None,
+                          pins: dict[str, str] | None = None) -> None:
     """Refuse, before the run directory exists, a claude_code route whose Claude Code
     cannot run its model: a chosen executable that is missing, not executable or whose
     version is unreadable, or a version older than the model needs
@@ -314,6 +315,10 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
     over its own role's. Without a graph the run route, each role route and each node
     route (as role ``worker``) are checked. Only a Claude Code problem is refused: a
     combination that is not a valid route is left for dispatch to report.
+
+    ``pins`` maps an agent node to the Claude Code version it must run on
+    (`Mode.claude_code_versions`): with ``roles``, a claude_code route for that node whose
+    Claude Code reports another version, or none, is refused.
     """
     # Another ModelClient (a test's fake, a library caller's own) carries no route
     # config to read; its own readiness contract applies.
@@ -325,10 +330,11 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
 
     def resolved(where: str, role: str = 'worker', node: str = '') -> tuple[str, dict[str, Any]] | None:
         try:
-            return where, resolve_route(base, role=role, node=node, role_routes=role_routes,
-                                        node_routes=node_routes)
+            route = resolve_route(base, role=role, node=node, role_routes=role_routes,
+                                  node_routes=node_routes)
         except ValueError:
             return None
+        return where, {**route, '_node': node}
 
     if roles is None:
         candidates = [resolved('the run', role=''),
@@ -359,24 +365,37 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
                              f'executable')
         model_id = route.get('model', '')
         minimum = claude_code_minimum(model_id)
-        if not minimum:
+        pinned = (pins or {}).get(route['_node'], '') if roles is not None else ''
+        if not minimum and not pinned:
             continue
         if chosen:
             if chosen not in versions:
                 versions[chosen] = claude_code_version(chosen)
             version, described = versions[chosen], chosen
             if not version:
+                needs = (f'model {model_id} needs Claude Code {minimum} or newer' if minimum
+                         else f'its mode pins Claude Code {pinned}')
                 raise ValueError(f'the claude_code worker for {where} is set to run Claude Code at {chosen}, '
-                                 f'but `{chosen} --version` reported no version, and model {model_id} needs '
-                                 f'Claude Code {minimum} or newer. Point {_CLAUDE_EXECUTABLE_FIX} at a '
-                                 f'Claude Code executable')
+                                 f'but `{chosen} --version` reported no version, and {needs}. Point '
+                                 f'{_CLAUDE_EXECUTABLE_FIX} at a Claude Code executable')
         else:
             bundled = bundled_claude_code(root)
             if not bundled or not bundled['version']:
+                if pinned:
+                    raise ValueError(f'the claude_code worker for {where} must run Claude Code {pinned}, '
+                                     f'which its mode pins, and no Claude Code is named or bundled; point '
+                                     f'{_CLAUDE_EXECUTABLE_FIX} at Claude Code {pinned}')
                 continue  # dispatch reports a missing adapter; nothing to compare against
             version = bundled['version']
             described = (f'{bundled["path"] or "the Agent SDK"} (bundled with {CLAUDE_AGENT_SDK} '
                          f'{bundled["sdk_version"]})')
+        if pinned and version != pinned:
+            raise ValueError(f'the claude_code worker for {where} would run Claude Code {version} at '
+                             f'{described}, and its mode pins Claude Code {pinned} (its system prompt '
+                             f'and tool text change between versions). Point {_CLAUDE_EXECUTABLE_FIX} '
+                             f'at Claude Code {pinned}')
+        if not minimum:
+            continue
         found = _version_tuple(version)
         if found is None:
             continue  # a version string with no X.Y.Z says nothing to compare

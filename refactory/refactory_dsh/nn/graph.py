@@ -105,8 +105,9 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
 def retry_safe(node: "Node") -> bool:
     """Whether running ``node`` again in a fresh session cannot start from what a failed
     session left: its only effect is its own declared report files (``outputs_only``),
-    each attempt gets a fresh workspace, or its model can change nothing (``tool_policy``
-    ``none`` or ``refused``), so its only effect is the reply the runtime captures."""
+    each attempt gets a fresh workspace, or its model changes nothing that outlives its
+    session (``tool_policy`` ``none`` or ``refused``), so its only effect is the reply the
+    runtime captures."""
     return bool(node.outputs_only or node.workspace is not None
                 or node.tool_policy in TOOL_POLICIES)
 

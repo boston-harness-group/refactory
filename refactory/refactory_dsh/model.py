@@ -1771,7 +1771,8 @@ class DshModelClient:
 
     def _record_teardown(self, run_dir: Path, detail: str) -> None:
         who = self._node_id or "a model call"
-        tools = not tool_policies.no_effect(getattr(self, "_tool_policy", ""))
+        # A refused session may run read-only commands, so it may have processes too.
+        tools = getattr(self, "_tool_policy", "") != "none"
         # With tools, the session's tool processes may outlive the failed cleanup.
         self._emit(run_dir, TEARDOWN_EVENT, state="warning", error=detail[:500],
                    tools=tools, cleanup="unconfirmed",
@@ -1827,10 +1828,10 @@ class DshModelClient:
         """When (monotonic) the session last showed life: its model's last frame
         (`_last_frame`), or ``now`` while a tool command it started after that frame is
         still running. A session with no tools (``tool_policy`` none) has only its
-        stream: a process beneath it is no sign of the model's life. Nor has one whose
-        every command is refused (``refused``)."""
+        stream: a process beneath it is no sign of the model's life. A refused session
+        (``refused``) may run a read-only command (``sleep``, say), which counts."""
         written = self._last_frame(started_epoch)
-        if (not tool_policies.no_effect(getattr(self, "_tool_policy", ""))
+        if (getattr(self, "_tool_policy", "") != "none"
                 and tool_command_running_since(pid, written)):
             return now
         return now - max(0.0, time.time() - written)

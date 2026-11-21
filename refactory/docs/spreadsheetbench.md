@@ -44,8 +44,10 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
 - `solve` is one model call whose reply is the node's output. It runs as SkillOpt's
   `claude -p` did: Claude Code's own system prompt with SkillOpt's text appended, and
   Claude Code's default tools offered and refused by `dontAsk` (`tool_policy="refused"`,
-  [architecture](architecture.md)), in a fresh empty directory. Its route must be the
-  `claude_code` worker with permission mode `dontAsk` and no `user` settings.
+  [architecture](architecture.md)), in a fresh empty directory, with no settings loaded.
+  Its route must be the `claude_code` worker with permission mode `dontAsk`, and its
+  Claude Code must be SkillOpt's, 2.1.299: `refactory optimize` refuses another (the
+  SDK's bundled 2.1.281 included), so name it with `--claude-executable`.
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
   is none, so prose comes back as a SyntaxError, not as "no code"), and runs it with
   SkillOpt's runner. An error is the next user message. A solve call that ended without
@@ -131,12 +133,16 @@ Where neither can run, code is not run.
    the pass's first step runs.
 3. **Tools**: refused, as SkillOpt's were. SkillOpt sends no tool schemas of its own,
    but its CLI calls carried Claude Code's default tools under `dontAsk`, which refused
-   any command, write or read outside the call's empty directory (60% of so-s43's target
-   calls tried one, nearly all Bash). A tool that needs no permission (Read in that
-   directory, ToolSearch, a subagent under the same rules) runs in both; here the
-   directory is empty, where SkillOpt's held its system-prompt file. With no tools at all,
-   as the port first ran, the model wrote tool calls and invented their output as text in
-   about a third of its turns.
+   any write, non-read-only command or read outside the call's empty directory (60% of
+   so-s43's target calls had a refusal, nearly all Bash). What needs no permission (a
+   read-only command, Read in that directory, ToolSearch, a subagent under the same
+   rules) runs in both; here the directory is empty, where SkillOpt's held its
+   system-prompt file. A write to Claude Code's memory folder succeeds here for the
+   session and is removed with it; in SkillOpt's runs the home was read-only, so it
+   failed. With no tools at all, as the port first ran, the model wrote tool calls and
+   invented their output as text, at a rate that varied by run: 99 of 304 train solve
+   replies in the clean OL-s43 run, 84 of 273 in SO-s42, 5 of 43 in the val start-skill
+   pass.
 4. **Interpreter**: pandas installed in the pinned environment, not added through
    `PYTHONPATH`; `PYTHONPATH` and `PYTHONHOME` are not passed to model code.
    `INPUT_PATH` names a copy of the input and the code runs in an empty working

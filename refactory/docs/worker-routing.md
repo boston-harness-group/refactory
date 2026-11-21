@@ -34,7 +34,8 @@ Claude Code settings it loads (as `claude --setting-sources`), at the run level 
 the file or a route map, in an optimization profile's `setting_sources`, or with
 `--setting-sources` on `refactory ceo`. Unset, it loads all of
 them, or none for a node with `tool_policy="none"` or `"refused"`; set, it replaces
-either default, and such a node still gets no tools (a `refused` node refuses `user`). The worker record's `actual_route` shows the
+either default, and such a node still gets no tools (a `refused` node loads none, whatever
+the route says). The worker record's `actual_route` shows the
 effort and settings sources Claude Code was started with, and `enforced_tool_policy`
 is set only once the runtime has applied the policy.
 

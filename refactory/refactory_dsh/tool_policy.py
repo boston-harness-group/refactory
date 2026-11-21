@@ -1,22 +1,24 @@
 """The tool policies an agent step may declare (``tool_policy``).
 
-Both make a step whose model can change nothing: its reply is its one output, it reads
-only what its prompt inlines, and asking it again repeats no work. They differ in what
-the model is shown:
+Both make a step whose model changes nothing that outlives its session: its reply is its
+one output, it reads only what its prompt inlines, and asking it again repeats no work.
+They differ in what the model is shown:
 
 ``none``
     No tools at all: the request carries no tool definitions (DSH's no-tools plugin,
     Claude Code's ``tools: []``).
 ``refused``
     Claude Code's default tools are offered, and Claude Code's own ``dontAsk``
-    permission mode refuses every call that needs permission (a command, a write, a read
-    outside its directory) with its usual "Permission to use ... has been denied"
-    result -- what ``claude -p --permission-mode dontAsk`` does, as SkillOpt's harness
-    ran it. The session works in a fresh empty directory, also its one added directory
-    (``--add-dir``), so a tool that needs no permission (Read or Glob there, ToolSearch,
-    a subagent under the same rules) finds nothing. Only the ``claude_code`` backend,
-    with ``permission_mode`` ``dontAsk``, and never with user settings, whose allow rules
-    could let a tool run.
+    permission mode refuses every call that needs permission (a write, a command that is
+    not read-only, a read outside its directory) with its usual "Permission to use ...
+    has been denied" result -- what ``claude -p --permission-mode dontAsk`` does, as
+    SkillOpt's harness ran it. What needs no permission still runs: a read-only command
+    (``pwd``, ``ls``, ``sleep``), Read in its directory, ToolSearch, a subagent under the
+    same rules, and a write to the memory folder Claude Code's prompt names. The session
+    works in a fresh empty directory, also its one added directory (``--add-dir``), and
+    loads no settings, CLAUDE.md or MCP servers whatever the route names (project ones
+    are also found in the folders above that directory); its folders go with it. Only
+    the ``claude_code`` backend, with ``permission_mode`` ``dontAsk``.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ REFUSED_ROUTE_MODES = (REFUSED_PERMISSION_MODE, "default")
 
 
 def no_effect(policy: Any) -> bool:
-    """Whether ``policy`` makes a step whose model can change nothing (`POLICIES`)."""
+    """Whether ``policy`` makes a step whose model changes nothing that outlives its session (`POLICIES`)."""
     return policy in POLICIES
 
 
@@ -63,7 +65,4 @@ def route_refusal(policy: Any, route: dict[str, Any]) -> str | None:
         if mode not in REFUSED_ROUTE_MODES:
             return (f"tool_policy 'refused' needs permission_mode {REFUSED_PERMISSION_MODE!r}, "
                     f"whose refusal it is; the route has {mode!r}")
-        if "user" in str(route.get("setting_sources") or "").split(","):
-            return ("tool_policy 'refused' cannot load user settings (setting_sources has "
-                    "'user'): their allow rules could let a tool run")
     return None
