@@ -26,9 +26,9 @@ from typing import Any, Iterable
 #: A line shorter than this is not counted as repeated text (a label, a short heading, a
 #: per-item status line that reads the same for different items).
 REPEAT_LINE = 60
-#: The renderers' own short pointers, which say where a repeated text was shown: not
-#: repeated content themselves.
-POINTERS = ("Sees: ", "Rest of its prompt: same as", "[a line of ", "[as in ")
+#: The renderers' own short pointers, which say where a repeated text was shown, and
+#: their per-step labels (how a step ran, ``Ran as:``): not repeated content themselves.
+POINTERS = ("Sees: ", "Rest of its prompt: same as", "[a line of ", "[as in ", "Ran as: ")
 
 
 def _outside_fences(text: str) -> list[str]:

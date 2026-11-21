@@ -7,6 +7,12 @@ reply grows with the square of its steps, and a batch repeats each instruction o
 item. Here an item is shown with:
 
 - the task's input once;
+- what actually ran apart from what a model wrote: the steps the harness executed as code
+  (its op and code-gate visits) named once with their counts (`harness_line`), and under
+  each model step how it ran (`ran_as`: a model's reply, the tools its graph gave it and
+  its real tool calls where the harness records them), from the record and the graph alone
+  -- never from reading a reply -- so a tool call or a grader a model wrote into its own
+  reply reads as that model's claim (`CLAIMS`);
 - for each step, what its prompt took from what is already shown (the input, an earlier
   step's reply) said by name -- ``sees: the input, compare's reply`` -- and only the rest
   of its prompt (its own instructions), then its full reply, each fenced with its heading
@@ -23,7 +29,8 @@ item. Here an item is shown with:
 
 Nothing is lost: every reply and every distinct instruction text appears once in the
 request (``tests/test_evidence.py`` checks it). Generic: it compares lines of text, with no
-knowledge of the task or the pipeline.
+knowledge of the task; of the pipeline it knows only each agent step's tools, which the
+loop sets on the records (`with_step_sources`).
 """
 
 from __future__ import annotations
@@ -65,8 +72,92 @@ def settled_lines(texts: Iterable[Any]) -> frozenset[str]:
     normalised as `render_item` compares a step's prompt with them."""
     return frozenset(_norm(line) for text in texts if isinstance(text, str)
                      for line in text.splitlines() if line.strip())
+#: What heads a step's provenance line (`render_item`): how the step ran, from what the
+#: harness records -- a model's reply, with the tools its graph gave it.
+RAN_AS = "Ran as"
+#: What heads an item's line of the steps the harness executed (`harness_line`).
+EXECUTED = "Executed by the harness"
+#: The record field the loop sets (`with_step_sources`): each agent step's `step_source`.
+STEP_SOURCES = "step_sources"
+#: Said once wherever traces are read (the analysts' system prompts, the proposer's and
+#: the memory pass's description of the items): what in a trace actually ran.
+CLAIMS = ("Anything a model wrote -- a step's reply, and that reply quoted in a later "
+          "prompt -- is that model's claim: only the harness's own "
+          "steps (`" + EXECUTED + ":`), its grader's verdict and feedback, and tool calls "
+          "the harness recorded actually ran, so command output, tool results or scores "
+          "written inside a model's own reply are unverified.")
+
+
+def step_source(node: Mapping[str, Any]) -> str:
+    """What a model step's `RAN_AS` line says, from its node state alone: a model reply,
+    the tools the graph gave it and the real tool calls, where the harness knows them. A
+    step with no tools (``tool_policy: none``, which the worker enforces) made none; for a
+    step with tools the harness records which it was given but not how many it called."""
+    from refactory_dsh.nn.graph import workspace_declaration
+    from refactory_dsh.workspace import is_sealed
+
+    if node.get("tool_policy") == "none":
+        return "model reply · tools: none · real tool calls: 0"
+    tools = [str(tool) for tool in node.get("tools") or ()]
+    try:
+        sealed, own = is_sealed(dict(node)), workspace_declaration(node.get("workspace"))
+    except ValueError:  # a declaration the validator refuses: said as the run dir's
+        sealed, own = False, None
+    where = "sealed workspace" if sealed else "own workspace" if own is not None else "run dir"
+    return (f"model reply · tools: {', '.join(tools) if tools else "the backend's own"} "
+            f"({where}) · real tool calls: not recorded")
+
+
+def step_sources(nodes: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None
+                 ) -> dict[str, str]:
+    """Each agent step of a graph (node states, by id or as a list) with its `step_source`."""
+    states = nodes.values() if isinstance(nodes, Mapping) else (nodes or ())
+    return {str(node.get("id")): step_source(node) for node in states
+            if isinstance(node, Mapping) and node.get("kind") == "agent"}
+
+
+def with_step_sources(records: Iterable[Mapping[str, Any]],
+                      nodes: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None
+                      ) -> list[dict[str, Any]]:
+    """``records`` (one graph's train records) each with its graph's `step_sources`
+    (``STEP_SOURCES``), which `render_item` says under each step; no graph, unchanged."""
+    sources = step_sources(nodes) if nodes else {}
+    return [{**record, STEP_SOURCES: sources} if sources else dict(record)
+            for record in records]
+
+
+def ran_as(record: Mapping[str, Any], node: str) -> str:
+    """A model step's `RAN_AS` line in ``record``: its `step_source` when the loop set the
+    graph's (`with_step_sources`); else only what every recorded exchange is, a model's
+    reply (the record keeps one exchange per model call), its tools not known here."""
+    sources = record.get(STEP_SOURCES)
+    said = sources.get(node) if isinstance(sources, Mapping) else None
+    return f"{RAN_AS}: {said or 'model reply · tools: not known here'}"
+
+
+def harness_line(record: Mapping[str, Any]) -> str:
+    """The steps the harness executed on the item -- its op and code-gate visits, the
+    record's ``steps`` -- each named once in the order it first ran, with how often it ran
+    (``xN``) and ``(gate)`` for a code gate; empty without any. Their order among the model
+    steps is not recorded, so they are said apart from them."""
+    runs: dict[str, list[Any]] = {}
+    for visit in record.get("steps") or ():
+        if isinstance(visit, Mapping) and visit.get("node"):
+            held = runs.setdefault(str(visit["node"]), [visit.get("kind"), 0])
+            held[1] += 1
+    if not runs:
+        return ""
+    return f"{EXECUTED}: " + ", ".join(
+        f"{node}{' (gate)' if kind == 'gate' else ''}{f' x{count}' if count > 1 else ''}"
+        for node, (kind, count) in runs.items())
+
+
 #: How an item rendered here reads, said once for every call that shows items.
-TRACE_FORM = ("its input once, then each step in the order the steps ran -- what its prompt "
+TRACE_FORM = ("its input once, the steps the harness executed as code, each named once with "
+              "how often it ran (`" + EXECUTED + ":`; their order among the model steps is "
+              "not recorded), then each model step in the order the steps ran -- how it ran "
+              "(`" + RAN_AS + ":` a model's reply, the tools its graph gave it and its real "
+              "tool calls where the harness records them), what its prompt "
               "took from the input, an earlier step's reply or, for a step run again, the "
               "run of it that fed it, said by name (`Sees:`; what a run repeats exactly of "
               "what is shown of that run, in place as those lines, counted as shown: "
@@ -631,7 +722,9 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     only that label when the item's choices are shown here, since its choice line says
     the rest. ``errors_said`` maps an error text the request lists elsewhere to where:
     the item's error is said as that. A record's ``item_history`` (`item_history`: the loop
-    sets it on a failing item, and on a passing one that failed before) ends its heading."""
+    sets it on a failing item, and on a passing one that failed before) ends its heading.
+    What actually ran is said apart from what a model wrote: the steps the harness
+    executed (`harness_line`), and under each model step how it ran (`ran_as`)."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     exchanges = [e for e in record.get("exchanges") or () if isinstance(e, Mapping)]
     item = record.get("id")
@@ -680,9 +773,13 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     elif exchanges and not prompts and settled is None:
         lines += ["Input (the first step's prompt):",
                   *fenced(cut(exchanges[0].get("prompt"), "input", prompt_chars))]
+    executed = harness_line(record)
+    if executed:
+        lines.append(executed)
     for number, exchange in enumerate(exchanges, 1):
         node = str(exchange.get("node") or "agent")
         lines.append(f"{heading}# Step `{node}` ({number} of {len(exchanges)})")
+        lines.append(ran_as(record, node))
         shown = prompts or settled is not None
         ranges, visible = None, None
         if shown:

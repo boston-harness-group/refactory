@@ -30,6 +30,7 @@ from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import validate_state
 from . import checks, repair
+from .evidence import CLAIMS
 from refactory_dsh.nn.knob import Knob
 from refactory_dsh.nn.validate import Invariant
 from refactory_dsh.tool_policy import no_effect
@@ -3533,7 +3534,11 @@ def _cited_items(items: Sequence[dict[str, Any]],
 #: What an item shown here holds -- said once beside the items, and what `_trajectory`
 #: renders with the steps' settings as ``settled`` (a test holds the two together).
 ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the grader's "
-             "reason, its input once, then each step in the order it ran: what its prompt "
+             "reason, its input once, the steps the harness executed as code, each named once "
+             "with how often it ran (`Executed by the harness:`; their order among the model "
+             "steps is not recorded), then each model step in the order it ran: how it ran "
+             "(`Ran as:` a model's reply, the tools its graph gave it and its real tool calls "
+             "where the harness records them), what its prompt "
              "took from the input or an earlier step's reply, by name (`Sees:`), any part of "
              "its prompt that is not in its settings (`" + "Also in its prompt (not in its "
              "settings)" + "`: a reason a judge sent it back with, say), and its reply. A "
@@ -3541,7 +3546,7 @@ ITEM_FORM = ("Each item: its verdict, what was expected and what it gave, the gr
              "step run again says in place what its prompt has exactly as the run of it "
              "that fed it had, counted as that run's block and reply show them (`[same as "
              "solve's prompt (step 3), all but its last shown line]`, `[same as solve's reply "
-             "(step 3), lines 1-6]`).")
+             "(step 3), lines 1-6]`). " + CLAIMS)
 #: Whether every train item is shown in full or the rule (`_shown_items`) picks them:
 #: every item when all of them together are under this many characters. It only decides
 #: that switch; it never cuts an item.
@@ -4955,8 +4960,8 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
                  text_chars: int = ITEM_TEXT_MAX) -> str:
     """How the edit moved one changed item: each side's verdict and answer, the input
     once, the steps whose reply stayed the same named, and each step whose reply changed,
-    is new in the child or is gone from it shown whole -- the parent's reply beside the
-    child's. A text already shown (``quoted``) is named by where it is instead; what this
+    is new in the child or is gone from it shown whole, headed by how it ran
+    (`evidence.ran_as`) -- the parent's reply beside the child's. A text already shown (``quoted``) is named by where it is instead; what this
     block shows is added to ``quoted``. Each text over ``text_chars`` (``ITEM_TEXT_MAX``,
     or less for a block cut to fit what the request's room leaves) is cut, each
     parent's reply over ``parent_chars`` (an item that must fit the section's room) and
@@ -5041,6 +5046,7 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
                   f"new: the parent ran it {_counts_in(parent, node)} time(s)")
         lines.append(f"##### Step `{node}` ({number} of {total} in the child"
                      + (f", run {run}" if counts.get(node, 0) > 1 else "") + f"; {status})")
+        lines.append(evidence.ran_as(child, node))
         ranges, visible = None, None
         if settled is not None:
             # What it repeats exactly of what the shown run of the step that fed it shows
@@ -5064,6 +5070,7 @@ def _moved_block(parent: dict[str, Any], child: dict[str, Any], kind: str, child
                      + (f" -- the parent ran it {_counts_in(parent, node)} time(s), the child "
                         f"{_counts_in(child, node)}: fewer runs" if _counts_in(child, node)
                         else " -- the parent ran it, the child did not"))
+        lines.append(evidence.ran_as(parent, node))
         lines += reply(parent, before[(node, run)], node, run, "Parent's")
     if not moves["changed"] and not moves["new"] and not moves["gone"]:
         lines.append("Every step's reply is the same as the parent's: the answer moved "
@@ -5396,7 +5403,8 @@ def _edit_change_lines(pairs: Sequence[dict[str, Any]],
              f"Every changed item (fixed, broken, and the largest score drops and rises) is "
              f"named with both scores, each side's answer and the steps whose reply changed, "
              f"is new or is gone. Up to {EDIT_ITEMS_WHOLE} of them are shown with those "
-             "steps whole, the parent's reply beside the child's, picked one per child and "
+             "steps whole, each with how it ran (`Ran as:`), the parent's reply beside the "
+             "child's, picked one per child and "
              "per kind in turn (broken, fixed, score dropped, score rose). The first broken "
              "and the first fixed pick are always shown, the child's replies whole and the "
              "parent's cut (head and tail, marked) only when the block would pass what is "

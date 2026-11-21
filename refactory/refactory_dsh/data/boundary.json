@@ -135,6 +135,7 @@
     "refactory_dsh.tools.gen_discovery",
     "refactory_dsh.tools.gen_tutorial",
     "refactory_dsh.tools.recipes",
+    "refactory_dsh.tools.replay_round",
     "refactory_dsh.tools.request_sizes",
     "refactory_dsh.tools.thinking_probe",
     "refactory_dsh.unbuilt_check",

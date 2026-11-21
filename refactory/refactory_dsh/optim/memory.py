@@ -493,7 +493,7 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
             + f"## Longitudinal comparison (the same {len(entries)} train items, "
             + _what(curr, same) + ")\n"
             f"{_sides(prev, curr)} Each trace is the item in full: "
-            f"{evidence.TRACE_FORM}.\n\n")
+            f"{evidence.TRACE_FORM}. {evidence.CLAIMS}\n\n")
     return head, f"\n\n## Answer\n{answer_text()}"
 
 
@@ -785,7 +785,7 @@ class MemoryRequest:
                 f"{_tally_text(self.entries)}. The comparison did not fit one request, so "
                 "each part is read by its own call; this part holds the items below, and "
                 "its summary counts only them. Each trace is the item in full: "
-                f"{evidence.TRACE_FORM}.\n\n"
+                f"{evidence.TRACE_FORM}. {evidence.CLAIMS}\n\n"
                 + _comparison(part, _deduped(part, texts, self.look), self.look)
                 + f"\n\n## Answer\n{compare_answer_text()}")
 

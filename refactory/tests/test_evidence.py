@@ -23,9 +23,11 @@ from refactory_dsh.optim import analysts, evidence
 
 def _repeated_share(text: str) -> float:
     """The share of ``text`` in content lines (40+ characters) that appear more than once;
-    the renderer's own short pointers (``Sees:``, ``... same as item``) are not content."""
+    the renderer's own short pointers and labels (``Sees:``, ``... same as item``, a step's
+    ``Ran as:``) are not content."""
     lines = [" ".join(line.split()) for line in text.splitlines()
-             if not line.startswith(("Sees: ", f"{evidence.REST}: same as"))]
+             if not line.startswith(("Sees: ", f"{evidence.REST}: same as",
+                                     f"{evidence.RAN_AS}: "))]
     counts = collections.Counter(line for line in lines if len(line) >= 40)
     return sum(len(line) * (n - 1) for line, n in counts.items() if n > 1) / max(1, len(text))
 
