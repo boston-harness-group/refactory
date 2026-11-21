@@ -168,7 +168,8 @@ def test_every_reader_of_traces_is_told_a_reply_is_a_claim():
     `evidence.CLAIMS` once, and what the lines mean."""
     from refactory_dsh.optim import random_optimizer
 
-    assert "What the harness wrote is real" in evidence.CLAIMS
+    assert "What the harness itself produced is real" in evidence.CLAIMS
+    assert "may still carry a model's earlier text" in evidence.CLAIMS
     assert "`Completed by the harness:`" in evidence.CLAIMS
     assert evidence.CLAIMS in analysts.FAILURE_SYSTEM
     assert evidence.CLAIMS in analysts.SUCCESS_SYSTEM

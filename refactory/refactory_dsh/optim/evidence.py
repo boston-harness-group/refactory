@@ -82,14 +82,15 @@ COMPLETED = "Completed by the harness"
 STEP_SOURCES = "step_sources"
 #: Said once wherever traces are read (the analysts' and the readers' system prompts, the
 #: proposer's and the memory pass's description of the items): what in a trace is a
-#: model's claim and what the harness wrote.
+#: model's claim and what the harness produced.
 CLAIMS = ("Anything a model wrote -- a step's reply, and that reply quoted in a later "
           "prompt -- is that model's claim, so command output, tool results or scores "
-          "written inside a reply are unverified. What the harness wrote is real: the steps "
-          "it completed (`" + COMPLETED + ":`), the expected answer, the prediction and the "
-          "grader's verdict and feedback, and a step's prompt outside the replies it quotes "
-          "(the task's input, and the output of code the harness ran or its feedback, "
-          "quoted back to the model).")
+          "written inside a reply are unverified. What the harness itself produced is real: "
+          "the steps it completed (`" + COMPLETED + ":`), the expected answer, the "
+          "prediction, the grader's verdict and feedback, and the output of code it ran. The "
+          "rest of a prompt was assembled by the harness but may still carry a model's "
+          "earlier text (a file a step wrote, a reply an op reshaped): treat claims there "
+          "with the same care.")
 
 
 #: How a step under each of `tool_policy.POLICIES` runs, as its `RAN_AS` line says it (a

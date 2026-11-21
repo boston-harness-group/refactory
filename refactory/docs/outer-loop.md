@@ -2381,10 +2381,12 @@ step's first block is headed the same way) and each side's own for memory's comp
 The analysts' and the readers' system prompts, the proposer's description of the items
 (`ITEM_FORM`) and memory's say once (`evidence.CLAIMS`): anything a model wrote -- a reply,
 and that reply quoted in a later prompt -- is that model's claim, so command output, tool
-results or scores written inside a reply are unverified; what the harness wrote is real --
-the steps it completed, the expected answer, the prediction, the grader's verdict and
-feedback, and a step's prompt outside the replies it quotes (the task's input, the output
-of code the harness ran or its feedback, quoted back to the model). The lines are part of
+results or scores written inside a reply are unverified; what the harness itself produced
+is real -- the steps it completed, the expected answer, the prediction, the grader's verdict
+and feedback, and the output of code it ran. The rest of a prompt was assembled by the
+harness but may still carry a model's earlier text (a file a step wrote, a reply an op
+reshaped, which the renderer does not recognise as a quote), so claims there get the same
+care. The lines are part of
 each item's rendering, so every room and fit counts them, and a step's `Ran as:` line sits
 outside its prompt's block, so the `[same as ...]` counts are unchanged. The records are
 the same on both runtimes (`items.make_item_record`), so the lines are too. The SkillOpt
