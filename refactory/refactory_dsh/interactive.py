@@ -177,7 +177,8 @@ def prepare(
                 # A Claude Code too old for a node's model fails at its first call, after
                 # setup; the console's open and `run` both refuse it here instead.
                 from refactory_dsh.workers import agent_roles, claude_code_preflight
-                claude_code_preflight(model_context, roles=agent_roles(state))
+                claude_code_preflight(model_context, roles=agent_roles(state),
+                                      pins=mode.claude_code_versions())
     with ownership(workdir):
         if resume:
             if knobs or intent or model_context:
@@ -382,7 +383,8 @@ def run(
                                            setting_sources=setting_sources,
                                            claude_executable=claude_executable,
                                            role_routes=role_routes, node_routes=node_routes, **timeout_kwargs).context()
-        state = with_knobs(registry.resolve(route_project, identifier)[1]().state_dict(), list(knobs or []))
+        run_mode = registry.resolve(route_project, identifier)[1]()
+        state = with_knobs(run_mode.state_dict(), list(knobs or []))
         needed = not headless or calls_models(state)
         if needed:
             model_context = require_route(model_context, interactive=interactive)
@@ -390,7 +392,8 @@ def run(
             # setup and the worktrees; refuse it here, before ownership creates the run
             # directory (`prepare` is then told it was checked).
             from refactory_dsh.workers import agent_roles, claude_code_preflight
-            claude_code_preflight(model_context, roles=agent_roles(state))
+            claude_code_preflight(model_context, roles=agent_roles(state),
+                                  pins=run_mode.claude_code_versions())
         provider, model = ceo_route(model_context, interactive=interactive, required=not headless)
         if model_context.get("worker_backend") == "openshell":
             print(OPENSHELL_MODEL_NOTE, file=sys.stderr)

@@ -174,7 +174,7 @@
         "timeout_factor": 2
       },
       "missing_on_crash": true,
-      "tool_policy": "none",
+      "tool_policy": "refused",
       "_type": "AgentNode"
     },
     "turn_gate": {

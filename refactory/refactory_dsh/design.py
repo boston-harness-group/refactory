@@ -1693,7 +1693,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         # A Claude Code too old for a node's model would fail at its first call.
-        claude_code_preflight(client, roles=agent_roles(mode.state_dict()))
+        claude_code_preflight(client, roles=agent_roles(mode.state_dict()),
+                              pins=mode.claude_code_versions())
     except ValueError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1

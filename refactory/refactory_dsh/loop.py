@@ -761,7 +761,8 @@ class Loop(OuterLoop):
             from refactory_dsh.workers import agent_roles, claude_code_preflight
             try:
                 claude_code_preflight(model.context(), roles={
-                    **agent_roles(self.mode.state_dict()), "optimizer": "optimizer"})
+                    **agent_roles(self.mode.state_dict()), "optimizer": "optimizer"},
+                    pins=self.mode.claude_code_versions())
             except ValueError as error:
                 raise LoopError(str(error)) from error
         self.invariants = self.mode.invariants()

@@ -32,6 +32,7 @@ from refactory_dsh.nn import validate_state
 from . import checks, repair
 from refactory_dsh.nn.knob import Knob
 from refactory_dsh.nn.validate import Invariant
+from refactory_dsh.tool_policy import no_effect
 
 
 #: How the refusal summary is built. A list truncated by count drops whatever came
@@ -126,8 +127,8 @@ def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str
     """Check whether any node in the candidate escalates a seed's no-tools policy.
 
     Anchored to the actual persisted original seed: a seed node with
-    ``tool_policy='none'`` must keep that policy in every candidate, and no
-    candidate may add tools to such a node. New node IDs (present only in the
+    ``tool_policy='none'`` or ``'refused'`` must keep a policy whose model can change
+    nothing in every candidate, and no candidate may add tools to such a node. New node IDs (present only in the
     candidate, not in the seed) are allowed tools -- they represent genuinely
     new architecture. Returns a list of rejection reasons, or an empty list.
     """
@@ -136,7 +137,7 @@ def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str
     reasons: list[str] = []
     for node_id, seed_node in seed_nodes.items():
         seed_policy = seed_node.get("tool_policy")
-        if seed_policy != "none":
+        if not no_effect(seed_policy):
             continue
         candidate_node = candidate_nodes.get(node_id)
         if candidate_node is None:
@@ -144,16 +145,16 @@ def _tool_policy_escalated(seed_state: dict[str, Any], candidate_state: dict[str
             # But if it was re-added under a different policy, we catch that below.
             continue
         candidate_policy = candidate_node.get("tool_policy")
-        if candidate_policy != "none":
+        if not no_effect(candidate_policy):
             reasons.append(
                 f"E-tool-policy-escalation: node {node_id!r} seed declares "
-                f"tool_policy='none'; candidate removes it or changes it"
+                f"tool_policy={seed_policy!r}; candidate removes it or changes it"
             )
         candidate_tools = candidate_node.get("tools") or []
         if candidate_tools:
             reasons.append(
                 f"E-tool-policy-escalation: node {node_id!r} seed declares "
-                f"tool_policy='none'; candidate adds tools {candidate_tools!r}"
+                f"tool_policy={seed_policy!r}; candidate adds tools {candidate_tools!r}"
             )
     return reasons
 
@@ -226,12 +227,12 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     # `nn.coverage.DECISIONS`), so it never works where the step it copies works.
     seed_tools = {(node.get("tool_policy"), tuple(node.get("tools") or ()))
                   for node in seed_nodes.values() if node.get("kind") == "agent"
-                  and (node.get("tool_policy") != "none" or node.get("tools"))}
+                  and (not no_effect(node.get("tool_policy")) or node.get("tools"))}
     reasons = []
     for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
         if node_id in seed_nodes or node.get("kind") != "agent":
             continue
-        if node.get("tool_policy") == "none" and not node.get("tools"):
+        if no_effect(node.get("tool_policy")) and not node.get("tools"):
             continue
         if is_sealed(node):
             sealable, why = sealed if sealed is not None else sealed_steps(None)

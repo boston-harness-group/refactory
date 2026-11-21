@@ -91,6 +91,7 @@
     "refactory_dsh.target_guard",
     "refactory_dsh.task",
     "refactory_dsh.toolchain",
+    "refactory_dsh.tool_policy",
     "refactory_dsh.traces",
     "refactory_dsh.tools",
     "refactory_dsh.worker_config",

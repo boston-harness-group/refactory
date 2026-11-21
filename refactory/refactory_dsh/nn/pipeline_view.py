@@ -39,6 +39,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from refactory_dsh.tool_policy import POLICIES as TOOL_POLICIES
+
 from .graph import FALLBACK as FALLBACK_VERDICT, FALLBACK_GATE_CALL, Graph
 from .operators import carried_knobs, made_by, map_of
 from .validate import consumed
@@ -206,7 +208,7 @@ class _View:
     def sees(self, node_id: str) -> str:
         node = self.graph.nodes[node_id]
         parts = [self._input(k, n) for k, n in self._sorted(self.inputs[node_id])]
-        if node.kind == "agent" and (node.tool_policy != "none" or node.tools):
+        if node.kind == "agent" and (node.tool_policy not in TOOL_POLICIES or node.tools):
             from refactory_dsh.workspace import is_sealed
 
             where = ("sealed workspace" if is_sealed(node) else

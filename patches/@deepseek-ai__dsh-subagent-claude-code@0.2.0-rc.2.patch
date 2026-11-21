@@ -1,8 +1,18 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba732435fb5b20d 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863a263299a 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -147,7 +147,8 @@ function failureDiagnostic(facts) {
+@@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
+ import { brandString } from "@deepseek-ai/dsh-brand";
+ import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
+ import { EventEmitter } from "node:events";
++import { mkdtempSync, realpathSync, rmSync } from "node:fs";
++import { homedir, tmpdir } from "node:os";
++import { join } from "node:path";
+ //#region lib/types/process.js
+ /**
+ * Projection from the shared managed-process handle to the official Claude
+@@ -147,7 +150,8 @@ function failureDiagnostic(facts) {
  	if (exitCode !== null && exitCode !== void 0) fields.push(`exit code: ${exitCode}`);
  	const signal = facts.outcome?.signal;
  	if (signal !== null && signal !== void 0) fields.push(`signal: ${signal}`);
@@ -12,7 +22,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  }
  var ClaudeCodeFailure = class extends Error {
  	facts;
-@@ -217,12 +218,53 @@ function successfulResult(message) {
+@@ -217,12 +221,53 @@ function successfulResult(message) {
  			category
  		}, detail === void 0 || detail.length === 0 ? void 0 : new Error(detail));
  	}
@@ -70,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +273,200 @@ function successfulResult(message) {
+@@ -231,20 +276,207 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -196,7 +206,14 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
 +					enforced_tool_policy: observedTools === null || observedTools.length === 0 ? "none" : null,
 +					tools_permitted: observedTools, tool_observation_available: observedTools !== null,
 +					tool_policy_source: "claude-agent-sdk-options"
++				} : sent?.refused ? {
++					// Offered, and refused by dontAsk wherever they need permission.
++					enforced_tool_policy: "refused", tools_offered: observedTools,
++					tool_observation_available: observedTools !== null,
++					tool_policy_source: "claude-code-dont-ask", working_directory: sent.workingDirectory,
++					...sent.routeSourcesIgnored?.length ? { setting_sources_ignored: sent.routeSourcesIgnored } : {}
 +				} : {};
++				if (sent && typeof message.session_id === "string") sent.sessionId = message.session_id;
 +				onRefactoryMetadata?.({ actual_route: { worker_backend: "claude_code", provider: null,
 +					model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
 +					...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources },
@@ -280,7 +297,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  	});
  	return {
  		output: [{
-@@ -295,15 +517,36 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +527,36 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -322,7 +339,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,9 +570,36 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +580,83 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -341,10 +358,43 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
 +		options.settingSources = [];
 +		options.strictMcpConfig = true;
 +	}
++	// tool_policy refused: Claude Code's default tools are offered, and Claude Code's own
++	// dontAsk mode refuses every call that needs permission, as `claude -p
++	// --permission-mode dontAsk` does.
++	if (_rfToolPolicy === "refused" && spec.permissionMode !== "dontAsk") throw new Error(`subagent-claude-code: tool_policy refused needs permission mode dontAsk, not ${spec.permissionMode}`);
 +	// A route's explicit settings sources ("none" or e.g. "user,project") replace the
 +	// default; tools stay disabled under tool_policy none either way.
 +	if (_rfSettingSources) {
 +		options.settingSources = _rfSettingSources === "none" ? [] : _rfSettingSources.split(",");
++	}
++	if (_rfToolPolicy === "refused") {
++		// No settings, CLAUDE.md or MCP servers load, whatever the route names: project
++		// settings are found in the folders above the empty directory too (a shared /tmp),
++		// and an allow rule or an MCP server's command would run. In the empty directory
++		// itself there are none, so the request is the one `--setting-sources project` sends.
++		options[ROUTE_SOURCES_IGNORED] = options.settingSources ?? null;
++		options.settingSources = [];
++		options.mcpServers = {};
++		options.strictMcpConfig = true;
++		// A one-shot `claude -p` offers no plan-mode tools; a session fed a prompt stream
++		// (this adapter's, for follow-ups) would list them, so they are left out here.
++		options.disallowedTools = [...new Set([...options.disallowedTools, "EnterPlanMode", "ExitPlanMode"])];
++		// The session works in a fresh empty directory, which is also its one added
++		// directory (`--add-dir`): a tool that needs no permission (Read, a subagent) finds
++		// nothing there, and reading anywhere else needs permission, which dontAsk refuses.
++		// Its real path, as Claude Code names its project folder after it (macOS /var).
++		const scratch = realpathSync(mkdtempSync(join(tmpdir(), "refactory-claude-")));
++		options.cwd = scratch;
++		options.additionalDirectories = [scratch];
++		// Claude Code keeps folders named after the working directory: its project folder
++		// (the memory folder its system prompt names, which the model may write) and its
++		// temporary one (background task output). Each refused session has a new working
++		// directory, so they and its session-env folder go with the session.
++		const configDir = _rfEnv.CLAUDE_CONFIG_DIR || join(_rfEnv.HOME || homedir(), ".claude");
++		const slug = scratch.replace(/[^a-zA-Z0-9]/g, "-");
++		const tmpRoot = _rfEnv.CLAUDE_CODE_TMPDIR || _rfEnv.TMPDIR || tmpdir();
++		options[SCRATCH_DIR] = { scratch, configDir, project: join(configDir, "projects", slug),
++			temporary: join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug) };
 +	}
 +	// A route's chosen Claude Code replaces the one bundled with the SDK.
 +	if (_rfClaudeExecutable) {
@@ -352,15 +402,29 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
 +	}
 +	options[COMPACT_ENV_DROPPED] = _rfCompactEnvDropped;
 +	return options;
- }
++}
 +/** The environment switches that disable Claude Code's compaction. */
 +const COMPACTION_SWITCHES = ["DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "DISABLE_MICROCOMPACT"];
 +/** Where claudeQueryOptions leaves the switches it dropped; not an SDK option. */
 +const COMPACT_ENV_DROPPED = Symbol("compact env dropped");
++/** Where claudeQueryOptions leaves a refused session's folders; not an SDK option. */
++const SCRATCH_DIR = Symbol("scratch dir");
++/** Where claudeQueryOptions leaves the settings sources a route asked for under refused. */
++const ROUTE_SOURCES_IGNORED = Symbol("route sources ignored");
++/**
++* Remove a refused session's folders, whatever the model left in them: its working
++* directory, and Claude Code's project, temporary and session-env folders for it. Each
++* is named after this session's own working directory or id, so no other session's.
++*/
++function removeScratch(dirs, sessionId) {
++	if (dirs === void 0) return;
++	const own = [dirs.scratch, dirs.project, dirs.temporary];
++	if (typeof sessionId === "string" && /^[0-9a-f-]{8,}$/i.test(sessionId)) own.push(join(dirs.configDir, "session-env", sessionId));
++	for (const dir of own) rmSync(dir, { recursive: true, force: true });
+ }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
- * @param request - resolved shared subagent request.
-@@ -338,6 +608,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +666,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -406,22 +470,31 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +667,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +725,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
 +	let sent;
++	let scratch;
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +685,26 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +744,35 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
 +		const options = claudeQueryOptions(spec, controller, captureChild, capturePermissionDiagnostic);
++		scratch = options[SCRATCH_DIR];
++		delete options[SCRATCH_DIR];
++		const ignoredSources = options[ROUTE_SOURCES_IGNORED];
++		delete options[ROUTE_SOURCES_IGNORED];
 +		sent = {
 +			effort: options.effort,
 +			toolsNone: Array.isArray(options.tools) && options.tools.length === 0,
++			// tool_policy refused: default tools under dontAsk, in an empty directory.
++			refused: scratch !== void 0 && options.tools === void 0 && options.permissionMode === "dontAsk",
++			workingDirectory: scratch?.scratch,
++			routeSourcesIgnored: ignoredSources,
 +			settingSources: options.settingSources,
 +			claudeExecutable: options.pathToClaudeCodeExecutable,
 +			autoCompact: options.settings?.autoCompactEnabled === true,
@@ -440,10 +513,11 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  		if (isAborted(controller.signal)) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	} catch (error) {
 +		releaseInput();
++		removeScratch(scratch);
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +757,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +825,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -455,7 +529,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +784,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +852,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -464,7 +538,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,6 +796,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +864,15 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -472,7 +546,15 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..1c6cbdc019a30c05c53c8c639ba73243
  			try {
  				await disposeClaudeCodeChild(publishedQuery, publishedChild);
  			} catch (error) {
-@@ -529,6 +856,12 @@ var ClaudeCodeProvider = class {
+ 				const failure = thrown(error);
+ 				reportFailure(failure);
+ 				throw failure;
++			} finally {
++				removeScratch(scratch, sent?.sessionId);
+ 			}
+ 		}
+ 	});
+@@ -529,6 +926,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

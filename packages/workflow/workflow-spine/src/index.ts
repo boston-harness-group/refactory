@@ -37,6 +37,7 @@ import type { NodeView, SpineNext, TerminalHalt } from './spine.ts'
 import { commandOf, isDeterministic, runDataCommand, runDeterministic, runWarningsOf } from './execute.ts'
 import type { CommandFailure, CommandOutcome, CommandRunnerConfig } from './execute.ts'
 import type { WorkflowGraph } from './types.ts'
+import { isToolPolicy } from './types.ts'
 import { validateBuild } from './build-stamp.ts'
 import { validateWorkspaceBuild } from './workspace-stamp.ts'
 import { presentCall, presentResult, presentationMeta } from './present.ts'
@@ -45,7 +46,7 @@ export { Spine, validateGraph } from './spine.ts'
 export { commandOf, dataCommandOf, isDeterministic, reasonOf, runDataCommand, runWarningsOf, verdictOf, NODE_ENV_KEY, REASON_LIMIT } from './execute.ts'
 export type { CommandFailure, CommandOutcome, CommandRunnerConfig, NodeManifest } from './execute.ts'
 export type { DataPass, GraphIssue, NodeView, PromptAmendmentMode, SpineNext } from './spine.ts'
-export type { AgentWorkspace, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
+export type { AgentWorkspace, ToolPolicy, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
 export { BUILD_STAMP, computeSourceStamp, validateBuild } from './build-stamp.ts'
 
 export const name = 'workflow-spine'
@@ -2347,7 +2348,7 @@ export function apply(ctx: Context, config: Config): void {
         const receipt = runtimeBridge(agentCommand, agentDir, agentEnv, {
           action: 'begin', node: node.id, prompt: node.prompt_template ?? '',
           reads: node.reads ?? [], writes: node.writes ?? [],
-          ...(node.tool_policy === 'none' ? { tool_policy: 'none' } : {}),
+          ...(isToolPolicy(node.tool_policy) ? { tool_policy: node.tool_policy } : {}),
           ...(spine.isOptionalBranch(node.id) ? { optional: true } : {}),
         })
         if (receipt.missing === true) {

@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from refactory_dsh.tool_policy import no_effect
+
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
 CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 #: Claude Code's filesystem settings sources (the SDK's ``settingSources``), as the
@@ -283,15 +285,19 @@ def _claude_global_config() -> Path:
     return legacy if legacy.exists() else Path(configured or Path.home()) / '.claude.json'
 
 
-def claude_code_version(executable: str) -> str:
-    """The X.Y.Z ``executable --version`` starts with, or empty when it says none."""
+def claude_code_version(executable: str, *, exact: bool = False) -> str:
+    """The X.Y.Z ``executable --version`` starts with, or empty when it says none. With
+    ``exact``, the whole version it reports (its first word: ``2.1.299-beta``, say), for a
+    pin (`Mode.claude_code_versions`), which a suffix does not meet."""
     try:
         done = subprocess.run([executable, '--version'], capture_output=True, text=True,
                               timeout=20, check=False)
     except (OSError, subprocess.SubprocessError):
         return ''
     match = re.match(r'\s*(\d+\.\d+\.\d+)', done.stdout)
-    return match.group(1) if done.returncode == 0 and match else ''
+    if done.returncode != 0 or not match:
+        return ''
+    return done.stdout.split()[0] if exact else match.group(1)
 
 
 #: How a refusal says to choose another Claude Code.
@@ -300,7 +306,8 @@ _CLAUDE_EXECUTABLE_FIX = (f'--claude-executable /path/to/claude, {CLAUDE_EXECUTA
 
 
 def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
-                          roles: dict[str, str] | None = None) -> None:
+                          roles: dict[str, str] | None = None,
+                          pins: dict[str, str] | None = None) -> None:
     """Refuse, before the run directory exists, a claude_code route whose Claude Code
     cannot run its model: a chosen executable that is missing, not executable or whose
     version is unreadable, or a version older than the model needs
@@ -312,6 +319,10 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
     over its own role's. Without a graph the run route, each role route and each node
     route (as role ``worker``) are checked. Only a Claude Code problem is refused: a
     combination that is not a valid route is left for dispatch to report.
+
+    ``pins`` maps an agent node to the Claude Code version it must run on
+    (`Mode.claude_code_versions`): with ``roles``, a claude_code route for that node whose
+    Claude Code reports another version, or none, is refused.
     """
     # Another ModelClient (a test's fake, a library caller's own) carries no route
     # config to read; its own readiness contract applies.
@@ -323,10 +334,11 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
 
     def resolved(where: str, role: str = 'worker', node: str = '') -> tuple[str, dict[str, Any]] | None:
         try:
-            return where, resolve_route(base, role=role, node=node, role_routes=role_routes,
-                                        node_routes=node_routes)
+            route = resolve_route(base, role=role, node=node, role_routes=role_routes,
+                                  node_routes=node_routes)
         except ValueError:
             return None
+        return where, {**route, '_node': node}
 
     if roles is None:
         candidates = [resolved('the run', role=''),
@@ -357,24 +369,40 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
                              f'executable')
         model_id = route.get('model', '')
         minimum = claude_code_minimum(model_id)
-        if not minimum:
+        pinned = (pins or {}).get(route['_node'], '') if roles is not None else ''
+        if not minimum and not pinned:
             continue
         if chosen:
             if chosen not in versions:
-                versions[chosen] = claude_code_version(chosen)
-            version, described = versions[chosen], chosen
+                versions[chosen] = claude_code_version(chosen, exact=True)
+            # The exact version for a pin; its leading X.Y.Z for a model's minimum.
+            reported, described = versions[chosen], chosen
+            leading = re.match(r'\d+\.\d+\.\d+', reported)
+            version = leading.group(0) if leading else ''
             if not version:
+                needs = (f'model {model_id} needs Claude Code {minimum} or newer' if minimum
+                         else f'its mode pins Claude Code {pinned}')
                 raise ValueError(f'the claude_code worker for {where} is set to run Claude Code at {chosen}, '
-                                 f'but `{chosen} --version` reported no version, and model {model_id} needs '
-                                 f'Claude Code {minimum} or newer. Point {_CLAUDE_EXECUTABLE_FIX} at a '
-                                 f'Claude Code executable')
+                                 f'but `{chosen} --version` reported no version, and {needs}. Point '
+                                 f'{_CLAUDE_EXECUTABLE_FIX} at a Claude Code executable')
         else:
             bundled = bundled_claude_code(root)
             if not bundled or not bundled['version']:
+                if pinned:
+                    raise ValueError(f'the claude_code worker for {where} must run Claude Code {pinned}, '
+                                     f'which its mode pins, and no Claude Code is named or bundled; point '
+                                     f'{_CLAUDE_EXECUTABLE_FIX} at Claude Code {pinned}')
                 continue  # dispatch reports a missing adapter; nothing to compare against
-            version = bundled['version']
+            version = reported = bundled['version']
             described = (f'{bundled["path"] or "the Agent SDK"} (bundled with {CLAUDE_AGENT_SDK} '
                          f'{bundled["sdk_version"]})')
+        if pinned and reported != pinned:
+            raise ValueError(f'the claude_code worker for {where} would run Claude Code {reported} at '
+                             f'{described}, and its mode pins Claude Code {pinned} (its system prompt '
+                             f'and tool text change between versions). Point {_CLAUDE_EXECUTABLE_FIX} '
+                             f'at Claude Code {pinned}')
+        if not minimum:
+            continue
         found = _version_tuple(version)
         if found is None:
             continue  # a version string with no X.Y.Z says nothing to compare
@@ -411,14 +439,16 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
               'usage': {'status': 'unavailable', 'tokens': None},
               'runtime': {'backend': route['worker_backend'], 'version': None}}
     # ── no-tools receipt fields ─────────────────────────────────────────
-    if tool_policy == 'none':
-        record['requested_tool_policy'] = 'none'
+    if no_effect(tool_policy):
+        record['requested_tool_policy'] = tool_policy
         # Nothing is enforced until the runtime says so: DSH's no-tools plugin at the
         # provider request, Claude Code's adapter from the options it sent the SDK and
         # the tools the SDK reported. A worker that never got that far enforced nothing.
         record['enforced_tool_policy'] = None
         record['tool_observation_available'] = False
-        record['tools_permitted'] = None
+        # ``none`` permits no tool; ``refused`` offers Claude Code's own, each refused by
+        # dontAsk where it needs permission (`tool_policy`).
+        record['tools_permitted' if tool_policy == 'none' else 'tools_offered'] = None
         record['tool_policy_source'] = 'not-yet-observed'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
@@ -707,8 +737,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
         # below reserves every attempt.
         selected = selected.with_tool_policy(getattr(node, "tool_policy", None) or "")
-        if node.tool_policy == "none" and node.tools:
-            raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
+        if no_effect(node.tool_policy) and node.tools:
+            raise ValueError(f'worker node {name!r} declares tool_policy="{node.tool_policy}" and also declares tools, which is a contradiction')
         if node.tools and not is_sealed(node_state):
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)

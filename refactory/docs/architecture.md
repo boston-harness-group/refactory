@@ -99,7 +99,7 @@ optimizer's prompt via `rules_text()`.
 | `V12` | a fork's targets, a join's sources and a data node's subgraph must name nodes that exist; a data node's entry reaches its exit, which is not a gate and has no out-edge; a pass is entered only through its data node and never leads back to it |
 | `V13` | a data node must not appear inside a fork branch |
 | `V14` | every field binding must name a declared knob of the field's kind (`str` for the two templates and `code`, `int` for `max_iterations` and `parallelism`), once per field; the field must be in the bindable allowlist, and `parallelism` only on a data node (the node must also list the knob in its `knobs`, checked when the node is built) |
-| `V15` | a node's required inputs are produced upstream on every path to it (a data pass's own outputs stay in the pass): an agent's reads and every `{{name}}` its prompts fill in (not a knob, not in its `feedback_keys`, not inside an `{% if name %}` on the same name), an op's or a gate's `required_reads` and `inputs` (facts), and every `{{name}}` in a knob an op that fills facts reads; a `tool_policy: none` agent declares exactly one write |
+| `V15` | a node's required inputs are produced upstream on every path to it (a data pass's own outputs stay in the pass): an agent's reads and every `{{name}}` its prompts fill in (not a knob, not in its `feedback_keys`, not inside an `{% if name %}` on the same name), an op's or a gate's `required_reads` and `inputs` (facts), and every `{{name}}` in a knob an op that fills facts reads; a `tool_policy: none` or `refused` agent declares exactly one write |
 | `V16` | a fork has one unconditional out-edge, to its join, and each join belongs to one fork; branches are disjoint, never lead back to the fork or past the join, declare no shared facts or conflicting files, and a gate in a branch reloops only inside it; a join is entered only from its fork's branches and waits only for nodes every run of their branch visits |
 | `V17` | no node outside the grader side (the data nodes, the mode's protected and grader nodes) consumes grader-derived data: what a data pass publishes, the runtime's grading files, a Task's `grader_outputs`, what a grader node writes or produces, and whatever a node consuming any of these writes or produces in turn -- through a prompt slot or an {% if %} condition on it (bound fields included), `feedback_keys`, reads, required_reads or `inputs`; see outer-loop.md |
 | `V18` | a code node (`call` `refactory_dsh.snippet:run`, or `evaluator` `refactory_dsh.snippet:gate`) has code that parses, defines `main(inp)`, is at most 4096 bytes, imports only `re`, `json`, `math`, `collections`, `itertools`, `statistics`, `fractions`, `unicodedata` or `string`, and uses no `open`, `exec`, `eval`, `compile`, `__import__`, `getattr`/`setattr`/`delattr`, `globals`/`locals`/`vars` or dunder name or attribute (checked without running it); no other node carries code; a verdict gate (`refactory_dsh.snippet:verdict`) declares a `required_reads` file or an `inputs` fact to read its verdict from; see outer-loop.md |
@@ -509,8 +509,9 @@ outer-loop evaluations):
   timed-out attempt during which the run's worktree changed is not retried
   (another branch of its fork may have written there). Design mode
   declares it on the verifier only, the one agent seen to time out; a node is
-  added when it is seen to time out. A node without tools (`tool_policy: none`)
-  may declare a retry too: its only effect is the reply the runtime captures.
+  added when it is seen to time out. A node without tools (`tool_policy: none`,
+  or `refused`: offered Claude Code's own, each refused) may declare a retry too: its
+  only effect is the reply the runtime captures.
 
 - **Crashed steps in a data pass.** `retry.on` may also name `crash` and
   `output_limit`. A `crash` is a session the worker or product failed
@@ -525,7 +526,7 @@ outer-loop evaluations):
   never decides whether the client replays a session (`model.without_product_detail`).
   The client itself never replays a crash, because the replay would run outside
   the node's delivery bracket. An agent step in a data pass that may safely run
-  again (`outputs_only`, a workspace, or `tool_policy: none`) gets
+  again (`outputs_only`, a workspace, or `tool_policy` `none` or `refused`) gets
   `{"on": ["crash"], "times": 2}` by default (`Graph.retry_rule`): each retry is a
   fresh session under the same limit, recorded as a `node_retried` event. A step
   that opts in to `output_limit` gets a retry whose prompt says the last attempt
