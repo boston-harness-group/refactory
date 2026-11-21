@@ -1282,8 +1282,10 @@ def prune(target: Path, *, idle_hours: float | None = None, succeeded: bool = Fa
                 if path.is_dir():
                     try:
                         notes.append(_remove(target, found, path))
-                    except ValueError as error:  # one broken worktree never stops the rest
-                        notes.append(f"kept {path}: {error}")
+                    except (OSError, ValueError) as error:  # one broken worktree never stops the rest
+                        notes.append(f"kept {path}: {error}. Once nothing in it is needed, remove it "
+                                     f"with `git -C {target} worktree remove --force {path}`, or delete "
+                                     "it when git cannot")
                 notes.extend(_remove_companions(target, here, run_id))
             if outcome == "ended" and not path.is_dir() and idle >= FAILED_BRANCH_DAYS * 24:
                 try:

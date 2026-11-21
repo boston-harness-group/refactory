@@ -800,7 +800,6 @@ def test_prune_leaves_the_targets_own_worktrees_alone(repo, tmp_path):
     assert git(theirs, "diff", "--cached", "--name-only") == "app.py"
 
 
-
 def test_a_worktree_git_cannot_read_is_kept_and_reported_and_the_rest_still_go(repo, tmp_path):
     """Found live: one worktree whose `.git` link broke stopped the prune of 185 others."""
     broken_run, ended_run = _run(tmp_path, "broken"), _run(tmp_path, "ended")
@@ -812,6 +811,7 @@ def test_a_worktree_git_cannot_read_is_kept_and_reported_and_the_rest_still_go(r
     notes = worktree.prune(repo, idle_hours=0)
     assert Path(broken.path).exists() and not Path(ended.path).exists()
     assert any(note.startswith(f"kept {broken.path}:") for note in notes)
+
 
 def _companions(repo: Path, run_id: str) -> list[Path]:
     """The base worktree and check copy a run keeps beside its own, with their records."""
