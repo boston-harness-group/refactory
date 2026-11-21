@@ -382,11 +382,11 @@ CLAUDE_CODE = {"worker_backend": "claude_code", "model": "claude-opus-4-6", "per
 
 
 def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
-                   gold_feedback: bool = False,
+                   gold_feedback: bool = False, parallelism: int = 1,
                    expect_ok: bool = True) -> tuple[list[dict], str]:
     """A part on the walker through the real model client and a scripted ``dsh``: its
     records and the run's error (empty when the run succeeded)."""
-    mode, state = _state()
+    mode, state = _state(data_parallelism=parallelism)
     work = tmp_path / "walk-dsh"
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
                                        if p != "train"}, train_ids=list(train))
@@ -398,14 +398,14 @@ def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple 
 
 
 def _scripted_spine(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
-                    gold_feedback: bool = False,
+                    gold_feedback: bool = False, parallelism: int = 1,
                     expect_ok: bool = True) -> tuple[list[dict], str]:
     """A part on the spine, its solve step dispatched to the real worker (`worker_node`)
     with the same scripted ``dsh``, as a run on DSH lowers it: its records and the run's
     error (its last failure; empty when the run succeeded)."""
     from refactory_dsh import lowering, workers
 
-    mode, state = _state()
+    mode, state = _state(data_parallelism=parallelism)
     work = tmp_path / "spine-dsh"
     work.mkdir(parents=True)
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
@@ -515,16 +515,18 @@ def test_a_logged_out_worker_fails_the_item_at_once(tmp_path, sb_env, runtime):
     assert by_id["t2"]["passed"] and by_id["t2"]["error_kind"] is None, by_id["t2"]
 
 
+@pytest.mark.parametrize("parallelism", [1, 2])
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_train_item_is_scored_on_its_first_attempt(tmp_path, sb_env, runtime):
-    """[both runtimes] With gold feedback, t1's first clean run is wrong, it is told so and
-    is right on its next turn: it scores 0, its record keeping the feedback's turn and its
-    grade after it. t2, right at once, is told nothing and passes."""
+def test_a_train_item_is_scored_on_its_first_attempt(tmp_path, sb_env, runtime, parallelism):
+    """[both runtimes, one item at a time and both at once] With gold feedback, t1's first
+    clean run is wrong, it is told so and is right on its next turn: it scores 0, its
+    record keeping the feedback's turn and its grade after it. t2, right at once, is told
+    nothing and passes."""
     from test_crashed_step_retry import Scripted
 
     dsh = Scripted(tmp_path / "dsh", {"Put 42 in B1": [_good(41), _good(42)], "": [_good(9)]})
     records, _ = _scripted(runtime, tmp_path, dsh, part="train", train=("t1", "t2"),
-                           gold_feedback=True)
+                           gold_feedback=True, parallelism=parallelism)
     by_id = {r["id"]: r for r in records}
     t1, t2 = by_id["t1"], by_id["t2"]
     assert (t1["passed"], t1["score"]) == (False, 0.0), t1
@@ -767,6 +769,27 @@ def test_a_train_item_still_wrong_after_its_feedback_says_both(tmp_path, sb_env)
     assert record["gold_feedback"] == {"told_wrong": 3, "passed_after": False, "score_after": 0.0}
     assert record["fail_reason"].startswith(
         "first attempt wrong (still wrong after gold feedback); eval-mismatch: ")
+
+
+def test_no_edit_may_touch_the_gold_feedback_count():
+    """An added node that declares the count (or anything under .refactory/) as a write,
+    or as a read, is refused (V17): otherwise it could erase the count and give a
+    told-wrong item back its grade after the feedback."""
+    from refactory_dsh.nn import edits
+    from refactory_dsh.nn.validate import validate_state
+
+    solver = sb_mode.Solver()
+    for field in ("writes", "reads"):
+        state = edits.apply({"op": "add_node", "position": {"after": "next_turn"},
+                             "node": {"id": "note", "kind": "agent",
+                                      "prompt_template": "Write a short note.",
+                                      field: [".refactory/gold_feedback.json"]}},
+                            solver.state_dict(), protected=solver.protected_nodes())
+        issues = validate_state(state, **sb_mode.Solver(state=state).grader_scope())
+        assert any(i.code == "V17" and i.node == "note" and ".refactory" in i.message
+                   for i in issues), (field, issues)
+    assert not [i for i in validate_state(solver.state_dict(), **solver.grader_scope())
+                if ".refactory" in i.message]
 
 
 def test_turns_are_capped_and_the_last_code_runs_again(tmp_path, sb_env):

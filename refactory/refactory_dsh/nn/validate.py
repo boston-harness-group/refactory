@@ -80,7 +80,8 @@ RULES: dict[str, str] = {
            "a node that consumes any of these writes or produces in turn -- whether "
            "through a prompt slot or an {% if %} condition (bound fields included), feedback_keys, reads, "
            "required_reads or inputs. The grader side is the data nodes, the mode's protected nodes "
-           "and its grader nodes",
+           "and its grader nodes. No node declares a read or a write under .refactory/ (the "
+           "runtime's own records, the gold-feedback count among them)",
     "V18": "a code node (call refactory_dsh.snippet:run, or evaluator refactory_dsh.snippet:gate) "
            f"has code that parses, defines main(inp), is at most {MAX_CODE_BYTES} bytes, imports "
            f"only these modules: {ALLOWED_IMPORTS_TEXT}; and uses no open, exec, eval, compile, __import__, getattr/setattr/delattr, "
@@ -1530,6 +1531,21 @@ def feedback_channel_issues(graph: Graph, *, grader_side: Iterable[str] = ()) ->
         if wrong:
             issues.append(Issue("V17", "a train-feedback node (the one way grader-derived data "
                                        "reaches a pass) " + "; ".join(wrong), node=node_id))
+    # The channel's count of feedback that said an attempt was wrong decides the item's
+    # train score (`feedback.TOLD_WRONG`) and lives with the runtime's own records under
+    # `.refactory/`: no node may declare a read or a write there, or an edit could erase
+    # the count and give the item back its grade after the feedback.
+    from pathlib import PurePosixPath
+
+    metadata = PurePosixPath(".refactory")
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        touched = [path for path in (*node.reads, *node.required_reads, *node.writes)
+                   if PurePosixPath(path) == metadata or metadata in PurePosixPath(path).parents]
+        if touched:
+            issues.append(Issue("V17", f"declares the runtime's own records {sorted(touched)} "
+                                       "(under .refactory/, the gold-feedback count among them) "
+                                       "as a read or a write", node=node_id))
     return issues
 
 

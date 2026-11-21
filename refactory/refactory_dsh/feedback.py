@@ -76,14 +76,18 @@ def says_wrong(value: Any) -> bool:
 
 
 def told_wrong(pass_dir: Path) -> int:
-    """How many times the pass at ``pass_dir`` was told its attempt was wrong (0 for
-    none, or a record that cannot be read)."""
-    try:
-        record = json.loads((Path(pass_dir) / TOLD_WRONG).read_text())
-    except (OSError, json.JSONDecodeError):
+    """How many times the pass at ``pass_dir`` was told its attempt was wrong: 0 with no
+    record. A record that is there but cannot be read counts as told wrong once (fail
+    closed): a damaged count never gives an item back its grade after the feedback."""
+    path = Path(pass_dir) / TOLD_WRONG
+    if not path.exists():
         return 0
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return 1
     count = record.get("told_wrong") if isinstance(record, dict) else None
-    return count if isinstance(count, int) and count > 0 else 0
+    return count if isinstance(count, int) and count > 0 else 1
 
 
 def clear_told_wrong(pass_dir: Path) -> None:

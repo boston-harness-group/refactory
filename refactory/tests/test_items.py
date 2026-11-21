@@ -1505,6 +1505,18 @@ def test_a_pass_that_starts_again_forgets_its_earlier_feedback(tmp_path):
     assert feedback.told_wrong(pass_dir) == 0
 
 
+@pytest.mark.parametrize("text", ["", "{not json", "[]", '{"told_wrong": "many"}', '{"told_wrong": 0}'])
+def test_a_damaged_count_fails_closed(tmp_path, text):
+    """A count file that is there but unreadable counts as told wrong once, so damage
+    never gives an item back its grade after the feedback."""
+    from refactory_dsh import feedback
+
+    path = tmp_path / feedback.TOLD_WRONG
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    assert feedback.told_wrong(tmp_path) == 1
+
+
 @pytest.mark.parametrize("value,counted", [
     ({"passed": False, "feedback": "cells"}, 1), ({"passed": True}, 0), (None, 0),
     ("wrong", 0), ({"passed": 0}, 0)])
