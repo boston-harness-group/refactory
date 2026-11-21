@@ -860,8 +860,10 @@ def test_a_deleted_targets_worktrees_go_but_an_unmounted_ones_stay(tmp_path):
         _companions(repo, run_id)
         _spine(run, "ready")  # resumable, but nothing is left to resume it on
     deleted_slot, unmounted_slot = worktree.slot(deleted), worktree.slot(unmounted)
+    git_repo(tmp_path / "projects" / "another")
     shutil.rmtree(deleted)
     (tmp_path / "disk").rename(tmp_path / "disk-off")
+    (tmp_path / "disk").mkdir()  # the mount point an unmounted disk leaves behind
     worktree.prune_gone(deleted)
     assert Path(runs["deleted"].path).exists(), "idle less than the limit"
     notes = worktree.prune_gone(deleted, idle_hours=0) + worktree.prune_gone(unmounted, idle_hours=0)
@@ -873,14 +875,52 @@ def test_a_deleted_targets_worktrees_go_but_an_unmounted_ones_stay(tmp_path):
 def test_a_gone_targets_record_never_deletes_anything_outside_its_slot(tmp_path):
     """A damaged record could name any path; only the slot's own worktrees are ever deleted."""
     repo = git_repo(tmp_path / "projects" / "deleted")
+    git_repo(tmp_path / "projects" / "another")
     worktree.create(repo, "HEAD", "7a7a7a7a0000", _run(tmp_path))
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (worktree.slot(repo) / "run-7b7b7b7b0000.json").write_text(json.dumps(
-        {"branch": "refactory/run-7b7b7b7b0000", "path": str(elsewhere), "target": str(repo)}))
+    for run_id, path in (("7b7b7b7b0000", elsewhere), ("7c7c7c7c0000", worktree.slot(repo) / "..")):
+        (worktree.slot(repo) / f"run-{run_id}.json").write_text(json.dumps(
+            {"branch": f"refactory/run-{run_id}", "path": str(path), "target": str(repo)}))
     shutil.rmtree(repo)
+    notes = worktree.prune_gone(repo, idle_hours=0)
+    assert any("which is gone" in note for note in notes), "the slot's own worktree went"
+    assert elsewhere.is_dir() and worktree.root().is_dir()
+
+
+def test_a_gone_targets_run_a_process_still_owns_is_kept(tmp_path):
+    from refactory_dsh.run_ownership import ownership
+
+    repo = git_repo(tmp_path / "projects" / "deleted")
+    git_repo(tmp_path / "projects" / "another")
+    run = _run(tmp_path)
+    found = worktree.create(repo, "HEAD", "7d7d7d7d0000", run)
+    shutil.rmtree(repo)
+    with ownership(run):
+        worktree.prune_gone(repo, idle_hours=0)
+    assert Path(found.path).exists()
     worktree.prune_gone(repo, idle_hours=0)
-    assert elsewhere.is_dir()
+    assert not Path(found.path).exists()
+
+
+def test_a_target_the_sweep_cannot_prune_is_reported_and_the_rest_still_go(tmp_path, monkeypatch):
+    first, second = git_repo(tmp_path / "first"), git_repo(tmp_path / "second")
+    made = {}
+    for repo, run_id in ((first, "7e7e7e7e0000"), (second, "7f7f7f7f0000")):
+        run = _run(tmp_path, f"run-{repo.name}")
+        made[repo.name] = worktree.create(repo, "HEAD", run_id, run)
+        _spine(run, "failed")
+    real = worktree.prune
+
+    def refuse_first(target: Path, **kwargs: object) -> list[str]:
+        if Path(target).name == "first":
+            raise ValueError("git is broken here")
+        return real(target, **kwargs)
+
+    monkeypatch.setattr(worktree, "prune", refuse_first)
+    notes = worktree.sweep(idle_hours=0)
+    assert any(note.startswith("kept the worktrees in") and "git is broken here" in note for note in notes)
+    assert Path(made["first"].path).exists() and not Path(made["second"].path).exists()
 
 def test_a_runs_start_sweeps_every_targets_worktrees_at_most_once_an_hour(tmp_path):
     """Found live: canaries and measurements start each run on a fresh target no run revisits."""

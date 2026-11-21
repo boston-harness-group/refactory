@@ -64,6 +64,10 @@ COMPANION_PREFIXES = ("base-", "check-")
 #: How often a run's start sweeps every target's worktrees, not only its own (:func:`sweep`).
 SWEEP_EVERY_S = 3600
 
+#: How long one sweep may hold up the run whose start it runs in; what it has not
+#: reached by then waits for the next one.
+SWEEP_BUDGET_S = 60
+
 #: Who commits a run's attempts. Each commit only records an attempt; who authors what
 #: is finally delivered is decided when it is delivered (#350).
 COMMITTER = {
@@ -1170,8 +1174,29 @@ def _remove(target: Path, found: dict[str, Any], path: Path) -> str:
 
 
 def _limit(variable: str, default: float) -> float:
-    """An idle limit in hours, from ``variable`` when the environment sets it."""
-    return float(os.environ.get(variable, default))
+    """An idle limit in hours, from ``variable`` when the environment sets it to a number."""
+    try:
+        return float(os.environ.get(variable, default))
+    except ValueError:
+        return default
+
+
+def _gone(target: Path) -> bool:
+    """Whether ``target`` was deleted, rather than sitting on a disk that is not mounted.
+
+    Its parent must still be there, hold something, and hold no mount point: an
+    unmounted disk leaves an empty mount-point directory on Linux, and a repository at
+    the root of a volume sits in a directory of mount points (`/Volumes` on macOS). A
+    case this cannot tell apart keeps its worktrees.
+    """
+    parent = target.parent
+    try:
+        if target.exists() or not parent.is_dir():
+            return False
+        entries = list(parent.iterdir())
+        return bool(entries) and not any(os.path.ismount(entry) for entry in entries)
+    except OSError:
+        return False
 
 
 def _remove_companions(target: Path | None, here: Path, run_id: str) -> list[str]:
@@ -1276,15 +1301,16 @@ def prune_gone(target: Path, *, idle_hours: float | None = None) -> list[str]:
 
     git cannot remove them -- their repository went with the target, and nothing in
     them can be committed any more -- so their directories are deleted, with their
-    base worktrees, check copies and records. Only when the target's parent directory is
-    still there: a target on a disk that is not mounted keeps everything (see
-    :func:`prune`). A run some process still owns is never touched; the rest go after
+    base worktrees, check copies and records. Only a target :func:`_gone` judges deleted:
+    one on a disk that is not mounted keeps everything (see :func:`prune`). Only the
+    worktree a record names in its own slot is deleted, never a path a damaged record
+    points elsewhere. A run some process still owns is never touched; the rest go after
     :data:`IDLE_HOURS` idle, dated by their run directory, or by their record when that
     is gone too. A resumable run counts as over: there is nothing left to resume it on.
     """
     target = Path(target).resolve()
     here = slot(target)
-    if target.exists() or not target.parent.is_dir() or not here.is_dir():
+    if not _gone(target) or not here.is_dir():
         return []
     limit = _limit("REFACTORY_WORKTREE_IDLE_HOURS", IDLE_HOURS) if idle_hours is None else idle_hours
     notes: list[str] = []
@@ -1303,7 +1329,7 @@ def prune_gone(target: Path, *, idle_hours: float | None = None) -> list[str]:
             last = _last_active(target, found)
             if (time.time() - (record_path.stat().st_mtime if last is None else last)) / 3600 < limit:
                 continue
-            if path.parent == here:  # never anything a damaged record points elsewhere
+            if path == here / f"run-{run_id}":  # never what a damaged record points elsewhere
                 shutil.rmtree(path, ignore_errors=True)
             notes.extend(_remove_companions(None, here, run_id))
             if path.exists():
@@ -1333,28 +1359,33 @@ def sweep(*, idle_hours: float | None = None) -> list[str]:
     A run's start prunes its own target, which alone leaves every target no later run
     revisits -- a canary's fresh project, a measurement's copy, one deleted since --
     holding its worktrees for good. So a start also sweeps them all, under a stamp that
-    keeps starts close together from repeating the walk. A target that is gone goes
-    through :func:`prune_gone`; one that cannot be pruned is reported, and never fails
-    the run whose start swept it.
+    keeps starts close together from repeating the walk, and within
+    :data:`SWEEP_BUDGET_S`. A target that is gone goes through :func:`prune_gone`; one
+    that cannot be pruned is reported, and never fails the run whose start swept it.
     """
     base = root()
-    if not base.is_dir():
-        return []
     stamp = base / ".last-sweep"
     try:
         if time.time() - stamp.stat().st_mtime < SWEEP_EVERY_S:
             return []
     except OSError:
         pass
-    stamp.touch()
     notes: list[str] = []
-    for here in sorted(entry for entry in base.iterdir() if entry.is_dir()):
-        target = _slot_target(here)
-        if target is None:
-            continue
+    try:
+        stamp.touch()
+        slots = sorted(entry for entry in base.iterdir() if entry.is_dir())
+    except OSError as error:
+        return [f"did not sweep {base}: {error}"]
+    deadline = time.monotonic() + SWEEP_BUDGET_S
+    for here in slots:
+        if time.monotonic() > deadline:
+            notes.append(f"stopped sweeping after {SWEEP_BUDGET_S}s; the next sweep goes on")
+            break
         try:
-            notes.extend(prune(target, idle_hours=idle_hours) if target.is_dir()
-                         else prune_gone(target, idle_hours=idle_hours))
+            target = _slot_target(here)
+            if target is not None:
+                notes.extend(prune(target, idle_hours=idle_hours) if target.is_dir()
+                             else prune_gone(target, idle_hours=idle_hours))
         except (OSError, ValueError) as error:
             notes.append(f"kept the worktrees in {here}: {error}")
     return notes
