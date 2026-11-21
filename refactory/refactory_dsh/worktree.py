@@ -1280,7 +1280,10 @@ def prune(target: Path, *, idle_hours: float | None = None, succeeded: bool = Fa
             if (idle >= limit if outcome == "ended"
                     else succeeded or idle >= done_limit):
                 if path.is_dir():
-                    notes.append(_remove(target, found, path))
+                    try:
+                        notes.append(_remove(target, found, path))
+                    except ValueError as error:  # one broken worktree never stops the rest
+                        notes.append(f"kept {path}: {error}")
                 notes.extend(_remove_companions(target, here, run_id))
             if outcome == "ended" and not path.is_dir() and idle >= FAILED_BRANCH_DAYS * 24:
                 try:
