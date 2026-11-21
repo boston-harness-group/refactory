@@ -263,6 +263,9 @@ def test_a_pinned_step_runs_only_on_its_claude_code(tmp_path):
     claude_code_preflight(client(_claude(tmp_path, "2.1.299")), roles=roles, pins=pins)
     with pytest.raises(ValueError, match="node 'solve'.*2.1.300.*pins Claude Code 2.1.299"):
         claude_code_preflight(client(_claude(tmp_path, "2.1.300")), roles=roles, pins=pins)
+    # The exact version it reports: a suffixed build is another Claude Code.
+    with pytest.raises(ValueError, match="2.1.299-beta.*pins Claude Code 2.1.299"):
+        claude_code_preflight(client(_claude(tmp_path, "2.1.299-beta")), roles=roles, pins=pins)
     if _bundled_claude():
         with pytest.raises(ValueError, match="bundled with .*pins Claude Code 2.1.299"):
             claude_code_preflight(client(), roles=roles, pins=pins)
@@ -270,6 +273,30 @@ def test_a_pinned_step_runs_only_on_its_claude_code(tmp_path):
             pytest.raises(ValueError, match="no Claude Code is named or bundled"):
         claude_code_preflight(client(), roles=roles, pins=pins)
     claude_code_preflight(client(_claude(tmp_path, "2.1.300")), roles=roles)  # no pin, no refusal
+
+
+def test_running_spreadsheetbench_once_refuses_another_claude_code(tmp_path, monkeypatch):
+    """`refactory run` / `refactory ceo` and the console's open (`interactive.run`,
+    `interactive.prepare`) check the mode's pin too, before the run directory exists."""
+    from refactory_dsh import dsh_profile, interactive, steer_probe
+
+    monkeypatch.setattr(interactive, "require_build", lambda **kw: None)
+    monkeypatch.setattr(steer_probe, "find_steer_module", lambda: "refactory.steer")
+    monkeypatch.setattr(dsh_profile, "require", lambda **kw: None)
+    route = dict(worker_backend="claude_code", model="claude-opus-4-6", permission_mode="dontAsk",
+                 claude_executable=_claude(tmp_path, "2.1.300"))
+    workdir = tmp_path / "the-run"
+    with pytest.raises(ValueError, match="node 'solve'.*2.1.300.*pins Claude Code 2.1.299"):
+        interactive.run("spreadsheetbench/solver", workdir=workdir, project=ROOT / "refactory",
+                        headless=True, **route)
+    assert not workdir.exists()
+    from refactory_dsh.model import DshModelClient
+
+    context = DshModelClient(project=ROOT / "refactory", routes_resolved=True, **route).context()
+    with pytest.raises(ValueError, match="pins Claude Code 2.1.299"):
+        interactive.prepare("spreadsheetbench/solver", workdir=tmp_path / "opened",
+                            project=ROOT / "refactory", model_context=context)
+    assert not (tmp_path / "opened").exists()
 
 
 def test_optimize_refuses_spreadsheetbench_on_another_claude_code(tmp_path, monkeypatch):

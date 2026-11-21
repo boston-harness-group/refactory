@@ -213,11 +213,13 @@ class Mode:
         return ()
 
     def claude_code_versions(self) -> dict[str, str]:
-        """The Claude Code version (``X.Y.Z``) each named agent step must run on when its
-        route is ``claude_code``: a mode that reproduces another harness pins the one that
-        harness ran, since its system prompt and tool text change between versions. A run
-        whose Claude Code for such a step reports another version, or none, is refused
-        before it starts (`workers.claude_code_preflight`). Empty by default.
+        """The Claude Code version each named agent step must run on when its route is
+        ``claude_code``, exactly as ``claude --version`` reports it: a mode that reproduces
+        another harness pins the one that harness ran, since its system prompt and tool
+        text change between versions. Every entry point that runs a mode's graph
+        (optimize, run/ceo, the console's open, design, create, edit) refuses, before the
+        run directory exists, a run whose Claude Code for such a step reports another
+        version, or none (`workers.claude_code_preflight`). Empty by default.
         """
         return {}
 

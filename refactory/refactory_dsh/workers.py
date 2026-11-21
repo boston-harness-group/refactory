@@ -285,15 +285,19 @@ def _claude_global_config() -> Path:
     return legacy if legacy.exists() else Path(configured or Path.home()) / '.claude.json'
 
 
-def claude_code_version(executable: str) -> str:
-    """The X.Y.Z ``executable --version`` starts with, or empty when it says none."""
+def claude_code_version(executable: str, *, exact: bool = False) -> str:
+    """The X.Y.Z ``executable --version`` starts with, or empty when it says none. With
+    ``exact``, the whole version it reports (its first word: ``2.1.299-beta``, say), for a
+    pin (`Mode.claude_code_versions`), which a suffix does not meet."""
     try:
         done = subprocess.run([executable, '--version'], capture_output=True, text=True,
                               timeout=20, check=False)
     except (OSError, subprocess.SubprocessError):
         return ''
     match = re.match(r'\s*(\d+\.\d+\.\d+)', done.stdout)
-    return match.group(1) if done.returncode == 0 and match else ''
+    if done.returncode != 0 or not match:
+        return ''
+    return done.stdout.split()[0] if exact else match.group(1)
 
 
 #: How a refusal says to choose another Claude Code.
@@ -370,8 +374,11 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
             continue
         if chosen:
             if chosen not in versions:
-                versions[chosen] = claude_code_version(chosen)
-            version, described = versions[chosen], chosen
+                versions[chosen] = claude_code_version(chosen, exact=True)
+            # The exact version for a pin; its leading X.Y.Z for a model's minimum.
+            reported, described = versions[chosen], chosen
+            leading = re.match(r'\d+\.\d+\.\d+', reported)
+            version = leading.group(0) if leading else ''
             if not version:
                 needs = (f'model {model_id} needs Claude Code {minimum} or newer' if minimum
                          else f'its mode pins Claude Code {pinned}')
@@ -386,11 +393,11 @@ def claude_code_preflight(model: Any, runtime_root: Path | str | None = None, *,
                                      f'which its mode pins, and no Claude Code is named or bundled; point '
                                      f'{_CLAUDE_EXECUTABLE_FIX} at Claude Code {pinned}')
                 continue  # dispatch reports a missing adapter; nothing to compare against
-            version = bundled['version']
+            version = reported = bundled['version']
             described = (f'{bundled["path"] or "the Agent SDK"} (bundled with {CLAUDE_AGENT_SDK} '
                          f'{bundled["sdk_version"]})')
-        if pinned and version != pinned:
-            raise ValueError(f'the claude_code worker for {where} would run Claude Code {version} at '
+        if pinned and reported != pinned:
+            raise ValueError(f'the claude_code worker for {where} would run Claude Code {reported} at '
                              f'{described}, and its mode pins Claude Code {pinned} (its system prompt '
                              f'and tool text change between versions). Point {_CLAUDE_EXECUTABLE_FIX} '
                              f'at Claude Code {pinned}')

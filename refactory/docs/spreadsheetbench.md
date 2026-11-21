@@ -46,8 +46,9 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
   Claude Code's default tools offered and refused by `dontAsk` (`tool_policy="refused"`,
   [architecture](architecture.md)), in a fresh empty directory, with no settings loaded.
   Its route must be the `claude_code` worker with permission mode `dontAsk`, and its
-  Claude Code must be SkillOpt's, 2.1.299: `refactory optimize` refuses another (the
-  SDK's bundled 2.1.281 included), so name it with `--claude-executable`.
+  Claude Code must report exactly SkillOpt's 2.1.299: `refactory optimize` and
+  `refactory run` refuse another before they start (the SDK's bundled 2.1.281
+  included), so name it with `--claude-executable`.
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
   is none, so prose comes back as a SyntaxError, not as "no code"), and runs it with
   SkillOpt's runner. An error is the next user message. A solve call that ended without

@@ -505,7 +505,8 @@ anything else is refused before calling a model. The worker record shows
 `enforced_tool_policy: "refused"`, the `tools_offered` and the `working_directory`.
 
 A mode may pin the Claude Code version a step runs (`Mode.claude_code_versions`), as a
-reproduction of another harness does: `refactory optimize` refuses a run whose Claude
-Code for that step reports another version.
+reproduction of another harness does: `refactory optimize`, `refactory run`/`ceo`, the
+console's open, design, create and edit refuse, before the run directory exists, a run
+whose Claude Code for that step reports any other version (a suffixed build included).
 
 A no-tools or refused node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.
