@@ -46,6 +46,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from refactory_dsh.feedback import FIRST_ATTEMPT_WRONG, clear_told_wrong, told_wrong
 from refactory_dsh.paths import project_root, project_for_nodes
 from refactory_dsh.nn import Node
 from refactory_dsh.nn.executor import CURRENT_ITEM, ITEMS_OVERRIDE, load_items
@@ -182,7 +183,8 @@ def prepare_pass_dir(
       (:func:`detach_read_through`), so a pass cannot change a run-level input.
     * With ``starting`` (the item's pass begins, a resumed or retried one included),
       stamps the time (:data:`ITEM_STARTED`), so its record's ``duration_s`` is this
-      attempt's and never counts the time a run spent stopped; the spine's ``end``
+      attempt's and never counts the time a run spent stopped, and clears an earlier
+      attempt's gold-feedback count (`feedback.TOLD_WRONG`); the spine's ``end``
       reuses the directory with ``starting`` False.
     * Marks it as a pass (:data:`PASS_MARKER`): the data node, the item and its index,
       and the node's Task (*task_ref*), so a grader-side op inside the pass can find
@@ -209,6 +211,9 @@ def prepare_pass_dir(
     if starting or not started.exists():
         started.parent.mkdir(parents=True, exist_ok=True)
         started.write_text(f"{time.time():.3f}\n")
+    if starting:
+        # A fresh attempt at the item: an earlier attempt's gold feedback is not its.
+        clear_told_wrong(pass_dir)
     marker = pass_dir / PASS_MARKER
     if not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -716,7 +721,9 @@ def make_item_record(
     With ``pass_dir``, the record says how long the item took, ``duration_s``, from its
     pass starting (`item_duration`), so an item's time is its own on both runtimes.
 
-    **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``.
+    **Success path** (error is None, verdict is not None): ``{"id", "passed", "score"}``;
+    an item its gold feedback told was wrong (`feedback.told_wrong`) fails with score 0,
+    its grade after that feedback under ``gold_feedback``.
     **Failure path** (error is not None): ``{"id", "passed": False, "score": 0.0,
     "error_text", "error_kind"}``.
     **No-verdict path** (error is None, verdict is None): ``None`` — the Task chose
@@ -764,10 +771,22 @@ def make_item_record(
     if verdict is None:
         return None
     missing = missing_steps(pass_dir) if pass_dir is not None else {}
+    passed, score = verdict.passed, verdict.score
+    told = told_wrong(pass_dir) if pass_dir is not None else 0
+    if told:
+        # A train item is scored on its first attempt (`feedback.SCORING`): told it was
+        # wrong, it fails, however the turns that feedback bought end.
+        passed, score = False, 0.0
+        after = "right" if verdict.passed else "still wrong"
+        base["fail_reason"] = "; ".join(part for part in (
+            f"{FIRST_ATTEMPT_WRONG} ({after} after gold feedback)", base.get("fail_reason"))
+            if part)
+        base["gold_feedback"] = {"told_wrong": told, "passed_after": verdict.passed,
+                                 "score_after": verdict.score}
     return {
         "id": item_id,
-        "passed": verdict.passed,
-        "score": verdict.score,
+        "passed": passed,
+        "score": score,
         "error_text": None,
         "error_kind": None,
         **base,

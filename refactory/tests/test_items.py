@@ -1467,3 +1467,75 @@ def test_nested_capped_loops_are_marked_alike_and_said_with_each_gate_s_reruns(t
         assert said.count(f"(refused: cap of {cap} reached)") == refused, said
         if refused:
             assert said.endswith(f"{taken} rerun{'' if taken == 1 else 's'} taken"), said
+
+
+# ── a gold-feedback train item is scored on its first attempt ────────────────
+
+def test_an_item_told_it_was_wrong_scores_its_first_attempt(tmp_path):
+    """A pass the feedback channel told was wrong fails, whatever its grade after; its
+    grade after the feedback is kept. A pass told nothing keeps its grade."""
+    from refactory_dsh import feedback
+    from refactory_dsh.task import VerifyResult
+
+    right = VerifyResult(passed=True, score=1.0)
+    plain = items.make_item_record("a", right, pass_dir=tmp_path)
+    assert (plain["passed"], plain["score"]) == (True, 1.0) and "gold_feedback" not in plain
+    feedback._count_told_wrong(tmp_path)
+    feedback._count_told_wrong(tmp_path)
+    told = items.make_item_record("a", right, pass_dir=tmp_path)
+    assert (told["passed"], told["score"]) == (False, 0.0)
+    assert told["gold_feedback"] == {"told_wrong": 2, "passed_after": True, "score_after": 1.0}
+    assert told["fail_reason"] == "first attempt wrong (right after gold feedback)"
+    wrong = items.make_item_record("a", VerifyResult(passed=False, score=0.0, details="x"),
+                                   fail_reason="eval-mismatch: x", pass_dir=tmp_path)
+    assert wrong["fail_reason"] == \
+        "first attempt wrong (still wrong after gold feedback); eval-mismatch: x"
+
+
+def test_a_pass_that_starts_again_forgets_its_earlier_feedback(tmp_path):
+    """A retried or resumed item starts its pass again (``starting``): the earlier
+    attempt's count goes. The spine's end (not starting) keeps it."""
+    from refactory_dsh import feedback
+
+    pass_dir = items.prepare_pass_dir(tmp_path, "data", "a", 0)
+    feedback._count_told_wrong(pass_dir)
+    items.prepare_pass_dir(tmp_path, "data", "a", 0, starting=False)
+    assert feedback.told_wrong(pass_dir) == 1
+    items.prepare_pass_dir(tmp_path, "data", "a", 0)
+    assert feedback.told_wrong(pass_dir) == 0
+
+
+@pytest.mark.parametrize("text", ["", "{not json", "[]", '{"told_wrong": "many"}', '{"told_wrong": 0}'])
+def test_a_damaged_count_fails_closed(tmp_path, text):
+    """A count file that is there but unreadable counts as told wrong once, so damage
+    never gives an item back its grade after the feedback."""
+    from refactory_dsh import feedback
+
+    path = tmp_path / feedback.TOLD_WRONG
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    assert feedback.told_wrong(tmp_path) == 1
+
+
+@pytest.mark.parametrize("value,counted", [
+    ({"passed": False, "feedback": "cells"}, 1), ({"passed": True}, 0), (None, 0),
+    ("wrong", 0), ({"passed": 0}, 0)])
+def test_only_feedback_saying_wrong_is_counted(tmp_path, monkeypatch, value, counted):
+    """The channel op counts a value that says the attempt is wrong (a mapping whose
+    ``passed`` is ``False``), and only on a gold-feedback train pass."""
+    from types import SimpleNamespace
+
+    from refactory_dsh import feedback
+
+    pass_dir = items.prepare_pass_dir(tmp_path, "data", "a", 0, task_ref="probe")
+    monkeypatch.setattr(task_module, "gold_feedback_on", lambda workdir: True)
+    instance = SimpleNamespace(id="a")
+    probe = SimpleNamespace(instances=lambda **kw: [instance],
+                            train_feedback=lambda inst, workdir, **kw: value)
+    monkeypatch.setattr(task_module, "load_task", lambda ref: probe)
+    ctx = SimpleNamespace(_declared_facts=("train_feedback",), workdir=pass_dir, node_id="g")
+    assert feedback.train_feedback(ctx) == {"train_feedback": value}
+    assert feedback.told_wrong(pass_dir) == counted
+    monkeypatch.setattr(task_module, "gold_feedback_on", lambda workdir: False)
+    feedback.train_feedback(ctx)
+    assert feedback.told_wrong(pass_dir) == counted

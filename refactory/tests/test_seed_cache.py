@@ -361,6 +361,26 @@ def test_the_runtime_semantics_are_part_of_the_context(tmp_path, monkeypatch):
         assert before["context_hash"] != after["context_hash"]
 
 
+def test_the_train_feedback_scoring_is_part_of_the_context(tmp_path, monkeypatch):
+    """A seed whose gold-feedback train items were scored another way (after the
+    feedback, before the first-attempt rule) is not reused (`feedback.SCORING`); nor is a
+    run's evidence resumed across the change (`profiles.resolve`)."""
+    from refactory_dsh import feedback, profiles
+
+    with _patch_mode(PartsProbe):
+        cache = _source_run(tmp_path)
+        real = feedback.SCORING
+        monkeypatch.setattr(feedback, "SCORING", "after-feedback")
+        loop = _loop(tmp_path / "reuse", _manifest(tmp_path), seed_results=str(cache))
+        with pytest.raises(LoopError, match="train_feedback_scoring"):
+            loop.init()
+        before = profiles.resolve(tmp_path, MODE)
+        monkeypatch.setattr(feedback, "SCORING", real)
+        after = profiles.resolve(tmp_path, MODE)
+        assert before["evaluation_context"]["train_feedback_scoring"] == "after-feedback"
+        assert before["context_hash"] != after["context_hash"]
+
+
 # ── the run's seed, and every setting that decides what an item scores ───────
 
 
