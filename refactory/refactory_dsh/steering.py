@@ -511,14 +511,28 @@ def installing_to(root: Path) -> Iterator[None]:
         _INSTALLED_ROOT.reset(token)
 
 
-def reads_run_dir(tool_policy: Any, workspace: Any) -> bool:
+def reads_run_dir(tool_policy: Any, sealed: bool) -> bool:
     """Whether a step can open files in the run directory, the ledger among them.
 
-    A step without tools (``tool_policy="none"``) cannot, and neither can one that works
-    in its own workspace (a sealed or scratch step sees only that folder). The same
-    rule decides what ``worker_node`` shows a retried step of its earlier output.
+    A step without tools (``tool_policy="none"``) cannot, and neither can a sealed one
+    (`workspace.is_sealed`: its tools run in a sandbox that shows no run directory,
+    `seal.py`). A step in a clone or scratch workspace that is not sealed can still read
+    the run directory: its workspace confines writes, not reads.
     """
-    return tool_policy != "none" and not workspace
+    return tool_policy != "none" and not sealed
+
+
+def _is_sealed_step(node: Any) -> bool:
+    """`workspace.is_sealed` for a walker `nn.Node` or a lowered `AgentNode` (which has no
+    ``kind``: it is an agent by type)."""
+    from refactory_dsh.workspace import is_sealed
+
+    return is_sealed({
+        "kind": "agent",
+        "tools": getattr(node, "tools", None),
+        "tool_policy": getattr(node, "tool_policy", None),
+        "workspace": getattr(node, "workspace", None),
+    })
 
 
 def _citation_block(ledger: Ledger, *, tools: bool = True) -> str:
@@ -581,7 +595,7 @@ def annotate(workflow: Any, ledger: Ledger) -> Any:
         existing = getattr(node, "prompt_template", "") or ""
         node.prompt_template = prompt_with_ledger(
             existing, ledger,
-            tools=reads_run_dir(getattr(node, "tool_policy", None), getattr(node, "workspace", None)))
+            tools=reads_run_dir(getattr(node, "tool_policy", None), _is_sealed_step(node)))
     return workflow
 
 

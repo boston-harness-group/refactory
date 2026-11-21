@@ -636,7 +636,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         annotated = prompt
     else:
         annotated = prompt_with_ledger(prompt, ledger, entries=entries,
-                                       tools=reads_run_dir(tool_policy, workspace))
+                                       tools=reads_run_dir(tool_policy, bool((workspace or {}).get('sealed'))))
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
                                                set_aside=set_aside, workspace=workspace,

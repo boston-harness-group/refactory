@@ -677,8 +677,8 @@ def test_a_no_tools_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_p
     assert 'Read the live ledger' in tooled
 
 
-def test_a_workspace_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path):
-    """A step working in its own workspace (sealed or scratch) cannot reach the run's ledger."""
+def test_a_sealed_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path):
+    """A sealed step's sandbox shows no run directory, so the run's ledger is out of reach."""
     from refactory_dsh.steering import Ledger
 
     ledger = Ledger.seed(tmp_path, "triage the reports")
@@ -691,3 +691,17 @@ def test_a_workspace_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_
                                   workspace=workspace)['prompt']
     assert 'never promise a refund' in prompt
     assert 'Read the live ledger' not in prompt and str(ledger.path) not in prompt
+
+
+def test_a_clone_workspace_dispatch_keeps_the_live_ledger_pointer(tmp_path):
+    """A clone workspace confines writes, not reads: the step can still open the ledger."""
+    from refactory_dsh.steering import Ledger
+
+    ledger = Ledger.seed(tmp_path, "triage the reports")
+    place = tmp_path / 'clone'
+    place.mkdir()
+    workspace = {'kind': 'clone', 'collect': [], 'path': str(place),
+                 'sandbox': 'workspace-write (clone)'}
+    prompt = agent_delivery.begin(tmp_path, 'build', 'Build it.', ['out.txt'],
+                                  workspace=workspace)['prompt']
+    assert 'Read the live ledger at `' + str(ledger.path) in prompt
