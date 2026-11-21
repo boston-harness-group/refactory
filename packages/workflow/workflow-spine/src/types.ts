@@ -5,6 +5,15 @@
  * @module @deepseek-ai/dsh-workflow-spine/types
  */
 
+/** The tool policies an agent node may declare (Python's `refactory_dsh.tool_policy.POLICIES`). */
+export const TOOL_POLICIES = ['none', 'refused'] as const
+/** One of {@link TOOL_POLICIES}: a step whose model can change nothing. */
+export type ToolPolicy = typeof TOOL_POLICIES[number]
+/** Whether `value` is a {@link ToolPolicy}. */
+export function isToolPolicy(value: unknown): value is ToolPolicy {
+  return (TOOL_POLICIES as readonly unknown[]).includes(value)
+}
+
 /** A director annotation on an AgentNode: hot-plug N child agents from a plan. */
 export interface DirectorExpansion {
   /** Artifact path the director writes (the plan). */
@@ -116,11 +125,13 @@ export interface WorkflowNode {
    */
   route?: Record<string, string>
   /**
-   * `AgentNode`: optional tool policy. When `'none'`, the model receives no
-   * tools and the runtime captures its text reply as the node's single declared
-   * output. Absent preserves existing tool-enabled behavior.
+   * `AgentNode`: optional tool policy (Python's `refactory_dsh.tool_policy`). When
+   * `'none'`, the model receives no tools; when `'refused'`, it is offered Claude Code's
+   * default tools and Claude Code's `dontAsk` refuses every call that needs permission,
+   * in an empty directory. Either way the runtime captures its text reply as the node's
+   * single declared output. Absent preserves existing tool-enabled behavior.
    */
-  tool_policy?: 'none'
+  tool_policy?: ToolPolicy
   /**
    * `FnNode`: which of the op's outputs (a file in `writes` or a fact in `produces`)
    * carry which of its `knobs`' text, naming every output once (Python's

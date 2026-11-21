@@ -2144,30 +2144,30 @@ class Executor:
         from refactory_dsh.workspace import for_sealed_step
         client = for_sealed_step(client, node.id, is_sealed(node))
         # ── no-tools enforcement ──────────────────────────────────────────
-        tool_policy = node.tool_policy or ""
+        from refactory_dsh import tool_policy as tool_policies
+        tool_policy = tool_policies.check(node.tool_policy)
         if callable(getattr(client, "with_tool_policy", None)):
             client = client.with_tool_policy(tool_policy)
-        if tool_policy == "none":
+        if tool_policies.no_effect(tool_policy):
             # Validate single-output cardinality before the model
             if len(node.writes) != 1:
                 raise ValueError(
-                    f"agent node {node.id!r} declares tool_policy='none' but has "
+                    f"agent node {node.id!r} declares tool_policy={tool_policy!r} but has "
                     f"{len(node.writes)} write(s); a no-tools node must declare "
                     "exactly one output for its captured reply"
                 )
             if not callable(getattr(client, "with_tool_policy", None)):
                 raise ValueError(
-                    f"agent node {node.id!r} declares tool_policy='none' but the "
+                    f"agent node {node.id!r} declares tool_policy={tool_policy!r} but the "
                     "model client does not support with_tool_policy; cannot "
                     "enforce the policy"
                 )
-            # Route refusal
-            backend = (client.route() if callable(getattr(client, "route", None)) else {}).get("worker_backend", "dsh")
-            if backend not in ("dsh", "claude_code"):
+            # Route refusal, as the spine's worker refuses it (`worker_node.execute`). A
+            # client without a route (a scripted one) answers for the policy itself.
+            if callable(getattr(client, "route", None)) and (
+                    refusal := tool_policies.route_refusal(tool_policy, client.route())):
                 raise ValueError(
-                    f"agent node {node.id!r} declares tool_policy='none', but the "
-                    f"{backend!r} route cannot enforce it"
-                )
+                    f"agent node {node.id!r} declares tool_policy={tool_policy!r}, but {refusal}")
         # The node's own bound on its session, as the spine applies it (#307).
         if node.timeout_s is not None and callable(getattr(client, "with_wall", None)):
             client = client.with_wall(node.timeout_s)
@@ -2206,7 +2206,7 @@ class Executor:
         # The step's own output from its previous visit, with the feedback, as
         # the spine's worker reads it (`agent_delivery.previous_output`).
         previous = previous_output(self.ctx.workdir, node.writes, sees_run_dir=(
-            node.tool_policy != "none" and not node.workspace)) if feedback else ""
+            not tool_policies.no_effect(node.tool_policy) and not node.workspace)) if feedback else ""
         prompt = with_feedback(render(_pt, self.ctx), feedback, previous)
         system = render(_spt, self.ctx) if _spt else ""
         # Gap 20 / correction C: detect unresolved template keys and emit
@@ -2263,7 +2263,7 @@ class Executor:
             return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
-        if tool_policy == "none":
+        if tool_policies.no_effect(tool_policy):
             _capture_final = True
         try:
             output, _receipt = deliver(

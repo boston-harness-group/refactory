@@ -98,24 +98,18 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             feedback = fb_path.read_text(encoding='utf-8')
 
     node = spec['node_id']
-    tool_policy = spec.get('tool_policy')
-    if tool_policy is None:
-        tool_policy = ''
-    if tool_policy not in ('', 'none'):
-        raise ValueError(f'invalid tool_policy {tool_policy!r}')
+    from refactory_dsh import tool_policy as tool_policies
+    tool_policy = tool_policies.check(spec.get('tool_policy'))
 
     # ── route refusal for no-tools ──
-    if tool_policy == 'none':
-        backend = spec['model_context'].get('worker_backend', 'dsh')
-        if backend not in ('dsh', 'claude_code'):
-            raise ValueError(
-                f"worker node {node!r} declares tool_policy='none', but the "
-                f"{backend!r} route cannot enforce it"
-            )
+    if tool_policies.no_effect(tool_policy):
+        refusal = tool_policies.route_refusal(tool_policy, spec['model_context'])
+        if refusal:
+            raise ValueError(f"worker node {node!r} declares tool_policy={tool_policy!r}, but {refusal}")
         # Validate single-output cardinality before the model
         if len(spec['writes']) != 1:
             raise ValueError(
-                f"worker node {node!r} declares tool_policy='none' but has "
+                f"worker node {node!r} declares tool_policy={tool_policy!r} but has "
                 f"{len(spec['writes'])} write(s); a no-tools node must declare "
                 "exactly one output for its captured reply"
             )
@@ -135,10 +129,10 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # The node's own role, as the walker's session records it; a spec from before the
     # role was written keeps the generic one.
     client = DshModelClient(**spec['model_context']).for_node(node, role=spec.get('role', 'worker'))
-    if tool_policy == 'none':
+    if tool_policies.no_effect(tool_policy):
         if not callable(getattr(client, 'with_tool_policy', None)):
             raise ValueError(
-                f"worker node {node!r} declares tool_policy='none' but the model "
+                f"worker node {node!r} declares tool_policy={tool_policy!r} but the model "
                 "client does not support with_tool_policy"
             )
     if callable(getattr(client, 'with_tool_policy', None)):
@@ -174,11 +168,11 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         return workspaces.ask(place, attempt, sent, workdir=workdir, system=system)
 
     _capture_final = client.route()["worker_backend"] == "dsh"
-    if tool_policy == "none":
+    if tool_policies.no_effect(tool_policy):
         _capture_final = True
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback, previous_output(
-            workdir, spec['writes'], sees_run_dir=tool_policy != 'none' and not spec.get('workspace'))
+            workdir, spec['writes'], sees_run_dir=not tool_policies.no_effect(tool_policy) and not spec.get('workspace'))
             if feedback else ''),
         writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
         capture_final=_capture_final, rule=spec.get('retry'),

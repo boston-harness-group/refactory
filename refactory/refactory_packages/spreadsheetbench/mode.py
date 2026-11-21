@@ -6,13 +6,22 @@ fenced block run against the input, an execution error sent back as the next use
 message, and -- in training rollouts only -- a wrong output told which cells are wrong
 (`ops`, `refactory_dsh.feedback`). Each call is one ``claude -p`` whose prompt is the
 whole conversation flattened into a ``History:`` block (`ops.frame`) and whose system
-file is ``codegen_system.md`` plus the ``## Skill`` section. The solve node has no tools
-(``tool_policy="none"``): SkillOpt sends no tool schemas, though its CLI calls carried
-Claude Code's default tools, which ``dontAsk`` denied (port spec §1.5, §7 Q2).
+file is ``codegen_system.md`` plus the ``## Skill`` section, appended to Claude Code's own
+system prompt (``--append-system-prompt-file``). SkillOpt sends no tool schemas of its
+own, but each ``claude -p`` carried Claude Code's default tools, run under ``dontAsk`` in
+a fresh empty directory (also its ``--add-dir``): a command, a write or a read elsewhere
+was refused with Claude Code's "Permission to use ... has been denied" result (60% of
+so-s43's 3,217 target calls had at least one: Bash 2,500, Write 109). So the solve node
+declares ``tool_policy="refused"`` (`refactory_dsh.tool_policy`): the same tools, refused
+the same way, in an empty directory of its own. With no tools at all (``"none"``, before)
+the model wrote its tool calls and their results as text, inventing the output, in about
+a third of its turns.
 
 Run settings, as SkillOpt's runs used them, are not part of the graph: the
 ``claude_code`` worker, ``claude-opus-4-6`` at effort ``medium``, permission mode
-``dontAsk``, setting sources ``project``.
+``dontAsk`` (which ``refused`` requires), setting sources ``project`` (never ``user``,
+which ``refused`` refuses). SkillOpt's ran the lab's own ``claude`` (2.1.299); a route's
+``claude_executable`` picks it over the SDK's bundled one.
 
 **Deviations from SkillOpt as shipped**, each recorded where it is decided:
 
@@ -35,7 +44,8 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
    (`sandbox`); SkillOpt's could. Stricter, so it can only lower a score that came
    from reading the answer (none of so-s42's generated code mentions the golden
    file, ``listdir`` or ``glob``; port spec §3).
-5. *Tools*: none on the solve call (above).
+5. *Tools*: refused, as SkillOpt's were (above), except that a tool which needs no
+   permission finds an empty directory where SkillOpt's found its system-prompt file.
 """
 from __future__ import annotations
 
@@ -109,7 +119,7 @@ class Solver(nn.Mode):
                       notes="flatten the conversation into the History: prompt"))
         g.add(nn.Node("solve", "agent", prompt_template="{{solver_prompt}}",
                       system_prompt_template=SYSTEM_PROMPT, writes=("reply.txt",),
-                      tool_policy="none", role="solver", outputs_only=True,
+                      tool_policy="refused", role="solver", outputs_only=True,
                       retry=SOLVE_RETRY,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))

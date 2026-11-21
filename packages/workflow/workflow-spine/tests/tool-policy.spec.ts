@@ -54,6 +54,19 @@ describe('tool_policy on WorkflowNode', () => {
     expect(next.nodes?.[0]?.tool_policy).toBe('none')
   })
 
+  it('passes tool_policy refused through describe, dispatched or not', () => {
+    // Claude Code's own tools, each refused by its dontAsk (Python's refactory_dsh.tool_policy).
+    for (const dispatch of [{}, { dispatch_command: 'python -m refactory_dsh.worker_node spec.json' }]) {
+      const graph: WorkflowGraph = {
+        ...baseGraph,
+        nodes: { a: { ...baseGraph.nodes.a!, tool_policy: 'refused', ...dispatch } },
+      }
+      const next = new Spine(graph).next()
+      expect(next.status).toBe('ready')
+      expect(next.nodes?.[0]?.tool_policy).toBe('refused')
+    }
+  })
+
   it('invalid tool_policy is refused before dispatch', () => {
     // TypeScript types restrict tool_policy to 'none' | undefined, but at runtime
     // Runtime input must also refuse unsupported policies.

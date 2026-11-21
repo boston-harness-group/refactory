@@ -1705,8 +1705,8 @@ state is promised, on any graph shape:
   one is missing. An agent's inputs are all required: its reads, and every `{{name}}`
   its prompts fill in that is not a knob, not in its `feedback_keys` and not inside an
   `{% if name %}` on the same name, are there on every path to it. A data pass's own
-  files and facts stay in the pass. A `tool_policy: none` agent declares exactly one
-  write. LiveMath's skill graph declares every read of its four ops as required.
+  files and facts stay in the pass. A `tool_policy` `none` or `refused` agent declares
+  exactly one write. LiveMath's skill graph declares every read of its four ops as required.
 - **Passes are closed (V12).** A data node's entry reaches its exit, which is not a gate
   and has no out-edge. A pass is entered only through its data node, never by an edge
   from the data node or from outside, and never leads back to it.
@@ -1721,7 +1721,9 @@ state is promised, on any graph shape:
   `label_text`, `theorem` and `sketch`.
 - **New agents run without tools, or sealed.** An agent node an edit adds gets
   `tool_policy: none` unless it lists tools from `workspace.SEALED_TOOLS` (the shell) in a
-  `scratch` workspace; any other ask for tools is refused `E-new-node-tools`. A sealed
+  `scratch` workspace, or declares `refused` (Claude Code's tools, each refused); any other
+  ask for tools is refused `E-new-node-tools`. A seed step with `none` or `refused` keeps
+  one of the two in every candidate. A sealed
   step's workspace holds copies of the files it reads, and every command it runs goes
   through `seal.runner_command`, set as DSH's local sandbox provider's `runnerCommand`:
   on Linux, user, network, mount and PID namespaces around a new root built from an

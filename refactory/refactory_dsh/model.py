@@ -39,6 +39,7 @@ import importlib.metadata
 
 from refactory_dsh.invocations import HOOK_SUPPRESS, WORKTREE_RECORD
 from refactory_dsh.owned_process import SHUTDOWN_GRACE_S, shutdown, _termination_as_exit
+from refactory_dsh import tool_policy as tool_policies
 
 
 class CompletionTimeout(RuntimeError):
@@ -265,7 +266,7 @@ def require_model_choice(client: Any, *, interactive: bool = False) -> Any:
 
 
 #: The worker backends that can run a call with no tools at all (tool_policy "none").
-TOOL_POLICY_NONE_BACKENDS = ("dsh", "claude_code")
+TOOL_POLICY_NONE_BACKENDS = tool_policies.BACKENDS["none"]
 
 #: The overlay that keeps a node's completion from backgrounding its own work. Checked
 #: in rather than generated, so what a node's model call is configured with is
@@ -946,9 +947,7 @@ class DshModelClient:
 
             stored = stored_model_choice(dsh_home)
             self._provider, self._model = stored["provider"], stored["model"]
-        if tool_policy not in ("", "none"):
-            raise ValueError(f"invalid tool_policy {tool_policy!r}")
-        self._tool_policy = tool_policy
+        self._tool_policy = tool_policies.check(tool_policy)
         self._configured_attempts = max(1, int(attempts))
         self._backoff_s = None if backoff_s is None else max(0.0, float(backoff_s))
         self._retry_window_s = max(0.0, float(retry_window_s))
@@ -958,12 +957,13 @@ class DshModelClient:
 
     def retry_attempts(self) -> int:
         """How many completions one ``complete`` call may make: the configured
-        ``attempts`` on the ``dsh`` backend, and on any backend for a session without
-        tools (``tool_policy == "none"``), whose replay has no side effects; 1 for a
-        native session with tools, whose replay could repeat real work."""
+        ``attempts`` on the ``dsh`` backend, and on any backend for a session whose model
+        can change nothing (``tool_policy`` ``none`` or ``refused``), whose replay has no
+        side effects; 1 for a native session with tools, whose replay could repeat real
+        work."""
         configured = max(1, int(getattr(self, "_configured_attempts", 1)))
         if (getattr(self, "_worker_backend", "dsh") == "dsh"
-                or getattr(self, "_tool_policy", "") == "none"):
+                or tool_policies.no_effect(getattr(self, "_tool_policy", ""))):
             return configured
         return 1
 
@@ -1102,10 +1102,8 @@ class DshModelClient:
 
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
-        if policy not in ("", "none"):
-            raise ValueError(f"invalid tool_policy {policy!r}")
         client = copy.copy(self)
-        client._tool_policy = policy
+        client._tool_policy = tool_policies.check(policy)
         return client
 
     def with_budget(self, budget: Any) -> DshModelClient:
@@ -1163,9 +1161,10 @@ class DshModelClient:
         failure only there); a session with tools is judged by the wire's own errors, as
         the transport retry judges it (`without_product_detail`)."""
         if not ((getattr(self, "_worker_backend", "dsh") == "dsh")
-                or getattr(self, "_tool_policy", "") == "none"):
+                or tool_policies.no_effect(getattr(self, "_tool_policy", ""))):
             return False
-        text = cause if getattr(self, "_tool_policy", "") == "none" else without_product_detail(cause)
+        text = (cause if tool_policies.no_effect(getattr(self, "_tool_policy", ""))
+                else without_product_detail(cause))
         return is_infrastructure_failure(text)
 
     def context(self) -> dict[str, Any]:
@@ -1220,8 +1219,8 @@ class DshModelClient:
             result.pop("REFACTORY_NODE_ID", None)
         # Tool policy: set when this node has one, clear for ordinary nodes so a
         # previous no-tools dispatch's env var does not leak to the next node.
-        if getattr(self, '_tool_policy', '') == 'none':
-            result["REFACTORY_TOOL_POLICY"] = "none"
+        if tool_policies.no_effect(policy := getattr(self, '_tool_policy', '')):
+            result["REFACTORY_TOOL_POLICY"] = policy
         else:
             result.pop("REFACTORY_TOOL_POLICY", None)
         # Only DSH's own system-prompt plugin reads this. An external worker gets the
@@ -1265,8 +1264,8 @@ class DshModelClient:
             else:
                 result[name] = value
         # Owned policy must win over arbitrary caller/workspace environment.
-        if getattr(self, '_tool_policy', '') == 'none':
-            result['REFACTORY_TOOL_POLICY'] = 'none'
+        if tool_policies.no_effect(policy := getattr(self, '_tool_policy', '')):
+            result['REFACTORY_TOOL_POLICY'] = policy
         else:
             result.pop('REFACTORY_TOOL_POLICY', None)
         return result
@@ -1409,8 +1408,8 @@ class DshModelClient:
         # starts without a complete route, so the headless profile's default never answers.
         if self._worker_backend == "dsh" and not (self._provider and self._model):
             raise ModelChoiceError()
-        if getattr(self, '_tool_policy', '') == 'none' and self._worker_backend not in TOOL_POLICY_NONE_BACKENDS:
-            raise ValueError(f"{self._worker_backend} cannot enforce tool_policy='none'")
+        if refusal := tool_policies.route_refusal(getattr(self, '_tool_policy', ''), self.route()):
+            raise ValueError(refusal)
         self._system_text = system
         task = prompt
         # The launcher resolves its own entry; the child's working directory stays
@@ -1772,7 +1771,7 @@ class DshModelClient:
 
     def _record_teardown(self, run_dir: Path, detail: str) -> None:
         who = self._node_id or "a model call"
-        tools = getattr(self, "_tool_policy", "") != "none"
+        tools = not tool_policies.no_effect(getattr(self, "_tool_policy", ""))
         # With tools, the session's tool processes may outlive the failed cleanup.
         self._emit(run_dir, TEARDOWN_EVENT, state="warning", error=detail[:500],
                    tools=tools, cleanup="unconfirmed",
@@ -1828,9 +1827,11 @@ class DshModelClient:
         """When (monotonic) the session last showed life: its model's last frame
         (`_last_frame`), or ``now`` while a tool command it started after that frame is
         still running. A session with no tools (``tool_policy`` none) has only its
-        stream: a process beneath it is no sign of the model's life."""
+        stream: a process beneath it is no sign of the model's life. Nor has one whose
+        every command is refused (``refused``)."""
         written = self._last_frame(started_epoch)
-        if getattr(self, "_tool_policy", "") != "none" and tool_command_running_since(pid, written):
+        if (not tool_policies.no_effect(getattr(self, "_tool_policy", ""))
+                and tool_command_running_since(pid, written)):
             return now
         return now - max(0.0, time.time() - written)
 

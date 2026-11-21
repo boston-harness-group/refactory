@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from refactory_dsh.tool_policy import no_effect
+
 BACKENDS = ('dsh', 'codex', 'claude_code', 'openshell')
 CLAUDE_CODE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 #: Claude Code's filesystem settings sources (the SDK's ``settingSources``), as the
@@ -411,14 +413,16 @@ def begin(workdir: Path, route: dict[str, Any], *, node: str = '', role: str = '
               'usage': {'status': 'unavailable', 'tokens': None},
               'runtime': {'backend': route['worker_backend'], 'version': None}}
     # ── no-tools receipt fields ─────────────────────────────────────────
-    if tool_policy == 'none':
-        record['requested_tool_policy'] = 'none'
+    if no_effect(tool_policy):
+        record['requested_tool_policy'] = tool_policy
         # Nothing is enforced until the runtime says so: DSH's no-tools plugin at the
         # provider request, Claude Code's adapter from the options it sent the SDK and
         # the tools the SDK reported. A worker that never got that far enforced nothing.
         record['enforced_tool_policy'] = None
         record['tool_observation_available'] = False
-        record['tools_permitted'] = None
+        # ``none`` permits no tool; ``refused`` offers Claude Code's own, each refused by
+        # dontAsk where it needs permission (`tool_policy`).
+        record['tools_permitted' if tool_policy == 'none' else 'tools_offered'] = None
         record['tool_policy_source'] = 'not-yet-observed'
     path.write_text(json.dumps(record, indent=2) + '\n')
     event(workdir, record, 'starting', f"Starting {route['worker_backend']} worker")
@@ -707,8 +711,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
         # below reserves every attempt.
         selected = selected.with_tool_policy(getattr(node, "tool_policy", None) or "")
-        if node.tool_policy == "none" and node.tools:
-            raise ValueError(f'worker node {name!r} declares tool_policy="none" and also declares tools, which is a contradiction')
+        if no_effect(node.tool_policy) and node.tools:
+            raise ValueError(f'worker node {name!r} declares tool_policy="{node.tool_policy}" and also declares tools, which is a contradiction')
         if node.tools and not is_sealed(node_state):
             raise ValueError(f'worker node {name!r} declares tool restrictions this bridge cannot enforce')
         directory.mkdir(parents=True, exist_ok=True)

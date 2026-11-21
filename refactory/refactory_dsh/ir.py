@@ -136,15 +136,15 @@ class AgentNode(Node):
     #: canonical form), set on its worker's model context. None is the run's route, and is
     #: left out of the serialized graph.
     route: dict[str, str] | None = None
-    #: Optional tool policy. ``"none"`` disables all tools; ``None`` preserves defaults.
+    #: Optional tool policy (`refactory_dsh.tool_policy`): ``"none"`` offers no tools,
+    #: ``"refused"`` offers Claude Code's own and refuses each that needs permission;
+    #: ``None`` preserves defaults.
     tool_policy: str | None = None
 
     @model_validator(mode="after")
     def _validate_tool_policy(self) -> AgentNode:
-        if self.tool_policy is not None and self.tool_policy != "none":
-            raise ValueError(
-                f"invalid tool_policy {self.tool_policy!r}; the only accepted value is 'none'"
-            )
+        from refactory_dsh.tool_policy import check
+        check(self.tool_policy)
         return self
 
 

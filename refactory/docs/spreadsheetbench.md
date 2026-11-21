@@ -41,7 +41,11 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
   prompt per turn, `History:` then `- User:`/`- Assistant:` lines (stripped, continuation
   lines indented two spaces), then `Answer the latest user request.`
   (`refactory_packages.skillopt.claude_backend.claude_backend_messages`).
-- `solve` is one model call with no tools; its reply is the node's output.
+- `solve` is one model call whose reply is the node's output. It runs as SkillOpt's
+  `claude -p` did: Claude Code's own system prompt with SkillOpt's text appended, and
+  Claude Code's default tools offered and refused by `dontAsk` (`tool_policy="refused"`,
+  [architecture](architecture.md)), in a fresh empty directory. Its route must be the
+  `claude_code` worker with permission mode `dontAsk` and no `user` settings.
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
   is none, so prose comes back as a SyntaxError, not as "no code"), and runs it with
   SkillOpt's runner. An error is the next user message. A solve call that ended without
@@ -125,9 +129,14 @@ Where neither can run, code is not run.
    The lab's SkillOpt wrapper is to run with the same backstop as its item limit.
 2. **Item start**: SkillOpt's clock starts when its worker picks the item up; here when
    the pass's first step runs.
-3. **Tools**: none on the solve call. SkillOpt sends no tool schemas, but its CLI calls
-   carried Claude Code's default tools, which `dontAsk` refused (74% of so-s42's target
-   calls tried one).
+3. **Tools**: refused, as SkillOpt's were. SkillOpt sends no tool schemas of its own,
+   but its CLI calls carried Claude Code's default tools under `dontAsk`, which refused
+   any command, write or read outside the call's empty directory (60% of so-s43's target
+   calls tried one, nearly all Bash). A tool that needs no permission (Read in that
+   directory, ToolSearch, a subagent under the same rules) runs in both; here the
+   directory is empty, where SkillOpt's held its system-prompt file. With no tools at all,
+   as the port first ran, the model wrote tool calls and invented their output as text in
+   about a third of its turns.
 4. **Interpreter**: pandas installed in the pinned environment, not added through
    `PYTHONPATH`; `PYTHONPATH` and `PYTHONHOME` are not passed to model code.
    `INPUT_PATH` names a copy of the input and the code runs in an empty working

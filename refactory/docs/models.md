@@ -488,4 +488,16 @@ Set `tool_policy="none"` on an agent node to disable acting tools. An omitted po
 
 The DSH runtime restricts the actual scoped tool registry, guards execution, and refuses a provider request if tools remain exposed. Claude Code receives `tools: []`, `mcpServers: {}`, `settingSources: []`, and `strictMcpConfig: true`. Unsupported routes, including Codex and OpenShell, refuse this policy before calling a model.
 
-A no-tools node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.
+Set `tool_policy="refused"` to offer the model Claude Code's own default tools and have
+Claude Code refuse them, as `claude -p --permission-mode dontAsk` does (SpreadsheetBench's
+solver, matching SkillOpt's harness). Nothing about the tools is changed: Claude Code's
+`dontAsk` refuses every call that needs permission (a command, a write, a read outside
+its directory) with its usual "Permission to use ... has been denied" result, and the
+session works in a fresh empty directory, also its one added directory, so a tool that
+needs no permission (Read there, ToolSearch, a subagent under the same rules) finds
+nothing. It needs the `claude_code` backend with permission mode `dontAsk`, loads no
+settings unless the route names some, and refuses `user` settings, whose allow rules could
+let a tool run; anything else is refused before calling a model. The worker record shows
+`enforced_tool_policy: "refused"`, the `tools_offered` and the `working_directory`.
+
+A no-tools or refused node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
 
+from refactory_dsh.tool_policy import POLICIES as TOOL_POLICIES
+
 #: The node kinds a mode may declare. `fork`/`join` are a barrier pair and
 #: `data` iterates a subgraph once per item; all three are executed by the
 #: runtime, and they are kinds here because a mode has to be able to declare
@@ -103,9 +105,10 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
 def retry_safe(node: "Node") -> bool:
     """Whether running ``node`` again in a fresh session cannot start from what a failed
     session left: its only effect is its own declared report files (``outputs_only``),
-    each attempt gets a fresh workspace, or it has no tools at all (``tool_policy:
-    none``), so its only effect is the reply the runtime captures."""
-    return bool(node.outputs_only or node.workspace is not None or node.tool_policy == "none")
+    each attempt gets a fresh workspace, or its model can change nothing (``tool_policy``
+    ``none`` or ``refused``), so its only effect is the reply the runtime captures."""
+    return bool(node.outputs_only or node.workspace is not None
+                or node.tool_policy in TOOL_POLICIES)
 
 #: What an agent step's own route may set (`Node.route`): its model, reasoning effort and
 #: output cap, each a value the run's routes already use (`workers.step_route_refusal`).
@@ -501,9 +504,12 @@ class Node:
     #: whatever its role and the run's routes give it, on both runtimes
     #: (`DshModelClient.with_step_route`). None takes the run's route as it is.
     route: dict[str, str] | None = None
-    #: `agent`: optional tool policy. When ``"none"``, the model receives no
-    #: tools and the runtime captures its text reply as the node's single declared
-    #: output. ``None`` (the default) preserves existing tool-enabled behavior.
+    #: `agent`: optional tool policy (`refactory_dsh.tool_policy`). When ``"none"``, the
+    #: model receives no tools; when ``"refused"``, it is offered Claude Code's default
+    #: tools and Claude Code's ``dontAsk`` refuses every call that needs permission, in an
+    #: empty directory. Either way the runtime captures its text reply as the node's
+    #: single declared output. ``None`` (the default) preserves existing tool-enabled
+    #: behavior.
     tool_policy: str | None = None
     #: Typed knob-to-field bindings: each pair ``(field_name, knob_name)`` says
     #: the knob's value replaces this node's field when the graph runs.  Only
@@ -535,10 +541,10 @@ class Node:
     renames: dict[str, dict[str, str | None]] | None = None
 
     def __post_init__(self) -> None:
-        if self.tool_policy is not None and self.tool_policy != "none":
+        if self.tool_policy is not None and self.tool_policy not in TOOL_POLICIES:
             raise GraphError(
                 f"node {self.id!r}: unknown tool_policy {self.tool_policy!r}; "
-                "known: none (or omit for the default)"
+                f"known: {', '.join(TOOL_POLICIES)} (or omit for the default)"
             )
         if self.kind not in NODE_KINDS:
             raise GraphError(f"node {self.id!r}: unknown kind {self.kind!r}")
@@ -710,7 +716,7 @@ class Node:
                     "run's worktree or the target), so a second session would start from "
                     "whatever the first one left. Only a node whose outputs are its own "
                     "declared report files may retry: declare outputs_only=True, give "
-                    "it a workspace, or give it no tools (tool_policy='none')")
+                    "it a workspace, or give it no tools (tool_policy='none' or 'refused')")
     @property
     def resource_phase(self) -> str | None:
         """Explicit resource scope, with the historical validator fallback."""
