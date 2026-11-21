@@ -1535,13 +1535,20 @@ def feedback_channel_issues(graph: Graph, *, grader_side: Iterable[str] = ()) ->
     # train score (`feedback.TOLD_WRONG`) and lives with the runtime's own records under
     # `.refactory/`: no node may declare a read or a write there, or an edit could erase
     # the count and give the item back its grade after the feedback.
+    import posixpath
     from pathlib import PurePosixPath
 
     metadata = PurePosixPath(".refactory")
+
+    def under_metadata(path: str) -> bool:
+        # ``x/../.refactory/...`` names it too (the runtimes refuse absolute paths).
+        normal = PurePosixPath(posixpath.normpath(str(path)))
+        return normal == metadata or metadata in normal.parents
+
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
         touched = [path for path in (*node.reads, *node.required_reads, *node.writes)
-                   if PurePosixPath(path) == metadata or metadata in PurePosixPath(path).parents]
+                   if under_metadata(path)]
         if touched:
             issues.append(Issue("V17", f"declares the runtime's own records {sorted(touched)} "
                                        "(under .refactory/, the gold-feedback count among them) "

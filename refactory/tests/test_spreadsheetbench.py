@@ -779,15 +779,21 @@ def test_no_edit_may_touch_the_gold_feedback_count():
     from refactory_dsh.nn.validate import validate_state
 
     solver = sb_mode.Solver()
-    for field in ("writes", "reads"):
+    for field, path in (("writes", ".refactory/gold_feedback.json"),
+                        ("writes", "x/../.refactory/gold_feedback.json"),
+                        ("reads", ".refactory/gold_feedback.json"),
+                        ("required_reads", "./.refactory/gold_feedback.json")):
+        # Only an op or a gate declares required_reads.
+        node = ({"kind": "op", "call": "refactory_packages.spreadsheetbench.ops:frame",
+                 "reads": [path]}
+                if field == "required_reads" else
+                {"kind": "agent", "prompt_template": "Write a short note."})
         state = edits.apply({"op": "add_node", "position": {"after": "next_turn"},
-                             "node": {"id": "note", "kind": "agent",
-                                      "prompt_template": "Write a short note.",
-                                      field: [".refactory/gold_feedback.json"]}},
+                             "node": {"id": "note", **node, field: [path]}},
                             solver.state_dict(), protected=solver.protected_nodes())
         issues = validate_state(state, **sb_mode.Solver(state=state).grader_scope())
         assert any(i.code == "V17" and i.node == "note" and ".refactory" in i.message
-                   for i in issues), (field, issues)
+                   for i in issues), (field, path, issues)
     assert not [i for i in validate_state(solver.state_dict(), **solver.grader_scope())
                 if ".refactory" in i.message]
 
