@@ -511,20 +511,31 @@ def installing_to(root: Path) -> Iterator[None]:
         _INSTALLED_ROOT.reset(token)
 
 
+def reads_run_dir(tool_policy: Any, workspace: Any) -> bool:
+    """Whether a step can open files in the run directory, the ledger among them.
+
+    A step without tools (``tool_policy="none"``) cannot, and neither can one that works
+    in its own workspace (a sealed or scratch step sees only that folder). The same
+    rule decides what ``worker_node`` shows a retried step of its earlier output.
+    """
+    return tool_policy != "none" and not workspace
+
+
 def _citation_block(ledger: Ledger, *, tools: bool = True) -> str:
     """Keep live steering instructions separate from the node's output format.
 
-    A step without tools (``tool_policy="none"``) cannot read the ledger file, and told
-    to read it, it writes a made-up read instead: invented tool calls and constraints
-    nobody gave, in its reply (create-bench H2's report, H3's crash). It is told the
-    entries above are the ledger.
+    ``tools`` is False for a step that cannot open the ledger file (`reads_run_dir`).
+    Told to read it anyway, such a step writes a made-up read instead: invented tool
+    calls and constraints nobody gave, in its reply (create-bench H2's report, H3's
+    crash). It is told the entries above are the ledger.
     """
     if not tools:
         return (
-            "\n\nThe entries above are the live ledger as of this step. You have no tools: "
-            "do not call tools or write tool calls. Respect its constraints while "
-            "preserving the node's required output format, and do not append steering "
-            "citations or other prose to code, JSON, or another declared artifact."
+            "\n\nThe entries above are the live ledger as of this step. You cannot open "
+            "the ledger file from where you work: do not look for it, and do not write "
+            "tool calls or tool output for it. Respect its constraints while preserving "
+            "the node's required output format, and do not append steering citations or "
+            "other prose to code, JSON, or another declared artifact."
         )
     installed = _INSTALLED_ROOT.get()
     path = Ledger(installed).path if installed is not None else ledger.path
@@ -541,7 +552,7 @@ def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, A
                        tools: bool = True) -> str:
     """Replace only this layer's own block with current context at dispatch.
 
-    ``tools`` is False for a step without tools, which is never told to read a file.
+    ``tools`` is False for a step that cannot open the ledger file (`reads_run_dir`).
     """
     start = prompt.find(STEERING_START)
     end = prompt.find(STEERING_END, start)
@@ -569,7 +580,8 @@ def annotate(workflow: Any, ledger: Ledger) -> Any:
             continue
         existing = getattr(node, "prompt_template", "") or ""
         node.prompt_template = prompt_with_ledger(
-            existing, ledger, tools=getattr(node, "tool_policy", None) != "none")
+            existing, ledger,
+            tools=reads_run_dir(getattr(node, "tool_policy", None), getattr(node, "workspace", None)))
     return workflow
 
 

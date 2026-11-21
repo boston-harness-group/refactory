@@ -579,7 +579,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     A changed prompt or live ledger is supplied afresh and archived in the context
     history. A DSH view records context supplied to the CEO, not proof of forwarding.
     """
-    from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger
+    from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger, reads_run_dir
 
     if tool_policy not in ("", "none"):
         raise ValueError(f"invalid tool_policy {tool_policy!r}")
@@ -636,7 +636,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         annotated = prompt
     else:
         annotated = prompt_with_ledger(prompt, ledger, entries=entries,
-                                       tools=tool_policy != "none")
+                                       tools=reads_run_dir(tool_policy, workspace))
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
                                                set_aside=set_aside, workspace=workspace,

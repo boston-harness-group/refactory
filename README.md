@@ -72,7 +72,7 @@ git pull
 ./install.sh
 ```
 
-`./install.sh` is safe to repeat: it re-syncs the Python and Node dependencies, rebuilds every package and updates the DSH profiles only when they changed. A running `refactory ui` or `./refactory-dsh` keeps the build it started with, so restart it afterwards.
+`./install.sh` is safe to repeat: it re-syncs the Python and Node dependencies, rebuilds every package and updates the DSH profiles only when they changed. The checkout pins Python 3.12 (`.python-version`, the version CI uses), so the first `./install.sh` after updating rebuilds a `.venv` made with another Python. A running `refactory ui` or `./refactory-dsh` keeps the build it started with, so restart it afterwards.
 
 `install.sh` points the DSH profiles at the checkout it runs in, and a machine has one set per DSH home. Re-run it in whichever checkout you want to use, and don't run it in a second clone while a run is live in the first: it refuses while a registered run is live there, saying which run, and `REFACTORY_INSTALL_FORCE_RELINK=1` overrides that. To keep two checkouts side by side, give the second its own DSH home — `DSH_HOME=~/.dsh-<name> ./install.sh` — and export the same `DSH_HOME` whenever you use that checkout.
 

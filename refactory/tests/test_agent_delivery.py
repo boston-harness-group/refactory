@@ -675,3 +675,19 @@ def test_a_no_tools_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_p
     assert 'never promise a refund' in bare and 'never promise a refund' in tooled
     assert 'Read the live ledger' not in bare and str(ledger.path) not in bare
     assert 'Read the live ledger' in tooled
+
+
+def test_a_workspace_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path):
+    """A step working in its own workspace (sealed or scratch) cannot reach the run's ledger."""
+    from refactory_dsh.steering import Ledger
+
+    ledger = Ledger.seed(tmp_path, "triage the reports")
+    ledger.note("constraint", "never promise a refund")
+    place = tmp_path / 'ws'
+    place.mkdir()
+    workspace = {'kind': 'scratch', 'collect': [], 'path': str(place), 'sealed': True,
+                 'tools': ['bash'], 'sandbox': 'sealed: its files only, no network'}
+    prompt = agent_delivery.begin(tmp_path, 'solve', 'Solve it.', ['answer.txt'],
+                                  workspace=workspace)['prompt']
+    assert 'never promise a refund' in prompt
+    assert 'Read the live ledger' not in prompt and str(ledger.path) not in prompt

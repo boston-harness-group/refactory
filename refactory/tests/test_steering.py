@@ -114,8 +114,25 @@ def test_a_step_without_tools_gets_the_ledger_but_is_never_told_to_read_it(tmp_p
         assert "do not add a numpy dependency" in node.prompt_template
     assert "Read the live ledger" not in no_tools.prompt_template
     assert str(ledger.path) not in no_tools.prompt_template
-    assert "You have no tools" in no_tools.prompt_template
+    assert "You cannot open the ledger file" in no_tools.prompt_template
     assert "Read the live ledger at `" + str(ledger.path) in with_tools.prompt_template
+
+
+def test_a_step_in_its_own_workspace_is_never_told_to_read_the_ledger(tmp_path):
+    """A sealed or scratch step sees only its workspace, so the run's ledger file is out of reach."""
+    from refactory_dsh import lowering
+
+    workflow = lowering.to_workflow(_state(), name="m")
+    agents = [n for n in workflow.nodes.values() if n.__class__.__name__ == "AgentNode"]
+    sealed = agents[0]
+    sealed.tool_policy, sealed.workspace = None, {"kind": "scratch"}
+    ledger = Ledger.seed(tmp_path, "build a mode for circle packing")
+
+    steering.annotate(workflow, ledger)
+
+    assert "build a mode for circle packing" in sealed.prompt_template
+    assert "Read the live ledger" not in sealed.prompt_template
+    assert "You cannot open the ledger file" in sealed.prompt_template
 
 
 def test_the_three_kinds_are_recorded_and_distinguishable(tmp_path):
