@@ -365,7 +365,18 @@ def test_a_round_is_asked_again_on_a_copy_and_the_run_is_left_as_it_was(tmp_path
 
     before = digest(run)
     copy = tmp_path / "copy"
-    again = Client()
+
+    class Proposing(Client):
+        """Proposes a valid edit, so a round that installed it would journal a candidate."""
+
+        def complete(self, prompt: str, *, system: str = "", **kw: Any) -> str:
+            reply = super().complete(prompt, system=system, **kw)
+            if '"proposals": []' in reply:
+                return json.dumps({"diagnosis": "d", "proposals": [
+                    {"edit": {"op": "set_knob", "name": "level", "value": 3}}]})
+            return reply
+
+    again = Proposing()
     with _patch_mode(LevelProbe):
         assert replay_round.main([str(run), str(copy), "--epoch", "1", "--grep", "FAILURE"],
                                  client=again) == 0
