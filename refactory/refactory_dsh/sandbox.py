@@ -22,12 +22,14 @@ firejail or gvisor). This is the same idea for a different artifact.
 from __future__ import annotations
 
 import ast
+import collections
 import json
 import math
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +46,11 @@ DEFAULT_MODEL_SMOKE_TIMEOUT_S = 3600
 DEFAULT_MEMORY_MB = 2048
 DEFAULT_CPU_S = 120
 DEFAULT_FILE_MB = 16384
+
+#: The absolute wall-clock backstop for any command, matching the model session backstop
+#: (``model.DEFAULT_BACKSTOP_S``).  A command that keeps producing output is not stopped
+#: before this.  Overridable with ``REFACTORY_COMMAND_BACKSTOP_S``.
+COMMAND_BACKSTOP_S = int(os.environ.get("REFACTORY_COMMAND_BACKSTOP_S", "14400"))
 
 #: Shell exit codes for signals that may be the change's own fault (SIGABRT, SIGBUS,
 #: SIGSEGV).  Retried once in run_command; if they persist, the base comparison decides
@@ -115,15 +122,34 @@ class SandboxResult:
     prep_failure: dict[str, Any] | None = None
     cwd_outside: str | None = None
     change_caused_prep: dict[str, Any] | None = None
+    #: When ``timed_out`` is True, what stopped the command: ``'inactivity'`` (no output
+    #: for the inactivity limit), ``'backstop'`` (the absolute wall-clock cap), or ``None``
+    #: (a budget-exhaustion or legacy timeout).
+    timeout_kind: str | None = None
 
     def problem(self) -> str:
         if self.timed_out:
+            if self.timeout_kind == "inactivity":
+                tail = _output_tail(self.stdout, 5)
+                suffix = f" — last output:\n{tail}" if tail else ""
+                return f"timed out (inactivity, {self.timeout_s}s silent){suffix}"
+            if self.timeout_kind == "backstop":
+                elapsed = f" {self.elapsed_s:.0f}s elapsed" if self.elapsed_s is not None else ""
+                tail = _output_tail(self.stdout, 5)
+                suffix = f" — last output:\n{tail}" if tail else ""
+                return f"timed out (backstop,{elapsed}){suffix}"
             limit = f" of {self.timeout_s}s" if self.timeout_s is not None else ""
             return f"the run exceeded its time limit{limit}; partial artifacts remain in the workdir"
         if self.returncode != 0:
             tail = self.stderr.strip().splitlines()
             return tail[-1] if tail else f"exit {self.returncode}"
         return ""
+
+
+def _output_tail(text: str, n: int) -> str:
+    """The last *n* non-empty lines of *text* for display in timeout messages."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    return "\n".join(lines[-n:])
 
 
 # ── validation without execution ───────────────────────────────────────────
@@ -446,7 +472,9 @@ def run_command(
     child_env["HOME"] = str(home or workdir)
     kwargs: dict[str, Any] = {}
     if sys.platform != "win32":
-        cpu = cpu_s if cpu_s is not None else math.ceil(timeout_s) * (os.cpu_count() or 1)
+        # RLIMIT_CPU is based on the backstop, not on the inactivity limit, so a
+        # long-running active command is not killed by SIGXCPU (PIT-001).
+        cpu = cpu_s if cpu_s is not None else math.ceil(COMMAND_BACKSTOP_S) * (os.cpu_count() or 1)
         kwargs["preexec_fn"] = _limits(memory_mb, cpu, file_mb)
     # When the caller wants cwd-escape detection, wrap the command in a shell that
     # installs an EXIT trap: the trap writes the final $PWD to a sentinel file so
@@ -469,27 +497,71 @@ def run_command(
         )
     else:
         wrapped = command
-    options = dict(shell=True, text=True, cwd=str(workdir), env=child_env,
+    # text=False: we read raw bytes from the pipes in reader threads, decode at the end.
+    options = dict(shell=True, text=False, cwd=str(workdir), env=child_env,
                    stdin=subprocess.DEVNULL if stdin is None else stdin, **kwargs)
 
+    # Shared mutable state for the reader threads and the timeout result, in the outer
+    # scope so the timeout handler can read the output the threads have already captured.
+    _timeout_kind: list[str | None] = [None]
+    _last_stdout_lines: collections.deque[str] = collections.deque(maxlen=200)
+    _last_stderr_lines: collections.deque[str] = collections.deque(maxlen=200)
+
+    def _reader(fd, deque_lines, activity):
+        """Drain *fd* (a raw binary file descriptor) line by line, updating *activity*."""
+        buf = b""
+        while True:
+            try:
+                chunk = os.read(fd.fileno(), 8192)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            activity[0] = time.monotonic()
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                deque_lines.append(line.decode("utf-8", errors="replace"))
+        # Flush remainder
+        if buf:
+            deque_lines.append(buf.decode("utf-8", errors="replace"))
+
     def _once(deadline: float) -> subprocess.CompletedProcess[str]:
-        """Run the command once, bounded by *deadline*; raise on timeout or budget."""
+        """Run the command once, bounded by inactivity and backstop; raise on timeout or budget."""
+        backstop_deadline = time.monotonic() + COMMAND_BACKSTOP_S
+
         proc = subprocess.Popen(wrapped, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=os.name == "posix", **options)
+
+        # Clear the shared deques for this invocation (retries reuse them).
+        _last_stdout_lines.clear()
+        _last_stderr_lines.clear()
+        # activity[0] = last time output was seen.  GIL-atomic float assignment.
+        activity = [time.monotonic()]
+
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, _last_stdout_lines, activity), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, _last_stderr_lines, activity), daemon=True)
+        t_out.start()
+        t_err.start()
+
         try:
             while True:
                 if budget is not None:
                     budget.checkpoint()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                # Check if child is done
+                retcode = proc.poll()
+                if retcode is not None:
+                    break
+                # Inactivity check: no output for timeout_s seconds
+                silent = time.monotonic() - activity[0]
+                if silent >= timeout_s:
+                    _timeout_kind[0] = "inactivity"
                     raise subprocess.TimeoutExpired(command, timeout_s)
-                try:
-                    # A budget is checked between short waits; without one, wait out the time.
-                    stdout, stderr = proc.communicate(
-                        timeout=remaining if budget is None else min(remaining, 0.1))
-                    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
-                except subprocess.TimeoutExpired:
-                    pass
+                # Backstop check: total elapsed >= backstop
+                if time.monotonic() >= backstop_deadline:
+                    _timeout_kind[0] = "backstop"
+                    raise subprocess.TimeoutExpired(command, COMMAND_BACKSTOP_S)
+                time.sleep(0.1)
         except BaseException:
             # This session was created by this call and contains only this
             # check's shell/tools. No descendant discovery or name matching.
@@ -497,15 +569,25 @@ def run_command(
                 os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
             except ProcessLookupError:
                 pass
+            # Join reader threads with 5 s timeout to drain kernel-buffered output.
+            t_out.join(timeout=5)
+            t_err.join(timeout=5)
             try:
-                proc.communicate(timeout=2)
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
                 except ProcessLookupError:
                     pass
-                proc.communicate(timeout=2)
+                proc.wait(timeout=2)
             raise
+
+        # Normal exit: join reader threads
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        stdout_text = "\n".join(_last_stdout_lines) + ("\n" if _last_stdout_lines else "")
+        stderr_text = "\n".join(_last_stderr_lines) + ("\n" if _last_stderr_lines else "")
+        return subprocess.CompletedProcess(command, retcode, stdout_text, stderr_text)
 
     started = time.monotonic()
     try:
@@ -541,10 +623,16 @@ def run_command(
     except subprocess.TimeoutExpired:
         if sentinel_path is not None:
             sentinel_path.unlink(missing_ok=True)
+        # Keep the last output from the reader threads instead of discarding it.
+        kept_stdout = "\n".join(_last_stdout_lines) + ("\n" if _last_stdout_lines else "")
+        kept_stderr = "\n".join(_last_stderr_lines) + ("\n" if _last_stderr_lines else "")
+        kind = _timeout_kind[0]
         return SandboxResult(
             ok=False, timed_out=True, returncode=124, timeout_s=timeout_s,
             elapsed_s=round(time.monotonic() - started, 3), progress=_progress_at(workdir),
-            stderr=f"timed out after {timeout_s}s",
+            stdout=kept_stdout,
+            stderr=kept_stderr or f"timed out after {timeout_s}s",
+            timeout_kind=kind,
         )
     cwd_outside: str | None = None
     if sentinel_path is not None:

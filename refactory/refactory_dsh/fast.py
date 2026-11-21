@@ -224,7 +224,7 @@ class CreateFastMode(CreateMode):
         knobs.update({
             "repair_attempts": Knob(1, "int", lo=0, hi=3, description="total repairs across admission, runtime validation and focused QA"),
             "check": Knob("", "str", description="explicit focused check command in the emitted package; empty means not requested"),
-            "check_timeout_s": Knob(60, "int", lo=1, hi=600, description="seconds allowed for the explicit focused check"),
+            "check_timeout_s": Knob(60, "int", lo=1, hi=600, description="inactivity limit for the explicit focused check (seconds of no output); the shared backstop is the absolute wall cap"),
             "check_attempt_cap": Knob(8, "int", lo=0, description="hard cap on total check attempts including convergence grants; 0 or a value at or below repair_attempts disables the extension"),
             "refusal_attempts": Knob(3, "int", lo=1, hi=10, frozen=True, description="consecutive refused emissions before the run stops"),
         })

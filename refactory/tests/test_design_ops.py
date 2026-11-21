@@ -721,3 +721,132 @@ def test_steer_on_a_finished_walker_run_says_it_will_not_build_the_correction(tm
     payload["recorded_note"], payload["recorded_kind"] = LATE, "correction"
     assert payload["late_correction"]["applied"] is False
     assert "will not build this correction" in readable.format_steer(payload)
+
+
+# ── inactivity / backstop timeout tests ──────────────────────────────────
+
+
+def test_check_failure_kind_returns_check_timeout_for_inactivity():
+    """check_failure_kind returns 'check_timeout' for inactivity timeouts, not 'uncertain'."""
+    from refactory_dsh.authoring_evidence import check_failure_kind
+    from refactory_dsh.sandbox import SandboxResult
+
+    result = SandboxResult(ok=False, timed_out=True, returncode=124, timeout_kind="inactivity")
+    assert check_failure_kind(result) == "check_timeout"
+
+
+def test_check_failure_kind_returns_check_timeout_for_backstop():
+    """check_failure_kind returns 'check_timeout' for backstop timeouts."""
+    from refactory_dsh.authoring_evidence import check_failure_kind
+    from refactory_dsh.sandbox import SandboxResult
+
+    result = SandboxResult(ok=False, timed_out=True, returncode=124, timeout_kind="backstop")
+    assert check_failure_kind(result) == "check_timeout"
+
+
+def test_check_failure_kind_returns_uncertain_for_budget_timeout():
+    """check_failure_kind returns 'uncertain' for budget-exhaustion timeouts (no timeout_kind)."""
+    from refactory_dsh.authoring_evidence import check_failure_kind
+    from refactory_dsh.sandbox import SandboxResult
+
+    result = SandboxResult(ok=False, timed_out=True, returncode=124, timeout_kind=None)
+    assert check_failure_kind(result) == "uncertain"
+
+
+class _FullCtx(_Ctx):
+    """Extended ctx for _full_check tests with write_text, write_json, knob, etc."""
+
+    def __init__(self, workdir: Path) -> None:
+        super().__init__(workdir)
+        self.knobs_dict: dict[str, int | str] = {}
+        self.budget = None
+        self._written: dict[str, str] = {}
+
+    def knob(self, name: str, default: int | str = 0) -> int | str:
+        return self.knobs_dict.get(name, default)
+
+    def write_text(self, name: str, text: str) -> None:
+        (self.workdir / name).write_text(text)
+        self._written[name] = text
+
+    def write_json(self, name: str, data: object) -> None:
+        import json
+        (self.workdir / name).write_text(json.dumps(data))
+
+    def read_json(self, name: str, default: object = None) -> object:
+        import json
+        try:
+            return json.loads((self.workdir / name).read_text())
+        except (OSError, json.JSONDecodeError):
+            return default
+
+    def path(self, name: str) -> Path:
+        return self.workdir / name
+
+
+def test_timed_out_check_produces_draft_pr(tmp_path, monkeypatch):
+    """A check returning SandboxResult(timed_out=True, timeout_kind='inactivity') routes
+    to a draft PR (draft_delivery fact is set), not to stop_unrepairable."""
+    from refactory_dsh.sandbox import SandboxResult
+    from refactory_dsh.design_ops import _full_check
+    from refactory_dsh import authoring_evidence as evidence
+    from refactory_dsh import worktree
+
+    ctx = _FullCtx(tmp_path)
+    ctx.facts["check"] = "echo test"
+    ctx.facts["name"] = "test-run"
+    ctx.facts["commit"] = ""
+    ctx.facts["attempts_used"] = 1
+    ctx.knobs_dict = {"check_timeout_s": 180}
+
+    # Mock run_check to return a timed-out result
+    monkeypatch.setattr("refactory_dsh.repo_change.run_check",
+        lambda ctx_arg, command, timeout, **kw: SandboxResult(
+            ok=False, timed_out=True, returncode=124,
+            timeout_kind="inactivity", timeout_s=180,
+            stdout="test output line 1\ntest output line 2\n",
+            stderr="", elapsed_s=180.0,
+        ))
+    # Mock evidence.record (needs artifact dir) and worktree.recorded
+    monkeypatch.setattr(evidence, "record", lambda ctx, outcome: outcome)
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: None)
+
+    result = _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
+
+    assert result == "draft"
+    assert "draft_delivery" in ctx.facts
+    draft = ctx.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "inactivity" in draft["check_failure"]
+
+
+def test_timeout_output_txt_written_next_to_check(tmp_path, monkeypatch):
+    """When a check times out with timeout_kind, timeout-output.txt is written."""
+    from refactory_dsh.sandbox import SandboxResult
+    from refactory_dsh.design_ops import _full_check
+    from refactory_dsh import authoring_evidence as evidence
+    from refactory_dsh import worktree
+
+    ctx = _FullCtx(tmp_path)
+    ctx.facts["check"] = "echo test"
+    ctx.facts["name"] = "test-run"
+    ctx.facts["commit"] = ""
+    ctx.facts["attempts_used"] = 1
+    ctx.knobs_dict = {"check_timeout_s": 180}
+
+    monkeypatch.setattr("refactory_dsh.repo_change.run_check",
+        lambda ctx_arg, command, timeout, **kw: SandboxResult(
+            ok=False, timed_out=True, returncode=124,
+            timeout_kind="inactivity", timeout_s=180,
+            stdout="line_1\nline_2\nline_3\n",
+            stderr="err_line\n", elapsed_s=180.0,
+        ))
+    monkeypatch.setattr(evidence, "record", lambda ctx, outcome: outcome)
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: None)
+
+    _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
+
+    timeout_output = (tmp_path / "timeout-output.txt").read_text()
+    assert "[stdout] line_1" in timeout_output
+    assert "[stderr] err_line" in timeout_output
+    assert "inactivity" in timeout_output

@@ -494,7 +494,9 @@ class DesignMode(Mode):
             ),
             "check_timeout_s": Knob(
                 180, "int", lo=10, hi=1800,
-                description="how long the brief's check may run",
+                description="inactivity limit for the brief's check (seconds of no output); "
+                            "the command is stopped only when it has produced no stdout/stderr "
+                            "for this many seconds, and the shared backstop is the absolute wall cap",
             ),
             "check_attempt_cap": Knob(
                 8, "int", lo=0,
@@ -553,7 +555,7 @@ class DesignMode(Mode):
 
             "self_check_timeout_s": Knob(
                 300, "int", lo=10, hi=600,
-                description="how long the self-check's tests may run before the reviews; "
+                description="inactivity limit for the self-check's tests (seconds of no output); "
                             "never more than a third of check_timeout_s",
             ),
             "builder_timeout_s": Knob(

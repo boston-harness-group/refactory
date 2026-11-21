@@ -636,6 +636,11 @@ def check_failure_kind(
         if snapshot.get("exhausted"):
             return "resource_exhausted"
     if getattr(result, "timed_out", False):
+        # An inactivity or backstop timeout is a 'check_timeout': the check did not
+        # finish, and the caller routes it to a draft PR instead of stop_unrepairable.
+        # A budget-exhaustion timeout (which does not set timeout_kind) stays 'uncertain'.
+        if getattr(result, "timeout_kind", None) in ("inactivity", "backstop"):
+            return "check_timeout"
         return "uncertain"
     rc = getattr(result, "returncode", None)
     if rc is not None and rc < 0:

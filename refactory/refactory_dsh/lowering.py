@@ -508,13 +508,16 @@ def _is_check_node(node: Any) -> bool:
 def _check_envelope_s(state: dict[str, Any]) -> int:
     """The command_timeout_s a check node needs, in seconds.
 
-    Covers every sub-operation ``run_check`` and ``_check_in_worktree`` perform
-    sequentially: three dependency installs (each ``INSTALL_TIMEOUT_S``), setup,
-    generate and the check command (each ``check_timeout_s``), and the dispatch
-    overhead.
+    With inactivity-based timeouts, the envelope is the shared command backstop
+    (which covers any active command for up to 4 hours) plus dispatch overhead.
+    The ``check_timeout_s`` knob is now an inactivity limit: a command is stopped
+    only when it has produced no output for that many seconds, and the backstop
+    is the absolute wall-clock cap.  The envelope must be large enough for the
+    backstop so the runtime does not kill an op while its child commands are
+    still active.
     """
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-    from refactory_dsh.invocations import INSTALL_TIMEOUT_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     knob_entry = (state.get("knobs") or {}).get("check_timeout_s", {})
     budget = int(knob_entry.get(
@@ -523,7 +526,7 @@ def _check_envelope_s(state: dict[str, Any]) -> int:
     ))
     if not 1 <= budget <= 86400:
         raise LoweringError("check_timeout_s must be between 1 and 86400 seconds")
-    return 3 * INSTALL_TIMEOUT_S + 3 * budget + NODE_DISPATCH_OVERHEAD_S
+    return COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
 
 def _is_deliver_node(node: Any) -> bool:
@@ -542,33 +545,39 @@ def _is_deliver_node(node: Any) -> bool:
 def _delivery_envelope_s(state: dict[str, Any]) -> int:
     """The command_timeout_s a deliver node needs, in seconds.
 
-    Covers the full merged-check envelope (``_check_envelope_s``) plus one
-    additional install cycle for the merged tree's dependencies
-    (``INSTALL_TIMEOUT_S``) and overhead for the merge and regeneration steps
-    (``NODE_DISPATCH_OVERHEAD_S``).
+    With inactivity-based timeouts, the delivery envelope is the same backstop-based
+    formula as the check envelope: ``COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S``.
+    The backstop is large enough to cover all sequential sub-operations.
     """
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-    from refactory_dsh.invocations import INSTALL_TIMEOUT_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
-    return _check_envelope_s(state) + INSTALL_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
+    return COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
 
 def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:
     """The per-node command_timeout_s for ops and fn gates, or None.
 
     Extracted from the inline classification in ``to_workflow()`` so both lowering
-    and the walker executor share one formula.
+    and the walker executor share one formula.  With inactivity-based timeouts, the
+    envelope is ``COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S`` for all classified
+    nodes: smoke ops can also run long with continuous output.
     """
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+
     if node.kind == "op":
         if _is_smoke_node(node):
-            return 3 * _smoke_budget(state) + 600
+            _smoke_budget(state)  # validate range
+            return COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
         if _is_check_node(node):
             return _check_envelope_s(state)
         if _is_deliver_node(node):
             return _delivery_envelope_s(state)
     elif node.kind == "gate" and getattr(node, "gate_kind", "fn") == "fn":
         if _is_smoke_node(node):
-            return 2 * _smoke_budget(state) + 600
+            _smoke_budget(state)  # validate range
+            return COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
         if _is_check_node(node):
             return _check_envelope_s(state)
     return None

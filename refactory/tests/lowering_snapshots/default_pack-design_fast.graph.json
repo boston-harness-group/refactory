@@ -50,7 +50,7 @@
       "command": "python -m refactory_dsh.run refactory_dsh.fast_ops:focused_check",
       "callable_name": "refactory_dsh.fast_ops:focused_check",
       "notes": "run the explicitly requested bounded check; no implicit full evaluation",
-      "command_timeout_s": 6540,
+      "command_timeout_s": 15000,
       "_type": "FnNode"
     },
     "focused_qa": {
@@ -366,7 +366,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "how long the brief's check may run",
+      "description": "inactivity limit for the brief's check (seconds of no output); the command is stopped only when it has produced no stdout/stderr for this many seconds, and the shared backstop is the absolute wall cap",
       "required": false
     },
     "check_attempt_cap": {

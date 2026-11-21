@@ -356,6 +356,35 @@ describe("a node's own time limit", () => {
   })
 })
 
+describe('deterministic op with lowered envelope', () => {
+  it('silent while child runs is not killed', async () => {
+    // An op whose own process produces no stdout for 2 s (longer than the old 600 s /
+    // 1000 scale of commandTimeoutMs) while a child command runs inside it.
+    // The op's wall cap is its lowered envelope (3 s here), not commandTimeoutMs.
+    // The op itself sleeps (is silent) for 2 s, which is within the 3 s envelope.
+    const outcome = await runDeterministic(localShell,
+      { ...fn('prepare', 'sleep 2; echo done'), command_timeout_s: 3 },
+      { ...config, timeoutMs: 1_000 },  // commandTimeoutMs would be 1 s, but the node's own envelope is 3 s
+    )
+    expect(outcome.ok).toBe(true)
+    expect(outcome.stdout).toBe('done')
+  })
+
+  it('killed at envelope wall cap', async () => {
+    // An op with a lowered envelope wall cap of 2 s that takes longer (sleeps 10 s).
+    // Verify the op is killed at the envelope cap (2 s), not at commandTimeoutMs.
+    const start = Date.now()
+    const outcome = await runDeterministic(localShell,
+      { ...fn('slow_op', 'sleep 10; echo done'), command_timeout_s: 2 },
+      { ...config, timeoutMs: 60_000 },  // commandTimeoutMs is large, but envelope is 2 s
+    )
+    const elapsed = Date.now() - start
+    expect(outcome.ok).toBe(false)
+    expect(failure(outcome).error).toContain('timed out')
+    expect(elapsed).toBeLessThan(10_000)
+  })
+})
+
 describe('reading the run warnings a completed node printed', () => {
   it('keeps each run warning, with or without the program name in front', () => {
     const stderr = 'loading\nrefactory: run warning: the target moved\n  run warning: disk nearly full  \ndone'

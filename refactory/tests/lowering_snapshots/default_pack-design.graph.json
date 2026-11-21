@@ -79,7 +79,7 @@
       "command": "python -m refactory_dsh.run refactory_dsh.design_ops:check_beside_reviews",
       "callable_name": "refactory_dsh.design_ops:check_beside_reviews",
       "notes": "run the brief's check, in a sandbox, beside the reviews",
-      "command_timeout_s": 6540,
+      "command_timeout_s": 15000,
       "_type": "FnNode"
     },
     "check_design_claims": {
@@ -176,7 +176,7 @@
       "command": "python -m refactory_dsh.run refactory_dsh.delivery:deliver_design",
       "callable_name": "refactory_dsh.delivery:deliver_design",
       "notes": "push the run's branch and open its pull request, as the approval gate said",
-      "command_timeout_s": 8940,
+      "command_timeout_s": 15000,
       "_type": "FnNode"
     },
     "delivery_gate": {
@@ -370,7 +370,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:gate_check",
-      "command_timeout_s": 6540,
+      "command_timeout_s": 15000,
       "gate_prompt": "compose one send-back from check failures and review findings without spending an attempt; the combined send-back names every failing test and every review finding of the round; a failing check skips the QA judge and overwatch by graph topology (gate_check \u2192 pick_corrections bypasses synthesize_qa \u2192 qa_judge \u2192 overwatch); at its limit, deliver the attempt as a draft marked check failing; when the check and all reviews passed, proceed",
       "max_iterations": 8,
       "_type": "GateNode"
@@ -661,7 +661,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:prepare_check",
-      "command_timeout_s": 6540,
+      "command_timeout_s": 15000,
       "gate_prompt": "settle the commit the check and the reviews see; every attempt's self-check runs the tests the change touches here (first or fix-up): a failure goes back to emit as a fix-up, spending no attempt and running no review; the full check runs beside the reviews in fork_qa; a limit stop with an applied commit and current check evidence goes to the report as a draft",
       "max_iterations": 45,
       "_type": "GateNode"
@@ -1425,7 +1425,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "how long the brief's check may run",
+      "description": "inactivity limit for the brief's check (seconds of no output); the command is stopped only when it has produced no stdout/stderr for this many seconds, and the shared backstop is the absolute wall cap",
       "required": false
     },
     "check_attempt_cap": {
@@ -1568,7 +1568,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "how long the self-check's tests may run before the reviews; never more than a third of check_timeout_s",
+      "description": "inactivity limit for the self-check's tests (seconds of no output); never more than a third of check_timeout_s",
       "required": false
     },
     "builder_timeout_s": {

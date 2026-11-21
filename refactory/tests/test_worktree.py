@@ -807,7 +807,7 @@ def test_a_check_in_a_worktree_sees_none_of_refactorys_variables(repo, tmp_path,
     monkeypatch.setenv("DSH_WORKFLOW_NODE", "{}")
     found = worktree.create(repo, "HEAD", "7777cccc2222", _run(tmp_path))
     env = worktree.check_environment(Path(found.path), tmp_path / "home")
-    assert set(env) <= {"PATH", "HOME", "VIRTUAL_ENV", *worktree.CHECK_ENV, *worktree.HOOK_SUPPRESS}
+    assert set(env) <= {"PATH", "HOME", "VIRTUAL_ENV", "PYTHONUNBUFFERED", *worktree.CHECK_ENV, *worktree.HOOK_SUPPRESS}
     assert env["HOME"] == str(tmp_path / "home")
     assert env["PATH"].split(os.pathsep)[0] == str(venv_bin()), "none of its own, so refactory's"
 

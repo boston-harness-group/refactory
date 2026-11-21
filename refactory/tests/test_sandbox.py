@@ -185,7 +185,9 @@ def test_a_check_command_is_bounded_by_its_timeout_not_by_memory(tmp_path):
     assert result.ok, result.stderr
     address_space, cpu = json.loads(result.stdout)
     assert address_space == resource.getrlimit(resource.RLIMIT_AS)[0], "a check sets no address-space cap"
-    assert cpu == 30 * (os.cpu_count() or 1), "a check's CPU limit is its timeout on every core"
+    assert cpu == sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1), (
+        "a check's CPU limit is the backstop on every core (not the inactivity limit)"
+    )
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="this machine has no node")
@@ -265,6 +267,89 @@ def test_timeout_does_not_retry(tmp_path):
     result = sandbox.run_command("sleep 60", workdir=tmp_path / "w", timeout_s=1)
     assert result.timed_out
     assert result.returncode == 124
+
+
+# ── inactivity-based timeout tests ─────────────────────────────────────────
+
+def test_command_producing_output_survives_past_old_wall_limit(tmp_path):
+    """A command printing every 0.2 s for 2 s is not stopped by inactivity=1 s."""
+    result = sandbox.run_command(
+        'for i in $(seq 1 10); do echo "line_$i"; sleep 0.2; done',
+        workdir=tmp_path / "w", timeout_s=1,
+    )
+    assert result.ok, f"expected ok, got: {result.problem()}"
+    assert not result.timed_out, "should not have timed out"
+    assert "line_10" in result.stdout, "all lines should be present"
+
+
+def test_silent_command_stopped_at_inactivity_limit(tmp_path):
+    """sleep 10 with inactivity=1 s is stopped after ~1 s, not at the backstop."""
+    start = time.monotonic()
+    result = sandbox.run_command("sleep 10", workdir=tmp_path / "w", timeout_s=1)
+    elapsed = time.monotonic() - start
+    assert result.timed_out
+    assert result.timeout_kind == "inactivity"
+    assert elapsed < 5, f"should be stopped in ~1 s, took {elapsed:.1f} s"
+
+
+def test_timeout_output_is_kept_in_result(tmp_path):
+    """After an inactivity timeout, stdout contains the lines printed before silence."""
+    result = sandbox.run_command(
+        'echo kept_line_1; echo kept_line_2; sleep 10',
+        workdir=tmp_path / "w", timeout_s=1,
+    )
+    assert result.timed_out
+    assert "kept_line_1" in result.stdout, "output must be kept on timeout"
+    assert "kept_line_2" in result.stdout, "output must be kept on timeout"
+
+
+def test_timeout_kind_set_to_inactivity(tmp_path):
+    """A silent command's timeout_kind is 'inactivity', not None or 'backstop'."""
+    result = sandbox.run_command("sleep 10", workdir=tmp_path / "w", timeout_s=1)
+    assert result.timed_out
+    assert result.timeout_kind == "inactivity"
+
+
+def test_backstop_kills_despite_continuous_output(tmp_path, monkeypatch):
+    """A command printing every 0.2 s is stopped at the backstop (3 s)."""
+    monkeypatch.setattr(sandbox, "COMMAND_BACKSTOP_S", 3)
+    start = time.monotonic()
+    result = sandbox.run_command(
+        'while true; do echo tick; sleep 0.2; done',
+        workdir=tmp_path / "w", timeout_s=1,
+    )
+    elapsed = time.monotonic() - start
+    assert result.timed_out
+    assert result.timeout_kind == "backstop"
+    assert 2.5 < elapsed < 8, f"backstop should fire at ~3 s, took {elapsed:.1f} s"
+
+
+def test_rlimit_cpu_derives_from_backstop(tmp_path):
+    """RLIMIT_CPU is based on COMMAND_BACKSTOP_S, not the caller's timeout_s."""
+    probe = ("import json, resource; print(json.dumps("
+             "resource.getrlimit(resource.RLIMIT_CPU)[0]))")
+    result = sandbox.run_command(
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}",
+        workdir=tmp_path / "w", timeout_s=10,
+    )
+    assert result.ok, result.stderr
+    cpu = json.loads(result.stdout)
+    expected = sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1)
+    assert cpu == expected, (
+        f"RLIMIT_CPU should be backstop * cpu_count = {expected}, got {cpu}"
+    )
+
+
+def test_problem_includes_timeout_kind_and_output_tail(tmp_path):
+    """problem() on a timed-out command says 'inactivity' and includes output."""
+    result = sandbox.run_command(
+        'echo visible_line; sleep 10',
+        workdir=tmp_path / "w", timeout_s=1,
+    )
+    assert result.timed_out
+    problem = result.problem()
+    assert "inactivity" in problem
+    assert "visible_line" in problem
 
 
 def test_a_check_reads_no_input(tmp_path):

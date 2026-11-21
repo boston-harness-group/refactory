@@ -233,15 +233,16 @@ def _fix_pack_state(*, check_timeout_s: int = 300) -> dict:
     }
 
 
-def test_check_gate_envelope_grows_with_check_timeout_s():
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
+def test_check_gate_envelope_is_backstop_based():
+    """The check envelope is COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S, not a wall-clock sum."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     for timeout in (180, 600, 1500):
         state = _check_gate_state(check_timeout_s=timeout)
         workflow = lowering.to_workflow(state, name="design")
         lowered = workflow.nodes["check"]
-        expected = 3 * INSTALL_TIMEOUT_S + 3 * timeout + NODE_DISPATCH_OVERHEAD_S
         assert lowered.command_timeout_s == expected, (
             f"check_timeout_s={timeout}: expected {expected}, got {lowered.command_timeout_s}"
         )
@@ -249,34 +250,29 @@ def test_check_gate_envelope_grows_with_check_timeout_s():
             "the envelope must exceed the check's own budget"
         )
 
-    # Increasing check_timeout_s must increase command_timeout_s.
-    w1 = lowering.to_workflow(_check_gate_state(check_timeout_s=180), name="d")
-    w2 = lowering.to_workflow(_check_gate_state(check_timeout_s=600), name="d")
-    assert w2.nodes["check"].command_timeout_s > w1.nodes["check"].command_timeout_s
-
 
 def test_focused_check_op_gets_check_envelope():
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     timeout = 60
     state = _check_op_state(check_timeout_s=timeout)
     workflow = lowering.to_workflow(state, name="design_fast")
     lowered = workflow.nodes["focused_check"]
-    expected = 3 * INSTALL_TIMEOUT_S + 3 * timeout + NODE_DISPATCH_OVERHEAD_S
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > timeout
 
 
 def test_fix_pack_check_gate_gets_check_envelope():
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     timeout = 300
     state = _fix_pack_state(check_timeout_s=timeout)
     workflow = lowering.to_workflow(state, name="fix_pack")
     lowered = workflow.nodes["check"]
-    expected = 3 * INSTALL_TIMEOUT_S + 3 * timeout + NODE_DISPATCH_OVERHEAD_S
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > timeout
 
@@ -293,14 +289,14 @@ def test_check_timeout_s_out_of_range_is_refused():
             lowering.to_workflow(state, name="design")
 
 
-@pytest.mark.parametrize("mode_cls, check_node_id, expected_envelope_s", [
-    ("design", "check", 6540),
-    ("design", "prepare_check", 6540),
-    ("design_fast", "focused_check", 6540),
-    ("make_pass", "check", 6900),
+@pytest.mark.parametrize("mode_cls, check_node_id", [
+    ("design", "check"),
+    ("design", "prepare_check"),
+    ("design_fast", "focused_check"),
+    ("make_pass", "check"),
 ])
-def test_real_modes_get_check_envelope(mode_cls, check_node_id, expected_envelope_s):
-    """The real modes' check nodes get the envelope from their own check_timeout_s default.
+def test_real_modes_get_check_envelope(mode_cls, check_node_id):
+    """The real modes' check nodes get the backstop-based envelope.
 
     This test instantiates the actual mode classes — not synthetic graphs —
     so it catches regressions where a real mode's check node stops declaring
@@ -308,7 +304,11 @@ def test_real_modes_get_check_envelope(mode_cls, check_node_id, expected_envelop
     """
     from refactory_dsh.design import DesignMode
     from refactory_dsh.fast import DesignFastMode
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
     from refactory_packages.fix_pack.mode import MakePass  # noqa: F811
+
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
     classes = {"design": DesignMode, "design_fast": DesignFastMode, "make_pass": MakePass}
     mode = classes[mode_cls]()
@@ -316,8 +316,8 @@ def test_real_modes_get_check_envelope(mode_cls, check_node_id, expected_envelop
     workflow = lowering.to_workflow(state, name=mode_cls)
 
     lowered_check = workflow.nodes[check_node_id]
-    assert lowered_check.command_timeout_s == expected_envelope_s, (
-        f"{mode_cls}'s {check_node_id}: expected {expected_envelope_s}, "
+    assert lowered_check.command_timeout_s == expected, (
+        f"{mode_cls}'s {check_node_id}: expected {expected}, "
         f"got {lowered_check.command_timeout_s}"
     )
 
@@ -381,62 +381,62 @@ def _deliver_op_state(*, check_timeout_s: int = 180) -> dict:
 
 
 def test_deliver_node_gets_delivery_envelope():
-    """The real DesignMode's deliver node gets a command_timeout_s that covers the
-    full check envelope plus merge/regeneration overhead.
+    """The real DesignMode's deliver node gets a backstop-based command_timeout_s.
+    Both the check and delivery envelopes are now COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S.
     """
     from refactory_dsh.design import DesignMode
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     mode = DesignMode()
     state = mode.state_dict()
     workflow = lowering.to_workflow(state, name="design")
 
-    check_envelope = lowering._check_envelope_s(state)
-    deliver_expected = check_envelope + INSTALL_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
     lowered_deliver = workflow.nodes["deliver"]
-    assert lowered_deliver.command_timeout_s == deliver_expected, (
-        f"deliver: expected {deliver_expected}, got {lowered_deliver.command_timeout_s}"
+    assert lowered_deliver.command_timeout_s == expected, (
+        f"deliver: expected {expected}, got {lowered_deliver.command_timeout_s}"
     )
-    # The delivery envelope must exceed the check envelope
+    # Both envelopes are equal (backstop-based)
     lowered_check = workflow.nodes["check"]
-    assert lowered_deliver.command_timeout_s > lowered_check.command_timeout_s, (
-        f"deliver ({lowered_deliver.command_timeout_s}) must exceed "
-        f"check ({lowered_check.command_timeout_s})"
+    assert lowered_deliver.command_timeout_s == lowered_check.command_timeout_s, (
+        f"deliver ({lowered_deliver.command_timeout_s}) must equal "
+        f"check ({lowered_check.command_timeout_s}) with backstop-based formula"
     )
 
 
 def test_deliver_timeout_exceeds_spine_default():
-    """With check_timeout_s=1800, the delivery envelope far exceeds the spine's
-    default 600 s, so the b27c scenario would not be killed.
-    """
+    """The delivery envelope far exceeds the spine's default 600 s (now backstop-based)."""
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
     state = _deliver_op_state(check_timeout_s=1800)
     workflow = lowering.to_workflow(state, name="design")
     lowered = workflow.nodes["deliver"]
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > 600, (
         f"delivery envelope {lowered.command_timeout_s} must exceed "
         f"the spine's default 600 s"
     )
-    # At check_timeout_s=1800: check_envelope = 3*1800 + 3*1800 + 600 = 11400
-    # delivery = 11400 + 1800 + 600 = 13800
     assert lowered.command_timeout_s > 10000, (
-        f"with check_timeout_s=1800 the envelope should be > 10000, "
+        f"the backstop-based envelope should be > 10000, "
         f"got {lowered.command_timeout_s}"
     )
 
 
 def test_synthetic_deliver_op_gets_delivery_envelope():
     """A synthetic op under a different name that declares check_timeout_s gets
-    the delivery envelope, not the spine's default.
+    the delivery envelope (backstop-based), not the spine's default.
 
     This tests the knob-declaration predicate, not a function name match:
     the node is named 'ship_it', not 'deliver', and its call is not
     'delivery:deliver'.
     """
     from refactory_dsh.repo_change import CHECK_PRODUCES, CHECK_WRITES
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     graph = Graph()
     graph.add(Node(
@@ -461,23 +461,22 @@ def test_synthetic_deliver_op_gets_delivery_envelope():
     }
     workflow = lowering.to_workflow(state, name="custom_mode")
     lowered = workflow.nodes["ship_it"]
-    check_envelope = lowering._check_envelope_s(state)
-    expected = check_envelope + INSTALL_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected, (
         f"ship_it: expected {expected}, got {lowered.command_timeout_s}"
     )
 
 
-def test_deliver_envelope_grows_with_check_timeout_s():
-    from refactory_dsh.worktree import INSTALL_TIMEOUT_S
+def test_deliver_envelope_is_constant_backstop_based():
+    """The delivery envelope is now constant (backstop-based), independent of check_timeout_s."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     for timeout in (180, 600, 1500):
         state = _deliver_op_state(check_timeout_s=timeout)
         workflow = lowering.to_workflow(state, name="design")
         lowered = workflow.nodes["deliver"]
-        check_envelope = 3 * INSTALL_TIMEOUT_S + 3 * timeout + NODE_DISPATCH_OVERHEAD_S
-        expected = check_envelope + INSTALL_TIMEOUT_S + NODE_DISPATCH_OVERHEAD_S
         assert lowered.command_timeout_s == expected, (
             f"check_timeout_s={timeout}: expected {expected}, got {lowered.command_timeout_s}"
         )

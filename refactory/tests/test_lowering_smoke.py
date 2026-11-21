@@ -40,9 +40,12 @@ def test_smoke_predicate_is_sole_discriminator():
         "ports": [],
         "memory": [],
     }
-    # With the predicate active, the gate gets the smoke envelope.
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
+    # With the predicate active, the gate gets the smoke envelope (backstop-based).
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = 2 * 3600 + 600
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert workflow.nodes["smoke"].command_timeout_s == expected, (
         f"expected {expected}, got {workflow.nodes['smoke'].command_timeout_s}"
     )
@@ -86,8 +89,11 @@ def test_smoke_predicate_op_path():
         "ports": [],
         "memory": [],
     }
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = 3 * 3600 + 600
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert workflow.nodes["smoke_op"].command_timeout_s == expected
 
 

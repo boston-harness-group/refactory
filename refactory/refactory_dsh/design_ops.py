@@ -1782,6 +1782,23 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         # check binds to it (`authoring_evidence.current_problems`).
         outcome["check_attempt"] = check_attempt
     apply_cwd_escaped(result, outcome)
+
+    # When a command was stopped by inactivity or backstop, write timeout-output.txt
+    # next to check.txt with the last 200 lines of output and timeout classification.
+    if result.timed_out and getattr(result, "timeout_kind", None) in ("inactivity", "backstop"):
+        kind_label = result.timeout_kind
+        elapsed = f"{result.elapsed_s:.0f}" if result.elapsed_s is not None else "unknown"
+        limit_val = result.timeout_s if result.timeout_s is not None else "unknown"
+        header = f"Timeout: {kind_label} (elapsed {elapsed}s, inactivity limit {limit_val}s)\n\n"
+        lines: list[str] = []
+        for line in (result.stdout or "").splitlines()[-200:]:
+            lines.append(f"[stdout] {line}")
+        for line in (result.stderr or "").splitlines()[-200:]:
+            lines.append(f"[stderr] {line}")
+        ctx.write_text("timeout-output.txt", header + "\n".join(lines[-200:]) + "\n")
+        # Include a reference to timeout-output.txt in check.txt
+        detail = detail + "\n\n(see timeout-output.txt for the last output before the timeout)"
+
     ctx.write_text("check.txt", detail or "ok\n")
 
     # Whether the new tests fail without the change is evidence for the reviewers, passing
@@ -1835,6 +1852,39 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             "targeted_command": targeted_command,
         })
         return "proceed"
+
+    # A check stopped by inactivity or backstop timeout routes to a draft PR instead
+    # of stop_unrepairable, so the run delivers its output rather than failing silently.
+    if outcome["status"] == "check_timeout":
+        from refactory_dsh.run import BuildLoopStop
+
+        kind_label = getattr(result, "timeout_kind", "timeout")
+        if kind_label == "inactivity":
+            reason = f"Check did not finish (inactivity timeout after {result.timeout_s}s of silence)"
+        else:
+            elapsed = f"{result.elapsed_s:.0f}" if result.elapsed_s is not None else "unknown"
+            reason = f"Check did not finish (backstop timeout after {elapsed}s elapsed)"
+        # Build the check_failure text with the last output tail.
+        output_tail = _output_tail_for_draft(result)
+        check_failure = f"{reason}\n\n```\n{output_tail}\n```" if output_tail else reason
+        ctx.set_fact("validation", reason)
+        record_check_history(ctx, "full", reason, command)
+        ctx.write_json("check-record.json", {
+            "status": "check_timeout",
+            "validation": reason,
+            "attempt": int(ctx.facts.get("attempts_used", 0)),
+            "check_mode": "full",
+            "targeted_command": targeted_command,
+        })
+        # Route to draft delivery.
+        fact: dict[str, Any] = {
+            "reason": _one_line(reason, 300),
+            "unresolved": _unresolved(ctx),
+            "check_failing": True,
+            "check_failure": _one_line(check_failure, 500),
+        }
+        ctx.set_fact("draft_delivery", fact)
+        return "draft"
 
     # Name the specific resource limit when a file-size stop occurs.
     rc = result.returncode
@@ -3489,6 +3539,17 @@ def _one_line(text: Any, limit: int) -> str:
     """``text`` on one line, at most ``limit`` characters."""
     flat = " ".join(str(text).split())
     return flat if len(flat) <= limit else flat[:limit - 1].rstrip() + "…"
+
+
+def _output_tail_for_draft(result: Any, n: int = 20) -> str:
+    """The last *n* lines of combined stdout/stderr for a draft PR body."""
+    lines: list[str] = []
+    for line in (result.stdout or "").splitlines()[-n:]:
+        lines.append(line)
+    for line in (result.stderr or "").splitlines()[-n:]:
+        if line not in lines:
+            lines.append(line)
+    return "\n".join(lines[-n:])
 
 
 def _draft_for_stop(ctx: Any, stop: Exception, *, check_failing: bool | None = None,
