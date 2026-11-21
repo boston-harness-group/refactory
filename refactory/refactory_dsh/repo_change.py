@@ -339,6 +339,10 @@ def _open_worktree(ctx: Any, name: str, task: dict[str, Any],
             target_guard.warn(note)
         else:
             print(f"refactory: {note}", file=sys.stderr)
+    # Every other target's too, which no later run on it may ever prune (`worktree.sweep`);
+    # what is kept there is another project's, reported here without a warning.
+    for note in worktree.sweep():
+        print(f"refactory: {note}", file=sys.stderr)
     found = worktree.create(target, base, run_id, ctx.workdir)
     # When opted in, copy the person's uncommitted changes into the worktree and
     # commit them as the run's own base, so the attempts' diffs show only the run's

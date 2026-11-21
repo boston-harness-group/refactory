@@ -107,6 +107,18 @@ def test_a_base_that_names_nothing_is_refused_before_anything_is_pruned_or_made(
     assert Path(earlier.path).exists() and worktree.recorded(tmp_path / "run") is None
 
 
+
+def test_a_runs_start_prunes_other_targets_no_later_run_revisits(repo, tmp_path, monkeypatch):
+    """Found live: canaries start every run on a fresh target, so only a sweep reaches their worktrees."""
+    other = git_repo(tmp_path / "other")
+    ended = tmp_path / "ended"
+    ended.mkdir()
+    earlier = worktree.create(other, "HEAD", "0123abcd4567", ended)
+    (ended / ".refactory" / "spine-status.json").write_text(json.dumps({"status": "failed"}))
+    monkeypatch.setenv("REFACTORY_WORKTREE_IDLE_HOURS", "0")
+    _design(tmp_path / "run", FakeModel(_answers()), target=str(repo))
+    assert not Path(earlier.path).exists()
+
 def test_a_redo_of_prepare_keeps_the_base_it_pinned_even_once_that_branch_is_gone(repo, tmp_path):
     git(repo, "branch", "start")
     run = tmp_path / "run"
