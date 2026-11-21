@@ -6,9 +6,9 @@ a grader's "Eval: 22/22 correct" -- and every run's first-round analysts took th
 as fact ("the grader cannot read formulas"). The harness knew better: a recorded exchange
 is a model's reply, the step's tools are in its graph, and the op and code-gate visits
 really ran. Now each item says so, from the record and the graph alone, never by reading a
-reply: ``Executed by the harness: ...`` (the visits, counted) and, under each model step,
-``Ran as: model reply · tools: none · real tool calls: 0``; and every reader of traces is
-told once that anything inside a reply is that model's claim (`evidence.CLAIMS`). The
+reply: ``Completed by the harness: ...`` (the visits, counted) and, at each model step's
+first run, ``Ran as: model reply · tools: none · real tool calls: 0``; and every reader of
+traces is told once what a model wrote and what the harness did (`evidence.CLAIMS`). The
 SkillOpt port's own rendering is unchanged. Each test fails when the line it names is
 reverted.
 """
@@ -76,14 +76,15 @@ def _views(record: dict[str, Any]) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("view", ["analyst", "proposer", "proposer, items in full", "memory"])
-def test_every_model_step_says_how_it_ran_under_its_heading(view):
-    """Each run of a no-tools step is headed ``Ran as: model reply · tools: none · real
-    tool calls: 0``, its fake tool output still shown, as the reply it is."""
+def test_every_model_step_says_how_it_runs_once_under_its_first_heading(view):
+    """A no-tools step's first run is headed ``Ran as: model reply · tools: none · real
+    tool calls: 0``, said once for the step (as #713 says a text once), its fake tool
+    output still shown, as the reply it is."""
     text = _views(_annotated(_record(turns=3)))[view]
     lines = text.splitlines()
     heads = [at for at, line in enumerate(lines) if re.match(r"^#{4,6} Step `solve`", line)]
     assert len(heads) == 3
-    assert all(lines[at + 1] == NO_TOOLS for at in heads), [lines[at + 1] for at in heads]
+    assert lines[heads[0] + 1] == NO_TOOLS and text.count(NO_TOOLS) == 1, text
     assert "Eval: 22/22 correct" in text, "the reply is shown as it was written"
 
 
@@ -103,11 +104,26 @@ def test_a_step_with_tools_says_which_and_that_its_calls_are_not_recorded():
     assert evidence.step_sources(list(NODES.values())) == sources
 
 
+def test_each_tool_policy_says_how_its_step_runs():
+    """Every policy `tool_policy` defines has its own line (a new one cannot go unsaid):
+    ``refused`` offers Claude Code's tools and refuses each call needing permission, so a
+    read-only call may run and the count is not recorded; never "the backend's own"."""
+    from refactory_dsh import tool_policy
+
+    assert set(evidence.POLICY_SOURCES) == set(tool_policy.POLICIES)
+    refused = evidence.step_source({"id": "solve", "kind": "agent", "tool_policy": "refused"})
+    assert refused == evidence.POLICY_SOURCES["refused"]
+    assert "Claude Code's own" in refused and "refused" in refused
+    assert "real tool calls: not recorded" in refused and "backend's own" not in refused
+    assert evidence.step_source({"id": "s", "kind": "agent", "tool_policy": "bogus"}) == \
+        "model reply · tools: not known here"
+
+
 def test_a_record_the_loop_did_not_annotate_still_says_a_model_wrote_it():
     """Every recorded exchange is a model call, whatever the graph: without the graph's
     tools the step still reads as a model's reply, its tools not known here."""
     text = analysts.item_text(_record())
-    assert text.count("Ran as: model reply · tools: not known here") == 2
+    assert text.count("Ran as: model reply · tools: not known here") == 1
     assert evidence.ran_as({"step_sources": {"other": "x"}}, "solve") == \
         "Ran as: model reply · tools: not known here"
 
@@ -115,20 +131,22 @@ def test_a_record_the_loop_did_not_annotate_still_says_a_model_wrote_it():
 # -- 2. The steps the harness executed are named, counted -------------------------------
 
 
-def test_the_steps_the_harness_executed_are_named_with_their_counts():
-    """The op and code-gate visits (the record's ``steps``), each once in the order it
-    first ran, with its count and gates marked, before the model steps; none, no line."""
+def test_the_steps_the_harness_completed_are_named_with_their_counts():
+    """The op and code-gate visits (the record's ``steps``, each kept once it succeeded),
+    each once in the order it first completed, with its count and gates marked, before the
+    model steps; none, no line."""
     text = analysts.item_text(_annotated(_record(turns=3)))
-    line = "Executed by the harness: prepare, run_turn x3, turn_gate (gate) x3"
+    line = "Completed by the harness: prepare, run_turn x3, turn_gate (gate) x3"
     assert line in text.splitlines()
     assert text.index(line) < text.index("Step `solve`")
     bare = {**_record(), "steps": []}
-    assert "Executed by the harness" not in analysts.item_text(bare)
+    assert "Completed by the harness" not in analysts.item_text(bare)
 
 
 def test_the_last_edit_s_moved_steps_say_how_they_ran():
-    """"What the last edit changed" heads each moved step with how it ran, from the
-    child's own graph (a step gone from the child, from the parent's)."""
+    """"What the last edit changed" heads each moved step's first block with how it runs,
+    once a step, from the child's own graph (a step gone from the child, from the
+    parent's)."""
     child = _annotated(_record())
     parent = {**child, "passed": True, "exchanges": [
         {**e, "response": "earlier " + e["response"]} for e in child["exchanges"]]
@@ -136,7 +154,7 @@ def test_the_last_edit_s_moved_steps_say_how_they_ran():
     pair = {"child": "c", "parent": "p", "edit": [], "parent_records": [parent],
             "child_records": [child]}
     text = "\n".join(base._edit_change_lines([pair], settled=frozenset(), room=10 ** 7))
-    assert text.count(NO_TOOLS) == 2, text
+    assert text.count(NO_TOOLS) == 1, text
     assert ("Ran as: model reply · tools: the backend's own (run dir) · real tool calls: "
             "not recorded") in text
 
@@ -145,17 +163,58 @@ def test_the_last_edit_s_moved_steps_say_how_they_ran():
 
 
 def test_every_reader_of_traces_is_told_a_reply_is_a_claim():
-    """The analysts (both system prompts), the proposer (with the items) and the memory
-    pass (with its traces) each read `evidence.CLAIMS` once."""
-    assert "only the harness's own steps" in evidence.CLAIMS
+    """The analysts (both system prompts), the readers, the proposer (with the items) and
+    the memory pass (its request, and each part of one split into parts) each read
+    `evidence.CLAIMS` once, and what the lines mean."""
+    from refactory_dsh.optim import random_optimizer
+
+    assert "What the harness wrote is real" in evidence.CLAIMS
+    assert "`Completed by the harness:`" in evidence.CLAIMS
     assert evidence.CLAIMS in analysts.FAILURE_SYSTEM
     assert evidence.CLAIMS in analysts.SUCCESS_SYSTEM
+    assert evidence.CLAIMS in random_optimizer.READER_SYSTEM
     assert base.ITEM_FORM.endswith(evidence.CLAIMS)
     head, _tail = memory._frame(epoch=2, mode_name="m", prev={"id": "a"}, curr={"id": "b"},
                                 same=False, changes=[], previous_note="", entries=[])
     assert head.count(evidence.CLAIMS) == 1
-    assert "`Executed by the harness:`" in evidence.TRACE_FORM
-    assert "`Ran as:`" in evidence.TRACE_FORM and "`Ran as:`" in base.ITEM_FORM
+    record = _annotated(_record())
+    entries, _missing = memory.pairs([record], [record], [record["id"]])
+    side = {"id": "c1", "pipeline": "(pipeline)", "rollout": "train"}
+    request = memory.MemoryRequest(epoch=3, mode_name="m", prev=side, curr=side, changes=[],
+                                   previous_note="", entries=entries)
+    part = request.compare_prompt(entries, 1, 2)[0]
+    assert part.count(evidence.CLAIMS) == 1 and NO_TOOLS in part
+    for form in (evidence.TRACE_FORM, base.ITEM_FORM, random_optimizer.READER_FORM):
+        assert "`Completed by the harness:`" in form and "`Ran as:`" in form
+
+
+def test_a_reader_is_told_what_its_items_show(tmp_path):
+    """With the analysts off, items too many for one request go to readers: each reader
+    call says what an item shows (`READER_FORM`, the lines included) and that a reply is a
+    model's claim (`READER_SYSTEM`), and its items carry the lines."""
+    from refactory_dsh.optim import ProposalContext
+    from refactory_dsh.optim.random_optimizer import READER_FORM, AutoresearchOptimizer
+    from test_proposal_trajectories import NODES as READ_NODES, _ReaderClient, _sized_records
+
+    records = evidence.with_step_sources(_sized_records(), NODES)
+    client = _ReaderClient()
+    optimizer = AutoresearchOptimizer(client)
+    optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
+    optimizer.propose(ProposalContext(nodes=READ_NODES, item_records=records), 1, [])
+    assert len(client.readers) > 1
+    steps = {e["node"] for r in records for e in r["exchanges"]}
+    for prompt in client.readers:
+        assert f"each in full: {READER_FORM}" in prompt
+        assert prompt.count("Ran as: ") == len(steps), "each step's line once a group"
+    calls = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
+    assert all(evidence.CLAIMS in c["system"] for c in calls if c["kind"] == "reader")
+
+
+def test_a_workspace_the_validator_refuses_reads_as_the_run_dir():
+    """A step's label never stops a request: a workspace declaration the validator
+    refuses (a replayed run's, say) is said as the run dir's, not raised."""
+    assert evidence.step_source({"id": "x", "kind": "agent", "workspace": {"kind": "gone"}}) \
+        == "model reply · tools: the backend's own (run dir) · real tool calls: not recorded"
 
 
 # -- 4. The lines count against every room; the looped-step markers still read back -----
@@ -166,10 +225,10 @@ def test_the_lines_count_against_an_item_s_room():
     which are in the text measured, and an analyst batch fits its call's room."""
     record = _annotated(_record("w1", turns=12))
     whole = base._trajectory(record)
-    assert whole.count(NO_TOOLS) == 12
+    assert whole.count(NO_TOOLS) == 1
     for budget in (len(whole) - 1, len(whole) // 2, 3000):
         block = base._item_block(record, budget)
-        assert len(block) <= budget and block.count(NO_TOOLS) == 12, budget
+        assert len(block) <= budget and block.count(NO_TOOLS) == 1, budget
     for group in base.trajectory_groups([record, _annotated(_record("w2", 12))], 6000):
         assert sum(len(block) + 2 for _id, block in group) <= 6000 or len(group) == 1
 
@@ -193,7 +252,7 @@ def test_an_analyst_batch_with_the_lines_fits_its_room():
     for kind, index, group in plan:
         prompt = analysts.analyst_prompt(ctx, kind, index, len(plan), group, pipeline)
         assert len(analysts.system(kind)) + len(prompt) <= room
-        assert prompt.count(NO_TOOLS) == 6
+        assert prompt.count(NO_TOOLS) == 1
 
 
 def test_a_looped_step_with_its_lines_still_reads_back():
@@ -204,7 +263,39 @@ def test_a_looped_step_with_its_lines_still_reads_back():
 
     record = evidence.with_step_sources([_looped("L1", 8)], NODES)[0]
     _assert_reads_back(record)
-    assert analysts.item_text(record).count(NO_TOOLS) == 8
+    assert analysts.item_text(record).count(NO_TOOLS) == 1
+
+
+def test_how_a_step_runs_is_said_once_a_request():
+    """Across the items of one request (`evidence.dedup`), a step's ``Ran as:`` line is
+    said at its first run only; a line a model wrote in its reply is never touched, and a
+    step whose line differs (another graph's) is said again."""
+    first = _annotated(_record("i1"))
+    second = {**_annotated(_record("i2")), "exchanges": [
+        {"node": "solve", "prompt": "p", "response": f"Ran as: my own words\n{FAKE}"}]}
+    other = {**_record("i3"), evidence.STEP_SOURCES: {"solve": "model reply · other"}}
+    text = "\n\n".join(evidence.dedup([analysts.item_text(r) for r in (first, second, other)]))
+    assert text.count(NO_TOOLS) == 1 and "Ran as: my own words" in text
+    assert text.count("Ran as: model reply · other") == 1
+
+
+def test_the_proposer_says_how_a_step_runs_once_and_fits_as_shown():
+    """The proposer's items in full say each step's line once (at its first run in the
+    request), whether every item is shown or the rule picks them, and the items picked are
+    measured as shown together (`base._shown_size` with what was said)."""
+    from refactory_dsh.optim import ProposalContext
+    from test_proposal_trajectories import NODES as READ_NODES, _sized_records
+
+    few = [_annotated(_record(f"f{k}", turns=3)) for k in range(3)]
+    assert base.ProposalContext(nodes=READ_NODES, item_records=few).render().count(NO_TOOLS) == 1
+    many = evidence.with_step_sources(_sized_records(), NODES)
+    text = ProposalContext(nodes=READ_NODES, item_records=many).render()
+    shown = text.split("### Some items in full", 1)[1]
+    assert shown.count("### Item ") > 1 and shown.count("Ran as: ") == len(
+        {e["node"] for r in many for e in r["exchanges"]})
+    how: set[tuple[str, str]] = set()
+    sizes = [base._shown_size(r, None, None, how) for r in many[:2]]
+    assert sizes[1] < base._shown_size(many[1], None, None), "the second says no line again"
 
 
 # -- 5. In the loop: every reader gets its own graph's lines ----------------------------
@@ -223,7 +314,8 @@ def test_the_loop_annotates_the_analysts_the_proposer_and_memory(tmp_path, monke
     loop = _loop_run(tmp_path, monkeypatch, client, lessons=True)
     assert client.of(ANALYST_SYSTEMS), "the analysts ran"
     for prompt in client.of(ANALYST_SYSTEMS):
-        assert prompt.count("Ran as: LABEL work of 3 nodes") == prompt.count("Step `work`") > 0
+        # Said once a request, at the step's first run (`evidence.dedup`).
+        assert prompt.count("Ran as: LABEL work of 3 nodes") == 1, prompt
     memory_prompts = client.of((memory.MEMORY_SYSTEM,))
     assert memory_prompts and all("Ran as: LABEL work of 3 nodes" in p for p in memory_prompts)
     assert "Ran as: LABEL work of 3 nodes" in client.proposal()
@@ -257,7 +349,7 @@ def test_the_walker_s_records_say_how_each_step_ran(tmp_path):
     assert records and all(r["exchanges"] and r.get("steps") for r in records)
     for record in records:
         text = analysts.item_text(record)
-        assert "Executed by the harness: keep" in text.splitlines(), text
+        assert "Completed by the harness: keep" in text.splitlines(), text
         assert text.count(NO_TOOLS) == len(record["exchanges"]) == 1, text
 
 
@@ -288,7 +380,7 @@ def test_the_spine_s_records_say_how_each_step_ran(tmp_path):
     assert len(records) == 2
     for record in evidence.with_step_sources(records, Probe().state_dict()["graph"]["nodes"]):
         text = analysts.item_text(record)
-        assert "Executed by the harness: keep" in text.splitlines(), text
+        assert "Completed by the harness: keep" in text.splitlines(), text
         assert text.count(NO_TOOLS) == 1, text
     assert _probe_sources() == {"solve": NO_TOOLS.removeprefix("Ran as: ")}
 
@@ -335,7 +427,7 @@ def test_the_skillopt_port_reads_its_rollouts_exactly_as_before(tmp_path):
     assert plain and marked == plain
     assert hashlib.sha256(json.dumps(plain).encode()).hexdigest() == SKILLOPT_DIGEST
     for system, user in plain:
-        assert evidence.RAN_AS not in user and evidence.EXECUTED not in user
+        assert evidence.RAN_AS not in user and evidence.COMPLETED not in user
         assert evidence.CLAIMS not in system
 
 
@@ -354,6 +446,7 @@ def test_a_round_is_asked_again_on_a_copy_and_the_run_is_left_as_it_was(tmp_path
 
     loop = _loop_run(tmp_path, monkeypatch, Client())
     run = loop.root
+    (run / "linked.json").symlink_to(run / "config.json")  # a link into the run itself
     # Setup: the run's recorded optimizer is the model proposer it ran with, as a real
     # run's config says (the toy loop builds a random one, then swaps the client in).
     config = json.loads((run / "config.json").read_text())
@@ -391,6 +484,7 @@ def test_a_round_is_asked_again_on_a_copy_and_the_run_is_left_as_it_was(tmp_path
               .splitlines()]
     assert events.count("candidate") == 1, "nothing installed: only the seed"
     assert (copy / "optimizer_trace.jsonl.before-replay").exists()
+    assert not (copy / "linked.json").is_symlink(), "nothing in the copy leads into the run"
     text = (copy / replay_round.REPORT).read_text()
     assert "## Before" in text and "## After" in text and "| FAILURE |" in text
     with pytest.raises(SystemExit):

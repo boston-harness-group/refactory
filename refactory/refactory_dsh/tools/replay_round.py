@@ -8,7 +8,8 @@ For checking a change to what the optimizer reads (`optim.evidence`, the analyst
 proposer's or the memory pass's prompts) against a round a real run made: the same train
 records, the same graph, the same settings and model route, asked again. It:
 
-1. copies ``<run dir>`` to ``<copy dir>`` (which must not exist); the run is only read;
+1. copies ``<run dir>`` to ``<copy dir>`` (which must not exist; a link is copied as what it
+   points to, so nothing in the copy leads back into the run); the run is only read;
 2. in the copy, cuts the journal before the epoch's proposal round -- the first event of
    ``ROUND_EVENTS`` after its ``epoch_open`` -- and moves the round's analyst cache
    (``analyst_findings/``), the optimizer trace and the resolved-profile snapshot aside
@@ -70,7 +71,9 @@ def prepare(run_dir: Path, copy_dir: Path, epoch: int) -> int:
         raise SystemExit(f"replay_round: {copy_dir} exists; give a new folder")
     if copy_dir == run_dir or run_dir in copy_dir.parents:
         raise SystemExit("replay_round: the copy must be outside the run")
-    shutil.copytree(run_dir, copy_dir, symlinks=True)
+    # Links are copied as what they point to, so nothing in the copy leads back into the
+    # run (a link left dangling is skipped).
+    shutil.copytree(run_dir, copy_dir, symlinks=False, ignore_dangling_symlinks=True)
     for name in SET_ASIDE:
         path = copy_dir / name
         if path.exists():
