@@ -50,6 +50,10 @@ it with ``--claude-executable``.
    permission finds an empty directory where SkillOpt's found its system-prompt file, and
    a write to Claude Code's memory folder succeeds for the session (SkillOpt's home was
    read-only, so it failed there); the folder goes with the session.
+6. *Train score*: a train item its gold feedback told was wrong scores 0, however its
+   later turns end (`refactory_dsh.feedback.SCORING`); SkillOpt scores the attempt after
+   the feedback, which passed nearly every clean train item and left the search nothing
+   to learn from. The conversation, the feedback included, is unchanged.
 """
 from __future__ import annotations
 

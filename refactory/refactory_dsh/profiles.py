@@ -361,7 +361,7 @@ def load(project: Path, name: str, version: int | None = None) -> dict[str, Any]
 def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None = None,
             overrides: dict[str, Any] | None = None, validate_settings: bool = True,
             recipe: dict[str, Any] | None = None, model_client: Any = None) -> dict[str, Any]:
-    from refactory_dsh import node_retry, registry
+    from refactory_dsh import feedback, node_retry, registry
     from refactory_dsh.nn import edits
     profile = recipe if recipe is not None else load(project, name, version) if name else {"settings": {}, "contract": {}}
     from refactory_dsh.worker_config import FIELDS, resolve as resolve_workers
@@ -457,7 +457,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
                "settings": digest(evaluation_fields),
                # How the runtime treats a crashed agent step: evidence from before a change
                # to it is refused on resume rather than mixed in (`node_retry.SEMANTICS`).
-               "runtime_semantics": node_retry.SEMANTICS}
+               "runtime_semantics": node_retry.SEMANTICS,
+               # How a gold-feedback train evaluation scores an item (`feedback.SCORING`).
+               "train_feedback_scoring": feedback.SCORING}
     return {"schema_version": SCHEMA_VERSION, "profile": {"name": name, "version": profile.get("version")} if name else None,
             # What the launch changed on top of the saved profile, as given.
             "overrides": dict(overrides or {}) if name else None,
