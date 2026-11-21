@@ -92,10 +92,13 @@ def test_a_note_reaches_every_agent_node(tmp_path):
         )
 
 
-def test_a_step_without_tools_gets_the_ledger_but_is_never_told_to_read_it(tmp_path):
+@pytest.mark.parametrize("policy", ["none", "refused"])
+def test_a_step_without_tools_gets_the_ledger_but_is_never_told_to_read_it(tmp_path, policy):
     """A no-tools step told to read the ledger file invents the read (create-bench H2, H3).
 
-    It still gets every entry inline; a step with tools still gets the live-file pointer.
+    A ``refused`` step works in an empty directory whose outside reads are refused, so it
+    cannot open the file either. Both still get every entry inline; a step with tools
+    still gets the live-file pointer.
     """
     from refactory_dsh import lowering
 
@@ -103,7 +106,7 @@ def test_a_step_without_tools_gets_the_ledger_but_is_never_told_to_read_it(tmp_p
     agents = [n for n in workflow.nodes.values() if n.__class__.__name__ == "AgentNode"]
     assert len(agents) >= 2, "the fixture has too few agent nodes to prove anything"
     no_tools, with_tools = agents[0], agents[1]
-    no_tools.tool_policy, with_tools.tool_policy = "none", None
+    no_tools.tool_policy, with_tools.tool_policy = policy, None
     ledger = Ledger.seed(tmp_path, "build a mode for circle packing")
     ledger.note("constraint", "do not add a numpy dependency")
 

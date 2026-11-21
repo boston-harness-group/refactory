@@ -514,12 +514,15 @@ def installing_to(root: Path) -> Iterator[None]:
 def reads_run_dir(tool_policy: Any, sealed: bool) -> bool:
     """Whether a step can open files in the run directory, the ledger among them.
 
-    A step without tools (``tool_policy="none"``) cannot, and neither can a sealed one
-    (`workspace.is_sealed`: its tools run in a sandbox that shows no run directory,
-    `seal.py`). A step in a clone or scratch workspace that is not sealed can still read
-    the run directory: its workspace confines writes, not reads.
+    A step under a tool policy (`tool_policy.POLICIES`) cannot: ``none`` has no tools and
+    ``refused`` works in a fresh empty directory whose outside reads are refused. Neither
+    can a sealed one (`workspace.is_sealed`: its tools run in a sandbox that shows no run
+    directory, `seal.py`). A step in a clone or scratch workspace that is not sealed can
+    still read the run directory: its workspace confines writes, not reads.
     """
-    return tool_policy != "none" and not sealed
+    from refactory_dsh.tool_policy import no_effect
+
+    return not no_effect(tool_policy) and not sealed
 
 
 def _is_sealed_step(node: Any) -> bool:

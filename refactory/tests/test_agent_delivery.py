@@ -663,14 +663,15 @@ def test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_
         agent_delivery.finish(run_a, 'design_doc')
 
 
-def test_a_no_tools_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path):
+@pytest.mark.parametrize("policy", ["none", "refused"])
+def test_a_no_tools_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path, policy):
     """The dispatch-time block follows the step's tools, as `steering.annotate` does."""
     from refactory_dsh.steering import Ledger
 
     ledger = Ledger.seed(tmp_path, "triage the reports")
     ledger.note("constraint", "never promise a refund")
     bare = agent_delivery.begin(tmp_path, 'draft', 'Draft replies.', ['replies.json'],
-                                tool_policy='none')['prompt']
+                                tool_policy=policy)['prompt']
     tooled = agent_delivery.begin(tmp_path, 'study', 'Study the code.', ['notes.md'])['prompt']
     assert 'never promise a refund' in bare and 'never promise a refund' in tooled
     assert 'Read the live ledger' not in bare and str(ledger.path) not in bare
