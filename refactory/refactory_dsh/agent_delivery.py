@@ -581,7 +581,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     A changed prompt or live ledger is supplied afresh and archived in the context
     history. A DSH view records context supplied to the CEO, not proof of forwarding.
     """
-    from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger
+    from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger, reads_run_dir
 
     tool_policy = check_tool_policy(tool_policy)
     if no_effect(tool_policy) and len(writes) != 1:
@@ -636,7 +636,8 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     if saved_run_config(workdir).get("omit_steering"):
         annotated = prompt
     else:
-        annotated = prompt_with_ledger(prompt, ledger, entries=entries)
+        annotated = prompt_with_ledger(prompt, ledger, entries=entries,
+                                       tools=reads_run_dir(tool_policy, bool((workspace or {}).get('sealed'))))
     set_aside = _set_aside_stale_outputs(workdir, node, reads or [], writes) if previous is None else None
     annotated, execution = _execution_contract(workdir, node, annotated, reads or [], writes, model_context,
                                                set_aside=set_aside, workspace=workspace,

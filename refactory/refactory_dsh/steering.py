@@ -511,8 +511,49 @@ def installing_to(root: Path) -> Iterator[None]:
         _INSTALLED_ROOT.reset(token)
 
 
-def _citation_block(ledger: Ledger) -> str:
-    """Keep live steering instructions separate from the node's output format."""
+def reads_run_dir(tool_policy: Any, sealed: bool) -> bool:
+    """Whether a step can open files in the run directory, the ledger among them.
+
+    A step under a tool policy (`tool_policy.POLICIES`) cannot: ``none`` has no tools and
+    ``refused`` works in a fresh empty directory whose outside reads are refused. Neither
+    can a sealed one (`workspace.is_sealed`: its tools run in a sandbox that shows no run
+    directory, `seal.py`). A step in a clone or scratch workspace that is not sealed can
+    still read the run directory: its workspace confines writes, not reads.
+    """
+    from refactory_dsh.tool_policy import no_effect
+
+    return not no_effect(tool_policy) and not sealed
+
+
+def _is_sealed_step(node: Any) -> bool:
+    """`workspace.is_sealed` for a walker `nn.Node` or a lowered `AgentNode` (which has no
+    ``kind``: it is an agent by type)."""
+    from refactory_dsh.workspace import is_sealed
+
+    return is_sealed({
+        "kind": "agent",
+        "tools": getattr(node, "tools", None),
+        "tool_policy": getattr(node, "tool_policy", None),
+        "workspace": getattr(node, "workspace", None),
+    })
+
+
+def _citation_block(ledger: Ledger, *, tools: bool = True) -> str:
+    """Keep live steering instructions separate from the node's output format.
+
+    ``tools`` is False for a step that cannot open the ledger file (`reads_run_dir`).
+    Told to read it anyway, such a step writes a made-up read instead: invented tool
+    calls and constraints nobody gave, in its reply (create-bench H2's report, H3's
+    crash). It is told the entries above are the ledger.
+    """
+    if not tools:
+        return (
+            "\n\nThe entries above are the live ledger as of this step. You cannot open "
+            "the ledger file from where you work: do not look for it, and do not write "
+            "tool calls or tool output for it. Respect its constraints while preserving "
+            "the node's required output format, and do not append steering citations or "
+            "other prose to code, JSON, or another declared artifact."
+        )
     installed = _INSTALLED_ROOT.get()
     path = Ledger(installed).path if installed is not None else ledger.path
     return (
@@ -524,8 +565,12 @@ def _citation_block(ledger: Ledger) -> str:
     )
 
 
-def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, Any]] | None = None) -> str:
-    """Replace only this layer's own block with current context at dispatch."""
+def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, Any]] | None = None,
+                       tools: bool = True) -> str:
+    """Replace only this layer's own block with current context at dispatch.
+
+    ``tools`` is False for a step that cannot open the ledger file (`reads_run_dir`).
+    """
     start = prompt.find(STEERING_START)
     end = prompt.find(STEERING_END, start)
     if start >= 0 and end >= start:
@@ -533,7 +578,7 @@ def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, A
     block = ledger.render(entries=entries)
     if not block:
         return prompt
-    return f"{prompt}\n\n{STEERING_START}\n{block}{_citation_block(ledger)}\n{STEERING_END}"
+    return f"{prompt}\n\n{STEERING_START}\n{block}{_citation_block(ledger, tools=tools)}\n{STEERING_END}"
 
 
 def annotate(workflow: Any, ledger: Ledger) -> Any:
@@ -551,7 +596,9 @@ def annotate(workflow: Any, ledger: Ledger) -> Any:
         if not _is_agent_node(node):
             continue
         existing = getattr(node, "prompt_template", "") or ""
-        node.prompt_template = prompt_with_ledger(existing, ledger)
+        node.prompt_template = prompt_with_ledger(
+            existing, ledger,
+            tools=reads_run_dir(getattr(node, "tool_policy", None), _is_sealed_step(node)))
     return workflow
 
 

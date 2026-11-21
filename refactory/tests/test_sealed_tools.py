@@ -882,8 +882,12 @@ def test_a_sealed_command_has_a_session_keyring_of_its_own(tmp_path):
     _run, place = _layout(tmp_path)
     mine = subprocess.run(["keyctl", "show", "@s"], capture_output=True, text=True).stdout
     theirs = _sealed(place, "keyctl show @s").stdout
-    assert theirs.splitlines()[1:2] and theirs.splitlines()[1].split()[0] != mine.splitlines()[1].split()[0]
-    assert len(theirs.splitlines()) == 2, theirs  # the keyring alone, empty
+    assert len(theirs.splitlines()) == 2, theirs  # a keyring of its own, empty
+    # A process that outlives the login that started it (a detached lab run) holds a
+    # revoked session keyring: then there is no keyring of ours to compare against, and
+    # only the comparison is left out; the sealed step's own keyring is still checked.
+    if len(mine.splitlines()) >= 2:
+        assert theirs.splitlines()[1].split()[0] != mine.splitlines()[1].split()[0]
 
 
 def _ticker(place: workspace.Workspace) -> list[str]:

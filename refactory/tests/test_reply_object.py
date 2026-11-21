@@ -34,9 +34,26 @@ def test_the_first_object_wins_whatever_keys_a_later_one_has():
     assert reply_object(reply) == extract_json(reply)
 
 
+def _json_says(text: str) -> str:
+    """json's own message and position for *text*, as the refusal reports it.
+
+    Derived, not written out: Python 3.12 says "Expecting value ... column 45" for the
+    trailing comma below and 3.14 says "Illegal trailing comma ... column 43"; what the
+    test guards is that the refusal carries json's own message and position.
+    """
+    import json
+    import re
+
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as error:
+        return re.escape(f"{error.msg} at line {error.lineno} column {error.colno}")
+    raise AssertionError("expected invalid JSON")
+
+
 @pytest.mark.parametrize("reply,why", [
     ('{"findings": [{"where": {"step": "solve"}}, ], "verdict": "fail"}',
-     "Expecting value at line 1 column 45"),
+     _json_says('{"findings": [{"where": {"step": "solve"}}, ], "verdict": "fail"}')),
     ('Here: {"patterns": [{"where": {"step": "a"}}', "is never closed"),
 ])
 def test_a_broken_answer_is_refused_and_no_object_nested_in_it_is_taken(reply, why):

@@ -661,3 +661,48 @@ def test_two_runs_on_one_repository_one_run_s_setup_installs_hooks_the_other_is_
     (run_a / 'design.md').write_text('the design, again\n')
     with pytest.raises(ValueError, match=r'changed shared git state: .*\(hook pre-commit added\)'):
         agent_delivery.finish(run_a, 'design_doc')
+
+
+@pytest.mark.parametrize("policy", ["none", "refused"])
+def test_a_no_tools_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path, policy):
+    """The dispatch-time block follows the step's tools, as `steering.annotate` does."""
+    from refactory_dsh.steering import Ledger
+
+    ledger = Ledger.seed(tmp_path, "triage the reports")
+    ledger.note("constraint", "never promise a refund")
+    bare = agent_delivery.begin(tmp_path, 'draft', 'Draft replies.', ['replies.json'],
+                                tool_policy=policy)['prompt']
+    tooled = agent_delivery.begin(tmp_path, 'study', 'Study the code.', ['notes.md'])['prompt']
+    assert 'never promise a refund' in bare and 'never promise a refund' in tooled
+    assert 'Read the live ledger' not in bare and str(ledger.path) not in bare
+    assert 'Read the live ledger' in tooled
+
+
+def test_a_sealed_dispatch_is_given_the_ledger_and_never_told_to_read_it(tmp_path):
+    """A sealed step's sandbox shows no run directory, so the run's ledger is out of reach."""
+    from refactory_dsh.steering import Ledger
+
+    ledger = Ledger.seed(tmp_path, "triage the reports")
+    ledger.note("constraint", "never promise a refund")
+    place = tmp_path / 'ws'
+    place.mkdir()
+    workspace = {'kind': 'scratch', 'collect': [], 'path': str(place), 'sealed': True,
+                 'tools': ['bash'], 'sandbox': 'sealed: its files only, no network'}
+    prompt = agent_delivery.begin(tmp_path, 'solve', 'Solve it.', ['answer.txt'],
+                                  workspace=workspace)['prompt']
+    assert 'never promise a refund' in prompt
+    assert 'Read the live ledger' not in prompt and str(ledger.path) not in prompt
+
+
+def test_a_clone_workspace_dispatch_keeps_the_live_ledger_pointer(tmp_path):
+    """A clone workspace confines writes, not reads: the step can still open the ledger."""
+    from refactory_dsh.steering import Ledger
+
+    ledger = Ledger.seed(tmp_path, "triage the reports")
+    place = tmp_path / 'clone'
+    place.mkdir()
+    workspace = {'kind': 'clone', 'collect': [], 'path': str(place),
+                 'sandbox': 'workspace-write (clone)'}
+    prompt = agent_delivery.begin(tmp_path, 'build', 'Build it.', ['out.txt'],
+                                  workspace=workspace)['prompt']
+    assert 'Read the live ledger at `' + str(ledger.path) in prompt
