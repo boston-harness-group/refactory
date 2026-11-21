@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 if TYPE_CHECKING:
     from refactory_dsh.nn.mode import RunResult
@@ -761,7 +761,8 @@ class Loop(OuterLoop):
             from refactory_dsh.workers import agent_roles, claude_code_preflight
             try:
                 claude_code_preflight(model.context(), roles={
-                    **agent_roles(self.mode.state_dict()), "optimizer": "optimizer"})
+                    **agent_roles(self.mode.state_dict()), "optimizer": "optimizer"},
+                    pins=self.mode.claude_code_versions())
             except ValueError as error:
                 raise LoopError(str(error)) from error
         self.invariants = self.mode.invariants()
@@ -6069,10 +6070,12 @@ class Loop(OuterLoop):
             # Read now, not at construction: the point of steering a search is that a
             # note added while it runs reaches the next proposal.
             steering=self._steering_block(),
-            item_records=self._with_item_history(
+            item_records=self._with_step_sources(self._with_item_history(
                 self._with_item_meta(self._parent_train_records(board))),
-            parent_item_records=self._with_item_history(
+                self._train_records_owner(board)[0]),
+            parent_item_records=self._with_step_sources(self._with_item_history(
                 self._with_item_meta(self._parent_train_records(board))),
+                self._train_records_owner(board)[0]),
             graph_note=graph_note,
             edit_pairs=self._edit_pairs(board),
             reasoning=self._reasoning_entries(board),
@@ -6218,8 +6221,9 @@ class Loop(OuterLoop):
                 "edit": child.own_edits(), "gate": self._gate_decision(child.id),
                 # The values its set_knob edits replaced, so its edits show as changes.
                 "before": _values_before(parent, child.own_edits()),
-                "child_records": child_records,
-                "parent_records": parent_records, "same_seed": same,
+                "child_records": self._with_step_sources(child_records, child),
+                "parent_records": self._with_step_sources(parent_records, parent),
+                "same_seed": same,
                 # How a structural edit moved the items it changed (`optim.edit_effect`).
                 **({"effect": effect} if effect else {}),
                 # What the proposal predicted and said, for the prediction check, and
@@ -6687,6 +6691,9 @@ class Loop(OuterLoop):
         from refactory_dsh.model import ModelChoiceError
         from refactory_dsh.optim import analysts, memory
 
+        # Each side's records with how its own graph's model steps run (`_with_step_sources`).
+        records = [dict(zip(held, self._with_step_sources(held.values(), side)))
+                   for held, side in zip(records, (prev, current))]
         entries, missing = memory.pairs(records[0], records[1], sample)
 
         view = {c.id: analysts.pipeline_text(memory.state_view(c.state),
@@ -6869,6 +6876,21 @@ class Loop(OuterLoop):
         if self._item_meta_reader() is None:
             return records
         return [{**record, "item_meta": self._item_meta(record)} for record in records]
+
+    def _with_step_sources(self, records: Iterable[Mapping[str, Any]],
+                           candidate: Candidate | str | None) -> list[dict[str, Any]]:
+        """``records`` (``candidate``'s train records) each with how its graph's model steps
+        run (`optim.evidence.with_step_sources`: a model's reply, the tools the step was
+        given, its real tool calls where the harness records them), which the evidence the
+        analysts, the proposer and the memory pass read says under each step. From the
+        candidate's own graph; unchanged when the candidate is not known."""
+        from refactory_dsh.optim.evidence import with_step_sources
+
+        if isinstance(candidate, str):
+            candidate = next((c for c in self.population if c.id == candidate), None)
+        nodes = ((candidate.state.get("graph") or {}).get("nodes")
+                 if candidate is not None else None)
+        return with_step_sources(records, nodes)
 
     def _with_item_history(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Each failing record, and each passing one whose item failed at least once in

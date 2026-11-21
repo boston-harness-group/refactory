@@ -488,4 +488,25 @@ Set `tool_policy="none"` on an agent node to disable acting tools. An omitted po
 
 The DSH runtime restricts the actual scoped tool registry, guards execution, and refuses a provider request if tools remain exposed. Claude Code receives `tools: []`, `mcpServers: {}`, `settingSources: []`, and `strictMcpConfig: true`. Unsupported routes, including Codex and OpenShell, refuse this policy before calling a model.
 
-A no-tools node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.
+Set `tool_policy="refused"` to offer the model Claude Code's own default tools and have
+Claude Code refuse them, as `claude -p --permission-mode dontAsk` does (SpreadsheetBench's
+solver, matching SkillOpt's harness). Nothing about the tools is changed: Claude Code's
+`dontAsk` refuses every call that needs permission (a write, a command that is not
+read-only, a read outside its directory) with its usual "Permission to use ... has been
+denied" result. What needs none still runs: a read-only command (`pwd`, `ls`, `sleep`),
+Read in its directory, ToolSearch, a subagent under the same rules, a write to the memory
+folder Claude Code's prompt names. The session works in a fresh empty directory, also its
+one added directory, and loads no settings, CLAUDE.md or MCP servers, whatever the route's
+`setting_sources` say (project ones would also be found in the folders above it, such as a
+shared `/tmp`); the record's `setting_sources_ignored` says what the route asked for. Its
+directory, and Claude Code's project, temporary and session-env folders for it, are
+removed when it ends. It needs the `claude_code` backend with permission mode `dontAsk`;
+anything else is refused before calling a model. The worker record shows
+`enforced_tool_policy: "refused"`, the `tools_offered` and the `working_directory`.
+
+A mode may pin the Claude Code version a step runs (`Mode.claude_code_versions`), as a
+reproduction of another harness does: `refactory optimize`, `refactory run`/`ceo`, the
+console's open, design, create and edit refuse, before the run directory exists, a run
+whose Claude Code for that step reports any other version (a suffixed build included).
+
+A no-tools or refused node declares exactly one reply output. The runtime supplies declared input file contents, omits the file-writing execution contract, and saves the raw reply to that output. Checks, retries, steering, and separate system and user channels continue to apply. Receipts distinguish configured policy from observed provider requests. Search candidates cannot grant tools forbidden by the original seed, including after resume or deletion and re-addition of a node.

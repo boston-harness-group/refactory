@@ -40,6 +40,7 @@ from refactory_dsh.ir import (
 )
 from refactory_dsh.nn import Graph, Knob
 from refactory_dsh.nn.graph import op_io
+from refactory_dsh.tool_policy import no_effect
 
 #: How a node names the operation it runs. Resolved by the runtime, so no package
 #: is named here and no absolute path is baked in: `--python-bin` supplies the PATH.
@@ -366,9 +367,9 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                     f"agent node {node.id!r} declares role {node.role!r}, which the IR "
                     f"does not have; known roles: {known}"
                 ) from exc
-            if node.tool_policy == "none" and len(node.writes) != 1:
+            if no_effect(node.tool_policy) and len(node.writes) != 1:
                 raise LoweringError(
-                    f"agent node {node.id!r} declares tool_policy='none' but has "
+                    f"agent node {node.id!r} declares tool_policy={node.tool_policy!r} but has "
                     f"{len(node.writes)} write(s); a no-tools node must declare exactly "
                     "one output for its captured reply"
                 )

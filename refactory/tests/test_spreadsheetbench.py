@@ -376,6 +376,11 @@ def test_a_crashed_solve_call_gets_five_attempts(tmp_path, sb_env, crashes):
         _no_answer(record)
 
 
+#: The route the solve step's ``tool_policy="refused"`` needs (SkillOpt's runs' own).
+CLAUDE_CODE = {"worker_backend": "claude_code", "model": "claude-opus-4-6", "permission_mode": "dontAsk",
+               "setting_sources": "project"}
+
+
 def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
                    expect_ok: bool = True) -> tuple[list[dict], str]:
     """A part on the walker through the real model client and a scripted ``dsh``: its
@@ -385,7 +390,7 @@ def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple 
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
                                        if p != "train"}, train_ids=list(train))
     task_module.write_subset(work, part, 0.0, gold_feedback=False)
-    result = WalkerEvaluator(model=dsh.client(), project=Path("."), max_steps=4000) \
+    result = WalkerEvaluator(model=dsh.client(**CLAUDE_CODE), project=Path("."), max_steps=4000) \
         .evaluate(mode, state, work)
     assert result.exit_ok is expect_ok, result.error
     return result.item_records, "" if result.exit_ok else str(result.error)
@@ -407,7 +412,7 @@ def _scripted_spine(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple
     lowering.write_declarations(state, work)
 
     def dispatched(workflow: Any) -> Any:
-        return workers.lower_workflow(workflow, tmp_path / "specs", dsh.client().context(),
+        return workers.lower_workflow(workflow, tmp_path / "specs", dsh.client(**CLAUDE_CODE).context(),
                                       lowering.node_declarations(state))
 
     graph_path, _ = lowering.write_mode_graph(state, tmp_path / "graphs-dsh", name="sb",

@@ -1006,8 +1006,8 @@ Worker routes and durable receipts over DSH's named-provider registry.
 | function | `capabilities` | `(backend: 'str') -> 'dict[str, Any]'` |
 | function | `claude_code_compaction` | `(runtime_root: 'Path \| str') -> 'dict[str, Any] \| None'` |
 | function | `claude_code_minimum` | `(model: 'str') -> 'str'` |
-| function | `claude_code_preflight` | `(model: 'Any', runtime_root: 'Path \| str \| None' = None, *, roles: 'dict[str, str] \| None' = None) -> 'None'` |
-| function | `claude_code_version` | `(executable: 'str') -> 'str'` |
+| function | `claude_code_preflight` | `(model: 'Any', runtime_root: 'Path \| str \| None' = None, *, roles: 'dict[str, str] \| None' = None, pins: 'dict[str, str] \| None' = None) -> 'None'` |
+| function | `claude_code_version` | `(executable: 'str', *, exact: 'bool' = False) -> 'str'` |
 | function | `claude_executable_choice` | `(route: 'dict[str, Any]') -> 'str'` |
 | function | `environment` | `(context: 'dict[str, Any] \| None') -> 'dict[str, str]'` |
 | function | `event` | `(workdir: 'Path', record: 'dict[str, Any]', state: 'str', summary: 'str') -> 'None'` |
@@ -1034,7 +1034,7 @@ Worker routes and durable receipts over DSH's named-provider registry.
 - **`claude_code_compaction`** — Whether claude_code workers compact, and what of the person's they override.
 - **`claude_code_minimum`** — The oldest Claude Code version ``model`` runs on, or empty when none is known.
 - **`claude_code_preflight`** — Refuse, before the run directory exists, a claude_code route whose Claude Code
-- **`claude_code_version`** — The X.Y.Z ``executable --version`` starts with, or empty when it says none.
+- **`claude_code_version`** — The X.Y.Z ``executable --version`` starts with, or empty when it says none. With
 - **`claude_executable_choice`** — The Claude Code executable a claude_code route names, else `CLAUDE_EXECUTABLE_ENV`'s;
 - **`environment`** — Nonsecret resolved context for graph-owned calls.
 - **`lower_workflow`** — Resolve explicit node workers before graph dispatch, preserving all edges.

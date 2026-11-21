@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(not ADAPTER.exists() or shutil.which("node") is 
 
 _FAKE_SDK = textwrap.dedent("""\
     // Stands in for @anthropic-ai/claude-agent-sdk: records the query and answers once.
-    import { appendFileSync, writeFileSync } from 'node:fs'
+    import { appendFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
     // Whether the prompt stream ends (the adapter released it) within `ms`.
     const closes = (input, ms) => Promise.race([input.next().then(step => step.done),
                                                 new Promise(resolve => setTimeout(() => resolve(false), ms).unref())])
@@ -43,6 +43,10 @@ _FAKE_SDK = textwrap.dedent("""\
         tools: options.tools ?? null, mcpServers: options.mcpServers ?? null,
         settingSources: options.settingSources ?? null, strictMcpConfig: options.strictMcpConfig ?? null,
         permissionMode: options.permissionMode,
+        cwd: options.cwd, additionalDirectories: options.additionalDirectories ?? null,
+        // What the session's working directory held when Claude Code started.
+        cwdEntries: existsSync(options.cwd) ? readdirSync(options.cwd) : null,
+        disallowedTools: options.disallowedTools ?? null,
         pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable ?? null,
         backgroundTasksInChildEnv: options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null,
         systemPromptInChildEnv: 'REFACTORY_SYSTEM_PROMPT' in process.env,
@@ -307,6 +311,104 @@ def test_the_spine_worker_reaches_claude_code_with_the_node_settings(tmp_path, f
     assert sent["pathToClaudeCodeExecutable"] == "/opt/claude/bin/claude"
     assert sent["backgroundTasksInChildEnv"] is None
     assert _receipt(workdir)["enforced_tool_policy"] == "none"
+
+
+def _refused_sent(sent: dict, workdir: Path) -> Path:
+    """What every refused session sends: Claude Code's own tools, its dontAsk, no
+    settings or MCP servers, no plan-mode tools, and a fresh empty directory that is gone
+    after."""
+    assert sent["tools"] is None
+    assert sent["settingSources"] == [] and sent["mcpServers"] == {} and sent["strictMcpConfig"] is True
+    assert sent["permissionMode"] == "dontAsk"
+    assert set(sent["disallowedTools"]) == {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}
+    cwd = Path(sent["cwd"])
+    assert cwd.name.startswith("refactory-claude-") and not cwd.is_relative_to(workdir.resolve())
+    assert sent["cwdEntries"] == [] and sent["additionalDirectories"] == [str(cwd)]
+    assert not cwd.exists()
+    assert sent["controlsInChildEnv"] == []
+    return cwd
+
+
+def test_refused_offers_claude_codes_tools_under_dont_ask_in_an_empty_directory(tmp_path, fake_sdk, monkeypatch):
+    """tool_policy refused: the default tools, refused by Claude Code's dontAsk, as
+    `claude -p --permission-mode dontAsk --add-dir <dir>` in an empty `<dir>` runs them."""
+    monkeypatch.setenv("FAKE_SDK_INIT_TOOLS", json.dumps(["Bash", "Read", "Write"]))
+    workdir = tmp_path / "run"
+    client = _client(tmp_path, effort="medium", setting_sources="project").with_tool_policy("refused")
+    answer = client.complete("Say a fruit", system="Always answer with the word PINEAPPLE", workdir=workdir)
+
+    assert answer.strip() == "PINEAPPLE"
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["prompt"] == "Say a fruit"
+    assert sent["systemPrompt"] == {"type": "preset", "preset": "claude_code",
+                                    "append": "Always answer with the word PINEAPPLE"}
+    assert sent["effort"] == "medium"
+    cwd = _refused_sent(sent, workdir)
+    receipt = _receipt(workdir)
+    assert receipt["requested_tool_policy"] == "refused"
+    assert receipt["enforced_tool_policy"] == "refused"
+    assert receipt["tools_offered"] == ["Bash", "Read", "Write"]
+    assert receipt["tool_policy_source"] == "claude-code-dont-ask"
+    assert receipt["working_directory"] == str(cwd)
+    assert receipt["setting_sources_ignored"] == ["project"]
+    assert receipt["actual_route"]["setting_sources"] == []
+    assert "tools_permitted" not in receipt
+
+
+def test_refused_loads_no_settings_whatever_the_route_names(tmp_path, fake_sdk):
+    """Project settings are found in the folders above the empty directory too (a shared
+    /tmp), so none load; with none asked for, none are recorded as ignored."""
+    workdir = tmp_path / "run"
+    _client(tmp_path).with_tool_policy("refused").complete("Say a fruit", workdir=workdir)
+    _refused_sent(json.loads(fake_sdk.read_text()), workdir)
+    assert "setting_sources_ignored" not in _receipt(workdir)
+    _client(tmp_path, setting_sources="user,project").with_tool_policy("refused").complete(
+        "Say a fruit", workdir=tmp_path / "user")
+    _refused_sent(json.loads(fake_sdk.read_text()), tmp_path / "user")
+    assert _receipt(tmp_path / "user")["setting_sources_ignored"] == ["user", "project"]
+
+
+def test_the_spine_worker_reaches_claude_code_with_refused_tools(tmp_path, fake_sdk):
+    """The spine's dispatched worker (`worker_node.execute`) takes the same path."""
+    from refactory_dsh.worker_node import execute
+
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    client = _client(tmp_path, effort="low", setting_sources="project")
+    execute({"schema_version": 1, "node_id": "solve", "reads": [], "writes": ["answer.txt"],
+             "produces": [], "prompt": "Say a fruit", "tool_policy": "refused",
+             "system_prompt": "Always answer with the word PINEAPPLE",
+             "model_context": client.context()}, workdir)
+
+    sent = json.loads(fake_sdk.read_text())
+    assert sent["prompt"].startswith("Say a fruit")
+    assert sent["systemPrompt"]["append"] == "Always answer with the word PINEAPPLE"
+    _refused_sent(sent, workdir)
+    assert (workdir / "answer.txt").read_text().strip() == "PINEAPPLE"
+    assert _receipt(workdir)["enforced_tool_policy"] == "refused"
+
+
+@pytest.mark.parametrize("route", [
+    {"permission_mode": "acceptEdits"},
+    {"permission_mode": "bypassPermissions"},
+])
+def test_the_adapter_itself_refuses_a_refused_session_it_cannot_refuse(tmp_path, fake_sdk, monkeypatch,
+                                                                     route):
+    """Should the refactory side ever let one through (`tool_policy.route_refusal`
+    switched off here), the adapter starts no session: it fails before the SDK's query."""
+    from refactory_dsh import model
+    from refactory_dsh.model import DshModelClient
+
+    monkeypatch.setattr(model.tool_policies, "route_refusal", lambda policy, route: None)
+    node_route = {key: route.pop(key) for key in ("setting_sources",) if key in route}
+    client = DshModelClient(worker_backend="claude_code", model="claude-test", runtime_root=ROOT,
+                            dsh_home=tmp_path / "dsh-home", routes_resolved=True, timeout_s=120,
+                            node_routes={"solve": node_route}, **route).for_node("solve")
+    with pytest.raises(Exception, match="stage: query-start"):
+        client.with_tool_policy("refused").complete("Say a fruit", workdir=tmp_path / "run")
+    assert not fake_sdk.exists()
+    client.with_tool_policy("").complete("Say a fruit", workdir=tmp_path / "plain")
+    assert fake_sdk.exists()  # the same route without the policy does start one
 
 
 def test_a_step_waits_for_its_background_tasks_before_it_finishes(tmp_path, fake_sdk, monkeypatch):

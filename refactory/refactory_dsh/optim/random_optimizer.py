@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 
 from refactory_dsh.nn import edits as nn_edits
 
+from . import evidence
 from .evidence import keeping
 from .base import (
     READER_CONCURRENCY, UNREADABLE_PROPOSAL, Candidate, Optimizer, Proposal, ProposalContext,
@@ -65,8 +66,15 @@ def _fatal() -> tuple[type[BaseException], ...]:
 #: A reader's role: go through one group of whole trajectories and report patterns.
 READER_SYSTEM = (
     "You read an AI pipeline's trajectories on evaluation items and report what you find. "
-    "You reply with JSON only."
+    + evidence.CLAIMS + " You reply with JSON only."
 )
+#: What a reader's item shows (`base._trajectory` without the steps' settings).
+READER_FORM = ("its verdict, the expected answer, the prediction and the grader's reason, its "
+               "input, the steps the harness completed as code, each named once with how "
+               "often (`" + evidence.COMPLETED + ":`), and every model step's reply in the "
+               "order they ran, each step's first run in the request headed by how it runs (`"
+               + evidence.RAN_AS + ":` a model's reply, the tools its graph gave it and its "
+               "real tool calls where the harness records them).")
 READER_ANSWER = """Write one JSON object and nothing else:
 
 {"failure_patterns": [{"pattern": "<what goes wrong, in one sentence>",
@@ -277,7 +285,8 @@ class AutoresearchOptimizer(Optimizer):
 
         def read(index: int, group: list[tuple[str, str]]) -> tuple[dict | None, dict | None]:
             items = [item for item, _block in group]
-            body = "\n\n".join(block for _item, block in group)
+            how: set[tuple[str, str]] = set()  # how a step runs, said once (`said_once`)
+            body = "\n\n".join(evidence.said_once(block, how) for _item, block in group)
             key = hashlib.sha256(body.encode()).hexdigest()
             if key in cache:
                 return cache[key], None
@@ -291,8 +300,7 @@ class AutoresearchOptimizer(Optimizer):
             prompt = (f"# Reading trajectories -- group {index} of {len(groups)}\n\n"
                       f"Mode: `{ctx.mode_name}`. The pipeline's steps: {steps}.\n\n"
                       f"Below are {len(items)} train item(s) of the candidate being edited, "
-                      "each in full: its input, every step's output in the order they ran, "
-                      "the expected answer, the prediction and the grader's reason.\n\n"
+                      f"each in full: {READER_FORM}\n\n"
                       f"{body}\n\n## Answer\n{READER_ANSWER}")
             call = {"kind": "reader", "epoch": ctx.epoch, "generation": ctx.generation,
                     "group": index, "items": items, "system": READER_SYSTEM, "prompt": prompt}

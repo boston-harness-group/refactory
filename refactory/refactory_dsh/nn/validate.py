@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
 from refactory_dsh.snippet import ALLOWED_IMPORTS_TEXT, MAX_CODE_BYTES
+from refactory_dsh.tool_policy import POLICIES as TOOL_POLICIES
 
 from .graph import Graph, Node
 from .knob import Knob, KnobError
@@ -65,7 +66,8 @@ RULES: dict[str, str] = {
            "reads and every {{name}} its prompts fill in (not a knob, not in its "
            "feedback_keys, not inside an {% if name %} on the same name), an op's or a "
            "gate's required_reads and inputs (facts), and every {{name}} in a knob an op "
-           "that fills facts reads; a tool_policy 'none' agent declares exactly one write",
+           "that fills facts reads; a tool_policy 'none' or 'refused' agent declares "
+           "exactly one write",
     "V16": "a fork has one unconditional out-edge, to its join, and each join belongs to "
            "one fork; branches are disjoint, never lead back to the fork or past the join, "
            "declare no shared facts or conflicting files, and a gate in a branch reloops "
@@ -1215,7 +1217,7 @@ def _replaces_its_writes(node: Node) -> bool:
     from refactory_dsh import snippet
 
     if node.kind == "agent":
-        return node.tool_policy == "none"
+        return node.tool_policy in TOOL_POLICIES
     return node.kind == "op" and snippet.is_code_node(node)
 
 
@@ -1228,7 +1230,7 @@ def _reads_only_declared(node: Node) -> bool:
     from refactory_dsh import snippet
 
     if node.kind == "agent":
-        return node.tool_policy == "none"
+        return node.tool_policy in TOOL_POLICIES
     if node.kind == "op":
         return snippet.is_code_node(node)
     if node.kind == "gate":
@@ -1340,7 +1342,8 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any], *,
     Both runtimes refuse to dispatch an agent whose declared read is missing, and send a
     prompt with an unfilled ``{{name}}`` as it is, so each must be produced upstream on
     every path to the agent; a data pass's own files and facts stay inside the pass. A
-    ``tool_policy`` 'none' agent's reply is its one output, so it declares one write.
+    ``tool_policy`` 'none' or 'refused' agent's reply is its one output, so it declares
+    one write.
     """
     issues: list[Issue] = []
     available = available_inputs(graph)
@@ -1359,9 +1362,10 @@ def agent_input_issues(graph: Graph, knob_values: Mapping[str, Any], *,
             continue
         if node is None or node.kind != "agent":
             continue
-        if node.tool_policy == "none" and len(node.writes) != 1:
+        if node.tool_policy in TOOL_POLICIES and len(node.writes) != 1:
             issues.append(Issue(
-                "V15", f"declares tool_policy 'none' and {len(node.writes)} writes; a no-tools "
+                "V15", f"declares tool_policy {node.tool_policy!r} and {len(node.writes)} writes; "
+                "a no-tools "
                 "agent's reply is its one declared output, so it declares exactly one",
                 node=node_id))
         have = available.get(node_id, set())

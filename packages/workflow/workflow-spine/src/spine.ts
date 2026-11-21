@@ -8,7 +8,8 @@
  */
 
 import { retryEdges, retryKey } from './loops.ts'
-import type { DirectorExpansion, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
+import { isToolPolicy } from './types.ts'
+import type { DirectorExpansion, ToolPolicy, WorkflowEdge, WorkflowGraph, WorkflowNode } from './types.ts'
 
 /** The model-facing view of one node returned by {@link Spine.next}. */
 export interface NodeView {
@@ -56,8 +57,9 @@ export interface NodeView {
   parallelism?: number
   /** For a `SelectionNode`: the selection strategy. */
   strategy?: string
-  /** `AgentNode`: optional tool policy. `'none'` disables all tools. */
-  tool_policy?: 'none'
+  /** `AgentNode`: optional tool policy. `'none'` offers no tools; `'refused'` offers
+   * Claude Code's own and refuses each that needs permission (`ToolPolicy`). */
+  tool_policy?: ToolPolicy
   unsupported?: boolean
 }
 
@@ -696,8 +698,8 @@ export class Spine {
         view.command = node.dispatch_command
         if (node.command_timeout_s !== undefined) view.command_timeout_s = node.command_timeout_s
       }
-      if (node.tool_policy !== undefined && node.tool_policy !== null && node.tool_policy !== 'none') throw new Error(`invalid tool_policy ${node.tool_policy}`)
-      if (node.tool_policy === 'none') view.tool_policy = 'none'
+      if (node.tool_policy !== undefined && node.tool_policy !== null && !isToolPolicy(node.tool_policy)) throw new Error(`invalid tool_policy ${node.tool_policy}`)
+      if (isToolPolicy(node.tool_policy)) view.tool_policy = node.tool_policy
     }
     if (node._type === 'LLMNode') {
       // A one-shot model call is delivered the same way an agent node is: the

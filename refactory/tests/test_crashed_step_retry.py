@@ -106,9 +106,11 @@ class Scripted:
         rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
         return [row["prompt"] for row in rows if row["key"] == key]
 
-    def client(self) -> DshModelClient:
-        return DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(self.cli),
-                              attempts=1, timeout_s=60)
+    def client(self, **route: str) -> DshModelClient:
+        """The client on the ``dsh`` backend, or on the route given (a claude_code one, for
+        a step whose policy only Claude Code runs): the scripted ``dsh`` answers either."""
+        route = route or {"worker_backend": "dsh", "provider": "p", "model": "m"}
+        return DshModelClient(**route, dsh_cli=str(self.cli), attempts=1, timeout_s=60)
 
 
 def _solver(node_id: str = "solve", prompt: str = "Solve.", writes: str = "answer.txt",

@@ -241,11 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # A Claude Code too old for a node's model would fail at its first call. A resume
         # learns its graph only from the run, so its node routes are checked as ``worker``.
-        roles = None
+        roles, pins = None, None
         if not args.resume:
             from refactory_dsh.fast import EditFastMode
-            roles = agent_roles((EditFastMode if args.fast else EditMode)().state_dict())
-        claude_code_preflight(client, roles=roles)
+            run_mode = (EditFastMode if args.fast else EditMode)()
+            roles, pins = agent_roles(run_mode.state_dict()), run_mode.claude_code_versions()
+        claude_code_preflight(client, roles=roles, pins=pins)
     except ValueError as exc:
         print(f"refactory: {exc}", file=sys.stderr)
         return 1

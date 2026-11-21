@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_the_pin_matches_ci():
     pin = (ROOT / ".python-version").read_text().strip()
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    versions = set(re.findall(r'python-version:\s*"?([0-9.]+)"?', ci))
-    assert versions, "ci.yml names no python-version"
-    assert versions == {pin}, f".python-version {pin} vs ci.yml {sorted(versions)}"
+    versions = {
+        version
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        for version in re.findall(r'python-version:\s*"?([0-9.]+)"?', workflow.read_text())
+    }
+    assert versions, "no workflow names a python-version"
+    assert versions == {pin}, f".python-version {pin} vs workflows {sorted(versions)}"

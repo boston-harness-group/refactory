@@ -217,7 +217,7 @@ Each of these happened, and the shape of the code is the response.
 - A pull request that changes what the optimizer's calls are sent (the proposal, the
   analysts and their merges, memory and its comparison, the step review) includes the
   before/after size table from `uv run python -m refactory_dsh.tools.request_sizes
-  <run dir> ...` on a run (or a replay of one) made before the change and one made
+  <run dir> ...` on a run (or a replay of one, `python -m refactory_dsh.tools.replay_round`) made before the change and one made
   after it.
   `tests/test_request_guardrails.py` fails on repeated text and on sections out of
   order, never on size: a request may grow when it says more.

@@ -365,7 +365,9 @@ important COMMON failure patterns across the batch.
    such item is here. A retry, a check or a loop aimed at a wrong answer is a change
    like any other.
 
-You reply with JSON only."""
+{claims}
+
+You reply with JSON only.""".format(claims=evidence.CLAIMS)
 
 SUCCESS_SYSTEM = """\
 You are a success-pattern analyst for a multi-step AI pipeline: a graph of steps (nodes)
@@ -385,7 +387,9 @@ these items keep passing.
 - A pattern says what produced these passes, not a reason to avoid adding or changing
   steps: "preserve" names what a change must keep, never that the structure stay as is.
 
-You reply with JSON only."""
+{claims}
+
+You reply with JSON only.""".format(claims=evidence.CLAIMS)
 
 def system(kind: str) -> str:
     """An analyst call's system prompt."""

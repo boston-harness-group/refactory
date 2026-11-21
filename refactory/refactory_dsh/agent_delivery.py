@@ -18,6 +18,7 @@ from typing import Any, Sequence
 
 from refactory_dsh import target_guard
 from refactory_dsh.invocations import EVIDENCE, REVIEWERS, WORKTREE_RECORD
+from refactory_dsh.tool_policy import check as check_tool_policy, no_effect
 
 ROOT = Path('.refactory/agent-delivery')
 
@@ -249,11 +250,12 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
     outputs are copied out of it. Its outputs are listed in the workspace, since that is
     where it writes them; the run directory is outside what its tools may change.
 
-    When ``tool_policy`` is ``"none"``, the execution contract is suppressed entirely:
-    the node's model receives no tools and cannot write files, so the contract's
-    file-writing instructions would be noise. The raw reply is delivered by the runtime.
+    When ``tool_policy`` is ``"none"`` or ``"refused"``, the execution contract is
+    suppressed entirely: the node's model has no tools, or has every tool that could
+    write refused, so the contract's file-writing instructions would be noise. The raw
+    reply is delivered by the runtime.
     """
-    if tool_policy == "none":
+    if no_effect(tool_policy):
         return (prompt, {})
     context = model_context or {}
     # Absolute path to refactory's own Python, for nested dispatch (worker_node,
@@ -581,12 +583,11 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     """
     from refactory_dsh.steering import Ledger, parse_entries, prompt_with_ledger, reads_run_dir
 
-    if tool_policy not in ("", "none"):
-        raise ValueError(f"invalid tool_policy {tool_policy!r}")
-    if tool_policy == "none" and len(writes) != 1:
+    tool_policy = check_tool_policy(tool_policy)
+    if no_effect(tool_policy) and len(writes) != 1:
         raise ValueError("a no-tools node must declare exactly one reply output")
     workdir = Path(workdir).resolve()
-    if tool_policy == "none" and reads:
+    if no_effect(tool_policy) and reads:
         inputs = []
         for name in reads:
             path = _path(workdir, name)

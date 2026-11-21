@@ -80,11 +80,24 @@ CASES = {
 }
 
 
+#: The policies of a step that cannot read its run directory, so is handed its output:
+#: no tools, or Claude Code's own each refused (`refactory_dsh.tool_policy`).
+POLICIES = ["none", "refused"]
+
+
+@pytest.mark.parametrize("policy", POLICIES)
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_walker_a_step_sent_back_sees_its_last_output_and_the_judges_feedback(case, tmp_path):
+def test_walker_a_step_sent_back_sees_its_last_output_and_the_judges_feedback(case, policy, tmp_path,
+                                                                            monkeypatch):
     name, edit, sent_back, judged = CASES[case]
     seed = _seeds()[name]
     state = _looped(seed, edit)
+    assert state["graph"]["nodes"][sent_back]["tool_policy"] == "none"
+    state["graph"]["nodes"][sent_back]["tool_policy"] = policy
+    if policy == "refused":
+        # The route a refused step needs (`tool_policy.route_refusal`).
+        monkeypatch.setattr(sf.ScriptedModel, "route",
+                            lambda self: {"worker_backend": "claude_code", "permission_mode": "dontAsk"})
     model = _walk(seed, state, tmp_path, sent_back, _judge(state, judged))
     prompts = _prompts(model, sent_back)
     first_visit = prompts[0]
@@ -98,7 +111,8 @@ def test_walker_a_step_sent_back_sees_its_last_output_and_the_judges_feedback(ca
     assert again.endswith(first_visit), "the prompt itself follows, unchanged"
 
 
-def test_the_spine_worker_builds_the_same_prompt_from_the_spine_s_feedback_file(tmp_path):
+@pytest.mark.parametrize("policy", POLICIES)
+def test_the_spine_worker_builds_the_same_prompt_from_the_spine_s_feedback_file(policy, tmp_path):
     """Spine: the worker (`worker_node.execute`) reads the feedback file the spine wrote
     for the step sent back and the step's own output still in its run directory, and
     sends the prompt the walker sends on that visit, byte for byte."""
@@ -114,9 +128,11 @@ def test_the_spine_worker_builds_the_same_prompt_from_the_spine_s_feedback_file(
     (prompts / "solve.md").write_text(first_visit)
     (prompts / "solve.feedback.md").write_text(REASON)
     (workdir / "answer.txt").write_text(FIRST)
+    route = ({"worker_backend": "dsh"} if policy == "none"
+             else {"worker_backend": "claude_code", "permission_mode": "dontAsk"})
     spec = {"schema_version": 1, "node_id": "solve", "prompt": "fallback", "reads": [],
-            "writes": ["answer.txt"], "tool_policy": "none",
-            "model_context": {"provider": "test", "model": "test", "worker_backend": "dsh"}}
+            "writes": ["answer.txt"], "tool_policy": policy,
+            "model_context": {"provider": "test", "model": "test", **route}}
     sent: list[str] = []
 
     class Client:
@@ -124,7 +140,7 @@ def test_the_spine_worker_builds_the_same_prompt_from_the_spine_s_feedback_file(
         def for_node(self, node, role="worker"): return self
         def with_tool_policy(self, policy): return self
         def context(self): return {"provider": "test", "model": "test"}
-        def route(self): return {"worker_backend": "dsh"}
+        def route(self): return dict(route)
 
     def begin(_workdir, node, prompt, writes, **_kwargs):
         sent.append(prompt)

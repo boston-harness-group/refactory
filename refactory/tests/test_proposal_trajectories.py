@@ -709,9 +709,14 @@ _CITING = [
 ]
 
 
-def _whole_size(records: list[dict[str, Any]], *ids: str) -> int:
+def _whole_size(records: list[dict[str, Any]], *ids: str, after: tuple[str, ...] = ()) -> int:
+    """What items ``ids`` take shown whole after the items ``after``: a step's ``Ran as:``
+    line an earlier item said is not said again (`evidence.said_once`)."""
     by_id = {r["id"]: r for r in records}
-    return sum(base._shown_size(by_id[i], None, None) for i in ids)
+    how: set[tuple[str, str]] = set()
+    for i in after:
+        base._shown_size(by_id[i], None, None, how)
+    return sum(base._shown_size(by_id[i], None, None, how) for i in ids)
 
 
 def test_without_a_room_every_item_the_rule_picks_is_shown_whatever_their_size():
@@ -795,7 +800,7 @@ def test_a_request_over_its_room_shows_fewer_items_whole_and_nothing_else_change
     unbounded = _render(records, reader_findings=_CITING, request_room=0)
     assert _full(unbounded) == ["w20", "w23", "w24", "p09"]
     # Room for about two of the four.
-    room = len(unbounded) - _whole_size(records, "w23", "w24") + 200
+    room = len(unbounded) - _whole_size(records, "w23", "w24", after=("w20",)) + 200
     fitted = _render(records, reader_findings=_CITING, request_room=room)
     assert len(fitted) <= room < len(unbounded)
     assert _full(fitted) == ["w20", "p09"]

@@ -56,6 +56,7 @@ import re
 from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.seal import SEALED_TOOLS
+from refactory_dsh.tool_policy import POLICIES as TOOL_POLICIES
 
 from .graph import Graph, GraphError, Node
 from .operators import TASK_MEANING
@@ -218,7 +219,7 @@ def _kind_of(node: Node) -> str:
 
 
 def _uses_tools(node: Node) -> bool:
-    return node.kind == "agent" and (node.tool_policy != "none" or bool(node.tools))
+    return node.kind == "agent" and (node.tool_policy not in TOOL_POLICIES or bool(node.tools))
 
 
 def _forks_naming(graph: Graph, node_id: str) -> list[Node]:

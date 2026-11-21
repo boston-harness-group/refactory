@@ -6,13 +6,24 @@ fenced block run against the input, an execution error sent back as the next use
 message, and -- in training rollouts only -- a wrong output told which cells are wrong
 (`ops`, `refactory_dsh.feedback`). Each call is one ``claude -p`` whose prompt is the
 whole conversation flattened into a ``History:`` block (`ops.frame`) and whose system
-file is ``codegen_system.md`` plus the ``## Skill`` section. The solve node has no tools
-(``tool_policy="none"``): SkillOpt sends no tool schemas, though its CLI calls carried
-Claude Code's default tools, which ``dontAsk`` denied (port spec §1.5, §7 Q2).
+file is ``codegen_system.md`` plus the ``## Skill`` section, appended to Claude Code's own
+system prompt (``--append-system-prompt-file``). SkillOpt sends no tool schemas of its
+own, but each ``claude -p`` carried Claude Code's default tools, run under ``dontAsk`` in
+a fresh empty directory (also its ``--add-dir``): a command, a write or a read elsewhere
+was refused with Claude Code's "Permission to use ... has been denied" result (60% of
+so-s43's 3,217 target calls had at least one: Bash 2,500, Write 109). So the solve node
+declares ``tool_policy="refused"`` (`refactory_dsh.tool_policy`): the same tools, refused
+the same way, in an empty directory of its own. With no tools at all (``"none"``, before)
+the model wrote its tool calls and their results as text, inventing the output, in about
+a third of its turns.
 
 Run settings, as SkillOpt's runs used them, are not part of the graph: the
 ``claude_code`` worker, ``claude-opus-4-6`` at effort ``medium``, permission mode
-``dontAsk``, setting sources ``project``.
+``dontAsk`` (which ``refused`` requires). A refused step loads no settings whatever the
+route names (SkillOpt's ``project`` found none in its empty directory). Its Claude Code
+is pinned to SkillOpt's, 2.1.299 (`Solver.claude_code_versions`): a run whose solve step
+would run another (the SDK's bundled 2.1.281, say) is refused before it starts, so name
+it with ``--claude-executable``.
 
 **Deviations from SkillOpt as shipped**, each recorded where it is decided:
 
@@ -35,7 +46,10 @@ Run settings, as SkillOpt's runs used them, are not part of the graph: the
    (`sandbox`); SkillOpt's could. Stricter, so it can only lower a score that came
    from reading the answer (none of so-s42's generated code mentions the golden
    file, ``listdir`` or ``glob``; port spec §3).
-5. *Tools*: none on the solve call (above).
+5. *Tools*: refused, as SkillOpt's were (above), except that a tool which needs no
+   permission finds an empty directory where SkillOpt's found its system-prompt file, and
+   a write to Claude Code's memory folder succeeds for the session (SkillOpt's home was
+   read-only, so it failed there); the folder goes with the session.
 """
 from __future__ import annotations
 
@@ -51,6 +65,9 @@ from . import skillopt_port as port
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
 
+#: The Claude Code SkillOpt's runs used (the lab's ``claude --version``): its system
+#: prompt and tool text are what the solve call is compared with.
+SKILLOPT_CLAUDE_CODE = "2.1.299"
 #: SkillOpt's ``max_turns`` (configs/spreadsheetbench/default.yaml:31).
 MAX_TURNS = 30
 #: The solve node's system prompt: the system file, then the skill section.
@@ -109,7 +126,7 @@ class Solver(nn.Mode):
                       notes="flatten the conversation into the History: prompt"))
         g.add(nn.Node("solve", "agent", prompt_template="{{solver_prompt}}",
                       system_prompt_template=SYSTEM_PROMPT, writes=("reply.txt",),
-                      tool_policy="none", role="solver", outputs_only=True,
+                      tool_policy="refused", role="solver", outputs_only=True,
                       retry=SOLVE_RETRY,
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
@@ -146,6 +163,10 @@ class Solver(nn.Mode):
         g.connect("turn_gate", "frame", condition="reloop")
         g.connect("turn_gate", "finalize", condition="proceed")
         return g
+
+    def claude_code_versions(self) -> dict[str, str]:
+        """The solve step runs on SkillOpt's Claude Code (`SKILLOPT_CLAUDE_CODE`)."""
+        return {"solve": SKILLOPT_CLAUDE_CODE}
 
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass, the train-feedback node (V17's channel) and the item's outcome."""

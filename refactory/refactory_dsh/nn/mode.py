@@ -212,6 +212,17 @@ class Mode:
         """
         return ()
 
+    def claude_code_versions(self) -> dict[str, str]:
+        """The Claude Code version each named agent step must run on when its route is
+        ``claude_code``, exactly as ``claude --version`` reports it: a mode that reproduces
+        another harness pins the one that harness ran, since its system prompt and tool
+        text change between versions. Every entry point that runs a mode's graph
+        (optimize, run/ceo, the console's open, design, create, edit) refuses, before the
+        run directory exists, a run whose Claude Code for such a step reports another
+        version, or none (`workers.claude_code_preflight`). Empty by default.
+        """
+        return {}
+
     def edit_protected(self) -> tuple[str, ...]:
         """The nodes no edit may remove, rewire or replace: the protected nodes and the
         grader nodes, since grader status follows a node's id and an edit that could
