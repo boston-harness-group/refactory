@@ -872,6 +872,16 @@ def test_a_deleted_targets_worktrees_go_but_an_unmounted_ones_stay(tmp_path):
     assert Path(runs["unmounted"].path).exists() and (unmounted_slot / "base-5f5f5f5f0000").exists()
 
 
+def test_a_repository_at_a_volumes_root_is_not_taken_for_deleted(tmp_path):
+    """macOS's `/Volumes` may hold only the `Macintosh HD` link to `/` once a volume is unmounted."""
+    volumes = tmp_path / "Volumes"
+    repo = git_repo(volumes / "X")
+    (volumes / "Macintosh HD").symlink_to("/")
+    found = worktree.create(repo, "HEAD", "7e7e7e7e1111", _run(tmp_path))
+    (volumes / "X").rename(tmp_path / "X-unmounted")
+    worktree.prune_gone(repo, idle_hours=0)
+    assert Path(found.path).exists()
+
 def test_a_gone_targets_record_never_deletes_anything_outside_its_slot(tmp_path):
     """A damaged record could name any path; only the slot's own worktrees are ever deleted."""
     repo = git_repo(tmp_path / "projects" / "deleted")

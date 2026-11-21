@@ -1184,17 +1184,19 @@ def _limit(variable: str, default: float) -> float:
 def _gone(target: Path) -> bool:
     """Whether ``target`` was deleted, rather than sitting on a disk that is not mounted.
 
-    Its parent must still be there, hold something, and hold no mount point: an
-    unmounted disk leaves an empty mount-point directory on Linux, and a repository at
-    the root of a volume sits in a directory of mount points (`/Volumes` on macOS). A
-    case this cannot tell apart keeps its worktrees.
+    Its parent must still be there, hold something, and hold no mount point, nor a
+    link to one: an unmounted disk leaves an empty mount-point directory on Linux, and
+    a repository at the root of a volume sits in a directory of mount points, which on
+    macOS (`/Volumes`) may hold only the `Macintosh HD` link to `/`. A case this cannot
+    tell apart keeps its worktrees.
     """
     parent = target.parent
     try:
         if target.exists() or not parent.is_dir():
             return False
         entries = list(parent.iterdir())
-        return bool(entries) and not any(os.path.ismount(entry) for entry in entries)
+        return bool(entries) and not any(os.path.ismount(entry) or os.path.ismount(entry.resolve())
+                                         for entry in entries)
     except OSError:
         return False
 
