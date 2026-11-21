@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -797,6 +798,105 @@ def test_prune_leaves_the_targets_own_worktrees_alone(repo, tmp_path):
     worktree.prune(repo, idle_hours=0)
     hidden.rename(theirs)
     assert git(theirs, "diff", "--cached", "--name-only") == "app.py"
+
+
+def _companions(repo: Path, run_id: str) -> list[Path]:
+    """The base worktree and check copy a run keeps beside its own, with their records."""
+    made = []
+    for prefix in worktree.COMPANION_PREFIXES:
+        path = worktree.slot(repo) / f"{prefix}{run_id}"
+        git(repo, "worktree", "add", "-q", "--detach", str(path), "HEAD")
+        (worktree.slot(repo) / f"run-{prefix}{run_id}.json").write_text("{}")
+        made.append(path)
+    return made
+
+
+def test_a_succeeded_runs_worktree_goes_once_idle_long_enough_and_its_branch_never(repo, tmp_path, monkeypatch):
+    """Found live: 178 delivered runs' worktrees stayed for good, waiting for a delivery mark."""
+    found = worktree.create(repo, "HEAD", "5a5a5a5a0000", _run(tmp_path))
+    worktree.record_outcome(found, "succeeded")
+    monkeypatch.setattr(worktree, "_idle_hours", lambda *args: worktree.SUCCEEDED_IDLE_HOURS - 1)
+    worktree.prune(repo, idle_hours=0)
+    assert Path(found.path).exists(), "the ended runs' limit is not a succeeded run's"
+    monkeypatch.setattr(worktree, "_idle_hours", lambda *args: worktree.SUCCEEDED_IDLE_HOURS + 1)
+    worktree.prune(repo)
+    assert not Path(found.path).exists() and git(repo, "branch", "--list", found.branch)
+
+
+def test_a_runs_base_worktree_and_check_copy_go_with_its_worktree(repo, tmp_path):
+    """Found live: a run that died before its last step left both for good."""
+    ended, active = _run(tmp_path, "ended"), _run(tmp_path, "active")
+    gone = worktree.create(repo, "HEAD", "5b5b5b5b0000", ended)
+    kept = worktree.create(repo, "HEAD", "5c5c5c5c0000", active)
+    _spine(ended, "failed")
+    _spine(active, "ready")
+    removed, spared = _companions(repo, "5b5b5b5b0000"), _companions(repo, "5c5c5c5c0000")
+    notes = worktree.prune(repo, idle_hours=0)
+    assert not Path(gone.path).exists() and not any(path.exists() for path in removed)
+    assert not list(worktree.slot(repo).glob("run-*-5b5b5b5b0000.json")), "their records go too"
+    assert Path(kept.path).exists() and all(path.exists() for path in spared)
+    assert any(note.startswith("removed the base worktree of a run") for note in notes)
+
+
+def test_base_worktrees_and_check_copies_no_run_names_go_once_idle(repo, tmp_path):
+    """A run's record goes only after its worktree and branch; what it left beside them is over."""
+    left = _companions(repo, "5d5d5d5d0000")
+    named = worktree.slot(repo) / "base-person"
+    named.mkdir()
+    worktree.prune(repo)
+    assert all(path.exists() for path in left), "changed within the idle limit"
+    worktree.prune(repo, idle_hours=0)
+    assert not any(path.exists() for path in left) and named.exists()
+
+
+def test_a_deleted_targets_worktrees_go_but_an_unmounted_ones_stay(tmp_path):
+    """git cannot remove them once their repository is gone; a missing disk is not a deletion."""
+    deleted = git_repo(tmp_path / "projects" / "deleted")
+    unmounted = git_repo(tmp_path / "disk" / "unmounted")
+    runs = {}
+    for repo, run_id in ((deleted, "5e5e5e5e0000"), (unmounted, "5f5f5f5f0000")):
+        run = _run(tmp_path, repo.name)
+        runs[repo.name] = worktree.create(repo, "HEAD", run_id, run)
+        _companions(repo, run_id)
+        _spine(run, "ready")  # resumable, but nothing is left to resume it on
+    deleted_slot, unmounted_slot = worktree.slot(deleted), worktree.slot(unmounted)
+    shutil.rmtree(deleted)
+    (tmp_path / "disk").rename(tmp_path / "disk-off")
+    worktree.prune_gone(deleted)
+    assert Path(runs["deleted"].path).exists(), "idle less than the limit"
+    notes = worktree.prune_gone(deleted, idle_hours=0) + worktree.prune_gone(unmounted, idle_hours=0)
+    assert not deleted_slot.exists(), "its worktree, companions, records and slot all went"
+    assert any("which is gone" in note for note in notes)
+    assert Path(runs["unmounted"].path).exists() and (unmounted_slot / "base-5f5f5f5f0000").exists()
+
+
+def test_a_gone_targets_record_never_deletes_anything_outside_its_slot(tmp_path):
+    """A damaged record could name any path; only the slot's own worktrees are ever deleted."""
+    repo = git_repo(tmp_path / "projects" / "deleted")
+    worktree.create(repo, "HEAD", "7a7a7a7a0000", _run(tmp_path))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (worktree.slot(repo) / "run-7b7b7b7b0000.json").write_text(json.dumps(
+        {"branch": "refactory/run-7b7b7b7b0000", "path": str(elsewhere), "target": str(repo)}))
+    shutil.rmtree(repo)
+    worktree.prune_gone(repo, idle_hours=0)
+    assert elsewhere.is_dir()
+
+def test_a_runs_start_sweeps_every_targets_worktrees_at_most_once_an_hour(tmp_path):
+    """Found live: canaries and measurements start each run on a fresh target no run revisits."""
+    first, second, gone = (git_repo(tmp_path / name) for name in ("first", "second", "gone"))
+    made = []
+    for repo, run_id in ((first, "6a6a6a6a0000"), (second, "6b6b6b6b0000"), (gone, "6d6d6d6d0000")):
+        run = _run(tmp_path, f"run-{repo.name}")
+        made.append(worktree.create(repo, "HEAD", run_id, run))
+        _spine(run, "failed")
+    shutil.rmtree(gone)
+    worktree.sweep(idle_hours=0)
+    assert not any(Path(found.path).exists() for found in made)
+    run = _run(tmp_path, "later")
+    later = worktree.create(first, "HEAD", "6c6c6c6c0000", run)
+    _spine(run, "failed")
+    assert worktree.sweep(idle_hours=0) == [] and Path(later.path).exists(), "swept within the hour"
 
 
 # ── the check environment (remote-factory's test_worktree_venv) ───────────

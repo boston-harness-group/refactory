@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     for project in chosen:
         path = Path(str(project.get("path")))
         notes = (worktree.prune(path, succeeded=args.succeeded) if path.is_dir()
-                 else [f"{path} is gone; nothing to prune"])
+                 else worktree.prune_gone(path) or [f"{path} is gone; nothing of it to prune"])
         for note in notes or [f"{project.get('name')}: nothing to prune"]:
             print(note)
     return 0
