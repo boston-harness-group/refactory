@@ -36,6 +36,13 @@ from test_skillopt import TRAIN_IDS, _patch_mode
 from test_val_gate import LevelProbe, _level, _loop
 
 
+def _bare(text: str) -> str:
+    """``text`` without its steps' ``Ran as:`` lines (said once a request)."""
+    from refactory_dsh.optim import evidence
+
+    return "\n".join(line for line in text.split("\n")
+                     if not line.startswith(f"{evidence.RAN_AS}: "))
+
 def _section(text: str, heading: str) -> str:
     start = text.index(heading)
     end = text.find("\n## ", start + len(heading))
@@ -340,9 +347,11 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
         for item in _tasks(prompt):
             entry = next(e for e in entries if e["id"] == item)
             if entry["category"] != "stable_success":
-                assert memory._trace(entry, "prev", False, request._settled) in prompt, \
+                # A step's `Ran as:` line is said once a request (`evidence.said_once`).
+                bare = _bare(prompt)
+                assert _bare(memory._trace(entry, "prev", False, request._settled)) in bare, \
                     "both traces whole"
-                assert memory._trace(entry, "curr", False, request._settled) in prompt
+                assert _bare(memory._trace(entry, "curr", False, request._settled)) in bare
             else:
                 assert "BEFORE-" + item not in prompt, "stable successes without traces"
     read = [item for prompt in compares for item in _tasks(prompt)]

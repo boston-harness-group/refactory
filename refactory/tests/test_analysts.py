@@ -890,6 +890,14 @@ def _long(item: str, chars: int, passed: bool = False) -> dict[str, Any]:
                                                f"{item}-{n} " + "O" * each) for n in range(4)})
 
 
+def _bare(text: str) -> str:
+    """``text`` without its steps' ``Ran as:`` lines, which a request says once, at a step's
+    first run in it (`evidence.said_once`): an item's other lines are the same wherever it
+    sits."""
+    return "\n".join(line for line in text.split("\n")
+                     if not line.startswith(f"{evidence.RAN_AS}: "))
+
+
 def _whole(record: dict, ctx, pipeline: str | None = None) -> str:
     """An item whole, as an analyst request with ``ctx``'s items and ``pipeline`` (the
     request's own when not given) renders it: its steps' settings said once."""
@@ -906,7 +914,7 @@ def test_a_small_batch_of_long_traces_is_not_clipped():
     prompt, clip = analysts.analyst_batch(ctx, "failure", 1, 1, group, "PIPE")
     assert clip == {"items": 0, "chars": 0}
     assert "chars omitted" not in prompt
-    assert all(_whole(record, ctx, "PIPE") in prompt for record in group)
+    assert all(_bare(_whole(record, ctx, "PIPE")) in _bare(prompt) for record in group)
     assert len(prompt) <= analysts.ANALYST_ROOM
 
 
@@ -920,7 +928,7 @@ def test_a_batch_over_the_room_has_its_longest_items_clipped_to_one_length():
     blocks = {item: prompt.split(f"### Item {item} ")[1].split("\n\n### Item ")[0]
               .split("\n\n## Answer")[0] for item in ("s0", "f6", "f7")}
     assert "chars omitted" not in blocks["s0"], "the short items stay whole"
-    assert all(_whole(r, ctx, "PIPE") in prompt for r in shorts)
+    assert all(_bare(_whole(r, ctx, "PIPE")) in _bare(prompt) for r in shorts)
     assert "chars omitted" in blocks["f6"] and "chars omitted" in blocks["f7"]
     # Both long items are cut to the same length (within one clipped text's rounding),
     # and together they use the room the short ones leave.
@@ -958,7 +966,8 @@ def test_clipped_items_and_characters_are_journaled_and_reported():
     for prompt in client.of((analysts.FAILURE_SYSTEM,)):
         if _items(prompt) != ["f0"]:
             assert "chars omitted" not in prompt
-            assert all(_whole(r, ctx) in prompt for r in group if r["id"] in _items(prompt))
+            assert all(_bare(_whole(r, ctx)) in _bare(prompt) for r in group
+                       if r["id"] in _items(prompt))
     assert entry["clipped_items"] == batch["clipped"] == 1
     assert entry["clipped_chars"] == batch["clipped_chars"] > 100000
     from refactory_dsh.loop import LoopConfig, _analysts_report, _analysts_section
@@ -991,7 +1000,7 @@ def test_long_traces_are_split_across_batches_whole_never_cut(tmp_path):
         assert len(analysts.FAILURE_SYSTEM) + len(prompt) <= analysts.ANALYST_ROOM
     read = [item for prompt in prompts for item in _items(prompt)]
     assert sorted(read) == sorted(r["id"] for r in group), "every item exactly once"
-    assert all(_whole(r, ctx) in next(p for p in prompts if r["id"] in _items(p))
+    assert all(_bare(_whole(r, ctx)) in _bare(next(p for p in prompts if r["id"] in _items(p)))
                for r in group), "whole"
     batches = optimizer.last_analysis["batches"]
     assert [b["index"] for b in batches] == list(range(1, len(prompts) + 1))

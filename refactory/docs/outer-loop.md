@@ -2345,6 +2345,62 @@ of them may say a line an earlier knob showed by where it is, or clip a long tex
 the analyst's room, each marked, never by adding an escape. Generic: lines of
 text are compared, with no knowledge of the task or the pipeline.
 
+**What the harness did, and what a model only claims.** A step's reply is a model's text.
+On SpreadsheetBench (OL-s42..s45, 2026-11-20) the solver step, which has no tools, wrote
+fake `<tool_call>`/`<tool_result>` blocks into its replies -- invented command output, once
+a grader's "Eval: 22/22 correct" -- and every run's first-round analysts took that output
+as fact ("the grader cannot read formulas"). Each item now says what the harness knows,
+from the record and the graph alone, never by reading a reply:
+
+- `Completed by the harness: prepare, has_case (gate), frame x30, run_turn x30, gold_check
+  x30, next_turn x30, turn_gate (gate) x30, finalize` -- the item's op and code-gate
+  visits (the record's `steps`, each kept once the visit succeeded), each named once in
+  the order it first completed, with its count (`evidence.harness_line`). Their order among
+  the model calls is not recorded, so they are said once, before the model steps.
+- at a model step's first run, `Ran as: model reply · tools: none · real tool calls: 0`
+  (`evidence.ran_as`): every recorded exchange is a model call; the tools come from the
+  step's node in the graph the records came from (`evidence.step_source`). A step with
+  `tool_policy: none`, which its worker enforces, made no tool call. A step with tools says
+  which (`tools: bash (sealed workspace)`, `tools: the backend's own (run dir)`) and
+  `real tool calls: not recorded`: the worker record (`.refactory/workers/worker-*.json`)
+  keeps the policy it enforced and the tools it permitted, not how many it called, so the
+  count is never guessed. A step under a declared `tool_policy` is said as that policy runs
+  it (`evidence.POLICY_SOURCES`, one line for each of `tool_policy.POLICIES`): `refused`
+  offers Claude Code's own tools in a fresh empty folder and refuses every call needing
+  permission (a read-only one may run), so its calls are not recorded either. A record
+  with no graph says `tools: not known here`. Like any text, the line is said once: at the
+  step's first run in the request (`evidence.said_once`: through `evidence.dedup` for the
+  analysts and memory, in turn over a reader's group and the proposer's items in full,
+  which are measured to fit as shown), and at its first moved block in "What the last edit
+  changed".
+
+The loop puts each graph's step sources on the records it hands over
+(`Loop._with_step_sources`): the edited candidate's for the analysts, the readers and the
+proposer, the child's and the parent's own for "What the last edit changed" (each moved
+step's first block is headed the same way) and each side's own for memory's comparison.
+The analysts' and the readers' system prompts, the proposer's description of the items
+(`ITEM_FORM`) and memory's say once (`evidence.CLAIMS`): anything a model wrote -- a reply,
+and that reply quoted in a later prompt -- is that model's claim, so command output, tool
+results or scores written inside a reply are unverified; what the harness itself produced
+is real -- the steps it completed, the expected answer, the prediction, the grader's verdict
+and feedback, and the output of code it ran. The rest of a prompt was assembled by the
+harness but may still carry a model's earlier text (a file a step wrote, a reply an op
+reshaped, which the renderer does not recognise as a quote), so claims there get the same
+care. The lines are part of
+each item's rendering, so every room and fit counts them, and a step's `Ran as:` line sits
+outside its prompt's block, so the `[same as ...]` counts are unchanged. The records are
+the same on both runtimes (`items.make_item_record`), so the lines are too. The SkillOpt
+port renders its own rollouts (`refactory_packages/skillopt`): its analysts read exactly
+what they read before (`tests/test_evidence_provenance.py` holds them byte for byte).
+
+To check a change to what the optimizer reads against a round a real run made,
+`python -m refactory_dsh.tools.replay_round <run dir> <copy dir> --epoch N` copies the run,
+cuts the copy's journal before that epoch's proposal round, and asks the round's analysts,
+merges and proposer again on the same records and graph with the evidence rendered now,
+through the run's own model route; nothing is installed, evaluated or rolled out, the run
+itself is only read, and `<copy dir>/replay-round.md` puts each call's findings before and
+after (`--grep word,...` counts the findings naming each word).
+
 **The pipeline view.** "The pipeline you may edit" opens with the pipeline in one line per
 step, generated from the graph the edits act on (`nn.pipeline_view`), read in the core
 operators' own words. Reading mirrors writing: every operation in the catalogue names the
