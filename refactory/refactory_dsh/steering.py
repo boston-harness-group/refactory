@@ -511,8 +511,21 @@ def installing_to(root: Path) -> Iterator[None]:
         _INSTALLED_ROOT.reset(token)
 
 
-def _citation_block(ledger: Ledger) -> str:
-    """Keep live steering instructions separate from the node's output format."""
+def _citation_block(ledger: Ledger, *, tools: bool = True) -> str:
+    """Keep live steering instructions separate from the node's output format.
+
+    A step without tools (``tool_policy="none"``) cannot read the ledger file, and told
+    to read it, it writes a made-up read instead: invented tool calls and constraints
+    nobody gave, in its reply (create-bench H2's report, H3's crash). It is told the
+    entries above are the ledger.
+    """
+    if not tools:
+        return (
+            "\n\nThe entries above are the live ledger as of this step. You have no tools: "
+            "do not call tools or write tool calls. Respect its constraints while "
+            "preserving the node's required output format, and do not append steering "
+            "citations or other prose to code, JSON, or another declared artifact."
+        )
     installed = _INSTALLED_ROOT.get()
     path = Ledger(installed).path if installed is not None else ledger.path
     return (
@@ -524,8 +537,12 @@ def _citation_block(ledger: Ledger) -> str:
     )
 
 
-def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, Any]] | None = None) -> str:
-    """Replace only this layer's own block with current context at dispatch."""
+def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, Any]] | None = None,
+                       tools: bool = True) -> str:
+    """Replace only this layer's own block with current context at dispatch.
+
+    ``tools`` is False for a step without tools, which is never told to read a file.
+    """
     start = prompt.find(STEERING_START)
     end = prompt.find(STEERING_END, start)
     if start >= 0 and end >= start:
@@ -533,7 +550,7 @@ def prompt_with_ledger(prompt: str, ledger: Ledger, *, entries: list[dict[str, A
     block = ledger.render(entries=entries)
     if not block:
         return prompt
-    return f"{prompt}\n\n{STEERING_START}\n{block}{_citation_block(ledger)}\n{STEERING_END}"
+    return f"{prompt}\n\n{STEERING_START}\n{block}{_citation_block(ledger, tools=tools)}\n{STEERING_END}"
 
 
 def annotate(workflow: Any, ledger: Ledger) -> Any:
@@ -551,7 +568,8 @@ def annotate(workflow: Any, ledger: Ledger) -> Any:
         if not _is_agent_node(node):
             continue
         existing = getattr(node, "prompt_template", "") or ""
-        node.prompt_template = prompt_with_ledger(existing, ledger)
+        node.prompt_template = prompt_with_ledger(
+            existing, ledger, tools=getattr(node, "tool_policy", None) != "none")
     return workflow
 
 

@@ -92,6 +92,32 @@ def test_a_note_reaches_every_agent_node(tmp_path):
         )
 
 
+def test_a_step_without_tools_gets_the_ledger_but_is_never_told_to_read_it(tmp_path):
+    """A no-tools step told to read the ledger file invents the read (create-bench H2, H3).
+
+    It still gets every entry inline; a step with tools still gets the live-file pointer.
+    """
+    from refactory_dsh import lowering
+
+    workflow = lowering.to_workflow(_state(), name="m")
+    agents = [n for n in workflow.nodes.values() if n.__class__.__name__ == "AgentNode"]
+    assert len(agents) >= 2, "the fixture has too few agent nodes to prove anything"
+    no_tools, with_tools = agents[0], agents[1]
+    no_tools.tool_policy, with_tools.tool_policy = "none", None
+    ledger = Ledger.seed(tmp_path, "build a mode for circle packing")
+    ledger.note("constraint", "do not add a numpy dependency")
+
+    steering.annotate(workflow, ledger)
+
+    for node in (no_tools, with_tools):
+        assert "build a mode for circle packing" in node.prompt_template
+        assert "do not add a numpy dependency" in node.prompt_template
+    assert "Read the live ledger" not in no_tools.prompt_template
+    assert str(ledger.path) not in no_tools.prompt_template
+    assert "You have no tools" in no_tools.prompt_template
+    assert "Read the live ledger at `" + str(ledger.path) in with_tools.prompt_template
+
+
 def test_the_three_kinds_are_recorded_and_distinguishable(tmp_path):
     """`constraint` is not `info`: one has to be respected, the other only known."""
     ledger = Ledger.seed(tmp_path, "build a mode")
