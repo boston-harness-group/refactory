@@ -659,8 +659,8 @@ def run_command(
         if sentinel_path is not None:
             sentinel_path.unlink(missing_ok=True)
         # Keep the last 200 lines of output from the reader threads (tail deques).
-        kept_stdout = "\n".join(_tail_stdout) + ("\n" if _tail_stdout else "")
-        kept_stderr = "\n".join(_tail_stderr) + ("\n" if _tail_stderr else "")
+        kept_stdout = "\n".join(_tail_stdout)
+        kept_stderr = "\n".join(_tail_stderr)
         kind = _timeout_kind[0]
         return SandboxResult(
             ok=False, timed_out=True, returncode=124, timeout_s=timeout_s,
