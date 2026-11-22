@@ -167,6 +167,46 @@ def test_best_breaks_a_tie_the_way_the_run_reports_it(tmp_path):
     )
 
 
+def _strategy_run(run: Path, *, holdout_winner: str | None) -> None:
+    """A SkillOpt-shaped run: ``bbbb`` has the higher train score, ``aaaa`` is the
+    strategy's val-gated best."""
+    import json
+
+    run.mkdir()
+    state = {"version": 1, "graph": {"start": "a", "nodes": {}, "edges": []}, "knobs": {}}
+    entries = [
+        {"event": "candidate", "id": "seed", "parent": None, "edits": [], "state": state},
+        {"event": "score", "id": "seed", "score": 0.5, "exit_ok": True},
+        {"event": "candidate", "id": "aaaa", "parent": "seed",
+         "edits": [{"op": "set_knob", "name": "skill", "value": "a"}], "state": state},
+        {"event": "score", "id": "aaaa", "score": 0.51, "exit_ok": True},
+        {"event": "candidate", "id": "bbbb", "parent": "seed",
+         "edits": [{"op": "set_knob", "name": "skill", "value": "b"}], "state": state},
+        {"event": "score", "id": "bbbb", "score": 0.8, "exit_ok": True},
+        {"event": "strategy_state", "state": {
+            "val_cache": {"seed": 0.6, "aaaa": 0.67, "bbbb": 0.6},
+            "best_candidate_id": "aaaa", "current_candidate_id": "aaaa"}},
+    ]
+    (run / "journal.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    (run / "config.json").write_text(json.dumps({"strategy": "skillopt", "val_gate": False}))
+    if holdout_winner:
+        (run / "holdout.json").write_text(json.dumps({"winner": holdout_winner,
+                                                      "status": "not_applicable"}))
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_best_names_a_custom_strategys_own_winner(tmp_path, finished):
+    """SkillOpt picks its winner on val (``best_candidate``) and the report, the audit
+    and adoption's audit check name it; best() took the highest train score, so it
+    named another candidate, and adopting it was refused."""
+    run = tmp_path / "skillopt"
+    _strategy_run(run, holdout_winner="aaaa" if finished else None)
+    winner = best(run)
+    assert winner["candidate"] == "aaaa"
+    assert winner["score"] == 0.67 and winner["score_basis"] == "val"
+    assert winner["edits"] == [{"op": "set_knob", "name": "skill", "value": "a"}]
+
+
 def test_a_run_with_no_journal_refuses(tmp_path):
     with pytest.raises(AdoptionError, match="nothing recorded a state"):
         best(tmp_path / "empty")

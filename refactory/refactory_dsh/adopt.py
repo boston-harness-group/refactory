@@ -142,6 +142,9 @@ def best(run_root: Path) -> dict[str, Any]:
     gated = _gate_winner(run_root, entries)
     if gated is not None:
         return gated
+    chosen = _strategy_winner(run_root, entries)
+    if chosen is not None:
+        return chosen
     scores = _score_by_id(entries)
     rejected = _rejected_ids(entries)
 
@@ -241,6 +244,62 @@ def _gate_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any
         "score_basis": "val",
         "score_note": (f"{_number(score)} on val, the best the gate accepted; train "
                        + (_number(train) if train is not None else "none (its train run failed)")),
+        "edits": list(found.get("edits") or ()),
+        "state": found["state"],
+    }
+
+
+def _strategy_winner(run_root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The winner of a run under a custom strategy, as the run itself named it.
+
+    A strategy may pick its winner by a criterion the train scores do not show
+    (``OuterLoop.best_candidate``: SkillOpt's val-gated best), and the report, the
+    held-out audit and adoption's audit check all name that candidate. Taking the
+    highest train score instead named another one, which adopting then refused
+    because the audit described a different winner. The run's audit (``holdout.json``)
+    names the winner of a finished run; a live one's is the strategy's recorded
+    ``best_candidate_id``. ``None`` when the run used no custom strategy or named no
+    winner whose state it recorded, and the train ranking applies.
+    """
+    try:
+        config = json.loads((run_root / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        config = next((entry.get("config") or {} for entry in entries
+                       if entry.get("event") == "start"), {})
+    if str(config.get("strategy") or "default") == "default":
+        return None
+    state: dict[str, Any] = {}
+    for entry in entries:
+        if entry.get("event") == "strategy_state" and isinstance(entry.get("state"), dict):
+            state = entry["state"]
+    try:
+        audit = json.loads((run_root / "holdout.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        audit = {}
+    winner_id = str((audit.get("winner") if isinstance(audit, dict) else None)
+                    or state.get("best_candidate_id") or "")
+    states = {str(entry.get("id")): entry for entry in entries
+              if entry.get("event") == "candidate" and isinstance(entry.get("state"), dict)}
+    if winner_id not in states or winner_id in _rejected_ids(entries):
+        return None
+    found = states[winner_id]
+    train = _score_by_id(entries).get(winner_id)
+    val = (state.get("val_cache") or {}).get(winner_id)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        scored: dict[str, Any] = {
+            "score": float(val), "score_basis": "val",
+            "score_note": (f"{_number(val)} on val, the {config.get('strategy')} strategy's "
+                           "own winner; train " + (_number(train) if train is not None else "none")),
+        }
+    elif train is not None:
+        scored = {"score": train, **_score_basis(entries, winner_id, train)}
+    else:
+        scored = {"score": None, "score_note": f"the {config.get('strategy')} strategy's own "
+                                               "winner; the run recorded no score for it"}
+    return {
+        "run": str(run_root),
+        "candidate": winner_id,
+        **scored,
         "edits": list(found.get("edits") or ()),
         "state": found["state"],
     }
