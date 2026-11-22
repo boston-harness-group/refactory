@@ -158,20 +158,23 @@ def test_the_last_object_with_the_expected_keys_is_the_answer():
     assert parse_agent_json(reply) == {"note": 1}, "with no keys named, simply the last object"
 
 
-def test_a_fenced_example_does_not_beat_the_answer_outside_it():
-    reply = ('The format is:\n```json\n{"replies": ["EXAMPLE"]}\n```\n'
-             'My answer: {"replies": ["real"]}')
-    assert parse_agent_json(reply, expect=("replies",)) == {"replies": ["real"]}
+def test_the_last_answer_wins_fenced_or_not():
+    """An example or a draft before the answer, fenced or bare, never beats it."""
+    example_first = ('The format is:\n```json\n{"replies": ["EXAMPLE"]}\n```\n'
+                     'My answer: {"replies": ["real"]}')
+    assert parse_agent_json(example_first, expect=("replies",)) == {"replies": ["real"]}
+    bare_draft_then_fenced = ('Draft: {"replies": ["draft"]}\nFinal:\n```json\n'
+                              '{"replies": ["final"]}\n```\n')
+    assert parse_agent_json(bare_draft_then_fenced, expect=("replies",)) == {"replies": ["final"]}
+    inline_empty_then_fenced = ('I start from {"replies": []} and fill it:\n```json\n'
+                                '{"replies": ["filled"]}\n```\n')
+    assert parse_agent_json(inline_empty_then_fenced, expect=("replies",)) == {"replies": ["filled"]}
     fenced_only = 'Answer:\n```json\n{"replies": ["in a fence"]}\n```\n'
     assert parse_agent_json(fenced_only, expect=("replies",)) == {"replies": ["in a fence"]}
-    example_after = ('My answer: {"replies": ["real"]}\nFor reference, the format:\n'
-                     '```json\n{"replies": ["EXAMPLE"]}\n```\n')
-    assert parse_agent_json(example_after, expect=("replies",)) == {"replies": ["real"]}
-    later_example = ('```json\n{"replies": ["first"]}\n```\n```json\n{"replies": ["second"]}\n```\n')
-    assert parse_agent_json(later_example, expect=("replies",)) == {"replies": ["second"]}
 
 
-@pytest.mark.parametrize("tag", ["tool_call", "tool_result", "invoke", "function_calls", "function_results"])
+@pytest.mark.parametrize("tag", ["tool_call", "tool_result", "tool_use", "invoke", "function_call",
+                                 "function_calls", "function_result", "function_results"])
 def test_every_transcript_spelling_is_left_out(tag):
     reply = f'<{tag} name="bash">{{"replies": ["invented"]}}</{tag}>\n{{"replies": ["real"]}}\n<{tag}>{{"replies": ["after"]}}</{tag}>'
     assert parse_agent_json(reply, expect=("replies",)) == {"replies": ["real"]}

@@ -615,6 +615,9 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         previous = json.loads(pending.read_text())
         if previous['writes'] != writes:
             raise ValueError(f'agent {node!r} output declarations changed during delivery')
+        # The process that opened this record's watches may be gone; this one carries the
+        # node on, so the watches are its now (a gone owner's watch reads as closed).
+        target_guard.claim_watches(previous.get('checkouts'))
         if ((previous.get('target') is not None or previous.get('checkouts'))
                 and _attempt_failed(workdir, previous)):
             # A refused attempt keeps its record for the retry. Judging the retry against

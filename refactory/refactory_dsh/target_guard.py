@@ -927,13 +927,6 @@ def _untracked(entries: dict[str, str] | None, tracked: set[str]) -> dict[str, s
     return {path: kind for path, kind in entries.items() if path not in tracked and path not in prefixes}
 
 
-def removal_command(root: Path, added: list[str]) -> str:
-    """The command that removes ``added`` from ``root``; refactory never runs it."""
-    import shlex
-
-    return "rm -rf -- " + " ".join(shlex.quote(str(Path(root) / path)) for path in added)
-
-
 # ── who was watching: one record per watch of a checkout ─────────────────────
 #
 # Two runs on one driver, or two branches of a fork, watch the same checkout at once,
@@ -941,46 +934,122 @@ def removal_command(root: Path, added: list[str]) -> str:
 # only when no other watch of the checkout was open at any time in its window; otherwise
 # every overlapping run and node is named in a warning, and none is refused for it.
 
-#: How long a finished watch is kept for others to see, and how long an open one is
-#: trusted to still be open (a bridge that died never finishes its watch).
+#: How long a finished watch is kept for others to see.
 WATCH_KEPT_S = 24 * 3600
-WATCH_OPEN_S = 7 * 24 * 3600
+#: How long an open watch whose process cannot be checked (another host, an older
+#: record without a process, a process table refactory cannot read) is trusted to still
+#: be open. A watch whose process can be checked is open exactly while that process runs.
+WATCH_OPEN_S = 6 * 3600
 
 
 def _watches(root: Path) -> Path:
     return _stray_record_path(Path(root)) / "watches"
 
 
-def _open_watch(root: Path, workdir: Path, node: str, at: str) -> str:
-    """Record a watch of ``root`` by this run's ``node`` from ``at``; its id.
+def _process_start(pid: int) -> str | None:
+    """When process ``pid`` started, as the system says it; None when it is gone, a
+    zombie, or cannot be read. With the pid, it names one process: a pid the system
+    reuses has another start."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        return None if fields[0] == b"Z" else fields[19].decode()
+    except FileNotFoundError:
+        if Path("/proc/self/stat").exists():
+            return None  # a Linux process table without this pid: it is gone
+    except (OSError, IndexError):
+        return None
+    try:
+        out = subprocess.run(["ps", "-o", "stat=,lstart=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=10, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out or out.startswith("Z"):
+        return None
+    return out.split(None, 1)[1] if " " in out else None
 
-    An earlier open watch by the same run and node is a redo's predecessor, and is closed.
-    """
-    import uuid
 
+def _owner() -> dict[str, Any]:
+    import socket
+
+    return {"host": socket.gethostname(), "pid": os.getpid(), "pid_start": _process_start(os.getpid())}
+
+
+def _write_watch(root: Path, watch: dict[str, Any]) -> None:
+    """Write one watch whole: a reader sees the old file or the new one, never half of one."""
     directory = _watches(root)
     directory.mkdir(parents=True, exist_ok=True)
+    final = directory / f"{watch['id']}.json"
+    pending = directory / f".{watch['id']}.{os.getpid()}.tmp"
+    pending.write_text(json.dumps(watch))
+    os.replace(pending, final)
+
+
+def _open_watch(root: Path, workdir: Path, node: str, at: str) -> str:
+    """Record a watch of ``root`` by this run's ``node`` from ``at``, owned by this process;
+    its id. An earlier open watch by the same run and node is a redo's predecessor, and is
+    closed."""
+    import uuid
+
     for other in _read_watches(root):
         if other.get("run") == str(workdir) and other.get("node") == node and not other.get("finished"):
             _close_watch(root, other["id"], at)
     identifier = uuid.uuid4().hex
-    path = directory / f"{identifier}.json"
-    path.write_text(json.dumps({"id": identifier, "run": str(workdir), "node": node, "started": at,
-                                "finished": None}))
+    _write_watch(root, {"id": identifier, "run": str(workdir), "node": node, "started": at,
+                        "finished": None, **_owner()})
     return identifier
 
 
+def claim_watches(checkouts: dict[str, dict[str, Any]] | None) -> None:
+    """Make this process the owner of watches a reused dispatch record carries: the
+    process that opened them may be gone while the node goes on here."""
+    for path, snapshot in (checkouts or {}).items():
+        identifier = snapshot.get("watch_id")
+        watch = _read_watch(Path(path), identifier) if identifier else None
+        if watch is not None and not watch.get("finished"):
+            _write_watch(Path(path), {**watch, **_owner()})
+
+
+def _read_watch(root: Path, identifier: str) -> dict[str, Any] | None:
+    try:
+        return json.loads((_watches(root) / f"{identifier}.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _gone(watch: dict[str, Any]) -> bool | None:
+    """Whether an open watch's process is gone: True or False when that can be checked
+    here, None when it cannot."""
+    import socket
+
+    if not watch.get("pid") or not watch.get("pid_start") or watch.get("host") != socket.gethostname():
+        return None
+    return _process_start(int(watch["pid"])) != watch["pid_start"]
+
+
 def _read_watches(root: Path) -> list[dict[str, Any]]:
+    """The watches of ``root`` worth comparing with, oldest unpruned.
+
+    An open watch whose process is gone is closed where it began: it was seen alive only
+    then, so it overlaps a window it started in and no later one.
+    """
     found = []
     now = datetime.now(timezone.utc)
     for path in sorted(_watches(root).glob("*.json")) if _watches(root).is_dir() else []:
         try:
             watch = json.loads(path.read_text())
+            gone = None if watch.get("finished") else _gone(watch)
+            if gone:
+                watch = {**watch, "finished": watch["started"], "ended": "its process is gone"}
+                _write_watch(root, watch)
             ended = watch.get("finished") or watch.get("started")
             age = (now - datetime.fromisoformat(ended)).total_seconds()
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError):
             continue
-        if age > (WATCH_KEPT_S if watch.get("finished") else WATCH_OPEN_S):
+        # Kept a day once finished; open while its process runs; and, when nothing here
+        # can check its process, open only for the backstop.
+        limit = WATCH_KEPT_S if watch.get("finished") else (None if gone is False else WATCH_OPEN_S)
+        if limit is not None and age > limit:
             path.unlink(missing_ok=True)
             continue
         found.append(watch)
@@ -988,13 +1057,9 @@ def _read_watches(root: Path) -> list[dict[str, Any]]:
 
 
 def _close_watch(root: Path, identifier: str, at: str) -> None:
-    path = _watches(root) / f"{identifier}.json"
-    try:
-        watch = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return
-    watch["finished"] = at
-    path.write_text(json.dumps(watch))
+    watch = _read_watch(root, identifier)
+    if watch is not None:
+        _write_watch(root, {**watch, "finished": at})
 
 
 def _overlapping(root: Path, identifier: str, start: str, end: str) -> list[dict[str, Any]]:
@@ -1081,8 +1146,8 @@ def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -
                 named = ", ".join(sorted({f"{watch.get('node') or '?'} in {watch.get('run')}" for watch in others}))
                 warn(f"paths under the package roots of refactory's own checkout {path} changed while "
                      f"more than one node watched it ({what}). They are not charged to any one node; "
-                     f"the nodes that overlapped: {named}. Check them; to remove the new ones: "
-                     f"{removal_command(Path(path), added) if added else 'nothing new'}")
+                     f"the nodes that overlapped: {named}. No node may write under refactory's package "
+                     "roots; if a person or another tool made these paths, nothing needs doing.")
             else:
                 earlier["charged_packages"] = {"added": added, "changed": altered}
                 if added:
@@ -1167,8 +1232,7 @@ def _settled(path: str, node: str, result: dict[str, Any]) -> str:
         text += (f"; put back as before the node: {_named(result['restored'])}; the changed copies "
                  f"are in {result['set_aside']}")
     if result.get("new_paths"):
-        text += (f"; new paths under its package roots were left in place: {_named(result['new_paths'])}; "
-                 f"remove them with `{result['remove']}`")
+        text += f"; new paths under its package roots, left in place: {_named(result['new_paths'])}"
     if result.get("left"):
         text += f"; left as they are: {_named(result['left'])}"
     if result.get("errors"):
@@ -1206,11 +1270,11 @@ def settle_checkout(path: str, before: dict[str, Any], directory: Path, workdir:
                       "diff": (diff or "")[:DIFF_SHOWN]}
         # Untracked paths under the package roots charged to this node: never moved or
         # deleted, whatever the policy -- a path refactory did not write may be anyone's --
-        # but reported, the new ones with the command that removes them.
+        # only named.
         charged = before.get("charged_packages") or {}
         added, altered = list(charged.get("added") or []), list(charged.get("changed") or [])
         if added or altered:
-            result.update(new_paths=added, remove=removal_command(root, added) if added else None,
+            result.update(new_paths=added,
                           left=[*result.get("left", []), *(name for name in altered
                                                            if name not in result.get("left", []))])
     result.update(before_head=before.get("head"), head=now.get("head"))
@@ -1237,8 +1301,8 @@ def checkout_refusal(node: str, target: str | None, changed: dict[str, list[str]
             text += (f" Its changed files were put back as they were before the node: "
                      f"{_named(result['restored'])}. The changed copies are in {result['set_aside']}.")
         if result.get("new_paths"):
-            text += (f" The new paths under its package roots were left in place; refactory moves "
-                     f"nothing there. Remove them with `{result['remove']}`.")
+            text += (" A node must not write under refactory's package roots. Refactory leaves the "
+                     "new paths in place; if a person or another tool made them, nothing needs doing.")
         if result.get("left"):
             text += f" They were left as they are: {_named(result['left'])}."
         if result.get("errors"):

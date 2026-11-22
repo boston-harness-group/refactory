@@ -656,9 +656,12 @@ def test_a_package_copy_written_into_the_driver_is_refused_and_left_in_place(tmp
         ad.finish(run, "emit")
     assert (driver / ".factory" / "packages" / "h1_pkg" / "ops.py").exists(), "refactory moves nothing"
     assert lock.exists()
-    command = f"rm -rf -- {driver.resolve() / '.factory' / 'packages' / 'h1_pkg'}"
-    assert command in str(refused.value), "the person is given the command"
-    assert command in capsys.readouterr().err
+    text, said = str(refused.value), capsys.readouterr().err
+    assert "A node must not write under refactory's package roots" in text
+    assert "if a person or another tool made them, nothing needs doing" in text
+    assert text.count(".factory/packages/h1_pkg") == 1, "named once"
+    for reader in (text, said):  # a CEO agent reads both: nothing tells it to delete
+        assert "rm " not in reader and "remove them" not in reader.lower()
 
 
 def test_a_package_symlink_into_the_driver_is_refused_on_the_spine(tmp_path, monkeypatch):
@@ -845,3 +848,84 @@ def test_a_redo_closes_its_own_earlier_watch(tmp_path):
     _package(driver, "h1_pkg")
     changed = target_guard.strayed_checkouts(run, again)
     assert "new paths under its package roots: .factory/packages/h1_pkg" in changed[str(driver.resolve())]
+
+
+
+# ── watches belong to a process (PR 722, round 2) ─────────────────────────────────────
+
+def test_a_killed_watchers_watch_stops_counting_as_an_overlap(tmp_path):
+    """A run killed mid-node never finishes its watch; a later lone writer is still charged."""
+    import signal
+
+    driver, project, run = _create_run(tmp_path)
+    script = ("import os, signal, sys\n"
+              "from pathlib import Path\n"
+              "from refactory_dsh import agent_delivery as ad\n"
+              "ad.begin(Path(sys.argv[1]), 'crashed', 'Write c.txt.', ['c.txt'])\n"
+              "os.kill(os.getpid(), signal.SIGKILL)\n")
+    killed = subprocess.run([sys.executable, "-c", script, str(run)], capture_output=True, text=True,
+                            timeout=120, check=False)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    later = tmp_path / "run2"
+    target_guard.record(later, project)
+    _record(later, checkout=driver)
+    ad.begin(later, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "stray_by_emit")
+    (later / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/stray_by_emit"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_is_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    first = target_guard._open_watch(driver, run, "emit", "2026-11-22T00:00:00+00:00")
+    def fail(*_args):
+        raise OSError("disk full")
+    monkeypatch.setattr(target_guard.os, "replace", fail)
+    with pytest.raises(OSError):
+        target_guard._close_watch(driver, first, "2026-11-22T00:01:00+00:00")
+    assert target_guard._read_watch(driver, first)["finished"] is None, "the old record is whole"
+
+
+def test_a_reused_dispatch_record_is_owned_by_the_process_that_carries_it_on(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    watched = target_guard.watch_checkouts(run, [driver.resolve()], node="emit")
+    identifier = watched[str(driver.resolve())]["watch_id"]
+    gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                          text=True, check=True)
+    dead = {**target_guard._read_watch(driver.resolve(), identifier), "pid": int(gone.stdout), "pid_start": "then"}
+    target_guard._write_watch(driver.resolve(), dead)
+    assert target_guard._gone(dead) is True, "setup: its first process is gone"
+    target_guard.claim_watches(watched)
+    assert target_guard._gone(target_guard._read_watch(driver.resolve(), identifier)) is False
+
+
+def test_an_open_watch_nothing_can_check_lapses_after_the_backstop(tmp_path, monkeypatch):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    mine = target_guard._open_watch(driver, run, "here", "2026-11-22T00:00:00+00:00")
+    elsewhere = target_guard._open_watch(driver, run, "there", "2026-11-22T00:00:00+00:00")
+    target_guard._write_watch(driver, {**target_guard._read_watch(driver, elsewhere), "host": "another-host"})
+    monkeypatch.setattr(target_guard, "WATCH_OPEN_S", 0)
+    left = {watch["id"] for watch in target_guard._read_watches(driver)}
+    assert left == {mine}, "a live process's watch stays open; one nobody can check lapses"
+
+
+def test_a_dispatch_reused_after_its_bridge_died_keeps_its_watch_open(tmp_path):
+    """The bridge that began the node is killed; the redo reuses the pending record."""
+    import signal
+
+    driver, _project, run = _create_run(tmp_path)
+    script = ("import os, signal, sys\n"
+              "from pathlib import Path\n"
+              "from refactory_dsh import agent_delivery as ad\n"
+              "ad.begin(Path(sys.argv[1]), 'emit', 'Write emit.txt.', ['emit.txt'], reuse=True)\n"
+              "os.kill(os.getpid(), signal.SIGKILL)\n")
+    killed = subprocess.run([sys.executable, "-c", script, str(run)], capture_output=True, text=True,
+                            timeout=120, check=False)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    record = ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"], reuse=True)
+    watch = target_guard._read_watch(driver.resolve(), record["checkouts"][str(driver.resolve())]["watch_id"])
+    assert watch["pid"] == os.getpid() and target_guard._gone(watch) is False
