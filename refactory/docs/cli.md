@@ -227,7 +227,7 @@ Set these in a profile (`refactory profile-save --name NAME --spec '{"settings":
 | `refactory status --run <id>` | where it is, and the events since an offset. |
 | `refactory leaderboard --run <id>` | candidates by score, each with its diff against its parent. |
 | `refactory candidate <id> --run <id>` | one candidate, exactly what it changed. |
-| `refactory best --run <id>` | the winner, with the state that scored it and the held-out audit of whether it works beyond its training items. |
+| `refactory best --run <id>` | the winner, with the state that scored it and the held-out audit of whether it works beyond its training items. The winner is the one the run's report names: under the validation gate the gate's choice, under a strategy that picks its own (SkillOpt's val-gated best) that strategy's, else the highest score. |
 | `refactory artifacts --run <id> --contents` | what it left on disk. |
 | `refactory adopt --run <id> --as <package>` | write the winner as a new package, input untouched. |
 | `refactory adopt --run <id> --as <package> --allow-overfit` | adopt it anyway, with the audit recorded beside the package. |
