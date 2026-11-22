@@ -133,6 +133,44 @@ def test_eval_feedback_is_skillopts(index):
     assert port.build_eval_feedback(case["report"]) == case["feedback"]
 
 
+def _text_eq_pred(path: Path, b1: int) -> Path:
+    """A prediction whose C1 holds text starting with ``=`` (what SkillOpt's report lists
+    as a formula; a real formula reads as its cached value under ``data_only``)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"], ws["B1"] = 1, b1
+    ws["C1"] = "=A1*42"
+    ws["C1"].data_type = "s"
+    wb.save(path)
+    return path
+
+
+#: rollout.py:192, as SkillOpt ships it.
+SKILLOPT_FORMULA_WARNING = \
+    "\n  WARNING: 1 cells contain Excel formulas (openpyxl cannot evaluate them):"
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_formula_line_says_what_the_grader_does(tmp_path, monkeypatch, choice):
+    """Deviation 7: the recalc grader recalculates formulas, so its report says so (the
+    cells listed still); the cached grader's is SkillOpt's report, byte for byte. The
+    grader comes from `recalc.grader`, here through ``SB_GRADER``."""
+    monkeypatch.setenv(recalc.GRADER_ENV, choice)
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    pred = _text_eq_pred(tmp_path / "pred.xlsx", 41)
+    head = {"recalc": "\n  NOTE: 1 cells hold text that starts with '=' (text, not formulas: "
+                      "the grader recalculates real formulas before comparing values, but "
+                      "compares these cells as text):",
+            "cached": SKILLOPT_FORMULA_WARNING}[choice]
+    assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
+        "## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
+        + head + "\n    Sheet1!C1==A1*42")
+
+
 def test_no_code_and_exec_error_texts():
     assert port.NO_CODE == FIXTURE["no_code"]
     text = port.exec_error_feedback("x" * 4000)
@@ -716,6 +754,43 @@ def test_train_rollout_gets_gold_feedback(tmp_path, sb_env):
     assert EVAL_FEEDBACK_HEAD in prompts[2]
     assert "Sheet1!B1: your output = 41 (WRONG)" in prompts[2]
     assert "42" not in prompts[2].split(EVAL_FEEDBACK_HEAD)[1]
+
+
+def _text_eq(n: int) -> str:
+    return ("```python\nimport openpyxl\nwb = openpyxl.load_workbook(INPUT_PATH)\n"
+            f"wb.active['B1'] = {n}\nwb.active['C1'] = '=A1*42'\n"
+            "wb.active['C1'].data_type = 's'\nwb.save(OUTPUT_PATH)\n```")
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_the_formula_line_the_analysts_see_is_the_graders(tmp_path, sb_env, monkeypatch,
+                                                          choice):
+    """A train item with gold feedback, end to end: the verification report the analysts
+    and the proposer read (the record's ``prediction``) says the recalc grader
+    recalculates formulas, and is SkillOpt's under cached (deviation 7). The gold feedback
+    the solver gets lists only wrong cells, so neither line reaches it."""
+    if choice == "recalc":
+        fake = tmp_path / "soffice"  # never run (no answer cell holds a formula): copies
+        fake.write_text(
+            f"#!{sys.executable}\nimport os, shutil, sys\n"
+            "src = sys.argv[-1]; out = sys.argv[sys.argv.index('--outdir') + 1]\n"
+            "os.makedirs(out, exist_ok=True); "
+            "shutil.copyfile(src, os.path.join(out, os.path.basename(src)))\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv(recalc.SOFFICE_ENV, str(fake))
+        monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+    result, prompts = _walk(tmp_path, "train", [_text_eq(41), _text_eq(42)], gold_feedback=True)
+    (record,) = result.item_records
+    assert record["gold_feedback"]["told_wrong"] == 1 and len(prompts) == 2
+    assert "Sheet1!B1: your output = 41 (WRONG)" in prompts[1]
+    note = ("NOTE: 1 cells hold text that starts with '=' (text, not formulas: the grader "
+            "recalculates real formulas before comparing values, but compares these cells "
+            "as text):\n    Sheet1!C1==A1*42")
+    warning = SKILLOPT_FORMULA_WARNING.strip() + "\n    Sheet1!C1==A1*42"
+    said, unsaid = (note, warning) if choice == "recalc" else (warning, note)
+    assert said in record["prediction"] and unsaid not in record["prediction"]
+    told = prompts[1].split(EVAL_FEEDBACK_HEAD)[1]
+    assert "Sheet1!C1" not in told and "formulas" not in told
 
 
 class _PerItem(FakeModel):

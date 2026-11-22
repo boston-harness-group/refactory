@@ -453,11 +453,23 @@ def evaluate_cached(pred_path: str, gold_path: str, instruction_type: str,
 
 # rollout.py:112-211 ``_auto_verify_output``
 _MAX_REPORT_CHARS = 12000
+#: rollout.py:192, the line over the cells whose value (read as openpyxl reads cached
+#: values) is text starting with ``=``. True of SkillOpt's cached grader only.
+FORMULA_WARNING = "\n  WARNING: {n} cells contain Excel formulas (openpyxl cannot evaluate them):"
+#: The same line under the recalc grader (deviation 7, `mode`): it recalculates formulas,
+#: and a cell listed here holds text, which no grader evaluates (a real formula reads as
+#: its cached value, or ``None``, never as ``=...``).
+FORMULA_NOTE_RECALC = ("\n  NOTE: {n} cells hold text that starts with '=' (text, not formulas: "
+                       "the grader recalculates real formulas before comparing values, but "
+                       "compares these cells as text):")
 
 
-def auto_verify_output(pred_path: str, gold_path: str, answer_position: str) -> str:
+def auto_verify_output(pred_path: str, gold_path: str, answer_position: str,
+                       *, recalculates: bool = False) -> str:
     """The per-cell verification report (``got=..., expected=... ✓|✗``), head+tail
-    truncated at 12,000 characters."""
+    truncated at 12,000 characters. ``recalculates``: the grader in force recalculates
+    formulas (`recalc.grader`), so the line over the ``=`` cells says so rather than
+    SkillOpt's `FORMULA_WARNING`."""
     if not os.path.exists(pred_path):
         return "Verification: output file does not exist."
     try:
@@ -517,7 +529,8 @@ def auto_verify_output(pred_path: str, gold_path: str, answer_position: str) -> 
             if len(formula_cells) >= 10:
                 break
         if formula_cells:
-            lines.append(f"\n  WARNING: {len(formula_cells)} cells contain Excel formulas (openpyxl cannot evaluate them):")
+            head = FORMULA_NOTE_RECALC if recalculates else FORMULA_WARNING
+            lines.append(head.format(n=len(formula_cells)))
             for fc in formula_cells[:5]:
                 lines.append(f"    {fc}")
             if len(formula_cells) > 5:
