@@ -1,0 +1,430 @@
+{
+ "graph": {
+  "edges": [
+   {
+    "condition": null,
+    "source": "frame",
+    "target": "solve"
+   },
+   {
+    "condition": null,
+    "source": "gold_check",
+    "target": "next_turn"
+   },
+   {
+    "condition": "skip",
+    "source": "has_case",
+    "target": "finalize"
+   },
+   {
+    "condition": "proceed",
+    "source": "has_case",
+    "target": "frame"
+   },
+   {
+    "condition": null,
+    "source": "next_turn",
+    "target": "turn_gate"
+   },
+   {
+    "condition": null,
+    "source": "prepare",
+    "target": "has_case"
+   },
+   {
+    "condition": null,
+    "source": "run_turn",
+    "target": "gold_check"
+   },
+   {
+    "condition": null,
+    "source": "solve",
+    "target": "run_turn"
+   },
+   {
+    "condition": "proceed",
+    "source": "turn_gate",
+    "target": "finalize"
+   },
+   {
+    "condition": "reloop",
+    "source": "turn_gate",
+    "target": "frame"
+   }
+  ],
+  "nodes": {
+   "data": {
+    "blocking": true,
+    "call": "",
+    "evaluator": "",
+    "id": "data",
+    "kind": "data",
+    "knobs": [
+     "data_parallelism"
+    ],
+    "max_iterations": 1,
+    "notes": "",
+    "parallelism_knob": "data_parallelism",
+    "produces": [
+     "item_scores"
+    ],
+    "prompt_template": "",
+    "reads": [],
+    "role": "ceo",
+    "score_effect": "affects",
+    "subgraph_entry": "prepare",
+    "subgraph_exit": "finalize",
+    "task_ref": "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask",
+    "tools": [],
+    "writes": [
+     "current_item.json"
+    ]
+   },
+   "finalize": {
+    "blocking": true,
+    "call": "refactory_packages.spreadsheetbench.ops:finalize",
+    "evaluator": "",
+    "id": "finalize",
+    "kind": "op",
+    "knobs": [
+     "max_turns"
+    ],
+    "max_iterations": 1,
+    "notes": "the item's outcome before grading",
+    "produces": [
+     "finished"
+    ],
+    "prompt_template": "",
+    "reads": [
+     "current_item.json",
+     "turn.json",
+     "history.json",
+     "code.py"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": [
+     "final.json",
+     "conversation.json",
+     "pred.xlsx"
+    ]
+   },
+   "frame": {
+    "blocking": true,
+    "call": "refactory_packages.spreadsheetbench.ops:frame",
+    "evaluator": "",
+    "id": "frame",
+    "kind": "op",
+    "knobs": [],
+    "max_iterations": 1,
+    "notes": "flatten the conversation into the History: prompt",
+    "produces": [
+     "solver_prompt"
+    ],
+    "prompt_template": "",
+    "reads": [
+     "history.json"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": []
+   },
+   "gold_check": {
+    "blocking": true,
+    "call": "refactory_dsh.feedback:train_feedback",
+    "evaluator": "",
+    "id": "gold_check",
+    "kind": "op",
+    "knobs": [],
+    "max_iterations": 1,
+    "notes": "train rollouts only: is the clean run's output right",
+    "produces": [
+     "train_feedback"
+    ],
+    "prompt_template": "",
+    "reads": [],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": []
+   },
+   "has_case": {
+    "blocking": true,
+    "call": "",
+    "evaluator": "refactory_packages.spreadsheetbench.ops:has_case",
+    "id": "has_case",
+    "inputs": [
+     "has_case"
+    ],
+    "kind": "gate",
+    "knobs": [],
+    "max_iterations": 1,
+    "notes": "an item with no test case skips the loop",
+    "produces": [],
+    "prompt_template": "",
+    "reads": [],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": []
+   },
+   "next_turn": {
+    "blocking": true,
+    "call": "refactory_packages.spreadsheetbench.ops:next_turn",
+    "evaluator": "",
+    "id": "next_turn",
+    "inputs": [
+     "train_feedback"
+    ],
+    "kind": "op",
+    "knobs": [],
+    "max_iterations": 1,
+    "notes": "a clean run ends the item unless train feedback says it is wrong",
+    "produces": [
+     "turn_status"
+    ],
+    "prompt_template": "",
+    "reads": [
+     "history.json",
+     "turn.json"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": [
+     "history.json",
+     "turn.json"
+    ]
+   },
+   "prepare": {
+    "blocking": true,
+    "call": "refactory_packages.spreadsheetbench.ops:prepare",
+    "evaluator": "",
+    "id": "prepare",
+    "kind": "op",
+    "knob_outputs": {
+     "has_case": [],
+     "history.json": [],
+     "skill_section": [
+      "skill"
+     ],
+     "spreadsheet_preview.txt": [],
+     "target_system_prompt.txt": [
+      "skill"
+     ],
+     "target_user_prompt.txt": [],
+     "turn.json": []
+    },
+    "knobs": [
+     "skill"
+    ],
+    "max_iterations": 1,
+    "notes": "record the item's start and build SkillOpt's first message",
+    "produces": [
+     "skill_section",
+     "has_case"
+    ],
+    "prompt_template": "",
+    "reads": [
+     "current_item.json"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": [
+     "history.json",
+     "turn.json",
+     "target_system_prompt.txt",
+     "target_user_prompt.txt",
+     "spreadsheet_preview.txt"
+    ]
+   },
+   "run_turn": {
+    "blocking": true,
+    "call": "refactory_packages.spreadsheetbench.ops:run_turn",
+    "evaluator": "",
+    "id": "run_turn",
+    "kind": "op",
+    "knobs": [
+     "turn_pause_s"
+    ],
+    "max_iterations": 1,
+    "notes": "run the reply's code; an error is the next user message",
+    "produces": [
+     "turn_status"
+    ],
+    "prompt_template": "",
+    "reads": [
+     "reply.txt",
+     "history.json",
+     "turn.json",
+     "current_item.json"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": [
+     "history.json",
+     "turn.json",
+     "code.py",
+     "raw.txt",
+     "pred.xlsx"
+    ]
+   },
+   "solve": {
+    "blocking": true,
+    "call": "",
+    "evaluator": "",
+    "field_bindings": [
+     [
+      "system_prompt_template",
+      "solve__system_prompt"
+     ]
+    ],
+    "id": "solve",
+    "kind": "agent",
+    "knobs": [
+     "max_completion_tokens",
+     "solve__system_prompt"
+    ],
+    "max_iterations": 1,
+    "notes": "",
+    "outputs_only": true,
+    "produces": [],
+    "prompt_template": "{{solver_prompt}}",
+    "reads": [],
+    "retry": {
+     "on": [
+      "crash"
+     ],
+     "timeout_factor": 2,
+     "times": 4
+    },
+    "role": "solver",
+    "score_effect": "affects",
+    "system_prompt_template": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
+    "tool_policy": "refused",
+    "tools": [],
+    "writes": [
+     "reply.txt"
+    ]
+   },
+   "turn_gate": {
+    "blocking": true,
+    "call": "",
+    "evaluator": "refactory_packages.spreadsheetbench.ops:turn_gate",
+    "id": "turn_gate",
+    "kind": "gate",
+    "knobs": [
+     "max_turns"
+    ],
+    "max_iterations": 29,
+    "notes": "another turn while turns and budget remain",
+    "on_exhausted": "continue",
+    "produces": [],
+    "prompt_template": "",
+    "reads": [
+     "turn.json"
+    ],
+    "role": "ceo",
+    "score_effect": "affects",
+    "tools": [],
+    "writes": [
+     "turn.json"
+    ]
+   }
+  },
+  "start": "data"
+ },
+ "knobs": {
+  "data_parallelism": {
+   "spec": {
+    "default": 24,
+    "description": "concurrent items (SkillOpt's workers)",
+    "enum": [],
+    "frozen": true,
+    "hi": 64,
+    "kind": "int",
+    "lo": 1,
+    "required": false,
+    "values": []
+   },
+   "value": 24
+  },
+  "max_completion_tokens": {
+   "spec": {
+    "default": 0,
+    "description": "output-token cap on each solve call; 0 = no cap (SkillOpt's claude backend drops its 16384)",
+    "enum": [],
+    "frozen": true,
+    "hi": null,
+    "kind": "int",
+    "lo": 0,
+    "required": false,
+    "values": []
+   },
+   "value": 0
+  },
+  "max_turns": {
+   "spec": {
+    "default": 30,
+    "description": "model calls per item",
+    "enum": [],
+    "frozen": true,
+    "hi": 30,
+    "kind": "int",
+    "lo": 1,
+    "required": false,
+    "values": []
+   },
+   "value": 30
+  },
+  "skill": {
+   "spec": {
+    "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+    "description": "skill appended to the solver's system prompt",
+    "enum": [],
+    "frozen": false,
+    "hi": null,
+    "kind": "str",
+    "lo": null,
+    "required": false,
+    "values": []
+   },
+   "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n"
+  },
+  "solve__system_prompt": {
+   "spec": {
+    "default": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}",
+    "description": "the solve call's system prompt (frozen; use the skill knob)",
+    "enum": [],
+    "frozen": true,
+    "hi": null,
+    "kind": "str",
+    "lo": null,
+    "required": false,
+    "values": []
+   },
+   "value": "You are an expert Python programmer specializing in spreadsheet manipulation. You will be given a user instruction together with a preview of an input .xlsx file. Your job is to write a single self-contained Python script that reads the input file at the path stored in the variable INPUT_PATH, performs the requested manipulation, and saves the result to OUTPUT_PATH. Use only the standard library, openpyxl, and pandas. Do not print anything. Do not use input(). Do not hardcode file paths. Return ONLY the Python code inside a single ```python ... ``` fenced block.{{skill_section}}"
+  },
+  "turn_pause_s": {
+   "spec": {
+    "default": 3,
+    "description": "cooldown after each model call",
+    "enum": [],
+    "frozen": true,
+    "hi": 3,
+    "kind": "int",
+    "lo": 0,
+    "required": false,
+    "values": []
+   },
+   "value": 3
+  }
+ },
+ "memory": [],
+ "ports": [],
+ "version": 1
+}

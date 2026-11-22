@@ -5,7 +5,8 @@
       "id": "data",
       "reads": [],
       "writes": [
-        "current_item.json"
+        "current_item.json",
+        "item/input.xlsx"
       ],
       "blocking": true,
       "task_ref": "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask",
@@ -28,6 +29,7 @@
         "code.py",
         "current_item.json",
         "history.json",
+        "item/input.xlsx",
         "turn.json"
       ],
       "writes": [
@@ -95,7 +97,8 @@
     "prepare": {
       "id": "prepare",
       "reads": [
-        "current_item.json"
+        "current_item.json",
+        "item/input.xlsx"
       ],
       "writes": [
         "history.json",
@@ -135,6 +138,7 @@
       "reads": [
         "current_item.json",
         "history.json",
+        "item/input.xlsx",
         "reply.txt",
         "turn.json"
       ],

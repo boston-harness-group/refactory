@@ -20,8 +20,9 @@ Two items are known by name, as they are in SkillOpt's runs:
   field, so neither does this Task.
 
 The golden file and the input's path in the dataset are grader-only
-(``grader_fields``): the nodes see the input as a copy in their pass, and model code
-sees a copy of that in its sandbox (`sandbox`).
+(``grader_fields``): the nodes see the input as a copy in their pass, its item file
+``item/input.xlsx`` (`Task.item_files`), and model code sees a copy of that in its
+sandbox (`sandbox`), under the input's own name.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from refactory_dsh.task import Task, TaskError, TaskInstance, VerifyResult
@@ -45,8 +47,9 @@ DATA_ENV = "SB_DATA"
 #: Another id split and dataset checksum in the manifest's format (a smoke split, a
 #: test fixture); the shipped ``manifest.json`` by default.
 MANIFEST_ENV = "SB_MANIFEST"
-#: Where `setup` puts the item's input in its pass.
-INPUT_DIR = "input"
+#: Where `setup` lays the item's input in its pass: its item file (`Task.item_files`),
+#: under one name for every item, so any step may declare it in its reads.
+INPUT = "item/input.xlsx"
 #: The pass's copy of the latest prediction (SkillOpt's ``<case>_pred.xlsx``).
 PRED = "pred.xlsx"
 #: What the pass's last step (`ops.finalize`) concluded, for `verify`.
@@ -104,6 +107,8 @@ class SpreadsheetBenchTask(Task):
     name = "spreadsheetbench"
     #: ``verify`` scores the pass's final record and its latest prediction.
     graded_files = (PRED, FINAL)
+    #: The item's input workbook, the one item file (all the release's inputs are .xlsx).
+    item_files = MappingProxyType({"input": INPUT})
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 
@@ -143,10 +148,11 @@ class SpreadsheetBenchTask(Task):
 
     def setup(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
               seed: int | None = None) -> None:
-        """Copy the item's input into the pass (nothing for an item with no case)."""
+        """Copy the item's input into the pass as its item file (nothing for an item with
+        no case)."""
         source = instance.metadata.get("input_path") or ""
         if source:
-            target = Path(workspace) / INPUT_DIR / instance.metadata["input_name"]
+            target = Path(workspace) / INPUT
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
 

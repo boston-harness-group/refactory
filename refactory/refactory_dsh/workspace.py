@@ -180,6 +180,12 @@ class Workspace:
     generate_owned: dict[str, str] = field(default_factory=dict)
     #: Files in ``generate_owned`` the agent then changed, which it is told about.
     prepared_edits: tuple[str, ...] = ()
+    #: A sealed step's cap on the whole of what its commands start (`seal.step_cap`):
+    #: whether it has one, and what it is or why not.
+    whole_step_cap: tuple[bool, str] | None = None
+    #: A sealed step's own cgroup, where a delegated one caps it (`seal.step_cap`): removed
+    #: once its processes are ended (`release_cgroup`); "" for any other.
+    cgroup: str = ""
     #: A sealed step's tools (`is_sealed`), and the runner each of its commands runs
     #: under (`seal.runner_command`); empty for any other workspace.
     tools: tuple[str, ...] = ()
@@ -191,6 +197,9 @@ class Workspace:
             "kind": self.kind, **({"of": self.of} if self.of else {}), "collect": self.collect,
             "path": str(self.path), **({"base": self.base} if self.base else {}),
             **({"sealed": True, "tools": list(self.tools)} if self.runner else {}),
+            **({"whole_step_cap": self.whole_step_cap[0], "cap": self.whole_step_cap[1]}
+               if self.runner and self.whole_step_cap is not None else {}),
+            **({"cgroup": self.cgroup} if self.runner and self.cgroup else {}),
             "sandbox": ("sealed: its files only, no network" if self.runner
                         else self.confine and f"workspace-write ({self.confine})"
                         or f"not confined: {self.unconfined}"),
@@ -264,6 +273,7 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             if fresh:
+                _release_recorded(root)
                 # Keep the lock inode: removing it would let another dispatch acquire
                 # a new lock while this one is still preparing the replacement.
                 for entry in root.iterdir():
@@ -275,8 +285,15 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                             raise WorkspaceError(f"cannot discard timed-out workspace {entry}: {failures[0]}")
                     else:
                         entry.unlink()
-            yield prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
-                          runtime_root=runtime_root, budget=budget, tools=tools, reads=reads)
+            place = prepare(workdir, node, declared, knobs=knobs, facts=facts, route=route,
+                            runtime_root=runtime_root, budget=budget, tools=tools, reads=reads)
+            try:
+                yield place
+            finally:
+                # However the dispatch ended (collected, failed, timed out): a sealed step's
+                # cgroup goes with it, once what it left running is ended.
+                if place is not None and place.cgroup:
+                    release_cgroup(place.path, place.cgroup)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -298,6 +315,8 @@ def prepare(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, Any]
     workdir = Path(workdir).resolve()
     root = workdir / ROOT / _slug(node)
     root.mkdir(parents=True, exist_ok=True)
+    # An earlier dispatch's cgroup that outlived it (its runner or its run died) goes first.
+    _release_recorded(root)
     route = route or {}
     if route.get("worker_backend") == "openshell" and not _opted_in(OPENSHELL_OPT_IN):
         raise WorkspaceError(
@@ -464,7 +483,20 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
         finally:
             os.close(fd)
     workspace.tools = tools
-    workspace.runner = tuple(seal.runner_command(workspace.path))
+    cap = seal.step_cap(workspace.path)
+    try:
+        workspace.runner = tuple(seal.runner_command(workspace.path, cap))
+    except BaseException:
+        if cap.cgroup:
+            release_cgroup(workspace.path, cap.cgroup)
+        raise
+    workspace.whole_step_cap = (cap.capped, cap.how)
+    workspace.cgroup = cap.cgroup
+    # What the runner records beside the workspace belongs to this dispatch alone.
+    from refactory_dsh.seal_reaper import incidents_path, notes_path
+
+    for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path))):
+        Path(record).unlink(missing_ok=True)
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:
@@ -999,6 +1031,102 @@ def _same_as(path: Path, base: str, names: list[str]) -> set[str]:
     return same
 
 
+def _read_lines(path: Path, key: str) -> list[str]:
+    """Each JSON line's ``key`` of a runner's record beside a workspace, which is then
+    removed: a record belongs to the one dispatch that made it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    path.unlink(missing_ok=True)
+    out = []
+    for line in lines:
+        try:
+            out.append(str(json.loads(line).get(key) or "unknown"))
+        except (ValueError, AttributeError):
+            out.append(line.strip() or "unknown")
+    return out
+
+
+def release_cgroup(path: Path | str, cgroup: str) -> None:
+    """End every process still sealed in the workspace at ``path`` (as it was prepared;
+    `seal_reaper.reap`), then remove its step's ``cgroup`` (`seal_cgroup.remove`): at the
+    end of its dispatch, at the next prepare of its node, and at the run's end. One that
+    cannot be removed is warned about, never raised: the step's outcome stands."""
+    if not cgroup:
+        return
+    from refactory_dsh.seal_reaper import reap
+
+    sealed = str(path).removesuffix(".collected")
+    if sealed:
+        reap(sealed)
+    _remove_cgroup(f"the sealed workspace {sealed}", cgroup)
+
+
+def _remove_cgroup(whose: str, cgroup: str) -> None:
+    from refactory_dsh import seal_cgroup
+
+    left = seal_cgroup.remove(cgroup)
+    if left:
+        _warn(f"{whose}: its step's cgroup was left: {left}")
+
+
+def _release_recorded(root: Path) -> None:
+    """Release the cgroup the last dispatch in node directory ``root`` recorded, if any."""
+    record = _json(root / "dispatch.json")
+    if not record.get("cgroup"):
+        return
+    if not _recorded_cgroup_is_its_own(root, record):
+        return
+    release_cgroup(str(record["path"]), str(record["cgroup"]))
+
+
+def _recorded_cgroup_is_its_own(root: Path, record: dict[str, Any]) -> bool:
+    """Whether a dispatch record's ``cgroup`` is the one `seal_cgroup.make` gives its own
+    workspace, a sealed scratch folder of ``root``, in this process's delegated cgroup
+    (`seal_cgroup.delegated_base`), its path resolved: a record anything else wrote (a
+    step with tools in the run directory) never names another step's cgroup or workspace,
+    another unit's cgroup, or one reached through ``..`` or a link, for ending and removal."""
+    from refactory_dsh import seal_cgroup
+
+    path, cgroup = Path(str(record.get("path") or "")), Path(str(record["cgroup"]))
+    name = path.name.removesuffix(".collected")
+    try:
+        base = seal_cgroup.delegated_base().resolve()
+    except seal_cgroup.Unavailable:
+        base = None
+    if (base is None or path.parent != Path(root).resolve() or not name.startswith("scratch-")
+            or cgroup.name != seal_cgroup.step_name(path.parent / name)
+            or cgroup.resolve().parent != base):
+        _warn(f"{root}: its dispatch record names a cgroup that is not its own sealed step's "
+              f"({cgroup}), so it was left")
+        return False
+    return True
+
+
+def _record_seal_notes(workspace: Workspace, notes: Path) -> None:
+    """Put what the runner noted of how the step's commands ran (`seal_reaper.record_note`:
+    one ran without the whole-step cap) in the step's dispatch record."""
+    found = _read_lines(notes, "note")
+    if not found:
+        return
+    workspace.whole_step_cap = (False, found[0])
+    _write_json(workspace.root / "dispatch.json", workspace.describe())
+
+
+def _raise_seal_incidents(node: str, incidents: Path) -> None:
+    """Raise `incidents.SealFailed` when a command of the sealed step could not start in
+    its seal (`seal_reaper.record_incident`): the step then ran without what it asked
+    for, so its outcome is the harness's failure, on both runtimes (`node_retry.deliver`
+    collects for each)."""
+    reasons = _read_lines(incidents, "reason")
+    if reasons:
+        from refactory_dsh.incidents import HARNESS_INCIDENT_TEXT, SealFailed
+
+        raise SealFailed(f"{HARNESS_INCIDENT_TEXT}agent node {node!r}: {len(reasons)} sealed "
+                         f"command(s) could not start in the seal: {reasons[0]}")
+
+
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             final_response: str | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
@@ -1017,12 +1145,18 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     from refactory_dsh.agent_delivery import _path
 
     if workspace.runner:
-        from refactory_dsh.seal_reaper import reap
+        from refactory_dsh.seal_reaper import incidents_path, notes_path, reap
 
+        incidents = Path(incidents_path(str(workspace.path)))
+        notes = Path(notes_path(str(workspace.path)))
         reap(str(workspace.path))
         moved = workspace.path.with_name(workspace.path.name + ".collected")
         os.rename(workspace.path, moved)
         workspace.path = moved
+        # Its PID namespace is killed and reaped: its cgroup can go.
+        _remove_cgroup(f"agent node {workspace.node!r}", workspace.cgroup)
+        _record_seal_notes(workspace, notes)
+        _raise_seal_incidents(workspace.node, incidents)
         size = _tree_bytes(workspace.path)
         if size > SEALED_WORKSPACE_MAX_BYTES:
             raise WorkspaceError(f"agent node {workspace.node!r} left {size >> 20} MiB in its sealed "
@@ -1246,6 +1380,7 @@ def sweep(workdir: Path) -> None:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
+            _release_recorded(entry)
             failures = _remove_tree(entry)
             if failures:
                 left.append(f"{entry}: {failures[0]}")

@@ -902,7 +902,16 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
             knob = knob_to if knob_to in filled else (filled[0] if len(filled) == 1 else None)
             if knob is None and to is None and filled:
                 return []  # it fills several prompts: which one is the proposer's to say
+        section = f"## {_heading(fact)}\n{{{{{fact}}}}}"
+        if guarded or ("fact", fact) not in avail.get(reader, set()):
+            section = f"{{% if {fact} %}}{section}{{% endif %}}"
         if knob is None:
+            if to is not None and knob_to is None and node is not None \
+                    and node.kind == "agent" and _task_knob(node) is None:
+                # An agent 'to' names whose prompt is no knob (a template a step's fact
+                # fills, say) is re-slotted in place, as `rewire` re-slots one: the same
+                # step, with a section for the fact after its prompt.
+                return _reslotted(state, node, fact, section)
             if to is not None:
                 raise edits.EditError(f"step {reader!r} has no prompt knob of its own to put "
                                       f"{{{{{fact}}}}} in; name the knob with 'to'",
@@ -911,11 +920,22 @@ def _place(state: Mapping[str, Any], fact: str, *, readers: Sequence[str],
         current = str(((state.get("knobs") or {}).get(knob) or {}).get("value") or "")
         if re.search(r"\{\{\s*" + re.escape(fact) + r"\s*\}\}", current):
             return []
-        section = f"## {_heading(fact)}\n{{{{{fact}}}}}"
-        if guarded or ("fact", fact) not in avail.get(reader, set()):
-            section = f"{{% if {fact} %}}{section}{{% endif %}}"
         return [{"op": "set_knob", "name": knob, "value": f"{current.rstrip()}\n\n{section}".lstrip()}]
     return []
+
+
+def _reslotted(state: Mapping[str, Any], node: Node, fact: str, section: str) -> list[dict]:
+    """The steps that give agent ``node``, whose prompt is no knob, ``section`` (the slot
+    for ``fact``) after its prompt, in place (`_respec`): its id, outputs, settings and
+    place in any fork, join, loop or pass stay; its prompt becomes a knob of its own
+    (``<id>__task``) when it is added again (`edits._own_bindings`), as a rewired one's
+    does. Nothing when the prompt already fills ``fact``."""
+    text = str(node.prompt_template or "")
+    if re.search(r"\{\{\s*" + re.escape(fact) + r"\s*\}\}", text):
+        return []
+    new_state = node.to_state()
+    new_state["prompt_template"] = f"{text.rstrip()}\n\n{section}".lstrip()
+    return _respec(state, node.id, new_state)
 
 
 def _place_all(build: _Steps, facts: Sequence[str], *, after: str, to: str | None = None,
@@ -1132,7 +1152,7 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
             raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
                            "step without tools writes only its reply; take it over with a "
-                           "code step, or with 'tools'")
+                           f"code step{TOOLS_HINTS[0]}")
     return None
 
 
@@ -2861,8 +2881,8 @@ def _fallback_spec(edit: dict, step: Node) -> dict:
     spec = _spec({k: v for k, v in edit.items() if k not in ("op", "step")})
     if spec["kind"] == "agent" and not spec.get("tools") and len(step.writes) > 1:
         raise _Refused(f"{step.id!r} writes {len(step.writes)} files, and a new agent step "
-                       "without tools writes only its reply; give it a code step, or "
-                       "'tools'")
+                       "without tools writes only its reply; give it a code step"
+                       f"{TOOLS_HINTS[1]}")
     return spec
 
 
@@ -3306,7 +3326,8 @@ def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[di
 
 #: Where a new step's output goes (`_place`): one phrase for every operator that says it.
 REACHES = ("its output goes into the nearest prompt {where} that can take it -- an agent's own "
-           "prompt knob, or the one text knob an op fills facts into -- or where 'to' says; "
+           "prompt knob, or the one text knob an op fills facts into -- or where 'to' says (a "
+           "prompt knob, or a step: an agent whose prompt is no knob gets a section for it); "
            "with neither, refused unless a step reads it")
 
 #: The field a new agent step names its own route in (`Node.route`).
@@ -3323,6 +3344,36 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
             + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
 
 
+#: What the insert line says of 'tools', and the map line: dropped from the request, with
+#: the 'tools' field, in a run that offers no tool step (`without_tools`).
+INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
+                + "; a new step may have them though the steps beside it have none or refuse "
+                "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
+                "files it sees (an item's files too), no network, no grader files")
+MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+
+
+#: How a refusal ends that names tools as the other way to write several files (a
+#: take-over's, a fallback's): said only where the run offers a tool step
+#: (`refusal_without_tools`).
+TOOLS_HINTS = (", or with 'tools'", ", or 'tools'")
+
+
+def refusal_without_tools(reason: str) -> str:
+    """A refusal as a run that offers no tool step says it: without `TOOLS_HINTS`."""
+    for hint in TOOLS_HINTS:
+        reason = reason.replace(hint, "")
+    return reason
+
+
+def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
+    """An operator's request line and fields with no offer of tools: for a run where a new
+    step has none (no seal, or ``new_step_tools`` off)."""
+    for clause in (INSERT_TOOLS, MAP_TOOLS):
+        description = description.replace(clause, "")
+    return description, [f for f in fields if f != "tools"]
+
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
@@ -3334,8 +3385,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "
                 + REACHES.format(where="after it")
-                + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
-                + "; runs sealed: only the files it sees, no network"
+                + INSERT_TOOLS
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",
@@ -3454,7 +3504,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
                 "result and writes one output, placed as insert's is; 'system' as insert's, "
-                "for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map "
+                "for each run" + MAP_TOOLS + "; remove the elements step or the combine and the whole map "
                 "goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",
@@ -3566,9 +3616,11 @@ def _open_knob(state: Mapping[str, Any], name: str) -> bool:
     return not (((state.get("knobs") or {}).get(name) or {}).get("spec") or {}).get("frozen")
 
 
-def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
+def reader_knobs(state: Mapping[str, Any], node_id: str, *, steps: bool = False) -> list[str]:
     """The prompt knobs after step ``node_id`` that 'to' can name for its output, nearest
-    first: an agent's own prompt knob, or a text knob an op fills facts into; none frozen."""
+    first: an agent's own prompt knob, or a text knob an op fills facts into; none frozen.
+    With ``steps``, an agent whose prompt is no knob is named too, by its id ('to' naming
+    it re-slots its prompt, `_reslotted`)."""
     graph = _edits()._graph(state)
     names: list[str] = []
     if not graph.nodes[node_id].produces:
@@ -3580,6 +3632,9 @@ def reader_knobs(state: Mapping[str, Any], node_id: str) -> list[str]:
         if node.kind == "agent":
             knob = _task_knob(node)
             found = [knob] if knob and len(graph.knob_consumers().get(knob, ())) == 1 else []
+            if steps and knob is None and reader not in names:
+                names.append(reader)
+                continue
         else:
             found = _filled_text_knobs(node, state, graph)
         names += [k for k in found if k not in names and _open_knob(state, k)]
@@ -3611,8 +3666,8 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
                  before: Mapping[str, Any]) -> str:
     """Where step ``node_id``'s output could go, for a refusal, in one clause: the prompt
     knobs after it (named in 'to' when ``edit``'s operator takes one); when the nearest
-    agent after it takes no knob of its own, the op before it that builds that agent's
-    prompt, to insert before; and when no later step can read it at all, a step that takes
+    agent after it takes no knob of its own, that agent in 'to' (its prompt is re-slotted)
+    and the op before it that builds that agent's prompt, to insert before; and when no later step can read it at all, a step that takes
     over the one whose output is graded (``takes_over``; a route way's new step rewrites it
     in place on its way)."""
     op = edit.get("op")
@@ -3628,6 +3683,8 @@ def _reader_hint(state: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
                      f"put {{{{{fact}}}}} in a later prompt: {names}")
     first = next((graph.nodes[r] for r in readers if graph.nodes[r].kind == "agent"), None)
     if takes_to and first is not None and _task_knob(first) is None:
+        # Its prompt is no knob: 'to' naming it re-slots it (`_reslotted`).
+        parts.append(f"name {first.id} in 'to' (its prompt gets a section for it)")
         after = _downstream(graph, node_id)
         taken = _consumed(first, state)
         for builder in graph.nodes.values():
