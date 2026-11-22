@@ -2,6 +2,8 @@
 
     uv run python refactory/scripts/replay_memory.py RUN_DIR [--out DIR] [--epoch N]
     uv run python refactory/scripts/replay_memory.py RUN_DIR --epoch N --reply REPLY.json
+    uv run python refactory/scripts/replay_memory.py RUN_DIR --epoch N --journal \
+        [--reply E=REPLY.json ...] [--swap-proposal]
 
 Reads ``RUN_DIR/optimizer_trace.jsonl`` (read only) and, for every memory call it
 recorded -- the single call or a split pass's synthesis (kind ``memory``) and its
@@ -26,6 +28,27 @@ them after the answer -- and are not rebuilt here: a recorded request holds only
 counts. ``--reply`` reads one model reply to a re-rendered note request as the record
 would (`memory.note_from`, the request's own items and change ids): what is kept, and
 what is stripped and why.
+
+``--journal`` rebuilds the record's facts from ``RUN_DIR/journal.jsonl`` as the loop had
+them at each memory pass up to epoch N: the run's mode and ``config.json`` make a `Loop`
+whose working directory is a temporary one (nothing is written into the run), its
+journal replayed up to that pass's ``optimizer_memory`` event (`Loop._replay`: the
+``train_records``/``train_records_epoch``, ``proposal``, ``strategy_state`` val_gate,
+``rejection`` and ``integrity_verdict`` events), and the loop's own `_tried_in_round` and
+`memory.record_facts` read from it, over every round so far. Each pass's observations
+come from the reply given for it (``--reply E=FILE``, read as the loop reads one,
+`memory.note_from`), or none (the facts alone). The record of epoch N, rendered as the
+readers see it (`memory.render_record`), goes to ``OUT/epoch_N/record.json`` (and the
+whole record, nothing left out, to ``record.full.json``). The mode's package must be
+importable (``--project``).
+
+``--swap-proposal`` (with ``--journal``) takes epoch N's last recorded proposal request
+(kind ``proposal``) and writes three: ``proposal.old`` as recorded, ``proposal.record``
+with its "## Optimizer memory" section replaced by the record as the request shows it
+(`memory.request_lines` of the note the proposal read, its text the rendered record),
+and ``proposal.none`` with that section removed, heading and all; each as
+``.prompt.txt`` and ``.system.txt``. The section is found by the request's own headings
+and must be there exactly once.
 """
 
 from __future__ import annotations
@@ -216,6 +239,199 @@ def check_reply(prompt: str, reply: str, epoch: int | None) -> dict[str, Any]:
     return {"kept": note["record"]["observations"], "stripped": note["stripped"]}
 
 
+# ── the record's facts from the journal, as the loop had them ───────────────
+
+
+def _events(run: Path) -> list[dict[str, Any]]:
+    """The run's journal, read as `Loop._replay` reads it (a half-written last line ends it)."""
+    journal = run / "journal.jsonl"
+    if not journal.exists():
+        raise SystemExit(f"no journal.jsonl in {run}")
+    out = []
+    for line in journal.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            break
+    return out
+
+
+def _passes(events: list[dict[str, Any]], epoch: int) -> list[dict[str, Any]]:
+    """Each memory pass the journal holds up to ``epoch`` (``optimizer_memory``), in order."""
+    return [e for e in events if e.get("event") == "optimizer_memory"
+            and int(e.get("epoch") or 0) <= epoch]
+
+
+def _loop_at(run: Path, events: list[dict[str, Any]], at: dict[str, Any], project: Path,
+             scratch: Path) -> Any:
+    """The run's `Loop`, its journal replayed up to (not including) the pass ``at``, in a
+    working directory of its own under ``scratch``: what the loop held when it made that
+    pass."""
+    from refactory_dsh.loop import Loop, LoopConfig
+
+    saved = json.loads((run / "config.json").read_text())
+    mode = str(saved.get("mode") or next((e.get("mode") for e in events
+                                          if e.get("event") == "start"), "") or "")
+    if not mode:
+        raise SystemExit(f"{run}/config.json names no mode")
+    where = scratch / f"epoch_{at.get('epoch')}"
+    where.mkdir(parents=True, exist_ok=True)
+    journal = where / "journal.jsonl"
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events[:events.index(at)]))
+    config = LoopConfig.from_dict(saved)
+    config.runs_root = where
+    loop = Loop(mode, config, project=project)
+    loop._replay(journal)
+    return loop
+
+
+def facts_at(loop: Any, at: dict[str, Any]) -> dict[str, Any]:
+    """The record's facts the loop handed the pass ``at`` (`Loop._make_memory_pass`): every
+    round before its epoch (`Loop._tried_in_round`), the gate's word as it stood, and,
+    without a gate, the candidate current then (the incumbent when a not-kept change was
+    compared)."""
+    epoch = int(at["epoch"])
+    rounds = sorted({int(r["epoch"]) for r in loop.proposals.values()
+                     if isinstance(r, dict) and r.get("epoch") is not None
+                     and int(r["epoch"]) < epoch}
+                    | {r for r in loop._round_refusals if r < epoch} | {epoch - 1})
+    every = [loop._tried_in_round(r) for r in rounds]
+    return memory.record_facts([t for done, _f in every for t in done],
+                               [f for _d, failed in every for f in failed],
+                               gated=loop.selection_mode() or False,
+                               current=at.get("prev") if at.get("rejected") else at.get("curr"))
+
+
+def _compared(at: dict[str, Any]) -> dict[str, Any]:
+    """The pass ``at`` as the record lists it (`MemoryRequest.compared`)."""
+    same = at.get("prev") == at.get("curr")
+    curr = {"rejected": at["rejected"]} if at.get("rejected") else {}
+    return {"epoch": at.get("epoch"), "prev": at.get("prev"), "curr": at.get("curr"),
+            "compared": memory._what(curr, same), "items": int(at.get("pairs") or 0)}
+
+
+def _items(at: dict[str, Any]) -> list[str]:
+    """The items the pass ``at`` compared: its sample, less what either side lacked."""
+    missing = {str(i) for i in at.get("missing") or ()}
+    return [str(i) for i in at.get("sample") or () if str(i) not in missing]
+
+
+def record_from_journal(run: Path, epoch: int, replies: dict[int, str], project: Path,
+                        scratch: Path) -> dict[str, Any]:
+    """The record the loop would hold after epoch ``epoch``'s pass: every pass up to it,
+    each with the facts the loop had then and the observations of the reply given for it
+    (``replies``: epoch -> reply text; none, the facts alone), as `memory.note_from` reads
+    an answer, each carrying the record before it."""
+    from refactory_dsh.optim.random_optimizer import reply_object
+
+    events = _events(run)
+    passes = _passes(events, epoch)
+    if not any(int(p.get("epoch") or 0) == epoch for p in passes):
+        raise SystemExit(f"the journal holds no memory pass for epoch {epoch}")
+    record: dict[str, Any] | None = None
+    for at in passes:
+        loop = _loop_at(run, events, at, project, scratch)
+        text = replies.get(int(at["epoch"]))
+        payload = reply_object(text) if text is not None else {"observations": []}
+        note = memory.note_from(payload, epoch=int(at["epoch"]), facts=facts_at(loop, at),
+                                earlier=record, items=_items(at), compared=_compared(at))
+        if note is None:
+            raise SystemExit(f'the reply for epoch {at["epoch"]} has no "observations" list')
+        record = note["record"]
+    return record or {}
+
+
+# ── the proposal request with the record, and without memory ────────────────
+
+MEMORY_HEADING = "## Optimizer memory"
+
+
+def memory_section(prompt: str) -> tuple[int, int]:
+    """Where a request's "## Optimizer memory" section is: from its heading line to the
+    next line of the request that starts with "## " (a fenced block's lines are the
+    quoted text's, not the request's). Raises ``ValueError`` unless the heading is there
+    exactly once and a heading follows it."""
+    lines = prompt.split("\n")
+    offsets, at = [], 0
+    for line in lines:
+        offsets.append(at)
+        at += len(line) + 1
+    fence = None
+    heads = []
+    for index, line in enumerate(lines):
+        if fence is not None:
+            if line == fence:
+                fence = None
+            continue
+        if re.fullmatch(r"`{3,}\S*", line):
+            fence = re.match(r"`+", line).group(0)
+            continue
+        if line.startswith("## "):
+            heads.append(index)
+    found = [i for i in heads if lines[i] == MEMORY_HEADING]
+    if len(found) != 1:
+        raise ValueError(f"the request has {len(found)} '{MEMORY_HEADING}' sections, not one")
+    after = [i for i in heads if i > found[0]]
+    if not after:
+        raise ValueError(f"no section of the request follows '{MEMORY_HEADING}'")
+    return offsets[found[0]], offsets[after[0]]
+
+
+def swap_proposal(run: Path, epoch: int, record_text: str, out: Path) -> dict[str, int]:
+    """Epoch ``epoch``'s last recorded proposal request three ways (`swap-proposal`), written
+    under ``out``; returns each variant's characters (system prompt and request)."""
+    calls = [c for c in _trace(run) if c.get("kind") == "proposal" and c.get("epoch") == epoch
+             and c.get("prompt")]
+    if not calls:
+        raise SystemExit(f"no proposal request recorded for epoch {epoch}")
+    call = calls[-1]
+    prompt, system = str(call["prompt"]), str(call.get("system") or "")
+    start, end = memory_section(prompt)
+    passes = [p for p in _passes(_events(run), epoch)]
+    if not passes:
+        raise SystemExit(f"no memory pass before epoch {epoch}'s proposal")
+    shown = {**dict(passes[-1].get("memory") or {}), "text": record_text}
+    section = prompt[start:end]
+    tail = section[len(section.rstrip("\n")):]
+    variants = {"old": prompt,
+                "record": prompt[:start] + "\n".join(memory.request_lines(shown)) + tail
+                + prompt[end:],
+                "none": prompt[:start] + prompt[end:]}
+    out.mkdir(parents=True, exist_ok=True)
+    sizes = {}
+    for name, text in variants.items():
+        (out / f"proposal.{name}.prompt.txt").write_text(text)
+        (out / f"proposal.{name}.system.txt").write_text(system)
+        sizes[name] = len(system) + len(text)
+    return sizes
+
+
+def _trace(run: Path) -> list[dict[str, Any]]:
+    out = []
+    for line in (run / "optimizer_trace.jsonl").read_text().splitlines():
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _replies(given: list[str], epoch: int | None) -> dict[int, str]:
+    """``--reply`` values: ``E=FILE`` for epoch E's pass, a bare ``FILE`` for ``--epoch``'s."""
+    out = {}
+    for value in given:
+        name, sep, path = value.partition("=")
+        if sep and name.isdigit():
+            out[int(name)] = Path(path).read_text()
+        elif epoch is None:
+            raise SystemExit(f"--reply {value}: name its epoch (E=FILE) or give --epoch")
+        else:
+            out[epoch] = Path(value).read_text()
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("run", type=Path, help="a run directory holding optimizer_trace.jsonl")
@@ -225,20 +441,56 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compare-replies", type=Path, default=None,
                         help="a folder of epoch_<N>/part<k>.json replies to the comparison "
                              "requests, for the synthesis")
-    parser.add_argument("--reply", type=Path, default=None,
-                        help="a model reply to the epoch's note (or synthesis) request: "
-                             "print what the record keeps and strips")
+    parser.add_argument("--reply", action="append", default=[],
+                        help="a model reply to a pass's note (or synthesis) request: E=FILE "
+                             "for epoch E's pass, or FILE for --epoch's; without --journal, "
+                             "print what the record keeps and strips of --epoch's")
+    parser.add_argument("--journal", action="store_true",
+                        help="rebuild epoch --epoch's record from the run's journal.jsonl "
+                             "(facts) and the replies given (observations)")
+    parser.add_argument("--swap-proposal", action="store_true",
+                        help="with --journal: write epoch --epoch's proposal request as "
+                             "recorded, with the record, and without memory")
+    parser.add_argument("--project", type=Path, default=Path("."),
+                        help="the project whose packages hold the run's mode (default: .)")
     args = parser.parse_args(argv)
     out = args.out or Path(f"memory-replay-{args.run.resolve().name}")
     manifest = replay(args.run, out, args.epoch, args.compare_replies)
-    if args.reply is not None:
+    if args.journal or args.swap_proposal:
+        if args.epoch is None or not args.journal:
+            parser.error("--journal and --swap-proposal need --epoch, and --swap-proposal "
+                         "needs --journal")
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as scratch:
+            record = record_from_journal(args.run, args.epoch,
+                                         _replies(args.reply, args.epoch), args.project,
+                                         Path(scratch))
+        folder = out / f"epoch_{args.epoch}"
+        folder.mkdir(parents=True, exist_ok=True)
+        text = memory.render_record(record)
+        (folder / "record.json").write_text(text)
+        (folder / "record.full.json").write_text(json.dumps(record, indent=1))
+        print(f"record: {folder / 'record.json'} ({len(text)} chars)")
+        if args.swap_proposal:
+            try:
+                sizes = swap_proposal(args.run, args.epoch, text, folder)
+            except ValueError as error:
+                raise SystemExit(f"--swap-proposal: {error}")
+            for name, chars in sizes.items():
+                print(f"proposal.{name}: {folder / f'proposal.{name}.prompt.txt'} ({chars} chars)")
+        return 0
+    if args.reply:
         if args.epoch is None:
             parser.error("--reply needs --epoch")
         note = next((c for c in manifest["calls"] if c["kind"] == "memory" and "prompt" in c), None)
         if note is None:
             parser.error(f"no note request for epoch {args.epoch}")
-        print(json.dumps(check_reply(Path(note["prompt"]).read_text(), args.reply.read_text(),
-                                     args.epoch), indent=2))
+        reply = _replies(args.reply, args.epoch).get(args.epoch)
+        if reply is None:
+            parser.error(f"no reply for epoch {args.epoch}")
+        print(json.dumps(check_reply(Path(note["prompt"]).read_text(), reply, args.epoch),
+                         indent=2))
         return 0
     for call in manifest["calls"]:
         print(f"epoch {call['epoch']} {call['name']}: "

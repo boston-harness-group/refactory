@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from refactory_dsh.optim import memory
+from refactory_dsh.optim import evidence, memory
 from refactory_dsh.optim.base import edit_change
 
 from test_optimizer_memory import _events, _run
@@ -369,3 +369,158 @@ def test_the_replay_reads_a_reply_as_the_record_does(tmp_path, capsys):
         ("c3", "In b the inserted step returned 7.")]
     assert shown["stripped"] == [{"text": "Next time keep the edit smaller.",
                                   "why": "advice: 'Next time'"}]
+
+
+class _Proposing:
+    """A model client for a real loop: each proposal call sets the level to the next of
+    ``levels``; each memory call answers one observation on its first compared item,
+    about the first change "What was tried this epoch" names, and one piece of advice."""
+
+    def __init__(self, levels: list[int]) -> None:
+        self.levels, self.calls = list(levels), []
+
+    def complete(self, prompt: str, *, system: str = "", **_: Any) -> str:
+        import re
+
+        self.calls.append((system, prompt))
+        if system == memory.MEMORY_SYSTEM:
+            items = re.findall(r"^#### Task (\S+?)(?::| --|$)", prompt, re.M)
+            changes = re.findall(r"^- `([^`]+)` \(round ", prompt, re.M)
+            return json.dumps({"observations": [
+                {"change": changes[0] if changes else "", "items": items[:1],
+                 "observation": f"OBS for {items[0]}: step work returned TRAIN-OUT."},
+                {"change": "", "items": items[:1], "observation": "Next round, try a judge."}]})
+        if not self.levels:
+            return json.dumps({"diagnosis": "d", "proposals": []})
+        level = self.levels.pop(0)
+        return json.dumps({"diagnosis": "d", "proposals": [
+            {"edit": {"op": "set_knob", "name": "level", "value": level}}]})
+
+
+def test_the_replay_rebuilds_the_record_from_the_journal_and_swaps_it_into_a_proposal(
+        tmp_path, monkeypatch, capsys):
+    """A real loop (the model proposer, a scripted model): 7 kept, 8 kept, 6 rejected.
+    From its run directory alone, the record rebuilt from the journal and the memory
+    replies is the record the loop stored, and without replies the facts are the same;
+    epoch 4's proposal request is written as recorded, with the record, and without
+    memory."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+    from refactory_dsh.outerloop import ValidationGate
+    from test_analysts import _with_traces
+    from test_gate_aware_context import _passes_by_level, _val
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    _with_traces(monkeypatch)
+    script = _script()
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=4, val_gate=True)
+        loop.optimizer = AutoresearchOptimizer(_Proposing([7, 8, 6]))
+        loop.run()
+        run = loop.root
+        trace = [json.loads(line) for line in (run / "optimizer_trace.jsonl").read_text()
+                 .splitlines()]
+        replies = {c["epoch"]: c["reply"] for c in trace if c["kind"] == "memory"}
+        stored = [json.loads(line) for line in (run / "journal.jsonl").read_text().splitlines()]
+        stored = [e for e in stored if e["event"] == "optimizer_memory"]
+        assert [e["epoch"] for e in stored] == [2, 3, 4] and sorted(replies) == [2, 3, 4]
+        for at in stored:
+            rebuilt = script.record_from_journal(run, at["epoch"], replies, Path("."),
+                                                 tmp_path / f"scratch{at['epoch']}")
+            assert rebuilt == at["memory"]["record"], at["epoch"]
+        last = stored[-1]["memory"]["record"]
+        assert len(last["changes"]) == 3 and len(last["observations"]) == 3
+        assert {c["outcome"] for c in last["changes"]} == {"kept", "not kept"}
+        bare = script.record_from_journal(run, 4, {}, Path("."), tmp_path / "bare")
+        assert bare["changes"] == last["changes"] and bare["observations"] == []
+        assert bare["keeps_failing"] == last["keeps_failing"]
+        reply = tmp_path / "reply4.json"
+        reply.write_text(replies[4])
+        out = tmp_path / "out"
+        assert script.main([str(run), "--out", str(out), "--epoch", "4", "--journal",
+                            "--reply", f"2={_write(tmp_path, 'r2', replies[2])}",
+                            "--reply", f"3={_write(tmp_path, 'r3', replies[3])}",
+                            "--reply", str(reply), "--swap-proposal"]) == 0
+    printed = capsys.readouterr().out
+    folder = out / "epoch_4"
+    assert json.loads((folder / "record.json").read_text()) == json.loads(
+        memory.render_record(last))
+    assert (folder / "record.json").read_text() == loop._memory["text"]
+    # The proposal request three ways, the system prompt unchanged.
+    (call,) = [c for c in trace if c["kind"] == "proposal" and c["epoch"] == 4][-1:]
+    old, record, none = ((folder / f"proposal.{n}.prompt.txt").read_text()
+                         for n in ("old", "record", "none"))
+    assert old == call["prompt"]
+    assert {(folder / f"proposal.{n}.system.txt").read_text()
+            for n in ("old", "record", "none")} == {call["system"]}
+    start, end = script.memory_section(old)
+    assert old[start:].startswith("## Optimizer memory\n") and old[end:].startswith("## ")
+    assert record == old[:start] + "\n".join(memory.request_lines(
+        {**stored[-1]["memory"], "text": loop._memory["text"]})) + "\n\n" + old[end:]
+    assert record == old, "the loop's own note is that record: the swap changes nothing"
+    # With another record (the facts alone) only the section's note changes.
+    bare_text = memory.render_record(bare)
+    script.swap_proposal(run, 4, bare_text, tmp_path / "bare_out")
+    swapped = (tmp_path / "bare_out" / "proposal.record.prompt.txt").read_text()
+    s_start, s_end = script.memory_section(swapped)
+    assert swapped[:s_start] == old[:start] and swapped[s_end:] == old[end:]
+    assert "\n".join(evidence.exact_block(bare_text)) in swapped[s_start:s_end]
+    assert "OBS for" not in swapped[s_start:s_end] and "OBS for" in old[start:end]
+    assert "## Optimizer memory" not in none and none == old[:start] + old[end:]
+    assert memory.RECORD_LEAD in record and memory.RECORD_LEAD not in none
+    for name in ("old", "record", "none"):
+        assert f"proposal.{name}: " in printed
+    # A request whose memory section is not there exactly once is refused, loudly.
+    import pytest
+
+    for broken in (none, old.replace("## Optimizer memory\n", "## Optimizer memory\n\n"
+                                     "## Optimizer memory\n", 1)):
+        with pytest.raises(ValueError, match="sections, not one"):
+            script.memory_section(broken)
+
+
+def _write(folder: Path, name: str, text: str) -> Path:
+    path = folder / f"{name}.json"
+    path.write_text(text)
+    return path
+
+
+def test_the_memory_section_is_found_by_the_requests_own_headings():
+    script = _script()
+    note = "\n".join(evidence.exact_block("## Optimizer memory\n## Not a heading"))
+    prompt = ("# Update request\n\n## History\nH\n\n## Optimizer memory\nLEAD\n"
+              f"{note}\n\n## Answer\nA")
+    start, end = script.memory_section(prompt)
+    assert prompt[start:end] == f"## Optimizer memory\nLEAD\n{note}\n\n"
+    import pytest
+
+    with pytest.raises(ValueError, match="no section of the request follows"):
+        script.memory_section(prompt[:prompt.index("## Answer")])
+
+
+def test_without_the_gate_the_rebuilt_record_reads_the_train_leader_as_the_loop_did(
+        tmp_path, monkeypatch):
+    """Ungated, level 7 scores below the seed's 5: the pass compares the seed with that
+    unkept change, and the change is not the train leader. The rebuilt record says so,
+    as the loop's did."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+    from test_gate_aware_context import _passes_by_level
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    _passes_by_level(monkeypatch)
+    script = _script()
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=2, val_gate=False)
+        loop.optimizer = AutoresearchOptimizer(_Proposing([7]))
+        loop.run()
+        (at,) = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text()
+                 .splitlines() if '"optimizer_memory"' in line]
+        assert at["rejected"]["noun"] == memory.NOT_KEPT_NOUN
+        rebuilt = script.record_from_journal(loop.root, 2, {}, Path("."), tmp_path / "s")
+    (change,) = rebuilt["changes"]
+    assert (change["outcome"], change["why"]) == (
+        "not kept", "no validation gate: it is not the train leader now")
+    assert rebuilt["changes"] == at["memory"]["record"]["changes"]
