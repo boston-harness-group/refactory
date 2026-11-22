@@ -1,43 +1,33 @@
-"""Tests for per-step chain excusal logic in base_check.
+"""Tests for per-step chain excusal in base_check.
 
-Covers _chain_steps, _build_marker_script, _parse_step_results, _step_would_run,
-_run_chain_markers, _per_step_comparison, and excusal_blocker with step_results.
-
-Scenario tests drive filter_check with mocked run_base_check and _run_chain_markers,
-exercising the real code paths the brief's done-when cases describe.
+Covers `_chain_steps`, `_build_marker_script`, `_parse_step_results`, `_run_chain_markers`
+and `_per_step_comparison` through `filter_check`. The scenario tests feed step records
+to the comparison; the real tests run the chain in a shell, and the end-to-end ones run
+`run_base_check` and `filter_check` on real worktrees with a pytest stand-in on PATH.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
-import textwrap
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from refactory_dsh import sandbox
+from refactory_dsh import base_check, repo_change, sandbox, worktree
 from refactory_dsh.base_check import (
     BaseCheckResult,
-    ComparisonResult,
-    FilteredCheckResult,
-    _accounted,
     _build_marker_script,
     _chain_steps,
     _parse_step_results,
     _run_chain_markers,
     _runner,
     _runner_from_output,
-    _step_would_run,
-    compare_failures,
-    design_comparison,
-    excusal_blocker,
+    _step_record,
     filter_check,
-    parse_test_failures,
-    _per_step_comparison,
 )
 
 
@@ -160,911 +150,456 @@ class TestRunnerFromOutput:
         assert _runner_from_output("FAILED tests/test_a.py::test_x\n= 1 failed in 0.12s =\n") == "pytest"
 
 
+
+
+class TestChainStepsComments:
+    """An unquoted ``#`` starting a word starts a comment; nothing in it is split."""
+
+    def test_operators_in_a_comment_are_not_split(self):
+        assert _chain_steps("pytest a && pytest b # then x && y || z") == [
+            ("pytest a", ""), ("pytest b", "&&")]
+
+    def test_comment_ends_at_its_line(self):
+        assert _chain_steps("pytest a # unit && lint\n&& pytest b") == [
+            ("pytest a", ""), ("pytest b", "&&")]
+
+    def test_hash_inside_a_word_or_quotes_is_not_a_comment(self):
+        assert _chain_steps("echo a#b && echo '#c && d' && echo ${#X}") == [
+            ("echo a#b", ""), ("echo '#c && d'", "&&"), ("echo ${#X}", "&&")]
+
+    def test_runner_named_only_in_a_comment_is_not_a_runner(self):
+        steps = _chain_steps("make check # runs pytest && more")
+        assert steps == [("make check", "")]
+        assert _runner(steps[0][0]) is None
+
+
+# ── marker script and parsing ────────────────────────────────────────────
+
+
+def _shell(tmp_path: Path):
+    """Run a script as the base and the check copy do: `sandbox.run_command` in a directory."""
+    return lambda script: sandbox.run_command(script, workdir=tmp_path, timeout_s=30,
+                                              home=tmp_path)
+
+
 class TestMarkerScriptAndParsing:
-    """Unit tests for _build_marker_script and _parse_step_results."""
+    """`_build_marker_script` and `_parse_step_results`."""
 
-    def test_construction_and_parsing(self):
-        """Marker script construction and parsing round-trip correctly."""
-        steps = [("echo hello", ""), ("pytest tests/", "&&"), ("grep -q Y f", "&&")]
-        marker_id = "abcdef012345"
-        script = _build_marker_script(steps, marker_id)
+    def test_script_merges_stderr_first(self):
+        assert _build_marker_script([("a", ""), ("b", "&&")], "abc").startswith("exec 2>&1\n")
 
-        # Script starts with exec 2>&1
-        assert script.startswith("exec 2>&1\n")
-        # Contains all three echo markers
-        assert script.count(f"___REFACTORY_STEP_{marker_id}_") == 3
-
-        # Simulate stdout from running the script
-        stdout = (
-            "hello\n"
-            f"___REFACTORY_STEP_{marker_id}_0_EXIT_0\n"
-            "FAILED tests/test_a.py::test_x - assert False\n"
-            "1 failed in 0.1s\n"
-            f"___REFACTORY_STEP_{marker_id}_1_EXIT_1\n"
-            f"___REFACTORY_STEP_{marker_id}_2_EXIT_1\n"
-        )
-
-        results = _parse_step_results(stdout, marker_id, steps)
-        assert results is not None
-        assert len(results) == 3
-        assert results[0]["exit_code"] == 0
-        assert "hello" in results[0]["output"]
-        assert results[1]["exit_code"] == 1
+    def test_parsing_round_trip(self):
+        steps = [("echo hello", ""), ("pytest tests/", "&&"), ("echo c", "||")]
+        mark = "___REFACTORY_STEP_abcdef012345_"
+        stdout = (f"hello\n{mark}0_EXIT_0\nFAILED tests/test_a.py::test_x - assert False\n"
+                  f"{mark}1_EXIT_1\n{mark}2_SKIPPED\n")
+        results = _parse_step_results(stdout, "abcdef012345", steps)
+        assert [(r["ran"], r["exit_code"]) for r in results] == [(True, 0), (True, 1), (False, None)]
+        assert results[0]["output"] == "hello"
         assert "FAILED" in results[1]["output"]
-        assert results[2]["exit_code"] == 1
-        assert results[0]["operator"] == ""
-        assert results[1]["operator"] == "&&"
 
-    def test_parsing_returns_none_on_missing_marker(self):
-        """When a marker is missing, parsing returns None."""
+    def test_missing_marker_or_other_id_is_unreadable(self):
         steps = [("echo hello", ""), ("pytest", "&&")]
-        marker_id = "abcdef012345"
-        # Only one marker instead of two
-        stdout = f"hello\n___REFACTORY_STEP_{marker_id}_0_EXIT_0\n"
-        assert _parse_step_results(stdout, marker_id, steps) is None
-
-    def test_parsing_returns_none_on_uuid_mismatch(self):
-        """When marker UUID doesn't match, parsing returns None."""
-        steps = [("echo hello", "")]
-        marker_id = "abcdef012345"
-        stdout = f"hello\n___REFACTORY_STEP_wrongid00000_0_EXIT_0\n"
-        assert _parse_step_results(stdout, marker_id, steps) is None
+        assert _parse_step_results("hello\n___REFACTORY_STEP_abc_0_EXIT_0\n", "abc", steps) is None
+        assert _parse_step_results("___REFACTORY_STEP_zzz_0_EXIT_0\n___REFACTORY_STEP_zzz_1_EXIT_0",
+                                   "abc", steps) is None
 
 
-class TestStepWouldRun:
-    """Unit tests for _step_would_run."""
+class TestOneShell:
+    """The steps run in one shell through `_run_chain_markers`, so their effects carry."""
 
-    def test_operators(self):
-        """Operator gating applies to || only."""
-        assert _step_would_run("&&", 0) is True
-        assert _step_would_run("&&", 1) is True  # No gating for &&
-        assert _step_would_run("||", 0) is False
-        assert _step_would_run("||", 1) is True
-        assert _step_would_run(";", 0) is True
-        assert _step_would_run(";", 1) is True
-        assert _step_would_run("", 0) is True
+    def test_cd_and_export_carry_to_later_steps(self, tmp_path):
+        steps = _chain_steps("mkdir -p sub && cd sub && pwd && export X=1 && sh -c 'echo $X'")
+        results = _run_chain_markers(steps, _shell(tmp_path))
+        assert results is not None
+        assert [r["exit_code"] for r in results] == [0, 0, 0, 0, 0]
+        assert results[2]["output"].strip() == str((tmp_path / "sub").resolve())
+        assert results[4]["output"].strip() == "1"
 
-
-class TestExcusalBlockerBackwardsCompat:
-    """Test that excusal_blocker's existing behavior is unchanged without step_results."""
-
-    def test_backwards_compat(self):
-        """Existing callers without step_results get the same behavior."""
-        out = "FAILED tests/test_a.py::test_x - assert False\n1 failed, 3 passed in 0.12s\n"
-        failures = parse_test_failures(out)
-
-        # Without step_results (default): existing behavior
-        assert excusal_blocker(
-            "pnpm test && .venv/bin/python -m pytest -q tests 2>&1", out, failures
-        ) is None
-        result = excusal_blocker("python -m pytest -q; ruff check .", out, failures)
-        assert result is not None and "last step" in result
+    def test_stderr_is_in_the_step_output(self, tmp_path):
+        results = _run_chain_markers(_chain_steps("echo out && echo err >&2 && true"),
+                                     _shell(tmp_path))
+        assert results[1]["output"] == "err"
 
 
-class TestOrChainOperatorGating:
-    """Test that || steps whose previous step exited 0 are excluded."""
+class TestShellOperatorSemantics:
+    """``&&`` steps run whatever came before; ``||`` steps only when the shell would run them."""
 
-    def test_or_chain_gating(self):
-        """A || B where A succeeds on both sides: B's output is excluded."""
-        # Build base and attempt step results where step 0 (A) exits 0 on both sides,
-        # so step 1 (B, operator ||) would not run.
-        base_steps = [
-            {"step": "true", "operator": "", "exit_code": 0, "output": "",
-             "failures": [], "accounted": True},
-            {"step": "pytest tests/", "operator": "||", "exit_code": 1,
-             "output": "FAILED tests/test_a.py::test_x\n1 failed in 0.1s\n",
-             "failures": ["tests/test_a.py::test_x"], "accounted": True},
-        ]
+    def _ran(self, tmp_path: Path, command: str) -> list[tuple[bool, int | None, str]]:
+        results = _run_chain_markers(_chain_steps(command), _shell(tmp_path))
+        assert results is not None
+        return [(r["ran"], r["exit_code"], r["output"]) for r in results]
 
-        # Step 1 has operator "||" and prev_exit=0, so _step_would_run returns False.
-        assert _step_would_run("||", 0) is False
-        # The failure from step 1 should not be inherited since || gating drops it.
+    def test_and_step_runs_after_a_failure(self, tmp_path):
+        assert self._ran(tmp_path, "false && echo ran") == [(True, 1, ""), (True, 0, "ran")]
+
+    def test_or_chain_after_success_runs_nothing(self, tmp_path):
+        assert self._ran(tmp_path, "true || echo b || echo c") == [
+            (True, 0, ""), (False, None, ""), (False, None, "")]
+
+    def test_or_chain_runs_until_one_succeeds(self, tmp_path):
+        assert self._ran(tmp_path, "false || echo b || echo c") == [
+            (True, 1, ""), (True, 0, "b"), (False, None, "")]
+
+    def test_or_follows_the_chain_status_not_the_previous_step(self, tmp_path):
+        # The shell reads `false && echo x || echo y` as `(false && echo x) || echo y`: x is
+        # skipped by the shell (run here anyway) and the chain is still failing, so y runs.
+        assert self._ran(tmp_path, "false && echo x || echo y") == [
+            (True, 1, ""), (True, 0, "x"), (True, 0, "y")]
+        assert self._ran(tmp_path, "true && true || echo y") == [
+            (True, 0, ""), (True, 0, ""), (False, None, "")]
+
+    def test_install_guard(self, tmp_path):
+        command = "test -d node_modules || mkdir node_modules && echo built"
+        assert self._ran(tmp_path, command) == [(True, 1, ""), (True, 0, ""), (True, 0, "built")]
+        # Installed now: the shell skips the install, so the marker run does too.
+        assert self._ran(tmp_path, command) == [(True, 0, ""), (False, None, ""), (True, 0, "built")]
+
+    def test_unreadable_markers_warn_and_return_none(self, tmp_path, capsys):
+        assert _run_chain_markers(_chain_steps("echo a && exit 3 && echo c"), _shell(tmp_path)) is None
+        assert "could not be read: 1 of 3 step markers" in capsys.readouterr().err
 
 
-# ── Helpers for scenario tests ───────────────────────────────────────────
+# ── scenario tests: step records through filter_check ───────────────────
 
 
-def _make_pytest_output(failures: list[str], passed: int = 3) -> str:
-    """Build a fake pytest output with FAILED lines and a summary."""
-    lines = []
-    for f in failures:
-        lines.append(f"FAILED {f} - assert False")
-    n_failed = len(failures)
-    lines.append(f"={' ' * 10}{n_failed} failed, {passed} passed in 0.12s{' ' * 10}=")
+def _pytest_out(failures: list[str], passed: int = 3) -> str:
+    lines = [f"FAILED {f} - assert False" for f in failures]
+    lines.append(f"========== {len(failures)} failed, {passed} passed in 0.12s ==========")
     return "\n".join(lines) + "\n"
 
 
-def _make_vitest_output(failures: list[str], passed: int = 9) -> str:
-    """Build a fake vitest output with failure lines and a summary."""
-    lines = []
-    for f in failures:
-        lines.append(f" FAIL  {f}")
-    n_failed = len(failures)
-    lines.append(f"      Tests  {n_failed} failed | {passed} passed ({n_failed + passed})")
+def _vitest_out(failures: list[str], passed: int = 9) -> str:
+    lines = [f" FAIL  {f}" for f in failures]
+    lines.append(f"      Tests  {len(failures)} failed | {passed} passed ({len(failures) + passed})")
     return "\n".join(lines) + "\n"
 
 
-def _make_base_result(ok: bool, failures: set[str], output: str = "",
-                      complete: bool = False, step_results=None,
-                      exit_code: int = 1) -> BaseCheckResult:
-    """Create a BaseCheckResult with transient attributes."""
-    result = BaseCheckResult(ok=ok, failures=failures, output=output,
-                             exit_code=exit_code)
-    result._base_complete = complete  # type: ignore[attr-defined]
-    if step_results is not None:
-        result._step_results = step_results  # type: ignore[attr-defined]
-    return result
-
-
-def _make_ctx(workdir: Path, facts: dict | None = None) -> SimpleNamespace:
-    """Create a minimal context for filter_check."""
-    ctx = SimpleNamespace()
-    ctx.workdir = workdir
-    ctx.facts = facts or {}
-    ctx.exists = lambda name: False
-    ctx.read_text = lambda name: ""
-    ctx.budget = None
-    return ctx
-
-
-def _make_sandbox_result(ok: bool, stdout: str, stderr: str = "",
-                         returncode: int | None = None,
-                         timed_out: bool = False) -> sandbox.SandboxResult:
-    """Create a SandboxResult."""
-    if returncode is None:
-        returncode = 0 if ok else 1
-    return sandbox.SandboxResult(
-        ok=ok, stdout=stdout, stderr=stderr,
-        returncode=returncode, timed_out=timed_out,
-    )
-
-
-# ── Scenario tests (driving filter_check) ───────────────────────────────
-
-
-class TestChainTokShPytestGrep:
-    """tok.sh && pytest X && grep -q Y f scenario.
-
-    Base: tok.sh exit 1, pytest has failure S, grep exit 1.
-    Attempt: tok.sh exit 1, pytest has failures S and N, grep exit 1.
-    Expected: S is inherited; N and grep stay the attempt's.
-    """
-
-    def test_chain_tok_sh_pytest_grep(self, tmp_path):
-        command = "tok.sh && pytest X && grep -q Y f"
-
-        base_pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
-        attempt_pytest_out = _make_pytest_output(["tests/test_a.py::test_S",
-                                                   "tests/test_a.py::test_N"], passed=2)
-
-        base_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1, "output": "tok failed\n",
-             "failures": [], "accounted": True},
-            {"step": "pytest X", "operator": "&&", "exit_code": 1,
-             "output": base_pytest_out,
-             "failures": ["tests/test_a.py::test_S"], "accounted": True},
-            {"step": "grep -q Y f", "operator": "&&", "exit_code": 1, "output": "",
-             "failures": [], "accounted": True},
-        ]
-
-        base_failures = {"tests/test_a.py::test_S"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        # Attempt marker run results
-        attempt_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1,
-             "output": "tok failed\n"},
-            {"step": "pytest X", "operator": "&&", "exit_code": 1,
-             "output": attempt_pytest_out},
-            {"step": "grep -q Y f", "operator": "&&", "exit_code": 1,
-             "output": ""},
-        ]
-
-        # The attempt's original output (what the check produced before re-run):
-        # It stopped at step 0 (tok.sh), or maybe ran partially
-        attempt_original_out = (
-            "tok failed\n"
-            + attempt_pytest_out
-        )
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_original_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # S is inherited (same outcome on step 0, accounted on step 1)
-        assert "tests/test_a.py::test_S" in filtered.inherited
-        # N is new (not in base)
-        assert "tests/test_a.py::test_N" in filtered.new_failures
-        assert not filtered.all_excused
-
-
-class TestChainBuildVitestDifferentOutcome:
-    """pnpm build && vitest scenario.
-
-    Base: build exit 1, vitest exit 1 with T failing.
-    Attempt: build exit 0, vitest exit 1 with T failing.
-    Expected: T stays the attempt's (different outcome on step 0).
-    """
-
-    def test_chain_build_vitest_different_outcome(self, tmp_path):
-        command = "pnpm build && vitest"
-
-        base_vitest_out = _make_vitest_output(["src/app.spec.ts > suite > test T"])
-        attempt_vitest_out = _make_vitest_output(["src/app.spec.ts > suite > test T"])
-
-        base_step_results = [
-            {"step": "pnpm build", "operator": "", "exit_code": 1,
-             "output": "build failed\n", "failures": [], "accounted": True},
-            {"step": "vitest", "operator": "&&", "exit_code": 1,
-             "output": base_vitest_out,
-             "failures": ["src/app.spec.ts > suite > test T"], "accounted": True},
-        ]
-
-        base_failures = {"src/app.spec.ts > suite > test T"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_step_results = [
-            {"step": "pnpm build", "operator": "", "exit_code": 0,
-             "output": "build ok\n"},
-            {"step": "vitest", "operator": "&&", "exit_code": 1,
-             "output": attempt_vitest_out},
-        ]
-
-        attempt_original_out = attempt_vitest_out
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_original_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # T stays the attempt's because step 0 ended differently (1 vs 0)
-        assert "src/app.spec.ts > suite > test T" in filtered.new_failures
-        assert not filtered.all_excused
-
-
-class TestChainCdPytestStateCarries:
-    """cd pkg && pytest scenario.
-
-    Base and attempt: cd exit 0, pytest with pkg/tests/test_a.py::test_x failing.
-    Expected: failure inherited, with test ids from the real directory.
-    """
-
-    def test_chain_cd_pytest_state_carries(self, tmp_path):
-        command = "cd pkg && pytest"
-
-        pytest_out = _make_pytest_output(["pkg/tests/test_a.py::test_x"])
-
-        base_step_results = [
-            {"step": "cd pkg", "operator": "", "exit_code": 0,
-             "output": "", "failures": [], "accounted": True},
-            {"step": "pytest", "operator": "&&", "exit_code": 1,
-             "output": pytest_out,
-             "failures": ["pkg/tests/test_a.py::test_x"], "accounted": True},
-        ]
-
-        base_failures = {"pkg/tests/test_a.py::test_x"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_step_results = [
-            {"step": "cd pkg", "operator": "", "exit_code": 0, "output": ""},
-            {"step": "pytest", "operator": "&&", "exit_code": 1,
-             "output": pytest_out},
-        ]
-
-        attempt_original_out = pytest_out
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_original_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        assert "pkg/tests/test_a.py::test_x" in filtered.inherited
-        assert filtered.all_excused
-
-
-class TestChainPytestRuffPytestAttemptReruns:
-    """pytest unit && ruff check . && pytest integ scenario.
-
-    Base: pytest unit exit 1 (S fails), ruff exit 0, pytest integ exit 0.
-    Attempt original run: pytest unit fails (S), chain stops at step 0.
-    Attempt marker re-run: pytest unit exit 1 (S), ruff exit 0, pytest integ exit 1 (new N).
-    Expected: S is inherited, N is new.
-    """
-
-    def test_chain_pytest_ruff_pytest_attempt_reruns(self, tmp_path):
-        command = "pytest unit && ruff check . && pytest integ"
-
-        unit_out = _make_pytest_output(["tests/test_unit.py::test_S"])
-        integ_out = _make_pytest_output(["tests/test_integ.py::test_N"])
-
-        base_step_results = [
-            {"step": "pytest unit", "operator": "", "exit_code": 1,
-             "output": unit_out,
-             "failures": ["tests/test_unit.py::test_S"], "accounted": True},
-            {"step": "ruff check .", "operator": "&&", "exit_code": 0,
-             "output": "All checks passed\n", "failures": [], "accounted": True},
-            {"step": "pytest integ", "operator": "&&", "exit_code": 0,
-             "output": "3 passed in 0.1s\n", "failures": [], "accounted": True},
-        ]
-
-        base_failures = {"tests/test_unit.py::test_S"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_step_results = [
-            {"step": "pytest unit", "operator": "", "exit_code": 1,
-             "output": unit_out},
-            {"step": "ruff check .", "operator": "&&", "exit_code": 0,
-             "output": "All checks passed\n"},
-            {"step": "pytest integ", "operator": "&&", "exit_code": 1,
-             "output": integ_out},
-        ]
-
-        # Attempt's original output: only the unit test output (chain stopped at step 0)
-        attempt_original_out = unit_out
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_original_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # S is inherited
-        assert "tests/test_unit.py::test_S" in filtered.inherited
-        # N is new (discovered by the attempt re-run)
-        assert "tests/test_integ.py::test_N" in filtered.new_failures
-        assert not filtered.all_excused
-
-
-class TestHeredocNotSplitBaseIncomplete:
-    """A heredoc command is not split, and the base stays incomplete."""
-
-    def test_heredoc_not_split_base_incomplete(self):
-        cmd = "cat <<EOF\ndata\nEOF && pytest tests/"
-        assert _chain_steps(cmd) is None
-
-
-class TestPassingBaseOneRun:
-    """A passing base makes exactly one run (no marker re-run)."""
-
-    def test_passing_base_one_run(self, tmp_path):
-        """When the base check passes, _base_complete is True and no marker re-run.
-        filter_check with a passing base returns all_excused=False (no failures to excuse).
-        """
-        command = "tok.sh && pytest tests/"
-
-        base_result = _make_base_result(ok=True, failures=set(), complete=True,
-                                         exit_code=0)
-        attempt_out = _make_pytest_output(["tests/test_a.py::test_x"])
-        attempt_sandbox = _make_sandbox_result(ok=False, stdout=attempt_out, returncode=1)
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers") as mock_run, \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # No attempt re-run needed (base passed, failure is new)
-        assert "tests/test_a.py::test_x" in filtered.new_failures
-        assert not filtered.all_excused
-        # _run_chain_markers was not called (no per-step comparison needed)
-        mock_run.assert_not_called()
-
-
-class TestUnavailableTimedOutBaseInheritsNothing:
-    """An unavailable or timed-out base inherits nothing."""
-
-    def test_unavailable_base_inherits_nothing(self, tmp_path):
-        base_result = BaseCheckResult(
-            ok=False, failures=set(), output="environment failed",
-            exit_code=-1, environment_failure="could not prepare base",
-        )
-
-        attempt_out = _make_pytest_output(["tests/test_a.py::test_x"])
-        attempt_sandbox = _make_sandbox_result(ok=False, stdout=attempt_out, returncode=1)
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt:
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-
-            filtered = filter_check(ctx, attempt_sandbox, "tok.sh && pytest tests/", 60.0)
-
-        # Environment failure: nothing inherited
-        assert not filtered.all_excused
-        assert not filtered.inherited
-        assert filtered.base_environment_failure is not None
-
-
-class TestSingleShellFidelityReal:
-    """Prove single-shell fidelity through sandbox.run_command.
-
-    mkdir -p sub && cd sub && pwd: later steps see cd's effect.
-    export X=1 && sh -c 'echo $X': later steps see the export.
-    """
-
-    def test_single_shell_fidelity_real(self, tmp_path):
-        """Real shell execution proves state carries between steps."""
-        steps = [
-            ("mkdir -p sub", ""),
-            ("cd sub", "&&"),
-            ("pwd", "&&"),
-            ("export X=1", "&&"),
-            ("sh -c 'echo $X'", "&&"),
-        ]
-        marker_id = "fidelitytest0"
-        script = _build_marker_script(steps, marker_id)
-
-        result = sandbox.run_command(
-            script, workdir=tmp_path, timeout_s=30,
-            home=tmp_path,
-        )
-
-        stdout = "\n".join((result.stdout or "", result.stderr or "")).strip()
-        parsed = _parse_step_results(stdout, marker_id, steps)
-        assert parsed is not None, f"Parsing failed. stdout:\n{stdout}"
-        assert len(parsed) == 5
-
-        # mkdir exit 0
-        assert parsed[0]["exit_code"] == 0
-        # cd exit 0
-        assert parsed[1]["exit_code"] == 0
-        # pwd output ends with /sub
-        assert parsed[2]["output"].strip().endswith("/sub"), f"pwd was: {parsed[2]['output']}"
-        assert parsed[2]["exit_code"] == 0
-        # export exit 0
-        assert parsed[3]["exit_code"] == 0
-        # sh -c 'echo $X' outputs 1
-        assert "1" in parsed[4]["output"], f"echo $X was: {parsed[4]['output']}"
-        assert parsed[4]["exit_code"] == 0
-
-
-class TestAttemptMarkerRunLeavesNoFilesInRunWorktree:
-    """The attempt's marker run uses the check copy, not the run worktree."""
-
-    def test_no_files_in_run_worktree(self, tmp_path):
-        """_per_step_comparison's attempt marker run leaves no files in the run worktree."""
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        attempt_dir = tmp_path / "attempt"
-        attempt_dir.mkdir()
-
-        command = "echo hello && echo world"
-        steps = _chain_steps(command)
-        assert steps is not None
-
-        base_step_results = [
-            {"step": "echo hello", "operator": "", "exit_code": 0,
-             "output": "hello\n", "failures": [], "accounted": True},
-            {"step": "echo world", "operator": "&&", "exit_code": 0,
-             "output": "world\n", "failures": [], "accounted": True},
-        ]
-
-        base_result = _make_base_result(
-            ok=False, failures=set(), complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_step_results = [
-            {"step": "echo hello", "operator": "", "exit_code": 0,
-             "output": "hello\n"},
-            {"step": "echo world", "operator": "&&", "exit_code": 0,
-             "output": "world\n"},
-        ]
-
-        with patch("refactory_dsh.base_check._run_chain_markers") as mock_run, \
-             patch("refactory_dsh.base_check.worktree") as mock_wt:
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(attempt_dir), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(run_dir),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            mock_run.return_value = attempt_step_results
-
-            _per_step_comparison(
-                _make_ctx(run_dir),
-                command, steps, base_result,
-                _make_sandbox_result(ok=True, stdout="hello\nworld\n"),
-                timeout=60.0, named_text=None,
-                changed_files=[], brief_text="", design_text="",
-            )
-
-        # The run worktree should not have new files
-        # (since we mock _run_chain_markers, nothing actually runs in run_dir)
-        after_files = set(run_dir.rglob("*"))
-        # run_dir/.refactory/check-home may be created by _per_step_comparison
-        new_files = {f for f in after_files if ".refactory" not in str(f)}
-        assert not new_files, f"New files appeared in run worktree: {new_files}"
-
-
-# ── Excusal blocker with step_results tests ──────────────────────────────
-
-
-class TestExcusalBlockerWithStepResults:
-    """Test excusal_blocker when step_results is provided."""
-
-    def test_all_accounted_returns_none(self):
-        """When all test runner steps are accounted, returns None."""
-        step_results = [
-            {"step": "echo hello", "operator": "", "exit_code": 0, "output": "hello\n"},
-            {"step": "pytest tests/", "operator": "&&", "exit_code": 1,
-             "output": "FAILED tests/test_a.py::test_x - assert\n1 failed in 0.1s\n"},
-        ]
-        result = excusal_blocker("echo hello && pytest tests/", "", set(),
-                                  step_results=step_results)
-        assert result is None
-
-    def test_non_test_step_fails_returns_blocker(self):
-        """A non-test step failure blocks excusal."""
-        step_results = [
-            {"step": "build.sh", "operator": "", "exit_code": 1, "output": "build failed\n"},
-            {"step": "pytest tests/", "operator": "&&", "exit_code": 0,
-             "output": "1 passed in 0.1s\n"},
-        ]
-        result = excusal_blocker("build.sh && pytest tests/", "", set(),
-                                  step_results=step_results)
-        assert result is not None and "non-test step" in result
-
-    def test_runner_failed_no_failures_returns_blocker(self):
-        """A runner that failed but named no tests blocks excusal."""
-        step_results = [
-            {"step": "pytest tests/", "operator": "", "exit_code": 1,
-             "output": "ERROR collecting tests\n"},
-        ]
-        result = excusal_blocker("pytest tests/", "", set(),
-                                  step_results=step_results)
-        assert result is not None and "named no failing test" in result
-
-
-# ── Cache integration test ───────────────────────────────────────────────
-
-
-class TestCacheStepsField:
-    """Test that steps field is written to and read from cache."""
-
-    def test_cache_round_trip(self, tmp_path):
-        from refactory_dsh.base_check import _write_cache, _read_cache
-
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-
-        result = BaseCheckResult(ok=False, failures={"tests/test_a.py::test_x"},
-                                 output="FAILED tests/test_a.py::test_x\n1 failed in 0.1s",
-                                 exit_code=1)
-        result._base_complete = True  # type: ignore[attr-defined]
-        result._step_results = [  # type: ignore[attr-defined]
-            {"step": "echo hello", "operator": "", "exit_code": 0,
-             "output": "hello\n", "failures": [], "accounted": True},
-            {"step": "pytest tests/", "operator": "&&", "exit_code": 1,
-             "output": "FAILED tests/test_a.py::test_x\n1 failed in 0.1s",
-             "failures": ["tests/test_a.py::test_x"], "accounted": True},
-        ]
-
-        _write_cache(run_dir, "test-key", result)
-        cached = _read_cache(run_dir, "test-key")
-
-        assert cached is not None
-        assert cached._base_complete is True  # type: ignore[attr-defined]
-        assert hasattr(cached, "_step_results")
-        assert len(cached._step_results) == 2  # type: ignore[attr-defined]
-        assert cached._step_results[0]["step"] == "echo hello"  # type: ignore[attr-defined]
-        assert cached._step_results[1]["failures"] == ["tests/test_a.py::test_x"]  # type: ignore[attr-defined]
-
-    def test_old_cache_without_steps(self, tmp_path):
-        """A cache written before this change (no steps) has no _step_results."""
-        run_dir = tmp_path / "run"
-        refactory_dir = run_dir / ".refactory"
-        refactory_dir.mkdir(parents=True)
-
-        cache_data = {
-            "cache_key": "old-key",
-            "ok": False,
-            "failures": ["tests/test_a.py::test_x"],
-            "output": "...",
-            "exit_code": 1,
-            "base_complete": False,
-            "base_clean": True,
-        }
-        (refactory_dir / "base-check.json").write_text(json.dumps(cache_data))
-
-        from refactory_dsh.base_check import _read_cache
-        cached = _read_cache(run_dir, "old-key")
-        assert cached is not None
-        assert not hasattr(cached, "_step_results")
-
-    def test_cache_hit_does_not_rerun_base(self, tmp_path):
-        """A cache with steps field never re-runs the base."""
-        from refactory_dsh.base_check import _read_cache
-
-        run_dir = tmp_path / "run"
-        refactory_dir = run_dir / ".refactory"
-        refactory_dir.mkdir(parents=True)
-
-        cache_data = {
-            "cache_key": "cached-key",
-            "ok": False,
-            "failures": ["tests/test_a.py::test_S"],
-            "output": "...",
-            "exit_code": 1,
-            "base_complete": True,
-            "base_clean": True,
-            "steps": [
-                {"step": "tok.sh", "operator": "", "exit_code": 1,
-                 "output": "tok failed", "failures": [], "accounted": True},
-                {"step": "pytest X", "operator": "&&", "exit_code": 1,
-                 "output": "FAILED tests/test_a.py::test_S\n1 failed in 0.1s",
-                 "failures": ["tests/test_a.py::test_S"], "accounted": True},
-            ],
-        }
-        (refactory_dir / "base-check.json").write_text(json.dumps(cache_data))
-
-        cached = _read_cache(run_dir, "cached-key")
-        assert cached is not None
-        assert hasattr(cached, "_step_results")
-        assert len(cached._step_results) == 2  # type: ignore[attr-defined]
-
-
-class TestBaseCompleteRequiresAccounted:
-    """base_complete must be False when a runner's _accounted returns False.
-
-    This tests through _per_step_comparison: when the base's pytest step has
-    failures but no summary (killed mid-run, so _accounted returns False),
-    the failure should NOT be inherited because the _accounted gate in
-    _per_step_comparison blocks it.
-    """
-
-    def test_unaccounted_base_step_blocks_inheritance(self, tmp_path):
-        """A base step where _accounted is False prevents inheritance."""
-        command = "tok.sh && pytest tests/"
-
-        # Base pytest output has failures but NO summary line (killed mid-run)
-        base_pytest_no_summary = "FAILED tests/test_a.py::test_S - assert False\n"
-
-        base_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1,
-             "output": "tok failed\n", "failures": [], "accounted": True},
-            {"step": "pytest tests/", "operator": "&&", "exit_code": 1,
-             "output": base_pytest_no_summary,
-             "failures": ["tests/test_a.py::test_S"], "accounted": False},
-        ]
-
-        base_failures = {"tests/test_a.py::test_S"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=False,
-            step_results=base_step_results,
-        )
-
-        attempt_pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
-        attempt_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1,
-             "output": "tok failed\n"},
-            {"step": "pytest tests/", "operator": "&&", "exit_code": 1,
-             "output": attempt_pytest_out},
-        ]
-
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_pytest_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # S should NOT be inherited because base's _accounted is False
-        assert "tests/test_a.py::test_S" in filtered.new_failures
-        assert not filtered.all_excused
-
-
-class TestAndGatingMustNotApply:
-    """Re-adding && gating would break the tok.sh && pytest X && grep scenario.
-
-    With tok.sh failing on the base, && gating would exclude pytest failures,
-    and S could not be inherited.
-    """
-
-    def test_and_gating_would_break_inheritance(self, tmp_path):
-        """Steps after a failed && must still run (not gated)."""
-        command = "tok.sh && pytest X && grep -q Y f"
-
-        base_pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
-
-        base_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1,
-             "output": "tok failed\n", "failures": [], "accounted": True},
-            {"step": "pytest X", "operator": "&&", "exit_code": 1,
-             "output": base_pytest_out,
-             "failures": ["tests/test_a.py::test_S"], "accounted": True},
-            {"step": "grep -q Y f", "operator": "&&", "exit_code": 1,
-             "output": "", "failures": [], "accounted": True},
-        ]
-
-        base_failures = {"tests/test_a.py::test_S"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
-        attempt_step_results = [
-            {"step": "tok.sh", "operator": "", "exit_code": 1,
-             "output": "tok failed\n"},
-            {"step": "pytest X", "operator": "&&", "exit_code": 1,
-             "output": attempt_pytest_out},
-            {"step": "grep -q Y f", "operator": "&&", "exit_code": 1,
-             "output": ""},
-        ]
-
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout="tok failed\n" + attempt_pytest_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # S is inherited even though tok.sh (step before it) failed
-        # This proves && gating is NOT applied
-        assert "tests/test_a.py::test_S" in filtered.inherited
-
-
-class TestNonTestStepRegressionAfterTestSteps:
-    """pytest X && check-output.sh scenario.
-
-    Both sides fail pytest with S, check-output.sh exits 0 on base and 1 on attempt.
-    Expected: all_excused=False — the non-test step regression blocks excusal.
-    Brief Change 3: "A non-test step that fails on the attempt is never excused."
-    """
-
-    def test_non_test_step_regression_blocks_excusal(self, tmp_path):
-        command = "pytest X && check-output.sh"
-
-        pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
-
-        base_step_results = [
-            {"step": "pytest X", "operator": "", "exit_code": 1,
-             "output": pytest_out,
-             "failures": ["tests/test_a.py::test_S"], "accounted": True},
-            {"step": "check-output.sh", "operator": "&&", "exit_code": 0,
-             "output": "all good\n", "failures": [], "accounted": True},
-        ]
-
-        base_failures = {"tests/test_a.py::test_S"}
-        base_result = _make_base_result(
-            ok=False, failures=base_failures, complete=True,
-            step_results=base_step_results,
-        )
-
-        attempt_step_results = [
-            {"step": "pytest X", "operator": "", "exit_code": 1,
-             "output": pytest_out},
-            {"step": "check-output.sh", "operator": "&&", "exit_code": 1,
-             "output": "check failed\n"},
-        ]
-
-        attempt_original_out = pytest_out
-        attempt_sandbox = _make_sandbox_result(
-            ok=False, stdout=attempt_original_out, returncode=1,
-        )
-
-        ctx = _make_ctx(tmp_path)
-
-        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
-             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
-             patch("refactory_dsh.base_check.worktree") as mock_wt, \
-             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
-            mock_wt.recorded.return_value = SimpleNamespace(
-                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
-                head="def456", branch="test", run=str(tmp_path),
-            )
-            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
-            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
-
-            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
-
-        # S is inherited (same test failure on both sides)
-        assert "tests/test_a.py::test_S" in filtered.inherited
-        # But all_excused must be False because the non-test step regressed
-        assert not filtered.all_excused, (
-            "_per_step_comparison must block excusal when a non-test step "
-            "passes on base (exit 0) but fails on attempt (exit 1)"
-        )
+def _recs(*steps: tuple[str, str, int, str]) -> list[dict]:
+    return [_step_record({"step": s, "operator": op, "ran": True, "output": out, "exit_code": code})
+            for s, op, code, out in steps]
+
+
+def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_steps: list[dict],
+              attempt_out: str, *, base_complete: bool = True) -> Any:
+    """`filter_check` on a failed base with ``base_steps`` and an attempt whose re-run gives ``attempt_steps``."""
+    base = BaseCheckResult(ok=False, failures={f for sr in base_steps for f in sr["failures"]},
+                           output="", exit_code=1)
+    base._base_complete = base_complete  # type: ignore[attr-defined]
+    base._step_results = base_steps  # type: ignore[attr-defined]
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "attempt"), base="abc", head="def")
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check, "_run_chain_markers", return_value=attempt_steps), \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]):
+        return filter_check(ctx, attempt, command, 60.0)
+
+
+S = "tests/test_a.py::test_S"
+N = "tests/test_a.py::test_N"
+
+
+def test_tok_sh_pytest_grep(tmp_path):
+    """S inherited; N and the grep step stay the attempt's."""
+    filtered = _scenario(
+        tmp_path, "tok.sh && pytest X && grep -q Y f",
+        _recs(("tok.sh", "", 1, "tok failed"), ("pytest X", "&&", 1, _pytest_out([S])),
+              ("grep -q Y f", "&&", 1, "")),
+        _recs(("tok.sh", "", 1, "tok failed"), ("pytest X", "&&", 1, _pytest_out([S, N], passed=2)),
+              ("grep -q Y f", "&&", 1, "")),
+        "tok failed\n")
+    assert filtered.inherited == {S}
+    assert N in filtered.new_failures
+    assert not filtered.all_excused
+
+
+def test_earlier_step_ending_differently_charges_the_failure(tmp_path):
+    """pnpm build && vitest: build failed on the base and passed on the attempt, so T is the attempt's."""
+    t = "src/app.spec.ts > suite > test T"
+    filtered = _scenario(
+        tmp_path, "pnpm build && vitest",
+        _recs(("pnpm build", "", 1, "build failed"), ("vitest", "&&", 1, _vitest_out([t]))),
+        _recs(("pnpm build", "", 0, "build ok"), ("vitest", "&&", 1, _vitest_out([t]))),
+        _vitest_out([t]))
+    assert t in filtered.new_failures
+    assert not filtered.all_excused
+
+
+def test_same_outcomes_excuse(tmp_path):
+    """cd pkg && pytest: cd ended alike, pytest accounted on both sides, so x is excused."""
+    x = "pkg/tests/test_a.py::test_x"
+    out = _pytest_out([x])
+    filtered = _scenario(tmp_path, "cd pkg && pytest",
+                         _recs(("cd pkg", "", 0, ""), ("pytest", "&&", 1, out)),
+                         _recs(("cd pkg", "", 0, ""), ("pytest", "&&", 1, out)), out)
+    assert filtered.inherited == {x}
+    assert filtered.all_excused
+
+
+def test_attempt_rerun_finds_failures_its_check_never_ran(tmp_path):
+    """pytest unit && ruff check . && pytest integ: the attempt's check stopped at unit; its re-run finds N."""
+    unit, integ = "tests/test_unit.py::test_S", "tests/test_integ.py::test_N"
+    filtered = _scenario(
+        tmp_path, "pytest unit && ruff check . && pytest integ",
+        _recs(("pytest unit", "", 1, _pytest_out([unit])), ("ruff check .", "&&", 0, "ok"),
+              ("pytest integ", "&&", 0, "========== 3 passed in 0.1s ==========")),
+        _recs(("pytest unit", "", 1, _pytest_out([unit])), ("ruff check .", "&&", 0, "ok"),
+              ("pytest integ", "&&", 1, _pytest_out([integ]))),
+        _pytest_out([unit]))
+    assert filtered.inherited == {unit}
+    assert integ in filtered.new_failures
+    assert not filtered.all_excused
+    assert "pytest integ" in filtered.new_failure_detail
+
+
+def test_failing_and_step_does_not_stop_the_comparison(tmp_path):
+    """tok.sh failing on both sides does not drop the pytest step behind it: S is inherited."""
+    filtered = _scenario(
+        tmp_path, "tok.sh && pytest X",
+        _recs(("tok.sh", "", 1, "tok failed"), ("pytest X", "&&", 1, _pytest_out([S]))),
+        _recs(("tok.sh", "", 1, "tok failed"), ("pytest X", "&&", 1, _pytest_out([S]))),
+        "tok failed\n")
+    assert filtered.inherited == {S}
+    assert filtered.all_excused
+
+
+def test_unaccounted_base_step_blocks_the_excusal(tmp_path):
+    """The base's pytest named S but counted two failures: S is not excused."""
+    filtered = _scenario(
+        tmp_path, "tok.sh && pytest tests/",
+        _recs(("tok.sh", "", 1, "tok failed"),
+              ("pytest tests/", "&&", 1, f"FAILED {S} - x\n========== 2 failed in 0.1s ==========")),
+        _recs(("tok.sh", "", 1, "tok failed"), ("pytest tests/", "&&", 1, _pytest_out([S]))),
+        _pytest_out([S]), base_complete=False)
+    assert S in filtered.new_failures
+    assert not filtered.all_excused
+
+
+def test_non_test_step_regression_is_charged(tmp_path):
+    """pytest X && check-output.sh: the second step passed on the base and failed on the attempt."""
+    out = _pytest_out([S])
+    filtered = _scenario(tmp_path, "pytest X && check-output.sh",
+                         _recs(("pytest X", "", 1, out), ("check-output.sh", "&&", 0, "all good")),
+                         _recs(("pytest X", "", 1, out), ("check-output.sh", "&&", 1, "bad")), out)
+    assert filtered.inherited == {S}
+    assert not filtered.all_excused
+    assert "check-output.sh" in filtered.new_failure_detail
+
+
+def test_passing_base_needs_no_step_run(tmp_path):
+    """A passing base excuses nothing, so the attempt's steps are not run again."""
+    base = BaseCheckResult(ok=True, failures=set(), output="", exit_code=0)
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=_pytest_out([S]), stderr="", returncode=1)
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check, "_run_chain_markers") as markers, \
+         patch.object(base_check.worktree, "recorded",
+                      return_value=SimpleNamespace(path=str(tmp_path), base="a", head="b")), \
+         patch.object(base_check, "_all_changed_files", return_value=[]):
+        filtered = filter_check(ctx, attempt, "tok.sh && pytest tests/", 60.0)
+    assert S in filtered.new_failures and not filtered.all_excused
+    markers.assert_not_called()
+
+
+def test_heredoc_is_not_split():
+    reason: list[str] = []
+    assert _chain_steps("cat <<EOF\ndata\nEOF && pytest tests/", reason=reason) is None
+    assert "heredoc" in reason[0]
+
+
+# ── end to end: run_base_check and filter_check on real worktrees ───────
+
+
+#: A pytest stand-in, on the check's PATH through the worktree's ``node_modules/.bin``
+#: (`worktree.check_environment`). ``results/<suite>.txt`` names the tests that fail;
+#: ``@notests`` collects nothing (exit 5), ``@unaccounted`` counts one failure more than
+#: it names, ``@spam N`` prints N lines of noise. Every call is logged with its directory.
+_FAKE_PYTEST = """#!/bin/sh
+echo "$PWD $1" >> "{log}"
+f="results/$1.txt"
+names=""; mode=""
+if [ -f "$f" ]; then names=$(grep -v '^@' "$f"); mode=$(grep '^@' "$f" | head -n 1); fi
+n=0
+for t in $names; do echo "FAILED $t - assert False"; n=$((n + 1)); done
+case "$mode" in
+  "@notests") echo "no tests ran in 0.01s"; exit 5 ;;
+  "@unaccounted") n=$((n + 1)) ;;
+  "@spam "*) i=0; while [ "$i" -lt "${{mode#@spam }}" ]; do
+      echo "noise $i ......................................................"; i=$((i + 1)); done ;;
+esac
+if [ "$n" -gt 0 ]; then echo "========== $n failed, 3 passed in 0.10s =========="; exit 1; fi
+echo "========== 3 passed in 0.10s =========="
+"""
+
+UNIT_S = "tests/test_unit.py::test_S"
+INTEG_N = "tests/test_integ.py::test_N"
+
+
+class _Ctx:
+    """The parts of a run's context `run_check` and `filter_check` use."""
+
+    def __init__(self, workdir: Path, facts: dict[str, Any]):
+        self.workdir = workdir
+        self.facts = dict(facts)
+        self.budget = None
+
+    def knob(self, name: str, default: Any = None) -> Any:
+        return default
+
+    def set_fact(self, name: str, value: Any) -> None:
+        self.facts[name] = value
+
+    def exists(self, name: str) -> bool:
+        return (self.workdir / name).exists()
+
+    def read_text(self, name: str) -> str:
+        return (self.workdir / name).read_text()
+
+    def write_text(self, name: str, text: str) -> Path:
+        (self.workdir / name).write_text(text)
+        return self.workdir / name
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def _commit_files(repo: Path, files: dict[str, str]) -> str:
+    for name, text in files.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        if name.endswith("/pytest"):
+            path.chmod(0o755)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+class _Run(SimpleNamespace):
+    ctx: _Ctx
+    found: worktree.Worktree
+    log: Path
+
+    def base_calls(self) -> list[str]:
+        if not self.log.exists():
+            return []
+        run_path = Path(self.found.path).resolve()
+        base = run_path.parent / f"base-{run_path.name.removeprefix('run-')}"
+        return [line for line in self.log.read_text().splitlines()
+                if line.startswith(str(base))]
+
+
+def _run(tmp_path: Path, base: dict[str, str], attempt: dict[str, str]) -> _Run:
+    """A target whose base fails as ``base`` says and a run whose attempt fails as ``attempt`` says."""
+    log = tmp_path / "pytest-calls.log"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "T")
+    base_commit = _commit_files(repo, {
+        "node_modules/.bin/pytest": _FAKE_PYTEST.format(log=log),
+        **{f"results/{suite}.txt": text for suite, text in base.items()},
+    })
+    run_dir = tmp_path / "run"
+    worktree.create(repo, base_commit, "chain0excuse", run_dir)
+    found = worktree.commit_attempt(
+        run_dir, {Path("change.txt"): "the attempt\n",
+                  **{Path(f"results/{suite}.txt"): text for suite, text in attempt.items()}},
+        "attempt")
+    worktree.write_wrapper(found, run_dir)
+    return _Run(ctx=_Ctx(run_dir, {"commit": found.head}), found=found, log=log)
+
+
+def _check(run: _Run, command: str) -> Any:
+    """The attempt's own check, then `filter_check`, as design mode runs them."""
+    result = repo_change.run_check(run.ctx, command, 60)
+    assert not result.ok, result.stdout
+    return filter_check(run.ctx, result, command, 60, named_text="")
+
+
+def test_base_stopping_at_its_first_step_still_records_its_steps(tmp_path):
+    """H1: the base stops at unit, which the whole-command blocker calls complete; the
+    attempt fails S too and breaks integ, which only its re-run reaches."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S, "integ": INTEG_N})
+    filtered = _check(run, "pytest unit && pytest integ")
+    assert not filtered.all_excused
+    assert INTEG_N in filtered.new_failures
+    assert filtered.inherited == {UNIT_S}
+    cached = json.loads((run.ctx.workdir / base_check.CACHE_FILE).read_text())
+    assert [(s["step"], s["exit_code"]) for s in cached["steps"]] == [
+        ("pytest unit", 1), ("pytest integ", 0)]
+
+
+def test_shared_failure_in_one_shell_is_excused(tmp_path):
+    """The same failure in the same step, every step ending alike: excused."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S, "integ": ""})
+    filtered = _check(run, "pytest unit && pytest integ")
+    assert filtered.all_excused
+    assert filtered.inherited == {UNIT_S}
+    assert filtered.base_complete
+
+
+@pytest.mark.parametrize("base_integ, excused", [("", False), ("@notests", True)])
+def test_runner_step_failing_without_naming_a_test(tmp_path, base_integ, excused):
+    """H2: integ collects nothing on the attempt (exit 5). It is charged unless the base's
+    integ ended the same way."""
+    run = _run(tmp_path, base={"unit": UNIT_S, "integ": base_integ},
+               attempt={"unit": UNIT_S, "integ": "@notests"})
+    filtered = _check(run, "pytest unit && pytest integ")
+    assert filtered.all_excused is excused
+    if not excused:
+        assert "pytest integ` exited 5" in filtered.new_failure_detail
+
+
+def test_marker_run_leaves_no_files_in_the_run_worktree(tmp_path):
+    """H3: the attempt's steps run in its check copy, as its check beside the reviews does."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    filtered = _check(run, "pytest unit && touch made_by_marker")
+    assert filtered.all_excused
+    assert not (Path(run.found.path) / "made_by_marker").exists()
+    run_id = Path(run.found.path).name.removeprefix("run-")
+    copy = repo_change._check_copy_path(Path(run.found.target), run_id)
+    assert (copy / "made_by_marker").exists()
+    assert _git(Path(run.found.path), "status", "--porcelain") == ""
+
+
+def test_cache_hit_never_reruns_the_base(tmp_path):
+    """The base's steps are cached under its key; a second check reads them and runs nothing on the base."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    command = "pytest unit && pytest integ"
+    first = _check(run, command)
+    calls = len(run.base_calls())
+    assert calls == 3  # the check stops at unit; the steps run unit and integ
+    second = _check(run, command)
+    assert len(run.base_calls()) == calls
+    assert first.all_excused and second.all_excused
+
+
+def test_base_complete_needs_its_runner_accounted(tmp_path):
+    """The base's unit names S but counts two failures: incomplete, and S is not excused."""
+    run = _run(tmp_path, base={"unit": f"{UNIT_S}\n@unaccounted"},
+               attempt={"unit": UNIT_S})
+    filtered = _check(run, "pytest unit && pytest integ")
+    assert filtered.base_complete is False
+    assert not filtered.all_excused
+
+
+def test_cut_output_charges(tmp_path, monkeypatch, capsys):
+    """M1: the attempt's per-step output is cut between its markers, so nothing is excused."""
+    monkeypatch.setattr(sandbox, "OUTPUT_KEEP_BYTES", 4096)
+    monkeypatch.setattr(sandbox, "OUTPUT_TAIL_BYTES", 512)
+    # The steps pass alike on both sides; only the attempt's print enough to be cut.
+    run = _run(tmp_path, base={"unit": UNIT_S},
+               attempt={"unit": UNIT_S, "integ": "@spam 200", "e2e": "@spam 200"})
+    filtered = _check(run, "pytest unit && pytest integ && pytest e2e")
+    assert not filtered.all_excused
+    assert not filtered.inherited
+    assert "could not be read" in filtered.inherited_detail
+    assert "step markers in its kept output" in capsys.readouterr().err
