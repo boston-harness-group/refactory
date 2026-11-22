@@ -1284,14 +1284,15 @@ def _check_copy_path(target: Path, run_id: str) -> Path:
 
 
 def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
-                ) -> tuple[worktree.Worktree, dict[str, str], Path, list[str]]:
+                ) -> tuple[worktree.Worktree, dict[str, str], Path, list[str], dict[str, Any] | None]:
     """The run's check copy at the attempt's commit, with its environment prepared.
 
     It is kept across attempts -- moved to the new commit with what the last check left
     in tracked and untracked files put back, its installed environment kept -- and its
     hooks and HOME are its own, as the base worktree's are. It goes when the run's base worktree
-    does (`remove_check_copy`). Returns the copy, its environment and home, and the
-    problems that stopped its preparation.
+    does (`remove_check_copy`). Returns the copy, its environment and home, the
+    problems that stopped its preparation, and the prep-failure dict of the step that
+    failed (None when it worked).
     """
     target = Path(found.target)
     run_id = Path(found.path).name.removeprefix("run-")
@@ -1312,10 +1313,10 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
 
     home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
     home.mkdir(parents=True, exist_ok=True)
-    copy, env, problems, _fail = prepare_check_environment(
+    copy, env, problems, prep_fail = prepare_check_environment(
         copy, ctx.facts, amend=False, commit_lockfiles=False, run=ctx.workdir, home=home,
         timeout=timeout, budget=getattr(ctx, "budget", None))
-    return copy, env, home, problems
+    return copy, env, home, problems, prep_fail
 
 
 def remove_check_copy(target: Path, run_id: str) -> None:
@@ -1347,7 +1348,9 @@ def _check_in_worktree(ctx: Any, found: worktree.Worktree, command: str, timeout
                     stderr=triage["error_text"],
                     change_caused_prep=triage,
                 )
-        return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, prep_failure=prep_fail,
+        _pf = prep_fail if prep_fail else {"step": "prepare", "returncode": 1,
+                                             "timed_out": False, "error_text": "\n".join(problems)}
+        return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, prep_failure=_pf,
                                      stderr=(
             "the worktree's environment could not be prepared:\n" + "\n".join(problems)))
     result = sandbox.run_command(command, workdir=Path(found.path), timeout_s=timeout,
@@ -1399,10 +1402,26 @@ def run_check(ctx: Any, command: str, timeout: float,
         if found.head != str(ctx.facts.get("commit")):
             raise ValueError("the worktree is not at the attempt its check was prepared for; "
                              "prepare the check again")
-        copy, env, home, problems = _check_copy(ctx, found, timeout)
+        copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
+        attempts = 1
+        if problems and not (prep_fail or {}).get("timed_out"):
+            # The run's own worktree prepared cleanly at this commit: the check beside the
+            # reviews runs only on an attempt `prepare_check` prepared without a problem
+            # (it decides a failed preparation itself), and the commit was compared above.
+            # So a failure in the copy alone is not the change's. It may be a passing
+            # fault, so the copy is prepared once more; a second failure stops the build
+            # loop as a draft (`design_ops._full_check`), never a builder round. One that
+            # timed out is not prepared again: a silent hang would cost a second wait.
+            copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
+            attempts = 2
         if problems:
-            return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, stderr=(
-                "the check copy's environment could not be prepared:\n" + "\n".join(problems)))
+            _stderr = "the check copy's environment could not be prepared:\n" + "\n".join(problems)
+            failed = dict(prep_fail) if prep_fail else {"step": "prepare", "returncode": 1,
+                                                        "timed_out": False}
+            failed.setdefault("error_text", "\n".join(problems))
+            failed.update(check_copy=True, commit=found.head, attempts=attempts)
+            return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
+                                         prep_failure=failed, stderr=_stderr)
         result = sandbox.run_command(command, workdir=Path(copy.path), timeout_s=timeout,
                                      budget=getattr(ctx, "budget", None), env=env, home=home,
                                      exact_env=True, worktree_root=Path(copy.path))
