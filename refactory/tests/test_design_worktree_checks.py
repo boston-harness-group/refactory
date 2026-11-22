@@ -163,8 +163,14 @@ def test_a_check_in_the_worktree_is_bounded_by_its_timeout_not_by_memory(repo, t
                      target=str(repo))
     assert result.exit_ok, result.error
     evidence = json.loads((tmp_path / "run" / "authoring-evidence.json").read_text())
+    desired_cpu = COMMAND_BACKSTOP_S * (os.cpu_count() or 1)
+    hard = resource.getrlimit(resource.RLIMIT_CPU)[1]
+    if hard != resource.RLIM_INFINITY and desired_cpu > hard:
+        expected_cpu = hard
+    else:
+        expected_cpu = desired_cpu
     assert json.loads(evidence["validation"]["stdout"]) == [resource.getrlimit(resource.RLIMIT_AS)[0],
-                                                            COMMAND_BACKSTOP_S * (os.cpu_count() or 1)]
+                                                            expected_cpu]
 
 
 def test_a_check_uses_the_environment_its_worktrees_manifests_install(repo, tmp_path, monkeypatch):

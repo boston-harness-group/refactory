@@ -39,7 +39,16 @@ from refactory_dsh import registry
 from refactory_dsh.paths import project_root, project_for_nodes
 
 #: Ceilings for one sandboxed run. A shell command (`run_command`) is bounded by its
-#: time rather than by the memory and CPU ceilings, which hold for code snippets (#325).
+#: inactivity limit (seconds of no stdout/stderr) rather than by the memory and CPU
+#: ceilings, which hold for code snippets (#325).
+#:
+#: Measured silent gaps (PYTHONUNBUFFERED=1, 2026-11-21):
+#:   ./install.sh           1.8 s max gap   (18 s total)
+#:   pnpm run docs:generate 1.5 s max gap   (4 s total)
+#:   pnpm test (vitest)    35.0 s max gap   (79 s total)
+#:   pytest -q -n 16       ~60 s max gap   (~1170 s total, estimated from prior runs)
+#:
+#: 3× the largest gap (60 s) = 180 s, which is today's default.
 DEFAULT_TIMEOUT_S = 180
 #: Whole-mode smoke budget when model calls are required; independently configurable.
 DEFAULT_MODEL_SMOKE_TIMEOUT_S = 3600
@@ -276,8 +285,17 @@ def _limits(memory_mb: int, cpu_s: int, file_mb: int, *,
     import resource
 
     def apply() -> None:
+        # Cap RLIMIT_CPU at the system's hard limit — a non-root process cannot
+        # raise its hard limit, so setrlimit would silently fail.
+        effective_cpu = cpu_s
+        try:
+            _soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+            if hard != resource.RLIM_INFINITY and cpu_s > hard:
+                effective_cpu = hard
+        except (ValueError, OSError):
+            pass
         caps = (
-            (resource.RLIMIT_CPU, (cpu_s, cpu_s)),
+            (resource.RLIMIT_CPU, (effective_cpu, effective_cpu)),
             (resource.RLIMIT_FSIZE, (file_mb * 1024 * 1024,) * 2),
         )
         for which, value in caps:
@@ -509,8 +527,11 @@ def run_command(
     _all_stderr_lines: list[str] = []
     _tail_stdout: collections.deque[str] = collections.deque(maxlen=200)
     _tail_stderr: collections.deque[str] = collections.deque(maxlen=200)
+    # Track whether the stream ended with a newline so the reconstructed text matches.
+    _stdout_trailing_nl: list[bool] = [False]
+    _stderr_trailing_nl: list[bool] = [False]
 
-    def _reader(fd, all_lines, tail_lines, activity):
+    def _reader(fd, all_lines, tail_lines, activity, trailing_nl):
         """Drain *fd* (a raw binary file descriptor) line by line, updating *activity*."""
         buf = b""
         while True:
@@ -532,6 +553,9 @@ def run_command(
             decoded = buf.decode("utf-8", errors="replace")
             all_lines.append(decoded)
             tail_lines.append(decoded)
+            trailing_nl[0] = False
+        else:
+            trailing_nl[0] = bool(all_lines)
 
     def _once() -> subprocess.CompletedProcess[str]:
         """Run the command once, bounded by inactivity and backstop; raise on timeout or budget."""
@@ -545,11 +569,13 @@ def run_command(
         _all_stderr_lines.clear()
         _tail_stdout.clear()
         _tail_stderr.clear()
+        _stdout_trailing_nl[0] = False
+        _stderr_trailing_nl[0] = False
         # activity[0] = last time output was seen.  GIL-atomic float assignment.
         activity = [time.monotonic()]
 
-        t_out = threading.Thread(target=_reader, args=(proc.stdout, _all_stdout_lines, _tail_stdout, activity), daemon=True)
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, _all_stderr_lines, _tail_stderr, activity), daemon=True)
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, _all_stdout_lines, _tail_stdout, activity, _stdout_trailing_nl), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, _all_stderr_lines, _tail_stderr, activity, _stderr_trailing_nl), daemon=True)
         t_out.start()
         t_err.start()
 
@@ -594,8 +620,8 @@ def run_command(
         # Normal exit: join reader threads, return ALL output (not truncated).
         t_out.join(timeout=5)
         t_err.join(timeout=5)
-        stdout_text = "\n".join(_all_stdout_lines) + ("\n" if _all_stdout_lines else "")
-        stderr_text = "\n".join(_all_stderr_lines) + ("\n" if _all_stderr_lines else "")
+        stdout_text = "\n".join(_all_stdout_lines) + ("\n" if _stdout_trailing_nl[0] else "")
+        stderr_text = "\n".join(_all_stderr_lines) + ("\n" if _stderr_trailing_nl[0] else "")
         return subprocess.CompletedProcess(command, retcode, stdout_text, stderr_text)
 
     started = time.monotonic()

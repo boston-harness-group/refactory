@@ -185,8 +185,15 @@ def test_a_check_command_is_bounded_by_its_timeout_not_by_memory(tmp_path):
     assert result.ok, result.stderr
     address_space, cpu = json.loads(result.stdout)
     assert address_space == resource.getrlimit(resource.RLIMIT_AS)[0], "a check sets no address-space cap"
-    assert cpu == sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1), (
-        "a check's CPU limit is the backstop on every core (not the inactivity limit)"
+    desired = sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1)
+    hard = resource.getrlimit(resource.RLIMIT_CPU)[1]
+    if hard != resource.RLIM_INFINITY and desired > hard:
+        expected_cpu = hard
+    else:
+        expected_cpu = desired
+    assert cpu == expected_cpu, (
+        "a check's CPU limit is the backstop on every core (not the inactivity limit), "
+        f"capped at the system hard limit; expected {expected_cpu}, got {cpu}"
     )
 
 
@@ -334,9 +341,21 @@ def test_rlimit_cpu_derives_from_backstop(tmp_path):
     )
     assert result.ok, result.stderr
     cpu = json.loads(result.stdout)
-    expected = sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1)
+    import resource as _res
+    desired = sandbox.COMMAND_BACKSTOP_S * (os.cpu_count() or 1)
+    hard = _res.getrlimit(_res.RLIMIT_CPU)[1]
+    if hard != _res.RLIM_INFINITY and desired > hard:
+        expected = hard
+    else:
+        expected = desired
     assert cpu == expected, (
-        f"RLIMIT_CPU should be backstop * cpu_count = {expected}, got {cpu}"
+        f"RLIMIT_CPU should be backstop * cpu_count = {desired}, "
+        f"capped at hard limit {hard}; got {cpu}"
+    )
+    # Key assertion: RLIMIT_CPU is NOT the inactivity timeout_s (10) times cpu_count —
+    # that would be far smaller than the backstop-based value.
+    assert cpu != 10 * (os.cpu_count() or 1), (
+        "RLIMIT_CPU must be based on the backstop, not the caller's timeout_s"
     )
 
 
