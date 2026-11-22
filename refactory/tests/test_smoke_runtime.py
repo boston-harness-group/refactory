@@ -4,10 +4,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -119,7 +117,7 @@ class TestRunOnDshInactivity:
 
     def _mock_dsh_deps(self, monkeypatch, tmp_path, process):
         """Patch all external dependencies of run_on_dsh."""
-        from refactory_dsh import dsh_runtime, dsh_profile, lowering, workers, steering
+        from refactory_dsh import dsh_runtime, dsh_profile, lowering, workers
 
         monkeypatch.setattr(dsh_profile, "model_home", lambda x: tmp_path / "home")
         monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
@@ -138,7 +136,6 @@ class TestRunOnDshInactivity:
         monkeypatch.setattr(workers, "environment", lambda ctx: {})
         monkeypatch.setattr(workers, "session_patch", lambda wd: None)
 
-        from refactory_dsh.owned_process import _termination_as_exit
         import contextlib
         monkeypatch.setattr("refactory_dsh.owned_process._termination_as_exit",
                             contextlib.nullcontext)
@@ -150,7 +147,6 @@ class TestRunOnDshInactivity:
         })())
         monkeypatch.setattr(dsh_runtime, "track_run", lambda p: None)
         monkeypatch.setattr(dsh_runtime, "untrack_run", lambda p: None)
-        from refactory_dsh.owned_process import shutdown
         monkeypatch.setattr("refactory_dsh.owned_process.shutdown", lambda p, **kw: None)
 
     def test_run_on_dsh_inactivity_true_stops_on_idle(self, tmp_path, monkeypatch):

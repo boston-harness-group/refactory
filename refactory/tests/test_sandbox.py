@@ -156,7 +156,19 @@ def test_a_run_that_exceeds_its_time_limit_is_killed(tmp_path):
         "import time; time.sleep(30)", workdir=tmp_path / "run", timeout_s=1
     )
     assert not result.ok and result.timed_out
-    assert "timed out" in result.problem() or "inactivity" in result.problem()
+    assert "time limit" in result.problem()
+
+
+def test_a_sandboxed_run_keeps_its_wall_clock_unless_it_asks_for_inactivity(tmp_path):
+    """Only a smoke opts in to the inactivity limit: every other caller (verify, describe,
+    readiness) keeps the wall clock it had, so a run that keeps printing is still stopped
+    at its limit, reported as the time limit rather than as inactivity."""
+    code = "import time\nwhile True:\n    print('.', flush=True)\n    time.sleep(0.1)\n"
+    started = time.monotonic()
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "run", timeout_s=1)
+    assert time.monotonic() - started < 10
+    assert result.timed_out and result.timeout_kind is None
+    assert "time limit" in result.problem()
 
 
 def test_a_failing_run_reports_the_last_line_of_its_error(tmp_path):
@@ -744,6 +756,7 @@ def test_run_sandboxed_inactivity_timeout_fires_on_idle(tmp_path):
         "import time; time.sleep(30)",
         workdir=tmp_path / "idle",
         timeout_s=1,
+        inactivity=True,
     )
     assert result.timed_out
     assert result.timeout_kind == "inactivity"
@@ -760,7 +773,7 @@ def test_run_sandboxed_active_item_survives_past_timeout_s(tmp_path):
         "    time.sleep(0.3)\n"
         "print(json.dumps({'score': 42}), flush=True)\n"
     )
-    result = sandbox.run_sandboxed(code, workdir=tmp_path / "active", timeout_s=1)
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "active", timeout_s=1, inactivity=True)
     assert result.ok
     assert not result.timed_out
     assert result.timeout_kind is None
@@ -778,7 +791,7 @@ def test_run_sandboxed_backstop_fires_despite_activity(tmp_path, monkeypatch):
         "    print('.', flush=True)\n"
         "    time.sleep(0.1)\n"
     )
-    result = sandbox.run_sandboxed(code, workdir=tmp_path / "backstop", timeout_s=1)
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "backstop", timeout_s=1, inactivity=True)
     assert result.timed_out
     assert result.timeout_kind == "backstop"
 
@@ -789,6 +802,169 @@ def test_run_sandboxed_propagates_inner_timeout_kind(tmp_path):
         "import json\n"
         "print(json.dumps({'exit_ok': False, 'timeout_kind': 'inactivity', 'score': 0}), flush=True)\n"
     )
-    result = sandbox.run_sandboxed(code, workdir=tmp_path / "inner", timeout_s=30)
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "inner", timeout_s=30, inactivity=True)
     assert result.timed_out
     assert result.timeout_kind == "inactivity"
+
+
+# ── a smoke's nested run (the watched sandbox around run_on_dsh) ───────────
+
+#: The inner process a model smoke runs: the real `run_on_dsh`, with DSH replaced by a
+#: child that writes CHILD to stdout and its pid beside the run. Everything that would
+#: reach a real profile or build is stubbed; the output capture, the inner watcher and
+#: the activity mark are the real ones.
+_NESTED = '''
+import json, sys
+from pathlib import Path
+from refactory_dsh import dsh_profile, dsh_runtime, lowering, sandbox
+dsh_profile.requirement = lambda **kw: None
+dsh_runtime.require_build = lambda **kw: None
+dsh_runtime.dsh_command = lambda **kw: [sys.executable, "-u", "-c", {child!r}]
+lowering.write_mode_graph = lambda *a, **kw: None
+lowering.write_declarations = lambda *a, **kw: None
+run = dsh_runtime.run_on_dsh({{"knobs": {{}}}}, Path.cwd() / "inner", timeout_s=600, inactivity=True,
+                             activity_file=Path.cwd() / sandbox.ACTIVITY_FILE)
+print(json.dumps({{"returncode": run.returncode, "ticks": run.stdout.count("tick")}}))
+'''
+
+
+def _nested(child: str, pid_file: Path) -> str:
+    pid = f"import os, pathlib; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+    return _NESTED.format(child=pid + child)
+
+
+def test_a_smoke_whose_nested_run_keeps_working_outlives_its_inactivity_limit(tmp_path):
+    """The nested run's output never reaches the sandbox's pipes (`run_on_dsh` captures
+    it), so before the mark the sandbox stopped it `timeout_s` after it began; the mark
+    it leaves for each line it sees keeps it running to its end."""
+    child = "import time\nfor i in range(12):\n    print('tick', i, flush=True)\n    time.sleep(0.5)\n"
+    result = sandbox.run_sandboxed(_nested(child, tmp_path / "dsh.pid"), workdir=tmp_path / "run",
+                                   timeout_s=2, inactivity=True)
+    assert not result.timed_out, result.stderr
+    assert result.payload == {"returncode": 0, "ticks": 12}, result.stdout + result.stderr
+    assert result.elapsed_s is not None and result.elapsed_s > 4
+
+
+def test_a_smoke_whose_nested_run_goes_quiet_is_stopped_and_its_run_shut_down(tmp_path):
+    """Silence is still stopped at the limit, and the nested run is asked to stop rather
+    than killed: it shuts its DSH child down within the sandbox's grace."""
+    child = "import time\ntime.sleep(120)\n"
+    result = sandbox.run_sandboxed(_nested(child, tmp_path / "dsh.pid"), workdir=tmp_path / "run",
+                                   timeout_s=2, inactivity=True)
+    assert result.timed_out and result.timeout_kind == "inactivity", result.stderr
+    assert result.elapsed_s is not None and result.elapsed_s < sandbox.STOP_GRACE_S
+    assert "cleanup unconfirmed" not in result.stderr
+    pid = int((tmp_path / "dsh.pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+# ── a smoke's sample of a Task-bound mode ──────────────────────────────────
+
+_SAMPLED = {
+    "__init__.py": (
+        "from refactory_dsh.nn import Package\n"
+        "from .mode import Knobbed, Plain\n\n"
+        "PACKAGE = Package(name='sandboxed_pkg', modes=(Knobbed, Plain),"
+        " ops=('refactory_packages.sandboxed_pkg.ops',))\n"
+    ),
+    "task.py": (
+        "from refactory_dsh.task import Task, TaskInstance, VerifyResult\n\n"
+        "class Many(Task):\n"
+        "    name = 'many'\n"
+        "    def instances(self, **kw):\n"
+        # Listed highest id first: the first items listed are the ones the train part
+        # holds out (`task.partition` holds out the highest ids).
+        "        return [TaskInstance(id=f'item_{i:03d}', metadata={}) for i in reversed(range(177))]\n"
+        "    def setup(self, instance, workspace, **kw):\n"
+        "        pass\n"
+        "    def verify(self, instance, workspace, **kw):\n"
+        "        return VerifyResult(passed=True, score=1.0)\n"
+    ),
+    "ops.py": (
+        "import json, time\n\n"
+        "def work(ctx):\n"
+        "    item = ctx.read_json('current_item.json', {}) or {}\n"
+        "    started = time.time()\n"
+        "    time.sleep(1.0)\n"
+        "    ctx.write_json('span.json', {'id': item.get('id'), 'start': started, 'end': time.time()})\n"
+        "    return {}\n\n"
+        "def finish(ctx):\n"
+        "    ctx.write_json('best.json', {'best': 1.0})\n"
+        "    return {'best': 1.0}\n"
+    ),
+    "mode.py": (
+        "from refactory_dsh import nn\n"
+        "OPS = 'refactory_packages.sandboxed_pkg.ops'\n"
+        "TASK = 'refactory_packages.sandboxed_pkg.task:Many'\n\n"
+        "def _graph(**data):\n"
+        "    g = nn.Graph()\n"
+        "    g.add(nn.Node('data', 'data', subgraph_entry='work', subgraph_exit='work',"
+        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',), **data))\n"
+        "    g.add(nn.Node('work', 'op', call=OPS + ':work', reads=('current_item.json',),"
+        " writes=('span.json',)))\n"
+        "    g.add(nn.Node('finish', 'op', call=OPS + ':finish', writes=('best.json',),"
+        " produces=('best',)))\n"
+        "    g.connect('data', 'finish')\n"
+        "    return g\n\n"
+        "class Knobbed(nn.Mode):\n"
+        "    name = 'knobbed'\n"
+        "    @classmethod\n"
+        "    def declare(cls):\n"
+        "        return {'data_parallelism': nn.Knob(24, 'int', lo=1, hi=64, frozen=True)}\n"
+        "    def build(self):\n"
+        "        return _graph(parallelism_knob='data_parallelism', knobs=('data_parallelism',))\n"
+        "    def score(self, result):\n"
+        "        return 1.0\n\n"
+        "class Plain(nn.Mode):\n"
+        "    name = 'plain'\n"
+        "    def build(self):\n"
+        "        return _graph()\n"
+        "    def score(self, result):\n"
+        "        return 1.0\n"
+    ),
+}
+
+
+def _most_at_once(spans: list[dict]) -> int:
+    """The most spans that were open at one moment."""
+    edges = sorted([(span["start"], 1) for span in spans] + [(span["end"], -1) for span in spans],
+                   key=lambda edge: (edge[0], edge[1]))
+    most = current = 0
+    for _at, step in edges:
+        current += step
+        most = max(most, current)
+    return most
+
+
+@pytest.mark.parametrize(("mode", "knobs", "at_once"), [
+    ("knobbed", None, 3),                       # the knob, 24, is no ceiling for 3 items
+    ("knobbed", {"data_parallelism": "2"}, 2),  # the mode's own knob caps the sample
+    ("plain", None, 3),                         # no knob: the node's parallelism is set
+])
+def test_a_smoke_of_a_task_bound_mode_runs_a_parallel_sample_of_its_train_part(
+        tmp_path, graph_profile_home, mode, knobs, at_once):
+    """The smoke create runs (`sandbox.smoke` with a model), on the spine: 3 of the Task's
+    177 items, from its train part, at once.
+
+    A node whose parallelism is a knob cannot also be given ``parallelism`` (the graph
+    refuses both), so the knob is set instead, held to its own value. The spine is the
+    graph profile's (`graph-owner.mjs`); the mode has no agent node, so no model is
+    called."""
+    from refactory_dsh.model import DshModelClient
+    from tests_support import graph_owner_launcher
+
+    launcher = graph_owner_launcher(tmp_path / "dsh")
+    if launcher is None:
+        pytest.skip("the spine owner needs Node and the installed workspace (pnpm install)")
+    _stage(tmp_path, _SAMPLED)
+    run = tmp_path / "run"
+    context = DshModelClient(attempts=1, dsh_cli=str(launcher)).context()
+    result = sandbox.smoke(f"{NAME}/{mode}", run, project=tmp_path, model=True, knobs=knobs,
+                           model_context=context, smoke_items=3, timeout_s=120)
+    assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
+    assert result.payload["item_limit"] == 3
+    spans = [json.loads(path.read_text()) for path in run.glob("passes/data/*/span.json")]
+    # The train part holds the 124 lowest ids; the Task lists the highest first.
+    assert sorted(span["id"] for span in spans) == ["item_121", "item_122", "item_123"]
+    assert _most_at_once(spans) == at_once

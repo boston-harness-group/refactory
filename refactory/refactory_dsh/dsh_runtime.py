@@ -117,6 +117,7 @@ def run_on_dsh(
     item_slots: int | None = None,
     stop_event: threading.Event | None = None,
     inactivity: bool = False,
+    activity_file: Path | None = None,
 ) -> DshRun:
     """Lower ``state``, run it on DSH, and read back the facts it produced.
 
@@ -128,6 +129,12 @@ def run_on_dsh(
     ``stop_event`` (``Run.evaluate_many``'s): once it is set the run does not
     start, and a run in flight is shut down and raises ``EvaluationStopped``
     rather than returning a result.
+
+    ``inactivity`` makes ``timeout_s`` an inactivity limit -- no output and no change to
+    the run's progress files for that long -- with a wall-clock backstop, instead of a
+    wall clock. ``activity_file`` is where this run marks each sign of work it sees
+    (`sandbox.mark_activity`), for a watched sandbox it runs inside (a smoke's), which
+    cannot see this run's output.
     """
     import time
 
@@ -261,13 +268,16 @@ def run_on_dsh(
             reader.start()
 
         # Progress-file watcher: when inactivity=True, monitor the inner run's
-        # progress files so worker events and item results count as activity.
+        # progress files so worker events and item results count as activity. With an
+        # activity_file it also marks there each time it sees new work, for the
+        # sandbox this run is nested in.
         _progress_thread: Thread | None = None
-        if inactivity:
-            from refactory_dsh.sandbox import _progress_at
+        if inactivity or activity_file is not None:
+            from refactory_dsh.sandbox import _progress_at, mark_activity
 
             def _watch_progress() -> None:
                 prev: dict[str, Any] = {}
+                marked = 0.0
                 while process.poll() is None:
                     try:
                         snap = _progress_at(workdir)
@@ -276,6 +286,9 @@ def run_on_dsh(
                     if snap != prev:
                         _activity[0] = time.monotonic()
                         prev = snap
+                    if activity_file is not None and _activity[0] != marked:
+                        marked = _activity[0]
+                        mark_activity(activity_file)
                     time.sleep(1)
 
             _progress_thread = Thread(target=_watch_progress, daemon=True, name="dsh-progress-watch")
@@ -300,9 +313,14 @@ def run_on_dsh(
                     now = time.monotonic()
                     if now - _activity[0] >= timeout_s:
                         _timeout_kind = "inactivity"
-                        raise subprocess.TimeoutExpired(command, timeout_s)
-                    if now - _began >= _backstop_s:
+                    elif now - _began >= _backstop_s:
                         _timeout_kind = "backstop"
+                    if _timeout_kind is not None:
+                        # Stopping is work: the sandbox around this run gives the
+                        # shutdown below its window rather than stopping it midway.
+                        if activity_file is not None:
+                            from refactory_dsh.sandbox import mark_activity
+                            mark_activity(activity_file)
                         raise subprocess.TimeoutExpired(command, timeout_s)
                     try:
                         returncode = process.wait(timeout=0.1)
@@ -410,6 +428,7 @@ def evaluate_on_dsh(
     item_slots: int | None = None,
     stop_event: threading.Event | None = None,
     inactivity: bool = False,
+    activity_file: Path | None = None,
 ) -> RunResult:
     """One forward pass on DSH, scored by the mode's own `score()`.
 
@@ -432,7 +451,7 @@ def evaluate_on_dsh(
                      **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
                         if item_slots_dir is not None else {}),
                      **({"stop_event": stop_event} if stop_event is not None else {}),
-                     inactivity=inactivity)
+                     inactivity=inactivity, activity_file=activity_file)
     # The DSH evaluator's run end (a spine run it launched and waited for): the
     # same cleanups the walker runs when its own run ends.
     from refactory_dsh.nn.executor import _run_end_cleanup

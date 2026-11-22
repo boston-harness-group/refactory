@@ -1670,7 +1670,6 @@ def smoke(ctx: Any) -> dict[str, Any]:
     if not 1 <= timeout_s <= 86400:
         raise ValueError("smoke_timeout_s must be between 1 and 86400 seconds")
     smoke_items = int(ctx.knob("smoke_items", 3))
-    data_parallelism = int(ctx.knob("data_parallelism", 0))
     described = sandbox.describe_package(name, project=project_for_nodes())
     if not described.ok:
         raise ValueError(f"the package could not be read: {described.problem()}")
@@ -1685,7 +1684,7 @@ def smoke(ctx: Any) -> dict[str, Any]:
     result = sandbox.smoke(
         identifier, workdir, project=project_for_nodes(), model=bool(agent_nodes),
         knobs=samples or None, model_context=context, timeout_s=timeout_s,
-        smoke_items=smoke_items, data_parallelism=data_parallelism,
+        smoke_items=smoke_items,
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     ok = result.ok and result.payload.get("exit_ok") is not False
@@ -1701,7 +1700,6 @@ def smoke(ctx: Any) -> dict[str, Any]:
         "sample_knobs": samples,
         "timeout_kind": _timeout_kind,
         "item_limit": result.payload.get("item_limit"),
-        "total_items": result.payload.get("total_items"),
         "status": "pass" if ok else failure_kind(error, timed_out=result.timed_out, returncode=result.returncode),
     }
     ctx.write_json("smoke.json", payload)
@@ -1842,8 +1840,8 @@ def gate_smoke(ctx: Any) -> str:
             if timeout_kind:
                 items_info = ""
                 if receipt.get("item_limit"):
-                    items_info = (f"; {receipt.get('item_limit')} of "
-                                  f"{receipt.get('total_items', '?')} items requested")
+                    items_info = (f"; a sample of {receipt.get('item_limit')} items "
+                                  "per task-bound data node")
                 reason = (f"smoke timed out ({timeout_kind}, limit "
                           f"{receipt.get('timeout_s', '?')}s{items_info}); "
                           f"code repair was not attempted")

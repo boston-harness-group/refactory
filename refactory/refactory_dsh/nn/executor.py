@@ -638,9 +638,17 @@ def load_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     :func:`refactory_dsh.task.select_subset`; both runtimes load through this
     function, so both iterate the same part of the same items.
     """
+    from refactory_dsh.items import source_override
     from refactory_dsh.task import select_subset
 
-    return select_subset(full_items(node, workdir), workdir)
+    items = select_subset(full_items(node, workdir), workdir)
+    # A node bound to a Task keeps its ``limit`` too, taken from the selected part, so
+    # a limit of N runs the first N items of that part (a smoke's sample,
+    # `sandbox.smoke_sample`). A declared source applies its limit as it reads.
+    limit = source_override(workdir, node.id).get("limit") or node.limit
+    if node.task_ref and limit:
+        items = items[: int(limit)]
+    return items
 
 
 def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
@@ -660,14 +668,6 @@ def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
 
         part, seed = subset_part_seed(workdir)
         items = task_items(load_task(node.task_ref, workdir), part=part, seed=seed)
-        # Apply the node's limit to task-ref items as well, so a smoke run that
-        # sets limit=N on the data node runs only N items from the bound task.
-        from refactory_dsh.items import source_override
-
-        override = source_override(workdir, node.id)
-        limit = override.get("limit") or node.limit
-        if limit:
-            items = items[: int(limit)]
     return items
 
 

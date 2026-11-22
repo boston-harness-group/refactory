@@ -1349,7 +1349,7 @@ def test_walker_edit_from_another_checkout_leaves_it_and_refactory_untouched(tmp
 
 def _gate_smoke_context(tmp_path, *, knobs=None, smoke_json=None, facts=None):
     """Create a RunContext suitable for testing gate_smoke."""
-    from refactory_dsh import nn, authoring_evidence as evidence
+    from refactory_dsh import nn
     from refactory_dsh.steering import Ledger
 
     root = tmp_path / "artifact"
@@ -1375,7 +1375,7 @@ def test_gate_smoke_uncertain_returns_halt_verdict(tmp_path, monkeypatch):
     smoke_receipt = {
         "status": "uncertain", "timeout_kind": "inactivity",
         "timed_out": True, "timeout_s": 3600,
-        "item_limit": 3, "total_items": 177,
+        "item_limit": 3,
     }
     ctx = _gate_smoke_context(tmp_path)
 
@@ -1391,7 +1391,7 @@ def test_gate_smoke_uncertain_returns_halt_verdict(tmp_path, monkeypatch):
     assert hasattr(result, "reason")
     assert "inactivity" in result.reason
     assert "code repair was not attempted" in result.reason
-    assert "3 of 177 items requested" in result.reason
+    assert "a sample of 3 items per task-bound data node" in result.reason
 
 
 def test_gate_smoke_uncertain_non_timeout_returns_halt_verdict(tmp_path, monkeypatch):
@@ -1426,130 +1426,3 @@ def test_gate_smoke_code_failure_still_reloops(tmp_path, monkeypatch):
 
     result = create_ops.gate_smoke(ctx)
     assert str(result) == "reloop"
-
-
-def test_halt_reason_in_walker_outcome(tmp_path):
-    """The halt reason from Verdict('halt', reason) reaches the walker's outcome
-    record and spine-status.json through the actual executor code path."""
-    from refactory_dsh.nn import Graph, Node, execute
-    from refactory_dsh.nn.executor import CURRENT_ITEM
-
-    reason_text = "smoke timed out (inactivity, limit 3600s); code repair was not attempted"
-
-    # Build a graph: op → gate that halts with the reason.
-    graph = Graph()
-    graph.add(Node("prepare", "op", call="loop_ops:noop",
-                   writes=("halt_reason.txt",)))
-    graph.add(Node("gate", "gate", gate_kind="fn",
-                   evaluator="loop_ops:halt_with_reason",
-                   reads=("halt_reason.txt",)))
-    graph.add(Node("done", "op", call="loop_ops:noop"))
-    graph.connect("prepare", "gate")
-    graph.connect("gate", "done", condition="proceed")
-
-    # Write the halt reason so the gate reads it.
-    (tmp_path / "halt_reason.txt").write_text(reason_text)
-
-    result = execute(graph, tmp_path, enforce_writes=False)
-    assert result.halted is True, f"expected halted=True, got {result.halted}"
-    assert reason_text in (result.error or ""), f"halt reason not in error: {result.error}"
-
-    # The error should also appear in the spine-status.json written by the walker.
-    status_path = tmp_path / ".refactory" / "spine-status.json"
-    assert status_path.exists(), "spine-status.json not written"
-    status = json.loads(status_path.read_text())
-    assert status["status"] == "halted"
-    assert reason_text in (status.get("error") or ""), (
-        f"halt reason not in spine-status error: {status.get('error')}")
-
-
-def test_smoke_task_bound_runs_parallel_sample(tmp_path):
-    """Task-bound smoke runs exactly `limit` items from a 177-item data node,
-    in parallel (overlapping in time), by running the real generated smoke item
-    limit code on the walker with no model.
-
-    The generated code in sandbox.smoke modifies the mode's state_dict to set
-    the data node's limit=smoke_items and parallelism=smoke_items. This test
-    applies that same logic to a graph with a 177-item data node and runs it
-    through the walker executor, asserting exactly 3 items ran and overlapped.
-    """
-    from refactory_dsh.nn import Graph, Node, execute
-    from refactory_dsh.nn.executor import CURRENT_ITEM
-
-    # Build a graph with a 177-item data node (via BigTask).
-    graph = Graph()
-    graph.add(Node(
-        "data", "data",
-        subgraph_entry="work", subgraph_exit="work",
-        writes=(CURRENT_ITEM,), produces=("item_scores",),
-        task_ref="loop_ops:BigTask",
-    ))
-    graph.add(Node("work", "op", call="loop_ops:record_item",
-                   reads=(CURRENT_ITEM,), writes=("seen.json",)))
-    graph.add(Node("report", "op", call="loop_ops:write_best",
-                   writes=("best.json",), produces=("best",)))
-    graph.connect("data", "report")
-
-    # Apply the same item_limit_code that sandbox.smoke generates.
-    # This is the real generated code's logic:
-    #   _smoke_items = 3
-    #   _data_parallelism = 0
-    #   _st = mode.state_dict()  # == {"graph": graph.to_state(), ...}
-    #   for _nid, _ns in _st["graph"]["nodes"].items():
-    #       if _ns.get("kind") == "data":
-    #           _total = max(_total, _ns.get("count", 0) or 0)
-    #           _ns["limit"] = _smoke_items
-    #           _ns["parallelism"] = _smoke_items  # since data_parallelism is 0
-    #   mode.load_state_dict(_st)
-    smoke_items = 3
-    state = {"graph": graph.to_state()}
-    total = 0
-    for nid, ns in state["graph"]["nodes"].items():
-        if ns.get("kind") == "data":
-            total = max(total, ns.get("count", 0) or 0)
-            ns["limit"] = smoke_items
-            ns["parallelism"] = smoke_items
-    # Reload the graph with the modified state.
-    graph = Graph.from_state(state["graph"])
-
-    # Verify the data node has 177 items (from BigTask) and limit=3, parallelism=3.
-    data_node = graph.nodes["data"]
-    assert data_node.limit == smoke_items
-    assert data_node.parallelism == smoke_items
-
-    # Run through the walker executor with no model.
-    result = execute(graph, tmp_path, enforce_writes=False)
-    assert result.exit_ok, result.error
-
-    # Assert exactly 3 items ran (not all 177).
-    # Each item runs in its own pass directory: passes/data/<item_id>/
-    passes_dir = tmp_path / "passes" / "data"
-    assert passes_dir.exists(), f"passes directory not created; workdir contents: {list(tmp_path.iterdir())}"
-    item_dirs = sorted(d.name for d in passes_dir.iterdir() if d.is_dir())
-    assert len(item_dirs) == smoke_items, (
-        f"expected {smoke_items} items, got {len(item_dirs)}: {item_dirs}")
-    # They should be the first 3 items from the train split (deterministic).
-    # Pass directory names are "{item_id}_{index}".
-    assert all(d.startswith("item_00") for d in item_dirs), (
-        f"expected first 3 items (item_000, item_001, item_002), got: {item_dirs}")
-
-    # Assert items overlapped in time (ran concurrently, not sequentially).
-    # With parallelism=3, the walker starts all 3 items concurrently.
-    assert len(result.item_records) == smoke_items, (
-        f"expected {smoke_items} item records, got {len(result.item_records)}")
-    # Read ITEM_STARTED timestamps from each pass directory to verify overlap.
-    # item_records don't have started/finished keys; the authoritative start
-    # time is in each pass's .refactory/item_started file.
-    from refactory_dsh.items import ITEM_STARTED
-    start_times: list[float] = []
-    for item_dir in sorted(passes_dir.iterdir()):
-        stamp_path = item_dir / ITEM_STARTED
-        assert stamp_path.exists(), f"no ITEM_STARTED in {item_dir}"
-        start_times.append(float(stamp_path.read_text().strip()))
-    assert len(start_times) == smoke_items
-    # With parallelism=3, all items start at nearly the same time (within ~1 s).
-    # Sequential execution would space starts by each item's full duration.
-    spread = max(start_times) - min(start_times)
-    assert spread < 2.0, (
-        f"expected near-simultaneous starts (parallel), but start times "
-        f"spread is {spread:.2f}s: {start_times}")

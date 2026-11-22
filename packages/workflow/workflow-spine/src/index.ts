@@ -3120,15 +3120,17 @@ export function apply(ctx: Context, config: Config): void {
     presentResult: (args, result) => presentResult('redo', args as Record<string, unknown>, result),
     execute(args, exec) {
       const { spine, workdir, commandEnv, dataCommand } = requireRun(exec)
-      // A halt that stopped the run -- a gate halted at its iteration limit, a
-      // verdict halt, or the run failed -- is not the CEO's to lift.
+      // A stop the run came to -- a gate halted at its iteration limit, a gate's halt
+      // verdict (a smoke whose outcome is uncertain), or the run failed, as design
+      // mode's own attempt limit fails it -- is not the CEO's to lift. A cancelled or
+      // incomplete run is not stopped by a verdict, and stays the CEO's to redo.
       const state = spine.state()
       const halted = state.halted as { gate?: string; reason?: string; detail?: string } | undefined
-      const stopped = halted !== undefined
-        ? (halted.reason === 'max_iterations'
-          ? `run halted at gate ${halted.gate} after reaching its iteration limit`
-          : `run halted at gate ${halted.gate ?? '?'}: ${halted.detail ?? halted.reason ?? 'verdict'}`)
-        : recordedStatus(workdir) === 'failed' ? 'run has failed' : undefined
+      const stopped = halted?.reason === 'max_iterations'
+        ? `run halted at gate ${halted.gate} after reaching its iteration limit`
+        : halted?.reason === 'verdict'
+          ? `run halted at gate ${halted.gate}${halted.detail ? `: ${halted.detail}` : ''}`
+          : recordedStatus(workdir) === 'failed' ? 'run has failed' : undefined
       if (stopped !== undefined) {
         throw new Error(`${stopped}; a CEO redo cannot spend more attempts. Use `
           + '`refactory graph-control rerun --acknowledge-failure` to have a person spend more attempts.')

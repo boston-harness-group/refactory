@@ -79,6 +79,18 @@ EXIT_GRACE_S = 2.0
 #: What can stop a command before it exits (`SandboxResult.timeout_kind`).
 STOP_KINDS = ("inactivity", "backstop", "output_limit")
 
+#: Where a run nested in a watched sandbox (`run_sandboxed` with ``inactivity``) marks
+#: that it is working, relative to the sandbox's directory. A smoke's DSH run keeps its
+#: output inside the smoke's process and changes its progress files only as items
+#: start, so without the mark the sandbox stopped a run that was still working.
+ACTIVITY_FILE = ".refactory/sandbox-activity"
+#: How often a watched sandbox looks at its progress files and the activity mark.
+WATCH_INTERVAL_S = 0.5
+#: How long a watched sandbox waits, once it has asked its run to stop, before killing
+#: it: the run's own shutdown of its DSH child (`owned_process.SHUTDOWN_GRACE_S`) with
+#: room to report.
+STOP_GRACE_S = 30
+
 #: Shell exit codes for signals that may be the change's own fault (SIGABRT, SIGBUS,
 #: SIGSEGV).  Retried once in run_command; if they persist, the base comparison decides
 #: whether the crash is the change's fault or infrastructure.
@@ -504,6 +516,8 @@ def run_sandboxed(
     env: dict[str, str] | None = None,
     forwarded: dict[str, str] | None = None,
     address_space: bool = True,
+    inactivity: bool = False,
+    backstop_s: float | None = None,
 ) -> SandboxResult:
     """Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 
@@ -512,10 +526,10 @@ def run_sandboxed(
     given its own working directory. ``address_space=False`` keeps the heap cap and
     drops the address-space cap (`_limits`).
 
-    Uses inactivity-based timeout: the process is stopped when no output has
-    arrived and no progress-file changes have been detected for ``timeout_s``
-    seconds, with a backstop at ``min(4 × timeout_s, COMMAND_BACKSTOP_S)``
-    seconds of wall time.
+    ``timeout_s`` is a wall clock unless ``inactivity`` is set (a smoke's choice,
+    `smoke`): the run is then stopped only after ``timeout_s`` seconds with no sign of
+    work -- its own output, its progress files, or the mark an inner run leaves in
+    ``ACTIVITY_FILE`` -- or at ``backstop_s`` of wall time (`_run_watched`).
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -526,20 +540,139 @@ def run_sandboxed(
     kwargs: dict[str, Any] = {}
     if sys.platform != "win32":
         kwargs["preexec_fn"] = _limits(memory_mb, cpu_s, file_mb, address_space=address_space)
+    if inactivity:
+        return _run_watched(
+            [sys.executable, "-c", code], workdir=workdir, env=child_env, timeout_s=timeout_s,
+            backstop_s=backstop_s if backstop_s is not None else min(4 * timeout_s, COMMAND_BACKSTOP_S),
+            **kwargs,
+        )
+    started = time.monotonic()
+    try:
+        if child_env.get("REFACTORY_BUDGET_LEDGER"):
+            from refactory_dsh.owned_process import run_owned
 
-    cmd: list[str] = [sys.executable, "-c", code]
+            result = run_owned(
+                [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=str(workdir), env=child_env, timeout=timeout_s,
+                label="budgeted validation", **kwargs,
+            )
+        else:
+            result = subprocess.run(
+                [sys.executable, "-c", code], capture_output=True, text=True,
+                cwd=str(workdir), env=child_env, timeout=timeout_s, **kwargs,
+            )
+    except subprocess.TimeoutExpired as exc:
+        return SandboxResult(
+            ok=False,
+            timed_out=True,
+            returncode=124,
+            timeout_s=timeout_s,
+            elapsed_s=round(time.monotonic() - started, 3),
+            progress=_progress_at(workdir),
+            stdout=(exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            stderr=f"timed out after {timeout_s}s",
+        )
+    payload: dict[str, Any] = {}
+    for line in reversed(result.stdout.strip().splitlines()):
+        try:
+            loaded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            payload = loaded
+            break
+    return SandboxResult(
+        ok=result.returncode == 0,
+        timeout_s=timeout_s,
+        elapsed_s=round(time.monotonic() - started, 3),
+        payload=payload,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _signs_of_work(workdir: Path) -> tuple[dict[str, Any], str]:
+    """What `_run_watched` compares to tell a working run from an idle one: the run's
+    progress files and the mark an inner run leaves in ``ACTIVITY_FILE``."""
+    try:
+        mark = (workdir / ACTIVITY_FILE).read_text()
+    except OSError:
+        mark = ""
+    return _progress_at(workdir), mark
+
+
+def mark_activity(path: Path) -> None:
+    """Leave the mark `_run_watched` reads as work: the time, in ``path``.
+
+    For a run nested inside a watched sandbox (a smoke's DSH run,
+    `dsh_runtime.run_on_dsh`), whose output its own process keeps.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time_ns()))
+    except OSError:
+        pass
+
+
+def _stop_watched(proc: subprocess.Popen) -> bool:
+    """Ask a watched run to stop and give it ``STOP_GRACE_S`` to do so; then kill its group.
+
+    Only the direct child is asked, as `owned_process.shutdown` asks: a smoke's process
+    shuts its own DSH run down in that window. Whatever is left in its process group is
+    killed afterwards either way. Returns whether the child had to be killed.
+    """
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+    forced = False
+    try:
+        proc.wait(timeout=STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        forced = True
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elif forced:
+        proc.kill()
+    if forced:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    return forced
+
+
+def _run_watched(
+    argv: list[str],
+    *,
+    workdir: Path,
+    env: dict[str, str],
+    timeout_s: int,
+    backstop_s: float,
+    **kwargs: Any,
+) -> SandboxResult:
+    """`run_sandboxed` with an inactivity limit and a wall-clock backstop.
+
+    Work is any output, a change to the run's progress files, or a new mark in
+    ``ACTIVITY_FILE`` (`_signs_of_work`). A run stopped for either limit is asked to stop
+    and given ``STOP_GRACE_S`` before it is killed (`_stop_watched`); a kill says that
+    its cleanup is unconfirmed, as `owned_process.shutdown` does. A run that stopped
+    itself for one of these limits reports it in its payload's ``timeout_kind``, which
+    is returned as the result's.
+    """
+    from refactory_dsh.owned_process import _termination_as_exit
 
     started = time.monotonic()
     out = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
     err = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
     activity = [started]
-    backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
-
-    from refactory_dsh.owned_process import _termination_as_exit
     with _termination_as_exit():
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=False, cwd=str(workdir), env=child_env,
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(workdir), env=env,
             start_new_session=os.name == "posix", **kwargs,
         )
         readers = [threading.Thread(target=_drain, args=(pipe, sink, activity), daemon=True,
@@ -547,28 +680,17 @@ def run_sandboxed(
                    for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
         for reader in readers:
             reader.start()
-
-        # Progress-file watcher thread.
-        _prev_progress: list[dict[str, Any]] = [{}]
-
-        def _watch_progress() -> None:
-            while proc.poll() is None:
-                try:
-                    snap = _progress_at(workdir)
-                except Exception:
-                    snap = {}
-                if snap != _prev_progress[0]:
-                    activity[0] = time.monotonic()
-                    _prev_progress[0] = snap
-                time.sleep(1)
-
-        progress_thread = threading.Thread(target=_watch_progress, daemon=True, name="sandbox-progress")
-        progress_thread.start()
-
+        seen = _signs_of_work(workdir)
+        look_at = started + WATCH_INTERVAL_S
         stop: str | None = None
         try:
             while proc.poll() is None:
                 now = time.monotonic()
+                if now >= look_at:
+                    current = _signs_of_work(workdir)
+                    if current != seen:
+                        seen, activity[0] = current, now
+                    look_at = now + WATCH_INTERVAL_S
                 if now - activity[0] >= timeout_s:
                     stop = "inactivity"
                 elif now - started >= backstop_s:
@@ -577,59 +699,29 @@ def run_sandboxed(
                     break
                 time.sleep(0.05)
         except BaseException:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
-                except (ProcessLookupError, PermissionError):
-                    pass
-                proc.wait(timeout=2)
+            _stop_watched(proc)
             for reader in readers:
                 reader.join(timeout=5)
             raise
-
         if stop is not None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
-                except (ProcessLookupError, PermissionError):
-                    pass
-                proc.wait(timeout=2)
+            forced = _stop_watched(proc)
             for reader in readers:
                 reader.join(timeout=5)
+            note = f"timed out ({stop}) after {timeout_s}s"
+            if forced:
+                note += (f"; the run did not stop within {STOP_GRACE_S}s of being asked; "
+                         "forced exit; child cleanup unconfirmed")
             return SandboxResult(
-                ok=False,
-                timed_out=True,
-                returncode=124,
-                timeout_s=timeout_s,
-                timeout_kind=stop,
-                elapsed_s=round(time.monotonic() - started, 3),
-                progress=_progress_at(workdir),
-                stdout=out.text(),
-                stderr=err.text() or f"timed out ({stop}) after {timeout_s}s",
+                ok=False, timed_out=True, returncode=124, timeout_s=timeout_s, timeout_kind=stop,
+                elapsed_s=round(time.monotonic() - started, 3), progress=_progress_at(workdir),
+                stdout=out.text(), stderr="\n".join(part for part in (err.text().rstrip(), note) if part),
             )
-
-        # Normal exit: join readers with a grace period.
         grace_end = time.monotonic() + EXIT_GRACE_S
         for reader in readers:
             reader.join(timeout=max(0.0, grace_end - time.monotonic()))
-
-    stdout_text = out.text()
-    stderr_text = err.text()
-
+    stdout, stderr = out.text(), err.text()
     payload: dict[str, Any] = {}
-    for line in reversed(stdout_text.strip().splitlines()):
+    for line in reversed(stdout.strip().splitlines()):
         try:
             loaded = json.loads(line)
         except json.JSONDecodeError:
@@ -637,31 +729,17 @@ def run_sandboxed(
         if isinstance(loaded, dict):
             payload = loaded
             break
-
-    # Propagate an inner timeout_kind through the payload (the inner run timed
-    # out but the outer process exited cleanly).
-    inner_timeout_kind = payload.get("timeout_kind")
-    if inner_timeout_kind in STOP_KINDS:
-        return SandboxResult(
-            ok=proc.returncode == 0,
-            timed_out=True,
-            timeout_s=timeout_s,
-            timeout_kind=inner_timeout_kind,
-            elapsed_s=round(time.monotonic() - started, 3),
-            payload=payload,
-            returncode=proc.returncode,
-            stdout=stdout_text,
-            stderr=stderr_text,
-        )
-
+    inner = payload.get("timeout_kind")
     return SandboxResult(
         ok=proc.returncode == 0,
+        timed_out=inner in STOP_KINDS,
+        timeout_kind=inner if inner in STOP_KINDS else None,
         timeout_s=timeout_s,
         elapsed_s=round(time.monotonic() - started, 3),
         payload=payload,
         returncode=proc.returncode,
-        stdout=stdout_text,
-        stderr=stderr_text,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -914,6 +992,77 @@ def model_readiness(
     return result.payload
 
 
+def smoke_backstop_s(timeout_s: float) -> float:
+    """The wall-clock backstop of a smoke whose inactivity limit is ``timeout_s``.
+
+    The backstop a command gets (four times its limit, at most ``COMMAND_BACKSTOP_S``),
+    plus ``STOP_GRACE_S``, so a smoke with a model reaches its own run's backstop, stops
+    and reports first.
+    """
+    return min(4 * timeout_s, COMMAND_BACKSTOP_S) + STOP_GRACE_S
+
+
+def smoke_wall_s(timeout_s: float) -> float:
+    """The longest one smoke can take: its backstop, then the stop's grace and kill.
+
+    What a node that runs smokes covers per run (`lowering._smoke_envelope_s`), so the
+    node's own timeout does not fire before the smoke's stop is reported.
+    """
+    return smoke_backstop_s(timeout_s) + STOP_GRACE_S + 5
+
+
+def smoke_sample(mode: Any, workdir: Path, items: int) -> dict[str, Any]:
+    """Cut ``mode`` down to a smoke's sample: ``items`` items of each Task's train part.
+
+    Each data node bound to a Task (``task_ref``) runs only the first ``items`` items of
+    the Task's train part -- the part the run directory names, written here
+    (`task.write_subset`) -- and runs them at once. A node whose parallelism is a knob
+    (``parallelism_knob``, or a ``parallelism`` field binding) gets that knob set, held
+    to the knob's own value as a ceiling, since a node may not carry both; any other
+    node gets ``parallelism``, held to the value it declares when that is above one.
+    Nothing changes for ``items`` 0 or a mode with no Task-bound data node.
+
+    Runs in the smoke's sandboxed process, before the run. What it sets is state and the
+    run directory's part, which the walker and DSH read the same way
+    (`nn.executor.load_items`, `Node.effective_parallelism`).
+    Returns ``{"item_limit": items, "nodes": [...]}`` for the nodes cut, or ``{}``.
+    """
+    from refactory_dsh import task as task_module
+    from refactory_dsh.nn.edits import configure
+    from refactory_dsh.nn.graph import MAX_PARALLELISM, Node
+
+    if items <= 0:
+        return {}
+    state = mode.state_dict()
+    nodes = (state.get("graph") or {}).get("nodes") or {}
+    knob_widths: dict[str, int] = {}
+    sampled: list[str] = []
+    for node_id, entry in nodes.items():
+        node = Node.from_state({**entry, "id": node_id})
+        if node.kind != "data" or not node.task_ref:
+            continue
+        entry["limit"] = min(items, node.limit) if node.limit else items
+        knob = node.parallelism_knob or node.bound_knob("parallelism")
+        if knob:
+            entry_of_knob = (state.get("knobs") or {}).get(knob, {})
+            ceiling = int(entry_of_knob.get("value") or 0)
+            width = min(items, ceiling) if ceiling > 0 else items
+            floor = (entry_of_knob.get("spec") or {}).get("lo")
+            width = max(width, int(floor)) if floor is not None else width
+            knob_widths[knob] = min(knob_widths.get(knob, width), width)
+        else:
+            declared = node.parallelism if node.parallelism > 1 else MAX_PARALLELISM
+            entry["parallelism"] = min(items, declared)
+        sampled.append(node_id)
+    if not sampled:
+        return {}
+    for knob, width in knob_widths.items():
+        state = configure(state, knob, max(1, min(width, MAX_PARALLELISM)))
+    mode.load_state_dict(state)
+    task_module.write_subset(workdir, task_module.TRAIN, task_module.DEFAULT_HOLDOUT)
+    return {"item_limit": items, "nodes": sampled}
+
+
 def smoke(
     identifier: str,
     workdir: Path,
@@ -923,7 +1072,6 @@ def smoke(
     knobs: dict[str, Any] | None = None,
     model_context: dict[str, str] | None = None,
     smoke_items: int = 0,
-    data_parallelism: int = 0,
     **kwargs: Any,
 ) -> SandboxResult:
     """Run one mode once, in a sandbox, and report what it scored.
@@ -949,6 +1097,15 @@ def smoke(
     ``knobs`` overrides the mode's declared defaults for this run. Without it a smoke
     exercises the *default* path only, so a mode whose new input path is broken --
     the one the brief asked for -- scores on the fixture and is accepted.
+
+    ``smoke_items`` cuts each data node bound to a Task down to that many items of the
+    Task's train part, run at once (`smoke_sample`), in a smoke with a model; 0 runs
+    every item, as a smoke without a model always does.
+
+    ``timeout_s`` is an inactivity limit here, not a wall clock: a smoke that is still
+    working is not stopped before the backstop (`smoke_backstop_s`). A run with a model
+    gets a slightly shorter limit of its own, so it stops itself first and says why,
+    and it marks its DSH run's work in ``ACTIVITY_FILE`` for this sandbox to see.
     """
     project = Path(project or project_for_nodes())
     client = (
@@ -967,25 +1124,10 @@ def smoke(
     call = f"model=DshModelClient(**{context!r})" if model else ""
     evaluation = (
         f"evaluate_on_dsh(mode, mode.state_dict(), Path({str(Path(workdir))!r}), "
-        f"timeout_s=smoke_timeout_s, inactivity=True, {call})"
+        f"timeout_s=smoke_timeout_s, inactivity=True, "
+        f"activity_file=Path({str(Path(workdir) / ACTIVITY_FILE)!r}), {call})"
         if model else f"mode.evaluate(Path({str(Path(workdir))!r}))"
     )
-    # Item limit and parallelism injection for task-bound data nodes.
-    _item_limit_code = ""
-    if model and smoke_items:
-        _item_limit_code = (
-            f"_smoke_items = {smoke_items}\n"
-            f"_data_parallelism = {data_parallelism}\n"
-            "_total = 0\n"
-            "if _smoke_items:\n"
-            "    _st = mode.state_dict()\n"
-            "    for _nid, _ns in _st.get('graph', {}).get('nodes', {}).items():\n"
-            "        if _ns.get('kind') == 'data':\n"
-            "            _total = max(_total, _ns.get('count', 0) or 0)\n"
-            "            _ns['limit'] = _smoke_items\n"
-            "            _ns['parallelism'] = min(_smoke_items, _data_parallelism) if _data_parallelism else _smoke_items\n"
-            "    mode.load_state_dict(_st)\n"
-        )
     code = (
         "import json\n"
         "from pathlib import Path\n"
@@ -1000,7 +1142,8 @@ def smoke(
         "    for name, value in overrides.items():\n"
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
-        f"{_item_limit_code}"
+        "from refactory_dsh.sandbox import smoke_sample\n"
+        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items) if model else 0!r})\n"
         f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
         # Reported after the run, so a mode that cannot report them still passes.
@@ -1009,12 +1152,10 @@ def smoke(
         " (mode.state_dict().get('knobs') or {}).items() if isinstance(entry, dict)}\n"
         "except Exception:\n"
         "    knobs = None\n"
-        f"_tk = getattr(result, 'timeout_kind', None)\n"
-        f"_il = {smoke_items!r}\n"
-        f"_tt = _total if {bool(model and smoke_items)!r} else None\n"
         "print(json.dumps({'exit_ok': result.exit_ok, 'error': result.error,"
         " 'score': result.score, 'iterations': result.iterations, 'knobs': knobs,"
-        " 'timeout_kind': _tk, 'item_limit': _il, 'total_items': _tt}, default=str))\n"
+        " 'timeout_kind': getattr(result, 'timeout_kind', None),"
+        " 'item_limit': sample.get('item_limit')}, default=str))\n"
     )
     from refactory_dsh import toolchain
 
@@ -1036,13 +1177,16 @@ def smoke(
         remaining = budget.remaining_s()
         if remaining is not None:
             kwargs["timeout_s"] = min(kwargs["timeout_s"], remaining)
+            kwargs.setdefault("backstop_s", min(smoke_backstop_s(kwargs["timeout_s"]), remaining))
         forwarded["REFACTORY_BUDGET_LEDGER"] = str(budget.path)
     if model:
         # Leave time for the inner runtime to shut down before sandbox termination.
         timeout = kwargs["timeout_s"]
         code = f"smoke_timeout_s={max(1, int(timeout - min(5, timeout / 2)))!r}\n" + code
+    kwargs.setdefault("backstop_s", smoke_backstop_s(kwargs["timeout_s"]))
     return run_sandboxed(
-        code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded, **kwargs
+        code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded,
+        inactivity=True, **kwargs,
     )
 
 

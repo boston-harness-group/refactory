@@ -1159,74 +1159,91 @@ describe('applyControls integration', () => {
       .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
   })
 
-  it('wf_redo refuses when run is halted by a verdict (smoke timeout)', async () => {
-    const workdir = scratch()
-    const graph: WorkflowGraph = {
-      name: 't', start_node: 'smoke',
-      nodes: {
-        smoke: { _type: 'AgentNode', id: 'smoke', role: 'builder', prompt_template: 'S', reads: [], writes: [] },
-        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn', evaluator_command: 'true', reads: [] },
-        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
-      },
-      edges: [
-        { source: 'smoke', target: 'gate_smoke' },
-        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
-      ],
+  /** A shell that runs each command for real, as the graph profile's shell does. */
+  function realShell(): object {
+    return {
+      resolve: (request: { command: string; workdir?: string; timeoutMs?: number; env?: Record<string, string> }) => ({
+        command: request.command, workdir: request.workdir ?? process.cwd(),
+        timeoutMs: request.timeoutMs ?? 10_000, onExpiry: 'kill', stdoutMaxBytes: 1_000_000, env: request.env,
+      }),
+      execute: async (spec: { command: string; workdir: string; env?: Record<string, string> }) => ({
+        result: async () => {
+          const done = spawnSync('/bin/sh', ['-c', spec.command], {
+            cwd: spec.workdir, env: { ...process.env, ...spec.env }, encoding: 'utf8',
+          })
+          return {
+            exitCode: done.status ?? 1, signal: null, timedOut: false, aborted: false, timeoutMs: 10_000,
+            stdout: { text: done.stdout, truncated: false }, stderr: { text: done.stderr, truncated: false },
+          }
+        },
+      }),
     }
-    const ctx = await mount(graph, { workdir })
-    // Drive smoke to completion, then gate_smoke halts with a verdict.
-    await call(ctx, 'wf_next')       // smoke is due
-    await call(ctx, 'wf_done', { node: 'smoke' })
-    await call(ctx, 'wf_next')       // gate_smoke is due
-    await call(ctx, 'wf_verdict', { gate: 'gate_smoke', verdict: 'halt' })
-    // The spine is now halted
-    const next = await call(ctx, 'wf_next') as { status: string; halted?: { reason: string; gate?: string } }
-    expect(next.status).toBe('done')
-    expect(next.halted?.reason).toBe('verdict')
-    expect(next.halted?.gate).toBe('gate_smoke')
-    // wf_redo of smoke (upstream of gate_smoke) should refuse
-    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/run halted at gate gate_smoke/)
-    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
-    // wf_redo of register (downstream, never ran) should also refuse
-    await expect(call(ctx, 'wf_redo', { node: 'register' }))
-      .rejects.toThrow(/run halted at gate gate_smoke/)
-  })
+  }
 
-  it('halt verdict carries the gate reason to halted.detail and spine-status.json', async () => {
-    const workdir = scratch()
-    const graph: WorkflowGraph = {
+  /**
+   * Create's smoke as the spine runs it: the smoke, then its fn gate, which prints its
+   * reason and then `halt` as `python -m refactory_dsh.run` prints a gate's Verdict.
+   */
+  function smokeGraph(workdir: string, reason: string): WorkflowGraph {
+    return {
       name: 't', start_node: 'smoke',
       nodes: {
-        smoke: { _type: 'AgentNode', id: 'smoke', role: 'builder', prompt_template: 'S', reads: [], writes: [] },
-        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn', evaluator_command: 'true', reads: [] },
+        smoke: { _type: 'FnNode', id: 'smoke', command: `echo ran >> ${join(workdir, 'smoke-runs')}`, reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
+                      evaluator_command: `printf '%s\\n%s\\n' '${reason}' halt`, reads: [] },
         register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
       },
       edges: [
         { source: 'smoke', target: 'gate_smoke' },
         { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+        { source: 'gate_smoke', target: 'smoke', condition: 'reloop' },
       ],
     }
-    const ctx = await mount(graph, { workdir })
-    await call(ctx, 'wf_next')       // smoke is due
-    await call(ctx, 'wf_done', { node: 'smoke' })
-    await call(ctx, 'wf_next')       // gate_smoke is due
-    // Pass a halt verdict with feedback (reason text), as a fn gate would.
+  }
+
+  it('a fn gate that halts with a reason stops the run with it, and wf_redo is refused', async () => {
+    const workdir = scratch()
     const reason = 'smoke timed out (inactivity, limit 3600s); code repair was not attempted'
-    await call(ctx, 'wf_verdict', { gate: 'gate_smoke', verdict: 'halt', feedback: reason })
-    // The halted object carries reason='verdict' (type-safe) and detail=reason text.
-    const next = await call(ctx, 'wf_next') as { status: string; halted?: { reason: string; detail?: string; gate?: string } }
+    const ctx = await mount(smokeGraph(workdir, reason), { workdir, executeCommands: true })
+    ctx.provide('shell', realShell())
+    const next = await call(ctx, 'wf_next') as { status: string; halted?: { reason: string; gate?: string; detail?: string } }
     expect(next.status).toBe('done')
-    expect(next.halted?.gate).toBe('gate_smoke')
-    expect(next.halted?.reason).toBe('verdict')
-    expect(next.halted?.detail).toBe(reason)
-    // spine-status.json should contain the reason in its error field.
-    const statusPath = join(workdir, '.refactory', 'spine-status.json')
-    expect(existsSync(statusPath)).toBe(true)
-    const status = JSON.parse(readFileSync(statusPath, 'utf8'))
+    expect(next.halted).toEqual({ gate: 'gate_smoke', reason: 'verdict', detail: reason })
+    const status = JSON.parse(readFileSync(join(workdir, '.refactory', 'spine-status.json'), 'utf8'))
     expect(status.status).toBe('halted')
     expect(status.error).toContain(reason)
+    // The smoke ran once, and the CEO cannot send the run back to it.
+    expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
+    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
+      .rejects.toThrow(/run halted at gate gate_smoke: smoke timed out/)
+    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
+      .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
+    expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
+  })
+
+  it('a cancelled run is still the CEO\'s to redo', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'a',
+      nodes: {
+        a: { _type: 'AgentNode', id: 'a', role: 'builder', prompt_template: 'A', reads: [], writes: [] },
+        gate: { _type: 'GateNode', id: 'gate', evaluator_type: 'fn', evaluator_command: 'true', reads: [] },
+        c: { _type: 'AgentNode', id: 'c', role: 'builder', prompt_template: 'C', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'a', target: 'gate' },
+        { source: 'gate', target: 'c', condition: 'proceed' },
+      ],
+    }
+    // The gate is the runtime's to evaluate, so a halt it does not route cancels it.
+    const ctx = await mount(graph, { workdir, executeCommands: true })
+    await call(ctx, 'wf_next')
+    await call(ctx, 'wf_done', { node: 'a' })
+    expect(await call(ctx, 'wf_verdict', { gate: 'gate', verdict: 'halt' })).toEqual({ status: 'cancelled', gate: 'gate' })
+    const redone = await call(ctx, 'wf_redo', { node: 'a' }) as { status: string }
+    expect(redone.status).not.toBe('done')
+    const next = await call(ctx, 'wf_next') as { nodes?: Array<{ id: string }> }
+    expect(next.nodes?.map(node => node.id)).toEqual(['a'])
   })
 
   it('wf_redo refuses when run has failed', async () => {

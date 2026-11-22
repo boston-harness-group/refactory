@@ -719,15 +719,19 @@ Running code we did not write.
 | function | `is_secret` | `(name: 'str') -> 'bool'` |
 | function | `is_signal_crash` | `(result: 'SandboxResult') -> 'tuple[bool, str]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None) -> 'int'` |
+| function | `mark_activity` | `(path: 'Path') -> 'None'` |
 | function | `missing_init` | `(root: 'Path') -> 'str'` |
 | function | `model_readiness` | `(workdir: 'Path', *, model_context: 'dict[str, str] \| None' = None, require_ready: 'bool' = True) -> 'dict[str, Any]'` |
 | function | `output_tail` | `(stdout: 'str \| None', stderr: 'str \| None', n: 'int') -> 'str'` |
 | function | `promote` | `(project: 'Path', name: 'str', *, note: 'str' = '') -> 'dict[str, Any]'` |
 | function | `refactory_env` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
-| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True) -> 'SandboxResult'` |
+| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
-| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, data_parallelism: 'int' = 0, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke_backstop_s` | `(timeout_s: 'float') -> 'float'` |
+| function | `smoke_sample` | `(mode: 'Any', workdir: 'Path', items: 'int') -> 'dict[str, Any]'` |
+| function | `smoke_wall_s` | `(timeout_s: 'float') -> 'float'` |
 | function | `timeout_output` | `(result: 'SandboxResult', n: 'int' = 200) -> 'str'` |
 | function | `usage` | `() -> 'str'` |
 | function | `verify_sandboxed` | `(name: 'str', *, project: 'Path \| None' = None, shared_project: 'Path \| None' = None, requires_data_node: 'bool' = False, requires_task_ref: 'str' = '', requires_task_refs: 'tuple[str, ...]' = (), requires_input: 'tuple[str, ...]' = (), **kwargs: 'Any') -> 'SandboxResult'` |
@@ -739,6 +743,7 @@ Running code we did not write.
 - **`is_secret`** — Whether an environment name looks like a credential, which a sandboxed run never sees.
 - **`is_signal_crash`** — Whether a sandbox result is a signal crash that survived run_command's retry.
 - **`main`** — ``python -m refactory_dsh.sandbox --ast <pkg> | --smoke <pkg>/<mode>``.
+- **`mark_activity`** — Leave the mark `_run_watched` reads as work: the time, in ``path``.
 - **`missing_init`** — Why a package root has no `__init__.py`, and what it holds instead.
 - **`model_readiness`** — Check the model path after the same scrub/HOME rewrite as real smoke.
 - **`output_tail`** — The last *n* non-empty lines of each stream, each line labelled with its stream.
@@ -748,6 +753,9 @@ Running code we did not write.
 - **`run_sandboxed`** — Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 - **`scrub`** — The environment a sandboxed run sees: an allowlist, with secrets dropped.
 - **`smoke`** — Run one mode once, in a sandbox, and report what it scored.
+- **`smoke_backstop_s`** — The wall-clock backstop of a smoke whose inactivity limit is ``timeout_s``.
+- **`smoke_sample`** — Cut ``mode`` down to a smoke's sample: ``items`` items of each Task's train part.
+- **`smoke_wall_s`** — The longest one smoke can take: its backstop, then the stop's grace and kill.
 - **`timeout_output`** — The text of ``timeout-output.txt`` for a command stopped before it exited.
 - **`usage`** — The one usage line, printed both for ``--help`` and for misuse.
 - **`verify_sandboxed`** — Everything wrong with a package, checked without importing it here.
