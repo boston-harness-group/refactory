@@ -737,7 +737,7 @@ def test_the_request_says_new_steps_may_have_tools_whatever_the_existing_steps_r
     line = core_ops.OPERATORS["insert"]["line"]
     assert "an existing step keeps its own tool rules" in line
     assert "no grader files" in line
-    assert "in the per-item part the item's input files too" in line
+    assert "in the per-item part, without 'sees', the item's input files too" in line
     assert "existing step keeps its own tool rules" in base_mod.TOOLS_LINE
     assert "sealed" in base_mod.TOOLS_LINE and "no network" in base_mod.TOOLS_LINE
     for text in (line, base_mod.TOOLS_LINE, base_mod.NO_TOOLS_LINE, base_mod.PIPELINE_VIEW_LEAD):

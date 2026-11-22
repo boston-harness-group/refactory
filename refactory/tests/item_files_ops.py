@@ -189,12 +189,17 @@ class SealedLook(ItemFilesMode):
         return graph
 
 
+#: Names another interpreter for `ToolEnvTask` (a test's own virtual environment).
+PYTHON_ENV = "ITEM_FILES_TEST_PYTHON"
+
+
 def test_interpreter() -> str:
-    """The interpreter a `ToolEnvTask`'s sealed steps run as ``python3``: the one running the
-    tests, whose own packages (pytest) the machine's python3 lacks."""
+    """The interpreter a `ToolEnvTask`'s sealed steps run as ``python3``: `PYTHON_ENV`, else
+    the one running the tests."""
+    import os
     import sys
 
-    return sys.executable
+    return os.environ.get(PYTHON_ENV) or sys.executable
 
 
 #: What `ToolEnvTask` says of its tool environment.

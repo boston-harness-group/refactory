@@ -528,10 +528,13 @@ def _tool_path(workspace: Workspace, workdir: Path) -> Any:
     if found is None:
         return None
     ref, environment = found
+    from refactory_dsh.items import run_roots
+
     try:
         python = environment.python()
+        hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
         tool_path = seal.tool_path(python, workspace.root / TOOL_BIN, workspace=workspace.path,
-                                   run=workdir)
+                                   runs=run_roots(workdir), hidden=hidden)
     except Exception as exc:  # noqa: BLE001 - the Task's own check, said with its reason
         raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed with Task "
                              f"{ref!r}'s tool environment, which cannot be given: "

@@ -2083,9 +2083,9 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
 TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules (a step that has no "
               "tools or refuses them stays so). A new agent step may still have `tools` "
               "(`insert`, `map`, `fallback`): it runs sealed, in a fresh workspace holding "
-              "only the files it reads -- in the per-item part, the item's input files (the "
-              "pipeline view lists them) as well as what it sees -- with no network and no "
-              "grader files.")
+              "only the files it reads -- in the per-item part, unless its 'sees' (or a node's "
+              "'reads') names its inputs, the item's input files (the pipeline view lists "
+              "them) beside what it sees -- with no network and no grader files.")
 #: The same when this run offers no tool step (no seal here, or ``new_step_tools`` off).
 NO_TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules, and in this run "
                  "a new step has no tools.")
@@ -6204,6 +6204,8 @@ class Optimizer:
         # Each applied edit with the states before and after it, for what a core operator
         # wired (`core_ops.wiring_notes`), said once the whole proposal is applied.
         wired: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+        from refactory_dsh.nn import core_ops
+
         for index, edit in enumerate(steps):
             edit, fixed, ambiguous = repair.fix_edit(edit, state, steps, index)
             if ambiguous:
@@ -6229,6 +6231,14 @@ class Optimizer:
             reports: list[dict[str, Any]] = []
             try:
                 state = nn_edits.apply(edit, state, edit_reports=reports)
+                # A node object written out whole that runs its tools sealed in a pass and
+                # names no reads takes the item's input files, as a core operator's new
+                # tool step does; the edit recorded is the one with them.
+                defaulted = (core_ops.default_item_inputs(edit, before_step, state)
+                             if getattr(self, "new_step_tools", True) else None)
+                if defaulted is not None:
+                    edit, reports = defaulted, []
+                    state = nn_edits.apply(edit, before_step, edit_reports=reports)
             except nn_edits.EditError as exc:
                 return [_at(f"{exc.code}: {exc}", index, steps)]
             except Exception as exc:  # an operator bug is reported, not swallowed
@@ -6387,6 +6397,10 @@ class Optimizer:
         wired_notes = [note for edit, before_step, after_step in wired
                        for note in nn_edits.core_wiring_notes(edit, before_step, after_step,
                                                               state)]
+        if getattr(self, "new_step_tools", True):
+            # Whether each sealed tool step the proposal adds or changes in a pass sees the
+            # item's input files: said of the candidate, after every edit.
+            wired_notes += core_ops.item_input_notes(parent.state, state)
         candidate.repairs, candidate.notes = list(repairs), [*wired_notes, *notes]
         if repairs and record:
             self.record_call(kind="repair", how="deterministic", candidate=candidate.id,

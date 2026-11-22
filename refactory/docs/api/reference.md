@@ -1134,6 +1134,7 @@ The per-item half of a data node, from the command line.
 | function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]', reloop: 'Mapping[str, Any] \| None' = None) -> 'None'` |
 | function | `refused_at_cap` | `(earlier: 'Sequence[Mapping[str, Any]]', visit: 'Mapping[str, Any]', reloop: 'Mapping[str, Any] \| None') -> 'bool'` |
+| function | `run_roots` | `(workdir: 'Path') -> 'list[str]'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `update_record_file` | `(path: 'Path', change: 'Callable[[Any], Any]', empty: 'Callable[[], Any]') -> 'Any'` |
@@ -1175,6 +1176,7 @@ The per-item half of a data node, from the command line.
 - **`record_lock`** — Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
 - **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`refused_at_cap`** — Whether a gate visit's verdict is a reloop its cap refuses: one of the gate's
+- **`run_roots`** — The run an item's pass belongs to and, above it, the outer loop's root (every
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`update_record_file`** — Read, change and rewrite the JSON record file ``path`` under an exclusive lock

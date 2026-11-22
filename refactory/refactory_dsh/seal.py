@@ -262,7 +262,7 @@ class ToolPath:
 PYTHON_NAMES = ("python3", "python")
 
 
-def _distinct(paths) -> list[str]:
+def distinct_paths(paths) -> list[str]:
     """Absolute and resolved forms of ``paths``, existing ones only, in order, without
     one that another of them contains."""
     out: list[str] = []
@@ -276,21 +276,23 @@ def _distinct(paths) -> list[str]:
 
 @functools.lru_cache(maxsize=None)
 def interpreter_dirs(python: str) -> tuple[str, ...]:
-    """The directories ``python`` runs from: its prefixes, as it reports them, and where
-    its executable resolves to."""
+    """The directories ``python`` runs from: the prefixes it reports itself (``sys.prefix``,
+    ``base_prefix``, ``exec_prefix``, ``base_exec_prefix``) and the folder its executable
+    resolves to. Never a folder guessed from where ``python`` is named (a link to it may
+    sit anywhere); none at all when it cannot report."""
     import json
 
-    found = [os.path.dirname(os.path.dirname(os.path.realpath(python))),
-             os.path.dirname(os.path.dirname(os.path.abspath(python)))]
     try:
         proc = subprocess.run(
             [python, "-I", "-c", "import json, sys; print(json.dumps([sys.prefix, "
              "sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]))"],
             capture_output=True, text=True, timeout=60)
-        found += json.loads(proc.stdout) if proc.returncode == 0 else []
+        found = json.loads(proc.stdout) if proc.returncode == 0 else []
     except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return tuple(_distinct(found))
+        return ()
+    if not found:
+        return ()
+    return tuple(distinct_paths([*found, os.path.dirname(os.path.realpath(python))]))
 
 
 def _inside(path: str, root: str) -> bool:
@@ -298,41 +300,66 @@ def _inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def tool_path(python: str, bin_dir: Path, *, workspace: Path, run: Path) -> ToolPath:
+def refused_binding(bound, *, held=(), within=()) -> str | None:
+    """Why binding the folders ``bound`` into a confined root would show what it must
+    not: one of them holds a path of ``held`` (or is it), or lies inside one of
+    ``within``; ``None`` when none does. Paths compare resolved. The model-code sandbox
+    (`refactory_packages.spreadsheetbench.sandbox`) and the seal's tool environment
+    (:func:`tool_path`) both refuse on it."""
+    for folder in bound:
+        for secret in held:
+            if os.path.lexists(secret) and _inside(secret, folder):
+                return f"{secret}: it is inside {folder}"
+        for root in within:
+            if os.path.lexists(root) and _inside(folder, root):
+                return f"{folder}: it is inside {root}"
+    return None
+
+
+def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()) -> ToolPath:
     """The Task interpreter ``python`` for a sealed command: ``bin_dir`` (made afresh, beside
     the workspace and never inside it) holds ``python3`` and ``python``, each a two-line
     script that runs ``python`` by its own path (a link would lose a virtual environment),
-    and the interpreter's directories (`interpreter_dirs`) are readable. Refused
-    (`SealError`) when one of those directories holds the run, the workspace, the home
-    directory or refactory's own, or lies inside the run or refactory's own: the seal never
-    shows a grader file or another item's."""
+    and the folders it reports it runs from (`interpreter_dirs`) are bound read only.
+
+    Refused (`SealError`) when one of those folders holds, or lies inside, any of: the
+    run's roots ``runs`` (the run every item's pass is in, and the outer loop's root above
+    it), refactory's own directory, or a Task's ``hidden`` paths (its dataset, the secrets
+    `ToolEnvironment.hidden` names); or when one holds the home directory. The workspace is
+    inside the run, so it is covered. So the seal shows no item's pass, grader file or
+    dataset through it."""
     from refactory_dsh.paths import refactory_home
 
     python = os.path.abspath(python)
     if not os.path.isfile(python) or not os.access(python, os.X_OK):
         raise SealError(f"the Task's interpreter {python} is not an executable file")
     dirs = interpreter_dirs(python)
-    secret = [str(run), str(workspace), str(Path.home()), str(refactory_home())]
-    for folder in dirs:
-        held = [s for s in secret if _inside(s, folder)]
-        within = [s for s in (str(run), str(refactory_home())) if _inside(folder, s)]
-        if held or within:
-            raise SealError(f"the Task's interpreter {python} runs from {folder}, which "
-                            + (f"holds {held[0]}" if held else f"is inside {within[0]}")
-                            + "; a sealed step may read neither")
+    if not dirs:
+        raise SealError(f"the Task's interpreter {python} does not report where it runs from")
+    secret = [*map(str, runs), str(refactory_home()), *map(str, hidden)]
+    why = refused_binding(dirs, held=[*secret, str(Path.home())],
+                          within=secret)
+    if why:
+        raise SealError(f"the Task's interpreter {python} runs from a folder a sealed step may "
+                        f"not read ({why})")
     bin_dir = Path(bin_dir)
     if _inside(str(bin_dir), str(workspace)) or _inside(str(workspace), str(bin_dir)):
         raise SealError(f"the interpreter's folder {bin_dir} is not beside the workspace")
-    for path in (python, str(bin_dir), *dirs):
+    for path in (python, os.path.realpath(python), str(bin_dir), *dirs):
         if any(ch in path for ch in ":$\n\"'\\"):
             raise SealError(f"a sealed command's PATH cannot name {path!r}")
+    # Run by the name it was given where that name is inside its own folders (a virtual
+    # environment's bin/python, which only that name makes one), else by what it resolves to:
+    # a name elsewhere (a link beside other files) is not in the seal.
+    named = any(python.startswith(folder.rstrip("/") + "/") for folder in dirs)
+    run_as = python if named else os.path.realpath(python)
     shutil.rmtree(bin_dir, ignore_errors=True)
     bin_dir.mkdir(parents=True)  # raises when an earlier one could not be removed
     for name in PYTHON_NAMES:
         script = bin_dir / name
-        script.write_text(f'#!/bin/sh\nexec "{python}" "$@"\n')
+        script.write_text(f'#!/bin/sh\nexec "{run_as}" "$@"\n')
         script.chmod(0o555)
-    return ToolPath(str(bin_dir), tuple(_distinct([str(bin_dir), *dirs])), python)
+    return ToolPath(str(bin_dir), tuple(distinct_paths([str(bin_dir), *dirs])), run_as)
 
 
 def runner_command(workspace: Path, cap: StepCap | None = None,

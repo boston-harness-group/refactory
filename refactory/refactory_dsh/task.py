@@ -68,6 +68,10 @@ class ToolEnvironment:
     #: Returns the interpreter's path, checked as the Task checks it wherever else it
     #: runs; raises when there is none or it is not the one declared.
     python: Callable[[], str]
+    #: Given the item's pass, the grader-side paths (the dataset, secrets) that no folder
+    #: of the environment may hold or lie inside, beside the run's roots and refactory's
+    #: own directory, which are always refused (`seal.tool_path`). None: nothing more.
+    hidden: Callable[[Path], Sequence[str]] | None = None
 
 
 @dataclass(frozen=True)

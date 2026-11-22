@@ -1785,9 +1785,14 @@ state is promised, on any graph shape:
   both runtimes (the walker's dispatch and the spine's `worker_node`, through
   `workspace.prepare`, from the pass's `.refactory/pass.json`) put that interpreter first on
   the command's PATH as `python3` and `python` (two-line scripts in a `tool-bin` folder
-  beside the workspace) and bind its directories read only (`seal.tool_path`); a folder
-  that holds the run, the workspace, the home directory or refactory's own, or lies inside
-  the run or refactory's own, is refused. An interpreter that is missing or fails the Task's
+  beside the workspace) and bind read only only the folders it reports running from (its
+  prefixes and the folder its executable resolves to, never one guessed from where it is
+  named; `seal.interpreter_dirs`, `seal.tool_path`). A folder that holds or lies inside the
+  run's roots (the run every item's pass is in, and the outer loop's root), refactory's own
+  directory or a path the Task names as grader-side (`ToolEnvironment.hidden`;
+  SpreadsheetBench names what model code may not see, `sandbox.hidden_paths`, its dataset
+  among it), or that holds the home directory, is refused (`seal.refused_binding`, which
+  the model-code sandbox uses too). An interpreter that is missing or fails the Task's
   check fails the step; it never runs with the machine's python instead. The dispatch
   record says which (`tool_environment`). SpreadsheetBench declares the pinned interpreter
   its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares
@@ -2204,13 +2209,16 @@ the default produces the same digest as before, so it still resumes.
 **Item files.** A Task may lay files into each item's pass under fixed names
 (`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
 The data node declares each in its `writes` (V12), so any step of the pass can read one:
-a step names it in `sees` (or names the data node). A sealed tool step a core operator
-adds or changes inside a pass is given the pass's item files in its declared `reads`
-beside what it names (`core_ops._with_item_files`; a written-out `add_node` stays as
-written), so it gets a copy of each in its workspace; the graph lists them and the
-candidate's notes say `<step> (tools, in the per-item part) is given the item's input
-file(s) ...`. A tool step outside a pass, or a step without tools, gets nothing it did not
-name. An op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+a step names it in `sees` (or names the data node). A new sealed tool step inside a pass
+whose inputs the proposal does not name (no `sees` for a core operator's step, no `reads`
+in a node object written out whole) is given the pass's item files in its declared
+`reads` by default (`core_ops._with_item_files`, `core_ops.default_item_inputs`; the edit
+recorded holds them), so it gets a copy of each in its workspace. A default, never a
+limit: a step whose inputs are named keeps exactly those, and a rewire sees exactly what
+it says. The candidate's notes say, for each sealed tool step the proposal adds or changes
+in a pass, `<step> (tools, in the per-item part) has the item's input file(s) ...` or
+`... does not see the item's input file(s) ...`. A tool step outside a pass, or a step
+without tools, gets nothing it did not name. An op opens one through `ctx.item_file(role)`, which refuses (at run time, on
 both runtimes) a file the op does not list in its `reads`, as do the context's
 `read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
 never its answer: a path the grader reads or writes is refused when the Task is checked

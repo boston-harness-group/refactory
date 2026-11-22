@@ -97,6 +97,14 @@ def item_record(row: dict[str, Any], data_root: Path) -> TaskInstance:
     return TaskInstance(id=item_id, metadata=metadata)
 
 
+def _tool_hidden(workdir: Path) -> list[str]:
+    """What model code may not see (`ops.tool_hidden`): no folder of a sealed tool step's
+    environment may hold or lie inside it."""
+    from . import ops
+
+    return ops.tool_hidden(workdir)
+
+
 class SpreadsheetBenchTask(Task):
     """SpreadsheetBench Verified 400, graded as SkillOpt's runs graded it.
 
@@ -112,7 +120,8 @@ class SpreadsheetBenchTask(Task):
     #: A sealed tool step's commands run the interpreter model code runs under, checked
     #: the same way (`interpreter.interpreter`), as ``python3`` and ``python``.
     tool_environment = ToolEnvironment(summary=interpreter.SUMMARY,
-                                       python=interpreter.interpreter)
+                                       python=interpreter.interpreter,
+                                       hidden=_tool_hidden)
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 

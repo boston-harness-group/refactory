@@ -38,7 +38,8 @@ from typing import Iterable
 
 from refactory_dsh.model import HarnessIncident
 # The interpreter's directories, found as a sealed tool step's are (`seal.tool_path`).
-from refactory_dsh.seal import _distinct, interpreter_dirs, system_tool  # noqa: F401
+from refactory_dsh.seal import distinct_paths as _distinct
+from refactory_dsh.seal import interpreter_dirs, refused_binding, system_tool
 
 #: Secret paths under the home directory, as the lab's wrapper hides them
 #: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
@@ -223,13 +224,11 @@ def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
 def _refuse_covering(bound: Iterable[str], secret: Iterable[str]) -> None:
     """The reverse of the hidden check: no directory bound into the code's root may hold
     the home directory, the dataset or another hidden path (an interpreter installed in
-    the home directory itself would bring all of it along). Refused, never narrowed."""
-    for path in secret:
-        real = os.path.realpath(path).rstrip("/") + "/"
-        for dir_ in bound:
-            if real.startswith(os.path.realpath(dir_).rstrip("/") + "/"):
-                raise SandboxError(f"the sandbox would show {path}: it is inside {dir_}, "
-                                   "which the code needs")
+    the home directory itself would bring all of it along). Refused, never narrowed
+    (`seal.refused_binding`, which a sealed step's tool environment is held to too)."""
+    why = refused_binding(list(bound), held=list(secret))
+    if why:
+        raise SandboxError(f"the sandbox would show {why}, which the code needs")
 
 
 _PROBE = """

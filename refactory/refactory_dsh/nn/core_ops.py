@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextvars import ContextVar
 from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from refactory_dsh.seal import SEALED_TOOLS
@@ -543,6 +544,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
             node["workspace"] = {"kind": "scratch"}
             if files:
                 node["reads"] = files
+        if (tools or (like is not None and _uses_tools(like))) and spec.get("sees") is None \
+                and not spec.get("reads"):
+            # Wired by default, so given the item's input files by default too.
+            _default_wired(node_id)
         carried = _carried_knobs("agent", text, node["system_prompt_template"], knobs)
         if carried:
             node["knobs"] = carried
@@ -2281,12 +2286,19 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     keep = set(facts) | set(state.get("knobs") or {})
     if helper is not None:
         build.add(_bypass(build.state, helper))
-    if files:
+    from refactory_dsh.workspace import is_sealed
+
+    # A sealed step reads its files in its own workspace, as a new one does (`_step_nodes`):
+    # they are its reads, exactly what 'sees' says, never a collect step's text.
+    sealed = is_sealed(node)
+    if files and not sealed:
         keep.add(gather)
         facts.append(gather)
     new_text = _with_sections(_strip_unseen(text, keep), facts)
     for key in ("reads", "required_reads", "inputs"):
         new_state.pop(key, None)
+    if sealed and files:
+        new_state["reads"] = files
     # Its prompt as a knob carries the new slots (the field too, so the knob's slot check
     # holds); a prompt that is not a knob is re-slotted in place: data wiring, no new text.
     new_state["prompt_template"] = new_text
@@ -2295,7 +2307,7 @@ def _expand_rewire(edit: dict, state: dict) -> list[dict]:
     own_knob = knob is not None and knob.startswith(f"{node.id}__")
     build.add(_respec(build.state, node.id, new_state,
                       values={knob: new_text} if own_knob else None))
-    if files:
+    if files and not sealed:
         build.add(_renamed(build.state, node.id, [gather], joins=False))
         build.add([{"op": "add_node", "position": {"before": node.id},
                     "node": collect_node(gather, files, gather,
@@ -2849,6 +2861,8 @@ def _expand_map(edit: dict, state: dict) -> list[dict]:
             node.update({"tool_policy": None, "tools": list(tools),
                          "workspace": {"kind": "scratch"},
                          "prompt_template": MAP_ELEMENT_TOOLS_PROMPT.format(file=element)})
+            if edit.get("sees") is None:
+                _default_wired(copy)
         if anchor.kind == "agent" and anchor.role:
             node["role"] = anchor.role
         if route:
@@ -3257,12 +3271,16 @@ def _guarded(check):
 
 def _guarded_expand(expand):
     def run(edit: dict, state: dict) -> list[dict]:
+        token = _DEFAULT_WIRED.set(set())
         try:
             steps = expand(edit, state)
+            wired = _DEFAULT_WIRED.get()
         except _Refused as exc:
             raise _edits().EditError(str(exc), code="E-precondition") from exc
+        finally:
+            _DEFAULT_WIRED.reset(token)
         steps = steps + _settle_optional(state, steps)
-        return steps + _with_item_files(state, steps)
+        return steps + _with_item_files(state, steps, wired)
     return run
 
 
@@ -3287,25 +3305,35 @@ def item_files_before(graph: Graph, state: Mapping[str, Any], node_id: str) -> l
     return sorted(path for path in files.values() if ("file", path) in there)
 
 
-def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
-    """Steps that give each sealed tool step (`workspace.is_sealed`) a core operator added
-    or changed in ``steps`` the item's input files of the pass it runs in (`item_files_before`)
-    in its declared ``reads``, beside what it reads already: a tool step works on what is in
-    its sealed workspace, and the item's input is what an item gives its solver. What the
-    step names itself stays; the graph says each file outright, and the candidate's notes say
-    the step has them (`wiring_notes`)."""
+#: The new steps an operator's expansion wired by default (no 'sees' or 'reads' given
+#: for them): only these are given the item's input files by default (`_with_item_files`).
+_DEFAULT_WIRED: ContextVar[set[str] | None] = ContextVar("default_wired", default=None)
+
+
+def _default_wired(node_id: str) -> None:
+    found = _DEFAULT_WIRED.get()
+    if found is not None:
+        found.add(node_id)
+
+
+def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict],
+                     wired: Collection[str]) -> list[dict]:
+    """Steps that give each new sealed tool step (`workspace.is_sealed`) the operator wired
+    by default (``wired``: the proposer gave no 'sees' or 'reads' for it) the item's input
+    files of the pass it runs in (`item_files_before`) in its declared ``reads``, beside
+    what it reads already: a default, never a limit. A step whose inputs the proposer named
+    keeps exactly those (the candidate's notes say when it does not see the item's input
+    files, `item_input_notes`)."""
     from refactory_dsh.workspace import is_sealed
 
-    if not any(step.get("op") == "add_node" and is_sealed(step.get("node") or {})
-               for step in steps):
-        return []  # no step it adds or rebuilds runs its tools sealed
+    if not wired:
+        return []
     end = _simulate(start, steps)
-    old, new = _edits()._graph(start), _edits()._graph(end)
+    new = _edits()._graph(end)
     out: list[dict] = []
-    for node_id in sorted(new.nodes):
+    for node_id in sorted(set(wired) & set(new.nodes)):
         node = new.nodes[node_id]
-        if not is_sealed(node) or (node_id in old.nodes
-                                   and old.nodes[node_id].to_state() == node.to_state()):
+        if not is_sealed(node):
             continue
         missing = [path for path in item_files_before(new, end, node_id)
                    if path not in node.reads]
@@ -3407,8 +3435,8 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
 INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 + "; a new step may have them though the steps beside it have none or refuse "
                 "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
-                "files it sees, and in the per-item part the item's input files too, no "
-                "network, no grader files")
+                "files it sees (in the per-item part, without 'sees', the item's input files "
+                "too), no network, no grader files")
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
 
 
@@ -4120,8 +4148,7 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     def expand_loop(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_loop(edit):
             steps = old_loop.expand(edit, state)
-            steps = steps + _settle_optional(state, steps)
-            return steps + _with_item_files(state, steps)
+            return steps + _settle_optional(state, steps)
         return _guarded_expand(_expand_loop_line)(edit, state)
 
     def pre_split(edit: dict, state: dict) -> str | None:
@@ -4132,8 +4159,7 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     def expand_split(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_split(edit):
             steps = old_split.expand(edit, state)
-            steps = steps + _settle_optional(state, steps)
-            return steps + _with_item_files(state, steps)
+            return steps + _settle_optional(state, steps)
         return _guarded_expand(_expand_split_line)(edit, state)
 
     # Each core operator says only its one-line form, as the lead promises; a proposal
@@ -4191,7 +4217,6 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
                 unread.append(node_id)
     except Exception:  # noqa: BLE001 - a note, never a refusal
         unread = []
-    given = _given_item_files(before, after)
     taken, toolless = _taken_away(before, after, added, removed)
     # A removed step's own settings (`<id>_...`, `<id>__...`) always go with it; the
     # others are news.
@@ -4204,9 +4229,6 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
         parts.append("removed " + ", ".join(removed))
     if placed:
         parts.append("put " + "; ".join(placed))
-    for node_id, files in given:
-        parts.append(f"{node_id} (tools, in the per-item part) is given the item's input "
-                     f"file(s) {', '.join(files)} in its sealed workspace")
     if unread:
         parts.append(f"no step reads what {', '.join(unread)} make(s) yet (name a reader with "
                      "'to', or insert one)")
@@ -4218,37 +4240,84 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
     if dropped:
         parts.append(f"dropped knob(s) {', '.join(dropped)}, which no step reads now")
     try:
+        # Said by the edit that made it so, and only when it still is in the candidate.
         was_dead = dead_text_knobs(before)
+        still = dead_text_knobs(final) if final is not after else None
         parts += [f"knob {name!r} now reaches no step ({op} fills it into "
                   f"{', '.join(outputs)}, which no step reads)"
-                  for name, (op, outputs) in sorted(dead_text_knobs(final).items())
-                  if name not in was_dead]
+                  for name, (op, outputs) in sorted(dead_text_knobs(after).items())
+                  if name not in was_dead and (still is None or name in still)]
     except Exception:  # noqa: BLE001 - a note, never a refusal
         pass
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
 
 
-def _given_item_files(before: Mapping[str, Any], after: Mapping[str, Any]
-                      ) -> list[tuple[str, list[str]]]:
-    """Each sealed tool step ``after`` adds or changes, with the item's input files of its
-    pass it reads in ``after`` and did not in ``before`` (`_with_item_files`)."""
+def item_input_notes(parent: Mapping[str, Any], final: Mapping[str, Any]) -> list[str]:
+    """What the candidate says of each sealed tool step (`workspace.is_sealed`) it adds or
+    changes inside a per-item pass whose Task lays item files: whether its sealed workspace
+    holds the item's input files (given by default when the proposer named none of its
+    inputs, `_with_item_files`), or which of them it does not see. Facts, never refusals."""
     from refactory_dsh.workspace import is_sealed
 
     try:
-        old, new = _edits()._graph(before), _edits()._graph(after)
+        old, new = _edits()._graph(parent), _edits()._graph(final)
     except Exception:  # noqa: BLE001 - a note, never a refusal
         return []
-    out = []
+    notes = []
     for node_id in sorted(new.nodes):
         node = new.nodes[node_id]
-        if not is_sealed(node):
+        if not is_sealed(node) or (node_id in old.nodes
+                                   and old.nodes[node_id].to_state() == node.to_state()):
             continue
-        had = set(old.nodes[node_id].reads) if node_id in old.nodes else set()
-        files = [path for path in item_files_before(new, after, node_id)
-                 if path in node.reads and path not in had]
-        if files:
-            out.append((node_id, files))
-    return out
+        files = item_files_before(new, final, node_id)
+        has = [path for path in files if path in node.reads]
+        missing = [path for path in files if path not in node.reads]
+        if has:
+            notes.append(f"{node_id} (tools, in the per-item part) has the item's input "
+                         f"file(s) {', '.join(has)} in its sealed workspace")
+        if missing:
+            notes.append(f"{node_id} (tools, in the per-item part) does not see the item's "
+                         f"input file(s) {', '.join(missing)}")
+    return notes
+
+
+#: Where a written-out edit carries whole node objects (`nn.edits`): the field, and whether
+#: it holds a list of them.
+_NODE_FIELDS = (("node", False), ("into", True), ("branches", True))
+
+
+def default_item_inputs(edit: Mapping[str, Any], before: Mapping[str, Any],
+                        after: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``edit`` with the item's input files as the ``reads`` of each node object it adds
+    whole (``add_node``, the written-out macros) that runs its tools sealed inside a
+    per-item pass and names no ``reads`` of its own -- the default a core operator's new
+    tool step gets (`_with_item_files`) -- judged on ``after``, the state ``edit`` left;
+    ``None`` when it adds none such. The edit as returned is the one recorded and replayed.
+    A node object that lists ``reads`` (even none) keeps exactly those."""
+    from refactory_dsh.workspace import is_sealed
+
+    if not isinstance(edit, Mapping) or (edit.get("op") in CORE_OPS and not (
+            edit.get("op") == "split" and not is_one_line_split(edit))):
+        return None
+    try:
+        new = _edits()._graph(after)
+    except Exception:  # noqa: BLE001 - the validator's to say
+        return None
+    out = json.loads(json.dumps(edit))
+    changed = False
+    for key, many in _NODE_FIELDS:
+        value = out.get(key)
+        for node_state in (value if many and isinstance(value, list) else [value]):
+            if not isinstance(node_state, dict) or "reads" in node_state:
+                continue
+            node = new.nodes.get(str(node_state.get("id")))
+            if node is None or not is_sealed(node):
+                continue
+            files = item_files_before(new, after, node.id)
+            if files:
+                node_state["reads"] = files
+                changed = True
+    return out if changed else None
 
 
 def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequence[str],
