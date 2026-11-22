@@ -486,6 +486,7 @@ The optimizer loop, named like one.
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'bool'` |
+| function | `uncapped_sealed_steps` | `(runs: 'Path') -> 'dict[str, Any]'` |
 
 - **`EpochSummary`** — One epoch, as the report and the scheduler describe it.
 - **`EvaluationInterrupted`** — An evaluation whose items died with the run's own processes, not on their answers.
@@ -499,6 +500,7 @@ The optimizer loop, named like one.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
 - **`run`** — Build a loop and run it to its bound.
 - **`single_parent`** — Whether a run is the default loop with a single-parent optimizer and no
+- **`uncapped_sealed_steps`** — The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
 
 
 <a id="refactory_dsh-history"></a>

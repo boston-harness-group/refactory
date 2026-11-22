@@ -1741,10 +1741,14 @@ state is promised, on any graph shape:
   last session would kill a scope's commands mid-step, so a run outside the person's
   sessions (a system service, a container's shell) uses no scope; one that goes away
   anyway drops that step's later commands to the per-process limits, and the next step
-  is probed afresh. A command the runner cannot
-  start at all (a session keyring, the sandbox itself) is recorded beside the workspace,
-  and the step is a harness incident (`SealFailed`), never an answer from commands that
-  silently did nothing. Before its outputs are collected, every process still sealed in its
+  is probed afresh. Each step's dispatch record says whether it had that whole-step
+  cap and why not (`whole_step_cap`, `cap`), and the run's report says once when sealed
+  steps ran without one. The runner waits on the seal and is told, on a descriptor the
+  command never holds, when the command starts: a seal that fails before that (a
+  session keyring, the sandbox, its own setup exiting 97, a failing `unshare` or
+  `systemd-run`) is recorded beside the workspace for that one dispatch, and the step is
+  a harness incident (`SealFailed`), never an answer from commands that silently did
+  nothing. Whatever the command itself exits with is its own. Before its outputs are collected, every process still sealed in its
   workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
   workspace over 4 GiB is not collected, and each output is opened one name at a time
   relative to its folder's descriptor without following a link, so nothing it leaves or

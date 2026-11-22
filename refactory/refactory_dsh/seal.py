@@ -255,10 +255,37 @@ def user_manager_kept(groups: str | None = None,
     return os.path.exists(os.path.join(linger_root, name))
 
 
+def _no_scope_reason() -> str:
+    """Why this machine gives a sealed command no systemd user scope, in plain words, or
+    "" where it may (`_scope_prefix`)."""
+    if not shutil.which("systemd-run"):
+        return "no systemd-run here"
+    if not os.path.isdir(f"/run/user/{os.getuid()}"):
+        return "no systemd user manager is running for this user"
+    if not user_manager_kept():
+        return ("this run is outside the user's sessions and the user does not linger, so "
+                "systemd's user manager may stop (and take a scope's commands with it) at "
+                "any time")
+    return ""
+
+
+def whole_step_cap() -> tuple[bool, str]:
+    """Whether a sealed step made now gets a cap on the whole of what its commands start
+    (memory, processes), and what it is or why not: a systemd user scope on Linux
+    (`linux_scope`); per-process limits only otherwise, and on macOS. Recorded in each
+    sealed step's dispatch record (`workspace.Workspace.describe`) and the run's report."""
+    if sys.platform == "darwin":
+        return False, "macOS gives a sealed command per-process limits only"
+    if linux_scope():
+        return True, "a systemd user scope (" + ", ".join(SCOPE_LIMITS) + ")"
+    return False, (_no_scope_reason() or "the systemd user scope probe failed") \
+        + f"; per-process limits only ({LINUX_LIMITS_UNSCOPED})"
+
+
 def _scope_prefix() -> list[str]:
     systemd_run = shutil.which("systemd-run")
     runtime = f"/run/user/{os.getuid()}"
-    if not systemd_run or not os.path.isdir(runtime) or not user_manager_kept():
+    if _no_scope_reason():
         return []
     # Where systemd-run can be told not to expand $NAME in the command, it is told so;
     # the runner's arguments hold no '$' either way (`linux_arguments`).
@@ -292,7 +319,7 @@ def linux_scope() -> tuple[str, ...]:
     that finds its own memory cap is kept for the process; a failed one is tried again
     next time, so one slow probe does not drop every later step to the fallback. A kept
     prefix whose user bus is gone is dropped and probed again. A command whose scope bus
-    goes away after its runner was made runs unscoped instead (`seal_reaper.exec_runner`).""" 
+    goes away after its runner was made runs unscoped instead (`seal_reaper.exec_runner`)."""
     if _SCOPE:
         if _scope_bus_exists(_SCOPE[0]):
             return _SCOPE[0]

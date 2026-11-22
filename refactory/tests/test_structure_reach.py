@@ -384,11 +384,15 @@ def test_a_scope_bus_gone_mid_step_runs_the_command_unscoped(tmp_path, runtime, 
 
 
 @LINUX_ONLY
+@pytest.mark.parametrize("unshare", ["missing", "exit 1", "exit 97"])
 @pytest.mark.parametrize("runtime", ["walker", "spine"])
-def test_a_seal_that_cannot_start_a_command_is_a_harness_incident(tmp_path, runtime, monkeypatch):
-    """[walker: a data pass in process; spine: its agent dispatch, `worker_node`] The
-    runner cannot start the sandbox: no command runs, and the step is a harness incident
-    naming why -- never an item that quietly scores 0."""
+def test_a_seal_that_cannot_start_a_command_is_a_harness_incident(tmp_path, runtime, unshare,
+                                                                  monkeypatch):
+    """[walker: a data pass in process; spine: its agent dispatch, `worker_node`] The seal
+    fails before the command starts -- its sandbox cannot be started, or its unshare (or
+    systemd-run, or its own setup: "cannot bind /etc/group") exits 1 or 97 -- so no
+    command runs, and the step is a harness incident naming why, never an item that
+    quietly scores 0."""
     from test_sealed_tools import _sealable
 
     from refactory_dsh import items as items_mod
@@ -396,17 +400,22 @@ def test_a_seal_that_cannot_start_a_command_is_a_harness_incident(tmp_path, runt
 
     _sealable()
     monkeypatch.setattr(seal, "linux_scope", lambda: ())
+    fake = tmp_path / "fake-unshare"
+    if unshare != "missing":
+        fake.write_text(f"#!/bin/sh\n{unshare}\n")
+        fake.chmod(0o755)
     real_which = seal.shutil.which
     monkeypatch.setattr(seal.shutil, "which", lambda name, *a, **k: (
-        str(tmp_path / "no-such-unshare") if name == "unshare" else real_which(name, *a, **k)))
+        str(fake) if name == "unshare" else real_which(name, *a, **k)))
     says = "SealFailed: harness incident: agent node 'look': "
+    why = "before the command started"
     if runtime == "walker":
         client = _one_command_client(tmp_path, ifo.INPUT)
         records, ok = _records(ifo.SealedLook, "walker", tmp_path, model=client)
         assert not ok
         assert [r["error_kind"] for r in records] == ["harness_incident"] * 2, records
-        assert all(says in str(r["error_text"]) and "cannot start the sandbox" in
-                   str(r["error_text"]) for r in records), records
+        assert all(says in str(r["error_text"]) and why in str(r["error_text"])
+                   for r in records), records
         return
     from refactory_dsh import worker_node
 
@@ -414,8 +423,93 @@ def test_a_seal_that_cannot_start_a_command_is_a_harness_incident(tmp_path, runt
     with pytest.raises(Exception) as raised:
         worker_node.execute(spec, run)
     text = f"look: {type(raised.value).__name__}: {raised.value}"
-    assert says in text and "cannot start the sandbox" in text, text
+    assert says in text and why in text, text
     assert items_mod.error_kind(RuntimeError(text)) == "harness_incident"
+
+
+@LINUX_ONLY
+def test_a_command_that_started_never_makes_an_incident_whatever_it_exits(tmp_path):
+    """[the runner both runtimes put in front of a sealed command] Once the seal says the
+    command starts, its exit is its own: a command exiting 97 is no harness incident."""
+    from test_sealed_tools import _layout, _sealable, _sealed
+
+    from refactory_dsh import seal_reaper, workspace
+
+    _sealable()
+    run, place = _layout(tmp_path)
+    done = _sealed(place, "echo ran; exit 97")
+    assert done.returncode == 97 and done.stdout.split() == ["ran"], done
+    assert not Path(seal_reaper.incidents_path(str(place.path))).exists()
+    workspace.collect(place, run, [])
+
+
+@LINUX_ONLY
+def test_an_incident_belongs_to_the_one_dispatch_that_recorded_it(tmp_path):
+    """[the seal's preparation and collection, both runtimes] A dispatch whose command could
+    not start raises; the next dispatch of the step (its workspace reuses the name) does
+    not, whether or not the first was collected."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import seal_reaper, workspace
+    from refactory_dsh.incidents import SealFailed
+
+    _sealable()
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "input.txt").write_text("IN")
+
+    def dispatch():
+        return workspace.prepare(run, "look", "scratch", route={"worker_backend": "dsh"},
+                                 tools=("bash",), reads=("input.txt",))
+
+    first = dispatch()
+    recorded = Path(seal_reaper.incidents_path(str(first.path)))
+    seal_reaper.record_incident(str(first.path), "bus gone (simulated)")
+    with pytest.raises(SealFailed, match="bus gone"):
+        workspace.collect(first, run, [])
+    assert not recorded.exists(), "consumed by the dispatch it belongs to"
+    second = dispatch()
+    assert second.path.name == "scratch-1"  # the name the first had
+    workspace.collect(second, run, [])
+    # One an earlier dispatch recorded and nothing collected (its session crashed), under
+    # the name the next dispatch takes: that dispatch starts without it.
+    seal_reaper.record_incident(str(second.root / "scratch-1"), "bus gone (simulated)")
+    third = dispatch()
+    assert third.path.name == "scratch-1"
+    workspace.collect(third, run, [])
+
+
+@LINUX_ONLY
+def test_a_sealed_step_says_whether_it_had_a_whole_step_cap(tmp_path, monkeypatch):
+    """[the step's dispatch record, both runtimes; the run's report] Without a scope, the
+    record says the step has no whole-step cap and why; a runner that fell back mid-step
+    says so too; the run's report says it once."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import loop as loop_mod
+    from refactory_dsh import seal, seal_reaper, workspace
+
+    _sealable()
+    run = tmp_path / "runs" / "c1"
+    run.mkdir(parents=True)
+    (run / "input.txt").write_text("IN")
+    monkeypatch.setattr(seal, "linux_scope", lambda: ())
+    place = workspace.prepare(run, "look", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",), reads=("input.txt",))
+    record = json.loads((place.root / "dispatch.json").read_text())
+    assert record["whole_step_cap"] is False and "per-process limits only" in record["cap"]
+    monkeypatch.setattr(seal, "linux_scope", lambda: GONE_SCOPE)
+    place = workspace.prepare(run, "look", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",), reads=("input.txt",))
+    assert json.loads((place.root / "dispatch.json").read_text())["whole_step_cap"] is True
+    seal_reaper.record_note(str(place.path), "the bus went away (simulated)")
+    workspace.collect(place, run, [])
+    record = json.loads((place.root / "dispatch.json").read_text())
+    assert record["whole_step_cap"] is False and "went away" in record["cap"]
+    found = loop_mod.uncapped_sealed_steps(tmp_path / "runs")
+    assert found == {"dispatches": 1, "why": "the bus went away (simulated)"}
+    assert loop_mod._uncapped_lines(found)[1].startswith(  # noqa: SLF001
+        "Sealed steps ran without a whole-step memory cap (1 step(s)): the bus went away")
 
 
 def test_a_scope_is_made_only_where_the_user_manager_outlives_the_process(tmp_path, monkeypatch):

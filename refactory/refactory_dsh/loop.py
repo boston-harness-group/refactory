@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 if TYPE_CHECKING:
     from refactory_dsh.nn.mode import RunResult
@@ -5446,6 +5446,10 @@ class Loop(OuterLoop):
             # Every evaluation that had an item a harness fault failed: the items,
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
             "harness_incidents": list(self._harness_incidents),
+            # Sealed steps that ran without a whole-step memory and process cap, said once
+            # (`seal.whole_step_cap`, each step's dispatch record).
+            **({"sealed_without_cap": uncapped}
+               if (uncapped := uncapped_sealed_steps(self.root / "runs")) else {}),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -5874,6 +5878,7 @@ class Loop(OuterLoop):
             "",
             *_headline(payload),
             *_incident_lines(payload.get("harness_incidents") or []),
+            *_uncapped_lines(payload.get("sealed_without_cap")),
             *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
                f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
               if (payload.get("seed_results") or {}).get("parts_reused") else []),
@@ -8067,6 +8072,36 @@ def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
             "The kinds of change each proposal's answer said it weighed, and why it chose "
             "its own.", "",
             *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
+
+
+#: Where a sealed step's dispatch record sits in a candidate's run (`workspace.prepare`):
+#: in the run, or in an item's pass.
+_DISPATCH_RECORDS = ("*/.refactory/workspaces/*/dispatch.json",
+                     "*/passes/*/*/.refactory/workspaces/*/dispatch.json")
+
+
+def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
+    """The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
+    they ran without a whole-step cap (`seal.whole_step_cap`): how many, and the first
+    reason; empty when none did."""
+    found: list[str] = []
+    for pattern in _DISPATCH_RECORDS:
+        for path in sorted(Path(runs).glob(pattern)):
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("whole_step_cap") is False:
+                found.append(str(record.get("cap") or "no cap"))
+    return {"dispatches": len(found), "why": found[0]} if found else {}
+
+
+def _uncapped_lines(uncapped: Mapping[str, Any] | None) -> list[str]:
+    """The report's one line on sealed steps that ran without a whole-step cap."""
+    if not uncapped:
+        return []
+    return ["", f"Sealed steps ran without a whole-step memory cap "
+                f"({uncapped.get('dispatches')} step(s)): {uncapped.get('why')}."]
 
 
 def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:
