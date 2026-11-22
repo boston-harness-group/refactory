@@ -4,8 +4,9 @@ An agent that runs a refactory tool with the contract's Python imports refactory
 driver checkout, or from a pinned run's pin, and the tool writes there from any directory
 (b32l, 2026-10-21). Each test pins one rule, on the walker (a scripted design run) and on
 the spine's worker bridge (`worker_node.execute`, which every spine agent node runs). The
-guard watches tracked files and HEAD only; what a refusal does to the files is
-`target_guard.CHECKOUT_POLICY`'s, and each policy is tested here.
+guard watches tracked files and HEAD, and every path under the checkout's package roots;
+what a refusal does to the tracked files is `target_guard.CHECKOUT_POLICY`'s, and each
+policy is tested here. A new path under a package root is always moved out.
 """
 
 from __future__ import annotations
@@ -616,3 +617,130 @@ def test_a_checkout_is_read_from_one_status_call(tmp_path):
     # Tracked files only, and a rename names its new path only, however its old one reads.
     assert sorted(found["changes"]) == ["refactory/refactory_dsh/mine.py", "renamed odd.py"]
     assert target_guard._porcelain_v2("# branch.oid (initial)\0")[0] is None
+
+
+# ── new paths under the checkout's package roots (create benchmark H1/H2, C1) ─────────
+#
+# A create run's emit agent wrote a test copy of its package into the driver's
+# `.factory/packages/`, and an overwatch agent linked one into `refactory/refactory_packages/`
+# (2026-11-20). Neither path is tracked, so only the package-root watch sees them.
+
+def _create_run(tmp_path: Path, *, project: Path | None = None) -> tuple[Path, Path, Path]:
+    """A create run as `prepare_create` leaves it: the project recorded, the driver named."""
+    driver = _checkout(tmp_path / "driver")
+    project = project or (tmp_path / "project")
+    project.mkdir(parents=True, exist_ok=True)
+    run = tmp_path / "run"
+    target_guard.record(run, project)
+    _record(run, checkout=driver)
+    return driver, project, run
+
+
+def _package(root: Path, name: str) -> Path:
+    package = root / ".factory" / "packages" / name
+    package.mkdir(parents=True)
+    for file in ("__init__.py", "mode.py", "ops.py"):
+        (package / file).write_text(f"# {file}\n")
+    return package
+
+
+def test_a_package_copy_written_into_the_driver_is_refused_and_moved_out(tmp_path, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    (driver / ".factory" / "packages").mkdir(parents=True)
+    lock = driver / ".factory" / "packages" / ".created_pkg.lock"
+    lock.write_text("")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "h1_pkg")  # what H1's emit agent did to import its package
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/h1_pkg") as refused:
+        ad.finish(run, "emit")
+    assert not (driver / ".factory" / "packages" / "h1_pkg").exists()
+    assert lock.exists(), "a path that was there before is never touched"
+    receipt = ad.receipts_in(run)["emit"]
+    moved = run / ad.ROOT / receipt["id"] / "checkouts"
+    assert [p.name for p in moved.rglob("h1_pkg")], "moved aside, not deleted"
+    assert "moved out of the checkout" in str(refused.value)
+    assert "new paths it added were moved out" in capsys.readouterr().err
+
+
+def test_a_package_symlink_into_the_driver_is_refused_and_removed_on_the_spine(tmp_path, monkeypatch):
+    driver, project, run = _create_run(tmp_path)
+    mine = _package(project, "h2_pkg")
+    installed = driver / "refactory" / "refactory_packages"
+    installed.mkdir(parents=True)
+
+    def act(execution, workdir):  # what H2's overwatch agent did, through the spine's worker bridge
+        (workdir / "overwatch.md").write_text("ok\n")
+        os.symlink(mine, installed / "h2_pkg")
+
+    with pytest.raises(ValueError, match="refactory/refactory_packages/h2_pkg"):
+        _dispatch(run, "overwatch", ["overwatch.md"], monkeypatch, act)
+    assert not os.path.lexists(installed / "h2_pkg")
+    assert sorted(p.name for p in mine.iterdir()) == ["__init__.py", "mode.py", "ops.py"], \
+        "the link is moved, never what it points at"
+
+
+def test_a_path_already_under_the_package_roots_is_reported_not_reverted(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    old = _package(driver, "old_pkg")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    (old / "ops.py").write_text("# rewritten by the node, longer\n")
+    (old / "new.py").write_text("# new\n")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    with pytest.raises(ValueError) as refused:
+        ad.finish(run, "emit")
+    text = str(refused.value)
+    assert "paths that were already under its package roots changed: .factory/packages/old_pkg/ops.py" in text
+    assert "left as they are: .factory/packages/old_pkg/ops.py" in text
+    assert (old / "ops.py").read_text() == "# rewritten by the node, longer\n", "never reverted"
+    assert not (old / "new.py").exists(), "but a new path inside it is removed"
+
+
+def test_importing_a_package_in_the_driver_is_not_a_write(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    installed = driver / "refactory" / "refactory_packages" / "fix_pack"
+    installed.mkdir(parents=True)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "ops.cpython-312.pyc").write_bytes(b"pyc")
+    (installed / ".DS_Store").write_bytes(b"finder")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    assert ad.finish(run, "emit")["status"] == "delivered"
+
+
+def test_a_project_that_is_a_refactory_clone_may_write_its_own_packages(tmp_path):
+    project = _checkout(tmp_path / "clone")
+    driver, project, run = _create_run(tmp_path, project=project)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(project, "its_own")
+    (project / "refactory" / "refactory_packages").mkdir(parents=True)
+    os.symlink(project / ".factory" / "packages" / "its_own",
+               project / "refactory" / "refactory_packages" / "its_own")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    assert ad.finish(run, "emit")["status"] == "delivered"
+    assert (project / ".factory" / "packages" / "its_own" / "ops.py").exists()
+    assert target_guard.checkouts(run, tmp_path / "elsewhere") == [driver.resolve()], \
+        "the project is never watched as refactory's own, the driver is"
+
+
+def test_a_run_whose_project_is_the_driver_does_not_watch_it(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    target_guard.record(run, driver)
+    _record(run, checkout=driver)
+    assert target_guard.checkouts(run, driver / "refactory" / "refactory_dsh") == []
+
+
+def test_package_entries_are_paths_under_the_package_roots_only(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    _package(driver, "p")
+    (driver / "notes.txt").write_text("elsewhere\n")
+    found = target_guard._checkout_state(driver)["packages"]
+    assert sorted(found) == [".factory/packages/p", ".factory/packages/p/__init__.py",
+                             ".factory/packages/p/mode.py", ".factory/packages/p/ops.py"]
+    assert target_guard.package_differences(found, dict(found)) == ([], [])
+    added, _ = target_guard.package_differences({".factory/packages/p": "directory"}, found)
+    assert added == [".factory/packages/p/__init__.py", ".factory/packages/p/mode.py",
+                     ".factory/packages/p/ops.py"], "a new file in an old directory is new"
+    added, _ = target_guard.package_differences({}, found)
+    assert added == [".factory/packages/p"], "only the top of a new tree"

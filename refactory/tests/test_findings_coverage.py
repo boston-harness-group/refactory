@@ -377,9 +377,12 @@ def test_scripted_design_run_dropped_finding(tmp_path):
     assert result.facts['design_review_status'].startswith('Design review: PASS')
 
 
-def test_scripted_create_run_finding_coverage(tmp_path):
+def test_scripted_create_run_finding_coverage(tmp_path, monkeypatch):
     """19: A create run whose strategy drops a finding raises CreateError,
     and strategy-review.txt names the missing finding."""
+    project = tmp_path / "project"  # a create run refuses refactory's checkout (C1)
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
     from refactory_dsh.create import CreateConfig, CreateError, create
 
     def bad_strategy(name: str) -> str:

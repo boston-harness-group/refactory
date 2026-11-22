@@ -23,6 +23,7 @@ from refactory_dsh.design import DesignMode
 from refactory_dsh.repo_change import ARTIFACTS, OWNERS
 from refactory_dsh.edit import EditConfig, EditMode
 from refactory_dsh.run import run_node
+from refactory_dsh.paths import project_for_nodes
 from tests_support import (
     DESIGN_DOC_ANSWER,
     PITFALLS_ANSWER,
@@ -44,15 +45,27 @@ pytestmark = pytest.mark.usefixtures("fake_gh")
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _project(tmp_path, monkeypatch):
+    """Every run here writes its packages into a project of its own: never refactory's
+    checkout, which a run now refuses as a project (C1), and which these tests used to
+    fill with packages."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    # Started from inside it, as a person runs one: what a step finds relative to the
+    # working directory (`.factory/artifacts`, the workspace) is the same project.
+    monkeypatch.chdir(project)
+    return project
+
+
+@pytest.fixture(autouse=True)
+def _clean(_project):
     # The owner record too: the check tests run the gate without a prepare, so a name
     # an earlier run claimed would otherwise refuse them.
-    for root in (registry.workspace_root(Path(".")) / NAME, ARTIFACTS / ARTIFACT):
-        shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(ARTIFACTS / ARTIFACT, ignore_errors=True)
     (OWNERS / f"{ARTIFACT}.json").unlink(missing_ok=True)
     yield
-    for root in (registry.workspace_root(Path(".")) / NAME, ARTIFACTS / ARTIFACT):
-        shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(ARTIFACTS / ARTIFACT, ignore_errors=True)
     (OWNERS / f"{ARTIFACT}.json").unlink(missing_ok=True)
 
 
@@ -108,7 +121,7 @@ def test_a_revision_produces_a_package_and_reports_before_and_after(tmp_path):
     # Use a unique package name and tmp_path workdir so parallel workers do not
     # collide on the shared .factory/edit-run lock or edited_pkg directory.
     pkg = "edited_produces"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         result = edit_module.edit(
@@ -121,14 +134,14 @@ def test_a_revision_produces_a_package_and_reports_before_and_after(tmp_path):
         assert result["revision_of"] == "circle_packing/adaptive"
         assert result["before_score"] is not None and result["after_score"] is not None
         assert result["regressed"] is False
-        assert f"{pkg}/counter" in registry.render_catalogue(Path("."))
+        assert f"{pkg}/counter" in registry.render_catalogue(project_for_nodes())
     finally:
         shutil.rmtree(pkg_dir, ignore_errors=True)
 
 
 def test_the_revision_records_what_it_came_from(tmp_path):
     pkg = "edited_records"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         edit_module.edit(
@@ -138,7 +151,7 @@ def test_the_revision_records_what_it_came_from(tmp_path):
             ),
             client=FakeModel(create_answers(pkg, good_files(pkg))),
         )
-        recorded = registry.provenance(pkg, Path("."))
+        recorded = registry.provenance(pkg, project_for_nodes())
         assert recorded["revision_of"] == "circle_packing/adaptive"
         assert recorded["brief"] == "count"
         assert "before_score" in recorded and "after_score" in recorded
@@ -159,7 +172,7 @@ def test_a_regression_is_refused_by_default(monkeypatch, tmp_path):
     import refactory_dsh.create_ops as create_ops
 
     pkg = "edited_regression"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +212,7 @@ def test_a_regression_can_be_intended(monkeypatch, tmp_path):
     import refactory_dsh.create_ops as create_ops
 
     pkg = "edited_intended"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -235,7 +248,7 @@ def test_a_revision_of_a_mode_that_does_not_run_is_refused(monkeypatch, tmp_path
     import refactory_dsh.create_ops as create_ops
 
     pkg = "edited_norun"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -378,7 +391,7 @@ def test_the_artifact_lands_beside_the_workspace_not_in_it():
     ctx.write_text("emit.txt", render({"tool.py": "print('hi')\n"}))
     facts = repo_change.materialise(ctx)
     assert Path(facts["artifact"]).is_relative_to(ARTIFACTS.resolve())
-    assert not Path(facts["artifact"]).is_relative_to(registry.workspace_root(Path(".")))
+    assert not Path(facts["artifact"]).is_relative_to(registry.workspace_root(project_for_nodes()))
 
 
 def test_the_check_gate_passes_an_artifact_that_runs(tmp_path):
@@ -858,7 +871,7 @@ def test_a_revision_records_the_state_it_came_from(tmp_path):
     # Use a unique package name so parallel workers cleaning ``edited_pkg``
     # cannot break the registration step (pre-existing parallel-execution race).
     pkg = "edited_state"
-    pkg_dir = registry.workspace_root(Path(".")) / pkg
+    pkg_dir = registry.workspace_root(project_for_nodes()) / pkg
     shutil.rmtree(pkg_dir, ignore_errors=True)
     try:
         result = edit_module.edit(
@@ -870,11 +883,11 @@ def test_a_revision_records_the_state_it_came_from(tmp_path):
         assert result["revision_of_digest"], "no digest of the state that was revised"
 
         recorded = json.loads(
-            (registry.workspace_root(Path(".")) / pkg / registry.ORIGIN).read_text()
+            (registry.workspace_root(project_for_nodes()) / pkg / registry.ORIGIN).read_text()
         )
         state = recorded["revision_of_state"]
         assert sorted(state) == sorted(
-            registry.resolve(Path("."), "circle_packing/adaptive")[1]().state_dict()
+            registry.resolve(project_for_nodes(), "circle_packing/adaptive")[1]().state_dict()
         )
         assert recorded["revision_of_digest"] == result["revision_of_digest"]
 
@@ -998,7 +1011,7 @@ def test_a_comparison_names_the_defaults_the_revision_changed(tmp_path, monkeypa
     from refactory_dsh.run import run_node
     from refactory_dsh.sandbox import SandboxResult
 
-    source = registry.resolve(Path("."), "circle_packing/adaptive")[1]().state_dict()["knobs"]
+    source = registry.resolve(project_for_nodes(), "circle_packing/adaptive")[1]().state_dict()["knobs"]
     revised = {name: entry["value"] for name, entry in source.items()}
     assert revised["budget"] == 3
     revised["budget"] = 8
@@ -1031,10 +1044,10 @@ def test_the_sandboxed_smoke_reports_the_knob_values_it_ran_with(tmp_path):
     """What the comparison above reads: the defaults, with the sample knobs over them."""
     from refactory_dsh import sandbox
 
-    result = sandbox.smoke("circle_packing/adaptive", tmp_path / "smoke", project=Path("."),
+    result = sandbox.smoke("circle_packing/adaptive", tmp_path / "smoke", project=project_for_nodes(),
                            knobs={"budget": "5"})
     assert result.ok, result.problem()
-    defaults = registry.resolve(Path("."), "circle_packing/adaptive")[1]().state_dict()["knobs"]
+    defaults = registry.resolve(project_for_nodes(), "circle_packing/adaptive")[1]().state_dict()["knobs"]
     assert result.payload["knobs"] == {
         **{name: entry["value"] for name, entry in defaults.items()}, "budget": 5}
 
@@ -1112,7 +1125,7 @@ def test_a_revision_of_a_mode_that_calls_a_model_is_not_refused_on_one_sample(
     from refactory_dsh import registry
     from refactory_dsh.run import run_node
 
-    source = registry.workspace_root(Path(".")) / "agent_probe"
+    source = registry.workspace_root(project_for_nodes()) / "agent_probe"
     shutil.rmtree(source, ignore_errors=True)
     source.mkdir(parents=True)
     (source / "__init__.py").write_text(

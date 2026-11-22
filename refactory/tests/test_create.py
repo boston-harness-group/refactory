@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-import shutil
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,7 @@ from refactory_dsh import registry
 from refactory_dsh.create import CreateConfig, CreateError, CreateMode
 from refactory_dsh import create_ops, sandbox
 from refactory_dsh.create_ops import parse_files
-from refactory_dsh.paths import REPO_ROOT
+from refactory_dsh.paths import REPO_ROOT, project_for_nodes
 from test_fast_modes import PLAN, QA_PASS
 from tests_support import (
     FakeModel,
@@ -56,24 +55,17 @@ def _config(**overrides) -> CreateConfig:
 
 
 @pytest.fixture(autouse=True)
-def _clean_package():
-    """A created package is real: leave the workspace as it was found.
-
-    Uses a file lock so xdist workers do not step on each other's packages.
-    """
-    import fcntl
-    root = registry.workspace_root(Path(".")) / NAME
-    lock_path = root.parent / f".{NAME}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = open(lock_path, "w")
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-    shutil.rmtree(root, ignore_errors=True)
-    try:
-        yield
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+def _project(tmp_path, monkeypatch):
+    """Every run here writes its packages into a project of its own: never refactory's
+    checkout, which a run now refuses as a project (C1), and which these tests used to
+    fill with packages and lock files."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    # Started from inside it, as a person runs one: what a step finds relative to the
+    # working directory (`.factory/artifacts`, the workspace) is the same project.
+    monkeypatch.chdir(project)
+    return project
 
 
 # ── T2: @-path accepted by parse_files ─────────────────────────────────────
@@ -286,10 +278,10 @@ def test_a_good_answer_creates_registers_and_smoke_scores(tmp_path):
     assert result.package == NAME
     assert result.mode == f"{NAME}/counter"
     assert result.smoke_score and result.smoke_score > 0
-    assert f"{NAME}/counter" in registry.render_catalogue(Path("."))
+    assert f"{NAME}/counter" in registry.render_catalogue(project_for_nodes())
     assert (result.path / "mode.py").exists()
     assert result.path.resolve().is_relative_to(
-        registry.workspace_root(Path(".")).resolve()
+        registry.workspace_root(project_for_nodes()).resolve()
     ), "a generated package must not be written into the source tree"
 
 
@@ -298,7 +290,7 @@ def test_the_created_mode_runs_and_scores(tmp_path):
     create_module.create(
         _config(name=NAME, brief="count", workdir=tmp_path / "run"), client=model
     )
-    _package, mode_class = registry.resolve(Path("."), f"{NAME}/counter")
+    _package, mode_class = registry.resolve(project_for_nodes(), f"{NAME}/counter")
     workdir = tmp_path / "smoke"
     result = mode_class().evaluate(workdir)
     assert result.exit_ok, result.error
@@ -608,6 +600,7 @@ def test_check_package_never_imports_the_package_it_checks(tmp_path, monkeypatch
     """The whole point of #23: the check must not run model code in the driver."""
     _stage(tmp_path, "spied_pkg", _valid_package("spied_pkg"))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REFACTORY_PROJECT")  # the working directory is the project
     imported = _record_package_imports(monkeypatch, "spied_pkg")
     problems = create_ops.check_package("spied_pkg")
     assert problems == [], problems
@@ -639,7 +632,7 @@ def test_a_creation_asked_for_a_data_node_is_checked_for_one():
     from refactory_dsh.create_ops import check_package
     from tests_support import good_files
 
-    root = registry.workspace_root(Path(".")) / "checked_pkg"
+    root = registry.workspace_root(project_for_nodes()) / "checked_pkg"
     _shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
     for filename, body in good_files("checked_pkg").items():
@@ -685,7 +678,7 @@ def test_naming_only_a_task_yields_a_data_node_harness_bound_to_it(tmp_path):
     )
     assert problems == [], problems
 
-    _package, mode_class = registry.resolve(Path("."), f"{NAME}/chore")
+    _package, mode_class = registry.resolve(project_for_nodes(), f"{NAME}/chore")
     bound = [
         node for node in mode_class().build().nodes.values()
         if node.kind == "data" and node.task_ref == TASK
@@ -712,6 +705,7 @@ def test_a_harness_that_bakes_its_items_in_is_refused(tmp_path, monkeypatch):
     """
     _stage(tmp_path, NAME, baked_data_files(NAME, TASK))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REFACTORY_PROJECT")  # the working directory is the project
     problems = create_ops.check_package(NAME)
     assert any("inline_items" in problem for problem in problems), problems
     assert any("run time" in problem for problem in problems)
@@ -721,6 +715,7 @@ def test_a_data_node_that_names_no_source_is_refused(tmp_path, monkeypatch):
     """A data node with no Task and no source iterates nothing, so it is not a harness."""
     _stage(tmp_path, NAME, unfed_data_files(NAME))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REFACTORY_PROJECT")  # the working directory is the project
     problems = create_ops.check_package(NAME)
     assert any("no way to be fed at run time" in problem for problem in problems), problems
 
@@ -776,7 +771,7 @@ def test_single_still_produces_the_single_shot_package(tmp_path):
     )
     assert result.smoke_score and result.smoke_score > 0
     assert create_ops.check_package(NAME) == []
-    _package, mode_class = registry.resolve(Path("."), f"{NAME}/counter")
+    _package, mode_class = registry.resolve(project_for_nodes(), f"{NAME}/counter")
     assert not [n for n in mode_class().build().nodes.values() if n.kind == "data"]
 
 
@@ -1048,6 +1043,7 @@ def test_a_mode_that_cannot_receive_the_briefs_input_is_refused(tmp_path, monkey
     """The counter takes `target` and reads `state.json`, so it cannot take a package."""
     _stage(tmp_path, NAME, _valid_package(NAME))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REFACTORY_PROJECT")  # the working directory is the project
     problems = create_ops.check_package(NAME, requires_input=("package",))
     assert any("no way to receive 'package'" in problem for problem in problems), problems
     assert any("declare a knob named after it" in problem for problem in problems)
@@ -1066,6 +1062,7 @@ def test_a_mode_that_takes_the_input_passes(tmp_path, monkeypatch):
     )
     _stage(tmp_path, NAME, files)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REFACTORY_PROJECT")  # the working directory is the project
     assert create_ops.check_package(NAME, requires_input=("package",)) == []
 
 
@@ -1282,3 +1279,67 @@ def test_the_design_review_and_the_package_gate_say_why_they_send_work_back(tmp_
     ctx.write_json("brief.json", {"task_refs": [], "data_node": False})
     verdict = create_ops.validate(ctx)
     assert verdict == "reloop" and verdict.reason and verdict.reason == ctx.facts["validation"]
+
+
+# ── C1: a run started from inside another checkout leaves it, and refactory, alone ──
+#
+# On the walker, with the working directory in a different refactory checkout and the
+# project stated: nothing under that checkout or `REPO_ROOT`'s package roots changes,
+# and the package lands in the project. (The spine's own ops are driven through
+# `python -m refactory_dsh.run` in `test_staging_isolation.py`, and its agent bridge in
+# `test_target_guard_checkouts.py`.)
+
+def _another_checkout(root: Path) -> Path:
+    from tests_support import git, git_repo
+
+    other = git_repo(root)
+    (other / "refactory" / "refactory_packages" / "kept").mkdir(parents=True)
+    (other / "refactory" / "refactory_packages" / "kept" / "__init__.py").write_text("# kept\n")
+    (other / ".factory" / "packages").mkdir(parents=True)
+    git(other, "add", ".")
+    git(other, "commit", "-q", "-m", "a refactory checkout")
+    return other
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    import os
+
+    found = {}
+    for directory, names, contents in os.walk(root):
+        names[:] = [n for n in names if n not in (".git", "__pycache__")]
+        for name in contents:
+            path = Path(directory) / name
+            found[str(path.relative_to(root))] = path.read_bytes()
+    return found
+
+
+def test_walker_create_from_another_checkout_leaves_it_and_refactory_untouched(tmp_path, monkeypatch, _project):
+    from refactory_dsh import target_guard
+
+    other = _another_checkout(tmp_path / "other")
+    monkeypatch.chdir(other)
+    before, ours = _files(other), target_guard.package_entries(REPO_ROOT)
+    name = "c1_walker_pkg"
+    created = create_module.create(_config(name=name, brief="count to a target", workdir=tmp_path / "create"),
+                                   client=FakeModel(create_answers(name, good_files(name))))
+    assert created.package == name
+    assert (_project / ".factory" / "packages" / name / "__init__.py").exists()
+    assert _files(other) == before, "the checkout the run started in is not the project"
+    assert target_guard.package_entries(REPO_ROOT) == ours, "refactory's own package roots are untouched"
+
+
+def test_walker_edit_from_another_checkout_leaves_it_and_refactory_untouched(tmp_path, monkeypatch, _project):
+    from refactory_dsh import edit as edit_module
+    from refactory_dsh import target_guard
+    from refactory_dsh.edit import EditConfig
+
+    other = _another_checkout(tmp_path / "other")
+    monkeypatch.chdir(other)
+    before, ours = _files(other), target_guard.package_entries(REPO_ROOT)
+    name = "c1_walker_edit"
+    edit_module.edit(EditConfig(verdicts={"gate_strategy": "proceed"}, name=name, mode="circle_packing/adaptive",
+                                brief="restart on a stall", workdir=tmp_path / "edit"),
+                     client=FakeModel(create_answers(name, good_files(name))))
+    assert (_project / ".factory" / "packages" / name / "__init__.py").exists()
+    assert _files(other) == before, "the checkout the run started in is not the project"
+    assert target_guard.package_entries(REPO_ROOT) == ours, "refactory's own package roots are untouched"

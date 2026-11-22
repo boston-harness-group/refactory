@@ -6,8 +6,11 @@ object nested inside a broken answer; no proposer-key preference (that is
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from refactory_dsh.agent_json import parse_agent_json
 from refactory_dsh.optim.random_optimizer import answer_json, extract_json, reply_object
 
 
@@ -123,3 +126,59 @@ def test_a_proposer_answer_quoting_a_fence_in_a_fenced_reply_is_read_whole():
 def test_an_answer_starting_on_the_opening_fence_line_is_read_whole(reply):
     for read in (reply_object, extract_json):
         assert read(reply) == {"findings": [{"finding": "x"}], "verdict": "ok"}
+
+
+# ── parse_agent_json: the shared reader for an agent's JSON answer (C2) ─────────────
+
+
+#: create benchmark H3's two failing replies, verbatim (2026-11-20, held-out batches ho1
+#: and ho2): a tool-less agent invented a tool-call transcript before its answer, bare in
+#: one and fenced mid-line in the other. The package's `json.loads` crashed on both.
+H3_REPLIES = [Path(__file__).parent / "fixtures" / name
+              for name in ("h3_replies_bare_after_invented_transcript.txt",
+                           "h3_replies_fenced_after_invented_transcript.txt")]
+
+
+@pytest.mark.parametrize("path", H3_REPLIES, ids=["bare", "fenced"])
+def test_h3s_replies_are_read_past_the_invented_transcript(path):
+    reply = path.read_text()
+    answer = parse_agent_json(reply, expect=("replies",))
+    assert [item["id"] for item in answer["replies"]] == [f"{n:03d}" for n in range(1, 13)]
+    # Without the transcript dropped, the first object is the invented tool call.
+    assert set(extract_json(reply)) == {"name", "arguments"}, "the replay: extract_json misreads it"
+    assert parse_agent_json(reply) == answer, "the transcript never holds the answer"
+
+
+def test_the_first_object_with_the_expected_keys_is_the_answer():
+    reply = 'Shape: {"replies": "..."} is the format; first {"note": 1}\n{"replies": [], "n": 0}'
+    assert parse_agent_json(reply, expect=("replies", "n")) == {"replies": [], "n": 0}
+    assert parse_agent_json(reply) == {"replies": "..."}
+
+
+def test_an_object_nested_in_another_is_never_the_answer():
+    reply = '{"outer": {"replies": [1]}}'
+    with pytest.raises(ValueError, match=r"has the keys \['replies'\]; the objects it has carry: \{outer\}"):
+        parse_agent_json(reply, expect=("replies",))
+
+
+@pytest.mark.parametrize("reply, said", [
+    ("", "reply is empty"),
+    ("no object here", "no JSON object in the agent's reply"),
+    ('<tool_call>{"name": "bash"}</tool_call>', "no JSON object in the agent's reply"),
+])
+def test_a_reply_with_no_answer_is_refused(reply, said):
+    with pytest.raises(ValueError, match=said):
+        parse_agent_json(reply)
+
+
+def test_create_tells_generated_packages_to_parse_agent_json_with_it():
+    from refactory_dsh import create_ops
+
+    assert "refactory_dsh.agent_json.parse_agent_json(text, expect=(...))" in create_ops.API
+
+
+def test_the_judges_and_agent_replies_share_one_scanner():
+    """One top-level object scanner, not a seventh (C0 reuse audit, D7)."""
+    from refactory_dsh import agent_json, judges
+
+    assert judges._objects is agent_json.objects

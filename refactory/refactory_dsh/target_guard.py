@@ -10,7 +10,8 @@ the baseline is recorded at `prepare`, and every agent node of a worktree run fa
 when it changes the target while it ran (dm-159). An output-only agent also fails
 when the run's own worktree changed. Every agent node of a recorded run also fails
 when it changes refactory's own checkout -- the driver, or the run's pin -- where that
-is not the target (:func:`checkouts`, dm-164).
+is not the target (:func:`checkouts`, dm-164), including a path it adds under that
+checkout's package roots (:data:`PACKAGE_ROOTS`; create benchmark H1/H2).
 """
 
 from __future__ import annotations
@@ -802,7 +803,9 @@ def _checkout_state(root: Path) -> dict[str, Any]:
 
     Untracked files are not watched: an editor's swap or lock file, a log, a person's new
     notes or a copied tree are where false refusals came from, and a generator run with
-    the contract's Python rewrites tracked files, which is what b32l did. HEAD stands for
+    the contract's Python rewrites tracked files, which is what b32l did. The one
+    exception is the checkout's package roots (:func:`package_entries`), where nothing
+    but a run's own stray copy of a package ever appears. HEAD stands for
     the committed content, so a commit there is a change. The root is the checkout's top
     (:func:`checkouts` takes only those). Every agent node takes two of these.
     """
@@ -812,10 +815,126 @@ def _checkout_state(root: Path) -> dict[str, Any]:
     if listing is None:
         raise ValueError(f"git cannot report the state of {root}")
     head, paths = _porcelain_v2(listing)
-    found: dict[str, Any] = {"root": str(root), "git": True, "head": head, "branch": None, "tree": head}
+    found: dict[str, Any] = {"root": str(root), "git": True, "head": head, "branch": None, "tree": head,
+                             "packages": package_entries(root)}
     if len(paths) > LIMIT:
         return {**found, "changes": None}
     return {**found, "changes": {path: _digest(root / path) for path in sorted(paths)}}
+
+
+#: Where a refactory checkout keeps packages of modes, relative to its top: the project
+#: workspace (`registry.WORKSPACE`) and the installed distribution. A run's packages
+#: belong in the run's own project, never here, so a path that appears here while an
+#: agent node runs is that node's: the emit agent of a create run wrote a test copy of
+#: its package into the driver's ``.factory/packages/``, and an overwatch agent linked
+#: one into ``refactory/refactory_packages/``, to import it (2026-11-20). Neither is
+#: tracked, and ``.factory/`` is ignored, so :func:`_checkout_state`'s git view of the
+#: checkout cannot see them; this is the one place untracked paths are watched.
+PACKAGE_ROOTS = (Path(".factory") / "packages", Path("refactory") / "refactory_packages")
+
+
+def _entry(path: Path) -> str:
+    """What one path under a package root is, cheaply: its kind, and a file's size and time.
+
+    Metadata, not content: every path is read before and after every agent node, and
+    the tracked files among them are already compared by content (:func:`_checkout_state`).
+    """
+    try:
+        if path.is_symlink():
+            return "symlink:" + os.readlink(path)
+        stat = path.stat()
+    except OSError:
+        return "-"
+    return "directory" if path.is_dir() else f"file:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def package_entries(root: Path) -> dict[str, str] | None:
+    """Every path under ``root``'s :data:`PACKAGE_ROOTS`, relative to ``root``, with what it is.
+
+    Symlinks are entries, never followed. Caches an import writes (``__pycache__``) and
+    editor or OS litter are left out with the rest of :data:`UNWATCHED`, because running
+    a package is allowed; writing one is not. None when there are more than :data:`LIMIT` paths.
+    """
+    root = Path(root)
+    found: dict[str, str] = {}
+    for relative in PACKAGE_ROOTS:
+        top = root / relative
+        if not top.is_dir() or top.is_symlink():
+            continue
+        for directory, names, files in os.walk(top):
+            here = Path(directory)
+            # os.walk lists a symlinked directory as an entry and does not walk it.
+            names[:] = [name for name in names if name not in UNWATCHED]
+            for name in [*names, *files]:
+                if name in UNWATCHED:
+                    continue
+                path = here / name
+                found[path.relative_to(root).as_posix()] = _entry(path)
+            if len(found) > LIMIT:
+                return None
+    return found
+
+
+def package_differences(before: dict[str, str] | None,
+                        after: dict[str, str] | None) -> tuple[list[str], list[str]]:
+    """``(added, changed)``: paths under the package roots that are new, and ones that
+    existed before and now differ or are gone. ``added`` holds only the topmost new
+    path of each new tree, so removing those removes exactly what is new."""
+    if before is None or after is None:
+        return [], []
+    new = sorted(set(after) - set(before))
+    added = [path for path in new
+             if not any(path.startswith(f"{other}/") for other in new if other != path)]
+    changed = sorted(path for path in before if after.get(path, "-") != before[path])
+    return added, changed
+
+
+def remove_additions(root: Path, added: list[str], before: dict[str, str] | None,
+                     aside: Path) -> tuple[list[str], list[str]]:
+    """Move each path in ``added`` out of ``root`` into ``aside``; ``(moved, errors)``.
+
+    Only a path that did not exist when the node began (absent from ``before``) is
+    ever touched: what was there before is the person's, and is reported, never
+    changed. Moved rather than deleted, so what the node wrote can still be read.
+    """
+    moved: list[str] = []
+    errors: list[str] = []
+    for relative in added:
+        if before is None or relative in before:
+            continue
+        source = Path(root) / relative
+        if not source.is_symlink() and not source.exists():
+            continue
+        destination = Path(aside) / relative
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if _same_device(source, destination.parent):
+                os.rename(source, destination)
+            else:
+                _move(source, destination)
+        except OSError as error:
+            errors.append(f"{relative}: {error}")
+            continue
+        moved.append(relative)
+    return moved, errors
+
+
+def _same_device(path: Path, directory: Path) -> bool:
+    try:
+        return os.lstat(path).st_dev == os.stat(directory).st_dev
+    except OSError:
+        return False
+
+
+def _move(source: Path, destination: Path) -> None:
+    """A move across devices that keeps a symlink a symlink."""
+    import shutil
+
+    if source.is_symlink():
+        os.symlink(os.readlink(source), destination)
+        source.unlink()
+    else:
+        shutil.move(str(source), str(destination))
 
 
 def watch_checkouts(workdir: Path, paths: list[Path]) -> dict[str, dict[str, Any]]:
@@ -852,6 +971,11 @@ def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -
                  f"this node, so whether the node changed it is unknown: {error}")
             continue
         differences = _compare(earlier, now, commits=False)
+        added, altered = package_differences(earlier.get("packages"), now.get("packages"))
+        if added:
+            differences.append(f"new paths under its package roots: {_named(added)}")
+        if altered:
+            differences.append(f"paths that were already under its package roots changed: {_named(altered)}")
         if differences:
             changed[path] = differences
     return changed
@@ -929,6 +1053,8 @@ def _settled(path: str, node: str, result: dict[str, Any]) -> str:
     if result.get("restored"):
         text += (f"; put back as before the node: {_named(result['restored'])}; the changed copies "
                  f"are in {result['set_aside']}")
+    if result.get("removed"):
+        text += f"; new paths it added were moved out to {result['removed_to']}: {_named(result['removed'])}"
     if result.get("left"):
         text += f"; left as they are: {_named(result['left'])}"
     if result.get("errors"):
@@ -964,6 +1090,17 @@ def settle_checkout(path: str, before: dict[str, Any], directory: Path, workdir:
             result = {"mode": "reported", "restored": [], "left": left, "set_aside": None, "errors": [],
                       "head_moved": now.get("head") != before.get("head"),
                       "diff": (diff or "")[:DIFF_SHOWN]}
+        # Untracked paths under the package roots: whatever policy above, a new one is
+        # moved out (it cannot be anyone's but the node's), and one that was already
+        # there is reported and left as it is.
+        added, altered = package_differences(before.get("packages"), now.get("packages"))
+        if added or altered:
+            aside = checkout_baseline(directory, path).parent / "added"
+            removed, failed = remove_additions(root, added, before.get("packages"), aside)
+            result.update(removed=removed, removed_to=str(aside) if removed else None,
+                          left=[*result.get("left", []), *(name for name in altered
+                                                           if name not in result.get("left", []))],
+                          errors=[*result.get("errors", []), *failed])
     result.update(before_head=before.get("head"), head=now.get("head"))
     note = _settled(path, node, result)
     warn(note + (f"\n{result['diff']}" if result.get("diff") else ""))
@@ -987,6 +1124,9 @@ def checkout_refusal(node: str, target: str | None, changed: dict[str, list[str]
         if result.get("restored"):
             text += (f" Its changed files were put back as they were before the node: "
                      f"{_named(result['restored'])}. The changed copies are in {result['set_aside']}.")
+        if result.get("removed"):
+            text += (f" The new paths it added were moved out of the checkout to {result['removed_to']}: "
+                     f"{_named(result['removed'])}.")
         if result.get("left"):
             text += f" They were left as they are: {_named(result['left'])}."
         if result.get("errors"):

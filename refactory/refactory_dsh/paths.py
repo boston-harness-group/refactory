@@ -56,6 +56,55 @@ def project_for_nodes() -> Path:
     return Path(os.environ.get("REFACTORY_PROJECT") or Path.cwd())
 
 
+class CheckoutProjectError(ValueError):
+    """A package write resolved to refactory's own checkout instead of a project."""
+
+
+def refactory_checkouts(workdir: Path | None = None) -> list[Path]:
+    """Refactory's own checkouts, which are never a run's project: this one
+    (:data:`REPO_ROOT`), and the driver and pin the run's record names (``workdir``'s
+    ``.refactory/run-config.json``; ``REFACTORY_WORKDIR`` when no workdir is given).
+    """
+    import json
+
+    found = [REPO_ROOT.resolve()]
+    run = workdir if workdir is not None else os.environ.get("REFACTORY_WORKDIR")
+    if run:
+        try:
+            driver = json.loads((Path(run) / ".refactory" / "run-config.json").read_text()).get("driver")
+        except (OSError, ValueError, AttributeError):
+            driver = None
+        if isinstance(driver, dict):
+            for key in ("checkout", "pin_checkout"):
+                value = driver.get(key)
+                if isinstance(value, str) and value:
+                    path = Path(value).expanduser().resolve()
+                    if path not in found:
+                        found.append(path)
+    return found
+
+
+def project_for_writes(project: Path | None = None, *, workdir: Path | None = None) -> Path:
+    """The project a node may write packages into: ``project``, else
+    :func:`project_for_nodes`, resolved -- refused when it is refactory's own checkout.
+
+    A run that never said which project it serves falls back to the working directory,
+    and a run launched from the checkout then writes its packages into the checkout,
+    where every later run on that checkout imports them. Saying the project
+    (``REFACTORY_PROJECT``, or launching from the project's directory) is the fix, so
+    the refusal says that. A project that is some *other* refactory clone is a project
+    like any other.
+    """
+    resolved = Path(project if project is not None else project_for_nodes()).expanduser().resolve()
+    for checkout in refactory_checkouts(workdir):
+        if resolved == checkout:
+            raise CheckoutProjectError(
+                f"refusing to write packages into refactory's own checkout {checkout}: that is "
+                "not a project. Set REFACTORY_PROJECT to the project the packages belong to, "
+                "or start the run from that project's directory")
+    return resolved
+
+
 def refactory_home() -> Path:
     """Refactory's own per-user directory: global memory, the project registry, run worktrees.
 
