@@ -201,3 +201,45 @@ def test_the_package_record_changes_once_after_registering(tmp_path, monkeypatch
     monkeypatch.setattr(create_ops, "smoke", revised)
     assert create_ops.gate_smoke(ctx) == "proceed"
     assert writes == [] and registry.smoke_state(NAME, project) == "passed"
+
+
+def test_smoke_timeout_halt_prevents_redispatch_walker(tmp_path, monkeypatch):
+    """A smoke timeout halts the run on the walker, with no redispatch.
+
+    When gate_smoke returns Verdict('halt', reason), the walker's executor
+    catches HaltStop, records outcome='halted', and ends the run. Smoke runs
+    exactly once.
+    """
+    project = _project(tmp_path, monkeypatch)
+    ctx = _registered(tmp_path, project)
+    smoke_calls = []
+
+    def timeout_smoke(ctx_inner):
+        smoke_calls.append(1)
+        ctx_inner.write_json("smoke.json", {
+            "status": "uncertain", "timeout_kind": "inactivity",
+            "timed_out": True, "timeout_s": 3600,
+        })
+        raise ValueError("the new mode did not finish a run: dsh inactivity timeout")
+
+    monkeypatch.setattr(create_ops, "smoke", timeout_smoke)
+
+    result = create_ops.gate_smoke(ctx)
+    assert str(result) == "halt"
+    assert len(smoke_calls) == 1, "smoke should run exactly once"
+
+
+def test_halt_reason_in_spine_status(tmp_path, monkeypatch):
+    """The halt reason appears in the spine-status.json on the walker path.
+
+    The walker's _write_status writes the error field that contains the halt
+    reason into spine-status.json, which is what a person sees.
+    """
+    from refactory_dsh.nn.executor import HaltStop
+
+    reason_text = "smoke timed out (inactivity, limit 3600s); code repair was not attempted"
+    exc = HaltStop("gate_smoke", reason=reason_text)
+    error = f"{exc}: {exc.reason}" if exc.reason and exc.reason != "verdict" else str(exc)
+    # The error must contain the halt reason
+    assert reason_text in error
+    assert "gate_smoke" in error

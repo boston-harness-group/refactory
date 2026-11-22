@@ -314,6 +314,7 @@
     "task_ref": "",
     "single_shot": 0.0,
     "smoke_timeout_s": 3600.0,
+    "smoke_items": 3.0,
     "check_attempt_cap": 8.0,
     "sample_knobs": "",
     "requires_input": "",
@@ -371,7 +372,18 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds of inactivity (no worker events or item completions) allowed for each smoke pass; a long backstop caps total wall time",
+      "required": false
+    },
+    "smoke_items": {
+      "default": 3,
+      "kind": "int",
+      "lo": 1,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
       "required": false
     },
     "check_attempt_cap": {

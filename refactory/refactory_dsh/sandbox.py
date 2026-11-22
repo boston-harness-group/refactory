@@ -50,7 +50,7 @@ from refactory_dsh.paths import project_root, project_for_nodes
 #:
 #: 3× the largest gap (60 s) = 180 s, which is today's default.
 DEFAULT_TIMEOUT_S = 180
-#: Whole-mode smoke budget when model calls are required; independently configurable.
+#: Inactivity timeout for smoke passes; stops when no progress for this many seconds.
 DEFAULT_MODEL_SMOKE_TIMEOUT_S = 3600
 DEFAULT_MEMORY_MB = 2048
 DEFAULT_CPU_S = 120
@@ -511,6 +511,11 @@ def run_sandboxed(
     being contained is *code*: only a separate process can be killed, capped and
     given its own working directory. ``address_space=False`` keeps the heap cap and
     drops the address-space cap (`_limits`).
+
+    Uses inactivity-based timeout: the process is stopped when no output has
+    arrived and no progress-file changes have been detected for ``timeout_s``
+    seconds, with a backstop at ``min(4 × timeout_s, COMMAND_BACKSTOP_S)``
+    seconds of wall time.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -521,34 +526,108 @@ def run_sandboxed(
     kwargs: dict[str, Any] = {}
     if sys.platform != "win32":
         kwargs["preexec_fn"] = _limits(memory_mb, cpu_s, file_mb, address_space=address_space)
-    started = time.monotonic()
-    try:
-        if child_env.get("REFACTORY_BUDGET_LEDGER"):
-            from refactory_dsh.owned_process import run_owned
 
-            result = run_owned(
-                [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, cwd=str(workdir), env=child_env, timeout=timeout_s,
-                label="budgeted validation", **kwargs,
-            )
-        else:
-            result = subprocess.run(
-                [sys.executable, "-c", code], capture_output=True, text=True,
-                cwd=str(workdir), env=child_env, timeout=timeout_s, **kwargs,
-            )
-    except subprocess.TimeoutExpired as exc:
+    cmd: list[str] = [sys.executable, "-c", code]
+
+    started = time.monotonic()
+    out = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
+    err = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
+    activity = [started]
+    backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=False, cwd=str(workdir), env=child_env,
+        start_new_session=os.name == "posix", **kwargs,
+    )
+    readers = [threading.Thread(target=_drain, args=(pipe, sink, activity), daemon=True,
+                                name="sandbox-drain")
+               for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
+    for reader in readers:
+        reader.start()
+
+    # Progress-file watcher thread.
+    _prev_progress: list[dict[str, Any]] = [{}]
+
+    def _watch_progress() -> None:
+        while proc.poll() is None:
+            try:
+                snap = _progress_at(workdir)
+            except Exception:
+                snap = {}
+            if snap != _prev_progress[0]:
+                activity[0] = time.monotonic()
+                _prev_progress[0] = snap
+            time.sleep(1)
+
+    progress_thread = threading.Thread(target=_watch_progress, daemon=True, name="sandbox-progress")
+    progress_thread.start()
+
+    stop: str | None = None
+    try:
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now - activity[0] >= timeout_s:
+                stop = "inactivity"
+            elif now - started >= backstop_s:
+                stop = "backstop"
+            if stop is not None:
+                break
+            time.sleep(0.05)
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=2)
+        for reader in readers:
+            reader.join(timeout=5)
+        raise
+
+    if stop is not None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=2)
+        for reader in readers:
+            reader.join(timeout=5)
         return SandboxResult(
             ok=False,
             timed_out=True,
             returncode=124,
             timeout_s=timeout_s,
+            timeout_kind=stop,
             elapsed_s=round(time.monotonic() - started, 3),
             progress=_progress_at(workdir),
-            stdout=(exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
-            stderr=f"timed out after {timeout_s}s",
+            stdout=out.text(),
+            stderr=err.text() or f"timed out ({stop}) after {timeout_s}s",
         )
+
+    # Normal exit: join readers with a grace period.
+    grace_end = time.monotonic() + EXIT_GRACE_S
+    for reader in readers:
+        reader.join(timeout=max(0.0, grace_end - time.monotonic()))
+
+    stdout_text = out.text()
+    stderr_text = err.text()
+
     payload: dict[str, Any] = {}
-    for line in reversed(result.stdout.strip().splitlines()):
+    for line in reversed(stdout_text.strip().splitlines()):
         try:
             loaded = json.loads(line)
         except json.JSONDecodeError:
@@ -556,14 +635,31 @@ def run_sandboxed(
         if isinstance(loaded, dict):
             payload = loaded
             break
+
+    # Propagate an inner timeout_kind through the payload (the inner run timed
+    # out but the outer process exited cleanly).
+    inner_timeout_kind = payload.get("timeout_kind")
+    if inner_timeout_kind in STOP_KINDS:
+        return SandboxResult(
+            ok=proc.returncode == 0,
+            timed_out=True,
+            timeout_s=timeout_s,
+            timeout_kind=inner_timeout_kind,
+            elapsed_s=round(time.monotonic() - started, 3),
+            payload=payload,
+            returncode=proc.returncode,
+            stdout=stdout_text,
+            stderr=stderr_text,
+        )
+
     return SandboxResult(
-        ok=result.returncode == 0,
+        ok=proc.returncode == 0,
         timeout_s=timeout_s,
         elapsed_s=round(time.monotonic() - started, 3),
         payload=payload,
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        returncode=proc.returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
     )
 
 
@@ -824,6 +920,8 @@ def smoke(
     model: bool = False,
     knobs: dict[str, Any] | None = None,
     model_context: dict[str, str] | None = None,
+    smoke_items: int = 0,
+    data_parallelism: int = 0,
     **kwargs: Any,
 ) -> SandboxResult:
     """Run one mode once, in a sandbox, and report what it scored.
@@ -867,9 +965,25 @@ def smoke(
     call = f"model=DshModelClient(**{context!r})" if model else ""
     evaluation = (
         f"evaluate_on_dsh(mode, mode.state_dict(), Path({str(Path(workdir))!r}), "
-        f"timeout_s=smoke_timeout_s, {call})"
+        f"timeout_s=smoke_timeout_s, inactivity=True, {call})"
         if model else f"mode.evaluate(Path({str(Path(workdir))!r}))"
     )
+    # Item limit and parallelism injection for task-bound data nodes.
+    _item_limit_code = ""
+    if model and smoke_items:
+        _item_limit_code = (
+            f"_smoke_items = {smoke_items}\n"
+            f"_data_parallelism = {data_parallelism}\n"
+            "_total = 0\n"
+            "if _smoke_items:\n"
+            "    _st = mode.state_dict()\n"
+            "    for _nid, _ns in _st.get('graph', {}).get('nodes', {}).items():\n"
+            "        if _ns.get('kind') == 'data':\n"
+            "            _total = max(_total, _ns.get('count', 0) or 0)\n"
+            "            _ns['limit'] = _smoke_items\n"
+            "            _ns['parallelism'] = min(_smoke_items, _data_parallelism) if _data_parallelism else _smoke_items\n"
+            "    mode.load_state_dict(_st)\n"
+        )
     code = (
         "import json\n"
         "from pathlib import Path\n"
@@ -884,6 +998,7 @@ def smoke(
         "    for name, value in overrides.items():\n"
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
+        f"{_item_limit_code}"
         f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
         # Reported after the run, so a mode that cannot report them still passes.
@@ -892,8 +1007,12 @@ def smoke(
         " (mode.state_dict().get('knobs') or {}).items() if isinstance(entry, dict)}\n"
         "except Exception:\n"
         "    knobs = None\n"
+        f"_tk = getattr(result, 'timeout_kind', None)\n"
+        f"_il = {smoke_items!r}\n"
+        f"_tt = _total if {bool(model and smoke_items)!r} else None\n"
         "print(json.dumps({'exit_ok': result.exit_ok, 'error': result.error,"
-        " 'score': result.score, 'iterations': result.iterations, 'knobs': knobs}, default=str))\n"
+        " 'score': result.score, 'iterations': result.iterations, 'knobs': knobs,"
+        " 'timeout_kind': _tk, 'item_limit': _il, 'total_items': _tt}, default=str))\n"
     )
     from refactory_dsh import toolchain
 

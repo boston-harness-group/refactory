@@ -95,8 +95,13 @@ class CreateMode(Mode):
             ),
             "smoke_timeout_s": Knob(
                 DEFAULT_MODEL_SMOKE_TIMEOUT_S, "int", lo=1, hi=86400,
-                description="wall-clock seconds allowed for each full mode validation "
-                            "pass, including its model calls; timeout fails creation",
+                description="seconds of inactivity (no worker events or item completions) "
+                            "allowed for each smoke pass; a long backstop caps total wall time",
+            ),
+            "smoke_items": Knob(
+                3, "int", lo=1,
+                description="number of items to run from a task-bound data node "
+                            "during smoke; the full item set is not exercised",
             ),
             "check_attempt_cap": Knob(
                 8, "int", lo=0,
@@ -562,7 +567,7 @@ class CreateMode(Mode):
         graph.add(Node(
             "smoke", "gate", evaluator=f"{OPS}:gate_smoke", role="validation",
             resource_role="final_validation", max_iterations=12,
-            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "attempts", "check_attempt_cap"),
+            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items", "attempts", "check_attempt_cap"),
             writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt"),
             produces=("smoke_score", "smoke_ok", "smoke_model", "smoke_reason",
                       "before_score", "after_score", "regressed", "revision_note",

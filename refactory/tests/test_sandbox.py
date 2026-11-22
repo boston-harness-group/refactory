@@ -156,7 +156,7 @@ def test_a_run_that_exceeds_its_time_limit_is_killed(tmp_path):
         "import time; time.sleep(30)", workdir=tmp_path / "run", timeout_s=1
     )
     assert not result.ok and result.timed_out
-    assert "time limit" in result.problem()
+    assert "timed out" in result.problem() or "inactivity" in result.problem()
 
 
 def test_a_failing_run_reports_the_last_line_of_its_error(tmp_path):
@@ -734,3 +734,61 @@ def test_a_nodes_model_call_cannot_background_its_own_work(monkeypatch):
     cmd = seen["cmd"]
     assert "--patch" in cmd  # type: ignore[operator]
     assert str(NODE_PATCH) in cmd  # type: ignore[operator]
+
+
+# ── run_sandboxed inactivity / backstop tests ──────────────────────────────
+
+def test_run_sandboxed_inactivity_timeout_fires_on_idle(tmp_path):
+    """An idle process is stopped after the inactivity limit."""
+    result = sandbox.run_sandboxed(
+        "import time; time.sleep(30)",
+        workdir=tmp_path / "idle",
+        timeout_s=1,
+    )
+    assert result.timed_out
+    assert result.timeout_kind == "inactivity"
+    assert result.returncode == 124
+
+
+def test_run_sandboxed_active_item_survives_past_timeout_s(tmp_path):
+    """A process producing output survives past timeout_s (inactivity-based)."""
+    # Prints every 0.3 s for ~2 s, with a 1 s inactivity limit — should survive.
+    code = (
+        "import time, json, sys\n"
+        "for i in range(7):\n"
+        "    print(f'tick {i}', flush=True)\n"
+        "    time.sleep(0.3)\n"
+        "print(json.dumps({'score': 42}), flush=True)\n"
+    )
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "active", timeout_s=1)
+    assert result.ok
+    assert not result.timed_out
+    assert result.timeout_kind is None
+    assert result.payload.get("score") == 42
+
+
+def test_run_sandboxed_backstop_fires_despite_activity(tmp_path, monkeypatch):
+    """The backstop fires even when activity keeps resetting the inactivity limit."""
+    # Set a very small backstop to avoid waiting
+    monkeypatch.setattr(sandbox, "COMMAND_BACKSTOP_S", 2)
+    # Print continuously but backstop is 2 s (min(4*1, 2) = 2)
+    code = (
+        "import time, sys\n"
+        "while True:\n"
+        "    print('.', flush=True)\n"
+        "    time.sleep(0.1)\n"
+    )
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "backstop", timeout_s=1)
+    assert result.timed_out
+    assert result.timeout_kind == "backstop"
+
+
+def test_run_sandboxed_propagates_inner_timeout_kind(tmp_path):
+    """When the payload contains a timeout_kind, it's propagated to SandboxResult."""
+    code = (
+        "import json\n"
+        "print(json.dumps({'exit_ok': False, 'timeout_kind': 'inactivity', 'score': 0}), flush=True)\n"
+    )
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "inner", timeout_s=30)
+    assert result.timed_out
+    assert result.timeout_kind == "inactivity"

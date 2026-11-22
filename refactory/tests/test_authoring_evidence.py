@@ -976,3 +976,64 @@ def test_full_graph_first_pass_supplies_every_declared_worker_input(tmp_path, mo
                    task={"name": "first_pass", "brief": "produce a checked answer", "check": "python answer.py"},
                    verdicts={"gate_strategy": "proceed"})
     assert run.exit_ok, run.error
+
+
+# ── source_files symlink handling ───────────────────────────────────────────
+
+def test_source_files_skips_internal_symlink(tmp_path):
+    """An internal symlink (target inside root) is skipped by source_files.
+
+    The canonical file at the target location is visited by rglob; the symlink
+    itself is not double-counted.
+    """
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "real.txt").write_text("content")
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "link.txt").symlink_to(root / "real.txt")
+
+    files = evidence.source_files(root)
+    assert "real.txt" in files
+    assert "sub/link.txt" not in files
+
+
+def test_source_files_refuses_external_symlink(tmp_path):
+    """An external symlink (target outside root) raises ValueError."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external")
+    (root / "escape.txt").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="escapes the root"):
+        evidence.source_files(root)
+
+
+def test_source_files_h4_layout_with_pass_symlinks(tmp_path):
+    """H4-style layout: per-item .refactory/declarations.json symlinks inside root.
+
+    This reproduces the layout that crashed evidence.record on the H4 smoke workdir:
+    ``passes/data/item1/.refactory/declarations.json`` → ``../../../.refactory/declarations.json``.
+    """
+    root = tmp_path / "smoke_workdir"
+    root.mkdir()
+    decl_dir = root / ".refactory"
+    decl_dir.mkdir()
+    (decl_dir / "declarations.json").write_text('{"nodes": {}}')
+
+    # Create the item directory with a symlink back to root's declarations.json.
+    item_dir = root / "passes" / "data" / "item1" / ".refactory"
+    item_dir.mkdir(parents=True)
+    (item_dir / "declarations.json").symlink_to(
+        root / ".refactory" / "declarations.json"
+    )
+    # Also create a real file in the item dir to ensure it's visited.
+    (root / "passes" / "data" / "item1" / "output.txt").write_text("result")
+
+    # source_files should not crash.
+    files = evidence.source_files(root)
+    assert ".refactory/declarations.json" in files
+    assert "passes/data/item1/output.txt" in files
+    # The symlink is skipped (its target is inside root).
+    assert "passes/data/item1/.refactory/declarations.json" not in files

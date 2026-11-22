@@ -1343,3 +1343,148 @@ def test_walker_edit_from_another_checkout_leaves_it_and_refactory_untouched(tmp
     assert (_project / ".factory" / "packages" / name / "__init__.py").exists()
     assert _files(other) == before, "the checkout the run started in is not the project"
     assert target_guard.package_entries(REPO_ROOT) == ours, "refactory's own package roots are untouched"
+
+
+# ── gate_smoke halt verdict tests ──────────────────────────────────────────
+
+def _gate_smoke_context(tmp_path, *, knobs=None, smoke_json=None, facts=None):
+    """Create a RunContext suitable for testing gate_smoke."""
+    from refactory_dsh import nn, authoring_evidence as evidence
+    from refactory_dsh.steering import Ledger
+
+    root = tmp_path / "artifact"
+    root.mkdir(exist_ok=True)
+    (root / "__init__.py").write_text("PACKAGE = None")
+    ctx = nn.RunContext(tmp_path, facts={
+        "brief": "test smoke",
+        "artifact": str(root),
+        "name": "test_pkg",
+        "package_path": str(root),
+        **(facts or {}),
+    }, knobs=knobs or {}, enforce_writes=False)
+    ctx.write_json("brief.json", {"brief": ctx.facts["brief"]})
+    ctx.write_json("strategy.json", {"acceptance_criteria": ["it works"]})
+    Ledger.seed(tmp_path, ctx.facts["brief"])
+    if smoke_json is not None:
+        ctx.write_json("smoke.json", smoke_json)
+    return ctx
+
+
+def test_gate_smoke_uncertain_returns_halt_verdict(tmp_path, monkeypatch):
+    """An uncertain smoke with timeout_kind returns Verdict('halt', reason)."""
+    smoke_receipt = {
+        "status": "uncertain", "timeout_kind": "inactivity",
+        "timed_out": True, "timeout_s": 3600,
+        "item_limit": 3, "total_items": 177,
+    }
+    ctx = _gate_smoke_context(tmp_path)
+
+    def _fail_smoke(ctx_inner):
+        # smoke() writes smoke.json before raising, as the real code does
+        ctx_inner.write_json("smoke.json", smoke_receipt)
+        raise ValueError("the new mode did not finish a run: dsh inactivity timeout")
+
+    monkeypatch.setattr(create_ops, "smoke", _fail_smoke)
+
+    result = create_ops.gate_smoke(ctx)
+    assert str(result) == "halt"
+    assert hasattr(result, "reason")
+    assert "inactivity" in result.reason
+    assert "code repair was not attempted" in result.reason
+    assert "3 of 177 items requested" in result.reason
+
+
+def test_gate_smoke_uncertain_non_timeout_returns_halt_verdict(tmp_path, monkeypatch):
+    """An uncertain smoke with no timeout_kind still returns halt."""
+    smoke_receipt = {"status": "uncertain"}
+    ctx = _gate_smoke_context(tmp_path)
+
+    def _fail_smoke(ctx_inner):
+        ctx_inner.write_json("smoke.json", smoke_receipt)
+        raise ValueError("the new mode did not finish a run: killed by signal")
+
+    monkeypatch.setattr(create_ops, "smoke", _fail_smoke)
+
+    result = create_ops.gate_smoke(ctx)
+    assert str(result) == "halt"
+    assert hasattr(result, "reason")
+    assert "uncertain" in result.reason
+    assert "code repair was not attempted" in result.reason
+
+
+def test_gate_smoke_code_failure_still_reloops(tmp_path, monkeypatch):
+    """A code_failure smoke still triggers repair (reloop), not halt."""
+    smoke_receipt = {"status": "code_failure"}
+    ctx = _gate_smoke_context(tmp_path,
+                               knobs={"attempts": "10", "check_attempts": "5"})
+
+    def _fail_smoke(ctx_inner):
+        ctx_inner.write_json("smoke.json", smoke_receipt)
+        raise ValueError("smoke failed")
+
+    monkeypatch.setattr(create_ops, "smoke", _fail_smoke)
+
+    result = create_ops.gate_smoke(ctx)
+    assert str(result) == "reloop"
+
+
+def test_halt_reason_in_walker_outcome(tmp_path, monkeypatch):
+    """The halt reason from Verdict('halt', reason) reaches the walker's outcome."""
+    from refactory_dsh.nn.executor import Verdict, HaltStop, route_verdict
+
+    reason_text = "smoke timed out (inactivity, limit 3600s); code repair was not attempted"
+    verdict = Verdict("halt", reason_text)
+
+    # route_verdict should return (None, "verdict") for halt
+    edge, route_reason = route_verdict(str(verdict), [], "fn")
+    assert edge is None
+
+    # HaltStop should carry the reason
+    halt_reason = str(getattr(verdict, "reason", "") or "").strip() or route_reason
+    exc = HaltStop("gate_smoke", reason=halt_reason)
+    # The error string should contain the reason
+    error = f"{exc}: {exc.reason}" if exc.reason and exc.reason != "verdict" else str(exc)
+    assert reason_text in error
+    assert "halted the run" in str(exc)
+
+
+def test_smoke_task_bound_runs_parallel_sample(tmp_path, monkeypatch):
+    """Task-bound smoke limits items and sets parallelism on the data node."""
+    from refactory_dsh import sandbox as sandbox_module
+
+    seen: dict[str, object] = {}
+
+    def recording_smoke(identifier, workdir, *, smoke_items=0, data_parallelism=0, **kwargs):
+        seen["smoke_items"] = smoke_items
+        seen["data_parallelism"] = data_parallelism
+        return sandbox_module.SandboxResult(
+            ok=True,
+            payload={
+                "score": 0.5, "iterations": 3, "exit_ok": True,
+                "timeout_kind": None, "item_limit": smoke_items, "total_items": 177,
+            },
+        )
+
+    monkeypatch.setattr(sandbox_module, "smoke", recording_smoke)
+    monkeypatch.setattr(sandbox_module, "describe_package", lambda name, **kwargs: (
+        sandbox_module.SandboxResult(ok=True, payload={"ids": [f"{name}/counter"]})
+    ))
+    monkeypatch.setattr("refactory_dsh.create_ops._agent_nodes", lambda name: ["agent1"])
+
+    from refactory_dsh.nn import RunContext
+    workdir = tmp_path / "smoke"
+    workdir.mkdir()
+    ctx = RunContext(workdir, knobs={}, facts={"name": NAME}, task={})
+    ctx.knobs["smoke_items"] = "3"
+    ctx.knobs["data_parallelism"] = "0"
+    ctx._declared = ("smoke.json",)
+    ctx._declared_facts = ("smoke_score", "smoke_ok", "smoke_model")
+
+    produced = create_ops.smoke(ctx)
+    assert seen["smoke_items"] == 3
+    assert produced["smoke_score"] == 0.5
+
+    # Check the payload was written to smoke.json
+    payload = json.loads((workdir / "smoke.json").read_text())
+    assert payload["item_limit"] == 3
+    assert payload["total_items"] == 177

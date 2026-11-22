@@ -53,6 +53,9 @@ class DshRun:
     stderr: str = ""
     duration_s: float = 0.0
     best_score: float | None = None
+    #: What stopped the run before it finished: ``'inactivity'`` or ``'backstop'``,
+    #: or ``None`` when no timeout fired.
+    timeout_kind: str | None = None
 
 
 #: Spine runs in flight in this process, so a stop that reaches the main thread
@@ -113,6 +116,7 @@ def run_on_dsh(
     item_slots_dir: str | None = None,
     item_slots: int | None = None,
     stop_event: threading.Event | None = None,
+    inactivity: bool = False,
 ) -> DshRun:
     """Lower ``state``, run it on DSH, and read back the facts it produced.
 
@@ -241,9 +245,13 @@ def run_on_dsh(
         out_lines: list[str] = []
         err_lines: list[str] = []
 
+        # activity[0]: the last time output or progress-file changes arrived.
+        _activity = [time.monotonic()]
+
         def _pump(stream: Any, sink: list[str]) -> None:
             for line in stream:
                 sink.append(line)
+                _activity[0] = time.monotonic()
                 if on_output is not None:
                     on_output(line)
 
@@ -251,25 +259,75 @@ def run_on_dsh(
                    Thread(target=_pump, args=(process.stderr, err_lines), daemon=True)]
         for reader in readers:
             reader.start()
+
+        # Progress-file watcher: when inactivity=True, monitor the inner run's
+        # progress files so worker events and item results count as activity.
+        _progress_thread: Thread | None = None
+        if inactivity:
+            from refactory_dsh.sandbox import _progress_at
+
+            def _watch_progress() -> None:
+                prev: dict[str, Any] = {}
+                while process.poll() is None:
+                    try:
+                        snap = _progress_at(workdir)
+                    except Exception:
+                        snap = {}
+                    if snap != prev:
+                        _activity[0] = time.monotonic()
+                        prev = snap
+                    time.sleep(1)
+
+            _progress_thread = Thread(target=_watch_progress, daemon=True, name="dsh-progress-watch")
+            _progress_thread.start()
+
+        _timeout_kind: str | None = None
         try:
-            deadline = time.monotonic() + timeout_s
-            while True:
-                if telemetry is not None:
-                    telemetry.checkpoint()
-                if budget is not None:
-                    budget.checkpoint()
-                if callable(getattr(model, "_raise_if_cancelled", None)):
-                    model._raise_if_cancelled()
-                if _stopped():
-                    raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout_s)
-                try:
-                    returncode = process.wait(timeout=min(remaining, 0.1))
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            if inactivity:
+                from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+
+                _began = time.monotonic()
+                _backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
+                while True:
+                    if telemetry is not None:
+                        telemetry.checkpoint()
+                    if budget is not None:
+                        budget.checkpoint()
+                    if callable(getattr(model, "_raise_if_cancelled", None)):
+                        model._raise_if_cancelled()
+                    if _stopped():
+                        raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
+                    now = time.monotonic()
+                    if now - _activity[0] >= timeout_s:
+                        _timeout_kind = "inactivity"
+                        raise subprocess.TimeoutExpired(command, timeout_s)
+                    if now - _began >= _backstop_s:
+                        _timeout_kind = "backstop"
+                        raise subprocess.TimeoutExpired(command, timeout_s)
+                    try:
+                        returncode = process.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            else:
+                deadline = time.monotonic() + timeout_s
+                while True:
+                    if telemetry is not None:
+                        telemetry.checkpoint()
+                    if budget is not None:
+                        budget.checkpoint()
+                    if callable(getattr(model, "_raise_if_cancelled", None)):
+                        model._raise_if_cancelled()
+                    if _stopped():
+                        raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout_s)
+                    try:
+                        returncode = process.wait(timeout=min(remaining, 0.1))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
             # Ended by the stop's shutdown (or just as it came): not a result.
             if _stopped():
                 raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
@@ -280,13 +338,17 @@ def run_on_dsh(
                 untrack_run(process)
             for reader in readers:
                 reader.join(timeout=5)
+            if _progress_thread is not None:
+                _progress_thread.join(timeout=2)
             if telemetry is not None:
                 telemetry.finish("timed_out" if isinstance(error, subprocess.TimeoutExpired) else (
                     "budget_exhausted" if type(error).__name__ == "BudgetExhausted" else "cancelled"), str(error))
             if isinstance(error, subprocess.TimeoutExpired):
+                kind_label = _timeout_kind or "wall-clock"
                 return DshRun(facts={}, workdir=workdir, returncode=-1,
-                              stderr=f"dsh timed out after {timeout_s}s; owned runtime shutdown requested",
-                              duration_s=time.time() - started)
+                              stderr=f"dsh {kind_label} timeout after {timeout_s}s; owned runtime shutdown requested",
+                              duration_s=time.time() - started,
+                              timeout_kind=_timeout_kind)
             raise
         untrack_run(process)
         for reader in readers:
@@ -347,6 +409,7 @@ def evaluate_on_dsh(
     item_slots_dir: str | None = None,
     item_slots: int | None = None,
     stop_event: threading.Event | None = None,
+    inactivity: bool = False,
 ) -> RunResult:
     """One forward pass on DSH, scored by the mode's own `score()`.
 
@@ -360,7 +423,8 @@ def evaluate_on_dsh(
                      **({"model": model} if model is not None else {}),
                      **({"item_slots_dir": item_slots_dir, "item_slots": item_slots}
                         if item_slots_dir is not None else {}),
-                     **({"stop_event": stop_event} if stop_event is not None else {}))
+                     **({"stop_event": stop_event} if stop_event is not None else {}),
+                     inactivity=inactivity)
     # The DSH evaluator's run end (a spine run it launched and waited for): the
     # same cleanups the walker runs when its own run ends.
     from refactory_dsh.nn.executor import _run_end_cleanup
@@ -374,6 +438,7 @@ def evaluate_on_dsh(
             error=f"dsh run failed (exit {run.returncode}): {detail[:300]}",
             workdir=run.workdir,
             model_calls=spine_model_calls(Path(run.workdir)),
+            timeout_kind=run.timeout_kind,
         )
     status = _spine_status(run.workdir)
     if status.get("status") not in ("", "done"):
@@ -386,9 +451,11 @@ def evaluate_on_dsh(
             error=f"the graph did not finish: {detail[:300]}",
             workdir=run.workdir,
             model_calls=spine_model_calls(Path(run.workdir)),
+            timeout_kind=run.timeout_kind,
         )
     result = RunResult(facts=run.facts, duration_s=run.duration_s, workdir=run.workdir,
-                       model_calls=spine_model_calls(Path(run.workdir)))
+                       model_calls=spine_model_calls(Path(run.workdir)),
+                       timeout_kind=run.timeout_kind)
     try:
         result.score = float(mode.score(result))
     except Exception as exc:

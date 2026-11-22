@@ -1669,6 +1669,8 @@ def smoke(ctx: Any) -> dict[str, Any]:
     timeout_s = int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S))
     if not 1 <= timeout_s <= 86400:
         raise ValueError("smoke_timeout_s must be between 1 and 86400 seconds")
+    smoke_items = int(ctx.knob("smoke_items", 3))
+    data_parallelism = int(ctx.knob("data_parallelism", 0))
     described = sandbox.describe_package(name, project=project_for_nodes())
     if not described.ok:
         raise ValueError(f"the package could not be read: {described.problem()}")
@@ -1683,9 +1685,12 @@ def smoke(ctx: Any) -> dict[str, Any]:
     result = sandbox.smoke(
         identifier, workdir, project=project_for_nodes(), model=bool(agent_nodes),
         knobs=samples or None, model_context=context, timeout_s=timeout_s,
+        smoke_items=smoke_items, data_parallelism=data_parallelism,
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     ok = result.ok and result.payload.get("exit_ok") is not False
+    # Determine timeout_kind: prefer the outer SandboxResult's kind; fall back to payload.
+    _timeout_kind = result.timeout_kind or result.payload.get("timeout_kind") or None
     payload = {
         "mode": identifier, "ok": ok, "score": result.payload.get("score") if ok else None,
         "iterations": result.payload.get("iterations"), "workdir": str(workdir.resolve()),
@@ -1694,6 +1699,9 @@ def smoke(ctx: Any) -> dict[str, Any]:
         "timed_out": result.timed_out, "returncode": result.returncode,
         "stdout": result.stdout, "stderr": result.stderr, "error": error,
         "sample_knobs": samples,
+        "timeout_kind": _timeout_kind,
+        "item_limit": result.payload.get("item_limit"),
+        "total_items": result.payload.get("total_items"),
         "status": "pass" if ok else failure_kind(error, timed_out=result.timed_out, returncode=result.returncode),
     }
     ctx.write_json("smoke.json", payload)
@@ -1826,6 +1834,24 @@ def gate_smoke(ctx: Any) -> str:
         kind = receipt.get("status") if receipt.get("status") not in (None, "pass") else evidence.failure_kind(detail)
         if "revision source" in detail and "did not finish" in detail:
             kind = "source_unavailable"
+        # Intercept any uncertain outcome: halt instead of raising.
+        if kind == "uncertain":
+            evidence.record(ctx, {"status": kind, "detail": detail,
+                                  "smoke": receipt, "revision": ctx.read_json("revision.json", None)})
+            timeout_kind = receipt.get("timeout_kind")
+            if timeout_kind:
+                items_info = ""
+                if receipt.get("item_limit"):
+                    items_info = (f"; {receipt.get('item_limit')} of "
+                                  f"{receipt.get('total_items', '?')} items requested")
+                reason = (f"smoke timed out ({timeout_kind}, limit "
+                          f"{receipt.get('timeout_s', '?')}s{items_info}); "
+                          f"code repair was not attempted")
+            else:
+                reason = (f"smoke outcome uncertain ({detail}); "
+                          f"code repair was not attempted")
+            from refactory_dsh.nn.executor import Verdict
+            return Verdict("halt", reason)
         evidence.record(ctx, {"status": kind, "detail": detail,
                               "smoke": receipt, "revision": ctx.read_json("revision.json", None)})
         evidence.stop_unrepairable(kind, detail)

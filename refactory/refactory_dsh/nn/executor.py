@@ -1459,7 +1459,8 @@ class Executor:
                 current = None
                 break
             except HaltStop as exc:
-                error = str(exc)
+                # Include the halt reason so it reaches the run's status record.
+                error = f"{exc}: {exc.reason}" if exc.reason and exc.reason != "verdict" else str(exc)
                 self._record(exc.gate, error=error, outcome="halted")
                 current = None
                 break
@@ -2357,9 +2358,12 @@ class Executor:
         # checkpoint's `gate_verdicts`, here the progress record), never a fact: no node
         # reads it, and the spine's facts have none.
         if selected is None:
-            # Terminal halt
+            # Terminal halt — carry the verdict's own reason so the halt text
+            # reaches the run's status record on the walker, as the spine carries
+            # it through ``reasonOf(stdout)`` (run.py prints reason then label).
+            halt_reason = str(getattr(verdict, "reason", "") or "").strip() or reason
             self.record.gate(self.graph, node.id, verdict, target=None, retry=False)
-            raise HaltStop(node.id, reason=reason)
+            raise HaltStop(node.id, reason=halt_reason)
         # SWEEP-4: Match the spine's feedback text (execute.ts:reasonOf).
         # On the spine, run.py prints Verdict.reason to stdout first, then the
         # verdict label; reasonOf() takes all lines before the last non-empty one.
