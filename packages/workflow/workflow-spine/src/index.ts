@@ -214,6 +214,15 @@ export const Config = z.object({
   steerCommand: z.string().default(''),
   steerArgs: z.array(z.string()).default([]),
   commandTimeoutMs: z.natural().default(600_000),
+  /**
+   * The absolute wall-clock backstop for a deterministic op, matching the
+   * Python-side ``sandbox.COMMAND_BACKSTOP_S`` (4 hours).  An op whose child
+   * commands are still producing output is not stopped before this.
+   * ``commandTimeoutMs`` caps only the bookkeeping ``spawnSync`` calls
+   * (``runtimeBridge``, ``steerCommand``), not deterministic ops that have a
+   * lowered envelope from ``lowering.command_timeout_s``.
+   */
+  commandBackstopMs: z.natural().default(14_400_000),
   maxConcurrentNodes: z.natural().default(0),
   commandSandboxMode: z.string().default('danger-full-access'),
   ceoDeny: z.array(z.string()).default(DEFAULT_CEO_DENY),
