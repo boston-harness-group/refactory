@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from refactory_dsh.memory import MemoryStore
 from refactory_dsh.nn.mode import RunResult
+from refactory_dsh.paths import project_for_nodes
 
 #: Kinds a mode can be run in. A search wants the fast one; a person using a mode
 #: wants the one whose result they will act on.
@@ -119,7 +120,7 @@ class WalkerEvaluator(Evaluator):
         omit_steering: bool = False,
     ) -> None:
         self.model = model
-        self.project = Path(project or Path("."))
+        self.project = Path(project or project_for_nodes())
         self.memory_global_root = memory_global_root
         self.max_steps = max_steps
         self.omit_steering = bool(omit_steering)

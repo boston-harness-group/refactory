@@ -96,7 +96,7 @@ def prepare_run(
         "model_context": dict(model_context or {}),
         "resource_limits": resource_limits,
         "configuration_fingerprints": configuration_fingerprints(
-            workdir, mode_id, Path(project) if project else Path(".")
+            workdir, mode_id, Path(project)
         ) if project else {},
         **({"omit_steering": True} if omit_steering else {}),
     }

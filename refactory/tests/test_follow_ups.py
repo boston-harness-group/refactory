@@ -10,13 +10,12 @@ findings ride along in the same feedback.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
-from refactory_dsh import create_ops, lowering, registry
+from refactory_dsh import create_ops, lowering
 from refactory_dsh.create_ops import MARKER_RULE, OVERWATCH_VERDICT_RULE, SEVERITY_RULE, is_non_core, split_core
 from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER,
                            RESEARCH_ANSWER, VERIFICATION_ANSWER, FakeModel, git_repo,
@@ -301,11 +300,13 @@ CREATE_NAME = "follow_up_pkg"
 
 
 @pytest.fixture
-def _clean_created_package():
-    root = registry.workspace_root(Path(".")) / CREATE_NAME
-    shutil.rmtree(root, ignore_errors=True)
+def _clean_created_package(tmp_path, monkeypatch):
+    """A project of the test's own: a create run refuses refactory's checkout (C1)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    monkeypatch.chdir(project)
     yield
-    shutil.rmtree(root, ignore_errors=True)
 
 
 def test_create_non_core_only_review_proceeds_with_follow_ups(tmp_path, _clean_created_package):
