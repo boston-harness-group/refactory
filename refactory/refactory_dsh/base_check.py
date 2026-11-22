@@ -26,7 +26,6 @@ import os
 import re
 import shlex
 import shutil
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -325,9 +324,10 @@ def _chain_steps(command: str, *, reason: list[str] | None = None) -> list[tuple
 def _unsafe_step(step: str) -> str | None:
     """Why ``step`` cannot run in the shell the chain's steps share; None when it can.
 
-    The marker script runs every step past a failure itself, so a step that ends or
-    traps that shell, or turns on errexit in a way `_without_errexit` cannot take back
-    out, would stop the later steps' markers.
+    The marker script runs every step past a failure itself, so a step that ends,
+    replaces (``exec``) or traps that shell, runs a file's commands in it (``.``,
+    ``source``: the file may turn on errexit), or turns on errexit in a way
+    `_without_errexit` cannot take back out, would stop the later steps' markers.
     """
     try:
         words = shlex.split(step)
@@ -335,8 +335,10 @@ def _unsafe_step(step: str) -> str | None:
         words = step.split()
     if not words:
         return None
-    if words[0] in ("exit", "trap"):
-        return f"a `{words[0]}` step ends or traps the shell the steps share"
+    if words[0] in ("exit", "trap", "exec"):
+        return f"a `{words[0]}` step ends, replaces or traps the shell the steps share"
+    if words[0] in (".", "source"):
+        return f"a `{words[0]}` step runs a file's commands in the shell the steps share"
     if words[0] == "set":
         if _without_errexit(step) is None:
             return "a `set` step whose options cannot be read"
@@ -465,17 +467,20 @@ def _roots(*places: tuple[Path | str, str]) -> list[tuple[str, str]]:
     return roots
 
 
-def _signature(output: str, roots: list[tuple[str, str]]) -> str:
-    """A step's output with each side's own paths -- its worktree or check copy, HOME,
-    temporary directories -- replaced, hashed, so the same output on base and attempt matches."""
+def _normalized(output: str, roots: list[tuple[str, str]]) -> str:
+    """A step's output with each side's own paths -- the exact worktree or check copy,
+    HOME and run directory it ran with -- replaced. Any other path, under /tmp or not,
+    stays as printed, so a new error that differs only there still differs."""
     text = strip_ansi(output)
     for path, label in sorted(roots, key=lambda root: -len(root[0])):
         if path and path != "/":
             text = text.replace(path, label)
-    temps = {"/tmp", tempfile.gettempdir(), str(Path(tempfile.gettempdir()).resolve())}
-    pattern = "|".join(re.escape(temp.rstrip("/")) for temp in sorted(temps, key=len, reverse=True))
-    text = re.sub(rf"(?:{pattern})/[^\s'\":]+", "<tmp>", text)
-    return hashlib.sha256(text.encode()).hexdigest()
+    return text
+
+
+def _signature(output: str, roots: list[tuple[str, str]]) -> str:
+    """`_normalized` output, hashed, so the same output on base and attempt matches."""
+    return hashlib.sha256(_normalized(output, roots).encode()).hexdigest()
 
 
 def _step_record(sr: dict, roots: list[tuple[str, str]] = ()) -> dict:  # type: ignore[assignment]
@@ -486,7 +491,8 @@ def _step_record(sr: dict, roots: list[tuple[str, str]] = ()) -> dict:  # type: 
     passed = sr["exit_code"] == 0 and not failures
     return {**sr, "failures": sorted(failures), "runner": runner,
             "accounted": runner is not None and (passed or _accounted(runner, sr["output"], failures)),
-            "signature": _signature(sr["output"], list(roots))}
+            "signature": _signature(sr["output"], list(roots)),
+            "quiet": not _normalized(sr["output"], list(roots)).strip()}
 
 
 def _run_chain_markers(
@@ -2583,12 +2589,16 @@ def _same_end(attempt_step: dict, base_step: dict) -> bool:
     """Whether a step ended the same way on both sides: it ran on both, with one exit code, or on neither.
 
     A step that failed without naming a failing test -- a lint, a build -- ends the same
-    way only when its output is the same too, its run-specific paths aside (`_signature`):
-    a new lint or build error behind the base's own is the attempt's.
+    way only when its output is the same too, its run-specific paths aside (`_signature`),
+    and not empty: a new lint or build error behind the base's own is the attempt's.
     """
     if attempt_step["ran"] != base_step["ran"] or attempt_step["exit_code"] != base_step["exit_code"]:
         return False
     if attempt_step["ran"] and attempt_step["exit_code"] != 0 and not attempt_step["failures"]:
+        # A failure that prints nothing (``build >/dev/null``, ``grep -q``) cannot be told
+        # from a new one, so it never ends the same way.
+        if attempt_step.get("quiet", True):
+            return False
         return attempt_step.get("signature") == base_step.get("signature") is not None
     return True
 

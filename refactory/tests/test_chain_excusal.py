@@ -434,6 +434,9 @@ def test_set_step_drops_errexit_only(step, rewritten):
     ("set $OPTS && pytest unit", "set"),
     ("shopt -s -o errexit; pytest unit", "errexit"),
     ("eval set -e; pytest unit", "errexit"),
+    (". results/env.txt && pytest unit && pytest integ", "runs a file"),
+    ("source .venv/bin/activate && pytest unit", "runs a file"),
+    ("true && exec pytest unit", "exec"),
 ])
 def test_steps_the_shared_shell_cannot_run_are_not_split(command, why):
     reason: list[str] = []
@@ -496,7 +499,7 @@ echo "========== 3 passed in 0.10s =========="
 _FAKE_TOOL = """#!/bin/sh
 f="results/$(basename "$0").txt"
 [ -s "$f" ] || { echo "$(basename "$0"): ok"; exit 0; }
-while IFS= read -r e; do echo "$PWD/src/app.py:1: $e (cache $HOME/.cache)"; done < "$f"
+while IFS= read -r e || [ -n "$e" ]; do echo "$PWD/src/app.py:1: $e (cache $HOME/.cache)"; done < "$f"
 exit 1
 """
 
@@ -730,9 +733,8 @@ def test_cut_base_output_charges(tmp_path, monkeypatch):
 
 
 def test_signature_ignores_each_sides_own_paths():
-    """The same error printed under each side's worktree, HOME and temporary files matches;
-    another error does not. (The end-to-end tests' worktrees all sit under /tmp, so they
-    cannot tell the root and HOME replacement from the temporary-directory one.)"""
+    """The same error printed under each side's worktree and HOME matches; another error,
+    or another path under /tmp, does not."""
     from refactory_dsh.base_check import _roots, _signature
 
     base = _roots((Path("/work/wt/base-1"), "<root>"), (Path("/work/run/.base-home"), "<home>"))
@@ -744,3 +746,38 @@ def test_signature_ignores_each_sides_own_paths():
     same = _signature(lint("/work/wt/base-1", "/work/run/.base-home", "E1"), base)
     assert same == _signature(lint("/work/wt/check-1", "/work/run/.copy-home", "E1"), attempt)
     assert same != _signature(lint("/work/wt/check-1", "/work/run/.copy-home", "E2"), attempt)
+    assert _signature("cannot read /tmp/gen/a.c", base) != _signature("cannot read /tmp/gen/b.c", attempt)
+
+
+@pytest.mark.parametrize("attempt_errors", ["E1", "E1\nE2"])
+def test_quiet_failing_step_never_ends_the_same_way(tmp_path, attempt_errors):
+    """`build >/dev/null 2>&1` fails on both sides with nothing printed: a new build error
+    cannot be told from the base's, so S behind it is charged."""
+    run = _run(tmp_path, base={"build": "E1", "unit": UNIT_S},
+               attempt={"build": attempt_errors, "unit": UNIT_S})
+    filtered = _check(run, "build >/dev/null 2>&1 && pytest unit")
+    assert not filtered.all_excused
+    assert not filtered.inherited
+
+
+@pytest.mark.parametrize("attempt_error, excused", [("cannot read /tmp/gen/a.c", True),
+                                                    ("cannot read /tmp/gen/b.c", False)])
+def test_other_tmp_paths_compare_literally(tmp_path, attempt_error, excused):
+    """Only each side's own paths are replaced: an error naming another /tmp file is new."""
+    run = _run(tmp_path, base={"lint": "cannot read /tmp/gen/a.c", "unit": UNIT_S},
+               attempt={"lint": attempt_error, "unit": UNIT_S})
+    filtered = _check(run, "lint && pytest unit")
+    assert filtered.all_excused is excused
+
+
+@pytest.mark.parametrize("command", [". results/env.txt && pytest unit && pytest integ",
+                                     "true && exec pytest unit"])
+def test_source_and_exec_take_the_whole_command_path(tmp_path, command):
+    """A sourced file that runs `set -e`, or an `exec`, would end the marker shell: the
+    chain is not split, and the whole-command path excuses S as main does."""
+    run = _run(tmp_path, base={"unit": UNIT_S, "env": "set -e"},
+               attempt={"unit": UNIT_S, "env": "set -e"})
+    filtered = _check(run, command)
+    assert filtered.all_excused
+    run_id = Path(run.found.path).name.removeprefix("run-")
+    assert not repo_change._check_copy_path(Path(run.found.target), run_id).exists()
