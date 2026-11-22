@@ -16,11 +16,13 @@ edits the graph and gives no advice: it records what happened.
 - **The observations are the model's**: one optimizer-model call compares two rollouts
   on the same train items and says what the traces show happened on them, each
   observation citing its items and, when it is about one change, that change's id. Its
-  prompt (`MEMORY_SYSTEM`) asks for nothing forward-looking -- no next steps, principles,
-  rules, recommendations or claims about what can be built -- and the answer is checked:
-  an observation that is advice (`advice_in`) or names no compared item is stripped and
-  journaled as stripped (`note_from`). Earlier passes' observations are carried, so the
-  record holds every pass's.
+  prompt (`MEMORY_SYSTEM`) forbids anything forward-looking -- next steps, principles,
+  rules, recommendations, claims about what can be built. Their wording is not judged
+  by code (a pattern filter misjudged both ways); what is checked is structural
+  (`note_from`): an observation naming no compared item is dropped, one pinned to a
+  change this pass did not compare is kept unpinned, each journaled with why. Earlier
+  passes' observations are carried, so the record holds every pass's. The facts are
+  rewritten at every pass, a failed one too (only its observations are missing).
 
 The comparison is SkillOpt's meta-skill mechanism (``skillopt/optimizer/meta_skill.py``,
 ``slow_update.py``, ``skillopt/engine/trainer.py:2088-2199``), which this pass keeps:
@@ -72,7 +74,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 from typing import Any, Mapping, Sequence
 
 from . import evidence
@@ -218,8 +219,8 @@ the traces briefly.
 - Make no claim about what can or cannot be built, edited, reached or unfrozen.
 - Do not judge a kind of change in general, and write no instructions for the
   pipeline's steps.
-- An observation that breaks a rule, or names no item of the comparison, is removed
-  before the record is saved.
+- An observation that names no item of the comparison is removed before the record is
+  saved.
 
 You reply with JSON only."""
 
@@ -280,39 +281,11 @@ def compare_answer_text() -> str:
             "(ids from this part).")
 
 
-#: What makes an observation advice, or a claim about what can be built, rather than a
-#: record of what happened (`advice_in`): read on its text only, never on its quotes
-#: (a trace may say anything). Task-general: no word here names a dataset or a step.
-ADVICE_PATTERNS = (
-    r"\bshould(?:n't| not)?\b", r"\bought to\b", r"\bmust\b", r"\bneeds? to\b",
-    r"\brecommend", r"\bsuggest", r"\badvis", r"\bconsider(?:ing)?\b", r"\bprefer",
-    r"\bavoid", r"\bprioriti[sz]", r"\bguard against\b", r"\btry\b", r"\bgoing forward\b",
-    r"\bnext (?:time|round|epoch|attempt|proposal|change)\b", r"\bin (?:the )?future\b",
-    r"\bfuture (?:optimizer|proposals?|changes?|rounds?|epochs?|edits?|calls?)\b",
-    r"\bprinciples?\b", r"\brule of thumb\b", r"\blessons?\b", r"\bbest practice",
-    r"\btakeaway", r"\bworth (?:trying|adding|keeping|testing|revisiting)\b",
-    r"\b(?:would|could|might) (?:likely |probably )?(?:fix|help|improve|work better)\b",
-    r"\bit (?:would|might|could) be (?:better|worth|useful)\b",
-    r"\b(?:can(?:not|'t)?|could(?:n't| not)?) (?:not )?be (?:built|edited|changed|added|"
-    r"reached|unfrozen|given|modified|moved)\b",
-    r"\bonly (?:unfrozen|editable|reachable|changeable|movable)\b", r"\bunfrozen\b",
-    r"\b(?:un)?reachable\b", r"\b(?:is|are) frozen\b", r"\b(?:un)?buildable\b",
-)
-_ADVICE = re.compile("|".join(ADVICE_PATTERNS), re.I)
-
-
-def advice_in(text: str) -> str | None:
-    """The first words of ``text`` that make it advice or a claim about what can be built
-    (`ADVICE_PATTERNS`), or ``None`` when it only records what happened."""
-    found = _ADVICE.search(str(text or ""))
-    return found.group(0) if found else None
-
-
 def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
     """A comparison call's observations (at most ``OBSERVATIONS_PER_CALL``, each with
     its category, text, items and up to ``EVIDENCE_PER_OBSERVATION`` quotes), or
-    ``None`` when the answer carries no ``observations`` list. Texts are kept whole; an
-    observation that is advice (`advice_in`) is dropped, as the record's own are."""
+    ``None`` when the answer carries no ``observations`` list. Texts are kept whole. What
+    they may say is the prompt's rules; nothing here judges their wording."""
     listed = payload.get("observations") if isinstance(payload, Mapping) else None
     if not isinstance(listed, list):
         return None
@@ -321,7 +294,7 @@ def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
         if not isinstance(raw, Mapping):
             continue
         text = str(raw.get("observation") or "").strip()
-        if not text or advice_in(text):
+        if not text:
             continue
         names = {name for name, _t, _l in CATEGORIES}
         kind = str(raw.get("category") or "").strip()
@@ -371,12 +344,24 @@ def item_ids(parent_records: Sequence[Mapping[str, Any]] | None,
             "shared": shared}
 
 
-def outcome(entry: Mapping[str, Any], *, gated: bool | str, current: str | None
-            ) -> tuple[str, str]:
+def own_items(records: Sequence[Mapping[str, Any]] | None) -> dict[str, list[str]]:
+    """A change's own train records, by id: the items it was scored on (an item the
+    harness timed out on left out) and those it got wrong. Read whether or not its parent
+    was scored with the same seed, so `keeps_failing` never leaves a change out."""
+    from .base import harness_timeout
+
+    held = _by_item(list(records or ()))
+    scored = sorted(item for item, record in held.items() if not harness_timeout(record))
+    return {"scored": scored, "failing": [i for i in scored if not held[i].get("passed")]}
+
+
+def outcome(entry: Mapping[str, Any], *, gated: bool | str, current: str | None,
+            leaders: Sequence[str] = (), lineage: Sequence[str] = ()) -> tuple[str, str]:
     """A tried change's outcome for the record, ``kept`` or ``not kept``, and why, from the
     harness's own words: not evaluated, its train run failed, or the gate's word
-    (``kept``/``current``/``in pool``/``left pool`` are kept); without a gate, whether it
-    is the train leader (``current``) now."""
+    (``kept``/``current``/``in pool``/``left pool`` are kept). Without a gate the train
+    leader is current, so a change is kept when it is the leader now (``current``), an
+    ancestor of it (``lineage``), or was the leader at an earlier epoch (``leaders``)."""
     from .feedback import KEPT_WORDS
 
     if not entry.get("evaluated", True):
@@ -386,13 +371,19 @@ def outcome(entry: Mapping[str, Any], *, gated: bool | str, current: str | None
     gate = entry.get("gate")
     if gated:
         return ("kept" if gate in KEPT_WORDS else "not kept"), f"gate: {gate or 'not gated'}"
-    if current is not None and str(entry.get("id")) == str(current):
-        return "kept", "no validation gate: it is the train leader now"
-    return "not kept", "no validation gate: it is not the train leader now"
+    cid = str(entry.get("id"))
+    if current is not None and cid == str(current):
+        return "kept", "no validation gate: the train leader now"
+    if cid in {str(c) for c in lineage}:
+        return "kept", "no validation gate: an ancestor of the train leader now"
+    if cid in {str(c) for c in leaders}:
+        return "kept", "no validation gate: the train leader at an earlier epoch"
+    return "not kept", "no validation gate: never the train leader"
 
 
 def record_facts(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
-                 gated: bool | str, current: str | None) -> dict[str, Any]:
+                 gated: bool | str, current: str | None, leaders: Sequence[str] = (),
+                 lineage: Sequence[str] = ()) -> dict[str, Any]:
     """The record's facts, from the harness's own data only (`Loop._tried_in_round` over
     every round so far): ``changes``, one per change tried, oldest round first (in a
     round the evaluated ones, then the refused ones) -- its id, round and parent, its
@@ -402,12 +393,14 @@ def record_facts(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[s
     train items it fixed and broke, by id, of how many it shared with its parent --
     ``None`` where its parent was not scored with the same seed; and ``keeps_failing``:
     each train item wrong under every change that scored it, at least two, with those
-    changes' ids (`keeps_failing`)."""
+    changes' ids (`keeps_failing`, from each change's own records). ``leaders`` and
+    ``lineage`` say, without a gate, which changes were kept (`outcome`)."""
     from .edit_effect import effect_lines
 
     rows = []
     for order, entry in enumerate(tried):
-        result, why = outcome(entry, gated=gated, current=current)
+        result, why = outcome(entry, gated=gated, current=current, leaders=leaders,
+                              lineage=lineage)
         ids = entry.get("items") if isinstance(entry.get("items"), Mapping) else None
         rows.append((entry.get("round") or 0, 0, order, {
             "id": str(entry.get("id")), "round": entry.get("round"),
@@ -436,17 +429,18 @@ def record_facts(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[s
 
 
 def keeps_failing(tried: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Each train item wrong under every evaluated change that scored it with its parent
-    (``items``: `item_ids`), when at least two did: ``{"item", "failed_under"}`` (those
-    changes' ids, oldest first), the items failed under the most changes first."""
+    """Each train item wrong under every evaluated change that scored it, by each change's
+    own records (``own``: `own_items`), when at least two did: ``{"item",
+    "failed_under"}`` (those changes' ids, oldest first), the items failed under the most
+    changes first."""
     scored: dict[str, list[str]] = {}
     failed: dict[str, list[str]] = {}
     for entry in tried:
-        ids = entry.get("items")
+        ids = entry.get("own")
         if not entry.get("evaluated", True) or not isinstance(ids, Mapping):
             continue
         failing = set(ids.get("failing") or ())
-        for item in ids.get("shared") or ():
+        for item in ids.get("scored") or ():
             scored.setdefault(str(item), []).append(str(entry.get("id")))
             if item in failing:
                 failed.setdefault(str(item), []).append(str(entry.get("id")))
@@ -458,26 +452,33 @@ def keeps_failing(tried: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 def note_from(payload: Any, *, epoch: int | None = None,
               facts: Mapping[str, Any] | None = None, earlier: Mapping[str, Any] | None = None,
               items: Sequence[str] | None = None, compared: Mapping[str, Any] | None = None,
+              pinnable: Sequence[str] | None = None,
               chars: int = MEMORY_CHARS) -> dict[str, Any] | None:
     """The note a memory answer makes: the record (`render_record`) of the harness's
     ``facts`` (`record_facts`), the passes so far and every observation -- the ``earlier``
     record's, of other epochs, then this answer's. ``None`` when the answer carries no
     ``observations`` list (an empty one is an answer: the facts alone).
 
-    Each observation of the answer is kept only when it records what happened: one that
-    is advice or a claim about what can be built (`advice_in`) or that names no item of
-    the comparison (``items``; any item when ``None``) is stripped, with why, as is one
-    past ``NOTE_OBSERVATIONS`` or ``chars`` (its text and quotes counted). Its ``change``
-    is kept when it is the id of a change in the facts, else the observation is about the
-    comparison as a whole. Returns ``{"text", "reasoning", "record", "stripped"}``."""
+    What an observation may say is the prompt's rules (`MEMORY_SYSTEM`); its wording is
+    not judged here. An observation that names no item of the comparison (``items``; any
+    item when ``None``) is dropped, as is one past ``NOTE_OBSERVATIONS`` or ``chars`` (its
+    text and quotes counted), each listed in ``stripped`` with why. Its ``change`` stays
+    only when it is a change in the facts that this pass compared (``pinnable``: the
+    changes between its two pipelines, or its not-kept change; any change of the facts
+    when ``None``); otherwise the observation is kept as one about the comparison as a
+    whole and listed in ``unpinned`` with why. Returns ``{"text", "reasoning", "record",
+    "stripped", "unpinned"}``."""
     listed = payload.get("observations") if isinstance(payload, Mapping) else None
     if not isinstance(listed, list):
         return None
     facts = facts or {}
     known = {str(c.get("id")) for c in facts.get("changes") or () if c.get("id")}
+    if pinnable is not None:
+        known &= {str(c) for c in pinnable}
     allowed = None if items is None else {str(i) for i in items}
     kept: list[dict[str, Any]] = []
     stripped: list[dict[str, str]] = []
+    unpinned: list[dict[str, str]] = []
     used = 0
     for raw in listed:
         if not isinstance(raw, Mapping):
@@ -488,10 +489,8 @@ def note_from(payload: Any, *, epoch: int | None = None,
         cited = [str(i) for i in (raw.get("items") if isinstance(raw.get("items"), list) else ())
                  if i not in (None, "")]
         cited = [i for i in dict.fromkeys(cited) if allowed is None or i in allowed]
-        phrase = advice_in(text)
-        if phrase or not cited:
-            stripped.append({"text": text, "why": f"advice: {phrase!r}" if phrase
-                             else "it names no item of the comparison"})
+        if not cited:
+            stripped.append({"text": text, "why": "it names no item of the comparison"})
             continue
         change = str(raw.get("change") or "").strip().strip("`")
         quotes = [str(q) for q in (raw.get("evidence") if isinstance(raw.get("evidence"), list)
@@ -501,6 +500,9 @@ def note_from(payload: Any, *, epoch: int | None = None,
             stripped.append({"text": text, "why": "past the note's limit"})
             continue
         used += size
+        if change and change not in known:
+            unpinned.append({"text": text, "change": change,
+                             "why": f"`{change}` is not a change this pass compared"})
         kept.append({"epoch": epoch, "change": change if change in known else None,
                      "items": cited, "text": text, "evidence": quotes})
     before = dict(earlier or {}) if (earlier or {}).get("format") == RECORD_FORMAT else {}
@@ -512,7 +514,7 @@ def note_from(payload: Any, *, epoch: int | None = None,
               "observations": [*(o for o in before.get("observations") or ()
                                  if o.get("epoch") != epoch), *kept]}
     return {"text": render_record(record), "reasoning": "", "record": record,
-            "stripped": stripped}
+            "stripped": stripped, "unpinned": unpinned}
 
 
 def parse_note(payload: Any) -> dict[str, Any] | None:
@@ -977,13 +979,18 @@ class MemoryRequest:
                  curr: Mapping[str, Any], changes: Sequence[str],
                  entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
                  objective: str = "", facts: Mapping[str, Any] | None = None,
-                 earlier: Mapping[str, Any] | None = None) -> None:
+                 earlier: Mapping[str, Any] | None = None,
+                 compared_changes: Sequence[str] | None = None) -> None:
         self.epoch, self.mode_name = epoch, mode_name
         self.prev, self.curr = dict(prev), dict(curr)
         self.changes = list(changes)
         self.entries, self.tried, self.objective = list(entries), list(tried), objective
         self.facts = dict(facts or {"changes": [], "keeps_failing": []})
         self.earlier = dict(earlier or {})
+        #: The changes this pass compares (between its two pipelines, or its not-kept
+        #: change): the only ones an observation may be pinned to; ``None``: any.
+        self.compared_changes = (None if compared_changes is None
+                                 else [str(c) for c in compared_changes])
         self.same = self.prev.get("id") == self.curr.get("id")
         self.look = _look(self.prev, self.curr)
         self._texts: dict[tuple[str, str], str] = {}
@@ -1004,7 +1011,15 @@ class MemoryRequest:
         """An answer (the single call's or the synthesis's) read into the record
         (`note_from`) with this pass's facts, its earlier record and its compared items."""
         return note_from(payload, epoch=self.epoch, facts=self.facts, earlier=self.earlier,
-                         items=[str(e["id"]) for e in self.entries], compared=self.compared())
+                         items=[str(e["id"]) for e in self.entries], compared=self.compared(),
+                         pinnable=self.compared_changes)
+
+    def facts_note(self) -> dict[str, Any]:
+        """The note when the pass wrote no observations (its call failed, or there was
+        nothing to compare): the harness's facts, current, and the earlier observations;
+        this pass is not listed among the passes."""
+        return note_from({"observations": []}, epoch=self.epoch, facts=self.facts,
+                         earlier=self.earlier, items=[], compared=None)
 
     def _whole(self, entry: Mapping[str, Any], side: str) -> str:
         key = (str(entry["id"]), side)
@@ -1517,15 +1532,15 @@ def _stale_text(memory: Mapping[str, Any] | None) -> str:
     stale = (memory or {}).get("not_updated") or {}
     if not stale:
         return ""
-    return (f" It was NOT UPDATED in epoch {stale.get('epoch', '?')} ("
-            f"{_clip(stale.get('why'), 300)}): this is the note written in epoch "
-            f"{(memory or {}).get('epoch', '?')}, unchanged.")
+    return (f" Epoch {stale.get('epoch', '?')}'s memory pass failed ("
+            f"{_clip(stale.get('why'), 300)}): the facts below are current, and that epoch "
+            "added no observations.")
 
 
 def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
-    """"Optimizer memory" for the proposal request: the latest note, when it was written
-    and, when a later pass failed (``not_updated``), that it was not updated then and
-    why; nothing before any pass wrote one or failed."""
+    """"Optimizer memory" for the proposal request: the latest note, when its observations
+    were written and, when a later pass failed (``not_updated``), that that epoch added
+    no observations and why (its facts are in the note); nothing before any pass."""
     memory = memory or {}
     text = str(memory.get("text") or "").strip()
     stale = memory.get("not_updated") or {}
@@ -1539,13 +1554,15 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                     "the train items that change moved"
                     if rejected else "the same train items under the pipeline at the start "
                     "of that epoch and after it")
-        lines.append(f"Written in epoch {memory.get('epoch', '?')}; that epoch's observations "
-                     f"come from a comparison of {compared}. {RECORD_LEAD}")
+        lines.append(f"Written in epoch {memory.get('epoch')}; that epoch's observations come "
+                     f"from a comparison of {compared}. {RECORD_LEAD}"
+                     if memory.get("epoch") is not None else
+                     f"No memory pass has added observations yet. {RECORD_LEAD}")
     if stale:
         lines.append(f"NOT UPDATED in epoch {stale.get('epoch', '?')}: the memory pass failed "
                      f"({_clip(stale.get('why'), 300)})"
-                     + ("; this is the earlier note, unchanged." if text
-                        else "; there is no note yet."))
+                     + ("; the record's facts are current, and that epoch added no "
+                        "observations." if text else "; there is no note yet."))
     tally = list(memory.get("tally") or ())
     if text and tally:
         lines.append("The tally of that epoch's tries:")

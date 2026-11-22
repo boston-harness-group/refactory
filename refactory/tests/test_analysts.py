@@ -787,7 +787,8 @@ def test_the_memory_note_reaches_every_analyst_and_merge_and_the_proposal():
     AutoresearchOptimizer(stale).propose(replace(ctx, memory={
         **ctx.memory, "not_updated": {"epoch": 3, "why": "TimeoutError: slow"}}), 1, [])
     for prompt in stale.of(ANALYST_SYSTEMS + MERGE_SYSTEMS):
-        assert "NOT UPDATED in epoch 3" in prompt and "TimeoutError: slow" in prompt
+        assert "Epoch 3's memory pass failed" in prompt and "TimeoutError: slow" in prompt
+        assert "the facts below are current, and that epoch added no observations" in prompt
     without = Client()
     AutoresearchOptimizer(without).propose(replace(ctx, memory={}), 1, [])
     assert not any("## Optimizer memory" in p for p in without.calls for p in p)

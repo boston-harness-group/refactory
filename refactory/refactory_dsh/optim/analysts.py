@@ -331,19 +331,47 @@ def fixed_tool_rules(seed_state: Mapping[str, Any] | None) -> dict[str, str] | N
 
 
 def buildable_lines(ctx: Any) -> list[str]:
-    """What an edit can build in this run, from its graph and settings, as plain facts
-    (no example, no suggestion): which existing steps' tool rules are fixed
+    """What edits are possible in this run, from its graph and settings, as plain facts (no
+    example, no suggestion), each only where an operation the run allows can touch it:
+    with `set_knob`, which settings it moves (all but the frozen ones); with operations
+    that change the structure, which existing steps' tool rules are fixed
     (`fixed_tool_rules`, or without a recorded seed the edited graph's own ``none`` and
-    ``refused`` steps, as an attempt reads them); whether a new agent step may have tools
-    -- the operations of the run's catalogue whose step takes ``tools``
-    (`nn.core_ops.OPERATORS`), sealed when the run can run a sealed step
-    (``ctx.new_node_tools``, `workspace.sealed_steps`), else none; and which steps are
-    protected. Each line is what an attempt accepts or refuses (``E-tool-policy-escalation``,
-    ``E-new-node-tools``, ``E-protected``)."""
+    ``refused`` steps, as an attempt reads them), whether a new agent step may have tools
+    -- the operations whose step takes ``tools`` (`nn.core_ops.OPERATORS`), sealed when the
+    run can run a sealed step (``ctx.new_node_tools``, `workspace.sealed_steps`), else none
+    -- and which steps are protected. Settings come first and are said as plainly as the
+    structure, so neither kind reads as the favoured one. Each line is what an attempt
+    accepts or refuses (``E-frozen``, ``E-tool-policy-escalation``, ``E-new-node-tools``,
+    ``E-protected``)."""
     from refactory_dsh.nn.core_ops import OPERATORS
     from refactory_dsh.seal import SEALED_TOOLS
     from refactory_dsh.tool_policy import no_effect
 
+    from .base import structural_ops
+
+    catalogue = list(getattr(ctx, "catalogue", None) or ())
+    structural = bool(structural_ops(catalogue))
+    lines = []
+    if any(c.get("op") == "set_knob" for c in catalogue):
+        from .base import _grader_side_knobs
+
+        # Frozen, or read by a protected or grading step: what an attempt holds fixed.
+        nodes = {str(n.get("id")): n for n in getattr(ctx, "node_states", None) or ()
+                 if isinstance(n, Mapping)}
+        held = _grader_side_knobs({"graph": {"nodes": nodes}},
+                                  [*(getattr(ctx, "protected", None) or ()),
+                                   *(getattr(ctx, "graders", None) or ())])
+        frozen = [str(k.get("name")) for k in getattr(ctx, "knobs", None) or ()
+                  if isinstance(k, Mapping) and (k.get("frozen") or str(k.get("name")) in held)]
+        lines.append("- Settings: `set_knob` changes the value of any setting"
+                     + (f" except these, which stay as they are: "
+                        f"{', '.join(f'`{k}`' for k in frozen)} (E-frozen)" if frozen else "")
+                     + ".")
+    if not structural:
+        if lines:
+            lines.append("- Structure: no operation of this run changes the steps, their "
+                         "edges or their tools.")
+        return lines
     steps = {str(n.get("id")): n for n in getattr(ctx, "node_states", None) or ()
              if isinstance(n, Mapping) and n.get("kind") == "agent"}
     rules = getattr(ctx, "fixed_tool_rules", None)
@@ -351,14 +379,13 @@ def buildable_lines(ctx: Any) -> list[str]:
         rules = {node_id: str(n.get("tool_policy")) for node_id, n in steps.items()
                  if no_effect(n.get("tool_policy"))}
     fixed = [(node_id, rule) for node_id, rule in rules.items() if node_id in steps]
-    lines = []
     if fixed:
         lines.append("- Fixed tool rules: " + "; ".join(
             f"`{node_id}` ({'no tools' if rule == 'none' else 'tools refused'}, "
             f"tool_policy `{rule}`)" for node_id, rule in fixed)
             + ". No edit gives these steps tools or changes their rule: an attempt that does "
             "is refused (E-tool-policy-escalation).")
-    adders = [str(c.get("op")) for c in getattr(ctx, "catalogue", None) or ()
+    adders = [str(c.get("op")) for c in catalogue
               if "tools" in ((OPERATORS.get(str(c.get("op"))) or {}).get("fields") or ())]
     if adders:
         named = ", ".join(f"`{op}`" for op in adders)
@@ -377,11 +404,15 @@ def buildable_lines(ctx: Any) -> list[str]:
     return lines
 
 
+#: The subsection of "The changes the optimizer can make" that `buildable_lines` fills.
+POSSIBLE_HEADING = "### What edits are possible in this run"
+
+
 def _buildable_text(ctx: Any) -> str:
-    """"What an edit can build in this run" (`buildable_lines`); empty when it says nothing."""
+    """`buildable_lines` under `POSSIBLE_HEADING`, beside the operations; empty when it
+    says nothing."""
     lines = buildable_lines(ctx)
-    return ("## What an edit can build in this run\n" + "\n".join(lines) + "\n\n"
-            if lines else "")
+    return f"\n\n{POSSIBLE_HEADING}\n" + "\n".join(lines) if lines else ""
 
 
 def _memory_text(ctx: Any) -> str:
@@ -595,8 +626,9 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
     return ((f"# Analysing {label} items -- batch {index} of {total}\n\n"
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
-             f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}\n\n"
-             f"{_buildable_text(ctx)}{_objective_text(ctx)}{_memory_text(ctx)}"
+             f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}"
+             f"{_buildable_text(ctx)}\n\n"
+             f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              f"Each item in full: {evidence.TRACE_FORM}.\n\n"),
             f"\n\n## Answer\n{answer}")

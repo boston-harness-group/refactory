@@ -566,8 +566,9 @@ def test_the_synthesis_keeps_the_record_rules_and_the_comparison_prompt_reads_ob
         {"category": "nope", "observation": " X ", "items": ["a", None], "evidence": list("abcdef")},
         {"observation": ""}, "junk",
         {"observation": "Future proposals should add a judge.", "items": ["a"]}]})
-    assert kept == [{"category": "", "observation": "X", "items": ["a"],
-                     "evidence": list("abcd")}], "advice is dropped here too"
+    assert [o["observation"] for o in kept] == ["X", "Future proposals should add a judge."]
+    assert kept[0] == {"category": "", "observation": "X", "items": ["a"],
+                       "evidence": list("abcd")}, "wording is the prompt's rules, not code's"
 
 
 # ── in the loop ─────────────────────────────────────────────────────────────
@@ -664,7 +665,14 @@ def test_a_failed_pass_keeps_the_earlier_note_marked_and_a_later_one_clears_it(
                           proposer=Remembering([[(5, 7)], [(7, 8)], [(8, 9)], []], fail=(3,)))
     third = _section(proposer.contexts[2].render(), "## Optimizer memory")
     assert "NOT UPDATED in epoch 3" in third and "DOWN-3" in third and "NOTE-2" in third
-    assert "this is the earlier note, unchanged" in third
+    assert "the record's facts are current, and that epoch added no observations" in third
+    # The failed pass still wrote the facts: round 2's change (8) is in, its gate word now.
+    by_id = {c.id: c for c in loop.population}
+    failed = _events(loop, "optimizer_memory")[1]["memory"]["record"]
+    assert [(_level(by_id[c["id"]]), c["why"]) for c in failed["changes"]] == [
+        (7, "gate: kept"), (8, "gate: current")]
+    assert [o["text"] for o in failed["observations"]] == ["NOTE-2"]
+    assert [p["epoch"] for p in failed["passes"]] == [2], "the failed pass compared nothing"
     fourth = proposer.contexts[3].render()
     assert "NOTE-4" in fourth and "NOT UPDATED" not in fourth
     assert "NOTE-2" in fourth, "the failed pass lost no earlier observation"

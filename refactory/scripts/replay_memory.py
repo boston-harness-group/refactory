@@ -35,9 +35,11 @@ whose working directory is a temporary one (nothing is written into the run), it
 journal replayed up to that pass's ``optimizer_memory`` event (`Loop._replay`: the
 ``train_records``/``train_records_epoch``, ``proposal``, ``strategy_state`` val_gate,
 ``rejection`` and ``integrity_verdict`` events), and the loop's own `_tried_in_round` and
-`memory.record_facts` read from it, over every round so far. Each pass's observations
+`Loop._record_facts` read from it, over every round so far. Each pass's observations
 come from the reply given for it (``--reply E=FILE``, read as the loop reads one,
-`memory.note_from`), or none (the facts alone). The record of epoch N, rendered as the
+`memory.note_from`, pinned only to the changes that pass compared), or none (the facts
+alone; a pass that failed in the run and gets no reply is left out of the passes, as
+the loop leaves it). The record of epoch N, rendered as the
 readers see it (`memory.render_record`), goes to ``OUT/epoch_N/record.json`` (and the
 whole record, nothing left out, to ``record.full.json``). The mode's package must be
 importable (``--project``).
@@ -236,7 +238,8 @@ def check_reply(prompt: str, reply: str, epoch: int | None) -> dict[str, Any]:
     note = memory.note_from(reply_object(reply), epoch=epoch, facts=facts, items=items)
     if note is None:
         return {"error": 'the reply has no "observations" list'}
-    return {"kept": note["record"]["observations"], "stripped": note["stripped"]}
+    return {"kept": note["record"]["observations"], "stripped": note["stripped"],
+            "unpinned": note["unpinned"]}
 
 
 # ── the record's facts from the journal, as the loop had them ───────────────
@@ -288,20 +291,30 @@ def _loop_at(run: Path, events: list[dict[str, Any]], at: dict[str, Any], projec
 
 
 def facts_at(loop: Any, at: dict[str, Any]) -> dict[str, Any]:
-    """The record's facts the loop handed the pass ``at`` (`Loop._make_memory_pass`): every
-    round before its epoch (`Loop._tried_in_round`), the gate's word as it stood, and,
-    without a gate, the candidate current then (the incumbent when a not-kept change was
-    compared)."""
+    """The record's facts the loop handed the pass ``at``, by the loop's own
+    `Loop._record_facts`: every round before its epoch, the gate's word as it stood, and,
+    without a gate, the train leader then (the incumbent when a not-kept change was
+    compared), its ancestors and every epoch's leader."""
     epoch = int(at["epoch"])
-    rounds = sorted({int(r["epoch"]) for r in loop.proposals.values()
-                     if isinstance(r, dict) and r.get("epoch") is not None
-                     and int(r["epoch"]) < epoch}
-                    | {r for r in loop._round_refusals if r < epoch} | {epoch - 1})
-    every = [loop._tried_in_round(r) for r in rounds]
-    return memory.record_facts([t for done, _f in every for t in done],
-                               [f for _d, failed in every for f in failed],
-                               gated=loop.selection_mode() or False,
-                               current=at.get("prev") if at.get("rejected") else at.get("curr"))
+    tried, refused = loop._tried_in_round(epoch - 1)
+    return loop._record_facts(epoch, tried, refused,
+                              current=at.get("prev") if at.get("rejected") else at.get("curr"))
+
+
+def compared_changes(loop: Any, at: dict[str, Any]) -> list[str]:
+    """The changes the pass ``at`` compared (`Loop._make_memory_pass`): those between its
+    two pipelines (`Loop._lineage_edits`) and its not-kept change; observations may be
+    pinned to these only."""
+    by_id = {c.id: c for c in loop.population}
+    prev, curr = by_id.get(str(at.get("prev"))), by_id.get(str(at.get("curr")))
+    if prev is None or curr is None:
+        return []
+    lineage = loop._lineage_edits(prev, curr)
+    out = [str(step.get("id")) for step in [*(lineage.get("prev") or ()),
+                                            *(lineage.get("curr") or ())]]
+    if at.get("rejected"):
+        out.append(str(at["rejected"].get("child")))
+    return out
 
 
 def _compared(at: dict[str, Any]) -> dict[str, Any]:
@@ -334,9 +347,14 @@ def record_from_journal(run: Path, epoch: int, replies: dict[int, str], project:
     for at in passes:
         loop = _loop_at(run, events, at, project, scratch)
         text = replies.get(int(at["epoch"]))
+        # A pass that wrote no observations in the run, and gets no reply here, is what
+        # the loop made of it: the facts, without listing it among the passes.
+        failed = text is None and not at.get("updated")
         payload = reply_object(text) if text is not None else {"observations": []}
         note = memory.note_from(payload, epoch=int(at["epoch"]), facts=facts_at(loop, at),
-                                earlier=record, items=_items(at), compared=_compared(at))
+                                earlier=record, items=_items(at),
+                                compared=None if failed else _compared(at),
+                                pinnable=compared_changes(loop, at))
         if note is None:
             raise SystemExit(f'the reply for epoch {at["epoch"]} has no "observations" list')
         record = note["record"]

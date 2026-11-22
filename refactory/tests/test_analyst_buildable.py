@@ -12,18 +12,20 @@ from typing import Any
 
 import structure_fuzz as sf
 from refactory_dsh.nn import edits as nn_edits
-from refactory_dsh.optim import ProposalContext, analysts
+from refactory_dsh.optim import ProposalContext, analysts, base
 
-HEADING = "## What an edit can build in this run\n"
+HEADING = f"{analysts.POSSIBLE_HEADING}\n"
 
 
 def _ctx(applier: Any, *, sealed: bool, seed: bool = True) -> ProposalContext:
     state = applier.seed_state
+    knobs = [{"name": name, "frozen": bool((entry.get("spec") or {}).get("frozen"))}
+             for name, entry in (state.get("knobs") or {}).items()]
     return ProposalContext(
         mode_name="m", epoch=2, node_states=[dict(n) for n in state["graph"]["nodes"].values()],
         edges=list(state["graph"]["edges"]), catalogue=nn_edits.catalogue("broad"),
-        protected=list(applier.protected), new_node_tools=sealed,
-        fixed_tool_rules=analysts.fixed_tool_rules(state) if seed else None,
+        protected=list(applier.protected), graders=list(applier.graders), knobs=knobs,
+        new_node_tools=sealed, fixed_tool_rules=analysts.fixed_tool_rules(state) if seed else None,
         analysts=analysts.settings())
 
 
@@ -31,6 +33,10 @@ def _section(ctx: ProposalContext, kind: str = "failure") -> str:
     head, _tail = analysts._analyst_frame(ctx, kind, 1, 1, 0, "PIPE")
     assert head.count(HEADING) == 1, kind
     start = head.index(HEADING)
+    # Inside "The changes the optimizer can make", beside the operations it qualifies.
+    operations = head.index("## The changes the optimizer can make\n")
+    assert operations < start and "## What the score measures" not in head[operations:start]
+    assert "## The failed items" not in head[:start] and "## The passed items" not in head[:start]
     return head[start:head.index("\n## ", start + len(HEADING))]
 
 
@@ -44,6 +50,8 @@ def test_a_fixed_tool_rule_and_a_sealed_new_step_are_said_as_an_attempt_decides(
     applier.optimizer.sealed_tools = (True, "")
     parent = sf.Candidate.from_state(applier.seed_state)
     section = _section(_ctx(applier, sealed=True))
+    # Settings first, said as plainly as the structure.
+    assert section.split("\n")[1] == "- Settings: `set_knob` changes the value of any setting."
     assert ("- Fixed tool rules: `draft` (no tools, tool_policy `none`); `finalize` (no tools, "
             "tool_policy `none`); `review` (no tools, tool_policy `none`). No edit gives "
             "these steps tools or changes their rule: an attempt that does is refused "
@@ -111,3 +119,42 @@ def test_the_loop_hands_the_analysts_its_seeds_fixed_tool_rules(tmp_path, monkey
     for ctx in proposer.contexts:
         assert ctx.fixed_tool_rules == analysts.fixed_tool_rules(loop._original_seed_state)
         assert ctx.fixed_tool_rules is not None
+
+
+def test_a_text_only_run_is_told_only_what_its_edits_can_move():
+    """With `set_knob` alone no line about tools, new steps or protection: no edit of the
+    run can touch them. One line says which settings move (all but the frozen ones and
+    those a protected or grading step reads) and that the structure stays."""
+    data = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    ctx = _ctx(data, sealed=True)
+    # The loop's catalogue under allowed_ops ["set_knob"] (`Loop._context`).
+    ctx.catalogue = [c for c in ctx.catalogue if c["op"] == "set_knob"]
+    held = sorted(base._grader_side_knobs(data.seed_state, [*data.protected, *data.graders]))
+    section = _section(ctx)
+    lines = section.split("\n")[1:]
+    assert [line.split(":")[0] for line in lines if line] == ["- Settings", "- Structure"]
+    assert lines[1] == ("- Structure: no operation of this run changes the steps, their "
+                        "edges or their tools.")
+    for word in ("tool", "Protected", "new agent step", "sealed"):
+        assert word not in lines[0] and word not in section.replace(lines[1], ""), word
+    assert held == ["data_parallelism"], "the data pass reads it"
+    assert all(f"`{k}`" in lines[0] for k in held) and "(E-frozen)" in lines[0]
+    # An attempt agrees: a held knob is refused, as the line says.
+    assert "E-frozen" in _reasons(data.attempt(
+        sf.Candidate.from_state(data.seed_state),
+        {"op": "set_knob", "name": held[0], "value": 2}, set()))
+
+
+def test_a_setting_a_protected_step_reads_is_said_held_as_an_attempt_decides():
+    """A knob no flag freezes but a protected step reads stays as it is: the settings line
+    names it, and an attempt that moves it is refused (E-frozen)."""
+    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    applier.protected = ("review",)
+    ctx = _ctx(applier, sealed=True)
+    ctx.catalogue = [c for c in ctx.catalogue if c["op"] == "set_knob"]
+    line = _section(ctx).split("\n")[1]
+    assert line == ("- Settings: `set_knob` changes the value of any setting except these, "
+                    "which stay as they are: `review_task`, `review__system_prompt` (E-frozen).")
+    assert "E-frozen" in _reasons(applier.attempt(
+        sf.Candidate.from_state(applier.seed_state),
+        {"op": "set_knob", "name": "review_task", "value": "Review it."}, set()))

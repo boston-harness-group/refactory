@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from refactory_dsh.optim import evidence, memory
 from refactory_dsh.optim.base import edit_change
 
@@ -83,7 +85,8 @@ def _tried(cid: str, round_: int, parent: str, *, gate: str, fixed: list[str],
             "structural": False, "touched": ["solve"], "edits": f"EDITS-{cid}",
             "evaluated": True, "exit_ok": True, "gate": gate, "fixed": len(fixed),
             "broken": len(broken), "shared": len(shared),
-            "items": {"fixed": fixed, "broken": broken, "failing": failing, "shared": shared}}
+            "items": {"fixed": fixed, "broken": broken, "failing": failing, "shared": shared},
+            "own": {"scored": shared, "failing": failing}}
 
 
 FACTS = memory.record_facts(
@@ -96,36 +99,70 @@ FACTS = memory.record_facts(
     gated=True, current="c2")
 
 
-def test_an_answer_with_advice_is_stripped_and_the_facts_stay_the_harnesss():
-    """Stripped, not rejected: the clean observations are kept, the advice dropped and
-    said why; a reply that writes facts of its own changes none of the harness's."""
+def test_an_answer_is_read_structurally_and_the_facts_stay_the_harnesss():
+    """No wording is judged (the prompt's rules are what keeps advice out; a pattern
+    filter misjudged both ways): what is checked is structure. An observation naming no
+    compared item is dropped, one pinned to a change this pass did not compare is kept
+    unpinned, each said why; a reply that writes facts of its own changes none."""
     payload = {
         "changes": [{"id": "c3", "outcome": "kept", "fixed": ["b"]}],  # not the model's to say
         "observations": [
             {"change": "c3", "items": ["b"], "observation": "In b, the step solve read the "
              "second table and returned 7 where the grader expected 4.", "evidence": ["7"]},
-            {"change": "c3", "items": ["b"], "observation": "Next round, try a judge after solve."},
-            {"change": "", "items": ["c"], "observation":
-             "The `skill` knob is the only unfrozen reachable text."},
-            {"change": "c2", "items": ["c"], "observation": "Future proposals should keep it short."},
+            {"change": "c3", "items": ["b"], "observation": "The skill text said 'must cite'."},
+            {"change": "c2", "items": ["c"], "observation": "In c, step solve stopped early."},
             {"change": "c2", "items": ["zz"], "observation": "Item zz was answered late."},
             {"change": "c9", "items": ["c"], "observation": "In c both pipelines stopped at step 2."},
         ]}
     note = memory.note_from(payload, epoch=3, facts=FACTS, items=["a", "b", "c"],
-                            compared={"epoch": 3, "prev": "c2", "curr": "c3"})
+                            compared={"epoch": 3, "prev": "c2", "curr": "c3"}, pinnable=["c3"])
     kept = note["record"]["observations"]
-    assert [o["text"][:9] for o in kept] == ["In b, the", "In c both"]
-    assert kept[0]["change"] == "c3" and kept[1]["change"] is None, "an unknown id is no change's"
-    assert [s["why"] for s in note["stripped"]] == [
-        "advice: 'Next round'", "advice: 'only unfrozen'", "advice: 'Future proposals'",
-        "it names no item of the comparison"]
+    assert [(o["change"], o["text"][:12]) for o in kept] == [
+        ("c3", "In b, the st"), ("c3", "The skill te"), (None, "In c, step s"),
+        (None, "In c both pi")]
+    assert note["stripped"] == [{"text": "Item zz was answered late.",
+                                 "why": "it names no item of the comparison"}]
+    assert [(u["change"], u["why"]) for u in note["unpinned"]] == [
+        ("c2", "`c2` is not a change this pass compared"),
+        ("c9", "`c9` is not a change this pass compared")]
     view = json.loads(note["text"])
     assert view["format"] == memory.RECORD_FORMAT
     c3 = next(c for c in view["changes"] if c["id"] == "c3")
     assert (c3["outcome"], c3["fixed"], c3["broken"]) == ("not kept", [], ["b"])
-    assert c3["observations"][0]["items"] == ["b"]
+    assert [o["items"] for o in c3["observations"]] == [["b"], ["b"]]
+    assert not hasattr(memory, "advice_in"), "no wording filter"
     assert memory.note_from({"memory": "a coach's note"}, facts=FACTS) is None, "no list, no note"
     assert json.loads(memory.note_from({"observations": []}, facts=FACTS)["text"])["changes"]
+
+
+def test_keeps_failing_reads_each_changes_own_records():
+    """A change whose parent was not scored with its seed (after a resume, say) has no
+    fixed/broken ids, but its own records still count: an item it passed never keeps
+    failing."""
+    tried = [_tried("c2", 1, "c1", gate="kept", fixed=[], broken=[], failing=["t6"],
+                    shared=["t5", "t6"]),
+             _tried("c3", 2, "c2", gate="rejected", fixed=[], broken=[], failing=["t6"],
+                    shared=["t5", "t6"]),
+             {**_tried("c8", 3, "c2", gate="current", fixed=[], broken=[], failing=[],
+                       shared=["t5", "t6"]), "items": None, "fixed": None, "broken": None}]
+    facts = memory.record_facts(tried, [], gated=True, current="c8")
+    assert facts["keeps_failing"] == [], "c8 passes t6"
+    c8 = facts["changes"][-1]
+    assert (c8["fixed"], c8["broken"], c8["outcome"]) == (None, None, "kept")
+    assert memory.record_facts(tried[:2], [], gated=True, current="c2")["keeps_failing"] == [
+        {"item": "t6", "failed_under": ["c2", "c3"]}]
+
+
+def test_without_a_gate_a_change_is_kept_when_it_led_or_leads_through_a_descendant():
+    tried = [_tried(c, r, p, gate=None, fixed=[], broken=[], failing=[], shared=["a"])
+             for c, r, p in (("c2", 1, "c1"), ("c3", 2, "c2"), ("c4", 2, "c2"), ("c5", 3, "c1"))]
+    facts = memory.record_facts(tried, [], gated=False, current="c3",
+                                leaders=["c1", "c5", "c3"], lineage=["c3", "c2", "c1"])
+    assert [(c["id"], c["outcome"], c["why"]) for c in facts["changes"]] == [
+        ("c2", "kept", "no validation gate: an ancestor of the train leader now"),
+        ("c3", "kept", "no validation gate: the train leader now"),
+        ("c4", "not kept", "no validation gate: never the train leader"),
+        ("c5", "kept", "no validation gate: the train leader at an earlier epoch")]
 
 
 def test_the_record_is_one_fixed_json_form_and_its_oldest_entries_go_first():
@@ -147,45 +184,136 @@ def test_the_record_is_one_fixed_json_form_and_its_oldest_entries_go_first():
     assert [c["id"] for c in shown["changes"]] == ["c3", None]
 
 
-def test_the_records_facts_match_the_journal(tmp_path, monkeypatch):
-    """Seed 5; 7 kept, 8 kept, 6 rejected (train item tN passes when N <= level - 2). The
-    record each pass journals says, for every change, exactly what the journal's own
-    train records and gate state say: the items it fixed and broke, and kept or not."""
-    loop, _proposer = _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 6)], []])
-    journal = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
-    first_records: dict[str, list[dict[str, Any]]] = {}
-    for event in journal:
-        if event["event"] == "train_records":
-            first_records.setdefault(event["id"], event["records"])
-    parents = {c.id: c.parent for c in loop.population}
+def _journal_oracle(events: list[dict[str, Any]], at: dict[str, Any]) -> dict[str, Any]:
+    """What the journal alone says of every change and refusal before the pass ``at``,
+    read independently of the loop's code: each change's round (``proposal``) and parent,
+    its fixed/broken ids against its parent on the records of the round it was evaluated
+    in (``train_records``/``train_records_epoch``; none when the parent has no records of
+    that round), kept or not (the gate's ``strategy_state``; without one, the leaders
+    ``epoch_current`` named and the current's ancestors), the refusals (``rejection``),
+    and the items wrong under every change that scored them, by each change's own
+    records."""
+    before = events[:events.index(at)]
+    latest: dict[str, list[dict[str, Any]]] = {}
+    by_epoch: dict[str, dict[int, list[dict[str, Any]]]] = {}
+    last_epoch: dict[str, int] = {}
+    rounds, parents, leaders, refusals, gate = {}, {}, set(), [], None
+    for e in before:
+        kind = e.get("event")
+        if kind == "train_records":
+            latest[e["id"]] = e["records"]
+        elif kind == "train_records_epoch":
+            by_epoch.setdefault(e["id"], {})[int(e["epoch"])] = latest.get(e["id"], [])
+            last_epoch[e["id"]] = int(e["epoch"])
+        elif kind == "candidate":
+            parents[e["id"]] = e.get("parent")
+        elif kind == "proposal":
+            rounds[e["id"]] = int(e["epoch"])
+        elif kind == "epoch_current":
+            leaders.add(e["id"])
+        elif kind == "rejection":
+            refusals.append((int(e["epoch"]), e["reasons"][0]))
+        elif kind == "strategy_state" and "val_gate" in (e.get("state") or {}):
+            gate = e["state"]["val_gate"]
+    current = at["prev"] if at.get("rejected") else at["curr"]
+    lineage, node = set(), current
+    while node:
+        lineage.add(node)
+        node = parents.get(node)
+    changes, own = {}, {}
+    for cid, round_ in rounds.items():
+        if round_ >= at["epoch"] or cid not in latest:
+            continue
+        parent = parents[cid]
+        if gate is None:
+            pair, child = latest.get(parent), latest[cid]
+        else:
+            first = min(by_epoch.get(cid) or {0: None})
+            child = (by_epoch[cid][first] if by_epoch.get(cid)
+                     and last_epoch.get(cid) != first else latest[cid])
+            pair = (by_epoch.get(parent) or {}).get(first)
+        moved = edit_change(pair, child) if pair and child else None
+        kept = (cid in gate["accepted"]) if gate is not None else (cid in leaders | lineage)
+        changes[cid] = (round_, parent, None if not moved or not moved["shared"] else
+                        (moved["fixed"], moved["broken"]), "kept" if kept else "not kept")
+        own[cid] = {r["id"]: bool(r.get("passed")) for r in child}
+    scored: dict[str, list[str]] = {}
+    for cid in sorted(own, key=lambda c: (rounds[c], c)):
+        for item, passed in own[cid].items():
+            scored.setdefault(item, []).append(cid)
+    failing = sorted([(item, under) for item, under in scored.items() if len(under) >= 2
+                      and not any(own[c][item] for c in under)],
+                     key=lambda f: (-len(f[1]), f[0]))
+    return {"changes": changes, "refused": [r for r in refusals if r[0] < at["epoch"]],
+            "keeps_failing": failing}
+
+
+def _scenario(name: str, tmp_path: Path, monkeypatch: Any) -> Any:
+    from test_optimizer_memory import Remembering
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    if name == "gated":
+        return _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], [(8, 6)], []])[0]
+    if name == "refusal":  # level 12 is past the knob's range: refused before it runs
+        return _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 12)], [(7, 8)], []])[0]
+    if name == "failed_pass":
+        plan = [[(5, 7)], [(7, 8)], [(8, 6)], []]
+        return _run(tmp_path, monkeypatch, plan, proposer=Remembering(plan, fail=(3,)))[0]
+    if name == "ungated":
+        # Without the gate a lower level scores higher: 3 and 4 from 5 (3 leads, 4 never
+        # does), then 2 from 4 leads: 4, never the leader, is kept as 2's ancestor.
+        return _run(tmp_path, monkeypatch, [[(5, 3), (5, 4)], [(4, 2)], []],
+                    val_gate=False, batch_size=2)[0]
+    assert name == "resume"
+    _run(tmp_path, monkeypatch, [[(5, 7)], [(7, 8)], []])
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=5, val_gate=True, resume=True)
+        resumed.optimizer = Remembering([[(8, 6)], []])
+        resumed.run()
+    return resumed
+
+
+@pytest.mark.parametrize("name", ["gated", "refusal", "failed_pass", "resume", "ungated"])
+def test_the_records_facts_match_the_journal(name, tmp_path, monkeypatch):
+    """Every memory pass's record says, for every change and refusal so far, exactly what
+    the journal says (`_journal_oracle`, read without the loop's code): a gated run, one
+    with a refused proposal, one whose memory call failed (its facts written all the
+    same), a resumed one, and one without the gate (a change kept when it led, or leads
+    through a descendant)."""
+    loop = _scenario(name, tmp_path, monkeypatch)
+    events = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text().splitlines()]
+    passes = [e for e in events if e["event"] == "optimizer_memory"]
+    assert len(passes) >= 2
+    for at in passes:
+        oracle = _journal_oracle(events, at)
+        record = at["memory"]["record"]
+        changes = [c for c in record["changes"] if c["id"]]
+        assert {c["id"]: (c["round"], c["parent"], None if c["fixed"] is None
+                          else (c["fixed"], c["broken"]), c["outcome"])
+                for c in changes} == oracle["changes"], (name, at["epoch"])
+        assert [(c["round"], c["why"].split(" | ")[0]) for c in record["changes"]
+                if c["outcome"] == "refused"] == [
+            (r, memory._clip(why, memory.TRIED_REASON_CHARS)) for r, why in oracle["refused"]]
+        assert [(f["item"], f["failed_under"]) for f in record["keeps_failing"]] == \
+            oracle["keeps_failing"], (name, at["epoch"])
     levels = {c.id: _level(c) for c in loop.population}
-    # Each pass with the gate's state as the journal had it when the pass was journaled.
-    passes, gate = [], {}
-    for event in journal:
-        if event["event"] == "strategy_state" and "val_gate" in (event.get("state") or {}):
-            gate = event["state"]["val_gate"]
-        if event["event"] == "optimizer_memory":
-            passes.append((event, dict(gate)))
-    assert [p["epoch"] for p, _g in passes] == [2, 3, 4]
-    for index, (done, gate) in enumerate(passes):
-        changes = done["memory"]["record"]["changes"]
-        assert len(changes) == index + 1, "every round so far, not only the last"
-        for change in changes:
-            moved = edit_change(first_records[parents[change["id"]]], first_records[change["id"]])
-            assert (change["fixed"], change["broken"]) == (moved["fixed"], moved["broken"])
-            assert change["of"] == moved["shared"] and change["parent"] == parents[change["id"]]
-            assert change["id"] in gate["accepted"] + gate["rejected"]
-            kept = change["id"] in gate["accepted"]
-            assert change["outcome"] == ("kept" if kept else "not kept"), change
-    passes = [p for p, _g in passes]
-    final = {levels[c["id"]]: (c["fixed"], c["broken"], c["outcome"])
-             for c in passes[-1]["memory"]["record"]["changes"]}
-    assert final == {7: (["t4", "t5"], [], "kept"), 8: (["t6"], [], "kept"),
-                     6: ([], ["t5", "t6"], "not kept")}
-    # t7 and t8 failed under every change that scored them; t6 was fixed by 8.
-    failing = passes[-1]["memory"]["record"]["keeps_failing"]
-    assert [(f["item"], [levels[c] for c in f["failed_under"]]) for f in failing] == [
-        ("t7", [7, 8, 6]), ("t8", [7, 8, 6])]
+    last = {levels[c["id"]]: c["outcome"] for c in passes[-1]["memory"]["record"]["changes"]
+            if c["id"]}
+    expected = {"gated": {7: "kept", 8: "kept", 6: "not kept"},
+                "refusal": {7: "kept", 8: "kept"},
+                "failed_pass": {7: "kept", 8: "kept", 6: "not kept"},
+                "resume": {7: "kept", 8: "kept", 6: "not kept"},
+                "ungated": {3: "kept", 4: "kept", 2: "kept"}}[name]
+    assert last == expected
+    if name == "refusal":
+        assert any(c["outcome"] == "refused" for c in passes[-1]["memory"]["record"]["changes"])
+    if name == "ungated":
+        first = {levels[c["id"]]: c["outcome"] for c in passes[0]["memory"]["record"]["changes"]}
+        assert first == {3: "kept", 4: "not kept"}, "4 not kept until 2 descends from it"
+    if name == "failed_pass":
+        assert [p["updated"] for p in passes] == [True, False, True]
+        assert len(passes[1]["memory"]["record"]["changes"]) == 2, "facts written on failure"
     # The note the proposer reads is that record, rendered.
     shown = json.loads(loop._memory["text"])["changes"]
     assert [{k: v for k, v in c.items() if k != "observations"} for c in shown] == \
@@ -366,18 +494,18 @@ def test_the_replay_reads_a_reply_as_the_record_does(tmp_path, capsys):
                         "--reply", str(reply)]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert [(o["change"], o["text"]) for o in shown["kept"]] == [
-        ("c3", "In b the inserted step returned 7.")]
-    assert shown["stripped"] == [{"text": "Next time keep the edit smaller.",
-                                  "why": "advice: 'Next time'"}]
+        ("c3", "In b the inserted step returned 7."), ("c2", "Next time keep the edit smaller.")]
+    assert shown["stripped"] == [] and shown["unpinned"] == []
 
 
 class _Proposing:
     """A model client for a real loop: each proposal call sets the level to the next of
-    ``levels``; each memory call answers one observation on its first compared item,
-    about the first change "What was tried this epoch" names, and one piece of advice."""
+    ``levels``; each memory call answers, on its first compared item, one observation
+    about the first change "What was tried this epoch" names, one piece of advice, and
+    one about the first change it was ever shown (later, not one that pass compares)."""
 
     def __init__(self, levels: list[int]) -> None:
-        self.levels, self.calls = list(levels), []
+        self.levels, self.calls, self.first = list(levels), [], ""
 
     def complete(self, prompt: str, *, system: str = "", **_: Any) -> str:
         import re
@@ -386,10 +514,12 @@ class _Proposing:
         if system == memory.MEMORY_SYSTEM:
             items = re.findall(r"^#### Task (\S+?)(?::| --|$)", prompt, re.M)
             changes = re.findall(r"^- `([^`]+)` \(round ", prompt, re.M)
+            self.first = self.first or (changes[0] if changes else "")
             return json.dumps({"observations": [
                 {"change": changes[0] if changes else "", "items": items[:1],
                  "observation": f"OBS for {items[0]}: step work returned TRAIN-OUT."},
-                {"change": "", "items": items[:1], "observation": "Next round, try a judge."}]})
+                {"change": "", "items": items[:1], "observation": "Next round, try a judge."},
+                {"change": self.first, "items": items[:1], "observation": "PINNED-FIRST"}]})
         if not self.levels:
             return json.dumps({"diagnosis": "d", "proposals": []})
         level = self.levels.pop(0)
@@ -426,12 +556,21 @@ def test_the_replay_rebuilds_the_record_from_the_journal_and_swaps_it_into_a_pro
         stored = [json.loads(line) for line in (run / "journal.jsonl").read_text().splitlines()]
         stored = [e for e in stored if e["event"] == "optimizer_memory"]
         assert [e["epoch"] for e in stored] == [2, 3, 4] and sorted(replies) == [2, 3, 4]
+        # Round 1's change is compared in epoch 2 only (7 -> 8, then 8 against 6): later,
+        # an observation pinned to it is kept unpinned, and the journal says so.
+        first = loop.optimizer._client.first
+        assert [[(u["change"], u["text"]) for u in e["unpinned"]] for e in stored] == [
+            [], [(first, "PINNED-FIRST")], [(first, "PINNED-FIRST")]]
+        assert all(e["stripped"] == [] for e in stored)
         for at in stored:
             rebuilt = script.record_from_journal(run, at["epoch"], replies, Path("."),
                                                  tmp_path / f"scratch{at['epoch']}")
             assert rebuilt == at["memory"]["record"], at["epoch"]
         last = stored[-1]["memory"]["record"]
-        assert len(last["changes"]) == 3 and len(last["observations"]) == 3
+        # Each pass's three observations, the advice one too: wording is not judged.
+        assert len(last["changes"]) == 3 and len(last["observations"]) == 9
+        assert [o["change"] for o in last["observations"] if o["text"] == "PINNED-FIRST"] == [
+            first, None, None]
         assert {c["outcome"] for c in last["changes"]} == {"kept", "not kept"}
         bare = script.record_from_journal(run, 4, {}, Path("."), tmp_path / "bare")
         assert bare["changes"] == last["changes"] and bare["observations"] == []
@@ -522,5 +661,33 @@ def test_without_the_gate_the_rebuilt_record_reads_the_train_leader_as_the_loop_
         rebuilt = script.record_from_journal(loop.root, 2, {}, Path("."), tmp_path / "s")
     (change,) = rebuilt["changes"]
     assert (change["outcome"], change["why"]) == (
-        "not kept", "no validation gate: it is not the train leader now")
+        "not kept", "no validation gate: never the train leader")
     assert rebuilt["changes"] == at["memory"]["record"]["changes"]
+
+
+def test_a_note_from_before_the_record_is_dropped_on_resume_and_said(tmp_path, monkeypatch):
+    """A run resumed from a journal whose note is an older coach note: the next pass
+    does not carry it (it is no record), and says so once, in the journal and the
+    progress log, never silently."""
+    from test_optimizer_memory import Remembering
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    class Coach(Remembering):
+        def write_memory(self, *, epoch, generation, build):  # type: ignore[no-untyped-def]
+            return {"note": {"text": "OLD-COACH-NOTE: try a judge", "reasoning": "r"},
+                    "error": None, "calls": 1}
+
+    _run(tmp_path, monkeypatch, [[(5, 7)], []], proposer=Coach([[(5, 7)], []]))
+    with _patch_mode(LevelProbe):
+        resumed = _loop(tmp_path, epochs=3, val_gate=True, resume=True)
+        resumed.optimizer = Remembering([[(7, 8)], []])
+        resumed.run()
+    events = [json.loads(line) for line in (resumed.root / "journal.jsonl").read_text()
+              .splitlines()]
+    (dropped,) = [e for e in events if e["event"] == "memory_note_dropped"]
+    assert dropped["note_epoch"] == 2 and memory.RECORD_FORMAT in dropped["why"]
+    assert "OLD-COACH-NOTE" not in resumed._memory["text"]
+    assert resumed._memory["record"]["format"] == memory.RECORD_FORMAT
+    progress = (resumed.root / "progress.jsonl").read_text()
+    assert "written before the record's format" in progress

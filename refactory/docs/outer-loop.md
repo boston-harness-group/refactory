@@ -1129,14 +1129,19 @@ paired with a parent picker), on the train records the request carries:
   analysts. Each reads the pipeline in the proposer's words, from the same renderers:
   the pipeline view and each step's settings with their values (a paragraph the steps'
   texts share read once, since an analyst never patches) -- no node table or node JSON
-  -- then "What an edit can build in this run" (`analysts.buildable_lines`, failure and
-  success analysts alike), plain facts from the run's graph and settings, each what an
-  attempt decides: the seed's steps whose tool rule (`tool_policy` `none` or `refused`)
-  no edit may change (`E-tool-policy-escalation`); whether a new agent step from an
-  operation of the run's catalogue that takes `tools` (`insert`, `map`, `fallback`) may
-  list them -- sealed, in a fresh workspace with only the files it reads and no
-  network, when the run can run a sealed step, else not (`E-new-node-tools`); and the
-  protected steps (`E-protected`); no example and no suggestion --
+  -- with "The changes the optimizer can make" ending in "What edits are possible in
+  this run" (`analysts.buildable_lines`, failure and success analysts alike): plain
+  facts from the run's graph and settings, each what an attempt decides, and each only
+  where an operation the run allows can touch it. With `set_knob`, first, which
+  settings it moves (all but those frozen or read by a protected or grading step,
+  `E-frozen`); with structural operations, the seed's steps whose tool rule
+  (`tool_policy` `none` or `refused`) no edit may change (`E-tool-policy-escalation`),
+  whether a new agent step from an operation that takes `tools` (`insert`, `map`,
+  `fallback`) may list them -- sealed, in a fresh workspace with only the files it
+  reads and no network, when the run can run a sealed step, else not
+  (`E-new-node-tools`) -- and the protected steps (`E-protected`); a text-only run gets
+  the settings line and one line that the structure stays. No example and no
+  suggestion --
   and each item's full trace: its input, every step's input and output in the order
   they ran, the expected answer, the prediction, the score and the grader's feedback. Each item's heading
   carries the item fields its Task declares (`Task.item_metadata`, read by
@@ -1312,11 +1317,15 @@ advice. Its facts are the harness's; only its observations are a model's:
   what it was (its edits, with the text it gave a new step or judge, as "What was tried
   this epoch" says it below), where a step it added sits and how a structural change
   moved its items, its outcome -- `kept`, `not kept` or `refused` -- and why (the gate's
-  word, a failed train run, not evaluated, without a gate whether it is the train
-  leader, or a refusal's reasons), and the train items it fixed and broke, by id, of how
-  many it shared with its parent (`null` when its parent was not scored with the same
-  seed); and `keeps_failing`: each train item wrong under every change that scored it,
-  when at least two did, with those changes' ids. No model writes or can change them.
+  word, a failed train run, not evaluated, or a refusal's reasons; without a gate a
+  change is kept when it is the train leader now, an ancestor of it, or was the leader
+  at an earlier epoch), and the train items it fixed and broke, by id, of how many it
+  shared with its parent (`null` when its parent was not scored with the same seed);
+  and `keeps_failing`: each train item wrong under every change that scored it, when at
+  least two did, with those changes' ids, read from each change's own records (so a
+  change whose parent was scored with another seed, after a resume say, still counts).
+  No model writes or can change them, and they are rewritten at every pass, a failed
+  one too.
 - **The observations**: one optimizer-model call (or a split pass's calls, below)
   compares two rollouts on the same train items, as SkillOpt's meta skill
   (`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does, and says what the
@@ -1327,14 +1336,17 @@ advice. Its facts are the harness's; only its observations are a model's:
   nothing about what to do next (no recommendations, suggestions, principles, rules,
   lessons, priorities or risks), no claim about what can or cannot be built, edited,
   reached or unfrozen, no judgement of a kind of change, no instructions for the
-  pipeline's steps. The answer is checked, not trusted: an observation whose text is
-  advice or a buildability claim (`memory.ADVICE_PATTERNS`: "should", "try", "next
-  round", "in future", "principle", "only unfrozen", "cannot be built" and the like;
-  its quotes are not read) or that names no compared item is stripped, and the pass's
-  journal entry lists each stripped one with why (`stripped`). A change id the facts do
-  not hold makes it an observation about the comparison as a whole. Earlier passes'
+  pipeline's steps. Those rules are the prompt's: no code judges an observation's
+  wording (a pattern filter tried here misjudged both ways, dropping facts and keeping
+  advice). What is checked is structure: an observation that names no compared item, or
+  comes past the limits, is dropped and listed with why (`stripped`); one pinned to a
+  change this pass did not compare (the changes between its two pipelines, or its
+  not-kept change) is kept as one about the comparison as a whole and listed with why
+  (`unpinned`); both lists go in the pass's journal entry. Earlier passes'
   observations are carried (a re-made pass of one epoch replaces its own), so the
-  record holds every pass's.
+  record holds every pass's. A run resumed with a note from before this format does not
+  carry it: the next pass journals `memory_note_dropped` and says it in the progress
+  log.
 - **The note** (`memory.render_record`): the JSON, one change, failing item or
   observation per line, each change with the observations about it. Within 20000
   characters (`RECORD_CHARS`): past that, the oldest changes and the oldest observations
@@ -1452,9 +1464,11 @@ The comparison the observations come from:
   showed on the items it names, and that it records what happened and says nothing
   about what to try. It replaces the proposer's former `lessons`; the run ledger and the
   step reviews stay. It never edits the graph.
-- **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
-  note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
-  next pass that writes one clears the mark. The call is retried as every optimizer call
+- **When it fails.** The facts need no model, so a pass whose call fails (or that has
+  nothing to compare) still writes them: the note is the record with this epoch's facts
+  and the earlier observations, marked NOT UPDATED in that epoch with why (it added no
+  observations) in every request that shows it; the next pass that writes observations
+  clears the mark. The call is retried as every optimizer call
   is. A spent budget, a cancelled run or a missing model choice is no answer about the
   memory: no pass is recorded, so a resume makes the pass; a spent budget or a person's
   stop ends the search as it does elsewhere, and the run's report is written either way.
@@ -1464,7 +1478,7 @@ The comparison the observations come from:
   (`optimizer_memory`: the two candidates, whether they are one, the sample, the items
   compared and missing, the counts per category, the evaluations and rollouts it made,
   the comparison calls (`parts`) when split, the calls' clipping and retry, the
-  observations the answer added and each one stripped with why, and the note with the
+  observations the answer added, each one stripped or unpinned with why, and the note with the
   whole record under `memory.record`); a resume replays the note, the record and the
   passes and does not make a pass again. A
   pass stopped part way is made again on resume: its answered calls come from their

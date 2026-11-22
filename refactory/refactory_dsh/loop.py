@@ -6613,10 +6613,15 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.base import _by_item
 
         if same:
+            # No call, but the facts need none: they are written all the same.
+            facts = self._record_facts(epoch, tried, refused, current=current.id)
             self._keep_memory({"epoch": epoch, "generation": self.generation, "prev": prev.id,
                                "curr": current.id, "same": True, "evaluated": 0, "rollouts": 0,
                                "error": "nothing was applied this epoch and no change that "
-                                        "was not applied moved an item"}, None)
+                                        "was not applied moved an item"}, None,
+                              facts=memory.note_from({"observations": []}, epoch=epoch,
+                                                     facts=facts, earlier=self._earlier_record(),
+                                                     items=[]))
             return
         held = [_by_item(self._train_item_records.get(c.id) or ()) for c in (prev, current)]
         sample = memory.sample_ids(sorted(set(held[0]) & set(held[1])), int(self.config.seed),
@@ -6729,14 +6734,13 @@ class Loop(OuterLoop):
         objective = self._objective()
         # The record's facts, from this run's own data over every round so far
         # (`memory.record_facts`): the model adds observations only.
-        rounds = sorted({int(r["epoch"]) for r in self.proposals.values()
-                         if isinstance(r, Mapping) and r.get("epoch") is not None
-                         and int(r["epoch"]) < epoch}
-                        | {r for r in self._round_refusals if r < epoch} | {epoch - 1})
-        every = [(tried, refused) if r == epoch - 1 else self._tried_in_round(r) for r in rounds]
-        facts = memory.record_facts([t for done, _f in every for t in done],
-                                    [f for _d, failed in every for f in failed], gated=gated,
-                                    current=prev.id if rejected else current.id)
+        facts = self._record_facts(epoch, tried, refused,
+                                   current=prev.id if rejected else current.id)
+        # The changes this pass compares: an observation may be pinned to these only.
+        compared_changes = [str(step.get("id")) for step in
+                            [*(lineage.get("prev") or ()), *(lineage.get("curr") or ())]]
+        if rejected:
+            compared_changes.append(str(rejected.get("child")))
 
         # The request: one call when it fits the room whole, else split into comparison
         # calls and a synthesis, never cut (`memory.MemoryRequest`).
@@ -6753,7 +6757,7 @@ class Loop(OuterLoop):
                          f"the {memory.noun({'rejected': rejected})}'s pipeline" if rejected
                          else "the pipeline now")}),
             entries=entries, tried=tried_lines, objective=objective, facts=facts,
-            earlier=self._memory.get("record"))
+            earlier=self._earlier_record(), compared_changes=compared_changes)
 
         outcome: dict[str, Any] = {}
         if not entries:
@@ -6780,8 +6784,53 @@ class Loop(OuterLoop):
             record["observations"] = sum(1 for o in (note.get("record") or {}).get(
                 "observations") or () if o.get("epoch") == epoch)
             record["stripped"] = list(note.get("stripped") or ())
+            record["unpinned"] = list(note.get("unpinned") or ())
+        # A pass that wrote no observations still writes the facts (`facts_note`).
         self._keep_memory({**record, **({"error": outcome.get("error")}
-                                         if not note else {})}, note)
+                                         if not note else {})}, note,
+                          facts=None if note else build.facts_note())
+
+    def _record_facts(self, epoch: int, tried: list[dict[str, Any]],
+                      refused: list[dict[str, Any]], *, current: str) -> dict[str, Any]:
+        """The record's facts at this epoch's pass (`memory.record_facts`): every round so
+        far (this epoch's ``tried``/``refused``, the earlier ones read again), the gate's
+        word as it stands, and without a gate the train leader ``current``, its ancestors
+        and every epoch's leader (each kept)."""
+        from refactory_dsh.optim import memory
+
+        rounds = sorted({int(r["epoch"]) for r in self.proposals.values()
+                         if isinstance(r, Mapping) and r.get("epoch") is not None
+                         and int(r["epoch"]) < epoch}
+                        | {r for r in self._round_refusals if r < epoch} | {epoch - 1})
+        every = [(tried, refused) if r == epoch - 1 else self._tried_in_round(r) for r in rounds]
+        by_id = {c.id: c for c in self.population}
+        lineage, node = [], by_id.get(current)
+        while node is not None and node.id not in lineage:
+            lineage.append(node.id)
+            node = by_id.get(node.parent or "")
+        return memory.record_facts([t for done, _f in every for t in done],
+                                   [f for _d, failed in every for f in failed],
+                                   gated=self.selection_mode() or False, current=current,
+                                   leaders=sorted(set(self._epoch_currents.values())),
+                                   lineage=lineage)
+
+    def _earlier_record(self) -> dict[str, Any] | None:
+        """The record the next pass carries on (`optim.memory.note_from`). A note written
+        before the record's format (a resumed older run) is not carried: it is dropped
+        once, journaled (``memory_note_dropped``) and said, never silently."""
+        from refactory_dsh.optim import memory
+
+        record = self._memory.get("record")
+        if isinstance(record, Mapping) and record.get("format") == memory.RECORD_FORMAT:
+            return dict(record)
+        if self._memory.get("text") and not self._memory.get("old_note_dropped"):
+            why = ("the memory note was written before the record's format "
+                   f"({memory.RECORD_FORMAT}); the next note is the record, without it")
+            self._memory = {**self._memory, "old_note_dropped": True}
+            self._journal("memory_note_dropped", epoch=self.epoch,
+                          note_epoch=self._memory.get("epoch"), why=why)
+            self._progress("warning", warning=why)
+        return None
 
     def _objective(self) -> str:
         """What the score measures and the compute policy
@@ -6831,6 +6880,9 @@ class Loop(OuterLoop):
             # (`memory.item_ids`): only where the counts are (one seed, shared items).
             if isinstance(entry.get("fixed"), int):
                 entry["items"] = memory.item_ids(parent_records, child_records)
+            # Its own records, whatever its parent's seed, for `memory.keeps_failing`.
+            if child_records:
+                entry["own"] = memory.own_items(child_records)
             effect = (edit_effect(parent_records, child_records, self._reply_judge(),
                                   new_steps=_new_steps(by_id.get(candidate.parent or ""),
                                                        candidate))
@@ -6855,9 +6907,11 @@ class Loop(OuterLoop):
                 "edits": memory.edits_text(steps), "reasons": list(rejection.reasons)})
         return tried, refused
 
-    def _keep_memory(self, record: dict[str, Any], note: dict[str, Any] | None) -> None:
-        """Keep a pass's note (or, when it wrote none, the earlier note marked not
-        updated in this epoch and why) and journal both (``optimizer_memory``)."""
+    def _keep_memory(self, record: dict[str, Any], note: dict[str, Any] | None,
+                     facts: dict[str, Any] | None = None) -> None:
+        """Keep a pass's note (or, when it wrote none, the record of its ``facts``
+        (`MemoryRequest.facts_note`) with the earlier observations, marked not updated in
+        this epoch and why) and journal both (``optimizer_memory``)."""
         if note:
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
@@ -6869,8 +6923,11 @@ class Loop(OuterLoop):
                                if getattr(self, "_pending_tally", None) else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
-            self._memory = {**self._memory, "not_updated": {
-                "epoch": record["epoch"], "why": str(record.get("error") or "no note")}}
+            self._memory = {**self._memory,
+                            **({"text": facts["text"], "record": dict(facts["record"])}
+                               if facts else {}),
+                            "not_updated": {"epoch": record["epoch"],
+                                            "why": str(record.get("error") or "no note")}}
             record = {**record, "updated": False}
         self._memory_passes.append(record)
         self._journal("optimizer_memory", memory=dict(self._memory), **record)
