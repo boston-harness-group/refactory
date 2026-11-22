@@ -49,7 +49,7 @@ PLAIN_CODE = "def main(inp):\n    return {'facts': {'%s': 'rewritten'}}\n"
 
 
 def _applier(name: str = S4) -> sf.Applier:
-    return sf.Applier(sf.seeds()[name])
+    return sf.cached_applier(name)
 
 
 def _accepted(applier: sf.Applier, edits: list[dict]) -> dict:

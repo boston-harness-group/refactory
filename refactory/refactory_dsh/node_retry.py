@@ -46,6 +46,10 @@ from typing import Any
 #: The event a retry is recorded as, in the run's `.refactory/events.jsonl`.
 RETRY_EVENT = "node_retried"
 
+#: The clock `deliver` reads for its timing: `time.monotonic` by default, monkeypatched
+#: to a fake clock in tests that must be deterministic under load.
+_clock: Callable[[], float] = time.monotonic
+
 #: The shortest session a retry is worth starting. When the node's envelope or the run's
 #: wall leaves less than this (or than the retry's own limit, when that is shorter), the
 #: timeout stands.
@@ -553,7 +557,7 @@ def deliver(
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}),
                                  tool_policy=tool_policy)
-                started = time.monotonic()
+                started = _clock()
                 output = ask(attempt_client, delivery["prompt"], place)
                 invented = invented_tool_calls(output) if markup else []
                 if place is not None and not invented:
@@ -568,7 +572,7 @@ def deliver(
                     pass
             if started is None or rule is None or kind not in rule["on"]:
                 raise
-            ran.append(int(round(time.monotonic() - started)))
+            ran.append(int(round(_clock() - started)))
             spent_s.append(ran[-1])
             spent = ", then ".join(f"{seconds}s" for seconds in ran)
             failed = {"timeout": "timed out", "output_limit": "ran out of output"}.get(kind, "crashed")
@@ -609,7 +613,7 @@ def deliver(
             # its output. Its bracket is settled as a timed-out attempt's is, so the retry
             # writes the output afresh and nothing of this reply is delivered.
             tags = ", ".join(f"<{tag}>" for tag in dict.fromkeys(invented))
-            waited = int(round(time.monotonic() - started)) if started is not None else 0
+            waited = int(round(_clock() - started)) if started is not None else 0
             spent_s.append(waited)
             wrote = (f"{node} has no tools, but its reply wrote out tool calls or results "
                      f"({tags})")

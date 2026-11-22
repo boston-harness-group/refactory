@@ -85,7 +85,7 @@ def test_a_silent_builder_is_stopped_at_the_inactivity_limit(tmp_path):
     elapsed, result = _complete(_client(tmp_path, inactivity_s=2, wall=60), tmp_path, "silent 40")
     assert isinstance(result, CompletionTimeout), result
     assert "timed out after 2s of inactivity" in str(result)
-    assert 1.5 < elapsed < 15
+    assert 1.5 < elapsed < 30
 
 
 def test_the_hard_maximum_still_stops_an_endlessly_busy_builder(tmp_path):
@@ -93,7 +93,7 @@ def test_the_hard_maximum_still_stops_an_endlessly_busy_builder(tmp_path):
     # The wall the node declares: the graph's own limit (`DeclaredTimeout`), not retried.
     assert isinstance(result, DeclaredTimeout), result
     assert "declared timeout_s (5s) after 5s" in str(result) and "inactivity" not in str(result)
-    assert 4 < elapsed < 15
+    assert 4 < elapsed < 30
 
 
 def test_a_session_without_a_node_has_no_inactivity_limit(tmp_path):

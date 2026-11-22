@@ -207,7 +207,7 @@ def _failing_op_branch(optional: bool) -> tuple[sf.Applier, dict]:
 
     from refactory_dsh.nn import Knob
 
-    applier = sf.Applier(sf.seeds()["fuzz_fork_join"])
+    applier = sf.cached_applier("fuzz_fork_join")
     state = copy.deepcopy(applier.seed_state)
     graph = state["graph"]
     graph["nodes"]["flaky"] = {"id": "flaky", "kind": "op", "call": sf.fg.FAIL,

@@ -182,6 +182,42 @@ def seeds() -> dict[str, Seed]:
 
 # ── the attempt path ──────────────────────────────────────────────────────
 
+#: Mode-level cache: mode(), state_dict(), invariants(), edit_protected() and
+#: grader_nodes() are expensive; each is built once per seed name and deep-copied
+#: for the Applier that tests may mutate through ``attempt``.
+import copy as _copy
+
+_MODE_CACHE: dict[str, tuple[dict, tuple, tuple, tuple]] = {}
+
+
+def cached_applier(seed_name: str) -> "Applier":
+    """An Applier for ``seed_name``, with the mode's expensive outputs cached.
+
+    Each call returns a fresh Applier (its ``seed_state`` is a deep-copied dict
+    tests may mutate through ``attempt``), but the mode's invariants, protected
+    list and graders are computed only once.
+    """
+    if seed_name not in _MODE_CACHE:
+        seed = seeds()[seed_name]
+        mode = seed.mode()
+        _MODE_CACHE[seed_name] = (
+            mode.state_dict(),
+            mode.invariants(),
+            tuple(mode.edit_protected()),
+            tuple(mode.grader_nodes()),
+        )
+    state, invariants, protected, graders = _MODE_CACHE[seed_name]
+    applier = object.__new__(Applier)
+    applier.seed = seeds()[seed_name]
+    applier.seed_state = _copy.deepcopy(state)
+    applier.invariants = invariants
+    applier.protected = protected
+    applier.graders = graders
+    applier.optimizer = Optimizer()
+    applier.optimizer.step_routes = StepRoutes(ROUTE_BASE, node_routes=ROUTE_MAPS)
+    applier.optimizer.answered_gates = True
+    return applier
+
 
 class Applier:
     """Applies edits to one seed's states exactly as the outer loop's attempt does."""

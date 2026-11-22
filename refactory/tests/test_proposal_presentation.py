@@ -105,7 +105,7 @@ def test_the_examples_parse_and_apply_to_a_generic_graph(seed):
     synthetic graphs' later steps take literal prompts or end the run, so a new step there
     reaches nothing and is refused, E-unread.)"""
     single, bundle = _examples(_answer(_render("broad", max_edits=4)))
-    applier = sf.Applier(sf.seeds()[seed])
+    applier = sf.cached_applier(seed)
     parent = Candidate.from_state(applier.seed_state)
     graph = sf._graph_of(parent.state)
     passes = edits._data_pass_nodes(graph)  # noqa: SLF001

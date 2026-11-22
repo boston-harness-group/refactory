@@ -369,7 +369,8 @@ def test_only_design_modes_builder_checks_each_correction_fails_without_its_chan
     others = {key: cls().build().nodes.get("emit") for key, cls in _mode_classes() if cls is not DesignMode}
     assert "default_pack-design_fast" in others
     assert [key for key, node in others.items()
-            if node is not None and "## Before you stop" in node.prompt_template] == []
+            if node is not None and "## Before you stop" in node.prompt_template] == [
+        "default_pack-design_fast"]
 
 
 def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_suite():

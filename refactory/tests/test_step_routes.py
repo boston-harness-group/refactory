@@ -150,7 +150,7 @@ def test_a_run_with_one_route_offers_nothing_and_its_maps_offer_their_values():
 
 
 def _attempt(edit, routes=StepRoutes(sf.ROUTE_BASE, node_routes=sf.ROUTE_MAPS)):
-    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    applier = sf.cached_applier("fuzz_draft_review")
     applier.optimizer.step_routes = routes
     parent = Candidate.from_state(applier.seed_state)
     return applier, applier.attempt(parent, edit, {parent.id})

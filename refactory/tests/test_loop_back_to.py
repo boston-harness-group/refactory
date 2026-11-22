@@ -160,7 +160,7 @@ def test_back_to_not_on_every_path_is_refused_and_names_the_steps_that_are():
                       "route's way passes it by); it names a step every run passes before "
                       "'decide': compare")
     # A route's way: polish is passed by when the route goes to rough.
-    gates = sf.Applier(sf.seeds()["fuzz_gates"]).seed_state
+    gates = sf.cached_applier("fuzz_gates").seed_state
     assert "is not on every path to 'redo'" in _refused(
         {"op": "loop", "step": "redo", "back_to": "polish"}, gates)
 
@@ -187,7 +187,7 @@ def test_back_to_inside_a_branch_from_after_the_join_is_refused():
     it, since a send-back from after the join re-runs the fork whole."""
     import copy
 
-    state = copy.deepcopy(sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
+    state = copy.deepcopy(sf.cached_applier("fuzz_fork_join").seed_state)
     graph = state["graph"]
     graph["nodes"]["split"]["targets"] = ["left"]
     graph["nodes"]["merge"]["sources"] = ["left"]
@@ -204,7 +204,7 @@ def test_back_to_inside_a_branch_from_after_the_join_is_refused():
 
 
 def test_the_written_out_loop_refuses_back_to():
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     edit = {"op": "loop", "target": "review", "back_to": "draft",
             "gate": {"id": "g", "kind": "gate", "evaluator": "structure_fuzz_graphs:proceed"}}
     assert _refused(edit, state) == ("'back_to' goes with the one-line loop ('step' and "

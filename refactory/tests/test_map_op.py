@@ -141,7 +141,7 @@ def test_the_view_reads_as_exactly_the_graph_s_edges():
 
     states = [_s1(), _s4()]
     for name in ("fuzz_draft_review", "fuzz_data_pass", "fuzz_fork_join"):
-        seed = sf.Applier(sf.seeds()[name]).seed_state
+        seed = sf.cached_applier(name).seed_state
         for step in sorted(_graph(seed).nodes):
             edit = {"op": "map", "after": step, "over": step}
             if nn_edits.precheck(edit, seed) is None:
@@ -792,7 +792,7 @@ def _driven(cap: int) -> dict[str, Any]:
     import structure_fuzz as sf
 
     edit = {"op": "map", "after": "draft", "over": "draft", "max": cap}
-    return nn_edits.apply(edit, sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state)
+    return nn_edits.apply(edit, sf.cached_applier("fuzz_draft_review").seed_state)
 
 
 def _driven_run(runtime: str, state: dict, draft: str, tmp_path: Path, monkeypatch
@@ -862,7 +862,7 @@ def test_the_fuzz_s_map_over_a_draft_runs_alike_on_the_walker_and_the_spine():
     file") when it handed the second run, which had no element, to the driver."""
     import structure_fuzz as sf
 
-    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    applier = sf.cached_applier("fuzz_draft_review")
     state = nn_edits.apply({"op": "map", "after": "draft", "over": "draft"},
                            applier.seed_state)
     assert sf.check_state(applier, state, walker=True, spine=True) == []

@@ -81,7 +81,7 @@ def test_the_chosen_attempt_is_what_is_graded_on_the_spine(tmp_path, monkeypatch
 def test_taking_over_renames_the_step_s_outputs_for_the_steps_before_only():
     """Any graph: the step taken over writes under new names, the steps before the new one
     read them there, and the steps after it read the new step's under the old names."""
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     after = nn_edits.apply({"op": "insert", "after": "review", "kind": "code",
                             "id": "pick", "takes_over": "draft"}, state)
     assert validate_state(after) == []
@@ -98,7 +98,7 @@ def test_taking_over_renames_the_step_s_outputs_for_the_steps_before_only():
 
 
 def test_taking_over_a_step_that_runs_after_is_refused():
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     reason = nn_edits.precheck({"op": "insert", "after": "draft", "kind": "code",
                                 "takes_over": "review"}, state)
     assert reason and "does not run before the new step" in reason
@@ -191,7 +191,7 @@ def test_routes_that_keep_every_input_and_removals_are_still_taken():
 def test_the_lost_input_rule_holds_on_any_graph():
     """A skip on a graph with no LiveMath in it: a route from intake straight to finalize
     leaves finalize without what draft and review make."""
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     graph = Graph.from_state(state["graph"])
     assert {"intake", "draft", "review", "finalize"} <= set(graph.nodes)
     with pytest.raises(nn_edits.EditError, match="would run without"):
@@ -203,7 +203,7 @@ def test_the_lost_input_rule_holds_on_any_graph():
 
 
 def _fuzz(name: str) -> dict:
-    return sf.Applier(sf.seeds()[name]).seed_state
+    return sf.cached_applier(name).seed_state
 
 
 def test_a_step_on_a_sibling_branch_cannot_be_taken_over():
@@ -505,7 +505,7 @@ def test_a_judge_is_not_split_into_code_that_cannot_answer_its_verdict():
     verdict gate reading what the default code joins, which never starts with a verdict, so
     every run failed. Refused, saying what to give; code with its own text is taken."""
     state = nn_edits.apply({"op": "loop", "step": "left", "judge": "agent"},
-                           sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state)
+                           sf.cached_applier("fuzz_fork_join").seed_state)
     edit = {"op": "split", "step": "left_check_judge", "into": [{"kind": "code"}, {"kind": "code"}]}
     assert nn_edits.precheck(edit, state) == (
         "'left_check' reads its verdict from what 'left_check_judge' writes; a code step "
@@ -632,7 +632,7 @@ def test_a_file_named_in_sees_reaches_the_step_and_its_output_decide_on_the_spin
 def test_a_to_inside_a_parallel_or_route_step_is_honoured_never_ignored():
     """'to' is a step field: a step parallelize's 'new' or a route's 'to' adds goes where it
     says, and a 'to' whose reader runs before the step is refused, as insert's is."""
-    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    applier = sf.cached_applier("livemath_skill_graph")
     from refactory_dsh.optim import Candidate
 
     parent = Candidate.from_state(applier.seed_state)
@@ -726,7 +726,7 @@ def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
 def test_a_map_run_an_edit_removes_is_refused_not_a_crash():
     """Found by the fuzz walk: removing a map's run left its fork naming no node, and V6's
     map check read that node."""
-    applier = sf.Applier(sf.seeds()["fuzz_file_output"])
+    applier = sf.cached_applier("fuzz_file_output")
     _states, refusal = applier.replay([
         {"op": "insert", "before": "plot"},
         {"op": "map", "after": "plot_prep_inputs", "over": "plot_prep_inputs"},
@@ -1215,7 +1215,7 @@ def test_a_tuned_and_rewired_branch_runs(prompts_of, tmp_path, monkeypatch):
 def test_a_rewire_with_text_on_a_step_with_a_mode_prompt_knob_sets_that_knob():
     """L4: fuzz_draft_review's review reads its prompt from the mode's knob review_task:
     the new text lands in that knob, with the slots for what it sees."""
-    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    applier = sf.cached_applier("fuzz_draft_review")
     from refactory_dsh.optim import Candidate
 
     parent = Candidate.from_state(applier.seed_state)

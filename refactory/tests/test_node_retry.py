@@ -395,15 +395,35 @@ def test_no_retry_starts_when_the_run_wall_is_spent(tmp_path, runtime):
     assert dsh.calls == 1 and _retried(workdir) == []
 
 
-class _Slow:
-    """A client that reports no limits: each call takes ``seconds`` and times out."""
+class _FakeClock:
+    """A deterministic clock for tests that must be load-independent."""
 
-    def __init__(self, seconds: float):
+    def __init__(self, start: float = 1000.0):
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+class _Slow:
+    """A client that reports no limits: each call takes ``seconds`` and times out.
+
+    When ``clock`` is given, advances the fake clock instead of sleeping.
+    """
+
+    def __init__(self, seconds: float, clock: _FakeClock | None = None):
         self.seconds, self.calls = seconds, 0
+        self._clock = clock
 
     def complete(self, prompt, *, system="", workdir=None):
         self.calls += 1
-        time.sleep(self.seconds)
+        if self._clock is not None:
+            self._clock.advance(self.seconds)
+        else:
+            time.sleep(self.seconds)
         raise CompletionTimeout(f"model completion timed out after {self.seconds}s")
 
 
@@ -413,8 +433,10 @@ def test_the_retry_stays_inside_the_nodes_envelope(tmp_path, monkeypatch):
     # the envelope.
     from refactory_dsh import node_retry
 
+    clock = _FakeClock()
     monkeypatch.setattr(node_retry, "ENVELOPE_SLACK_S", 0)
-    client = _Slow(2.6)
+    monkeypatch.setattr(node_retry, "_clock", clock)
+    client = _Slow(2.6, clock=clock)
     with pytest.raises(RetriesExhausted, match="its declared retry was not started"):
         deliver(tmp_path, "reviewer", prompt="p", writes=[REPORT], reads=[], client=client,
                 ask=lambda c, p, place: c.complete(p), capture_final=True, rule=RULE, timeout_s=1)

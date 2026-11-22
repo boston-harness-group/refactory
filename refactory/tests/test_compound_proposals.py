@@ -351,7 +351,7 @@ def test_a_proposal_entry_with_no_edit_is_a_counted_refusal_shown_back(tmp_path,
 
 
 def _livemath() -> tuple[sf.Applier, Candidate]:
-    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    applier = sf.cached_applier("livemath_skill_graph")
     return applier, Candidate.from_state(applier.seed_state)
 
 

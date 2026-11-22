@@ -139,7 +139,7 @@ def test_the_view_reads_as_exactly_the_graph_s_edges():
 
     states = [_s1(), _s4()]
     for name in ("fuzz_data_pass", "livemath_skill_graph"):
-        seed = sf.Applier(sf.seeds()[name]).seed_state
+        seed = sf.cached_applier(name).seed_state
         graph = _graph(seed)
         for step in sorted(graph.nodes):
             edit = {"op": "fallback", "step": step}
@@ -677,7 +677,7 @@ def test_removing_the_step_takes_its_fallback_with_it():
     removes it as with no fallback."""
     import structure_fuzz as sf
 
-    seed = sf.Applier(sf.seeds()["fuzz_data_pass"]).seed_state
+    seed = sf.cached_applier("fuzz_data_pass").seed_state
     graph = _graph(seed)
     tried = 0
     for step in sorted(graph.nodes):

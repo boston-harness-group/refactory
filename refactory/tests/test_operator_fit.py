@@ -181,7 +181,7 @@ def test_a_model_step_s_row_follows_its_prompt_back_through_the_plain_op_that_bu
 
 
 def test_lineage_follows_plain_ops_back_to_their_sources():
-    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    state = sf.cached_applier("fuzz_dataflow").seed_state
     carries = _rows(_section(state))["summarise"][0]
     # cleaned <- op clean <- raw.txt <- op load (which reads nothing): two ops back.
     clean = ("op clean, which reads raw.txt (op load, which reads nothing), knob(s) depth "
@@ -192,7 +192,7 @@ def test_lineage_follows_plain_ops_back_to_their_sources():
 
 def test_lineage_stops_at_its_depth_and_says_so(monkeypatch):
     monkeypatch.setattr(base, "CARRIES_DEPTH", 1)
-    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    state = sf.cached_applier("fuzz_dataflow").seed_state
     carries = _rows(_section(state))["summarise"][0]
     assert "raw.txt (op load, not followed further)" in carries, carries
     _package, mode = registry.resolve(Path("."), "livemath/solver")
@@ -265,7 +265,7 @@ def test_a_step_alone_reading_a_frozen_knob_is_shown_unsplittable():
 def test_a_step_alone_reading_a_frozen_knob_merges_only_with_a_prompt_naming_it():
     """The lead's rule, held to the attempt: merge, like split, is accepted when the new
     step's prompt names the frozen knob, and refused otherwise."""
-    state = sf.Applier(sf.seeds()["fuzz_dataflow"]).seed_state
+    state = sf.cached_applier("fuzz_dataflow").seed_state
     state["knobs"]["depth"]["spec"]["frozen"] = True
     named = {"op": "merge", "steps": ["clean", "summarise"],
              "text": "Summarise {{source}} to depth {{depth}}"}
@@ -278,7 +278,7 @@ def test_a_step_alone_reading_a_frozen_knob_merges_only_with_a_prompt_naming_it(
 
 
 def test_each_row_on_a_nested_fork_says_what_the_operators_do():
-    state = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
+    state = sf.cached_applier("fuzz_nested_fork").seed_state
     rows = _check_rows_are_true(state)
     forks = [n for n, node in state["graph"]["nodes"].items() if node.get("kind") == "fork"]
     assert len(forks) >= 2 and set(forks) <= set(rows)
@@ -357,7 +357,7 @@ def test_no_section_when_the_run_permits_no_core_operator_or_gives_no_check():
 
 
 def test_the_loop_line_states_the_cap_and_verdict_the_loop_builds():
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     after = nn_edits.apply({"op": "loop", "step": "review", "judge": "agent"}, state)
     knob = next(k for k in after["knobs"] if k.endswith("__max_iterations"))
     spec = after["knobs"][knob]["spec"]
@@ -521,7 +521,7 @@ def test_the_run_s_table_skips_the_code_dry_run_and_marks_new_code(tmp_path, mon
 def test_a_loop_states_its_cap_in_the_edit():
     """`max_iterations` on the loop sets how often the judge may send the step back, so
     a proposal says its cap in the edit and not only in prose; outside 1-5 it is refused."""
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     one = nn_edits.apply({"op": "loop", "step": "review", "judge": "agent",
                           "max_iterations": 1}, state)
     assert one["knobs"]["review_check__max_iterations"]["value"] == 1
@@ -543,7 +543,7 @@ def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
         "precision_prompt@notes_prompts (+knob precision_task), "
         "user_prompt@prepare, compare_notes.txt@compare, "
         "current_item.json@data; \"task\" gives user_prompt")
-    nested = sf.Applier(sf.seeds()["fuzz_nested_fork"]).seed_state
+    nested = sf.cached_applier("fuzz_nested_fork").seed_state
     forks = [n for n, x in nested["graph"]["nodes"].items() if x.get("kind") == "fork"]
     assert all(_rows(_section(nested))[f][0].startswith("a new branch here can see: ")
                for f in forks)
@@ -552,7 +552,7 @@ def test_a_fork_s_row_says_what_a_branch_seeing_the_task_takes_in():
 def test_max_iterations_is_refused_on_the_written_out_loop():
     """The written-out loop's cap is its gate's own field: a top-level one would be
     ignored there (even out of range), so it is refused; the one-line form takes it."""
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     gate = {"id": "review_gate", "kind": "gate", "evaluator": "refactory_dsh.snippet:gate",
             "code": "def main(inp):\n    return {'verdict': 'proceed', 'reason': ''}\n",
             "max_iterations": 2}

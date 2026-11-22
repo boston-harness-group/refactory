@@ -49,7 +49,7 @@ def _sealable() -> None:
 @pytest.mark.parametrize("tools", [["read"], ["bash", "web_fetch"], ["web_search"], True, "bash",
                                    [], ["bash", "bash"]])
 def test_a_tool_outside_the_sealed_set_is_refused_naming_the_set(tools):
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     edit = {"op": "insert", "after": "draft", "kind": "agent", "text": "Check it.", "tools": tools}
     with pytest.raises(nn_edits.EditError) as refused:
         nn_edits.apply(edit, state)
@@ -62,7 +62,7 @@ def test_a_tool_outside_the_sealed_set_is_refused_naming_the_set(tools):
 
 
 def test_a_listed_tool_makes_a_sealed_step_that_reads_its_files_in_its_workspace():
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     after = nn_edits.apply({"op": "insert", "after": "draft", "kind": "agent",
                             "text": "Check it.", "tools": ["bash"]}, state)
     added = [node for nid, node in after["graph"]["nodes"].items()
@@ -77,7 +77,7 @@ def test_a_listed_tool_makes_a_sealed_step_that_reads_its_files_in_its_workspace
 
 
 def test_a_sealed_step_is_a_candidate_with_no_run_switch():
-    applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
+    applier = sf.cached_applier("fuzz_draft_review")
     parent = sf.Candidate.from_state(applier.seed_state)
     edit = {"op": "insert", "after": "draft", "kind": "agent", "text": "Check it.", "tools": ["bash"]}
     if seal.available()[0]:

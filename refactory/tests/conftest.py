@@ -412,6 +412,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
              "(tests/ci_durations.json), so N parallel jobs together run every test once",
     )
     parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="run tests marked @pytest.mark.slow (they run in nightly CI)",
+    )
+    parser.addoption(
+        "--time-budget",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="fail any test whose call phase exceeds SECONDS unless it is marked @pytest.mark.slow "
+             "(pass --time-budget=10 in PR CI; off by default)",
+    )
+    parser.addoption(
         "--toolchain-gate",
         action="store_true",
         default=False,
@@ -460,6 +474,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_model_credential: needs a model credential the authoring sandbox "
         "accepts; the tests/model_credential.py hook skips it with a stated reason "
         "when this machine has none",
+    )
+    config.addinivalue_line(
+        "markers",
+        "slow: test exceeds the CI time budget and runs only in nightly",
     )
 
 
@@ -543,6 +561,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if "structure_fuzz_long" in item.keywords:
                 item.add_marker(skip_long)
+    if not config.getoption("--run-slow", default=False):
+        skip_slow = pytest.mark.skip(
+            reason="pass --run-slow to run slow tests; they run nightly")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
     if config.getoption("--run-integration", default=False):
         return
     skip = pytest.mark.skip(reason="pass --run-integration to run DSH inner-loop tests")
@@ -689,3 +713,29 @@ def configured_model_home(monkeypatch: pytest.MonkeyPatch) -> Path:
     home = Path(os.environ["DSH_HOME"])
     assert os.path.realpath(home) not in _REAL_DSH_HOMES, "configured_model_home needs the sealed DSH home"
     return model_home_with_a_key(home)
+
+
+# ── per-test time budget (opt-in via --time-budget) ─────────────────────────────
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Fail a test whose call phase exceeds --time-budget unless it carries @pytest.mark.slow.
+
+    The budget is off by default: design-run checks, local runs and the nightly job never
+    get it.  Only PR CI passes ``--time-budget=10`` in ``.github/workflows/ci.yml``.
+    """
+    outcome = yield
+    report: pytest.TestReport = outcome.get_result()
+    if report.when != "call" or not report.passed:
+        return
+    budget = item.config.getoption("--time-budget", default=None)
+    if budget is None:
+        return
+    if item.get_closest_marker("slow") is not None:
+        return
+    if report.duration > budget:
+        report.outcome = "failed"
+        report.longrepr = (
+            f"Test took {report.duration:.1f}s, exceeding the {budget}s budget. "
+            "Mark it @pytest.mark.slow or speed it up."
+        )

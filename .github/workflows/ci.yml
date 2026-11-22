@@ -200,6 +200,7 @@ jobs:
           REFACTORY_REQUIRE_CODE_SANDBOX: "1"
         run: >-
           uv run python -m pytest refactory/tests -q -rfEs -n 4 --timeout=900
+          --time-budget=10
           --shard ${{ matrix.shard }}/4 --junitxml=python-suite-shard${{ matrix.shard }}.xml
 
       # Each test's time, for `scripts/ci-durations.py` and to compare a test on Linux

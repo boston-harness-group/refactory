@@ -116,6 +116,11 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
     focused_qa_prompt = (
         qa_prompt + "\nEach entry in `findings` is a BLOCKING finding. " + SEVERITY_RULE + " " + MARKER_RULE
         + " A check of something non-core that fails ends its name with `[non-core]`.\n"
+        + "A test that runs a full spine or walker per parametrized case instead of testing logic in-process (one runtime run per feature for parity) is a finding rated per " + SEVERITY_RULE + "\n"
+        + "A test that uses a real time.sleep instead of an injected clock is a finding rated per " + SEVERITY_RULE + "\n"
+        + "A change that adds a new test file instead of extending the existing one, or that does not state the net test count, is a finding rated per " + SEVERITY_RULE + "\n"
+        + "A test that depends on machine state (absolute paths, host-specific resources) instead of using temp paths and skipping with a reason is a finding rated per " + SEVERITY_RULE + "\n"
+        + "A test over the CI time budget (10 s) without an explicit `slow` mark and reason is a finding rated per " + SEVERITY_RULE + "\n"
         + (ARTIFACT_QA if artifact else "")
         + ("{{review_instructions}}\nChanged functions:\n{{changed_functions}}\n\n"
            if design else "")
@@ -380,7 +385,7 @@ class DesignFastMode(DesignMode):
             notes="read the artifact brief, and say where the run works",
         ))
         _strategy_node(graph, artifact=True)
-        from refactory_dsh.design import BUILDER_TIMEOUT_S, BUILDER_WORKSPACE, WORKSPACE_BRIEFING
+        from refactory_dsh.design import BUILDER_TIMEOUT_S, BUILDER_WORKSPACE, EMIT_CHECKLIST, WORKSPACE_BRIEFING
         from refactory_dsh.create_ops import VERIFIER_RESPONSE_FILE
         graph.add(Node(
             "emit", "agent", role="builder", resource_role="work",
@@ -395,6 +400,7 @@ class DesignFastMode(DesignMode):
                 "or prior acceptance histories. Do not delegate or launch research, reviewer agents "
                 "or an optimizer.\n"
                 + WORKSPACE_BRIEFING
+                + EMIT_CHECKLIST
                 + "The runtime runs the requested check and one focused QA review next. Preserve all "
                 "requested behavior. Do not invoke downstream graph operations yourself. When the "
                 "repair feedback names verifier findings, answer each in your final message: the "

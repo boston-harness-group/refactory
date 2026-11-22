@@ -82,6 +82,11 @@ EMIT_CHECKLIST = (
     "- Avoid a test that calls the helper under test instead of driving the real path the "
     "brief names, test inputs nothing uses (such as a verdict list nothing consumes), and "
     "assertions on results the test built by hand.\n"
+    "- Test logic in-process, with one full spine or walker run per feature for runtime parity, not one per case.\n"
+    "- No real sleeps in tests: use an injected clock.\n"
+    "- Extend the module's existing test file, retire tests the change supersedes, and state the net test count in the PR.\n"
+    "- No dependence on machine state: use temp paths, and skip with a reason when a resource is unavailable.\n"
+    "- A test over the CI time budget (10 s) needs an explicit `slow` mark and a reason.\n"
 )
 
 #: Where design mode's builder works (`workspace.py`): a prepared clone of the last
@@ -1230,6 +1235,11 @@ class DesignMode(Mode):
                 "the result: the files at the artifact path, and the diff named above.\n\n"
                 + _ACCEPTANCE_BASELINE
                 + UPDATED_TESTS_NOTE
+                + "A test that runs a full spine or walker per parametrized case instead of testing logic in-process (one runtime run per feature for parity) is a finding rated per " + SEVERITY_RULE + "\n"
+                + "A test that uses a real time.sleep instead of an injected clock is a finding rated per " + SEVERITY_RULE + "\n"
+                + "A change that adds a new test file instead of extending the existing one, or that does not state the net test count, is a finding rated per " + SEVERITY_RULE + "\n"
+                + "A test that depends on machine state (absolute paths, host-specific resources) instead of using temp paths and skipping with a reason is a finding rated per " + SEVERITY_RULE + "\n"
+                + "A test over the CI time budget (10 s) without an explicit `slow` mark and reason is a finding rated per " + SEVERITY_RULE + "\n"
                 + "You are the code reviewer. Read the delivered files against the design "
                 "and the brief: is every file the design names present, does it do what "
                 "the design says, and would it run? Trace input values through parsing "

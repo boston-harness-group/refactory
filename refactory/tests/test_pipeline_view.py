@@ -37,7 +37,7 @@ def _mode(name: str):
 
 
 def _seed(name: str) -> dict:
-    return sf.Applier(sf.seeds()[name]).seed_state
+    return sf.cached_applier(name).seed_state
 
 
 def _lines(state, protected=()):

@@ -19,7 +19,7 @@ INSERT = {"op": "insert", "after": "hypotheses", "kind": "agent",
 
 
 def _s4() -> dict[str, Any]:
-    return sf.Applier(sf.seeds()["livemath_skill_graph"]).seed_state
+    return sf.cached_applier("livemath_skill_graph").seed_state
 
 
 def _tune(state: dict[str, Any], edit: dict[str, Any], line: str) -> dict[str, Any]:
@@ -87,7 +87,7 @@ def test_an_edit_that_adds_no_step_folds_no_downstream_tune():
     """fuzz_fork_join: a reorder (`right_b` and the join; no step added) plus "Be
     precise." on `style` and `decide__system_prompt` -- knobs of `decide`, which reads
     right_b's output -- is three changes, not one: only a new step's readers fold."""
-    state = sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state
+    state = sf.cached_applier("fuzz_fork_join").seed_state
     reorder = {"op": "reorder", "first": "right_b", "second": "merge"}
     out = nn_edits.apply(reorder, state)
     assert set(out["graph"]["nodes"]) == set(state["graph"]["nodes"])

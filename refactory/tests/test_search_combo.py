@@ -297,17 +297,134 @@ GATED_STRATEGIES = [n for n in strategies.names()
 UNGATED_STRATEGIES = ["best_of_n", "autoscientists", "reflective"]
 
 
+# ── module-scoped fixtures (shared across read-only tests) ─────────────────
+
+
+@pytest.fixture(scope="module")
+def _model_proposer_results(tmp_path_factory, sealed_environment):
+    """Every strategy × model proposer, val_gate per type, epochs=4.
+
+    Module-scoped: ``test_every_strategy_runs_with_the_model_proposer``,
+    ``test_the_strategy_decision_is_in_the_request_text`` and
+    ``test_no_strategy_leaves_its_last_round_ungated`` read without mutation.
+    """
+    root = tmp_path_factory.mktemp("model_proposer")
+    results: dict[str, tuple[Loop, ComboModel]] = {}
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _: None)
+            patch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+            for name in strategies.names():
+                model = ComboModel()
+                gated = name in GATED_STRATEGIES
+                sub = root / name
+                sub.mkdir(parents=True, exist_ok=True)
+                loop = _run(name, sub, model, val_gate=gated, epochs=4)
+                results[name] = (loop, model)
+        finally:
+            patch.undo()
+    return results
+
+
+@pytest.fixture(scope="module")
+def _random_proposer_results(tmp_path_factory, sealed_environment):
+    """Every strategy × random proposer, val_gate per type, epochs=3."""
+    root = tmp_path_factory.mktemp("random_proposer")
+    results: dict[str, tuple[Loop, ComboModel]] = {}
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _: None)
+            patch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+            for name in strategies.names():
+                model = ComboModel()
+                gated = name in GATED_STRATEGIES
+                sub = root / name
+                sub.mkdir(parents=True, exist_ok=True)
+                loop = _run(name, sub, model, optimizer="random", val_gate=gated, epochs=3)
+                results[name] = (loop, model)
+        finally:
+            patch.undo()
+    return results
+
+
+@pytest.fixture(scope="module")
+def _portfolio_results(tmp_path_factory, sealed_environment):
+    """Every strategy × portfolio (prompt+pipeline), val_gate per type, epochs=3, batch=1."""
+    root = tmp_path_factory.mktemp("portfolio")
+    results: dict[str, tuple[Loop, ComboModel]] = {}
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _: None)
+            patch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+            for name in strategies.names():
+                model = ComboModel(portfolio)
+                gated = name in GATED_STRATEGIES
+                sub = root / name
+                sub.mkdir(parents=True, exist_ok=True)
+                loop = _run(name, sub, model, val_gate=gated, epochs=3, batch_size=1,
+                            portfolio="prompt+pipeline")
+                results[name] = (loop, model)
+        finally:
+            patch.undo()
+    return results
+
+
+@pytest.fixture(scope="module")
+def _ungated_all_results(tmp_path_factory, sealed_environment):
+    """Every strategy run once without the validation gate, epochs=4."""
+    root = tmp_path_factory.mktemp("ungated_all")
+    results: dict[str, tuple[Loop, ComboModel]] = {}
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _: None)
+            patch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+            for name in strategies.names():
+                model = ComboModel()
+                sub = root / name
+                sub.mkdir(parents=True, exist_ok=True)
+                loop = _run(name, sub, model, epochs=4)
+                results[name] = (loop, model)
+        finally:
+            patch.undo()
+    return results
+
+
+@pytest.fixture(scope="module")
+def _picker_results(tmp_path_factory, sealed_environment):
+    """Every parent picker with the default strategy, epochs=4."""
+    pickers = ["archive", "evolutionary", "islands", "hill_climb", "map_elites"]
+    root = tmp_path_factory.mktemp("pickers")
+    results: dict[str, tuple[Loop, ComboModel]] = {}
+    with sealed_environment(root):
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr("refactory_dsh.optim.random_optimizer._sleep", lambda _: None)
+            patch.setenv("_REFACTORY_GRAPHIFY_BIN_OVERRIDE", "")
+            for picker in pickers:
+                model = ComboModel()
+                sub = root / picker
+                sub.mkdir(parents=True, exist_ok=True)
+                loop = _run("default", sub, model, parent_picker=picker, epochs=4)
+                results[picker] = (loop, model)
+        finally:
+            patch.undo()
+    return results
+
+
 # ── 1. every strategy x {random, autoresearch} ─────────────────────────────
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_every_strategy_runs_with_the_model_proposer_and_its_edits_score(tmp_path, name):
+def test_every_strategy_runs_with_the_model_proposer_and_its_edits_score(_model_proposer_results, name):
     """The model's edits are applied to the candidate the request showed, evaluated,
     and (under the gate) judged by it: the best candidate carries more than one of the
     model's fixes, so a later request edited an earlier model edit."""
-    model = ComboModel()
+    loop, model = _model_proposer_results[name]
     gated = name in GATED_STRATEGIES
-    loop = _run(name, tmp_path, model, val_gate=gated, epochs=4)
     assert loop.optimizer.proposal_failures == [], loop.optimizer.proposal_failures
     assert model.requests, f"{name} never asked the model"
     children = [c for c in _children(loop) if c.evaluated]
@@ -327,12 +444,11 @@ def test_every_strategy_runs_with_the_model_proposer_and_its_edits_score(tmp_pat
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_every_strategy_runs_with_the_random_proposer(tmp_path, name):
+def test_every_strategy_runs_with_the_random_proposer(_random_proposer_results, name):
     """The random sampler under every strategy: children are made, evaluated and
     (where the gate runs) judged; no strategy asks a model it does not need."""
-    model = ComboModel()
+    loop, model = _random_proposer_results[name]
     gated = name in GATED_STRATEGIES
-    loop = _run(name, tmp_path, model, optimizer="random", val_gate=gated, epochs=3)
     assert loop.optimizer.proposal_failures == []
     assert model.requests == [], "the random proposer sent a proposal request"
     children = [c for c in loop.population if c.parent and c.evaluated]
@@ -344,13 +460,11 @@ def test_every_strategy_runs_with_the_random_proposer(tmp_path, name):
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_every_strategy_runs_with_the_portfolio(tmp_path, name):
+def test_every_strategy_runs_with_the_portfolio(_portfolio_results, name):
     """``portfolio: prompt+pipeline`` under every strategy: every round that asks for
     levels gets one candidate per level asked, and both kinds are evaluated."""
-    model = ComboModel(portfolio)
+    loop, model = _portfolio_results[name]
     gated = name in GATED_STRATEGIES
-    loop = _run(name, tmp_path, model, val_gate=gated, epochs=3, batch_size=1,
-                portfolio="prompt+pipeline")
     assert loop.optimizer.proposal_failures == []
     asked = [r for r in model.requests if r.levels]
     if name in ("best_of_n", "autoscientists"):
@@ -491,11 +605,10 @@ def test_the_request_shows_one_example_per_composition():
 
 @pytest.mark.parametrize("picker", ["archive", "evolutionary", "islands", "hill_climb",
                                     "map_elites"])
-def test_every_picker_hands_its_choice_to_the_model_and_the_edit_lands_there(tmp_path, picker):
+def test_every_picker_hands_its_choice_to_the_model_and_the_edit_lands_there(_picker_results, picker):
     """The request describes the picked candidate (its prompt in the knob table), says
     who picked it, and every child of that request has it as parent."""
-    model = ComboModel()
-    loop = _run("default", tmp_path, model, parent_picker=picker, epochs=4)
+    loop, model = _picker_results[picker]
     assert loop.optimizer.name == f"autoresearch+{picker}"
     assert loop.optimizer.proposal_failures == []
     by_id = {c.id: c for c in loop.population}
@@ -531,12 +644,11 @@ def test_an_ungated_run_scores_its_last_proposals(tmp_path, picker):
 
 
 @pytest.mark.parametrize("name", strategies.names())
-def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, name):
+def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(_ungated_all_results, name):
     """Every strategy, ungated: a search that ends on its epoch limit scores what its
     last epoch proposed (strategies that drive their own epochs -- reflective,
     adaptive_meta, the curricula -- used to leave it), and each evaluation is counted."""
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, epochs=4)
+    loop, _model = _ungated_all_results[name]
     assert loop.optimizer.proposal_failures == []
     if loop.epochs:
         assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
@@ -561,11 +673,10 @@ def test_no_strategy_leaves_its_last_round_unscored_without_the_gate(tmp_path, n
 
 
 @pytest.mark.parametrize("name", GATED_STRATEGIES)
-def test_no_strategy_leaves_its_last_round_ungated(tmp_path, name):
+def test_no_strategy_leaves_its_last_round_ungated(_model_proposer_results, name):
     """Every strategy the gate runs with: the last epoch's proposals are scored and
     judged by the gate before the run reports, as the default loop's are."""
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, val_gate=True, epochs=4)
+    loop, _model = _model_proposer_results[name]
     assert loop.epochs[-1].accepted, f"{name}: the last epoch proposed nothing to score"
     assert loop._unevaluated() == [], f"{name} left its last round unscored"
     assert {c.id for c in loop.population} == _gated(loop), f"{name} left a candidate ungated"
@@ -792,9 +903,8 @@ def test_map_elites_keeps_each_structural_child_in_its_own_group_and_edits_it_ag
     ("best_of_n", "independent variants of the seed"),
     ("autoscientists", "independent lines of attack"),
 ])
-def test_the_strategy_decision_is_in_the_request_text(tmp_path, name, expected):
-    model = ComboModel()
-    loop = _run(name, tmp_path, model, val_gate=name in GATED_STRATEGIES, epochs=4)
+def test_the_strategy_decision_is_in_the_request_text(_model_proposer_results, name, expected):
+    loop, model = _model_proposer_results[name]
     decided = [r for r in model.requests if r.decision]
     assert decided, f"{name}'s decision never reached a request"
     if expected is None:  # adaptive_meta decides "no meta" while it progresses: still data

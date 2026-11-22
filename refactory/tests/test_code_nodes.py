@@ -48,7 +48,7 @@ def _sandbox_assumed_where_no_code_runs(request, monkeypatch):
 
 
 def _applier() -> sf.Applier:
-    return sf.Applier(sf.seeds()["livemath_skill_graph"])
+    return sf.cached_applier("livemath_skill_graph")
 
 
 def _propose(edits, applier=None, *, allow_code_nodes=True, secrets=()):
@@ -926,4 +926,3 @@ def test_the_code_examples_pass_the_code_check_and_run():
             assert out["verdict"] in ("proceed", "reloop") and out["reason"]
         else:
             assert list(out["facts"]) == [edit["id"]]
-

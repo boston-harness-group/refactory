@@ -155,8 +155,11 @@ def _require_sandbox(python: str) -> None:
 def sb_python():
     if shutil.which("uv") is None and not os.environ.get(interpreter.ENV):
         pytest.skip("building the pinned interpreter needs uv")
-    python = os.environ.get(interpreter.ENV) or str(interpreter.provision())
-    interpreter.check(python)
+    try:
+        python = os.environ.get(interpreter.ENV) or str(interpreter.provision())
+        interpreter.check(python)
+    except (interpreter.InterpreterError, OSError) as exc:
+        pytest.skip(f"pinned interpreter unavailable: {exc}")
     _require_sandbox(python)
     return python
 

@@ -87,7 +87,7 @@ def test_a_strategy_with_no_model_draws_every_core_operator():
     plain: set[str] = set()
     # fuzz_data_pass for fallback, which answers only for a step in a per-item pass.
     for name in ("fuzz_draft_review", "fuzz_fork_join", "fuzz_dataflow", "fuzz_data_pass"):
-        state = sf.Applier(sf.seeds()[name]).seed_state
+        state = sf.cached_applier(name).seed_state
         rng, rng_plain = random.Random(f"ops:{name}"), random.Random(f"plain:{name}")
         for _ in range(300):
             edit = nn_edits.random_edit(state, preset="broad", rng=rng, operators=True)
@@ -103,7 +103,7 @@ def test_a_strategy_with_no_model_draws_every_core_operator():
 def test_a_sampled_operator_leaves_its_texts_to_the_defaults():
     """No placeholder from an operator's example (``<what the new step does>``) reaches a
     sampled edit: each text is left out, so the operator's default text is used."""
-    state = sf.Applier(sf.seeds()["fuzz_fork_join"]).seed_state
+    state = sf.cached_applier("fuzz_fork_join").seed_state
     rng = random.Random("texts")
     for op in nn_edits.CORE_OPS:
         edit = core_ops.sample(op, state, rng)
@@ -155,7 +155,7 @@ def test_best_of_n_knob_variants_are_what_they_were_where_no_operator_applies(tm
 def test_rebase_replays_one_candidates_edits_onto_another_or_refuses_whole():
     """The structural merge's seam: B's own edits onto A's state; an edit that no longer
     applies there refuses the whole rebase, naming it, and A is left as it was."""
-    state = sf.Applier(sf.seeds()["fuzz_draft_review"]).seed_state
+    state = sf.cached_applier("fuzz_draft_review").seed_state
     onto = nn_edits.apply({"op": "insert", "after": "draft", "kind": "agent"}, state)
     edits = [{"op": "loop", "step": "review", "judge": "agent"},
              {"op": "rewire", "step": "finalize", "sees": ["task", "review"]}]

@@ -115,7 +115,7 @@ def _map_cases() -> list[tuple[str, dict]]:
     """A map over each step's own output, after it, on every seed."""
     out = []
     for name in sorted(sf.seeds()):
-        graph = sf._graph_of(sf.Applier(sf.seeds()[name]).seed_state)
+        graph = sf._graph_of(sf.cached_applier(name).seed_state)
         for step in sorted(n for n, node in graph.nodes.items() if node.kind in ("agent", "op")):
             out.append((name, {"op": "map", "after": step, "over": step, "max": 2}))
     return out
@@ -126,7 +126,7 @@ def _map_cases() -> list[tuple[str, dict]]:
 def test_every_map_a_seed_takes_is_sound(name, edit):
     """Each map the edit layer takes keeps every invariant on the walker, and removing it
     by its elements step gives back the seed's graph and knobs."""
-    applier = sf.Applier(sf.seeds()[name])
+    applier = sf.cached_applier(name)
     seed = Candidate.from_state(applier.seed_state)
     outcome = applier.attempt(seed, edit, set())
     if isinstance(outcome, list):
@@ -148,7 +148,7 @@ def _fallback_cases() -> list[tuple[str, dict]]:
     """A fallback, agent and code, on every step of each seed with a per-item pass."""
     out = []
     for name in ("fuzz_data_pass", "livemath_skill_graph"):
-        graph = sf._graph_of(sf.Applier(sf.seeds()[name]).seed_state)
+        graph = sf._graph_of(sf.cached_applier(name).seed_state)
         for step in sorted(n for n, node in graph.nodes.items()
                            if node.kind in ("agent", "op") and graph.in_data_pass(n)):
             for kind in ("agent", "code") if sf.CODE_NODES else ("agent",):
@@ -161,7 +161,7 @@ def _fallback_cases() -> list[tuple[str, dict]]:
 def test_every_fallback_a_seed_takes_is_sound(name, edit):
     """Each fallback the edit layer takes on a seed with a per-item pass keeps every
     invariant on the walker (the protected grader steps are refused, never broken)."""
-    applier = sf.Applier(sf.seeds()[name])
+    applier = sf.cached_applier(name)
     outcome = applier.attempt(Candidate.from_state(applier.seed_state), edit, set())
     if isinstance(outcome, list):
         assert outcome[0].startswith(("E-protected", "E-precondition")), outcome
@@ -259,7 +259,7 @@ def test_an_op_sees_its_declared_inputs_in_the_order_they_were_declared(tmp_path
 def test_a_compound_refusal_of_a_knob_a_protected_node_reads_names_that_edit():
     """The attempt path refuses an edit to a knob a protected or grading node reads
     (E-frozen) at that edit; the harness's model of it named a later edit instead."""
-    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    applier = sf.cached_applier("fuzz_data_pass")
     parent = sf.Candidate.from_state(applier.seed_state)
     edits = [{"op": "remove_knob", "name": "data_parallelism"}, {"op": "remove", "step": "check"}]
     outcome = applier.attempt(parent, {"edits": edits}, {parent.id})
@@ -277,7 +277,7 @@ class _Run:
 def test_a_marked_code_step_excuses_only_failures_at_that_step():
     """A text patch marks a code step allowed to fail at run time; the mark stays in the
     knob, so it must not excuse a failure anywhere else in the graph."""
-    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    applier = sf.cached_applier("fuzz_data_pass")
     state = json.loads(json.dumps(applier.seed_state))
     graph = sf._graph_of(state)
     ops = [n.id for n in graph.nodes.values() if n.kind == "op"]
@@ -431,7 +431,7 @@ def test_the_leak_invariant_reads_what_grading_produced():
     whatever the Task: the synthetic grader's verdict is one of them."""
     import tempfile
 
-    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    applier = sf.cached_applier("fuzz_data_pass")
     tmp = Path(tempfile.mkdtemp())
     model = sf.ScriptedModel(sf._answers(sf._graph_of(applier.seed_state)))
     sf.run_walker(applier.seed, applier.seed_state, tmp, model)
@@ -533,7 +533,7 @@ def test_node_item_hides_grader_fields():
 
 
 def test_a_new_agent_runs_without_tools_unless_they_run_sealed():
-    applier = sf.Applier(sf.seeds()["fuzz_dataflow"])
+    applier = sf.cached_applier("fuzz_dataflow")
     parent = sf.Candidate.from_state(applier.seed_state)
     node = {"id": "probe", "kind": "agent", "prompt_template": "Look.", "writes": ["probe.txt"]}
     # summarise reads what the probe writes: a new step nothing reads is refused (E-unread).
@@ -611,7 +611,7 @@ def test_v17_refuses_an_agent_that_reads_the_graded_records(how):
     """A data pass's graded records hold the expected answers: an agent after the pass
     that filled them into a prompt was sent the answers (found by the compound long
     tier). However it asks for them, the agent is refused (V17, provenance-based)."""
-    applier = sf.Applier(sf.seeds()["fuzz_data_pass"])
+    applier = sf.cached_applier("fuzz_data_pass")
     seed = sf.Candidate.from_state(applier.seed_state)
     graded = sorted(n for node in sf._graph_of(seed.state).nodes.values() if node.kind == "data"
                     for n in node.produces)[0]
@@ -697,7 +697,7 @@ def test_livemath_ops_require_their_reads_and_the_optimizer_sees_it():
 
 
 def _split(seed_name: str, target: str, first: dict, second: dict) -> tuple[sf.Applier, Any]:
-    applier = sf.Applier(sf.seeds()[seed_name])
+    applier = sf.cached_applier(seed_name)
     parent = sf.Candidate.from_state(applier.seed_state)
     return applier, applier.attempt(parent, {"op": "split", "target": target,
                                              "into": [first, second]}, {parent.id})
@@ -743,7 +743,7 @@ def test_split_replaces_its_step_on_the_livemath_graph():
     ("fuzz_gate_loop", "work", "work.txt", {"in": ["prepare", "review"], "out": ["review"]}),
 ])
 def test_split_rewires_any_graph_shape(seed_name, target, writes, expected):
-    applier = sf.Applier(sf.seeds()[seed_name])
+    applier = sf.cached_applier(seed_name)
     seed_graph = sf._graph_of(applier.seed_state)
     old = seed_graph.nodes[target]
     produces = list(old.produces)
@@ -820,7 +820,7 @@ def test_split_refuses_a_step_whose_own_knob_is_frozen():
 def test_v19_refuses_a_step_whose_output_is_overwritten_before_anyone_reads_it():
     """The audit's case: a new agent writing answer.txt in front of decide, which writes
     it again without reading it, on a straight path. V19 names the lost step."""
-    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    applier = sf.cached_applier("livemath_skill_graph")
     parent = sf.Candidate.from_state(applier.seed_state)
     early = _agent("early", "{{decide_prompt}}", "answer.txt")
     out = applier.attempt(parent, {"op": "insert_before", "target": "decide", "node": early},
@@ -842,7 +842,7 @@ def test_v19_refuses_a_step_whose_output_is_overwritten_before_anyone_reads_it()
             "early", "{{decide_prompt}}", "answer.txt", produces=["early_answer"])}]),
 ])
 def test_v19_keeps_a_write_something_can_still_see(why, edit):
-    applier = sf.Applier(sf.seeds()["livemath_skill_graph"])
+    applier = sf.cached_applier("livemath_skill_graph")
     parent = sf.Candidate.from_state(applier.seed_state)
     out = applier.attempt(parent, {"edits": edit} if len(edit) > 1 else edit[0], {parent.id})
     assert not (isinstance(out, list) and any(r.startswith("V19") for r in out)), (why, out)
