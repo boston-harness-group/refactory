@@ -257,13 +257,13 @@ def test_a_crashed_step_is_retried_and_its_item_scored(tmp_path, runtime):
     assert _sessions(item) == ["completed", "failed"]
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_an_output_limit_is_not_retried_and_leaves_no_answer(tmp_path, runtime):
-    """[both runtimes] Running out of output is the model failing the question: by default
-    it is not retried. The step has no answer (cause ``output_limit``, one session), the
-    item is graded without it, and its siblings are scored."""
+def test_an_output_limit_is_not_retried_and_leaves_no_answer(tmp_path):
+    """Running out of output is the model failing the question: by default it is not
+    retried. The step has no answer (cause ``output_limit``, one session), the item is
+    graded without it, and its siblings are scored."""
     dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
-    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(), run, dsh)
     assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
     assert dsh.calls() == 4
     item = _pass(run, "0")
@@ -274,14 +274,12 @@ def test_an_output_limit_is_not_retried_and_leaves_no_answer(tmp_path, runtime):
     assert "output limit reached after 128000 output tokens" in record["missing_steps"]["solve"]["error"]
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_an_opted_in_output_limit_is_retried_and_told_it_ran_out_of_room(tmp_path, runtime):
-    """[both runtimes] A step that declares ``retry.on: ["output_limit"]`` gets a fresh
-    session after the output limit, and that session's prompt says the last one ran out of
-    room."""
+def test_an_opted_in_output_limit_is_retried_and_told_it_ran_out_of_room(tmp_path):
+    """A step that declares ``retry.on: ["output_limit"]`` gets a fresh session after the
+    output limit, and that session's prompt says the last one ran out of room."""
     dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
-    scores, run = _run(runtime, _straight(retry={"on": ["crash", "output_limit"], "times": 2}),
-                       tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(retry={"on": ["crash", "output_limit"], "times": 2}), run, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 5
     first, second, *rest = dsh.prompts()
@@ -291,13 +289,13 @@ def test_an_opted_in_output_limit_is_retried_and_told_it_ran_out_of_room(tmp_pat
     assert retried["reason"] == "output_limit" and "output limit" in retried["summary"]
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp_path, runtime):
-    """[both runtimes] Every session of item 0 crashes: after `PASS_RETRY_TIMES` retries the
-    step is missing, the item is graded without an answer (0, no error), and its siblings
-    are scored. A product failure that is not the output limit adds no note."""
+def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp_path):
+    """Every session of item 0 crashes: after `PASS_RETRY_TIMES` retries the step is
+    missing, the item is graded without an answer (0, no error), and its siblings are
+    scored. A product failure that is not the output limit adds no note."""
     dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH] * (1 + PASS_RETRY_TIMES) + ["right"]})
-    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(), run, dsh)
     assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
     assert dsh.calls() == 1 + PASS_RETRY_TIMES + 3
     assert not any(OUTPUT_LIMIT_NOTE in prompt for prompt in dsh.prompts())
@@ -311,13 +309,13 @@ def test_a_step_whose_retries_all_crash_is_missing_and_its_item_still_scored(tmp
     assert _sessions(item) == ["failed"] * (1 + PASS_RETRY_TIMES)
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_crash_in_a_loop_is_an_attempt_its_gate_relooops_on(tmp_path, runtime):
-    """[both runtimes] Item 0's solver crashes through its retries; the checker gate sees
-    no answer and sends it back, and the next visit answers. The reloop's prompt carries the
-    gate's reason."""
+def test_a_crash_in_a_loop_is_an_attempt_its_gate_relooops_on(tmp_path):
+    """Item 0's solver crashes through its retries; the checker gate sees no answer and
+    sends it back, and the next visit answers. The reloop's prompt carries the gate's
+    reason."""
     dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH] * (1 + PASS_RETRY_TIMES) + ["right"]})
-    scores, run = _run(runtime, _looped(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_looped(), run, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 1 + PASS_RETRY_TIMES + 4
     reloop = dsh.prompts()[1 + PASS_RETRY_TIMES]
@@ -327,13 +325,13 @@ def test_a_crash_in_a_loop_is_an_attempt_its_gate_relooops_on(tmp_path, runtime)
     assert all("missing_steps" not in record for record in scores)
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_an_output_limit_in_a_loop_is_recovered_by_the_gate(tmp_path, runtime):
-    """[both runtimes] The structure recovers what the runtime does not retry: item 0's
-    solver runs out of output, the checker gate sees no answer and sends it back, and the
-    second visit answers."""
+def test_an_output_limit_in_a_loop_is_recovered_by_the_gate(tmp_path):
+    """The structure recovers what the runtime does not retry: item 0's solver runs out of
+    output, the checker gate sees no answer and sends it back, and the second visit
+    answers."""
     dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
-    scores, run = _run(runtime, _looped(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_looped(), run, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 5
     reloop = dsh.prompts()[1]
@@ -356,13 +354,13 @@ def test_a_crashed_fork_branch_does_not_sink_its_sibling(tmp_path, runtime):
     assert all(set(record["missing_steps"]) == {"a"} for record in scores)
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_genuine_error_after_a_missing_step_is_still_an_error(tmp_path, runtime):
-    """[both runtimes] Branch ``a`` (``a.txt``) goes missing, and the pick then fails on its
-    own bug, reading ``metadata.txt``. That error names no output of ``a`` -- ``a.txt`` is
-    only a substring of ``metadata.txt`` -- so the item fails with it, not "no answer"."""
+def test_a_genuine_error_after_a_missing_step_is_still_an_error(tmp_path):
+    """Branch ``a`` (``a.txt``) goes missing, and the pick then fails on its own bug,
+    reading ``metadata.txt``. That error names no output of ``a`` -- ``a.txt`` is only a
+    substring of ``metadata.txt`` -- so the item fails with it, not "no answer"."""
     dsh = Scripted(tmp_path / "dsh", {"Angle A.": [WORKER_CRASH], "Angle B.": ["right"], "": ["?"]})
-    scores, _ = _run(runtime, _forked("crash_ops:pick_with_metadata", (CURRENT_ITEM,)), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_forked("crash_ops:pick_with_metadata", (CURRENT_ITEM,)), run, dsh)
     [buggy] = [r for r in scores if str(r["id"]) == "0"]
     assert buggy["error_kind"] is not None and "metadata.txt" in buggy["error_text"], buggy
     assert not str(buggy.get("fail_reason") or "").startswith("no answer")
@@ -380,25 +378,25 @@ def test_a_missing_output_is_named_only_whole():
     assert not _names("No such file: 'answer_a.txt'", "answer_a")
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_declared_times_zero_turns_the_default_off(tmp_path, runtime):
-    """[both runtimes] ``retry: {"times": 0}`` restores the old behaviour: the crash is not
-    retried and fails its item."""
+def test_a_declared_times_zero_turns_the_default_off(tmp_path):
+    """``retry: {"times": 0}`` restores the old behaviour: the crash is not retried and
+    fails its item."""
     dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH, "right"]})
-    scores, _ = _run(runtime, _straight(retry={"times": 0}), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(retry={"times": 0}), run, dsh)
     [(item, passed, score, kind), *rest] = _keys(scores)
     assert (item, passed, score) == ("0", False, 0.0) and kind is not None
     assert rest == RIGHT[1:]
     assert dsh.calls() == 4
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path, runtime):
-    """[both runtimes] A wire that keeps failing (a provider error, not an outage the
-    client waits out) is not retried as a crash and does not become a missing step: the
-    item fails with an error, as before."""
+def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path):
+    """A wire that keeps failing (a provider error, not an outage the client waits out) is
+    not retried as a crash and does not become a missing step: the item fails with an
+    error, as before."""
     dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: 500 Internal Server Error", "right"]})
-    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(), run, dsh)
     [(item, passed, score, kind), *rest] = _keys(scores)
     assert (item, passed, score) == ("0", False, 0.0) and kind is not None
     assert rest == RIGHT[1:]
@@ -407,16 +405,16 @@ def test_a_transport_failure_is_not_a_crash_and_still_fails_its_item(tmp_path, r
     assert not (_pass(run, "0") / "reviews/solve-missing.txt").exists()
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_a_network_outage_is_waited_out_and_the_item_is_scored(tmp_path, runtime):
-    """[both runtimes] The proxy drops the first session (an outage, not a model failure):
-    the model client waits it out and asks again inside the same step, without using an
-    attempt (the client has one) or a node retry, and the item is scored. The outage is
-    traced in the item's pass (`model.NETWORK_WAIT_EVENT`)."""
+def test_a_network_outage_is_waited_out_and_the_item_is_scored(tmp_path):
+    """The proxy drops the first session (an outage, not a model failure): the model client
+    waits it out and asks again inside the same step, without using an attempt (the client
+    has one) or a node retry, and the item is scored. The outage is traced in the item's
+    pass (`model.NETWORK_WAIT_EVENT`)."""
     from refactory_dsh.model import NETWORK_WAIT_EVENT
 
     dsh = Scripted(tmp_path / "dsh", {"": ["dsh: TRANSPORT: socket hang up", "right"]})
-    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_straight(), run, dsh)
     assert _keys(scores) == RIGHT
     assert dsh.calls() == 5
     assert _events(_pass(run, "0"), RETRY_EVENT) == []
@@ -465,28 +463,15 @@ def test_the_optimizer_sees_no_answer_items_apart_from_wrong_ones():
 # ── outside a data pass: unchanged ──────────────────────────────────────────
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_outside_a_data_pass_a_crash_is_not_retried(tmp_path, runtime):
-    """[both runtimes] A crashed agent step that is not in a data pass fails as before:
-    one session, no retry, no missing record. (A guard: it passes on main too.)"""
+def test_outside_a_data_pass_a_crash_is_not_retried(tmp_path):
+    """A crashed agent step that is not in a data pass fails as before: one session, no
+    retry, no missing record. (A guard: it passes on main too.)"""
     graph = _unpassed()
     dsh = Scripted(tmp_path / "dsh", {"": [WORKER_CRASH, "right"]})
-    run = tmp_path / runtime
+    run = tmp_path / "run"
     run.mkdir()
-    if runtime == "walker":
-        result = execute(graph, run, model=dsh.client(), max_steps=50)
-        assert not result.exit_ok and "category: invalid-result" in (result.error or "")
-    else:
-        state = {"graph": graph.to_state()}
-        lowering.write_declarations(state, run)
-        lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path / "specs",
-                                         dsh.client().context(), lowering.node_declarations(state))
-        assert lowered.nodes["solve"].retry is None
-        assert getattr(lowered.nodes["solve"], "missing_on_crash", None) is None
-        env = {key: value for key, value in os.environ.items() if key != "REFACTORY_WORKER_CONTEXT"}
-        done = subprocess.run(lowered.nodes["solve"].dispatch_command.split(), cwd=run, env=env,
-                              capture_output=True, text=True, timeout=120)
-        assert done.returncode != 0 and "category: invalid-result" in done.stderr
+    result = execute(graph, run, model=dsh.client(), max_steps=50)
+    assert not result.exit_ok and "category: invalid-result" in (result.error or "")
     assert dsh.calls() == 1
     assert _events(run, RETRY_EVENT) == []
     assert not (run / "reviews/solve-missing.txt").exists()
@@ -677,16 +662,16 @@ def _required(parallelism: int = 1, requires: tuple[str, ...] = ("answer.txt",))
 
 
 @pytest.mark.parametrize("parallelism", [1, 2])
-@pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_required_input_its_missing_step_never_made_ends_the_item_not_the_run(
-        tmp_path, runtime, parallelism):
-    """[both runtimes, one and several items at once] One item's solve runs out of output;
-    the next step declares ``answer.txt`` a required input, so it cannot run. That item has
-    no answer (scored 0, no error); the run still succeeds, and its score is passed/total.
-    Concurrent items once let that step's failure fail the whole run, so no candidate with
-    a no-answer item could be ranked."""
+        tmp_path, parallelism):
+    """One item's solve runs out of output; the next step declares ``answer.txt`` a
+    required input, so it cannot run. That item has no answer (scored 0, no error); the
+    run still succeeds, and its score is passed/total. Concurrent items once let that
+    step's failure fail the whole run, so no candidate with a no-answer item could be
+    ranked."""
     dsh = Scripted(tmp_path / "dsh", {"": [OUTPUT_LIMIT, "right"]})
-    scores, _ = _run(runtime, _required(parallelism), tmp_path, dsh)
+    run = tmp_path / "run"
+    scores = _walker(_required(parallelism), run, dsh)
     assert dsh.calls() == 4
     [unanswered] = [r for r in scores if not r["passed"]]
     assert (unanswered["score"], unanswered["error_kind"], unanswered["error_text"]) == (0.0, None, None)

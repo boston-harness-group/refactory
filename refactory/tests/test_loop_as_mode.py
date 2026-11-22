@@ -291,10 +291,9 @@ def test_an_inserted_advisory_node_cannot_move_the_score(tmp_path):
     )
 
 
-def test_the_run_resumes_from_its_own_journal(tmp_path):
+def test_the_run_resumes_from_its_own_journal(default_run):
     """Each node is a separate process, so the journal is what carries the state."""
-    root = tmp_path / "graph"
-    _package, result = _run(root)
+    _package, result, root = default_run
     assert result.exit_ok, result.error
     journal = [json.loads(line) for line in (root / "loop" / "journal.jsonl").read_text().splitlines()]
     events = [record["event"] for record in journal]

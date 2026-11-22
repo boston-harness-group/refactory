@@ -3538,6 +3538,7 @@ def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
     # Track completion order via on_result
     completion_order: list[str] = []
     completion_lock = threading.Lock()
+    best_done = threading.Event()
 
     def _slow_baseline(self, candidate, part, items, seed, *, item_gate=None, **kw):
         """Delay baseline_test so best_test finishes first."""
@@ -3545,10 +3546,12 @@ def test_trace_order_when_best_finishes_before_baseline(tmp_path, monkeypatch):
                                         item_gate=item_gate, **kw)
         # After evaluation completes, record which phase completed
         if part == "test":
-            # The seed candidate is baseline_test; delay it
+            # The seed candidate is baseline_test; delay it until best is done
             pop = getattr(self, 'population', [])
             if pop and candidate.id == pop[0].id:
-                time.sleep(0.3)
+                best_done.wait(timeout=10)
+            else:
+                best_done.set()
         return result
 
     monkeypatch.setattr(Loop, "_evaluate_part", _slow_baseline)

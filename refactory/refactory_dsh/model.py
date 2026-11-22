@@ -1601,7 +1601,7 @@ class DshModelClient:
                         if outage is None:
                             outage = self._begin_outage(run_dir, wire_cause)
                         self._wait_for_network(run_dir, outage, wire_cause, state=network,
-                                               attempt_s=time.monotonic() - now, stop_at=stop_at)
+                                               attempt_s=self._monotonic() - now, stop_at=stop_at)
                         continue
                     # An answer of any kind shows the network is up.
                     NETWORK_GIVEN_UP.clear()
@@ -1630,10 +1630,10 @@ class DshModelClient:
                 if not self._cancellations:
                     time.sleep(delay)
                 else:
-                    deadline = time.monotonic() + delay
+                    deadline = self._monotonic() + delay
                     while True:
                         self._raise_if_cancelled()
-                        remaining = deadline - time.monotonic()
+                        remaining = deadline - self._monotonic()
                         if remaining <= 0:
                             break
                         # The innermost event wakes immediately; inherited scopes
@@ -1738,7 +1738,7 @@ class DshModelClient:
             NETWORK_GIVEN_UP.set()
             give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back, "
                                f"the most one call waits ({int(NETWORK_WAIT_S)}s)")
-        if stop_at is not None and stop_at - time.monotonic() - wait < NETWORK_WAIT_CAP_S:
+        if stop_at is not None and stop_at - self._monotonic() - wait < NETWORK_WAIT_CAP_S:
             give_up("gave_up", f"it waited {int(state['spent'])}s for the network to come back "
                                "until the node's time ran out")
         if outage["logged_at"] is None or state["spent"] - outage["logged_at"] >= NETWORK_LOG_EVERY_S:
@@ -1840,7 +1840,7 @@ class DshModelClient:
         (``refused``) may run a read-only command (``sleep``, say), which counts."""
         written = self._last_frame(started_epoch)
         if (getattr(self, "_tool_policy", "") != "none"
-                and tool_command_running_since(pid, written)):
+                and tool_command_running_since(pid, written, _wall_clock=self._wall_clock)):
             return now
         return now - max(0.0, self._wall_clock() - written)
 

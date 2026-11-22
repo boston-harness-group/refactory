@@ -200,7 +200,7 @@ def test_a_refused_sessions_read_only_command_is_a_sign_of_life(monkeypatch):
     tools; only a session with none at all has nothing beneath it."""
     from refactory_dsh import model
 
-    monkeypatch.setattr(model, "tool_command_running_since", lambda pid, since: True)
+    monkeypatch.setattr(model, "tool_command_running_since", lambda pid, since, _wall_clock=None: True)
     client = _client().for_node("solve")
     client._worker_receipt = None
     client._last_frame = lambda started: 0.0

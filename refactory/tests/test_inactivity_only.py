@@ -9,7 +9,7 @@ model client: the walker (`nn.executor`) in process, the spine through its real 
 whose dispatched worker (`worker_node`) rebuilds the client from the spec
 `workers.lower_workflow` wrote. The scripted session shows activity as the worker
 observer does: it touches the session's activity file (`model.activity_path`).
-Test-only values stand for production's: 5 s of inactivity for 600 s, and a backstop of
+Test-only values stand for production's: 1 s of inactivity for 600 s, and a backstop of
 seconds for 14400 s. The per-completion ``timeout_s`` is 3 s, so a session bounded by it
 would end long before the active one finishes.
 """
@@ -44,7 +44,7 @@ if mode == "busy" and int(seconds):   # a process runs beneath a model that stre
 while time.time() < end:
     if mode == "active":     # a frame streamed every second, as the observer records it
         activity.touch()
-    time.sleep(1)
+    time.sleep(0.3)
 print("right")
 '''
 
@@ -63,7 +63,7 @@ class Session:
 
     def client(self) -> DshModelClient:
         return DshModelClient(worker_backend="dsh", provider="p", model="m", dsh_cli=str(self.cli),
-                              attempts=1, timeout_s=3, inactivity_s=5, backstop_s=self.backstop_s)
+                              attempts=1, timeout_s=3, inactivity_s=1, backstop_s=self.backstop_s)
 
 
 def _graph(prompt: str, *, tools: bool = False) -> nn.Graph:
@@ -105,44 +105,44 @@ def _item(run: Path) -> Path:
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_active_session_runs_past_any_wall(tmp_path, runtime):
-    """[both runtimes] (a) Active every second for 20 s, inactivity 5 s, no wall: the
-    session completes and its item is scored -- not stopped by inactivity, nor by the
-    per-completion timeout_s (3 s), nor by the backstop (well past 20 s)."""
-    record, elapsed, run = _run(runtime, "active 20", tmp_path, backstop_s=120)
+    """[both runtimes] (a) Active for 3 s, inactivity 1 s, no wall: the session completes
+    and its item is scored -- not stopped by inactivity, nor by the per-completion
+    timeout_s (3 s), nor by the backstop (well past 3 s)."""
+    record, elapsed, run = _run(runtime, "active 3", tmp_path, backstop_s=30)
     assert record["passed"] is True and record["error_kind"] is None, record
-    assert elapsed >= 20
+    assert elapsed >= 3
     assert _sessions(_item(run)) == ["completed"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_an_idle_session_ends_on_inactivity(tmp_path, runtime):
-    """[both runtimes] (b) Silent past the 5 s inactivity limit: stopped as a timeout,
-    "of inactivity", long before its 60 s are up."""
-    record, elapsed, run = _run(runtime, "idle 60", tmp_path, backstop_s=120)
+    """[both runtimes] (b) Silent past the 1 s inactivity limit: stopped as a timeout,
+    "of inactivity", long before its 10 s are up."""
+    record, elapsed, run = _run(runtime, "idle 10", tmp_path, backstop_s=30)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
-    assert "timed out after 5s of inactivity" in record["error_text"]
-    assert elapsed < 60
+    assert "timed out after 1s of inactivity" in record["error_text"]
+    assert elapsed < 10
     assert _sessions(_item(run)) == ["timed_out"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_the_backstop_fires_only_past_its_value_and_is_the_models_failure(tmp_path, runtime):
-    """[both runtimes] (c) The backstop (10 s) leaves a session active for 6 s alone, and
+    """[both runtimes] (c) The backstop (3 s) leaves a session active for 2 s alone, and
     stops one still active past it: the model's own failure (``backstop``), neither a
     timeout nor a harness incident."""
-    record, _, _ = _run(runtime, "active 6", tmp_path / "under", backstop_s=10)
+    record, _, _ = _run(runtime, "active 2", tmp_path / "under", backstop_s=3)
     assert record["passed"] is True and record["error_kind"] is None, record
 
-    record, elapsed, run = _run(runtime, "active 60", tmp_path / "past", backstop_s=10)
+    record, elapsed, run = _run(runtime, "active 10", tmp_path / "past", backstop_s=3)
     assert record["passed"] is False and record["error_kind"] == "backstop", record
     assert not harness_incident(record), "scored 0, never rerun or left out of the score"
     assert "still writing" in record["error_text"]
     # The spine names it by its worker's own line (`items.WORKER_ERROR_MARKER`), with its
     # type, as the walker does: never by a `worker:` line a quoted reply could hold.
     assert record["error_text"].startswith("solve: HarnessBackstop: model session hit"), record
-    assert "hit the harness backstop after 10s" in record["error_text"]
+    assert "hit the harness backstop after 3s" in record["error_text"]
     assert "timed out" not in record["error_text"]
-    assert 10 <= elapsed < 60
+    assert 3 <= elapsed < 10
     assert _sessions(_item(run)) == ["harness_backstop"]
 
 
@@ -151,25 +151,25 @@ def test_a_running_process_is_no_activity_in_a_session_without_tools(tmp_path, r
     """[both runtimes] (d) A session with no tools whose model streams nothing while a
     process runs beneath it (a background job, a loop) ends on inactivity: only the
     model's stream is its sign of life."""
-    record, elapsed, run = _run(runtime, "busy 60", tmp_path, backstop_s=120)
+    record, elapsed, run = _run(runtime, "busy 3", tmp_path, backstop_s=30)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
-    assert "timed out after 5s of inactivity" in record["error_text"]
-    assert elapsed < 60
+    assert "timed out after 1s of inactivity" in record["error_text"]
+    assert elapsed < 15
     assert _sessions(_item(run)) == ["timed_out"]
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_tool_that_outlives_a_quiet_model_is_an_inactivity_timeout_at_the_backstop(tmp_path, runtime):
     """[both runtimes] (e) In a session with tools a running tool command keeps the
-    session alive past the 5 s inactivity limit, up to the backstop (10 s). Stopped
+    session alive past the 1 s inactivity limit, up to the backstop (3 s). Stopped
     there with no model frame for longer than the limit, it timed out on inactivity
     (``timeout``), not a harness incident."""
-    record, elapsed, run = _run(runtime, "busy 60", tmp_path, backstop_s=10, tools=True)
+    record, elapsed, run = _run(runtime, "busy 3", tmp_path, backstop_s=3, tools=True)
     assert record["passed"] is False and record["error_kind"] == "timeout", record
     assert re.search(r"model completion timed out after \d+s of inactivity \(no model output; a "
-                     r"tool command was still running at the 10s harness backstop\)",
+                     r"tool command was still running at the 3s harness backstop\)",
                      record["error_text"]), record["error_text"]
-    assert 10 <= elapsed < 60
+    assert 3 <= elapsed < 15
     assert _sessions(_item(run)) == ["timed_out"]
 
 
