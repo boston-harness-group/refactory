@@ -140,6 +140,9 @@ class AgentNode(Node):
     #: ``"refused"`` offers Claude Code's own and refuses each that needs permission;
     #: ``None`` preserves defaults.
     tool_policy: str | None = None
+    #: True keeps a tool-less step's reply that writes out tool calls as its output
+    #: (`nn.graph.Node.keeps_tool_markup`). None is left out of the serialized graph.
+    keeps_tool_markup: bool | None = None
 
     @model_validator(mode="after")
     def _validate_tool_policy(self) -> AgentNode:
@@ -308,6 +311,8 @@ class Workflow(BaseModel):
                 d.pop("system_prompt", None)
             if "tool_policy" in d and d["tool_policy"] is None:
                 d.pop("tool_policy")
+            if "keeps_tool_markup" in d and d["keeps_tool_markup"] is None:
+                d.pop("keeps_tool_markup")
             if "on_exhausted" in d and d["on_exhausted"] is None:
                 d.pop("on_exhausted")
             for field_name in ("knob_outputs", "knobs", "produces"):

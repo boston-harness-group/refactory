@@ -880,7 +880,7 @@ def harness_incident(record: dict[str, Any]) -> bool:
 
 def missing_steps(pass_dir: Path) -> dict[str, dict[str, Any]]:
     """The steps a pass went on without, each with why: ``cause`` (``output_limit``,
-    ``crash``, ``timeout``; for an optional branch, ``backstop``,
+    ``crash``, ``timeout``, ``invented_tool_calls``; for an optional branch, ``backstop``,
     ``declared_timeout`` or ``timeout`` when it timed out so, else ``failed``:
     `node_retry.missing_cause`), ``sessions`` (how many ran, when known) and ``error``. From ``reviews/<step>-missing.txt``, which both runtimes
     write (`nn.fork._record_missing`, `worker_node.main`), and the step's
@@ -925,7 +925,9 @@ def _spent_phrase(info: dict[str, Any]) -> str:
              "declared_timeout": "timed out at its declared timeout_s",
              "backstop": "was still writing at the session time limit",
              "harness_incident": "hit a harness fault",
-             "step_timeout": "ran over its own time limit"}.get(str(info.get("cause")), "failed")
+             "step_timeout": "ran over its own time limit",
+             "invented_tool_calls": "wrote out tool calls it has no tools for",
+             }.get(str(info.get("cause")), "failed")
     sessions = info.get("sessions")
     return f"{cause}" + (f" in all {sessions} sessions" if isinstance(sessions, int) and sessions > 1 else "")
 
