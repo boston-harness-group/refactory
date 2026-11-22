@@ -73,10 +73,10 @@ def test_every_strategy_takes_every_core_operator_or_declares_itself_text_only(n
     assert taken == set(nn_edits.CORE_OPS), sorted(set(nn_edits.CORE_OPS) - taken)
 
 
-def test_skillopt_is_the_one_text_only_strategy():
+def test_the_text_only_strategies_are_skillopt_and_gepa():
     """A strategy turning text-only is a decision, so the list of them is held here."""
     assert sorted(name for name in strategies.available(Path("."))
-                  if strategies.resolve(name, Path(".")).text_only) == ["skillopt"]
+                  if strategies.resolve(name, Path(".")).text_only) == ["gepa", "skillopt"]
 
 
 def test_a_strategy_with_no_model_draws_every_core_operator():
