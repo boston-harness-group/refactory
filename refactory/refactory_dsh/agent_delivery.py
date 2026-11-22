@@ -891,6 +891,8 @@ def invalidate(workdir: Path, nodes: list[str], reason: str) -> None:
         previous = json.loads(receipt.read_text())
         previous.update(status='superseded', finished=_now(), reason=reason)
         receipt.write_text(json.dumps(previous, indent=2) + '\n')
+        # The node is over without a finish: its watches of refactory's checkouts end here.
+        target_guard.close_watches(record.get('checkouts'), previous['finished'])
         pending.unlink()
 
 

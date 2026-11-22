@@ -983,3 +983,78 @@ def test_the_spine_names_itself_as_the_owner_of_bridged_watches():
     bridge = spine[spine.index("function runtimeBridge("):]
     bridge = bridge[:bridge.index("\n  }\n")]
     assert f"{target_guard.OWNER_ENV}: String(process.pid)" in bridge
+
+
+# ── a node that ends without a finish ends its watch (PR 722, round 4) ─────────────────
+
+def _lone_writer(tmp_path: Path, driver: Path, project: Path, name: str):
+    """Another run's node that writes a package into the driver on its own."""
+    later = tmp_path / f"run-{name}"
+    target_guard.record(later, project)
+    _record(later, checkout=driver)
+    ad.begin(later, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, name)
+    (later / "emit.txt").write_text("ok\n")
+    return later
+
+
+def test_an_invalidated_bridged_node_no_longer_shields_a_lone_writer(tmp_path):
+    driver, project, run = _create_run(tmp_path)
+    begun = _bridge(run, {"action": "begin", "node": "abandoned", "prompt": "Write it.",
+                          "writes": ["abandoned.txt"]}, owner=os.getpid())  # the spine lives on
+    assert begun.returncode == 0, begun.stderr
+    skipped = _bridge(run, {"action": "invalidate", "nodes": ["abandoned"], "reason": "skip abandoned"},
+                      owner=os.getpid())
+    assert skipped.returncode == 0, skipped.stderr
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/by_lone_writer"):
+        ad.finish(later, "emit")
+
+
+@pytest.mark.parametrize("status, refused", [("cancelled", True), ("failed", True), ("halted", True),
+                                             ("ready", False)])
+def test_a_stopped_runs_open_watch_no_longer_shields_a_lone_writer(tmp_path, monkeypatch, status, refused):
+    driver, project, run = _create_run(tmp_path)
+    assert _bridge(run, {"action": "begin", "node": "stopped", "prompt": "Write it.",
+                         "writes": ["stopped.txt"]}, owner=os.getpid()).returncode == 0
+    (run / ".refactory" / "spine-status.json").write_text(json.dumps({"status": status}))
+    monkeypatch.setattr(target_guard, "WATCH_SETTLING_S", 0)
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    if refused:
+        with pytest.raises(ValueError, match="new paths under its package roots"):
+            ad.finish(later, "emit")
+    else:
+        assert ad.finish(later, "emit")["status"] == "delivered", "a running run's node still overlaps"
+
+
+def test_a_watch_whose_delivery_record_is_gone_is_over(tmp_path, monkeypatch):
+    driver, project, run = _create_run(tmp_path)
+    ad.begin(run, "dropped", "Write it.", ["dropped.txt"])
+    ad._pending(run, "dropped").unlink()  # its delivery ended by a path that closed nothing
+    monkeypatch.setattr(target_guard, "WATCH_SETTLING_S", 0)
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_older_than_any_node_may_run_is_over_with_its_owner_alive(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    driver, project, run = _create_run(tmp_path)
+    record = ad.begin(run, "stuck", "Write it.", ["stuck.txt"])
+    identifier = record["checkouts"][str(driver.resolve())]["watch_id"]
+    long_ago = datetime.now(timezone.utc) - timedelta(seconds=target_guard._max_open_s() + 60)
+    target_guard._write_watch(driver.resolve(), {**target_guard._read_watch(driver.resolve(), identifier),
+                                                 "started": long_ago.isoformat()})
+    assert target_guard._gone(target_guard._read_watch(driver.resolve(), identifier)) is False
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_just_opened_counts_before_its_delivery_record_exists(tmp_path, capsys):
+    driver, project, run = _create_run(tmp_path)
+    target_guard.watch_checkouts(run, [driver.resolve()], node="starting")  # its record comes next
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    assert ad.finish(later, "emit")["status"] == "delivered"
+    assert "not charged to any one node" in capsys.readouterr().err

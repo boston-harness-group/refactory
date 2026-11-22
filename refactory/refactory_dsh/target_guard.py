@@ -940,6 +940,57 @@ WATCH_KEPT_S = 24 * 3600
 #: record without a process, a process table refactory cannot read) is trusted to still
 #: be open. A watch whose process can be checked is open exactly while that process runs.
 WATCH_OPEN_S = 6 * 3600
+#: Slack on the node's own backstop: no watch stays open longer than a node can run
+#: (`model.DEFAULT_BACKSTOP_S`, the model session's backstop) plus this, live owner or not.
+WATCH_SLACK_S = 30 * 60
+#: A watch younger than this is taken as open whatever the run's records say: its
+#: delivery record is written just after it (`agent_delivery.begin`).
+WATCH_SETTLING_S = 60
+
+
+def _max_open_s() -> int:
+    from refactory_dsh.model import DEFAULT_BACKSTOP_S
+
+    return DEFAULT_BACKSTOP_S + WATCH_SLACK_S
+
+
+def _run_status(run: Path) -> tuple[str, float] | None:
+    """The status the run's spine last recorded, and when, for a run directory or a data
+    pass inside one; None for a run with no spine (the walker)."""
+    for directory in [run, *run.parents][:8]:
+        path = directory / ".refactory" / "spine-status.json"
+        if path.is_file():
+            try:
+                return str(json.loads(path.read_text()).get("status") or ""), path.stat().st_mtime
+            except (OSError, ValueError, AttributeError):
+                return None
+    return None
+
+
+def _ended(watch: dict[str, Any], now: datetime) -> str | None:
+    """When an open watch's node ended though nothing closed its watch; None while it may
+    still run. Read from what already says a node is over: its delivery record is gone
+    (finished, invalidated, skipped, retried, missing); its run's spine stopped
+    (`graph_control.OWNER_STOPPED`: done, halted, failed, refused, cancelled); or it is
+    older than any node may run (:func:`_max_open_s`), whoever owns it."""
+    from datetime import timedelta
+
+    started = datetime.fromisoformat(watch["started"])
+    age = (now - started).total_seconds()
+    if age > _max_open_s():
+        return (started + timedelta(seconds=_max_open_s())).isoformat()
+    if age < WATCH_SETTLING_S or not watch.get("run") or not watch.get("node"):
+        return None
+    from refactory_dsh.agent_delivery import _pending
+    from refactory_dsh.graph_control import OWNER_STOPPED
+
+    run = Path(watch["run"])
+    if not _pending(run, str(watch["node"])).exists():
+        return watch["started"]
+    status = _run_status(run)
+    if status is not None and status[0] in OWNER_STOPPED:
+        return max(watch["started"], datetime.fromtimestamp(status[1], timezone.utc).isoformat())
+    return None
 
 
 def _watches(root: Path) -> Path:
@@ -1065,12 +1116,21 @@ def _read_watches(root: Path) -> list[dict[str, Any]]:
             continue
         # Kept a day once finished; open while its process runs; and, when nothing here
         # can check its process, open only for the backstop.
-        limit = WATCH_KEPT_S if watch.get("finished") else (None if gone is False else WATCH_OPEN_S)
+        limit = (WATCH_KEPT_S if watch.get("finished")
+                 else _max_open_s() + WATCH_KEPT_S if gone is False else WATCH_OPEN_S)
         if limit is not None and age > limit:
             path.unlink(missing_ok=True)
             continue
         found.append(watch)
     return found
+
+
+def close_watches(checkouts: dict[str, dict[str, Any]] | None, at: str | None = None) -> None:
+    """Close the watches a dispatch record carries: its node is over without a finish."""
+    at = at or datetime.now(timezone.utc).isoformat()
+    for path, snapshot in (checkouts or {}).items():
+        if snapshot.get("watch_id"):
+            _close_watch(Path(path), snapshot["watch_id"], at)
 
 
 def _close_watch(root: Path, identifier: str, at: str) -> None:
@@ -1081,9 +1141,15 @@ def _close_watch(root: Path, identifier: str, at: str) -> None:
 
 def _overlapping(root: Path, identifier: str, start: str, end: str) -> list[dict[str, Any]]:
     """Every other watch of ``root`` open at some time between ``start`` and ``end``."""
-    return [watch for watch in _read_watches(root)
-            if watch.get("id") != identifier and watch.get("started", "") <= end
-            and (not watch.get("finished") or watch["finished"] > start)]
+    now = datetime.now(timezone.utc)
+    found = []
+    for watch in _read_watches(root):
+        if watch.get("id") == identifier or watch.get("started", "") > end:
+            continue
+        finished = watch.get("finished") or _ended(watch, now)
+        if not finished or finished > start:
+            found.append(watch)
+    return found
 
 
 def watch_checkouts(workdir: Path, paths: list[Path], node: str = "",
