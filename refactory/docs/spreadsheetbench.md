@@ -77,6 +77,13 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
   no prediction, and records an item past the backstop as the model's own failure
   (`backstop`).
 
+The item's input workbook is its item file (`Task.item_files`): `setup` copies it into
+each pass as `item/input.xlsx`, the data node declares it, and `prepare`, `run_turn` and
+`finalize` list it in their reads and open it through `ctx.item_file("input")`. A step
+the outer loop adds can read it the same way, a sealed one getting a copy in its
+workspace. Model code still gets it under the input's own name in its sandbox, as
+SkillOpt's did.
+
 The grader (`recalc.evaluate`) is SkillOpt's cell comparison on cached values, then, when
 the prediction's answer cells hold formulas, the same comparison on a LibreOffice-
 recalculated copy; the item passes if either matches. `SB_GRADER=cached` is SkillOpt's
@@ -180,6 +187,18 @@ Where neither can run, code is not run.
 7. **Analysts' view**: a feedback message after the last model call (a loop that ended on
    turns or the backstop) is not in the conversation the analysts see; `n_turns` counts
    model calls; each message is shown stripped, as the History framing sends it.
+8. **Formula note**: SkillOpt's verification report ends, when cells read as text
+   starting with `=`, with "WARNING: n cells contain Excel formulas (openpyxl cannot
+   evaluate them):" and the cells. The cells it lists hold text starting with `=`, not
+   formulas (the report reads cached values, where a real formula reads as its value),
+   so the line is wrong under either grader; only "openpyxl cannot evaluate" holds, and
+   only under `cached`. A proposer cited it to argue for writing plain values, so under
+   `recalc` the line says "NOTE: n cells hold text that starts with '=' (stored as text,
+   not as formulas):", with "at least 10" (and "at least n more") when the scan's cap of
+   10 cells is hit. `SB_GRADER=cached` keeps SkillOpt's line byte for byte, for parity
+   with SkillOpt, not because it is true there. (`mode.py` lists this as deviation 7.)
+   The report reaches the analysts and the proposer, not the solver: the gold feedback
+   keeps only the wrong cells.
 
 ## Parity checks
 

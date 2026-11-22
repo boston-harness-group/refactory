@@ -54,6 +54,10 @@ it with ``--claude-executable``.
    later turns end (`refactory_dsh.feedback.SCORING`); SkillOpt scores the attempt after
    the feedback, which passed nearly every clean train item and left the search nothing
    to learn from. The conversation, the feedback included, is unchanged.
+7. *Formula note*: the verification report (the analysts' view) lists cells holding text
+   that starts with ``=``, not formulas; under ``recalc`` it says so
+   (`skillopt_port.FORMULA_NOTE_RECALC`), not SkillOpt's "openpyxl cannot evaluate them",
+   which is false there and led a proposer to argue for plain values; ``cached`` keeps it.
 """
 from __future__ import annotations
 
@@ -65,9 +69,12 @@ from refactory_dsh import nn
 from refactory_dsh.feedback import CALL as FEEDBACK_CALL
 
 from . import skillopt_port as port
+from .tasks import INPUT
 
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
+#: The ops that open the item's input (`RunContext.item_file`), so declare it in reads.
+INPUT_READERS = (f"{OPS}:prepare", f"{OPS}:run_turn", f"{OPS}:finalize")
 
 #: The Claude Code SkillOpt's runs used (the lab's ``claude --version``): its system
 #: prompt and tool text are what the solve call is compared with.
@@ -111,9 +118,11 @@ class Solver(nn.Mode):
     def build(self) -> nn.Graph:
         g = nn.Graph()
         g.add(nn.Node("data", "data", subgraph_entry="prepare", subgraph_exit="finalize",
-                      task_ref=TASK, writes=("current_item.json",), produces=("item_scores",),
+                      task_ref=TASK, writes=("current_item.json", INPUT),
+                      produces=("item_scores",),
                       parallelism_knob="data_parallelism", knobs=("data_parallelism",)))
-        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare", reads=("current_item.json",),
+        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare",
+                      reads=("current_item.json", INPUT),
                       knobs=("skill",),
                       writes=("history.json", "turn.json", "target_system_prompt.txt",
                               "target_user_prompt.txt", "spreadsheet_preview.txt"),
@@ -135,7 +144,8 @@ class Solver(nn.Mode):
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
         g.add(nn.Node("run_turn", "op", call=f"{OPS}:run_turn",
-                      reads=("reply.txt", "history.json", "turn.json", "current_item.json"),
+                      reads=("reply.txt", "history.json", "turn.json", "current_item.json",
+                             INPUT),
                       knobs=("turn_pause_s",),
                       writes=("history.json", "turn.json", "code.py", "raw.txt", "pred.xlsx"),
                       produces=("turn_status",),
@@ -151,7 +161,8 @@ class Solver(nn.Mode):
                       max_iterations=MAX_TURNS - 1, on_exhausted="continue",
                       notes="another turn while turns and budget remain"))
         g.add(nn.Node("finalize", "op", call=f"{OPS}:finalize",
-                      reads=("current_item.json", "turn.json", "history.json", "code.py"),
+                      reads=("current_item.json", "turn.json", "history.json", "code.py",
+                             INPUT),
                       knobs=("max_turns",),
                       writes=("final.json", "conversation.json", "pred.xlsx"),
                       produces=("finished",),
@@ -167,6 +178,37 @@ class Solver(nn.Mode):
         g.connect("turn_gate", "frame", condition="reloop")
         g.connect("turn_gate", "finalize", condition="proceed")
         return g
+
+    @classmethod
+    def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """A state saved before the input was an item file (`tasks.INPUT`): one whose data
+        node for this Task (protected, so no edit changes it) does not declare the input in
+        its writes. Then each such data node declares it, and each node running one of the
+        ops that open it (`ops.prepare`, ``run_turn``, ``finalize``, by call, whatever its
+        id) declares it in its reads, as this version's graph does. A state that already
+        declares it -- any state this version saved -- is returned as it is, with no note:
+        never a change to anything an edit chose."""
+        nodes = ((state.get("graph") or {}).get("nodes") or {}) if isinstance(state, Mapping) \
+            else {}
+        data = [n for n in nodes.values() if n.get("kind") == "data" and n.get("task_ref") == TASK]
+        if not data or all(INPUT in (n.get("writes") or ()) for n in data):
+            return dict(state), []
+        state = copy.deepcopy(dict(state))
+        nodes = state["graph"]["nodes"]
+        notes: list[str] = []
+        for node_id, node in sorted(nodes.items()):
+            if node.get("kind") == "data" and node.get("task_ref") == TASK:
+                key = "writes"
+            elif node.get("call") in INPUT_READERS:
+                key = "reads"
+            else:
+                continue
+            declared = list(node.get(key) or [])
+            if INPUT not in declared:
+                node[key] = [*declared, INPUT]
+                notes.append(f"{node_id} now declares {INPUT} in its {key} (a state saved "
+                             "before the input was an item file)")
+        return state, notes
 
     def claude_code_versions(self) -> dict[str, str]:
         """The solve step runs on SkillOpt's Claude Code (`SKILLOPT_CLAUDE_CODE`)."""

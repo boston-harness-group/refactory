@@ -196,8 +196,10 @@ def test_the_setup_command_runs_in_the_worktree_before_each_check(repo, tmp_path
     assert result.exit_ok, result.error
 
 
-def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tmp_path, monkeypatch):
-    """No code change can install uv; the run says so instead of asking emit to try again."""
+def test_a_missing_installer_ends_in_a_draft_without_spending_its_repairs(repo, tmp_path,
+                                                                         monkeypatch):
+    """No code change can install uv; the run ends in a draft naming it, instead of asking
+    emit to try again or ending with no pull request (D13)."""
     only_git = tmp_path / "only-git"
     only_git.mkdir()
     (only_git / "git").symlink_to(next(Path(entry) / "git" for entry in os.environ["PATH"].split(os.pathsep)
@@ -207,21 +209,44 @@ def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tm
     git(repo, "commit", "-q", "-m", "manifest")
     monkeypatch.setenv("PATH", str(only_git))
     emit = render({"tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit, emit)), target=str(repo))
-    assert result.exit_ok is False
-    assert "UNAVAILABLE: uv is not installed" in (result.error or "")
+    model = FakeModel(_answers(emit, emit))
+    result = _design(tmp_path / "run", model, target=str(repo))
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "`uv` is not installed (exit 127)" in draft["reason"], draft
+    assert "UNAVAILABLE: uv is not installed" in draft["check_failure"]
+    assert len([p for p in model.prompts if "Write the artifact `" in p]) == 1
     found = worktree.recorded(tmp_path / "run")
     assert git(repo, "rev-list", "--count", f"{found.base}..{found.branch}") == "1", "no repair was attempted"
 
 
+def test_a_setup_calling_a_missing_tool_ends_in_a_draft_naming_it(tmp_path):
+    """A setup command that runs a tool nobody installed exits 127: a draft naming the tool,
+    after one emit, not a run with no pull request (D13)."""
+    model = FakeModel(_answers(render({"tool.py": "print('built')\n"})))
+    result = _design(tmp_path / "run", model, _mode(setup="nosuchtool-d13 --build"),
+                     target=str(git_repo(tmp_path / "plain")))
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert "`nosuchtool-d13` is not installed (exit 127)" in draft["reason"], draft
+    assert len([p for p in model.prompts if "Write the artifact `" in p]) == 1
+
+
 def test_a_setup_command_that_fails_fails_the_check_and_says_why(tmp_path):
     emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_setup = _design(tmp_path / "setup", FakeModel(_answers(emit1, emit2, emit3)), _mode(setup="exit 3"),
+    model = FakeModel(_answers(emit1))
+    failed_setup = _design(tmp_path / "setup", model, _mode(setup="exit 3"),
                            target=str(git_repo(tmp_path / "plain")))
-    assert failed_setup.exit_ok is False
-    assert "the setup command `exit 3` failed" in (failed_setup.error or "")
+    # A setup that always fails is not change-caused → draft, not a builder round (D13).
+    assert failed_setup.exit_ok is True
+    draft = failed_setup.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    assert "exit 3" in failed_setup.facts.get("validation", "")
+    # Exactly one emit — no builder round.
+    emits = [p for p in model.prompts if "Write the artifact `" in p]
+    assert len(emits) == 1
 
 
 def test_a_generate_command_amends_tracked_file_changes_into_the_attempt(repo, tmp_path):
@@ -253,13 +278,19 @@ def test_a_generate_command_that_changes_nothing_adds_no_commit(repo, tmp_path):
 
 def test_a_generate_command_that_fails_fails_the_check_and_says_why(tmp_path):
     emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_generate = _design(tmp_path / "run", FakeModel(_answers(emit1, emit2, emit3)),
+    model = FakeModel(_answers(emit1))
+    failed_generate = _design(tmp_path / "run", model,
                               _mode(generate="exit 3"),
                               target=str(git_repo(tmp_path / "plain")))
-    assert failed_generate.exit_ok is False
-    assert "the generate command `exit 3` failed" in (failed_generate.error or "")
+    # A generate that always fails is not change-caused → draft, not a builder round (D13).
+    assert failed_generate.exit_ok is True
+    draft = failed_generate.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    assert "exit 3" in failed_generate.facts.get("validation", "")
+    # Exactly one emit — no builder round.
+    emits = [p for p in model.prompts if "Write the artifact `" in p]
+    assert len(emits) == 1
 
 
 def test_generate_runs_before_setup_so_setup_sees_generated_files(repo, tmp_path):

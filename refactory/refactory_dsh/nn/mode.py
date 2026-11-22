@@ -37,6 +37,22 @@ _TOP_LEVEL = frozenset({"version", "graph", "knobs", "ports", "memory"})
 _KNOB_ENTRY = frozenset({"value", "spec"})
 
 
+#: Where a run records what `Mode.upgrade_state` changed in the state it ran.
+STATE_UPGRADES = ".refactory/state-upgrades.json"
+
+
+def record_state_upgrades(workdir: Path, notes: Any) -> None:
+    """Record in ``workdir`` what a saved state's upgrade changed (`Mode.upgrade_state`),
+    so a run of an upgraded state says so; nothing when nothing changed."""
+    if not notes:
+        return
+    import json
+
+    path = Path(workdir) / STATE_UPGRADES
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(list(notes), indent=2) + "\n")
+
+
 def graph_identity(state: dict) -> dict:
     """Strip the steering block from all ``prompt_template`` values for comparison.
 
@@ -120,6 +136,9 @@ class Mode:
     #: inference ("it happens not to override score") into a declaration the
     #: registry, the sandbox and a reader can all check.
     unscored_reason: ClassVar[str] = ""
+    #: What `upgrade_state` changed in the state this instance loaded, one note each;
+    #: empty for a state that needed nothing (a fresh build among them).
+    state_upgrades: tuple[str, ...] = ()
 
     def __init__(self, state: dict[str, Any] | None = None) -> None:
         if state is None:
@@ -353,6 +372,7 @@ class Mode:
 
         from .executor import execute
 
+        record_state_upgrades(Path(workdir), self.state_upgrades)
         return execute(
             self.graph(), Path(workdir), knobs=self.values(),
             model=model, task=task, memory=memory, **kwargs,
@@ -524,6 +544,13 @@ class Mode:
         """
         if not isinstance(state, Mapping):
             raise StateError(f"a state dict must be a mapping, got {type(state).__name__}")
+        state, notes = type(self).upgrade_state(state)
+        self.state_upgrades = tuple(notes)
+        if notes:
+            import warnings
+
+            warnings.warn(f"{self.name}: a saved state was upgraded: {'; '.join(notes)}",
+                          UserWarning, stacklevel=2)
         unknown = sorted(set(state) - _TOP_LEVEL)
         if unknown and strict:
             raise StateError(f"unknown state dict field(s): {unknown}")
@@ -561,6 +588,17 @@ class Mode:
         ]
         self._graph_state = graph.to_state()
         self._knobs = knobs
+
+    @classmethod
+    def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """``state`` as an earlier version of this mode saved it, brought up to what this
+        version's own ops require, with one note per change; ``(state, [])`` when it needs
+        nothing (the default). Only a declaration the mode's own code now needs may be
+        added (a file an op reads that it did not have to declare before) -- never a
+        change to anything an edit chose -- so an old state runs as it ran.
+        `load_state_dict` applies it on the walker, `dsh_runtime.evaluate_on_dsh` on the
+        spine, and each run records the notes (`record_state_upgrades`)."""
+        return dict(state), []
 
     def clone(self) -> "Mode":
         """A fresh instance holding a copy of this state."""

@@ -133,6 +133,94 @@ def test_eval_feedback_is_skillopts(index):
     assert port.build_eval_feedback(case["report"]) == case["feedback"]
 
 
+def _text_eq_pred(path: Path, b1: int) -> Path:
+    """A prediction whose C1 holds text starting with ``=`` (what SkillOpt's report lists
+    as a formula; a real formula reads as its cached value under ``data_only``)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"], ws["B1"] = 1, b1
+    ws["C1"] = "=A1*42"
+    ws["C1"].data_type = "s"
+    wb.save(path)
+    return path
+
+
+#: rollout.py:192, as SkillOpt ships it.
+SKILLOPT_FORMULA_WARNING = \
+    "\n  WARNING: 1 cells contain Excel formulas (openpyxl cannot evaluate them):"
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_formula_line_says_what_the_grader_does(tmp_path, monkeypatch, choice):
+    """`mode` deviation 7 (docs item 8): under recalc the report says the cells it lists hold text starting
+    with ``=`` (listed still); the cached grader's is SkillOpt's report, byte for byte. The
+    grader comes from `recalc.grader`, here through ``SB_GRADER``."""
+    monkeypatch.setenv(recalc.GRADER_ENV, choice)
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    pred = _text_eq_pred(tmp_path / "pred.xlsx", 41)
+    head = {"recalc": "\n  NOTE: 1 cells hold text that starts with '=' (stored as text, "
+                      "not as formulas):",
+            "cached": SKILLOPT_FORMULA_WARNING}[choice]
+    assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
+        "## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
+        + head + "\n    Sheet1!C1==A1*42")
+
+
+def test_the_recalculated_copys_report_has_the_note(tmp_path, monkeypatch):
+    """The common recalc case: an answer cell holds a formula, so the report is read from
+    LibreOffice's recalculated copy (stubbed here: the copy as LibreOffice would write
+    it, the formula's value cached), and another cell holds text starting with '='."""
+    monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    pred = _text_eq_pred(tmp_path / "pred.xlsx", 41)
+    import openpyxl
+
+    wb = openpyxl.load_workbook(pred)
+    wb.active["B1"] = "=A1*42"  # a real formula in the answer cell
+    wb.save(pred)
+    copy = _text_eq_pred(tmp_path / "recalculated.xlsx", 42)
+    seen: list[str] = []
+    monkeypatch.setattr(recalc, "recalculated", lambda p: seen.append(p) or str(copy))
+    assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
+        "## Output Verification\n  Sheet1!B1: got=42, expected=42 \u2713\n"
+        "\n  NOTE: 1 cells hold text that starts with '=' (stored as text, not as formulas):"
+        "\n    Sheet1!C1==A1*42")
+    assert seen == [str(pred)]
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_a_capped_formula_count_says_at_least_under_recalc(tmp_path, monkeypatch, choice):
+    """The scan stops at 10 cells (rollout.py): under recalc the note says "at least";
+    under cached the line is SkillOpt's, its count capped."""
+    import openpyxl
+
+    monkeypatch.setenv(recalc.GRADER_ENV, choice)
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"], ws["B1"] = 1, 41
+    for i in range(1, 13):
+        ws[f"C{i}"] = f"=A1*{i}"
+        ws[f"C{i}"].data_type = "s"
+    wb.save(tmp_path / "pred.xlsx")
+    report = recalc.auto_verify_output(str(tmp_path / "pred.xlsx"), str(gold), "B1")
+    head, tail = {
+        "recalc": ("\n  NOTE: at least 10 cells hold text that starts with '=' "
+                   "(stored as text, not as formulas):", "    ... and at least 5 more"),
+        "cached": ("\n  WARNING: 10 cells contain Excel formulas (openpyxl cannot evaluate "
+                   "them):", "    ... and 5 more")}[choice]
+    cells = "".join(f"\n    Sheet1!C{i}==A1*{i}" for i in range(1, 6))
+    assert report == ("## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
+                      + head + cells + "\n" + tail)
+
+
 def test_no_code_and_exec_error_texts():
     assert port.NO_CODE == FIXTURE["no_code"]
     text = port.exec_error_feedback("x" * 4000)
@@ -159,6 +247,18 @@ def sb_python():
     interpreter.check(python)
     _require_sandbox(python)
     return python
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="pivot_root is Linux's")
+def test_the_sandbox_runs_where_path_lacks_sbin(sb_python, monkeypatch):
+    """A run whose PATH lacks /usr/sbin and /sbin (a system service's can): the sandbox
+    still finds pivot_root by its path, and runs the code."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    sandbox._probe.cache_clear()
+    try:
+        assert sandbox.available(sb_python) == (True, "")
+    finally:
+        sandbox._probe.cache_clear()
 
 
 def test_interpreter_check_refuses_other_versions():
@@ -706,6 +806,42 @@ def test_train_rollout_gets_gold_feedback(tmp_path, sb_env):
     assert "42" not in prompts[2].split(EVAL_FEEDBACK_HEAD)[1]
 
 
+def _text_eq(n: int) -> str:
+    return ("```python\nimport openpyxl\nwb = openpyxl.load_workbook(INPUT_PATH)\n"
+            f"wb.active['B1'] = {n}\nwb.active['C1'] = '=A1*42'\n"
+            "wb.active['C1'].data_type = 's'\nwb.save(OUTPUT_PATH)\n```")
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_the_formula_line_the_analysts_see_is_the_graders(tmp_path, sb_env, monkeypatch,
+                                                          choice):
+    """A train item with gold feedback, end to end: the verification report the analysts
+    and the proposer read (the record's ``prediction``) says the listed cells hold text
+    under recalc, and is SkillOpt's under cached (`mode` deviation 7, docs item 8). The gold feedback
+    the solver gets lists only wrong cells, so neither line reaches it."""
+    if choice == "recalc":
+        fake = tmp_path / "soffice"  # never run (no answer cell holds a formula): copies
+        fake.write_text(
+            f"#!{sys.executable}\nimport os, shutil, sys\n"
+            "src = sys.argv[-1]; out = sys.argv[sys.argv.index('--outdir') + 1]\n"
+            "os.makedirs(out, exist_ok=True); "
+            "shutil.copyfile(src, os.path.join(out, os.path.basename(src)))\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv(recalc.SOFFICE_ENV, str(fake))
+        monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+    result, prompts = _walk(tmp_path, "train", [_text_eq(41), _text_eq(42)], gold_feedback=True)
+    (record,) = result.item_records
+    assert record["gold_feedback"]["told_wrong"] == 1 and len(prompts) == 2
+    assert "Sheet1!B1: your output = 41 (WRONG)" in prompts[1]
+    note = ("NOTE: 1 cells hold text that starts with '=' (stored as text, not as formulas):"
+            "\n    Sheet1!C1==A1*42")
+    warning = SKILLOPT_FORMULA_WARNING.strip() + "\n    Sheet1!C1==A1*42"
+    said, unsaid = (note, warning) if choice == "recalc" else (warning, note)
+    assert said in record["prediction"] and unsaid not in record["prediction"]
+    told = prompts[1].split(EVAL_FEEDBACK_HEAD)[1]
+    assert "Sheet1!C1" not in told and "formulas" not in told
+
+
 class _PerItem(FakeModel):
     """Answers each item by its instruction: a wrong value first, then the right one.
     Shared by concurrent items (``thread_safe``)."""
@@ -844,6 +980,23 @@ def _ctx(workdir: Path, **knobs: Any) -> RunContext:
     return RunContext(workdir, knobs={"max_turns": 30, **knobs}, enforce_writes=False)
 
 
+def _node_ctx(workdir: Path, node_id: str, **knobs: Any) -> RunContext:
+    """`_ctx` as node ``node_id`` of the solver's graph runs in an item's pass: the pass
+    names its Task, and the node's declared reads are the graph's (`RunContext.item_file`
+    finds the item's input through them)."""
+    from refactory_dsh.items import PASS_MARKER
+    from refactory_dsh.nn.graph import op_io
+
+    marker = workdir / PASS_MARKER
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"node": "data", "item": "t1", "index": 0, "task": sb_mode.TASK}))
+    ctx = _ctx(workdir, **knobs)
+    ctx.node_id = node_id
+    ctx._declared, ctx._declared_reads, ctx._declared_facts = op_io(  # noqa: SLF001
+        sb_mode.Solver().build().nodes[node_id])
+    return ctx
+
+
 def test_turn_gate_stops_with_ten_seconds_left_before_the_backstop(tmp_path, monkeypatch):
     from refactory_dsh import model
 
@@ -891,19 +1044,90 @@ def test_the_solve_call_has_no_wall():
     assert "item_budget_s" not in sb_mode.Solver().values()
 
 
+#: The solver's state as main saved it before the input was an item file (e11cdc204b's
+#: ``Solver().state_dict()``): what a run started then holds for every candidate.
+STATE_BEFORE_ITEM_FILES = Path(__file__).parent / "fixtures" / \
+    "spreadsheetbench_state_before_item_files.json"
+
+
+def _walk_state(tmp_path: Path, state: dict[str, Any], name: str) -> tuple[Any, list[str], Path]:
+    from refactory_dsh.nn.edits import configure
+
+    for knob, value in {"data_parallelism": 1, "turn_pause_s": 0}.items():
+        state = configure(state, knob, value)
+    work = tmp_path / name
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=["t1"])
+    task_module.write_subset(work, "val", 0.0)
+    model = FakeModel([_good(7)])
+    result = WalkerEvaluator(model=model, project=Path("."), max_steps=4000).evaluate(
+        sb_mode.Solver(state=state), state, work)
+    return result, model.prompts, work
+
+
+def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_env):
+    """[walker end to end] A candidate state saved before item files (main's, verbatim) is
+    upgraded by the mode (`Solver.upgrade_state`): it becomes exactly this version's state,
+    says so, records it in its run, and scores as a fresh state with the same prompts."""
+    old = json.loads(STATE_BEFORE_ITEM_FILES.read_text())
+    with pytest.warns(UserWarning, match="a saved state was upgraded"):
+        upgraded = sb_mode.Solver(state=old)
+    assert upgraded.state_dict() == sb_mode.Solver().state_dict()
+    assert len(upgraded.state_upgrades) == 4
+    assert sb_mode.Solver(state=sb_mode.Solver().state_dict()).state_upgrades == ()
+    runs = {}
+    with pytest.warns(UserWarning):
+        runs["old"] = _walk_state(tmp_path, old, "old")
+    runs["new"] = _walk_state(tmp_path, sb_mode.Solver().state_dict(), "new")
+    seen = {}
+    for name, (result, prompts, work) in runs.items():
+        assert result.exit_ok, (name, result.error)
+        seen[name] = ([(r["id"], r["passed"], r["score"], r.get("fail_reason"))
+                       for r in result.item_records], prompts)
+    assert seen["old"] == seen["new"] and seen["new"][0] == [("v1", True, 1.0, None)], seen
+    from refactory_dsh.nn.mode import STATE_UPGRADES
+
+    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 4
+    assert not (runs["new"][2] / STATE_UPGRADES).exists()
+
+
+def test_the_spine_runs_a_state_saved_before_item_files_upgraded(tmp_path, monkeypatch):
+    """[the spine's entry, `dsh_runtime.evaluate_on_dsh`] The state lowered for DSH is the
+    upgraded one, and the run records the upgrade, as on the walker."""
+    from refactory_dsh import dsh_runtime
+    from refactory_dsh.nn.mode import STATE_UPGRADES
+
+    lowered = {}
+
+    class Lowered(Exception):
+        pass
+
+    def run_on_dsh(state, workdir, **kwargs):
+        lowered["state"] = state
+        raise Lowered
+
+    monkeypatch.setattr(dsh_runtime, "run_on_dsh", run_on_dsh)
+    old = json.loads(STATE_BEFORE_ITEM_FILES.read_text())
+    with pytest.raises(Lowered):
+        dsh_runtime.evaluate_on_dsh(sb_mode.Solver(), old, tmp_path)
+    assert lowered["state"] == sb_mode.Solver().state_dict()
+    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 4
+
+
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
     task = tasks.SpreadsheetBenchTask()
     t1 = task.instances()[0]
-    ctx = _ctx(tmp_path)
-    task.setup(t1, tmp_path)
+    work = tmp_path / "run" / "passes" / "data" / "t1_0"  # where a pass runs
+    ctx = _node_ctx(work, "finalize")
+    task.setup(t1, work)
     ctx.write_json("current_item.json", task_module.node_item({"id": "t1", **t1.metadata}, task))
     code = port.extract_code(_good(42))
     ctx.write_json("turn.json", {"start": time.time(), "turn": 1, "status": "exec_error",
                                  "code": code})
     ctx.write_json("history.json", [{"role": "user", "content": "u"}])
     ops.finalize(ctx)
-    assert json.loads((tmp_path / tasks.FINAL).read_text())["fail_reason"] == ""
-    assert task.verify(t1, tmp_path).passed
+    assert json.loads((work / tasks.FINAL).read_text())["fail_reason"] == ""
+    assert task.verify(t1, work).passed
 
 
 # ── train-only gold feedback, in the library ────────────────────────────────

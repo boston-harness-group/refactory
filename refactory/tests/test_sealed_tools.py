@@ -108,18 +108,26 @@ os.execv(args[0], args)
 """
 
 
-@pytest.fixture(params=["scoped", "unscoped", "expanding"])
+@pytest.fixture(params=["scoped", "unscoped", "expanding", "delegated"])
 def seal_path(request, monkeypatch, tmp_path_factory):
     """Each Linux path a sealed command can take: in a capped systemd user scope (where
     this machine's user manager makes one), without one (per-process limits only, as on
-    a CI runner with no user manager), and through a systemd-run that expands ``$NAME``
-    in its arguments. macOS has one path."""
+    a CI runner with no user manager), through a systemd-run that expands ``$NAME``
+    in its arguments, and in a cgroup of its own in the run's delegated cgroup (where
+    this process's cgroup is delegated: `seal_cgroup`). macOS has one path."""
     if not sys.platform.startswith("linux"):
         if request.param != "scoped":
             pytest.skip("macOS has one path")
         return request.param
     monkeypatch.setattr(seal, "_SCOPE", [])
     if request.param == "unscoped":
+        monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
+        monkeypatch.setattr(seal.seal_cgroup, "_proc_cgroup", lambda: "")
+    elif request.param == "delegated":
+        from test_seal_cgroup import _not_delegated
+
+        if _not_delegated():
+            pytest.skip(_not_delegated())
         monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
     elif request.param == "expanding":
         fake = tmp_path_factory.mktemp("fake-systemd") / "systemd-run"
@@ -608,7 +616,7 @@ def test_a_sealed_linux_command_sees_only_the_listed_parts_of_etc_and_runs_unpri
     listed = set(result.stdout.split("uid=")[0].split())
     assert listed <= {path.removeprefix("/etc/") for path in seal.LINUX_ETC}, listed
     assert f"uid={os.getuid()}" in result.stdout
-    assert result.stdout.split()[-1] == ("512" if seal.linux_scope() else "128")
+    assert result.stdout.split()[-1] == ("512" if place.whole_step_cap[0] else "128")
 
 
 def test_a_sealed_step_never_runs_as_root(tmp_path, monkeypatch):
@@ -859,7 +867,13 @@ def test_a_sealed_command_is_capped_as_a_whole_or_each_process_tightly(tmp_path)
     try:
         cgroup = command.stdout.readline().strip().removeprefix("0::")
         limits = [command.stdout.readline().strip(), command.stdout.readline().strip()]
-        if seal.linux_scope():
+        if place.cgroup:
+            # A delegated cgroup caps the step (`seal_cgroup`): the command runs in it.
+            assert f"/sys/fs/cgroup{cgroup}" == place.cgroup
+            assert Path(f"{place.cgroup}/memory.max").read_text().strip() == str(8 << 30)
+            assert Path(f"{place.cgroup}/pids.max").read_text().strip() == "256"
+            assert limits == ["512", "unlimited"]
+        elif seal.linux_scope():
             assert Path(f"/sys/fs/cgroup{cgroup}/memory.max").read_text().strip() == str(8 << 30)
             assert Path(f"/sys/fs/cgroup{cgroup}/pids.max").read_text().strip() == "256"
             assert limits == ["512", "unlimited"]
@@ -1014,6 +1028,8 @@ def test_each_layer_closes_inherited_descriptors(tmp_path, seal_path):
                                 f"cat /dev/fd/{gold.fileno()} 2>/dev/null; true"],
                                capture_output=True, text=True, pass_fds=(gold.fileno(),))
         inner_argv = list(place.runner[place.runner.index("--exec") + 1:])
+        if inner_argv[0] == seal_reaper.CGROUP_FLAG:
+            inner_argv = inner_argv[2:]
         inner = subprocess.run([*inner_argv, "--", "bash", "-c",
                                 f"cat /dev/fd/{gold.fileno()} <&- 2>/dev/null; echo ran"],
                                cwd=place.path, capture_output=True, text=True,
@@ -1108,3 +1124,15 @@ def test_a_run_offered_no_tool_step_says_why_once_in_its_journal_and_start_line(
                                                      allowed_ops=("set_knob",)),
                  project=Path("."), model=client)
     assert knobs._tools_not_offered() == ""
+
+
+@LINUX
+def test_a_seal_started_without_sbin_on_path_still_runs(tmp_path, monkeypatch):
+    """A run whose PATH lacks /usr/sbin and /sbin (a system service's can): the seal still
+    finds pivot_root (and unshare), and the command runs sealed."""
+    _sealable()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    _run, place = _layout(tmp_path)
+    assert any(arg.endswith("/pivot_root") for arg in place.runner), place.runner
+    done = _sealed(place, "cat input.txt")
+    assert done.returncode == 0 and done.stdout == "THE-INPUT", done

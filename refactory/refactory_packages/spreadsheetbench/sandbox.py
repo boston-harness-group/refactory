@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Iterable
 
 from refactory_dsh.model import HarnessIncident
+from refactory_dsh.seal import system_tool
 
 #: Secret paths under the home directory, as the lab's wrapper hides them
 #: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
@@ -91,7 +92,9 @@ def _linux_script(read_only: list[str], writable: list[str], links: dict[str, st
             lines.append(f'mkdir -p "$R/dev"; touch "$R"{_q(dev)}; '
                          f'mount -n --bind {_q(dev)} "$R"{_q(dev)}')
     lines += ['mkdir -p "$R/proc"; mount -n -t proc -o nosuid,nodev,noexec proc "$R/proc"',
-              'mkdir "$R/.old"; cd "$R"; pivot_root . .old; umount -n -l /.old; rmdir /.old',
+              # pivot_root by its path: a service's PATH may lack /usr/sbin (`seal.system_tool`).
+              f'mkdir "$R/.old"; cd "$R"; {_q(system_tool("pivot_root"))} . .old; '
+              'umount -n -l /.old; rmdir /.old',
               'cd "$WD" 2>/dev/null || cd /',
               ('exec unshare -U -r -m -- "$@"' if ready_fd is None else
                # The last step before the code: say so on the caller's pipe

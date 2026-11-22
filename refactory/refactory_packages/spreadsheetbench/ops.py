@@ -31,7 +31,7 @@ from refactory_dsh.nn import Verdict
 from refactory_packages.skillopt.claude_backend import claude_backend_messages
 
 from . import skillopt_port as port
-from .tasks import FINAL, INPUT_DIR, PRED, TURN
+from .tasks import FINAL, PRED, TURN
 
 HISTORY = "history.json"
 REPLY = "reply.txt"
@@ -60,10 +60,10 @@ def _item(ctx: Any) -> dict[str, Any]:
     return ctx.read_json("current_item.json", {}) or {}
 
 
-def _input(ctx: Any, item: dict[str, Any]) -> Path | None:
-    name = str(item.get("input_name") or "")
-    path = Path(ctx.workdir) / INPUT_DIR / name
-    return path if name and path.is_file() else None
+def _input(ctx: Any) -> Path | None:
+    """The item's input workbook, its item file (`tasks.INPUT`), through the declaration
+    that names it (`RunContext.item_file`); ``None`` for an item with no case."""
+    return ctx.item_file("input")
 
 
 def prepare(ctx: Any) -> dict[str, Any]:
@@ -71,7 +71,7 @@ def prepare(ctx: Any) -> dict[str, Any]:
     (rollout.py:700-721; codegen_agent.py:684-697) and the history that starts with it."""
     started = time.time()
     item = _item(ctx)
-    source = _input(ctx, item)
+    source = _input(ctx)
     if source is None:
         # rollout.py:681-685: no init+golden pair, no model call.
         ctx.write_json(TURN, {"start": started, "turn": 0, "status": "no_case", "done": True})
@@ -122,9 +122,10 @@ def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
         (root / "in").mkdir()
         (root / "out").mkdir()
         (root / "cwd").mkdir()
-        source = _input(ctx, item)
+        source = _input(ctx)
         assert source is not None
-        input_path = root / "in" / source.name
+        # Under the input's own name, as SkillOpt's code found it (``INPUT_PATH``).
+        input_path = root / "in" / (str(item.get("input_name") or "") or source.name)
         shutil.copyfile(source, input_path)
         output_path = root / "out" / pred_name
         if (workdir / PRED).exists():

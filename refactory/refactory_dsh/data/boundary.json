@@ -81,6 +81,7 @@
     "refactory_dsh.run_state",
     "refactory_dsh.sandbox",
     "refactory_dsh.seal",
+    "refactory_dsh.seal_cgroup",
     "refactory_dsh.seal_reaper",
     "refactory_dsh.seed_cache",
     "refactory_dsh.snippet",

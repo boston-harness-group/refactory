@@ -77,6 +77,18 @@ def no_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _step_cgroups_released(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A sealed step a test prepared and never collected leaves no cgroup behind where the
+    test runs in a delegated cgroup (`step_cgroups`): released when the test ends, while
+    the test's own stand-ins (a fake cgroup tree) are still in place."""
+    import step_cgroups
+
+    made = step_cgroups.track(monkeypatch)
+    yield
+    step_cgroups.release(made)
+
+
+@pytest.fixture(autouse=True)
 def _optimizer_retries_do_not_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """An optimizer call that fails is attempted again after SkillOpt's wait (1, 2, 4 s,
     `optim.random_optimizer.retry_delay`); the suite does not sleep through it. A test of

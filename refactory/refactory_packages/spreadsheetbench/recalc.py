@@ -239,10 +239,13 @@ def evaluate(pred_path: str, gold_path: str, instruction_type: str, answer_posit
 def auto_verify_output(pred_path: str, gold_path: str, answer_position: str,
                        *, choice: str | None = None) -> str:
     """The verification report, read from the recalculated copy under ``recalc`` when
-    the answer cells hold formulas."""
-    if grader(choice) == "recalc" and os.path.exists(pred_path) \
+    the answer cells hold formulas; under ``recalc`` its line over the ``=`` cells says
+    they hold text (`mode` deviation 7, docs item 8), under ``cached`` it is SkillOpt's."""
+    recalculates = grader(choice) == "recalc"
+    if recalculates and os.path.exists(pred_path) \
             and has_formula_answer(pred_path, answer_position):
         rc = recalculated(pred_path)
         if rc:
-            return port.auto_verify_output(rc, gold_path, answer_position)
-    return port.auto_verify_output(pred_path, gold_path, answer_position)
+            return port.auto_verify_output(rc, gold_path, answer_position, recalculates=True)
+    return port.auto_verify_output(pred_path, gold_path, answer_position,
+                                   recalculates=recalculates)

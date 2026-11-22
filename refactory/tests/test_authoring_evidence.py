@@ -256,7 +256,8 @@ def test_signal_death_classified_as_uncertain():
 
 
 def test_signal_death_stops_check_artifact_without_attempt(tmp_path, monkeypatch):
-    """A signal-killed environment install stops the run as uncertain, not as a code failure."""
+    """A signal-killed environment install stops the build loop, not as a code failure: a
+    BuildLoopStop naming the signal, which design mode makes a draft (D13)."""
     from refactory_dsh import design_ops, repo_change
 
     # Set up a RunContext with the minimum facts check_artifact needs.
@@ -282,9 +283,11 @@ def test_signal_death_stops_check_artifact_without_attempt(tmp_path, monkeypatch
         "`pnpm install --frozen-lockfile` failed: killed by SIGABRT", stdout="",
         prep_failure={"step": "pnpm install --frozen-lockfile", "returncode": -6, "timed_out": False}))
 
-    # check_artifact must raise ValueError matching "uncertain" — stop_unrepairable's
-    # message — proving the run does not reloop into emit or spend an attempt.
-    with pytest.raises(ValueError, match="uncertain"):
+    # check_artifact must raise BuildLoopStop naming the signal, proving the run does not
+    # reloop into emit or spend an attempt.
+    from refactory_dsh.run import BuildLoopStop
+
+    with pytest.raises(BuildLoopStop, match="was killed by signal 6"):
         design_ops.check_artifact(ctx)
 
     # No attempt was spent: repair() is never reached because stop_unrepairable raises first.

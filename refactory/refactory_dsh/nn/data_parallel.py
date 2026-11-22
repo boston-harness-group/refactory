@@ -318,6 +318,10 @@ def run_data_concurrent(
                         lambda: item_task.setup(instance, child.ctx.workdir, **setup_kwargs),
                         item_deadline_s, node.id, item_id,
                     )
+                    # What it laid in as item files is files of the pass (`Task.item_files`).
+                    from refactory_dsh.task import check_laid_item_files
+
+                    check_laid_item_files(item_task, pass_dir)
                 child.ctx.node_id = node.id
                 # As authored, as the spine hands them to its ops (`graph.op_io`).
                 child.ctx._declared, child.ctx._declared_reads, child.ctx._declared_facts = op_io(node)  # noqa: SLF001
