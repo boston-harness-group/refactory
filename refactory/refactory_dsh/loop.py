@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 if TYPE_CHECKING:
     from refactory_dsh.nn.mode import RunResult
@@ -64,7 +64,7 @@ from refactory_dsh.optim import (
 )
 from refactory_dsh.optim import create as create_optimizer
 from refactory_dsh.optim.base import (
-    MAX_EDITS_PER_PROPOSAL, RunStopped, available_before, edit_level, proposal_refusal,
+    MAX_EDITS_PER_PROPOSAL, NEW_STEP_TOOLS_OFF, RunStopped, available_before, edit_level, proposal_refusal,
     refused_entries,
     repair_losses,
     summarise_reasons,
@@ -426,6 +426,12 @@ class LoopConfig:
     #: only where the run permits structural edits, and a machine that cannot sandbox
     #: the code refuses code nodes either way (``E-code-nodes``).
     allow_code_nodes: bool = True
+    #: Whether a step an edit adds may have tools (``insert``/``map``/``fallback`` with
+    #: ``tools``, or a copy of a seed step that has some). On by default: such a step runs
+    #: sealed, seeing only the files it reads, with no network and no grader file. Off (an
+    #: ablation), the request offers no tool step and every new agent step with tools is
+    #: refused (``E-new-node-tools``); a step the seed has keeps its own tool rules either way.
+    new_step_tools: bool = True
     #: With ``val_gate``: stop after this many epochs in a row whose gating did not
     #: raise the best val score (SkillOpt's ``early_stop_patience``). 0 is off.
     early_stop_patience: int = 0
@@ -830,7 +836,8 @@ class Loop(OuterLoop):
         # request's offer and an attempt's acceptance (`workspace.sealed_steps`).
         from refactory_dsh.workspace import sealed_step, sealed_steps
 
-        self.optimizer.sealed_tools = sealed_steps(model)
+        self.optimizer.sealed_tools = self._sealed_answer(model)
+        self.optimizer.new_step_tools = bool(self.config.new_step_tools)
         # Each new sealed step on its own route, as its dispatch takes it.
         self.optimizer.sealed_check = functools.partial(sealed_step, model)
         self.optimizer.grader_secrets = self._grader_secrets
@@ -1068,10 +1075,18 @@ class Loop(OuterLoop):
         """Whether the request shows a tool step: on the answer an attempt refuses one by
         (`workspace.sealed_steps`, the optimizer's ``sealed_tools``)."""
         if getattr(self.optimizer, "sealed_tools", None) is None:
-            from refactory_dsh.workspace import sealed_steps
-
-            self.optimizer.sealed_tools = sealed_steps(self.model)
+            self.optimizer.sealed_tools = self._sealed_answer(self.model)
         return bool(self.optimizer.sealed_tools[0])
+
+    def _sealed_answer(self, model: Any) -> tuple[bool, str]:
+        """Whether a new step may run its tools sealed in this run, and why not: off when
+        the run turns new steps' tools off (``new_step_tools``), else whether the seal can
+        run here (`workspace.sealed_steps`)."""
+        if not self.config.new_step_tools:
+            return False, NEW_STEP_TOOLS_OFF
+        from refactory_dsh.workspace import sealed_steps
+
+        return sealed_steps(model)
 
     def _tools_not_offered(self) -> str:
         """Why the request offers no tool step, for the run's start summary and journal; empty
@@ -1638,6 +1653,7 @@ class Loop(OuterLoop):
         sampler.allow_code_nodes = bool(self.config.allow_code_nodes)
         sampler.step_routes = self.optimizer.step_routes
         sampler.sealed_tools = self.optimizer.sealed_tools
+        sampler.new_step_tools = bool(self.config.new_step_tools)
         sampler.sealed_check = self.optimizer.sealed_check
         sampler.grader_secrets = self._grader_secrets
         edits = self._exploration_edits(seed, wanted)
@@ -5430,6 +5446,10 @@ class Loop(OuterLoop):
             # Every evaluation that had an item a harness fault failed: the items,
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
             "harness_incidents": list(self._harness_incidents),
+            # Sealed steps that ran without a whole-step memory and process cap, said once
+            # (`seal.whole_step_cap`, each step's dispatch record).
+            **({"sealed_without_cap": uncapped}
+               if (uncapped := uncapped_sealed_steps(self.root / "runs")) else {}),
         }
         if gated and best is not None:
             payload.update(self.best_score_fields(best))
@@ -5858,6 +5878,7 @@ class Loop(OuterLoop):
             "",
             *_headline(payload),
             *_incident_lines(payload.get("harness_incidents") or []),
+            *_uncapped_lines(payload.get("sealed_without_cap")),
             *(["", f"The seed's first measurement on {', '.join(payload['seed_results']['parts_reused'])} "
                f"was reused from {payload['seed_results']['source']} (--seed-results), not run again."]
               if (payload.get("seed_results") or {}).get("parts_reused") else []),
@@ -8051,6 +8072,37 @@ def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
             "The kinds of change each proposal's answer said it weighed, and why it chose "
             "its own.", "",
             *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
+
+
+#: Where a sealed step's dispatch record sits under a candidate's run directory
+#: (`workspace.prepare`), at any depth: the run, an item's pass, and every occasion
+#: (``occasions/<part>_N``, ``train_epoch_N``, memory rollouts, smoke runs) and its passes.
+_DISPATCH_RECORDS = "*/**/.refactory/workspaces/*/dispatch.json"
+
+
+def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
+    """The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
+    they ran without a whole-step cap (`seal.whole_step_cap`): how many, and the first
+    reason; empty when none did."""
+    found: list[str] = []
+    # ``**`` does not follow links, so a concurrent pass's alias (``.refactory/live``) is
+    # not counted a second time.
+    for path in sorted(Path(runs).glob(_DISPATCH_RECORDS)):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("whole_step_cap") is False:
+            found.append(str(record.get("cap") or "no cap"))
+    return {"dispatches": len(found), "why": found[0]} if found else {}
+
+
+def _uncapped_lines(uncapped: Mapping[str, Any] | None) -> list[str]:
+    """The report's one line on sealed steps that ran without a whole-step cap."""
+    if not uncapped:
+        return []
+    return ["", f"Sealed steps ran without a whole-step memory cap "
+                f"({uncapped.get('dispatches')} step(s)): {uncapped.get('why')}."]
 
 
 def _incident_lines(incidents: Sequence[dict[str, Any]]) -> list[str]:

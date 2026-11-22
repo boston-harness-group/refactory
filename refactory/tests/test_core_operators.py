@@ -703,7 +703,9 @@ def _context(seed: str, **extra: Any) -> base_mod.ProposalContext:
 
 
 def test_the_request_explains_each_core_operator_in_one_line_with_one_example():
-    text = _context("fuzz_draft_review").render()
+    # A run that offers a tool step: each operator's line is said whole (without one,
+    # its tools clause goes, `core_ops.without_tools`).
+    text = _context("fuzz_draft_review", new_node_tools=True).render()
     section = text.split("## Structural operators", 1)[1].split("Compositions built", 1)[0]
     for name in core_ops.CORE_OPS:
         lines = [line for line in section.splitlines() if line.startswith(f"- `{name}` (")]

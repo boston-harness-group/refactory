@@ -54,7 +54,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from refactory_dsh import snippet
+from refactory_dsh import seal_reaper, snippet
 
 #: The tools a step an edit adds may list (`Node.tools`): those whose every effect runs
 #: through the seal. DSH's file and web tools run in its own process, outside any
@@ -71,16 +71,18 @@ PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 #: A sealed command's limits, as ``ulimit`` takes them: CPU seconds and the largest file
 #: (KiB). macOS counts processes per user, not per sandbox, and does not enforce an
 #: address-space limit, so it gets only these.
-LIMITS = "-t 3600 -f 4194304"
+#: (Defined in `seal_reaper`, which a runner whose scope's bus went away uses to fall back
+#: to the unscoped limits, and which runs with nothing but the standard library.)
+LIMITS = seal_reaper.LIMITS
 #: Linux, where each command runs in a systemd user scope (:func:`linux_scope`): the
 #: scope caps the memory and processes of the command and everything it starts
 #: together (:data:`SCOPE_LIMITS`), so the processes (counted in the command's own user
 #: namespace) need only a loose per-process bound.
-LINUX_LIMITS = "-u 512"
+LINUX_LIMITS = seal_reaper.LINUX_LIMITS
 SCOPE_LIMITS = ("MemoryMax=8G", "MemorySwapMax=0", "TasksMax=256")
 #: Linux without a user scope: no cap on the whole, so each process gets a tight one
 #: (128 processes, 8 GiB of address space each).
-LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
+LINUX_LIMITS_UNSCOPED = seal_reaper.LINUX_LIMITS_UNSCOPED
 
 #: macOS: closes every descriptor above stderr, then checks that none is left (a command
 #: that would start with one does not start), then runs its arguments. Linux runs the
@@ -228,10 +230,62 @@ def runner_command(workspace: Path) -> list[str]:
                              LINUX_LIMITS if scope else LINUX_LIMITS_UNSCOPED)]
 
 
+def user_manager_kept(groups: str | None = None,
+                      linger_root: str = "/var/lib/systemd/linger") -> bool:
+    """Whether this user's systemd manager runs as long as this process does: this process
+    is in one of the user's sessions or in the manager itself (its cgroup is under
+    ``user-<uid>.slice``), or the user lingers. Otherwise the manager stops a few seconds
+    after the user's last session ends, and with it every scope it made -- a sealed
+    command's included, killed mid-command, and the bus a new scope is made through gone
+    -- so a sealed command runs unscoped instead (`linux_scope`)."""
+    import pwd
+
+    if groups is None:
+        try:
+            with open("/proc/self/cgroup", encoding="utf-8") as handle:
+                groups = handle.read()
+        except OSError:
+            groups = ""
+    if f"/user-{os.getuid()}.slice/" in groups:
+        return True
+    try:
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return False
+    return os.path.exists(os.path.join(linger_root, name))
+
+
+def _no_scope_reason() -> str:
+    """Why this machine gives a sealed command no systemd user scope, in plain words, or
+    "" where it may (`_scope_prefix`)."""
+    if not shutil.which("systemd-run"):
+        return "no systemd-run here"
+    if not os.path.isdir(f"/run/user/{os.getuid()}"):
+        return "no systemd user manager is running for this user"
+    if not user_manager_kept():
+        return ("this run is outside the user's sessions and the user does not linger, so "
+                "systemd's user manager may stop (and take a scope's commands with it) at "
+                "any time")
+    return ""
+
+
+def whole_step_cap() -> tuple[bool, str]:
+    """Whether a sealed step made now gets a cap on the whole of what its commands start
+    (memory, processes), and what it is or why not: a systemd user scope on Linux
+    (`linux_scope`); per-process limits only otherwise, and on macOS. Recorded in each
+    sealed step's dispatch record (`workspace.Workspace.describe`) and the run's report."""
+    if sys.platform == "darwin":
+        return False, "macOS gives a sealed command per-process limits only"
+    if linux_scope():
+        return True, "a systemd user scope (" + ", ".join(SCOPE_LIMITS) + ")"
+    return False, (_no_scope_reason() or "the systemd user scope probe failed") \
+        + f"; per-process limits only ({LINUX_LIMITS_UNSCOPED})"
+
+
 def _scope_prefix() -> list[str]:
     systemd_run = shutil.which("systemd-run")
     runtime = f"/run/user/{os.getuid()}"
-    if not systemd_run or not os.path.isdir(runtime):
+    if _no_scope_reason():
         return []
     # Where systemd-run can be told not to expand $NAME in the command, it is told so;
     # the runner's arguments hold no '$' either way (`linux_arguments`).
@@ -251,14 +305,27 @@ def _scope_prefix() -> list[str]:
 _SCOPE: list[tuple[str, ...]] = []
 
 
+def _scope_bus_exists(prefix: tuple[str, ...]) -> bool:
+    """Whether the user bus a kept scope prefix connects through is still there."""
+    bus = seal_reaper.scope_bus(list(prefix))
+    return bus is None or os.path.exists(bus)
+
+
 def linux_scope() -> tuple[str, ...]:
     """What puts a sealed Linux command in a systemd user scope capped at
-    :data:`SCOPE_LIMITS`, or ``()`` where there is no user manager to make one (the
+    :data:`SCOPE_LIMITS`, or ``()`` where there is no user manager to make one, or none
+    that runs as long as this process (`user_manager_kept`) (the
     command then gets :data:`LINUX_LIMITS_UNSCOPED`, with a warning each time). A probe
     that finds its own memory cap is kept for the process; a failed one is tried again
-    next time, so one slow probe does not drop every later step to the fallback."""
+    next time, so one slow probe does not drop every later step to the fallback. A kept
+    prefix whose user bus is gone is dropped and probed again. A command whose scope bus
+    goes away after its runner was made runs unscoped instead (`seal_reaper.exec_runner`)."""
     if _SCOPE:
-        return _SCOPE[0]
+        if _scope_bus_exists(_SCOPE[0]):
+            return _SCOPE[0]
+        # systemd's user manager went away (its runtime directory goes with the person's
+        # last session): probed again, so later commands run unscoped rather than fail.
+        _SCOPE.clear()
     prefix = _scope_prefix()
     found: tuple[str, ...] = ()
     if prefix:

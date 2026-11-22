@@ -1734,9 +1734,21 @@ state is promised, on any graph shape:
   answer, no other process's environment), writes only its workspace, has no network, and
   starts with an environment of its own (no credential) and, on Linux, an empty session
   keyring of its own. On Linux each command runs in a systemd user scope capped at 8 GiB
-  of memory and 256 processes where the person's user manager can make one, else with
-  128 processes and 8 GiB of address space per process; it dies with the DSH process
-  that started it. Before its outputs are collected, every process still sealed in its
+  of memory and 256 processes where the person's user manager can make one and runs as
+  long as the run does (the run is in one of the person's sessions or in the manager, or
+  the person lingers), else with 128 processes and 8 GiB of address space per process;
+  it dies with the DSH process that started it. A manager that stops with the person's
+  last session would kill a scope's commands mid-step, so a run outside the person's
+  sessions (a system service, a container's shell) uses no scope; one that goes away
+  anyway drops that step's later commands to the per-process limits, and the next step
+  is probed afresh. Each step's dispatch record says whether it had that whole-step
+  cap and why not (`whole_step_cap`, `cap`), and the run's report says once when sealed
+  steps ran without one. The runner waits on the seal and is told, on a descriptor the
+  command never holds, when the command starts: a seal that fails before that (a
+  session keyring, the sandbox, its own setup exiting 97, a failing `unshare` or
+  `systemd-run`) is recorded beside the workspace for that one dispatch, and the step is
+  a harness incident (`SealFailed`), never an answer from commands that silently did
+  nothing. Whatever the command itself exits with is its own. Before its outputs are collected, every process still sealed in its
   workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
   workspace over 4 GiB is not collected, and each output is opened one name at a time
   relative to its folder's descriptor without following a link, so nothing it leaves or
@@ -2147,7 +2159,40 @@ whose default is a copy of one) keeps its tools only in a fresh workspace of its
 (`scratch`): the attempt path lets a new agent run with the same tools a step of the seed
 runs with when it works in such a workspace (`E-new-node-tools` otherwise; a step listing
 its own tools runs sealed instead). A step that uses tools in the run directory is not run
-beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
+beside a copy of itself, rewired or merged; the refusal says to give it a workspace. A step
+of the seed keeps its own tool rules (a `refused` solve step stays refused), but a step an
+edit adds may still have tools, and the request says so. `new_step_tools` off
+(`LoopConfig.new_step_tools`, on by default; an ablation) offers no tool step and refuses
+every new agent step with tools, `E-new-node-tools`, naming the setting. A run that keeps
+the default produces the same digest as before, so it still resumes.
+
+**Item files.** A Task may lay files into each item's pass under fixed names
+(`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
+The data node declares each in its `writes` (V12), so any step of the pass can read one:
+a new sealed step names it in `sees` (or names the data node) and gets a copy in its
+workspace; an op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+both runtimes) a file the op does not list in its `reads`, as do the context's
+`read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
+never its answer: a path the grader reads or writes is refused when the Task is checked
+(names compared case- and width-folded), `item_files` is a class attribute read the same
+way everywhere, and `setup` must lay each as a regular file of its own (a symbolic or hard
+link is refused and fails the item); grader-only fields stay out of the pass as before.
+
+**Saved states of an earlier version.** A mode may upgrade a state an earlier version of
+it saved (`Mode.upgrade_state`): only declarations its own ops now need, never what an
+edit chose. Both runtimes apply it (`Mode.load_state_dict` on the walker,
+`dsh_runtime.evaluate_on_dsh` on the spine), warn, and record each change in the run's
+`.refactory/state-upgrades.json`. SpreadsheetBench uses it so a candidate saved before
+its input was an item file (its protected data node does not declare `item/input.xlsx`)
+declares it and runs as it did; a state this version saved is never changed. The pipeline view's
+`per item` line names each item file and the steps that read it.
+
+**`to` an agent whose prompt is no knob.** `insert` (and `branch`, `map`) with `to` naming
+an agent step whose prompt is a template rather than a knob (SpreadsheetBench's
+`solve`, whose prompt is `{{solver_prompt}}`, a fact `frame` builds) re-slots that step's
+prompt in place, as `rewire` does: a `## <Fact>` section with the new step's `{{fact}}`
+goes after it, and the prompt becomes the step's own `<id>__task` knob. A frozen knob
+stays frozen: `to` naming one is still refused (`E-wiring`).
 
 **Each kind tried, against the noise.** A kind tried once with a small result read as a
 run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,

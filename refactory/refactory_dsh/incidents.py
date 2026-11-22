@@ -35,3 +35,10 @@ class HarnessIncident(RuntimeError):
 #: `HARNESS_INCIDENT_TEXT` -- a model's reply quoted in a ValueError, a code node's own
 #: exception -- is not.
 HARNESS_INCIDENT_CLASSES: set[str] = {"HarnessIncident"}
+
+
+class SealFailed(HarnessIncident):
+    """A sealed step's command could not start in its seal: its runner failed before the
+    command ran (systemd's user scope bus gone, a session keyring or the sandbox refused;
+    `seal_reaper.record_incident`). The machine's failure, so its item is a harness
+    incident, never a step whose commands quietly found nothing (`workspace.collect`)."""

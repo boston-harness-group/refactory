@@ -180,6 +180,9 @@ class Workspace:
     generate_owned: dict[str, str] = field(default_factory=dict)
     #: Files in ``generate_owned`` the agent then changed, which it is told about.
     prepared_edits: tuple[str, ...] = ()
+    #: A sealed step's cap on the whole of what its commands start (`seal.whole_step_cap`):
+    #: whether it has one, and what it is or why not.
+    whole_step_cap: tuple[bool, str] | None = None
     #: A sealed step's tools (`is_sealed`), and the runner each of its commands runs
     #: under (`seal.runner_command`); empty for any other workspace.
     tools: tuple[str, ...] = ()
@@ -191,6 +194,8 @@ class Workspace:
             "kind": self.kind, **({"of": self.of} if self.of else {}), "collect": self.collect,
             "path": str(self.path), **({"base": self.base} if self.base else {}),
             **({"sealed": True, "tools": list(self.tools)} if self.runner else {}),
+            **({"whole_step_cap": self.whole_step_cap[0], "cap": self.whole_step_cap[1]}
+               if self.runner and self.whole_step_cap is not None else {}),
             "sandbox": ("sealed: its files only, no network" if self.runner
                         else self.confine and f"workspace-write ({self.confine})"
                         or f"not confined: {self.unconfined}"),
@@ -465,6 +470,12 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
             os.close(fd)
     workspace.tools = tools
     workspace.runner = tuple(seal.runner_command(workspace.path))
+    workspace.whole_step_cap = seal.whole_step_cap()
+    # What the runner records beside the workspace belongs to this dispatch alone.
+    from refactory_dsh.seal_reaper import incidents_path, notes_path
+
+    for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path))):
+        Path(record).unlink(missing_ok=True)
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:
@@ -999,6 +1010,46 @@ def _same_as(path: Path, base: str, names: list[str]) -> set[str]:
     return same
 
 
+def _read_lines(path: Path, key: str) -> list[str]:
+    """Each JSON line's ``key`` of a runner's record beside a workspace, which is then
+    removed: a record belongs to the one dispatch that made it."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    path.unlink(missing_ok=True)
+    out = []
+    for line in lines:
+        try:
+            out.append(str(json.loads(line).get(key) or "unknown"))
+        except (ValueError, AttributeError):
+            out.append(line.strip() or "unknown")
+    return out
+
+
+def _record_seal_notes(workspace: Workspace, notes: Path) -> None:
+    """Put what the runner noted of how the step's commands ran (`seal_reaper.record_note`:
+    one ran without the whole-step cap) in the step's dispatch record."""
+    found = _read_lines(notes, "note")
+    if not found:
+        return
+    workspace.whole_step_cap = (False, found[0])
+    _write_json(workspace.root / "dispatch.json", workspace.describe())
+
+
+def _raise_seal_incidents(node: str, incidents: Path) -> None:
+    """Raise `incidents.SealFailed` when a command of the sealed step could not start in
+    its seal (`seal_reaper.record_incident`): the step then ran without what it asked
+    for, so its outcome is the harness's failure, on both runtimes (`node_retry.deliver`
+    collects for each)."""
+    reasons = _read_lines(incidents, "reason")
+    if reasons:
+        from refactory_dsh.incidents import HARNESS_INCIDENT_TEXT, SealFailed
+
+        raise SealFailed(f"{HARNESS_INCIDENT_TEXT}agent node {node!r}: {len(reasons)} sealed "
+                         f"command(s) could not start in the seal: {reasons[0]}")
+
+
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             final_response: str | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
@@ -1017,12 +1068,16 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     from refactory_dsh.agent_delivery import _path
 
     if workspace.runner:
-        from refactory_dsh.seal_reaper import reap
+        from refactory_dsh.seal_reaper import incidents_path, notes_path, reap
 
+        incidents = Path(incidents_path(str(workspace.path)))
+        notes = Path(notes_path(str(workspace.path)))
         reap(str(workspace.path))
         moved = workspace.path.with_name(workspace.path.name + ".collected")
         os.rename(workspace.path, moved)
         workspace.path = moved
+        _record_seal_notes(workspace, notes)
+        _raise_seal_incidents(workspace.node, incidents)
         size = _tree_bytes(workspace.path)
         if size > SEALED_WORKSPACE_MAX_BYTES:
             raise WorkspaceError(f"agent node {workspace.node!r} left {size >> 20} MiB in its sealed "
