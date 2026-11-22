@@ -82,11 +82,13 @@ INVENTED_TOOL_CALLS = "invented_tool_calls"
 #: (`record_spent`, read by `items.missing_steps`).
 MISSING_DIR = ".refactory/missing"
 
-#: The runtime behaviour a score depends on beyond the mode's own code: since this
-#: marker, a crashed agent step in a data pass is retried and a spent one leaves its item
-#: without an answer. Scores and seed caches from before it are not comparable
-#: (`profiles.resolve`, `seed_cache.score_context`).
-SEMANTICS = "pass-crash-retry/1"
+#: The runtime behaviour a score depends on beyond the mode's own code: since
+#: ``pass-crash-retry/1``, a crashed agent step in a data pass is retried and a spent one
+#: leaves its item without an answer; since ``invented-tool-calls/1``, a step with no
+#: tools whose reply writes out tool calls is asked once more and then left without an
+#: answer (`refuses_tool_markup`). Scores and seed caches from before it are not
+#: comparable (`profiles.resolve`, `seed_cache.score_context`).
+SEMANTICS = "invented-tool-calls/1"
 
 
 class RetriesExhausted(RuntimeError):

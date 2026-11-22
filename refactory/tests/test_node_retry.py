@@ -1049,3 +1049,34 @@ def test_livemath_and_the_skill_graph_keep_their_replies_as_skillopt_does():
              *skill_graph.SkillGraph().build().nodes.values()]
     agents = [node for node in nodes if node.kind == "agent"]
     assert agents and all(node.tool_policy == "none" and node.keeps_tool_markup for node in agents)
+
+
+@pytest.mark.parametrize("edit, copies", [
+    ({"op": "insert", "after": "solve"}, ["solve_next"]),
+    ({"op": "parallelize", "steps": ["solve"], "copies": 2}, ["solve_copy1", "solve_copy2"]),
+], ids=["insert", "parallelize"])
+def test_a_copy_of_livemaths_solve_keeps_its_replies_as_solve_does(edit, copies):
+    """A copy is sent what the step it copies is, and takes its reply the same way."""
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    graph = Graph.from_state(nn_edits.apply(edit, Solver().state_dict())["graph"])
+    assert graph.nodes["solve"].keeps_tool_markup
+    assert all(graph.nodes[copy].tool_policy == "none" and graph.nodes[copy].keeps_tool_markup
+               for copy in copies), edit
+
+
+def test_a_split_copy_keeps_its_replies_and_the_new_reviewer_refuses():
+    """LiveMath's solve alone reads frozen knobs, so split refuses it; on a step that keeps
+    its replies, split's copy keeps them and its new reviewer takes the platform's refusal."""
+    import structure_fuzz as sf
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    with pytest.raises(nn_edits.EditError, match="frozen knob"):
+        nn_edits.apply({"op": "split", "step": "solve"}, Solver().state_dict())
+    state = sf.seeds()["fuzz_draft_review"].state()
+    state["graph"]["nodes"]["review"]["keeps_tool_markup"] = True
+    graph = Graph.from_state(nn_edits.apply({"op": "split", "step": "review"}, state)["graph"])
+    assert graph.nodes["review_a"].tool_policy == "none" and graph.nodes["review_a"].keeps_tool_markup
+    assert not graph.nodes["review_b"].keeps_tool_markup
