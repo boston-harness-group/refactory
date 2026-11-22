@@ -72,6 +72,7 @@
         "check-verdict.json",
         "check.txt",
         "test-guardedness.json",
+        "timeout-output.txt",
         "validation.txt"
       ],
       "blocking": true,
@@ -363,6 +364,7 @@
         "check-verdict.json",
         "check.txt",
         "test-guardedness.json",
+        "timeout-output.txt",
         "validation.txt"
       ],
       "blocking": true,
@@ -654,6 +656,7 @@
         "check.txt",
         "self-check-record.jsonl",
         "test-guardedness.json",
+        "timeout-output.txt",
         "validation.txt"
       ],
       "blocking": true,

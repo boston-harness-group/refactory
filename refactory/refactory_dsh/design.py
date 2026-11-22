@@ -1099,7 +1099,8 @@ class DesignMode(Mode):
                           "convergence_extras_used", "convergence_granted", "inherited_failures",
                           "empty_emission_fingerprint")
         check_writes = ("check.txt", "validation.txt", "authoring-evidence.json",
-                        "check-record.json", "test-guardedness.json", CHECK_VERDICT)
+                        "check-record.json", "test-guardedness.json", CHECK_VERDICT,
+                        "timeout-output.txt")
         check_knobs = ("check_attempts", "check_timeout_s", "check_attempt_cap")
         defaults = {name: knob.default for name, knob in self.declare().items()}
         self_check_produces = (*check_produces, *repo_change.CHECK_PRODUCES,

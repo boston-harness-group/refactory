@@ -43,7 +43,8 @@
         "check.txt",
         "focused-check.json",
         "focused-source.json",
-        "test-guardedness.json"
+        "test-guardedness.json",
+        "timeout-output.txt"
       ],
       "blocking": true,
       "resource_role": "final_validation",

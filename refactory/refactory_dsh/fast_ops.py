@@ -496,7 +496,7 @@ def focused_check(ctx: Any) -> dict[str, Any]:
             # Write timeout-output.txt alongside the check record.
             _tout_lines = (result.stdout or "").splitlines()[-200:]
             _tout_header = f"# {_reason}\n# timeout_kind={_tk}\n\n"
-            (Path(ctx.workdir) / "timeout-output.txt").write_text(
+            ctx.write_text("timeout-output.txt",
                 _tout_header + "\n".join(_tout_lines) + "\n")
             _detail = f"{_reason}\n\nLast output:\n{_tail}" if _tail else _reason
             raise ValueError(f"validation check_timeout: {_detail}")

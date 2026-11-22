@@ -754,23 +754,43 @@ def test_check_failure_kind_returns_uncertain_for_budget_timeout():
 
 
 class _FullCtx(_Ctx):
-    """Extended ctx for _full_check tests with write_text, write_json, knob, etc."""
+    """Extended ctx for _full_check tests with write_text, write_json, knob, etc.
 
-    def __init__(self, workdir: Path) -> None:
+    Enforces the same write guard as the production ``OpContext._note_write``:
+    ``write_text`` and ``write_json`` raise when the file is not in
+    ``declared_writes``.  Tests must pass the same declared writes as the
+    graph node uses (``check_writes`` from ``design.py``), so removing a
+    file from the declaration breaks the test.
+    """
+
+    def __init__(self, workdir: Path, *, declared_writes: tuple[str, ...] = ()) -> None:
         super().__init__(workdir)
         self.knobs_dict: dict[str, int | str] = {}
         self.budget = None
         self._written: dict[str, str] = {}
+        self._declared_writes = declared_writes
+
+    def _check_write(self, name: str) -> None:
+        if not self._declared_writes:
+            return
+        for declared in self._declared_writes:
+            if name == declared or name.startswith(declared.rstrip("/") + "/"):
+                return
+        raise RuntimeError(
+            f"write guard: {name!r} is not in declared writes {list(self._declared_writes)}"
+        )
 
     def knob(self, name: str, default: int | str = 0) -> int | str:
         return self.knobs_dict.get(name, default)
 
     def write_text(self, name: str, text: str) -> None:
+        self._check_write(name)
         (self.workdir / name).write_text(text)
         self._written[name] = text
 
     def write_json(self, name: str, data: object) -> None:
         import json
+        self._check_write(name)
         (self.workdir / name).write_text(json.dumps(data))
 
     def read_json(self, name: str, default: object = None) -> object:
@@ -784,15 +804,34 @@ class _FullCtx(_Ctx):
         return self.workdir / name
 
 
+def _check_writes_tuple() -> tuple[str, ...]:
+    """The declared writes for the check node, read from the design graph.
+
+    Kept here so the tests exercise the same write guard the production
+    ``OpContext._note_write`` enforces.  If a file is removed from the
+    declaration, the test that writes it fails with a write-guard error.
+    """
+    from refactory_dsh.design import DesignMode
+    mode = DesignMode()
+    graph = mode.build()
+    # The "check" node has the check_writes tuple in its writes.
+    check_node = graph.nodes["check"]
+    return tuple(check_node.writes)
+
+
 def test_timed_out_check_produces_draft_pr(tmp_path, monkeypatch):
     """A check returning SandboxResult(timed_out=True, timeout_kind='inactivity') routes
-    to a draft PR (draft_delivery fact is set), not to stop_unrepairable."""
+    to a draft PR (draft_delivery fact is set), not to stop_unrepairable.
+
+    Uses the production check_writes as the write guard, so removing
+    timeout-output.txt from the declaration crashes the test.
+    """
     from refactory_dsh.sandbox import SandboxResult
     from refactory_dsh.design_ops import _full_check
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh import worktree
 
-    ctx = _FullCtx(tmp_path)
+    ctx = _FullCtx(tmp_path, declared_writes=_check_writes_tuple())
     ctx.facts["check"] = "echo test"
     ctx.facts["name"] = "test-run"
     ctx.facts["commit"] = ""
@@ -821,13 +860,17 @@ def test_timed_out_check_produces_draft_pr(tmp_path, monkeypatch):
 
 
 def test_timeout_output_txt_written_next_to_check(tmp_path, monkeypatch):
-    """When a check times out with timeout_kind, timeout-output.txt is written."""
+    """When a check times out with timeout_kind, timeout-output.txt is written.
+
+    Uses the production check_writes write guard so removing timeout-output.txt
+    from design.py check_writes crashes this test with a write-guard error.
+    """
     from refactory_dsh.sandbox import SandboxResult
     from refactory_dsh.design_ops import _full_check
     from refactory_dsh import authoring_evidence as evidence
     from refactory_dsh import worktree
 
-    ctx = _FullCtx(tmp_path)
+    ctx = _FullCtx(tmp_path, declared_writes=_check_writes_tuple())
     ctx.facts["check"] = "echo test"
     ctx.facts["name"] = "test-run"
     ctx.facts["commit"] = ""

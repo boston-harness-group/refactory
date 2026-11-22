@@ -88,7 +88,7 @@ def _qa_nodes(graph: Graph, *, artifact: bool, design: bool = False) -> None:
         knobs=("check", "check_timeout_s", "check_attempt_cap"),
         reads=("emit.txt",) + (() if artifact else ("authoring-evidence.json", "smoke.json")),
         writes=("focused-check.json", "focused-source.json", "authoring-evidence.json", "check-record.json",
-                "test-guardedness.json")
+                "test-guardedness.json", "timeout-output.txt")
                + (("check.txt", *repo_change.CHECK_WRITES) if artifact else ()),
         produces=("focused_check", "output_path", "review_files", "runtime_evidence",
                   "base_unavailable",
