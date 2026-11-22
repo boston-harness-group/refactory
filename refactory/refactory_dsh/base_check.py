@@ -26,9 +26,10 @@ import os
 import re
 import shlex
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from refactory_dsh import sandbox, worktree
 from refactory_dsh.worktree import _json as _read_json, NO_HOOKS, _isolate_hooks
@@ -128,6 +129,403 @@ def _steps(command: str) -> list[str]:
     return [step for step in steps if step]
 
 
+# ── chain-step splitting for per-step excusal ───────────────────────────
+
+#: Shell keywords that make a command unsplittable.
+_UNSPLITTABLE_KEYWORDS = frozenset({
+    "if", "then", "else", "elif", "fi",
+    "for", "while", "until", "do", "done",
+    "case", "esac",
+})
+
+
+def _chain_steps(command: str, *, reason: list[str] | None = None) -> list[tuple[str, str]] | None:
+    """Split *command* on top-level ``&&``, ``||`` and ``;`` only.
+
+    Returns a list of ``(step_text, operator)`` tuples where the first step's
+    operator is ``""``.  Keeps ``|`` (pipe) and ``&`` (background) inside the
+    step text, and drops comments (an unquoted ``#`` starting a word, to the end
+    of its line).  Returns ``None`` when the command is unsplittable: a heredoc,
+    a compound keyword (``if``/``case``/``for``/``while``), or a backtick
+    substitution that spans an operator.
+
+    When *reason* is a list, appends a human-readable string explaining why
+    the command could not be split.
+    """
+
+    def _refuse(msg: str) -> None:
+        if reason is not None:
+            reason.append(msg)
+
+    steps: list[tuple[str, str]] = []
+    current = ""
+    depth = 0        # parenthesis depth
+    quote = ""       # current quoting character
+    backtick = False # inside backtick substitution
+    operator = ""    # operator before this step
+    i = 0
+
+    while i < len(command):
+        char = command[i]
+
+        if quote:
+            current += char
+            if char == "\\" and quote == '"' and i + 1 < len(command):
+                current += command[i + 1]
+                i += 2
+                continue
+            elif char == quote:
+                quote = ""
+            i += 1
+            continue
+
+        if char == "\\" and i + 1 < len(command):
+            current += command[i:i + 2]
+            i += 2
+            continue
+
+        if char in "'\"":
+            quote = char
+            current += char
+            i += 1
+            continue
+
+        # An unquoted ``#`` that starts a word starts a comment, which runs to the end
+        # of the line: nothing in it is a step, an operator or a runner name.
+        if char == "#" and (not current or (current[-1] in " \t\n&|("
+                                            and current[-2:-1] != "\\")):
+            end = command.find("\n", i)
+            i = len(command) if end == -1 else end
+            continue
+
+        if char == "`":
+            backtick = not backtick
+            current += char
+            i += 1
+            continue
+
+        if char == "(":
+            depth += 1
+            current += char
+            i += 1
+            continue
+
+        if char == ")":
+            depth -= 1
+            current += char
+            i += 1
+            continue
+
+        # Redirection with & (e.g. 2>&1, &>log)
+        if char == "&" and (current.endswith((">", "<")) or command[i + 1:i + 2] == ">"):
+            current += char
+            i += 1
+            continue
+
+        # At top level (depth 0): check for split operators
+        if depth == 0:
+            # Check for heredoc: unquoted << not preceded by < and not <<<
+            if char == "<" and command[i + 1:i + 2] == "<" and command[i + 2:i + 3] != "<":
+                # Check it's not preceded by another <
+                if not current.rstrip().endswith("<"):
+                    _refuse("heredoc (unquoted <<) detected")
+                    return None
+
+            # Check for && or ||
+            if char == "&" and command[i + 1:i + 2] == "&":
+                # Backtick substitution spans an operator: unsplittable
+                if backtick:
+                    _refuse("backtick substitution spans && operator")
+                    return None
+                step_text = current.strip()
+                if step_text:
+                    # Check first word for shell keywords
+                    try:
+                        words = shlex.split(step_text)
+                    except ValueError:
+                        words = step_text.split()
+                    if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
+                        return None
+                    steps.append((step_text, operator))
+                operator = "&&"
+                current = ""
+                i += 2
+                continue
+
+            if char == "|" and command[i + 1:i + 2] == "|":
+                if backtick:
+                    _refuse("backtick substitution spans || operator")
+                    return None
+                step_text = current.strip()
+                if step_text:
+                    try:
+                        words = shlex.split(step_text)
+                    except ValueError:
+                        words = step_text.split()
+                    if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
+                        return None
+                    steps.append((step_text, operator))
+                operator = "||"
+                current = ""
+                i += 2
+                continue
+
+            if char == ";":
+                if backtick:
+                    _refuse("backtick substitution spans ; operator")
+                    return None
+                step_text = current.strip()
+                if step_text:
+                    try:
+                        words = shlex.split(step_text)
+                    except ValueError:
+                        words = step_text.split()
+                    if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
+                        return None
+                    steps.append((step_text, operator))
+                operator = ";"
+                current = ""
+                i += 1
+                continue
+
+        # Pipe (not ||) stays in current step
+        current += char
+        i += 1
+
+    # Handle the last step
+    step_text = current.strip()
+    if step_text:
+        try:
+            words = shlex.split(step_text)
+        except ValueError:
+            words = step_text.split()
+        if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+            _refuse(f"shell keyword '{words[0]}' in step")
+            return None
+        steps.append((step_text, operator))
+
+    # If backtick is still open, the substitution spans operators
+    if backtick:
+        _refuse("unclosed backtick substitution spans operators")
+        return None
+
+    for step_text, _operator in steps:
+        unsafe = _unsafe_step(step_text)
+        if unsafe:
+            _refuse(unsafe)
+            return None
+
+    return steps if steps else None
+
+
+def _unsafe_step(step: str) -> str | None:
+    """Why ``step`` cannot run in the shell the chain's steps share; None when it can.
+
+    The marker script runs every step past a failure itself, so a step that ends,
+    replaces (``exec``) or traps that shell, runs a file's commands in it (``.``,
+    ``source``: the file may turn on errexit), or turns on errexit in a way
+    `_without_errexit` cannot take back out, would stop the later steps' markers.
+    """
+    try:
+        words = shlex.split(step)
+    except ValueError:
+        words = step.split()
+    if not words:
+        return None
+    if words[0] in ("exit", "trap", "exec"):
+        return f"a `{words[0]}` step ends, replaces or traps the shell the steps share"
+    if words[0] in (".", "source"):
+        return f"a `{words[0]}` step runs a file's commands in the shell the steps share"
+    if words[0] == "set":
+        if _without_errexit(step) is None:
+            return "a `set` step whose options cannot be read"
+        return None
+    if re.search(r"\berrexit\b|\bSHELLOPTS\b", step) or (
+            words[0] in ("eval", "builtin", "command") and "set" in words):
+        return "a step that may turn on errexit some other way than `set`"
+    return None
+
+
+def _without_errexit(step: str) -> str | None:
+    """A ``set`` step without errexit (``-e``, ``-o errexit``), its other options kept.
+
+    ``set -euo pipefail`` becomes ``set -u -o pipefail``; ``set -e`` alone becomes ``:``.
+    A step that is not ``set`` is returned as it is; None when its options cannot be read
+    (a variable, a missing ``-o`` name).
+    """
+    try:
+        words = shlex.split(step)
+    except ValueError:
+        return None
+    if not words or words[0] != "set":
+        return step
+    if len(words) == 1:
+        return step
+    if any(char in step for char in "$`"):
+        return None
+    kept = ["set"]
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-", "--") or not word.startswith(("-", "+")):
+            kept += words[i:]  # positional parameters
+            break
+        if not re.fullmatch(r"[-+][A-Za-z]+", word):
+            return None
+        sign, letters = word[0], word[1:]
+        name = None
+        if "o" in letters:
+            if not letters.endswith("o") or letters.count("o") > 1 or i + 1 >= len(words):
+                return None
+            name = words[i + 1]
+            letters = letters[:-1]
+            i += 1
+        if sign == "-":
+            letters = letters.replace("e", "")
+        if letters:
+            kept.append(sign + letters)
+        if name is not None and not (sign == "-" and name == "errexit"):
+            kept += [sign + "o", name]
+        i += 1
+    return shlex.join(kept) if len(kept) > 1 else ":"
+
+
+def _build_marker_script(steps: list[tuple[str, str]], marker_id: str) -> str:
+    """A shell script that runs the chain's steps in one shell, each followed by a marker.
+
+    It begins with ``exec 2>&1``, so each step's output includes what it printed to
+    stderr (runners print summaries and errors there). A step after ``&&`` runs even
+    when the chain has failed by then -- running what ``&&`` skips is the point -- but
+    it leaves the chain's status as the shell would have it. A step after ``||`` runs
+    only when the shell would run it, on the chain's status so far, not only on the
+    previous step's exit: with ``a || b || c`` and ``a`` passing, neither ``b`` nor
+    ``c`` runs, and its marker says so. A ``set`` step runs without errexit
+    (`_without_errexit`), its other options kept.
+    """
+    status, code = "__refactory_status", "__refactory_exit"
+    lines = ["exec 2>&1", f"{status}=0"]
+    for idx, (step_text, operator) in enumerate(steps):
+        # errexit would end the shell at the first failing step, before the later markers.
+        step_text = _without_errexit(step_text) or step_text
+        mark = f"___REFACTORY_STEP_{marker_id}_{idx}_"
+        record = f"{code}=$?; echo '{mark}EXIT_'${code}"
+        if operator == "||":
+            lines += [f'if [ "${status}" -ne 0 ]; then', step_text, record,
+                      f"{status}=${code}", f"else echo '{mark}SKIPPED'; fi"]
+        elif operator == "&&":
+            lines += [step_text, record, f'if [ "${status}" -eq 0 ]; then {status}=${code}; fi']
+        else:
+            lines += [step_text, record, f"{status}=${code}"]
+    return "\n".join(lines)
+
+
+def _parse_step_results(
+    stdout: str, marker_id: str, steps: list[tuple[str, str]],
+) -> list[dict] | None:
+    """Parse marker lines from stdout.
+
+    Returns a list of dicts with ``step``, ``operator``, ``ran``, ``output`` and
+    ``exit_code`` (None for a step that did not run) per step, or ``None`` when
+    markers are missing, out of order or incomplete.
+    """
+    pattern = (r'___REFACTORY_STEP_' + re.escape(marker_id)
+               + r'_(\d+)_(?:EXIT_(\d+)|SKIPPED)')
+    markers = list(re.finditer(pattern, stdout))
+    if len(markers) != len(steps):
+        return None
+
+    results = []
+    prev_end = 0
+    for i, m in enumerate(markers):
+        if int(m.group(1)) != i:
+            return None  # out of order
+        ran = m.group(2) is not None
+        # The step's output is everything between the previous marker and this one.
+        output = stdout[prev_end:m.start()].rstrip()
+        prev_end = m.end()
+        if prev_end < len(stdout) and stdout[prev_end] == '\n':
+            prev_end += 1
+        step_text, operator = steps[i]
+        results.append({
+            "step": step_text,
+            "operator": operator,
+            "ran": ran,
+            "output": output if ran else "",
+            "exit_code": int(m.group(2)) if ran else None,
+        })
+    return results
+
+
+def _roots(*places: tuple[Path | str, str]) -> list[tuple[str, str]]:
+    """Run-specific paths with the placeholder each becomes in a step's `_signature`."""
+    roots = []
+    for path, label in places:
+        roots += [(str(path), label), (str(Path(path).resolve()), label)]
+    return roots
+
+
+def _normalized(output: str, roots: list[tuple[str, str]]) -> str:
+    """A step's output with each side's own paths -- the exact worktree or check copy,
+    HOME and run directory it ran with -- replaced. Any other path, under /tmp or not,
+    stays as printed, so a new error that differs only there still differs."""
+    text = strip_ansi(output)
+    for path, label in sorted(roots, key=lambda root: -len(root[0])):
+        if path and path != "/":
+            text = text.replace(path, label)
+    return text
+
+
+def _signature(output: str, roots: list[tuple[str, str]]) -> str:
+    """`_normalized` output, hashed, so the same output on base and attempt matches."""
+    return hashlib.sha256(_normalized(output, roots).encode()).hexdigest()
+
+
+def _step_record(sr: dict, roots: list[tuple[str, str]] = ()) -> dict:  # type: ignore[assignment]
+    """A parsed step with what the comparison reads: its failures, runner, accounting and signature."""
+    failures = parse_test_failures(sr["output"]) if sr["ran"] else set()
+    runner = (_runner(sr["step"]) or _runner_from_output(sr["output"])) if sr["ran"] else None
+    # A runner that passed names nothing and counts nothing failed: nothing is unaccounted.
+    passed = sr["exit_code"] == 0 and not failures
+    return {**sr, "failures": sorted(failures), "runner": runner,
+            "accounted": runner is not None and (passed or _accounted(runner, sr["output"], failures)),
+            "signature": _signature(sr["output"], list(roots)),
+            "quiet": not _normalized(sr["output"], list(roots)).strip()}
+
+
+def _run_chain_markers(
+    steps: list[tuple[str, str]], run: Callable[[str], Any],
+    roots: list[tuple[str, str]] = (),  # type: ignore[assignment]
+) -> list[dict] | None:
+    """Run all chain steps in one shell with markers, returning per-step records.
+
+    ``run`` runs a script where the side being compared runs its check, and returns
+    its `sandbox.SandboxResult`; ``roots`` are that side's own paths (`_signature`).
+    Returns ``None``, with a warning, when the per-step
+    results cannot be read: a timeout, a signal crash, or markers missing (the kept
+    output was cut, or a step ended the shell).
+    """
+    marker_id = uuid.uuid4().hex[:12]
+    result = run(_build_marker_script(steps, marker_id))
+    if result.timed_out:
+        target_guard.warn("the chain's per-step run timed out; its steps cannot be compared")
+        return None
+    crashed, signal_name = sandbox.is_signal_crash(result)
+    if crashed:
+        target_guard.warn(f"the chain's per-step run was {signal_name}; its steps cannot be compared")
+        return None
+    stdout = "\n".join((result.stdout or "", result.stderr or "")).strip()
+    parsed = _parse_step_results(stdout, marker_id, steps)
+    if parsed is None:
+        found = len(re.findall(r'___REFACTORY_STEP_' + re.escape(marker_id) + r'_', stdout))
+        target_guard.warn(f"the chain's per-step results could not be read: {found} of "
+                          f"{len(steps)} step markers in its kept output")
+        return None
+    return [_step_record(sr, roots) for sr in parsed]
+
+
 def _runner(step: str) -> str | None:
     """``pytest`` or ``vitest`` when ``step`` names that runner (jest reports like vitest)."""
     import shlex
@@ -140,6 +538,18 @@ def _runner(step: str) -> str | None:
     if "pytest" in names or "py.test" in names:
         return "pytest"
     if "vitest" in names or "jest" in names:
+        return "vitest"
+    return None
+
+
+def _runner_from_output(output: str) -> str | None:
+    """Detect the runner from its output when the step text does not name it.
+
+    Falls back to ``None`` when neither pytest's nor vitest's summary is found.
+    """
+    if _PYTEST_SUMMARY.search(output):
+        return "pytest"
+    if re.search(r"^\s*Tests\s+\d+\s+(?:failed|passed)", output, re.MULTILINE):
         return "vitest"
     return None
 
@@ -684,6 +1094,12 @@ def _read_cache(run: Path, key: str) -> BaseCheckResult | None:
         )
         # Attach base_complete as a transient attribute for filter_check (R5).
         result._base_complete = data.get("base_complete", False)  # type: ignore[attr-defined]
+        # Attach per-step results from cache if present.
+        cached_steps = data.get("steps")
+        if cached_steps is not None:
+            result._step_results = cached_steps  # type: ignore[attr-defined]
+        if data.get("steps_unreadable"):
+            result._steps_unreadable = True  # type: ignore[attr-defined]
         return result
     return None
 
@@ -712,6 +1128,12 @@ def _write_cache(run: Path, key: str, result: BaseCheckResult,
         "base_complete": base_complete,
         "base_clean": True,
     }
+    # Per-step results from chain marker runs.
+    step_results = getattr(result, '_step_results', None)
+    if step_results is not None:
+        data["steps"] = step_results
+    if getattr(result, '_steps_unreadable', False):
+        data["steps_unreadable"] = True
     (run / CACHE_FILE).write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -808,6 +1230,36 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         # Compute completeness for R5.
         blocker = excusal_blocker(command, output, failures) if failures else None
         result._base_complete = (blocker is None) if failures else check_result.ok  # type: ignore[attr-defined]
+
+        # A failed chain of two or more steps: run its steps again in one shell, each
+        # recorded, so the comparison can tell which step every failure came from and
+        # how each earlier step ended -- whatever the whole-command blocker says, because
+        # a base that stopped at its first step looks complete to it.
+        if not check_result.ok:
+            unsplit_reason: list[str] = []
+            chain = _chain_steps(command, reason=unsplit_reason)
+            if chain is None and unsplit_reason:
+                target_guard.warn(f"base chain not split: {unsplit_reason[0]}")
+            if chain is not None and len(chain) > 1:
+                step_results = _run_chain_markers(chain, lambda script: sandbox.run_command(
+                    script, workdir=base_path, timeout_s=timeout,
+                    budget=budget_inner, env=env, home=home, exact_env=True,
+                ), _roots((base_path, "<root>"), (home, "<home>"), (ctx.workdir, "<run>")))
+                if step_results is None:
+                    # Recorded, so the comparison charges rather than reading it as a cache
+                    # written before per-step results existed.
+                    result._steps_unreadable = True  # type: ignore[attr-defined]
+                else:
+                    for sr in step_results:
+                        result.failures |= set(sr["failures"])
+                    # Complete when every test runner that ran counts exactly the
+                    # failures it named.
+                    result._base_complete = all(  # type: ignore[attr-defined]
+                        sr["accounted"] for sr in step_results
+                        if sr["ran"] and sr["runner"] is not None)
+                    result._step_results = [  # type: ignore[attr-defined]
+                        {**sr, "output": sr["output"][-5000:]} for sr in step_results]
+
         return result, False
 
     result, is_crash = _try_base()
@@ -2108,6 +2560,140 @@ def compute_co_revert(
                 pass
 
 
+# ── per-step comparison for chain commands ───────────────────────────────
+
+
+def _attempt_marker_run(ctx: Any, timeout: float
+                        ) -> tuple[Callable[[str], Any], list[tuple[str, str]]]:
+    """How the attempt's per-step script runs, and that place's own paths (`_signature`).
+
+    It runs where and as the attempt's check beside the reviews runs: the run's check
+    copy, with the copy's environment and HOME and the same worktree-root and restore
+    handling (`repo_change.run_check` with ``beside_reviews``), so nothing the steps
+    write reaches the run's worktree.
+    """
+    from refactory_dsh import repo_change
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
+    found = worktree.recorded(ctx.workdir)
+    if found is None:
+        raise ValueError("the run has no worktree")
+    run_id = Path(found.path).name.removeprefix("run-")
+    copy = repo_change._check_copy_path(Path(found.target), run_id)
+    roots = _roots((copy, "<root>"), (Path(found.path), "<root>"),
+                   (Path(ctx.workdir).resolve() / CHECK_COPY_HOME, "<home>"), (ctx.workdir, "<run>"))
+    return (lambda script: repo_change.run_check(ctx, script, timeout, beside_reviews=True)), roots
+
+
+def _same_end(attempt_step: dict, base_step: dict) -> bool:
+    """Whether a step ended the same way on both sides: it ran on both, with one exit code, or on neither.
+
+    A step that failed without naming a failing test -- a lint, a build -- ends the same
+    way only when its output is the same too, its run-specific paths aside (`_signature`),
+    and not empty: a new lint or build error behind the base's own is the attempt's.
+    """
+    if attempt_step["ran"] != base_step["ran"] or attempt_step["exit_code"] != base_step["exit_code"]:
+        return False
+    if attempt_step["ran"] and attempt_step["exit_code"] != 0 and not attempt_step["failures"]:
+        # A failure that prints nothing (``build >/dev/null``, ``grep -q``) cannot be told
+        # from a new one, so it never ends the same way.
+        if attempt_step.get("quiet", True):
+            return False
+        return attempt_step.get("signature") == base_step.get("signature") is not None
+    return True
+
+
+def _per_step_comparison(
+    ctx: Any, steps: list[tuple[str, str]],
+    base_result: "BaseCheckResult", attempt_failures: set[str],
+    timeout: float, named_text: str | None,
+    changed_files: list[str], brief_text: str, design_text: str,
+) -> tuple[ComparisonResult | None, str]:
+    """Classify a failed chain's failures step by step: ``(comparison, why)``.
+
+    The attempt's steps run again in one shell (`_run_chain_markers`), and are compared
+    with the base's, recorded when the base ran (or read from its cache). A failure in
+    step k is excused only when it is inherited by the mode's rule, it failed in step k
+    on both sides, every step before k ended the same way on both (`_same_end`), and
+    step k's runner counts exactly its named failures on both sides (`_accounted`). A
+    step that failed on the attempt without naming a failing test is charged unless it
+    ended the same way on the base without naming one either.
+
+    When per-step results cannot be read on either side, the comparison is ``None``
+    and ``why`` says why: nothing is then excused, because which step a failure came
+    from, and whether the steps before it ran alike, is unknown.
+    """
+    base_steps = getattr(base_result, '_step_results', None)
+    if base_steps is None or len(base_steps) != len(steps):
+        return None, "the base's per-step results could not be read"
+    base_steps = [{"ran": True, **sr} for sr in base_steps]
+
+    try:
+        attempt_steps = _run_chain_markers(steps, *_attempt_marker_run(ctx, timeout))
+    except ValueError as exc:
+        return None, f"the attempt's steps could not be run again: {exc}"
+    if attempt_steps is None:
+        return None, "the attempt's per-step results could not be read"
+
+    all_attempt_failures = set(attempt_failures)
+    for sr in attempt_steps:
+        all_attempt_failures |= set(sr["failures"])
+    comparison = (design_comparison(base_result.failures, all_attempt_failures, named_text)
+                  if named_text is not None else compare_failures(
+                      base_result.failures, all_attempt_failures, changed_files,
+                      brief_text, design_text))
+
+    excused: set[str] = set()
+    for failure in comparison.inherited:
+        steps_with = [k for k, sr in enumerate(attempt_steps) if failure in sr["failures"]]
+        if steps_with and all(_excusable_in_step(k, failure, attempt_steps, base_steps)
+                              for k in steps_with):
+            excused.add(failure)
+
+    # A step that failed without naming a failing test -- a build, a grep, a runner that
+    # collected nothing or crashed first -- is the attempt's unless the base's same step
+    # ended the same way without naming one either.
+    unnamed = [
+        sr["step"] for sr, base_sr in zip(attempt_steps, base_steps)
+        if sr["ran"] and sr["exit_code"] != 0 and not sr["failures"]
+        and not (_same_end(sr, base_sr) and not base_sr.get("failures"))
+    ]
+    new_failures = all_attempt_failures - excused
+    detail = ""
+    shown = [sr for sr in attempt_steps
+             if sr["ran"] and sr["exit_code"] != 0
+             and (set(sr["failures"]) & new_failures or sr["step"] in unnamed)]
+    if shown:
+        detail = "\n".join(
+            f"step `{sr['step']}` exited {sr['exit_code']} when the chain's steps were run "
+            f"one by one:\n{sr['output'][-4000:]}" for sr in shown)
+    return ComparisonResult(
+        inherited=excused,
+        new_failures=new_failures,
+        all_excused=bool(excused) and not new_failures and not unnamed,
+        base_ok=comparison.base_ok,
+    ), detail
+
+
+def _excusable_in_step(k: int, failure: str, attempt_steps: list[dict],
+                       base_steps: list[dict]) -> bool:
+    """Whether ``failure``, failing in the attempt's step ``k``, is excused by the base's step ``k``."""
+    attempt_sr, base_sr = attempt_steps[k], base_steps[k]
+    if not base_sr["ran"] or failure not in base_sr.get("failures", []):
+        return False
+    if not all(_same_end(attempt_steps[j], base_steps[j]) for j in range(k)):
+        return False
+    if attempt_sr["runner"] is None or not attempt_sr["accounted"]:
+        return False
+    if not base_sr.get("runner") or not base_sr.get("accounted"):
+        return False
+    try:
+        words = shlex.split(attempt_sr["step"])
+    except ValueError:
+        words = attempt_sr["step"].split()
+    return not any(_EXIT_FIRST.match(word) for word in words)
+
+
 # ── integration function ────────────────────────────────────────────────
 
 
@@ -2163,7 +2749,35 @@ def filter_check(
                   if named_text is not None else compare_failures(
                       base_result.failures, attempt_failures, changed_files,
                       brief_text, design_text))
-    blocker = excusal_blocker(command, attempt_output, attempt_failures) if comparison.all_excused else None
+
+    blocker = None
+    step_detail = ""
+    chain = None
+    # A chain whose base failed is compared step by step unless a failure is already
+    # the attempt's: the attempt's check may have stopped at a step that fails on the
+    # base too (naming no test, or only inherited ones) before reaching what it broke.
+    if not base_result.ok and not comparison.new_failures:
+        unsplit_reason: list[str] = []
+        chain = _chain_steps(command, reason=unsplit_reason)
+        if chain is None and unsplit_reason:
+            target_guard.warn(f"attempt chain not split: {unsplit_reason[0]}")
+    if (chain is not None and len(chain) > 1 and getattr(base_result, '_step_results', None) is None
+            and not getattr(base_result, '_steps_unreadable', False)):
+        # A base cache written before per-step results existed: the whole-command path.
+        chain = None
+    if chain is not None and len(chain) > 1:
+        revised, why = _per_step_comparison(
+            ctx, chain, base_result, attempt_failures, timeout,
+            named_text, changed_files, brief_text, design_text,
+        )
+        if revised is None:
+            target_guard.warn(f"no failure of the chained check is excused: {why}")
+            blocker = why
+        else:
+            comparison, step_detail = revised, why
+    elif comparison.all_excused:
+        blocker = excusal_blocker(command, attempt_output, attempt_failures)
+
     if blocker:
         comparison = ComparisonResult(inherited=set(), new_failures=set(), all_excused=False,
                                       base_ok=comparison.base_ok)
@@ -2185,6 +2799,8 @@ def filter_check(
             or not any(f in line for f in comparison.inherited)
         ]
         new_failure_detail = "\n".join(new_lines) if new_lines else attempt_output
+    if step_detail:
+        new_failure_detail = f"{new_failure_detail}\n\n{step_detail}"
 
     # Populate base_failures and base_complete for R5 (broken guarantees).
     base_complete = getattr(base_result, '_base_complete', False)
