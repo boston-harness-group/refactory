@@ -334,3 +334,43 @@ def test_a_smoke_stopped_for_inactivity_halts_the_spine_run_once(tmp_path, monke
     assert _HALT in status["error"], status
     assert len(_smokes(run)) == 1
     assert json.loads((run / "smoke.json").read_text())["timeout_kind"] == "inactivity"
+
+
+# ── a halt's reason reaches the walker's status from inside a fork or a data pass ──
+
+def _fork_with_halting_branch() -> nn.Graph:
+    """fork -> (body -> gate, side) -> join, the gate out of retries and declared ``halt``."""
+    graph = nn.Graph()
+    graph.add(nn.Node("fork", "fork", targets=("body", "side")))
+    graph.add(nn.Node("body", "op", call="loop_ops:count_visit",
+                      writes=("visits.json",), produces=("visits",)))
+    graph.add(nn.Node("gate", "gate", evaluator="loop_ops:always_retry", max_iterations=2,
+                      on_exhausted="halt"))
+    graph.add(nn.Node("side", "op", call="loop_ops:noop"))
+    graph.add(nn.Node("join", "join", sources=("gate", "side")))
+    graph.add(nn.Node("done", "op", call="loop_ops:noop"))
+    graph.connect("fork", "join")
+    graph.connect("body", "gate")
+    graph.connect("gate", "body", condition="retry")
+    graph.connect("gate", "join", condition="proceed")
+    graph.connect("side", "join")
+    graph.connect("join", "done")
+    return graph
+
+
+@pytest.mark.parametrize("shape", ["fork", "pass", "pass-at-once"])
+def test_a_halt_inside_a_fork_or_a_data_pass_keeps_its_reason_on_the_walker(tmp_path, shape):
+    """The gate's reason -- here the cap that refused its retry -- is in the run's error
+    and its status, wherever the halt happened, as the spine keeps it; not only which
+    gate halted."""
+    from refactory_dsh.nn.executor import execute
+    from test_loop_exhaustion import _loop_graph
+
+    graph = (_fork_with_halting_branch() if shape == "fork"
+             else _loop_graph(parallelism=3 if shape == "pass-at-once" else 1, on_exhausted="halt"))
+    run = tmp_path / "run"
+    result = execute(graph, run, max_steps=400)
+    assert result.halted, result.error
+    assert "halted the run: max_iterations of 2" in str(result.error), result.error
+    status = json.loads((run / ".refactory" / "spine-status.json").read_text())
+    assert "max_iterations of 2" in status["error"], status

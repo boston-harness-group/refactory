@@ -1426,3 +1426,31 @@ def test_gate_smoke_code_failure_still_reloops(tmp_path, monkeypatch):
 
     result = create_ops.gate_smoke(ctx)
     assert str(result) == "reloop"
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+def test_gate_smoke_a_revision_source_that_timed_out_halts(tmp_path, monkeypatch, timed_out):
+    """A revision's source smoke stopped before it finished is uncertain, as the new
+    mode's own would be: the gate halts with the source's stop in its reason. A source
+    that ended on its own without finishing is still unavailable, and raises."""
+    ctx = _gate_smoke_context(tmp_path)
+    revision = {"phase": "source-comparison", "revision_of": "src/mode", "before_score": None}
+    if timed_out:
+        revision.update(timed_out=True, timeout_kind="inactivity", timeout_s=60)
+
+    def _fail_smoke(ctx_inner):
+        ctx_inner.write_json("smoke.json", {"status": "pass", "ok": True})
+        ctx_inner.write_json("revision.json", revision)
+        problem = ("the run exceeded its time limit of 60s; partial artifacts remain"
+                   if timed_out else "exit 1")
+        raise ValueError(f"the revision source src/mode did not finish a run: {problem}")
+
+    monkeypatch.setattr(create_ops, "smoke", _fail_smoke)
+    if not timed_out:
+        with pytest.raises(ValueError, match="validation source_unavailable"):
+            create_ops.gate_smoke(ctx)
+        return
+    result = create_ops.gate_smoke(ctx)
+    assert str(result) == "halt"
+    assert result.reason == ("the revision source's smoke timed out (inactivity, limit 60s); "
+                             "code repair was not attempted")

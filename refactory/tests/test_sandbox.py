@@ -968,3 +968,162 @@ def test_a_smoke_of_a_task_bound_mode_runs_a_parallel_sample_of_its_train_part(
     # The train part holds the 124 lowest ids; the Task lists the highest first.
     assert sorted(span["id"] for span in spans) == ["item_121", "item_122", "item_123"]
     assert _most_at_once(spans) == at_once
+
+
+# ── a smoke's inactivity limit, on the spine: what counts as work ──────────
+
+#: One mode per way a run works without the inner run's own output: an op that prints,
+#: an op that rewrites a file and prints nothing, one item running silent nodes in a
+#: row, and an op that does nothing at all. Each takes longer than the limit.
+_WORKING = {
+    "__init__.py": (
+        "from refactory_dsh.nn import Package\n"
+        "from .mode import Printing, Rewriting, Steps, Silent\n\n"
+        "PACKAGE = Package(name='sandboxed_pkg', modes=(Printing, Rewriting, Steps, Silent),"
+        " ops=('refactory_packages.sandboxed_pkg.ops',))\n"
+    ),
+    "task.py": (
+        "from refactory_dsh.task import Task, TaskInstance, VerifyResult\n\n"
+        "class One(Task):\n"
+        "    name = 'one'\n"
+        "    def instances(self, **kw):\n"
+        "        return [TaskInstance(id='item_000', metadata={})]\n"
+        "    def setup(self, instance, workspace, **kw):\n"
+        "        pass\n"
+        "    def verify(self, instance, workspace, **kw):\n"
+        "        return VerifyResult(passed=True, score=1.0)\n"
+    ),
+    "ops.py": (
+        "import json, os, time\n"
+        "from pathlib import Path\n\n"
+        "def printing(ctx):\n"
+        "    for i in range(20):\n"
+        "        print('tick', i, flush=True)\n"
+        "        time.sleep(0.25)\n"
+        "    return {'best': 1.0}\n\n"
+        "def rewriting(ctx):\n"
+        "    for i in range(20):\n"
+        "        ctx.write_json('span.json', {'tick': i})\n"
+        "        time.sleep(0.25)\n"
+        "    return {'best': 1.0}\n\n"
+        "def step(ctx):\n"
+        "    time.sleep(1.5)\n"
+        "    return {}\n\n"
+        "def silent(ctx):\n"
+        "    (ctx.workdir / 'op.pid').write_text(str(os.getpid()))\n"
+        "    time.sleep(120)\n"
+        "    return {'best': 1.0}\n\n"
+        "def finish(ctx):\n"
+        "    return {'best': 1.0}\n"
+    ),
+    "mode.py": (
+        "from refactory_dsh import nn\n"
+        "OPS = 'refactory_packages.sandboxed_pkg.ops'\n"
+        "TASK = 'refactory_packages.sandboxed_pkg.task:One'\n\n"
+        "def _one(call, writes=()):\n"
+        "    g = nn.Graph()\n"
+        "    g.add(nn.Node('work', 'op', call=OPS + ':' + call, writes=writes, produces=('best',)))\n"
+        "    return g\n\n"
+        "class _Scored(nn.Mode):\n"
+        "    def score(self, result):\n"
+        "        return 1.0\n\n"
+        "class Printing(_Scored):\n"
+        "    name = 'printing'\n"
+        "    def build(self):\n"
+        "        return _one('printing')\n\n"
+        "class Rewriting(_Scored):\n"
+        "    name = 'rewriting'\n"
+        "    def build(self):\n"
+        "        return _one('rewriting', writes=('span.json',))\n\n"
+        "class Silent(_Scored):\n"
+        "    name = 'silent'\n"
+        "    def build(self):\n"
+        "        return _one('silent')\n\n"
+        "class Steps(_Scored):\n"
+        "    name = 'steps'\n"
+        "    def build(self):\n"
+        "        g = nn.Graph()\n"
+        "        g.add(nn.Node('data', 'data', subgraph_entry='a', subgraph_exit='c',"
+        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',)))\n"
+        "        for name in 'abc':\n"
+        "            g.add(nn.Node(name, 'op', call=OPS + ':step', reads=('current_item.json',)))\n"
+        "        g.connect('a', 'b')\n"
+        "        g.connect('b', 'c')\n"
+        "        g.add(nn.Node('finish', 'op', call=OPS + ':finish', produces=('best',)))\n"
+        "        g.connect('data', 'finish')\n"
+        "        return g\n"
+    ),
+}
+
+#: The smoke's limit. The run inside it stops itself a little earlier (3 s of no work).
+_LIMIT_S = 6
+
+
+def _smoke_on_the_spine(tmp_path: Path, mode: str) -> sandbox.SandboxResult:
+    """A model smoke of ``mode`` (`sandbox.smoke` -> `evaluate_on_dsh` -> `run_on_dsh`), on
+    the graph profile's spine (`graph-owner.mjs`): every node runs as DSH runs it."""
+    from refactory_dsh.model import DshModelClient
+    from tests_support import graph_owner_launcher
+
+    launcher = graph_owner_launcher(tmp_path / "dsh")
+    if launcher is None:
+        pytest.skip("the spine owner needs Node and the installed workspace (pnpm install)")
+    _stage(tmp_path, _WORKING)
+    context = DshModelClient(attempts=1, dsh_cli=str(launcher)).context()
+    return sandbox.smoke(f"{NAME}/{mode}", tmp_path / "run", project=tmp_path, model=True,
+                         model_context=context, smoke_items=3, timeout_s=_LIMIT_S)
+
+
+@pytest.mark.parametrize("mode", [
+    "printing",   # an op that prints for 5 s and writes nothing
+    "rewriting",  # an op that rewrites a file for 5 s and prints nothing
+    "steps",      # one item, three silent 1.5 s nodes in a row
+])
+def test_a_smoke_that_keeps_working_outlives_its_inactivity_limit(tmp_path, graph_profile_home, mode):
+    """Work the inner run does inside a node or an item counts: none of these is stopped,
+    though each takes longer than the 3 s the run inside the smoke allows without work."""
+    result = _smoke_on_the_spine(tmp_path, mode)
+    assert not result.timed_out, result.stdout + result.stderr
+    assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
+    assert result.elapsed_s is not None and result.elapsed_s > 4
+
+
+def test_a_smoke_whose_op_goes_quiet_is_stopped_and_leaves_no_op_running(
+        tmp_path, graph_profile_home):
+    """An op that does nothing is stopped at the limit, and the stop ends the op's own
+    process too: nothing the run started is left running without a parent."""
+    result = _smoke_on_the_spine(tmp_path, "silent")
+    pid = int((tmp_path / "run" / "op.pid").read_text())
+    try:
+        assert result.timed_out and result.timeout_kind == "inactivity", result.stdout + result.stderr
+        assert result.elapsed_s is not None and result.elapsed_s < _LIMIT_S + 15
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        try:  # only the op this test started, should the assertion above fail
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_a_watched_sandbox_counts_a_silent_write_anywhere_under_its_run(tmp_path):
+    """A smoke without a model (the walker, in the sandbox's own process) is watched the
+    same way: a run that prints nothing but keeps writing a nested file outlives its
+    1 s limit, and one that stops writing is then stopped."""
+    code = (
+        "import time\nfrom pathlib import Path\n"
+        "span = Path('passes/data/item_0/span.json')\nspan.parent.mkdir(parents=True)\n"
+        "for i in range(10):\n    span.write_text(str(i))\n    time.sleep(0.3)\n"
+        "time.sleep(30)\n"
+    )
+    result = sandbox.run_sandboxed(code, workdir=tmp_path / "run", timeout_s=1, inactivity=True,
+                                   backstop_s=20)
+    assert result.timed_out and result.timeout_kind == "inactivity", result.stderr
+    assert result.elapsed_s is not None and 3 < result.elapsed_s < 10

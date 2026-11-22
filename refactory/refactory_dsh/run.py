@@ -31,8 +31,9 @@ import copy
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from refactory_dsh.lowering import DECLARATIONS, KNOBS_ENV
 from refactory_dsh.nn import RunContext
@@ -52,6 +53,16 @@ NODE_ENV = "DSH_WORKFLOW_NODE"
 
 #: The working directory the command runs in, if the runtime says so explicitly.
 WORKDIR_ENV = "REFACTORY_WORKDIR"
+
+#: Set by a watched run (`dsh_runtime.run_on_dsh` with an inactivity limit) to the file
+#: each node command marks as it writes output (`_output_marked`), so a watcher that
+#: looks at the run directory sees a node that prints as working. Unset, nothing changes.
+OUTPUT_ACTIVITY_ENV = "REFACTORY_OUTPUT_ACTIVITY"
+#: Where a watched run puts that file, relative to its directory.
+OUTPUT_ACTIVITY_FILE = ".refactory/node-output"
+#: The least time between two marks: often enough for any inactivity limit worth
+#: setting, rarely enough that a node printing without pause costs nothing.
+OUTPUT_MARK_INTERVAL_S = 0.2
 
 #: The most of a gate's reason the runner prints, marker included. It is the spine's
 #: own limit (``REASON_LIMIT`` in workflow-spine's ``execute.ts``): a whole check log
@@ -593,6 +604,87 @@ def record_visit(directory: Path, node_id: str, produced: Any, *, gate: bool) ->
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+@contextmanager
+def _output_marked(mark: str | None) -> Iterator[None]:
+    """While the node runs, mark ``mark`` each time it writes output (at most every
+    ``OUTPUT_MARK_INTERVAL_S``); with no ``mark``, do nothing.
+
+    At the file-descriptor level, so what the node's own subprocesses print counts too:
+    stdout and stderr become pipes whose readers pass every byte on, unchanged and in
+    order per stream, to where they went before. On the way out both are restored and
+    their readers drained before anything else is printed, so a gate's verdict is still
+    the last line of its stdout. A reader still held open by a process the node left
+    behind is given a moment, then left (its later output is dropped).
+    """
+    if not mark:
+        yield
+        return
+    import threading
+    import time
+
+    target = Path(mark)
+    last = [0.0]
+
+    def _mark() -> None:
+        now = time.monotonic()
+        if now - last[0] < OUTPUT_MARK_INTERVAL_S:
+            return
+        last[0] = now
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(time.time_ns()))
+        except OSError:
+            pass
+
+    def _forward(read_end: int, original: int) -> None:
+        while True:
+            try:
+                chunk = os.read(read_end, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            _mark()
+            view = memoryview(chunk)
+            while view:
+                try:
+                    view = view[os.write(original, view):]
+                except OSError:
+                    break
+        os.close(read_end)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved: list[tuple[int, int]] = []
+    readers: list[threading.Thread] = []
+    try:
+        for fd in (1, 2):
+            original = os.dup(fd)
+            read_end, write_end = os.pipe()
+            os.dup2(write_end, fd)
+            os.close(write_end)
+            saved.append((fd, original))
+            reader = threading.Thread(target=_forward, args=(read_end, original), daemon=True,
+                                      name=f"node-output-{fd}")
+            reader.start()
+            readers.append(reader)
+        yield
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+        for fd, original in saved:
+            os.dup2(original, fd)
+        for (_fd, original), reader in zip(saved, readers):
+            reader.join(timeout=2)
+            # A reader still passing output on keeps its descriptor: closed, its number
+            # could be reused for a file the reader would then write into.
+            if not reader.is_alive():
+                os.close(original)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     node_id = ""
@@ -610,7 +702,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        produced = run_node(argv[0], node_id=node_id or None)
+        with _output_marked(os.environ.get(OUTPUT_ACTIVITY_ENV)):
+            produced = run_node(argv[0], node_id=node_id or None)
     except BuildLoopStop as exc:
         print(FAILURE_MARKER, file=sys.stderr)
         print(format_failure_detail(exc), file=sys.stderr)

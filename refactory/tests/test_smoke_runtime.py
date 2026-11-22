@@ -147,6 +147,8 @@ class TestRunOnDshInactivity:
         })())
         monkeypatch.setattr(dsh_runtime, "track_run", lambda p: None)
         monkeypatch.setattr(dsh_runtime, "untrack_run", lambda p: None)
+        # The fake child is this process: there is no group of its own to end.
+        monkeypatch.setattr(dsh_runtime, "_run_group", lambda p: None)
         monkeypatch.setattr("refactory_dsh.owned_process.shutdown", lambda p, **kw: None)
 
     def test_run_on_dsh_inactivity_true_stops_on_idle(self, tmp_path, monkeypatch):
@@ -165,7 +167,7 @@ class TestRunOnDshInactivity:
             return real_monotonic() + call_count[0] * 100
 
         monkeypatch.setattr(time, "monotonic", fast_time)
-        monkeypatch.setattr(sandbox, "_progress_at", lambda w: {})
+        monkeypatch.setattr(sandbox, "run_activity", lambda w, **kw: (0, 0, 0))
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -205,37 +207,31 @@ class TestRunOnDshInactivity:
         assert "timeout" in result.stderr
 
     def test_run_on_dsh_inactivity_progress_files_count_as_activity(self, tmp_path, monkeypatch):
-        """Progress file changes in the inner workdir reset the activity timestamp.
+        """Writes under the inner workdir reset the activity timestamp.
 
         A long agent call that writes worker events but prints nothing must not
         trip the inner inactivity limit.  The test uses a short inactivity
-        limit (1 s) and a process that exits after several progress-thread
-        polls.  Without progress tracking the run would time out; with it the
-        progress changes keep resetting the activity timestamp.
+        limit (1 s) and a process that exits after several watcher looks.
+        Without the run directory watched the run would time out; with it the
+        changes keep resetting the activity timestamp.
         """
         from refactory_dsh.dsh_runtime import run_on_dsh
 
-        # Process exits normally after 5 poll() calls from the progress thread.
+        # Process exits normally after 5 poll() calls from the watcher thread.
         proc = _FakeProcess(exit_after=5)
         self._mock_dsh_deps(monkeypatch, tmp_path, proc)
 
-        # Speed up the progress watcher thread so it checks every 0.05 s
-        # instead of 1 s — real time, no monkeypatch on time.monotonic needed.
-        _real_sleep = time.sleep
+        # The watcher looks every 0.05 s instead of every 0.5 s.
+        monkeypatch.setattr(sandbox, "next_look_s", lambda cost: 0.05)
 
-        def _fast_sleep(secs: float) -> None:
-            _real_sleep(min(secs, 0.05))
-
-        monkeypatch.setattr(time, "sleep", _fast_sleep)
-
-        # Progress changes on every call, resetting activity.
+        # The run directory changes on every look, resetting activity.
         progress_call_count = [0]
 
-        def changing_progress(w):
+        def changing_progress(w, **kw):
             progress_call_count[0] += 1
-            return {"step": progress_call_count[0]}
+            return (progress_call_count[0], 0, 0)
 
-        monkeypatch.setattr(sandbox, "_progress_at", changing_progress)
+        monkeypatch.setattr(sandbox, "run_activity", changing_progress)
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -249,3 +245,32 @@ class TestRunOnDshInactivity:
         assert result.returncode == 0
         assert result.timeout_kind is None
         assert progress_call_count[0] >= 3  # progress was actually checked
+
+    @pytest.mark.parametrize("finishes", [True, False], ids=["finished", "timed-out"])
+    def test_no_watcher_outlives_the_run(self, tmp_path, monkeypatch, finishes):
+        """However the run ends, its watcher is stopped and joined before `run_on_dsh`
+        returns: one left looking would mark the sandbox's activity file after the run
+        was reported stopped. Each look takes 0.3 s here and the watcher barely pauses
+        between them, so one that was not joined is still looking when the run returns."""
+        import threading
+
+        from refactory_dsh.dsh_runtime import run_on_dsh
+
+        proc = _FakeProcess()
+        if finishes:  # it ends on its own, after the watcher's first look
+            threading.Timer(0.3, lambda: setattr(proc, "returncode", 0)).start()
+        self._mock_dsh_deps(monkeypatch, tmp_path, proc)
+        monkeypatch.setattr(sandbox, "next_look_s", lambda cost: 0.001)
+
+        def slow_look(w, **kw):
+            time.sleep(0.3)
+            return (0, 0, 0)
+
+        monkeypatch.setattr(sandbox, "run_activity", slow_look)
+        workdir = tmp_path / "run"
+        workdir.mkdir(parents=True)
+        result = run_on_dsh({"graph": {"nodes": {}}}, workdir, timeout_s=1, inactivity=True,
+                            activity_file=workdir / sandbox.ACTIVITY_FILE)
+        assert (result.timeout_kind is None) == finishes, result.stderr
+        assert [t for t in threading.enumerate()
+                if t.name == "dsh-progress-watch" and t.is_alive()] == []

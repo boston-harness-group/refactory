@@ -1649,6 +1649,7 @@ def _smoke_timeout_record(result: Any, identifier: str, workdir: Path, *, model:
     """Describe an incomplete pass without claiming a score or model request occurred."""
     return {
         "mode": identifier, "ok": False, "score": None, "timed_out": True,
+        "timeout_kind": result.timeout_kind,
         "returncode": result.returncode, "timeout_s": result.timeout_s,
         "elapsed_s": result.elapsed_s, "progress": result.progress,
         "workdir": str(workdir), "sandboxed": True,
@@ -1830,20 +1831,26 @@ def gate_smoke(ctx: Any) -> str:
         detail = f"{type(exc).__name__}: {exc}"
         receipt = ctx.read_json("smoke.json", {})
         kind = receipt.get("status") if receipt.get("status") not in (None, "pass") else evidence.failure_kind(detail)
-        if "revision source" in detail and "did not finish" in detail:
-            kind = "source_unavailable"
+        revision_record = ctx.read_json("revision.json", None) or {}
+        source_failed = "revision source" in detail and "did not finish" in detail
+        if source_failed:
+            # A source that was stopped before it finished is as uncertain as a new mode
+            # that was; only one that ended on its own is unavailable.
+            kind = "uncertain" if revision_record.get("timed_out") else "source_unavailable"
         # Intercept any uncertain outcome: halt instead of raising.
         if kind == "uncertain":
             evidence.record(ctx, {"status": kind, "detail": detail,
-                                  "smoke": receipt, "revision": ctx.read_json("revision.json", None)})
-            timeout_kind = receipt.get("timeout_kind")
+                                  "smoke": receipt, "revision": revision_record or None})
+            stopped = revision_record if source_failed else receipt
+            timeout_kind = stopped.get("timeout_kind")
             if timeout_kind:
                 items_info = ""
-                if receipt.get("item_limit"):
-                    items_info = (f"; a sample of {receipt.get('item_limit')} items "
+                if stopped.get("item_limit"):
+                    items_info = (f"; a sample of {stopped.get('item_limit')} items "
                                   "per task-bound data node")
-                reason = (f"smoke timed out ({timeout_kind}, limit "
-                          f"{receipt.get('timeout_s', '?')}s{items_info}); "
+                which = "the revision source's smoke" if source_failed else "smoke"
+                reason = (f"{which} timed out ({timeout_kind}, limit "
+                          f"{stopped.get('timeout_s', '?')}s{items_info}); "
                           f"code repair was not attempted")
             else:
                 reason = (f"smoke outcome uncertain ({detail}); "

@@ -95,8 +95,11 @@ class CreateMode(Mode):
             ),
             "smoke_timeout_s": Knob(
                 DEFAULT_MODEL_SMOKE_TIMEOUT_S, "int", lo=1, hi=86400,
-                description="seconds of inactivity (no worker events or item completions) "
-                            "allowed for each smoke pass; a long backstop caps total wall time",
+                description="seconds a smoke pass may go with no sign of work before it is "
+                            "stopped: work is any output, or any file written under the "
+                            "smoke's run directory (node state and output, item passes, "
+                            "worker receipts and events); a wall-clock backstop (four "
+                            "times this, capped at 4 hours by default) still ends each pass",
             ),
             "smoke_items": Knob(
                 3, "int", lo=1,

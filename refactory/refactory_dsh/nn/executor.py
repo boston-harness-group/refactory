@@ -150,6 +150,12 @@ class HaltStop(Exception):
         self.reason = reason
         super().__init__(f"gate {gate!r} halted the run")
 
+    def detail(self) -> str:
+        """What the run's status says of this halt: which gate, and the reason it gave
+        (a halt verdict's own reason, or the cap that refused a retry), as the spine
+        keeps it. A plain ``halt`` with no reason says only which gate."""
+        return f"{self}: {self.reason}" if self.reason and self.reason != "verdict" else str(self)
+
 
 def route_verdict(verdict: str, edges: list[Edge], gate_kind: str) -> tuple[Edge | None, str]:
     """Route a verdict to an edge, matching the spine's ``Spine.verdict()``.
@@ -1123,7 +1129,7 @@ class Executor:
                     error = str(exc)
                     self._record(node.id, error=error, outcome="refused")
                 except HaltStop as exc:
-                    error = str(exc)
+                    error = exc.detail()
                     self._record(node.id, error=error, outcome="halted")
                 except Exception as exc:
                     error = f"{node.id}: {type(exc).__name__}: {exc}"
@@ -1390,7 +1396,7 @@ class Executor:
                         raise
                       except HaltStop as exc:
                         # Terminal halt ends the data node.
-                        error = str(exc)
+                        error = exc.detail()
                         self._record(node.id, error=error, outcome="halted")
                         _data_halted = True
                         break
@@ -1545,7 +1551,7 @@ class Executor:
                 break
             except HaltStop as exc:
                 # Include the halt reason so it reaches the run's status record.
-                error = f"{exc}: {exc.reason}" if exc.reason and exc.reason != "verdict" else str(exc)
+                error = exc.detail()
                 self._record(exc.gate, error=error, outcome="halted")
                 current = None
                 break

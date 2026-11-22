@@ -80,11 +80,12 @@ EXIT_GRACE_S = 2.0
 STOP_KINDS = ("inactivity", "backstop", "output_limit")
 
 #: Where a run nested in a watched sandbox (`run_sandboxed` with ``inactivity``) marks
-#: that it is working, relative to the sandbox's directory. A smoke's DSH run keeps its
-#: output inside the smoke's process and changes its progress files only as items
-#: start, so without the mark the sandbox stopped a run that was still working.
+#: that it is working, relative to the sandbox's directory: the output of its DSH child,
+#: which the nested run keeps in its own process (`dsh_runtime.run_on_dsh`), and its
+#: own shutdown once it stops for inactivity.
 ACTIVITY_FILE = ".refactory/sandbox-activity"
-#: How often a watched sandbox looks at its progress files and the activity mark.
+#: How often a watched run's directory is looked at (`run_activity`), at least: a look
+#: that took long is repeated less often (`next_look_s`).
 WATCH_INTERVAL_S = 0.5
 #: How long a watched sandbox waits, once it has asked its run to stop, before killing
 #: it: the run's own shutdown of its DSH child (`owned_process.SHUTDOWN_GRACE_S`) with
@@ -528,8 +529,9 @@ def run_sandboxed(
 
     ``timeout_s`` is a wall clock unless ``inactivity`` is set (a smoke's choice,
     `smoke`): the run is then stopped only after ``timeout_s`` seconds with no sign of
-    work -- its own output, its progress files, or the mark an inner run leaves in
-    ``ACTIVITY_FILE`` -- or at ``backstop_s`` of wall time (`_run_watched`).
+    work -- its own output, or any write under ``workdir`` (`run_activity`), the mark an
+    inner run leaves in ``ACTIVITY_FILE`` included -- or at ``backstop_s`` of wall time
+    (`_run_watched`).
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -592,14 +594,56 @@ def run_sandboxed(
     )
 
 
-def _signs_of_work(workdir: Path) -> tuple[dict[str, Any], str]:
-    """What `_run_watched` compares to tell a working run from an idle one: the run's
-    progress files and the mark an inner run leaves in ``ACTIVITY_FILE``."""
-    try:
-        mark = (workdir / ACTIVITY_FILE).read_text()
-    except OSError:
-        mark = ""
-    return _progress_at(workdir), mark
+def run_activity(workdir: Path, *, ignore: tuple[Path, ...] = ()) -> tuple[int, int, int]:
+    """What a watcher compares to tell a working run from an idle one: every file under
+    ``workdir``, as (how many, the latest change, their total size).
+
+    Everything a run does that is work lands as a write under its directory: the spine's
+    status, checkpoint and events, each item's pass directory and what its nodes write
+    (spans, facts, records, nested passes), each worker's receipt, events and session
+    store, and -- in a watched run -- each node command's output, which the node runner
+    marks there as it is written (`run.OUTPUT_ACTIVITY_ENV`). Any write moves the latest
+    change (an append or a same-size rewrite included), and a file added or removed
+    changes the count. A run that writes nothing for the limit is idle. Links are not
+    followed. ``ignore`` names files the watcher writes itself, which are not the run's
+    work.
+    """
+    ignored = {str(path) for path in ignore}
+    count = latest = size = 0
+    pending = [str(workdir)]
+    while pending:
+        try:
+            entries = os.scandir(pending.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                        continue
+                    if entry.path in ignored:
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                count += 1
+                latest = max(latest, stat.st_mtime_ns)
+                size += stat.st_size
+    return count, latest, size
+
+
+def next_look_s(cost_s: float) -> float:
+    """How long a watcher waits before its next `run_activity` look, given what the last
+    one cost: ``WATCH_INTERVAL_S``, or four times the cost when that is longer, so a run
+    directory holding a large checkout is not walked without pause."""
+    return max(WATCH_INTERVAL_S, 4 * cost_s)
+
+
+def _signs_of_work(workdir: Path) -> tuple[int, int, int]:
+    """What `_run_watched` compares: the whole run directory (`run_activity`), which
+    holds the mark a nested run leaves in ``ACTIVITY_FILE``."""
+    return run_activity(workdir)
 
 
 def mark_activity(path: Path) -> None:
@@ -657,8 +701,8 @@ def _run_watched(
 ) -> SandboxResult:
     """`run_sandboxed` with an inactivity limit and a wall-clock backstop.
 
-    Work is any output, a change to the run's progress files, or a new mark in
-    ``ACTIVITY_FILE`` (`_signs_of_work`). A run stopped for either limit is asked to stop
+    Work is any output, or any write under the run's directory (`run_activity`), the
+    mark a nested run leaves in ``ACTIVITY_FILE`` included. A run stopped for either limit is asked to stop
     and given ``STOP_GRACE_S`` before it is killed (`_stop_watched`); a kill says that
     its cleanup is unconfirmed, as `owned_process.shutdown` does. A run that stopped
     itself for one of these limits reports it in its payload's ``timeout_kind``, which
@@ -688,9 +732,10 @@ def _run_watched(
                 now = time.monotonic()
                 if now >= look_at:
                     current = _signs_of_work(workdir)
+                    looked = time.monotonic()
                     if current != seen:
                         seen, activity[0] = current, now
-                    look_at = now + WATCH_INTERVAL_S
+                    look_at = looked + next_look_s(looked - now)
                 if now - activity[0] >= timeout_s:
                     stop = "inactivity"
                 elif now - started >= backstop_s:
@@ -1048,6 +1093,9 @@ def smoke_sample(mode: Any, workdir: Path, items: int) -> dict[str, Any]:
             ceiling = int(entry_of_knob.get("value") or 0)
             width = min(items, ceiling) if ceiling > 0 else items
             floor = (entry_of_knob.get("spec") or {}).get("lo")
+            # Never below the knob's own floor, which `configure` refuses: a floor above
+            # the sample leaves the width there, and the run still has only ``items``
+            # items to run at once.
             width = max(width, int(floor)) if floor is not None else width
             knob_widths[knob] = min(knob_widths.get(knob, width), width)
         else:
@@ -1103,9 +1151,11 @@ def smoke(
     every item, as a smoke without a model always does.
 
     ``timeout_s`` is an inactivity limit here, not a wall clock: a smoke that is still
-    working is not stopped before the backstop (`smoke_backstop_s`). A run with a model
-    gets a slightly shorter limit of its own, so it stops itself first and says why,
-    and it marks its DSH run's work in ``ACTIVITY_FILE`` for this sandbox to see.
+    working is not stopped before the backstop (`smoke_backstop_s`). Work is output, or
+    any write under the run directory (`run_activity`): every node's state and output,
+    per item and nested, and every worker's events. A run with a model gets a slightly
+    shorter limit of its own, so it stops itself first and says why, and it marks its
+    DSH child's output in ``ACTIVITY_FILE`` for this sandbox to see.
     """
     project = Path(project or project_for_nodes())
     client = (
