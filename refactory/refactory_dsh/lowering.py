@@ -407,6 +407,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 # model context, as the walker puts it on the step's client.
                 **({"route": dict(node.route)} if node.route is not None else {}),
                 **({"tool_policy": node.tool_policy} if node.tool_policy is not None else {}),
+                **({"keeps_tool_markup": True} if node.keeps_tool_markup else {}),
             )
 
     # SWEEP-1: Validate fork-shape rules at lowering so the spine refuses the same

@@ -348,6 +348,8 @@ def test_the_runtime_semantics_are_part_of_the_context(tmp_path, monkeypatch):
     a run's evidence resumed across one (`profiles.resolve`)."""
     from refactory_dsh import node_retry, profiles
 
+    # The marker since a no-tools step's invented tool calls are refused (D14).
+    assert node_retry.SEMANTICS == "invented-tool-calls/1"
     with _patch_mode(PartsProbe):
         cache = _source_run(tmp_path)
         monkeypatch.setattr(node_retry, "SEMANTICS", "an older runtime")
@@ -355,7 +357,7 @@ def test_the_runtime_semantics_are_part_of_the_context(tmp_path, monkeypatch):
         with pytest.raises(LoopError, match="runtime_semantics"):
             loop.init()
         before = profiles.resolve(tmp_path, MODE)
-        monkeypatch.setattr(node_retry, "SEMANTICS", "pass-crash-retry/1")
+        monkeypatch.setattr(node_retry, "SEMANTICS", "invented-tool-calls/1")
         after = profiles.resolve(tmp_path, MODE)
         assert before["evaluation_context"]["runtime_semantics"] == "an older runtime"
         assert before["context_hash"] != after["context_hash"]

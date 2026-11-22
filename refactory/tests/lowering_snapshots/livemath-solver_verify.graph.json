@@ -97,6 +97,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "verify": {
@@ -123,6 +124,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     }
   },

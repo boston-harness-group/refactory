@@ -240,6 +240,7 @@ _NODE_FIELDS = frozenset(
         "route",
         "system_prompt_template",
         "tool_policy",
+        "keeps_tool_markup",
         "parallelism",
         "parallelism_knob",
         "field_bindings",
@@ -512,6 +513,12 @@ class Node:
     #: single declared output. ``None`` (the default) preserves existing tool-enabled
     #: behavior.
     tool_policy: str | None = None
+    #: `agent` with ``tool_policy`` ``"none"``: True keeps a reply that writes out tool
+    #: calls or their results as the step's output, as it is. By default such a reply is
+    #: refused and the step asked once more, told it has no tools
+    #: (`node_retry.refuses_tool_markup`); a step whose harness must match one that never
+    #: did (LiveMath's, reproducing SkillOpt's) keeps it.
+    keeps_tool_markup: bool = False
     #: Typed knob-to-field bindings: each pair ``(field_name, knob_name)`` says
     #: the knob's value replaces this node's field when the graph runs.  Only
     #: fields in ``BINDABLE_FIELDS`` may be bound.  Generalises ``parallelism_knob``.
@@ -770,6 +777,7 @@ class Node:
             **({"workspace": dict(self.workspace)} if self.workspace is not None else {}),
             **({"route": dict(self.route)} if self.route is not None else {}),
             **({"tool_policy": self.tool_policy} if self.tool_policy is not None else {}),
+            **({"keeps_tool_markup": True} if self.keeps_tool_markup else {}),
             **({"field_bindings": [list(pair) for pair in self.field_bindings]} if self.field_bindings else {}),
             **({"code": self.code} if self.code else {}),
             **({"inputs": list(self.inputs)} if self.inputs else {}),
@@ -829,6 +837,7 @@ class Node:
             route=(dict(state["route"]) if isinstance(state.get("route"), dict)
                    else state.get("route")),
             tool_policy=state.get("tool_policy"),
+            keeps_tool_markup=bool(state.get("keeps_tool_markup", False)),
             field_bindings=tuple(
                 tuple(pair) for pair in (state.get("field_bindings") or ())
             ),

@@ -524,6 +524,10 @@ def _step_nodes(graph: Graph, state: Mapping[str, Any], spec: dict, node_id: str
                                       and source.kind == "agent" else None)
         if route:
             node["route"] = dict(route)
+        if like is not None and like.kind == "agent" and like.keeps_tool_markup:
+            # A copy takes a reply that writes out tool calls as the step it copies does
+            # (`graph.Node.keeps_tool_markup`); a new step takes the platform's refusal.
+            node["keeps_tool_markup"] = True
         if like is not None and _uses_tools(like):
             # A copy of a step that uses tools keeps them only in a fresh workspace of its
             # own, so it never works where the step it copies works (`coverage.DECISIONS`).

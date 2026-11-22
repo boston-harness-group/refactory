@@ -25,6 +25,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "data": {
@@ -72,6 +73,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "decide_prompt": {
@@ -137,6 +139,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "notes_prompts": {
@@ -191,6 +194,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "prepare": {
