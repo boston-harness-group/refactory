@@ -11,11 +11,12 @@ it, then reaps; on SIGTERM or SIGINT it forwards the signal and reaps too.
 
 **Linux**: each command runs in a PID namespace whose init is the runner's child, so
 killing the runner (``unshare --kill-child``) or that init ends every process in it.
-The runner is started through :func:`exec_runner` (``--exec``), which gives it a fresh
-session keyring (none of the person's keys are reachable through it) and has the kernel
-kill it when the process that started it (DSH) dies. :func:`reap` finds the runners and
-namespace inits still working in a workspace by their arguments and kills them, so a
-runner whose DSH was killed outright still ends.
+The runner is started through :func:`exec_runner` (``--exec``), which first moves itself
+into the step's delegated cgroup when it is given one (``--cgroup``, `seal_cgroup`),
+then gives it a fresh session keyring (none of the person's keys are reachable through
+it) and has the kernel kill it when the process that started it (DSH) dies. :func:`reap`
+finds the runners and namespace inits still working in a workspace by their arguments
+and kills them, so a runner whose DSH was killed outright still ends.
 
 `workspace.collect` reaps before collecting a sealed workspace, on both platforms.
 """
@@ -39,10 +40,31 @@ INCIDENTS_SUFFIX = ".seal-incidents.jsonl"
 #: A sealed command's limits, as ``ulimit`` takes them (`seal`, which re-exports these):
 #: CPU seconds and the largest file (KiB), on both platforms.
 LIMITS = "-t 3600 -f 4194304"
-#: Linux, in a systemd user scope that caps the whole command: a loose per-process bound.
+#: Linux, where a systemd user scope or a delegated cgroup caps the whole step: a loose
+#: per-process bound.
 LINUX_LIMITS = "-u 512"
-#: Linux without a user scope: a tight per-process bound (128 processes, 8 GiB each).
+#: Linux without a whole-step cap: a tight per-process bound (128 processes, 8 GiB each).
 LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
+#: A sealed step's whole-step cap, wherever it has one (a systemd user scope,
+#: `scope_properties`; a delegated cgroup, `cgroup_limits`): its memory, none of it in
+#: swap, and its processes and threads, all its commands start counted together.
+STEP_MEMORY_MAX = 8 << 30
+STEP_SWAP_MAX = 0
+STEP_TASKS_MAX = 256
+#: The runner's argument naming the delegated cgroup it moves itself into (`exec_runner`).
+CGROUP_FLAG = "--cgroup"
+
+
+def scope_properties() -> tuple[str, ...]:
+    """The whole-step cap as systemd-run's ``--property`` values for a user scope."""
+    return (f"MemoryMax={STEP_MEMORY_MAX}", f"MemorySwapMax={STEP_SWAP_MAX}",
+            f"TasksMax={STEP_TASKS_MAX}")
+
+
+def cgroup_limits() -> tuple[tuple[str, str], ...]:
+    """The whole-step cap as the files of a step's cgroup take it (`seal_cgroup.make`)."""
+    return (("memory.max", str(STEP_MEMORY_MAX)), ("memory.swap.max", str(STEP_SWAP_MAX)),
+            ("pids.max", str(STEP_TASKS_MAX)))
 
 
 def incidents_path(workspace: str) -> str:
@@ -111,6 +133,16 @@ def _bus_up(path: str) -> bool:
         probe.close()
 
 
+def uncapped(command: list[str]) -> list[str] | None:
+    """``command``, a Linux seal made for a whole-step cap, under the tight per-process
+    limits instead (the seal `seal.runner_command` makes without one), or None when it is
+    not of that shape."""
+    capped = f"{LIMITS} {LINUX_LIMITS}"
+    if command.count(capped) != 1:
+        return None
+    return [f"{LIMITS} {LINUX_LIMITS_UNSCOPED}" if arg == capped else arg for arg in command]
+
+
 def unscoped(command: list[str]) -> list[str] | None:
     """``command`` without its systemd scope and under the unscoped per-process limits --
     the runner `seal.runner_command` makes where there is no user scope -- or None when
@@ -118,11 +150,21 @@ def unscoped(command: list[str]) -> list[str] | None:
     names = [os.path.basename(arg) for arg in command]
     if "systemd-run" not in names or "--" not in command[names.index("systemd-run"):]:
         return None
-    rest = command[command.index("--", names.index("systemd-run")) + 1:]
-    scoped = f"{LIMITS} {LINUX_LIMITS}"
-    if rest.count(scoped) != 1:
-        return None
-    return [f"{LIMITS} {LINUX_LIMITS_UNSCOPED}" if arg == scoped else arg for arg in rest]
+    return uncapped(command[command.index("--", names.index("systemd-run")) + 1:])
+
+
+def join_cgroup(path: str) -> str:
+    """Move this process into the cgroup at ``path`` (a sealed step's, `seal_cgroup.make`);
+    "" once it is there, else why not."""
+    try:
+        fd = os.open(os.path.join(path, "cgroup.procs"), os.O_WRONLY | os.O_CLOEXEC)
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return f"cannot move into the step's cgroup {path}: {exc.strerror or exc}"
+    return ""
 
 #: ``sandbox_check`` filter types (``sandbox/sandbox.h``).
 _FILTER_NONE = 0
@@ -255,6 +297,9 @@ _PR_SET_PDEATHSIG = 1
 def exec_runner(command: list[str]) -> int:
     """Linux: run ``command`` (the seal) with a fresh, empty session keyring, tied to the
     process that started it (DSH): this runner dies with it, and the seal with this runner.
+    Given ``--cgroup <path>`` first, it moves into that cgroup (the step's whole-step cap,
+    `seal_cgroup`) before anything else, so all the seal starts counts against it; where
+    it cannot, the command runs under the tight per-process limits and a note says so.
     The runner waits on the seal as its child and hands its exit status back. Unless the
     seal says, on `START_FD`, that the command is starting (its last step,
     ``seal_close.sh``, does so after every other descriptor is closed and checked), the
@@ -264,6 +309,9 @@ def exec_runner(command: list[str]) -> int:
     commands quietly did nothing. Nothing the command does can be recorded so: its start
     is said before it runs, and it never holds that descriptor."""
     parent = os.getppid()
+    cgroup = ""
+    if command[:1] == [CGROUP_FLAG] and len(command) > 2:
+        cgroup, command = command[1], command[2:]
     workspace = _workspace_of(command)
 
     def refuse(reason: str) -> int:
@@ -288,6 +336,19 @@ def exec_runner(command: list[str]) -> int:
         if workspace:
             record_note(workspace, f"systemd's user scope bus {bus} went away during the "
                                    "step: a command ran without the whole-step cap")
+    if cgroup:
+        # The step's delegated cgroup caps it as a whole (`seal_cgroup`): the runner moves
+        # into it before the seal starts, so all the seal starts is counted in it. Where it
+        # cannot, the command runs under the tight per-process limits instead, as without
+        # a cap, and the step's record says it had none -- never a step that fails for it.
+        why = join_cgroup(cgroup)
+        if why:
+            fallback = uncapped(command)
+            if fallback is None:
+                return refuse(f"{why}, and the runner has no uncapped form")
+            command = fallback
+            if workspace:
+                record_note(workspace, f"{why}: a command ran without the whole-step cap")
     libc = ctypes.CDLL(None, use_errno=True)
     number = _KEYCTL.get(os.uname().machine)
     if number is None or libc.syscall(number, _KEYCTL_JOIN_SESSION_KEYRING, None) < 0:
