@@ -288,7 +288,9 @@ The default loop sees the solve step's reply and the item's verification, as for
 1. **Sealed workspace.** SkillOpt's workspace is a folder of its run
    (`<out>/predictions/<id>/codex_single`) and its tools are not confined: `Bash` under
    `bypassPermissions` reaches the dataset (golden files included), the other items'
-   outputs and the network. Here the agent sees its four files and nothing else. Stricter,
+   outputs and the network. Here the agent sees its four files and the pinned interpreter's
+   folders, never a folder holding what SB hides from model code (`sandbox.hidden_paths`,
+   the dataset included: `SpreadsheetBenchTask.tool_environment`'s `hidden`). Stricter,
    so it can only lower a score that came from reading outside the workspace.
 2. **Interpreter.** `python` in the workspace is the pinned interpreter model code runs
    under, so `run_solution.py` validates with the interpreter that grades. SkillOpt's
@@ -314,24 +316,39 @@ The default loop sees the solve step's reply and the item's verification, as for
    is the same.
 10. **Grader.** `recalc` by default, as in the solver (difference 6 above).
 
-### Notes on SkillOpt's harness
+### Problems in SkillOpt's exec path
 
-What its code does, for reading its numbers (evidence only):
+What its code does, for reading its numbers (evidence only). The port stays faithful to
+each, except where a difference above says otherwise, until they are measured:
 
-- `task.md` ends the first section with "Return only a ```python``` code block."
-  (`codegen_agent.py:164`) and the next with "Do not return a code fence as the primary
-  artifact; the source of truth is `solution.py`." (`:255`); the CLI lead asks to
-  "Return only the final answer text, keeping any required <answer>...</answer> tags"
-  (`codex_harness.py:713`), and an empty answer's retry asks for an `<answer>` tag
-  (`:725`).
-- `run_solution.py` runs the code at module level after its own two path lines
-  (`codegen_agent.py:305-309`); the grader runs it indented inside `try:` under its own
-  (`executor.py:12-23`), so a triple-quoted string spanning lines gains four spaces per
-  line at grading only.
-- The analysts' "Target System Prompt" is the chat path's codegen system prompt plus the
-  skill, which this harness's agent never sees (`rollout.py:705-719`), and their
-  conversation is the final message alone: no tool calls and no code.
-- Under `auto`, an SDK failure or an empty structured answer falls through to the CLI in
-  the same attempt (`codex_harness.py:975-1028`), so one attempt may run two sessions in
-  the same folder.
+1. **Conflicting output instructions.** `task.md` ends its first section with "Return only
+   a ```python``` code block." (`codegen_agent.py:164`) and its harness section with "Do not
+   return a code fence as the primary artifact; the source of truth is `solution.py`."
+   (`:255`); the CLI lead asks to "Return only the final answer text, keeping any required
+   <answer>...</answer> tags" (`codex_harness.py:713`), and an empty answer's retry asks for
+   an `<answer>` tag (`:725`).
+2. **The analysts see the wrong prompt and only the final message.** Their "Target System
+   Prompt" and "Target User Prompt" are the chat path's (`rollout.py:705-719`), which this
+   agent never sees, and their conversation is the final message alone
+   (`codegen_agent.py:501`): no tool calls (the CLI's raw output is its final text, so
+   `format_claude_trace_steps` finds none, `codex_harness.py:526-600`) and no code.
+3. **Grading time is counted against the agent.** The call gets `min(600, remaining)`
+   seconds (`codegen_agent.py:480-490`), and the batch scores the item a timeout 600 s after
+   it started, grading included, whatever `solution.py` holds (`rollout.py:983-1011`).
+4. **A raw-log fallback.** Without `solution.py` the code is
+   `extract_code(final_message or raw)` (`codegen_agent.py:496`): after an empty answer,
+   `raw` is the CLI log (`===== CLAUDE CLI ATTEMPT 1 =====` ...,
+   `codex_harness.py:1007-1028`), which is then run as code.
+5. **An unconfined workspace.** It is a folder of the run, `<out>/predictions/<id>/codex_single`
+   (`codegen_agent.py:332-333`), and `Bash` runs under `bypassPermissions`
+   (`codex_harness.py:904`) with no sandbox: the dataset, its golden files, other items'
+   outputs and the network are reachable.
+6. **Two sessions per attempt.** Under `claude_code_exec_use_sdk: auto` an SDK failure or an
+   empty structured answer falls through to the CLI in the same attempt and the same folder
+   (`codex_harness.py:975-1028`), and the one retry reruns in that folder again.
 
+Two more: `run_solution.py` runs the code at module level after its own two path lines
+(`codegen_agent.py:305-309`) while the grader runs it indented inside `try:`
+(`executor.py:12-23`), so a triple-quoted string spanning lines gains four spaces per line
+at grading only; and the driver runs whatever `python` the agent's shell finds while the
+grader runs the trainer's own (difference 2 above).

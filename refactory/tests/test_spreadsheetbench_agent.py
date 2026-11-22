@@ -424,6 +424,14 @@ export function query({ prompt, options }) {
       record.decisions.read_outside = (await ask('Read', { file_path: process.env.FAKE_AGENT_OUTSIDE }))?.permissionDecision
       symlinkSync(process.env.FAKE_AGENT_OUTSIDE, join(options.cwd, 'leak.xlsx'))
       record.decisions.read_link = (await ask('Read', { file_path: join(options.cwd, 'leak.xlsx') }))?.permissionDecision
+      // FAKE_AGENT_FORBIDDEN: more paths outside the workspace (the dataset, another item):
+      // a Read of each, and a `cat` of each through the hooked Bash.
+      record.forbidden = {}
+      for (const path of JSON.parse(process.env.FAKE_AGENT_FORBIDDEN || '[]')) {
+        const read = (await ask('Read', { file_path: path }))?.permissionDecision
+        const cat = await ask('Bash', { command: `cat '${path}' >/dev/null 2>&1 && echo READ || echo BLOCKED` })
+        record.forbidden[path] = { read, cat: execSync(cat.updatedInput.command, { cwd: options.cwd, shell: '/bin/bash', encoding: 'utf8' }).trim() }
+      }
       record.decisions.write_tool = (await ask('Write', { file_path: join(options.cwd, 'x.py'), content: '' }))?.permissionDecision
       writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify(record))
       const usage = { 'fake-claude': { inputTokens: 3, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
@@ -452,6 +460,12 @@ def sealed_sdk(tmp_path, monkeypatch, sb_env):
     monkeypatch.setenv("FAKE_AGENT_WRITE", "cat > solution.py <<'EOF'\n" + SOLUTION.format(n=7) + "EOF")
     monkeypatch.setenv("FAKE_AGENT_PROBE", PROBE.format(gold=gold))
     monkeypatch.setenv("FAKE_AGENT_OUTSIDE", gold)
+    # The gold again, the dataset's index, another item's input and the item's own
+    # golden folder: none is the agent's to read.
+    data = sb_env / "sb400"
+    monkeypatch.setenv("FAKE_AGENT_FORBIDDEN", json.dumps([
+        gold, str(data / "dataset.json"), str(data / "spreadsheet" / "t1" / "1_t1_init.xlsx"),
+        str(data / "spreadsheet" / "v1")]))
     monkeypatch.delenv("REFACTORY_WORKER_CONTEXT", raising=False)
     return record
 
@@ -483,6 +497,10 @@ def _adapter_sent(record: Path) -> dict[str, Any]:
                                  "read_relative": "allow", "read_outside": "deny",
                                  "read_link": "deny", "write_tool": "deny"}
     _sealed_and_pinned(sent["bash"]["probe"])
+    # The golden file, the dataset and other items: neither Bash nor Read reaches them.
+    assert len(sent["forbidden"]) == 4
+    assert all(v == {"read": "deny", "cat": "BLOCKED"} for v in sent["forbidden"].values()), \
+        sent["forbidden"]
     # A Read inside is given a copy of the file it checked, beside the workspace (Linux).
     if sys.platform.startswith("linux"):
         given = Path(sent["readInsideGiven"])
@@ -596,3 +614,29 @@ def test_the_default_loop_evaluates_the_agent_mode(tmp_path, sb_env):
     assert all(c["prompt"] == agent_port.SOLVE_PROMPT for c in model.calls)
     Run(_loop=loop).evaluate(seed, part="val")
     assert len(model.calls) == 3
+
+
+@needs_adapter
+def test_the_agent_cannot_read_the_gold_the_dataset_or_another_item(tmp_path, sealed_sdk, sb_env):
+    """From inside the agent's workspace (walker, real adapter): `cat` of the golden file,
+    the dataset's index, another item's input and the item's own folder fails under the
+    seal, and a Read of each is refused by the hook; so is a Read through a link to the
+    gold. The workspace is SB's tool environment (`SpreadsheetBenchTask.tool_environment`,
+    its `hidden` paths refused) like any sealed step's."""
+    mode, state = _agent_state()
+    work = tmp_path / "walk"
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=["t1"])
+    task_module.write_subset(work, "val", 0.0)
+    result = WalkerEvaluator(model=_claude(tmp_path), project=Path("."), max_steps=400) \
+        .evaluate(mode, state, work)
+    assert result.exit_ok, result.error
+    sent = json.loads(sealed_sdk.read_text())
+    gold = _gold(sb_env, "v1")
+    assert sent["forbidden"][gold] == {"read": "deny", "cat": "BLOCKED"}
+    assert sent["decisions"]["read_outside"] == "deny" and sent["decisions"]["read_link"] == "deny"
+    assert "GOLD-HIDDEN" in sent["bash"]["probe"]
+    assert all(v == {"read": "deny", "cat": "BLOCKED"} for v in sent["forbidden"].values())
+    dispatch = json.loads(next((work / "passes").rglob("workspaces/solve/dispatch.json")).read_text())
+    assert dispatch["sealed"] and dispatch["backend"] == "claude_code"
+    assert dispatch["tool_environment"]["python"] == os.environ[interpreter.ENV]
