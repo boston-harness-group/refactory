@@ -1007,13 +1007,31 @@ def test_a_failed_scope_probe_is_tried_again_and_warns(monkeypatch, capsys):
         return subprocess.CompletedProcess(argv, 0, stdout=f"{8 << 30}\n", stderr="")
 
     monkeypatch.setattr(seal, "_SCOPE", [])
+    monkeypatch.setattr(seal, "_WARNED", set())
     monkeypatch.setattr(seal, "_scope_prefix", lambda: ["/usr/bin/env", "--"])
     monkeypatch.setattr(seal.subprocess, "run", flaky)
     assert seal.linux_scope() == ()
-    assert "without a capped systemd user scope" in capsys.readouterr().err
+    assert "the systemd user scope probe failed" in capsys.readouterr().err
     assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2
     assert seal.linux_scope() == ("/usr/bin/env", "--") and len(calls) == 2, "kept once found"
+    # A probe that fails again is not said again: once per process.
+    monkeypatch.setattr(seal, "_SCOPE", [])
+    calls.clear()
+    assert seal.linux_scope() == () and capsys.readouterr().err == ""
     monkeypatch.setattr(seal.subprocess, "run", real)
+
+
+@LINUX
+def test_no_user_manager_to_ask_is_not_warned_about_on_every_command(monkeypatch, capsys):
+    """Where there is no user manager to probe (a system service), no probe runs and
+    `linux_scope` says nothing, however often it is asked: `step_cap` then caps the step
+    with a delegated cgroup, or says once per reason that it has no whole-step cap."""
+    monkeypatch.setattr(seal, "_SCOPE", [])
+    monkeypatch.setattr(seal, "_WARNED", set())
+    monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
+    for _ in range(3):
+        assert seal.linux_scope() == ()
+    assert capsys.readouterr().err == ""
 
 
 @LINUX

@@ -17,7 +17,11 @@ front of the command (its ``runnerCommand``). What the command can then see:
   (:data:`LOCAL_KEPT`);
 - an environment of its own (`PATH`, its workspace as HOME and TMPDIR, the locale) and
   no inherited descriptor: nothing of the DSH process's, so no credential or run
-  variable; no other process's arguments or environment either.
+  variable; no other process's arguments or environment either;
+- where the item's Task declares one (`task.Task.tool_environment`), its interpreter
+  first on that PATH as ``python3`` and ``python``, and the interpreter's own directories
+  read only (:func:`tool_path`): never one that holds the run, the home directory or
+  refactory's own.
 
 It is the code step's sandbox (`snippet`) with a writable workspace and a shell:
 
@@ -98,13 +102,14 @@ _CLOSE = ('for fd in /dev/fd/*; do n="${fd##*/}"; '
           'exec "$@"')
 
 #: macOS: sets the limits, then runs the command (after DSH's profile arguments and
-#: ``--``) in the workspace with that environment, through :data:`_CLOSE`.
+#: ``--``) in the workspace with that environment (``$cmd_path`` its PATH), through
+#: :data:`_CLOSE`.
 _EXEC = (f'ulimit {LIMITS} || {{ echo "refactory-seal: cannot set limits" >&2; exit 97; }}; '
          'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; '
          '[ "$1" = "--" ] || { echo "refactory-seal: no command" >&2; exit 97; }; shift; '
          'cd "$ws" || exit 97; '
          f'exec /bin/bash -c \'{_CLOSE}\' refactory-seal '
-         f'/usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="{PATH}" '
+         '/usr/bin/env -i HOME="$ws" TMPDIR="$ws" PATH="$cmd_path" '
          f'LANG={snippet.LOCALE} LC_ALL={snippet.LOCALE} "$@"')
 
 #: What a sealed Linux command may read besides its workspace, each bound read only and
@@ -145,14 +150,17 @@ def system_tool(name: str) -> str:
     return name
 
 
-def linux_arguments(ws: str, reads: tuple[str, ...], limits: str) -> list[str]:
+def linux_arguments(ws: str, reads: tuple[str, ...], limits: str,
+                    path: str = PATH, tools: tuple[str, ...] = ()) -> list[str]:
     """What follows ``bash`` in the Linux runner: the script and its arguments, none of
-    which holds a ``$`` (`seal_linux.sh` says what each is)."""
+    which holds a ``$`` (`seal_linux.sh` says what each is); ``path`` the command's PATH,
+    ``tools`` the tool environment's folders (:func:`tool_path`) not already in ``reads``."""
+    tools = tuple(d for d in tools if not any(_inside(d, root) for root in reads))
     arguments = [str(LINUX_SCRIPT), "refactory-seal", ws, str(os.getuid()), str(os.getgid()),
                  f"{LIMITS} {limits}", str(CLOSE_SCRIPT), ":".join(reads), ":".join(LOCAL_KEPT),
-                 PATH, snippet.LOCALE, system_tool("pivot_root")]
+                 path, snippet.LOCALE, system_tool("pivot_root"), ":".join(tools)]
     expanded = [argument for argument in arguments if "$" in argument or "\n" in argument]
-    if expanded or any(":" in path for path in reads):
+    if expanded or any(":" in path for path in (*reads, *tools)):
         raise SealError(f"a sealed runner's arguments hold no '$', newline or ':' in a path: {expanded}")
     return arguments
 
@@ -180,8 +188,8 @@ MAC_SYSCTLS = ('(sysctl-name-prefix "hw.") (sysctl-name-prefix "kern.os") '
                '(sysctl-name "kern.ngroups") (sysctl-name "sysctl.proc_cputype")')
 
 #: The shim that runs the command inside the profile sandbox-exec applies (macOS).
-#: Arguments: the workspace, then whatever DSH appends.
-_MAC_SHIM = 'ws="$1"; shift; ' + _EXEC
+#: Arguments: the workspace, the command's PATH, then whatever DSH appends.
+_MAC_SHIM = 'ws="$1"; cmd_path="$2"; shift 2; ' + _EXEC
 
 
 class SealError(RuntimeError):
@@ -198,9 +206,11 @@ def _check(workspace: Path, readable: tuple[str, ...]) -> str:
     return path
 
 
-def mac_profile(workspace: Path) -> str:
-    """The deny-by-default Seatbelt profile a sealed macOS command runs under."""
-    reads = [path for path in MAC_READS if os.path.exists(path)]
+def mac_profile(workspace: Path, extra: tuple[str, ...] = ()) -> str:
+    """The deny-by-default Seatbelt profile a sealed macOS command runs under; ``extra``
+    are more directories it may read and run programs from (a Task's interpreter's,
+    :func:`tool_path`)."""
+    reads = [path for path in (*MAC_READS, *extra) if os.path.exists(path)]
     ws = _check(workspace, tuple(reads))
     above = sorted({parent for path in (*reads, ws) for parent in snippet._ancestors(path)})
     readable = " ".join(f"(subpath {snippet._sbpl(path)})" for path in reads)
@@ -237,20 +247,140 @@ class StepCap:
     cgroup: str = ""
 
 
-def runner_command(workspace: Path, cap: StepCap | None = None) -> list[str]:
+@dataclass(frozen=True)
+class ToolPath:
+    """A Task's tool environment as a sealed command gets it (:func:`tool_path`): ``bin``,
+    first on its PATH, holds ``python3`` and ``python``; ``reads`` are the interpreter's
+    directories (and ``bin``), each bound read only."""
+
+    bin: str
+    reads: tuple[str, ...]
+    python: str
+
+
+#: The names a Task's interpreter answers to on a sealed command's PATH.
+PYTHON_NAMES = ("python3", "python")
+
+
+def distinct_paths(paths) -> list[str]:
+    """Absolute and resolved forms of ``paths``, existing ones only, in order, without
+    one that another of them contains."""
+    out: list[str] = []
+    for path in paths:
+        for form in (os.path.abspath(path), os.path.realpath(path)):
+            if os.path.exists(form) and form not in out:
+                out.append(form)
+    return [p for p in out
+            if not any(o != p and (p + "/").startswith(o.rstrip("/") + "/") for o in out)]
+
+
+@functools.lru_cache(maxsize=None)
+def interpreter_dirs(python: str) -> tuple[str, ...]:
+    """The directories ``python`` runs from: the prefixes it reports itself (``sys.prefix``,
+    ``base_prefix``, ``exec_prefix``, ``base_exec_prefix``) and the folder its executable
+    resolves to. Never a folder guessed from where ``python`` is named (a link to it may
+    sit anywhere); none at all when it cannot report."""
+    import json
+
+    try:
+        proc = subprocess.run(
+            [python, "-I", "-c", "import json, sys; print(json.dumps([sys.prefix, "
+             "sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]))"],
+            capture_output=True, text=True, timeout=60)
+        found = json.loads(proc.stdout) if proc.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ()
+    if not found:
+        return ()
+    return tuple(distinct_paths([*found, os.path.dirname(os.path.realpath(python))]))
+
+
+def _inside(path: str, root: str) -> bool:
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def refused_binding(bound, *, held=(), within=()) -> str | None:
+    """Why binding the folders ``bound`` into a confined root would show what it must
+    not: one of them holds a path of ``held`` (or is it), or lies inside one of
+    ``within``; ``None`` when none does. Paths compare resolved. The model-code sandbox
+    (`refactory_packages.spreadsheetbench.sandbox`) and the seal's tool environment
+    (:func:`tool_path`) both refuse on it."""
+    for folder in bound:
+        for secret in held:
+            if os.path.lexists(secret) and _inside(secret, folder):
+                return f"{secret}: it is inside {folder}"
+        for root in within:
+            if os.path.lexists(root) and _inside(folder, root):
+                return f"{folder}: it is inside {root}"
+    return None
+
+
+def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()) -> ToolPath:
+    """The Task interpreter ``python`` for a sealed command: ``bin_dir`` (made afresh, beside
+    the workspace and never inside it) holds ``python3`` and ``python``, each a two-line
+    script that runs ``python`` by its own path (a link would lose a virtual environment),
+    and the folders it reports it runs from (`interpreter_dirs`) are bound read only.
+
+    Refused (`SealError`) when one of those folders holds, or lies inside, any of: the
+    run's roots ``runs`` (the run every item's pass is in, and the outer loop's root above
+    it), refactory's own directory, or a Task's ``hidden`` paths (its dataset, the secrets
+    `ToolEnvironment.hidden` names); or when one holds the home directory. The workspace is
+    inside the run, so it is covered. So the seal shows no item's pass, grader file or
+    dataset through it."""
+    from refactory_dsh.paths import refactory_home
+
+    python = os.path.abspath(python)
+    if not os.path.isfile(python) or not os.access(python, os.X_OK):
+        raise SealError(f"the Task's interpreter {python} is not an executable file")
+    dirs = interpreter_dirs(python)
+    if not dirs:
+        raise SealError(f"the Task's interpreter {python} does not report where it runs from")
+    secret = [*map(str, runs), str(refactory_home()), *map(str, hidden)]
+    why = refused_binding(dirs, held=[*secret, str(Path.home())],
+                          within=secret)
+    if why:
+        raise SealError(f"the Task's interpreter {python} runs from a folder a sealed step may "
+                        f"not read ({why})")
+    bin_dir = Path(bin_dir)
+    if _inside(str(bin_dir), str(workspace)) or _inside(str(workspace), str(bin_dir)):
+        raise SealError(f"the interpreter's folder {bin_dir} is not beside the workspace")
+    for path in (python, os.path.realpath(python), str(bin_dir), *dirs):
+        if any(ch in path for ch in ":$\n\"'\\"):
+            raise SealError(f"a sealed command's PATH cannot name {path!r}")
+    # Run by the name it was given where that name is inside its own folders (a virtual
+    # environment's bin/python, which only that name makes one), else by what it resolves to:
+    # a name elsewhere (a link beside other files) is not in the seal.
+    named = any(python.startswith(folder.rstrip("/") + "/") for folder in dirs)
+    run_as = python if named else os.path.realpath(python)
+    shutil.rmtree(bin_dir, ignore_errors=True)
+    bin_dir.mkdir(parents=True)  # raises when an earlier one could not be removed
+    for name in PYTHON_NAMES:
+        script = bin_dir / name
+        script.write_text(f'#!/bin/sh\nexec "{run_as}" "$@"\n')
+        script.chmod(0o555)
+    return ToolPath(str(bin_dir), tuple(distinct_paths([str(bin_dir), *dirs])), run_as)
+
+
+def runner_command(workspace: Path, cap: StepCap | None = None,
+                   tools: ToolPath | None = None) -> list[str]:
     """The runner argv DSH's local sandbox provider puts in front of each command of a
     sealed step (``runnerCommand``), under the step's whole-step ``cap`` (`step_cap`).
     Without one (a probe, `run`) a command gets a user scope where one can be made, and
-    per-process limits only otherwise."""
+    per-process limits only otherwise. ``tools`` (:func:`tool_path`): the Task's
+    interpreter first on the command's PATH, its directories read only."""
+    extra = tools.reads if tools is not None else ()
+    path = f"{tools.bin}:{PATH}" if tools is not None else PATH
     if sys.platform == "darwin":
-        ws = _check(workspace, MAC_READS)
+        ws = _check(workspace, (*MAC_READS, *extra))
         # The reaper runs sandbox-exec, then ends whatever the command left behind.
         reaper = str(Path(__file__).with_name("seal_reaper.py"))
-        return [sys.executable, "-I", reaper, ws, snippet.SANDBOX_EXEC, "-p", mac_profile(workspace),
-                "/bin/sh", "-c", _MAC_SHIM, "refactory-seal", ws]
+        return [sys.executable, "-I", reaper, ws, snippet.SANDBOX_EXEC, "-p",
+                mac_profile(workspace, extra), "/bin/sh", "-c", _MAC_SHIM, "refactory-seal", ws,
+                path]
     if not sys.platform.startswith("linux"):
         raise SealError(f"no sealed workspace on {sys.platform}")
-    ws = _check(workspace, LINUX_READS + LINUX_ETC)
+    ws = _check(workspace, LINUX_READS + LINUX_ETC + extra)
     if os.getuid() == 0:
         # Root here is root inside, which reads what only root may (/etc/shadow and the
         # like): a sealed step runs as an ordinary user, or not at all.
@@ -266,7 +396,8 @@ def runner_command(workspace: Path, cap: StepCap | None = None) -> list[str]:
             system_tool("unshare"), "-Urnmp", "--fork", "--kill-child",
             "--mount-proc", "--", snippet.BASH,
             *linux_arguments(ws, LINUX_READS + LINUX_ETC,
-                             LINUX_LIMITS if scope or cgroup else LINUX_LIMITS_UNSCOPED)]
+                             LINUX_LIMITS if scope or cgroup else LINUX_LIMITS_UNSCOPED, path,
+                             extra)]
 
 
 def user_manager_kept(groups: str | None = None,
@@ -360,6 +491,9 @@ def _scope_prefix() -> list[str]:
 
 #: The scope prefix once a probe found one (`linux_scope`); a failed probe is not kept.
 _SCOPE: list[tuple[str, ...]] = []
+#: The `_WARNED` key of a failed user scope probe (`linux_scope`).
+_PROBE_FAILED = "the systemd user scope probe failed"
+
 
 
 def _scope_bus_exists(prefix: tuple[str, ...]) -> bool:
@@ -397,9 +531,14 @@ def linux_scope() -> tuple[str, ...]:
             pass
     if found:
         _SCOPE.append(found)
-    else:
-        print("refactory: warning: a sealed step's command runs without a capped systemd user "
-              "scope here", file=sys.stderr)
+    elif prefix and _PROBE_FAILED not in _WARNED:
+        # Said once, and only when a user manager was there to ask and its probe failed:
+        # where there is none, `step_cap` caps the step another way (a delegated cgroup)
+        # or says, once per reason, that it has no whole-step cap.
+        _WARNED.add(_PROBE_FAILED)
+        print("refactory: warning: the systemd user scope probe failed here; a sealed step's "
+              "command runs without a user scope (each step's dispatch record says what caps "
+              "it instead)", file=sys.stderr)
     return found
 
 

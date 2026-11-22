@@ -7,15 +7,26 @@
 #
 # Arguments: refactory-seal, the workspace, the caller's uid and gid, the ulimit
 # options, the close step's file, the paths to bind (colon-separated), the names of
-# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale, and
-# pivot_root's path (resolved by refactory: a service's PATH may lack /usr/sbin); then
-# whatever DSH appends, its command after "--".
+# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale,
+# pivot_root's path (resolved by refactory: a service's PATH may lack /usr/sbin), and the
+# folders of the Task's tool environment to bind read only (colon-separated, maybe none:
+# `seal.tool_path`); then whatever DSH appends, its command after "--".
 [ "$1" = refactory-seal ] || { echo "refactory-seal: bad arguments" >&2; exit 97; }
 ws="$2"; uid="$3"; gid="$4"; limits="$5"; closer="$6"; reads="$7"; kept="$8"
-cmd_path="$9"; locale="${10}"; pivot="${11}"
-shift 11
+cmd_path="$9"; locale="${10}"; pivot="${11}"; tools="${12}"
+shift 12
 fail() { echo "refactory-seal: $1" >&2; exit 97; }
 exec 3<"$ws" || fail "cannot open the workspace"
+# The tool environment's folders, opened now (as the workspace is): /tmp is covered below,
+# and one of them may be under it. Each must be there.
+IFS=: read -r -a tool_dirs <<< "$tools"
+tool_fds=()
+for d in "${tool_dirs[@]}"; do
+    [ -n "$d" ] || continue
+    [ -d "$d" ] || fail "no folder $d"
+    exec {fd}<"$d" || fail "cannot open $d"
+    tool_fds+=("$fd")
+done
 # The close step's code, read now: it runs as `bash -c` (a script file would hold a
 # descriptor of its own open) in the nested namespace, past anything that rewrites
 # arguments.
@@ -55,6 +66,14 @@ for e in "$r"/usr/local/* "$r"/usr/local/.[!.]*; do
     else
         mount -n --bind /dev/null "$e" && mount -n -o remount,bind,ro "$e"
     fi || fail "cannot cover $e"
+done
+i=0
+for d in "${tool_dirs[@]}"; do
+    [ -n "$d" ] || continue
+    fd="${tool_fds[$i]}"; i=$((i + 1))
+    { mkdir -p "$r$d" && mount -n --bind "/proc/self/fd/$fd" "$r$d" \
+        && mount -n -o remount,bind,ro "$r$d"; } || fail "cannot bind $d"
+    exec {fd}<&- || fail "cannot close $d"
 done
 mkdir -p "$r/dev" "$r/proc" "$r/tmp" || fail "cannot make the mount points"
 for n in null zero random urandom; do

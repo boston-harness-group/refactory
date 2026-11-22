@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from refactory_dsh import nn
-from refactory_dsh.task import Task, TaskInstance, VerifyResult
+from refactory_dsh.task import Task, TaskInstance, ToolEnvironment, VerifyResult
 
 MODULE = "item_files_ops"
 #: The item file every item gets, under the same name.
@@ -186,6 +186,94 @@ class SealedLook(ItemFilesMode):
         graph.add(nn.Node("look", "agent", prompt_template="Look at the item's input.",
                           reads=(INPUT,), writes=(ANSWER,), tools=("bash",),
                           workspace="scratch"))
+        return graph
+
+
+#: Names another interpreter for `ToolEnvTask` (a test's own virtual environment).
+PYTHON_ENV = "ITEM_FILES_TEST_PYTHON"
+
+
+def test_interpreter() -> str:
+    """The interpreter a `ToolEnvTask`'s sealed steps run as ``python3``: `PYTHON_ENV`, else
+    the one running the tests."""
+    import os
+    import sys
+
+    return os.environ.get(PYTHON_ENV) or sys.executable
+
+
+#: What `ToolEnvTask` says of its tool environment.
+TOOL_SUMMARY = "python3 (and python) = the tests' own interpreter, with pytest"
+
+
+class ToolEnvTask(FileTask):
+    """`FileTask` whose sealed tool steps run its interpreter (`Task.tool_environment`)."""
+
+    name = "item_files_tool_env"
+    tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter)
+
+
+#: Names the grader-side path `HiddenEnvTask` declares (`ToolEnvironment.hidden`).
+HIDDEN_ENV = "ITEM_FILES_TEST_HIDDEN"
+
+
+def test_hidden(workdir: Path) -> list[str]:
+    import os
+
+    return [os.environ[HIDDEN_ENV]] if os.environ.get(HIDDEN_ENV) else []
+
+
+class HiddenEnvTask(FileTask):
+    """`ToolEnvTask` whose environment names a grader-side path no folder may show."""
+
+    name = "item_files_hidden_env"
+    tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter,
+                                       hidden=test_hidden)
+
+
+def missing_interpreter() -> str:
+    raise RuntimeError("the pinned interpreter is missing (build it first)")
+
+
+class MissingEnvTask(FileTask):
+    """`FileTask` whose declared interpreter cannot be had: its sealed steps are refused."""
+
+    name = "item_files_missing_env"
+    tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=missing_interpreter)
+
+
+class SealedEnvLook(SealedLook):
+    """`SealedLook` whose Task declares a tool environment."""
+
+    name = "item_files_sealed_env"
+    task_ref = f"{MODULE}:ToolEnvTask"
+
+
+class SealedMissingEnv(SealedLook):
+    """`SealedLook` whose Task's tool environment cannot be had."""
+
+    name = "item_files_sealed_missing_env"
+    task_ref = f"{MODULE}:MissingEnvTask"
+
+
+class AgentPass(ItemFilesMode):
+    """A data pass whose one agent step (no tools) answers, then a step after the pass:
+    where the outer loop's operators add steps, inside the per-item part and outside it."""
+
+    name = "item_files_agent_pass"
+    task_ref = f"{MODULE}:ToolEnvTask"
+
+    def build(self) -> nn.Graph:
+        graph = nn.Graph()
+        graph.add(nn.Node("data", "data", subgraph_entry="solve", subgraph_exit="solve",
+                          task_ref=self.task_ref, writes=self.data_writes,
+                          produces=("item_scores",), parallelism_knob="data_parallelism",
+                          knobs=("data_parallelism",)))
+        graph.add(nn.Node("solve", "agent", prompt_template="Answer the item.",
+                          writes=(ANSWER,), tool_policy="none"))
+        graph.add(nn.Node("report", "agent", prompt_template="Report on the run.",
+                          writes=("report.txt",), tool_policy="none"))
+        graph.connect("data", "report")
         return graph
 
 

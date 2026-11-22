@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import Iterable
 
 from refactory_dsh.model import HarnessIncident
-from refactory_dsh.seal import system_tool
+# The interpreter's directories, found as a sealed tool step's are (`seal.tool_path`).
+from refactory_dsh.seal import distinct_paths as _distinct
+from refactory_dsh.seal import interpreter_dirs, refused_binding, system_tool
 
 #: Secret paths under the home directory, as the lab's wrapper hides them
 #: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
@@ -104,37 +106,6 @@ def _linux_script(read_only: list[str], writable: list[str], links: dict[str, st
                f'exec unshare -U -r -m -- {SHELL} -c '
                f'\'printf ok > /proc/self/fd/{int(ready_fd)} && exec "$@"\' sh "$@"')]
     return "\n".join(lines) + "\n"
-
-
-@lru_cache(maxsize=None)
-def interpreter_dirs(python: str) -> tuple[str, ...]:
-    """The directories ``python`` runs from: its prefixes, as it reports them, and where
-    its executable resolves to. Read-only in the sandbox."""
-    import json
-
-    found = [os.path.dirname(os.path.dirname(os.path.realpath(python))),
-             os.path.dirname(os.path.dirname(os.path.abspath(python)))]
-    try:
-        proc = subprocess.run(
-            [python, "-I", "-c", "import json, sys; print(json.dumps([sys.prefix, "
-             "sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]))"],
-            capture_output=True, text=True, timeout=60)
-        found += json.loads(proc.stdout) if proc.returncode == 0 else []
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return tuple(_distinct(found))
-
-
-def _distinct(paths: Iterable[str]) -> list[str]:
-    """Absolute and resolved forms of ``paths``, existing ones only, in order, without
-    one that another of them contains."""
-    out: list[str] = []
-    for path in paths:
-        for form in (os.path.abspath(path), os.path.realpath(path)):
-            if os.path.exists(form) and form not in out:
-                out.append(form)
-    return [p for p in out
-            if not any(o != p and (p + "/").startswith(o.rstrip("/") + "/") for o in out)]
 
 
 class SandboxError(RuntimeError):
@@ -253,13 +224,11 @@ def wrapper(hidden: Iterable[str], visible: Iterable[str] = ()):
 def _refuse_covering(bound: Iterable[str], secret: Iterable[str]) -> None:
     """The reverse of the hidden check: no directory bound into the code's root may hold
     the home directory, the dataset or another hidden path (an interpreter installed in
-    the home directory itself would bring all of it along). Refused, never narrowed."""
-    for path in secret:
-        real = os.path.realpath(path).rstrip("/") + "/"
-        for dir_ in bound:
-            if real.startswith(os.path.realpath(dir_).rstrip("/") + "/"):
-                raise SandboxError(f"the sandbox would show {path}: it is inside {dir_}, "
-                                   "which the code needs")
+    the home directory itself would bring all of it along). Refused, never narrowed
+    (`seal.refused_binding`, which a sealed step's tool environment is held to too)."""
+    why = refused_binding(list(bound), held=list(secret))
+    if why:
+        raise SandboxError(f"the sandbox would show {why}, which the code needs")
 
 
 _PROBE = """
