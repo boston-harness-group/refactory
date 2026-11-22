@@ -147,8 +147,14 @@ def test_a_check_in_the_worktree_sees_none_of_refactorys_environment(repo, tmp_p
 
 
 def test_a_check_in_the_worktree_is_bounded_by_its_timeout_not_by_memory(repo, tmp_path):
-    """A Node check that starts worker threads, as vitest does, failed under a 2 GB address-space cap (#325)."""
+    """A Node check that starts worker threads, as vitest does, failed under a 2 GB address-space cap (#325).
+
+    RLIMIT_CPU derives from the backstop (not the inactivity limit) so a long-running
+    active command is not killed by SIGXCPU (PIT-001).
+    """
     import resource
+
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
     tool = ("import json, resource\n"
             "print(json.dumps([resource.getrlimit(resource.RLIMIT_AS)[0], "
@@ -158,7 +164,7 @@ def test_a_check_in_the_worktree_is_bounded_by_its_timeout_not_by_memory(repo, t
     assert result.exit_ok, result.error
     evidence = json.loads((tmp_path / "run" / "authoring-evidence.json").read_text())
     assert json.loads(evidence["validation"]["stdout"]) == [resource.getrlimit(resource.RLIMIT_AS)[0],
-                                                            30 * (os.cpu_count() or 1)]
+                                                            COMMAND_BACKSTOP_S * (os.cpu_count() or 1)]
 
 
 def test_a_check_uses_the_environment_its_worktrees_manifests_install(repo, tmp_path, monkeypatch):

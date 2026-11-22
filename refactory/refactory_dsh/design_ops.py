@@ -1856,8 +1856,6 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     # A check stopped by inactivity or backstop timeout routes to a draft PR instead
     # of stop_unrepairable, so the run delivers its output rather than failing silently.
     if outcome["status"] == "check_timeout":
-        from refactory_dsh.run import BuildLoopStop
-
         kind_label = getattr(result, "timeout_kind", "timeout")
         if kind_label == "inactivity":
             reason = f"Check did not finish (inactivity timeout after {result.timeout_s}s of silence)"

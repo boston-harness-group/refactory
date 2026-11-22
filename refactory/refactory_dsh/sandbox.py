@@ -504,10 +504,13 @@ def run_command(
     # Shared mutable state for the reader threads and the timeout result, in the outer
     # scope so the timeout handler can read the output the threads have already captured.
     _timeout_kind: list[str | None] = [None]
-    _last_stdout_lines: collections.deque[str] = collections.deque(maxlen=200)
-    _last_stderr_lines: collections.deque[str] = collections.deque(maxlen=200)
+    # Full lists for normal completion (all output); deques for timeout tail (last 200).
+    _all_stdout_lines: list[str] = []
+    _all_stderr_lines: list[str] = []
+    _tail_stdout: collections.deque[str] = collections.deque(maxlen=200)
+    _tail_stderr: collections.deque[str] = collections.deque(maxlen=200)
 
-    def _reader(fd, deque_lines, activity):
+    def _reader(fd, all_lines, tail_lines, activity):
         """Drain *fd* (a raw binary file descriptor) line by line, updating *activity*."""
         buf = b""
         while True:
@@ -521,26 +524,32 @@ def run_command(
             buf += chunk
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
-                deque_lines.append(line.decode("utf-8", errors="replace"))
+                decoded = line.decode("utf-8", errors="replace")
+                all_lines.append(decoded)
+                tail_lines.append(decoded)
         # Flush remainder
         if buf:
-            deque_lines.append(buf.decode("utf-8", errors="replace"))
+            decoded = buf.decode("utf-8", errors="replace")
+            all_lines.append(decoded)
+            tail_lines.append(decoded)
 
-    def _once(deadline: float) -> subprocess.CompletedProcess[str]:
+    def _once() -> subprocess.CompletedProcess[str]:
         """Run the command once, bounded by inactivity and backstop; raise on timeout or budget."""
         backstop_deadline = time.monotonic() + COMMAND_BACKSTOP_S
 
         proc = subprocess.Popen(wrapped, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=os.name == "posix", **options)
 
-        # Clear the shared deques for this invocation (retries reuse them).
-        _last_stdout_lines.clear()
-        _last_stderr_lines.clear()
+        # Clear accumulators for this invocation (retries reuse them).
+        _all_stdout_lines.clear()
+        _all_stderr_lines.clear()
+        _tail_stdout.clear()
+        _tail_stderr.clear()
         # activity[0] = last time output was seen.  GIL-atomic float assignment.
         activity = [time.monotonic()]
 
-        t_out = threading.Thread(target=_reader, args=(proc.stdout, _last_stdout_lines, activity), daemon=True)
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, _last_stderr_lines, activity), daemon=True)
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, _all_stdout_lines, _tail_stdout, activity), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, _all_stderr_lines, _tail_stderr, activity), daemon=True)
         t_out.start()
         t_err.start()
 
@@ -582,21 +591,21 @@ def run_command(
                 proc.wait(timeout=2)
             raise
 
-        # Normal exit: join reader threads
+        # Normal exit: join reader threads, return ALL output (not truncated).
         t_out.join(timeout=5)
         t_err.join(timeout=5)
-        stdout_text = "\n".join(_last_stdout_lines) + ("\n" if _last_stdout_lines else "")
-        stderr_text = "\n".join(_last_stderr_lines) + ("\n" if _last_stderr_lines else "")
+        stdout_text = "\n".join(_all_stdout_lines) + ("\n" if _all_stdout_lines else "")
+        stderr_text = "\n".join(_all_stderr_lines) + ("\n" if _all_stderr_lines else "")
         return subprocess.CompletedProcess(command, retcode, stdout_text, stderr_text)
 
     started = time.monotonic()
     try:
         if budget is not None:
             budget.checkpoint()
-        result = _once(time.monotonic() + timeout_s)
+        result = _once()
         if result.returncode < 0:
             # Killed by a signal — retry once; the first death is transient.
-            result = _once(time.monotonic() + timeout_s)
+            result = _once()
             if result.returncode < 0:
                 sig_num = -result.returncode
                 try:
@@ -619,13 +628,13 @@ def run_command(
             # 128+N shells).  If the retry still crashes, the result falls through to
             # the caller's base comparison, which decides whether the crash is the
             # change's fault or infrastructure.
-            result = _once(time.monotonic() + timeout_s)
+            result = _once()
     except subprocess.TimeoutExpired:
         if sentinel_path is not None:
             sentinel_path.unlink(missing_ok=True)
-        # Keep the last output from the reader threads instead of discarding it.
-        kept_stdout = "\n".join(_last_stdout_lines) + ("\n" if _last_stdout_lines else "")
-        kept_stderr = "\n".join(_last_stderr_lines) + ("\n" if _last_stderr_lines else "")
+        # Keep the last 200 lines of output from the reader threads (tail deques).
+        kept_stdout = "\n".join(_tail_stdout) + ("\n" if _tail_stdout else "")
+        kept_stderr = "\n".join(_tail_stderr) + ("\n" if _tail_stderr else "")
         kind = _timeout_kind[0]
         return SandboxResult(
             ok=False, timed_out=True, returncode=124, timeout_s=timeout_s,

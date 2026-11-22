@@ -214,11 +214,6 @@ export const Config = z.object({
   steerCommand: z.string().default(''),
   steerArgs: z.array(z.string()).default([]),
   commandTimeoutMs: z.natural().default(600_000),
-  /** The absolute wall-clock backstop for any command (ms), matching the Python
-   *  ``COMMAND_BACKSTOP_S``.  Used as the envelope for deterministic ops whose
-   *  child commands enforce their own inactivity limits.  ``commandTimeoutMs``
-   *  stays the wall clock for the bookkeeping/steering ``spawnSync`` calls only. */
-  commandBackstopMs: z.natural().default(14_400_000),
   maxConcurrentNodes: z.natural().default(0),
   commandSandboxMode: z.string().default('danger-full-access'),
   ceoDeny: z.array(z.string()).default(DEFAULT_CEO_DENY),
