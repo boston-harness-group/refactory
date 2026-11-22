@@ -1790,7 +1790,8 @@ def ensure_environment(found: Worktree, run: Path, budget: Any = None, *,
         if shutil.which(command[0]) is None:
             problems.append(f"UNAVAILABLE: {command[0]} is not installed, so `{shown}` could not run")
             if prep_fail is None:
-                prep_fail = {"step": shown, "returncode": 127, "timed_out": False}
+                prep_fail = {"step": shown, "returncode": 127, "timed_out": False,
+                             "missing": command[0]}
             continue
         result = sandbox.run_command(
             shlex.join(command), workdir=path, timeout_s=INSTALL_TIMEOUT_S, file_mb=INSTALL_FILE_MB,
