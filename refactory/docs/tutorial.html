@@ -459,6 +459,7 @@ options:
       <details><summary>The real <code>--help</code></summary><pre><code>usage: python -m refactory_dsh.loop [-h] [--seed SEED] [--epochs EPOCHS]
                                     [--batch-size BATCH_SIZE]
                                     [--max-evaluations MAX_EVALUATIONS]
+                                    [--max-rollouts MAX_ROLLOUTS]
                                     [--optimizer OPTIMIZER]
                                     [--preset EDIT_PRESET]
                                     [--evaluator EVALUATOR]
@@ -491,6 +492,9 @@ options:
                         candidates proposed per epoch (default: 4)
   --max-evaluations MAX_EVALUATIONS
                         a hard ceiling on evaluated candidates (default: 64)
+  --max-rollouts MAX_ROLLOUTS
+                        a hard ceiling on item rollouts, every part counted
+                        (default: none); a resume may raise it
   --optimizer OPTIMIZER
                         how candidates are proposed: random, hill_climb,
                         evolutionary, archive, islands, map_elites or

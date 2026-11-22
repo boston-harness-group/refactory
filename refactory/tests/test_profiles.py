@@ -320,6 +320,38 @@ def test_resume_bound_extension_preserves_original_snapshot(tmp_path):
     assert 'resume_configuration' in (tmp_path / "journal.jsonl").read_text()
 
 
+def test_a_resume_may_raise_max_rollouts_and_the_run_goes_on(tmp_path):
+    """``max_rollouts`` is a bound like ``max_evaluations``: raising it on resume reuses
+    the evidence (it was refused as a changed evaluation context) and the run continues."""
+    config = LoopConfig(epochs=6, batch_size=1, optimizer="random", max_rollouts=2, runs_root=tmp_path)
+    first = Loop("circle_packing/adaptive", config, project=Path(".")).run()
+    assert first["bound"] == "rollouts"
+    config.resume, config.max_rollouts = True, 4
+    second = Loop("circle_packing/adaptive", config, project=Path(".")).run()
+    assert second["evaluations"] > first["evaluations"]
+    assert second["bound"] != "rollouts"
+
+
+def test_a_profile_resaved_with_only_a_bound_raised_has_the_same_context(tmp_path):
+    """A profile's version labels a save; the contract is its content. Re-saving one with
+    only a bound changed keeps the context hash, so ``--resume --profile`` reuses the
+    evidence, and a changed objective still does not."""
+    base = {"settings": {"optimizer": "random", "max_rollouts": 3000}, "contract": {"objective": "Same"}}
+    profiles.save(tmp_path, "budget", base)
+    profiles.save(tmp_path, "budget", {**base, "settings": {**base["settings"], "max_rollouts": 6000}})
+    profiles.save(tmp_path, "budget", {**base, "contract": {"objective": "Another"}})
+    hashes = [profiles.resolve(tmp_path, "circle_packing/adaptive", name="budget", version=v)["context_hash"]
+              for v in (1, 2, 3)]
+    assert hashes[0] == hashes[1] != hashes[2]
+
+
+def test_the_command_line_takes_max_rollouts():
+    import argparse
+    parser = argparse.ArgumentParser()
+    profiles.add_cli_arguments(parser)
+    assert parser.parse_args(["--max-rollouts", "6000"]).max_rollouts == 6000
+
+
 def test_proposer_uses_shared_budget_and_owned_directory(tmp_path, monkeypatch):
     import copy
     class Model:

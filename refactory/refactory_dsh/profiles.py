@@ -425,12 +425,12 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
                 "allowed_ops": settings["allowed_ops"] or [op["op"] for op in edits.catalogue(settings["edit_preset"])],
                 "frozen": sorted(set(settings["frozen"]) | {k for k, v in state.get("knobs", {}).items() if (v.get("spec") or {}).get("frozen")}),
                 "training": {"holdout": settings["holdout"], "proposal_access": "training only"},
-                "termination": {k: settings[k] for k in ("epochs", "max_evaluations", "max_elapsed_s", "max_tokens", "repeats")}}
+                "termination": {k: settings[k] for k in ("epochs", "max_evaluations", "max_rollouts", "max_elapsed_s", "max_tokens", "repeats")}}
     # Bounds can be explicitly extended on resume without reusing evidence under
     # another scoring/input/model contract. They still live in the exact snapshot.
     evaluation_fields = {k: v for k, v in settings.items() if k not in (
-        "epochs", "batch_size", "elite", "max_evaluations", "max_elapsed_s", "max_tokens",
-        "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
+        "epochs", "batch_size", "elite", "max_evaluations", "max_rollouts", "max_elapsed_s",
+        "max_tokens", "validation_reserve_s", "validation_reserve_tokens", "attempts", "history_limit", "prior_runs",
         "max_concurrent_evaluations", "max_items_in_flight",
         "early_stop_patience", "early_stop_at_full_val", "train_minibatch",
         "selection", "pool_size",
@@ -461,7 +461,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
         evaluation_fields.pop("portfolio", None)
     route_context = runtime_identity(settings, project, model_client=model_client, uses_models=settings["optimizer"] == "autoresearch" or any(n.get("kind") == "agent" for n in (nodes.values() if isinstance(nodes, dict) else nodes) if isinstance(n, dict)))
     context = {"mode": mode_id, "seed_state": digest(state), "implementation": hashlib.sha256(source.read_bytes()).hexdigest(), "dependencies": implementations, "routing": route_context,
-               "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k != "termination"}),
+               # The profile's version labels a save, not a contract: a profile re-saved with
+               # only a bound raised is the same contract, and its run resumes.
+               "inputs": inputs, "contract": digest({k: v for k, v in contract.items() if k not in ("termination", "version")}),
                "settings": digest(evaluation_fields),
                # How the runtime treats a crashed agent step: evidence from before a change
                # to it is refused on resume rather than mixed in (`node_retry.SEMANTICS`).
@@ -605,6 +607,8 @@ CLI_SETTINGS: dict[str, str] = {
     "epochs": "rounds of propose, validate, evaluate, select (default: 2)",
     "batch_size": "candidates proposed per epoch (default: 4)",
     "max_evaluations": "a hard ceiling on evaluated candidates (default: 64)",
+    "max_rollouts": "a hard ceiling on item rollouts, every part counted (default: "
+                    "none); a resume may raise it",
     "optimizer": "how candidates are proposed: random, hill_climb, evolutionary, archive, "
                  "islands, map_elites or autoresearch (default: autoresearch)",
     "edit_preset": "which edits are allowed: broad, structure, conservative or knob_only "
@@ -657,7 +661,7 @@ def add_cli_arguments(parser: Any) -> None:
     import argparse
 
     known = defaults()
-    integers = ("seed", "epochs", "batch_size", "max_evaluations", "max_items_in_flight")
+    integers = ("seed", "epochs", "batch_size", "max_evaluations", "max_rollouts", "max_items_in_flight")
     for key, text in CLI_SETTINGS.items():
         parser.add_argument(_flag(key), dest=key, type=int if key in integers else str,
                             default=None, help=text)
