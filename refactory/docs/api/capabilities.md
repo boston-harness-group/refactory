@@ -7823,6 +7823,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
         "attempts",
         "check_attempt_cap"
       ],
@@ -8130,9 +8131,21 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds of inactivity (no worker events or item completions) allowed for each smoke pass; a long backstop caps total wall time",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8199,7 +8212,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "3fddccba946f8bf6d63e2d7b4c59d50a346a8193a3a79a547be985dc1159ffd3"
+    "reviewed_schema": "215537a6708bd5cbbbec9ffe9c89653dd7ae0da077dbaad033600ffc52ffd7a5"
   }
 }
 ```
@@ -8396,6 +8409,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -8613,9 +8627,21 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds of inactivity (no worker events or item completions) allowed for each smoke pass; a long backstop caps total wall time",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8670,7 +8696,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "1f3437b748a7372075d53eaff9a6e1d1527c82be8d9abf70289bf86fe47f04a3"
+    "reviewed_schema": "1ade4d235c7e8b7eea54fd41e2ca3b5699a5dda8cfd30582f6b70f712e5c56d7"
   }
 }
 ```
@@ -11088,6 +11114,7 @@ Revise an existing mode package and validate the revision before separate QA and
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
         "attempts",
         "check_attempt_cap"
       ],
@@ -11395,9 +11422,21 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds of inactivity (no worker events or item completions) allowed for each smoke pass; a long backstop caps total wall time",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11464,7 +11503,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "184ce0afc0773fd7318dab012f721a9160cd84b03834893eb6622d0090ef279d"
+    "reviewed_schema": "a6c9330ba60f8c60ef773671fa5c86648c08a175f2573465c4535df0ec82ee4d"
   }
 }
 ```
@@ -11656,6 +11695,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "allow_regression",
         "sample_knobs",
         "smoke_timeout_s",
+        "smoke_items",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -11863,9 +11903,21 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "value": false,
       "values": []
     },
+    "smoke_items": {
+      "default": 3,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "frozen": false,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 3,
+      "values": []
+    },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds of inactivity (no worker events or item completions) allowed for each smoke pass; a long backstop caps total wall time",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11908,7 +11960,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "a030bca98b76bd46b990b05b557fa2ea0040aaa3d25b8b2d0c683434301f7054"
+    "reviewed_schema": "9699537e271e2d226293cf8b2621bf634b486a126ca329625fc8d1cbfe98d42a"
   }
 }
 ```

@@ -96,7 +96,7 @@ A mode: a Python class whose architecture and parameters are serializable.
 | kind | name | signature |
 |---|---|---|
 | class | `Mode` | `(state: 'dict[str, Any] \| None' = None) -> 'None'` |
-| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>) -> None` |
+| class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>, timeout_kind: 'str \| None' = None) -> None` |
 | class | `StateError` | `` |
 | function | `graph_identity` | `(state: 'dict') -> 'dict'` |
 
@@ -723,7 +723,7 @@ Running code we did not write.
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
 | function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
-| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, data_parallelism: 'int' = 0, **kwargs: 'Any') -> 'SandboxResult'` |
 | function | `timeout_output` | `(result: 'SandboxResult', n: 'int' = 200) -> 'str'` |
 | function | `usage` | `() -> 'str'` |
 | function | `verify_sandboxed` | `(name: 'str', *, project: 'Path \| None' = None, shared_project: 'Path \| None' = None, requires_data_node: 'bool' = False, requires_task_ref: 'str' = '', requires_task_refs: 'tuple[str, ...]' = (), requires_input: 'tuple[str, ...]' = (), **kwargs: 'Any') -> 'SandboxResult'` |

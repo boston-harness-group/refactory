@@ -547,7 +547,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip = pytest.mark.skip(reason="pass --run-integration to run DSH inner-loop tests")
     for item in items:
-        if "integration" in item.keywords:
+        if "integration" in item.keywords and "no_integration" not in item.keywords:
             item.add_marker(skip)
 
 

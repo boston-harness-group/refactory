@@ -1159,6 +1159,41 @@ describe('applyControls integration', () => {
       .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
   })
 
+  it('wf_redo refuses when run is halted by a verdict (smoke timeout)', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'smoke',
+      nodes: {
+        smoke: { _type: 'AgentNode', id: 'smoke', role: 'builder', prompt_template: 'S', reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn', evaluator_command: 'true', reads: [] },
+        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'smoke', target: 'gate_smoke' },
+        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir })
+    // Drive smoke to completion, then gate_smoke halts with a verdict.
+    await call(ctx, 'wf_next')       // smoke is due
+    await call(ctx, 'wf_done', { node: 'smoke' })
+    await call(ctx, 'wf_next')       // gate_smoke is due
+    await call(ctx, 'wf_verdict', { gate: 'gate_smoke', verdict: 'halt' })
+    // The spine is now halted
+    const next = await call(ctx, 'wf_next') as { status: string; halted?: { reason: string; gate?: string } }
+    expect(next.status).toBe('done')
+    expect(next.halted?.reason).toBe('verdict')
+    expect(next.halted?.gate).toBe('gate_smoke')
+    // wf_redo of smoke (upstream of gate_smoke) should refuse
+    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
+      .rejects.toThrow(/run halted at gate gate_smoke/)
+    await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
+      .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
+    // wf_redo of register (downstream, never ran) should also refuse
+    await expect(call(ctx, 'wf_redo', { node: 'register' }))
+      .rejects.toThrow(/run halted at gate gate_smoke/)
+  })
+
   it('wf_redo refuses when run has failed', async () => {
     const workdir = scratch()
     const graph: WorkflowGraph = {

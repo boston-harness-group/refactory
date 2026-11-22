@@ -96,6 +96,12 @@ class _FakeProcess:
         self._terminated = True
         self.returncode = -9
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
 
 class _FakeStream:
     """A stream that immediately yields nothing (empty iterator)."""
@@ -137,7 +143,11 @@ class TestRunOnDshInactivity:
         monkeypatch.setattr("refactory_dsh.owned_process._termination_as_exit",
                             contextlib.nullcontext)
 
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: process)
+        monkeypatch.setattr(dsh_runtime, "subprocess", type("FakeSub", (), {
+            "Popen": lambda *a, **kw: process,
+            "TimeoutExpired": subprocess.TimeoutExpired,
+            "PIPE": subprocess.PIPE,
+        })())
         monkeypatch.setattr(dsh_runtime, "track_run", lambda p: None)
         monkeypatch.setattr(dsh_runtime, "untrack_run", lambda p: None)
         from refactory_dsh.owned_process import shutdown
@@ -196,31 +206,33 @@ class TestRunOnDshInactivity:
         )
         assert result.returncode == -1
         assert result.timeout_kind is None
-        assert "timed out" in result.stderr
+        assert "timeout" in result.stderr
 
     def test_run_on_dsh_inactivity_progress_files_count_as_activity(self, tmp_path, monkeypatch):
         """Progress file changes in the inner workdir reset the activity timestamp.
 
         A long agent call that writes worker events but prints nothing must not
-        trip the inner inactivity limit.
+        trip the inner inactivity limit.  The test uses a short inactivity
+        limit (1 s) and a process that exits after several progress-thread
+        polls.  Without progress tracking the run would time out; with it the
+        progress changes keep resetting the activity timestamp.
         """
         from refactory_dsh.dsh_runtime import run_on_dsh
 
-        # Process exits normally after a few polls
-        proc = _FakeProcess(exit_after=15)
+        # Process exits normally after 5 poll() calls from the progress thread.
+        proc = _FakeProcess(exit_after=5)
         self._mock_dsh_deps(monkeypatch, tmp_path, proc)
 
-        # Time advances 2 seconds per call, with 10 s inactivity limit
-        real_monotonic = time.monotonic
-        call_count = [0]
+        # Speed up the progress watcher thread so it checks every 0.05 s
+        # instead of 1 s — real time, no monkeypatch on time.monotonic needed.
+        _real_sleep = time.sleep
 
-        def slow_advance():
-            call_count[0] += 1
-            return real_monotonic() + call_count[0] * 2
+        def _fast_sleep(secs: float) -> None:
+            _real_sleep(min(secs, 0.05))
 
-        monkeypatch.setattr(time, "monotonic", slow_advance)
+        monkeypatch.setattr(time, "sleep", _fast_sleep)
 
-        # Progress changes on every call, resetting activity
+        # Progress changes on every call, resetting activity.
         progress_call_count = [0]
 
         def changing_progress(w):
@@ -232,15 +244,12 @@ class TestRunOnDshInactivity:
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
 
-        # Write a facts.json so the return path has facts
-        facts_dir = workdir / ".refactory"
-        facts_dir.mkdir(parents=True)
-
         result = run_on_dsh(
             {"graph": {"nodes": {}}}, workdir,
-            timeout_s=10, inactivity=True,
+            timeout_s=1, inactivity=True,
         )
         # The run should complete normally (not time out) because progress
         # changes keep resetting the activity timestamp.
         assert result.returncode == 0
         assert result.timeout_kind is None
+        assert progress_call_count[0] >= 3  # progress was actually checked
