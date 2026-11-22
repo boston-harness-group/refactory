@@ -177,7 +177,8 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         writes=spec['writes'], reads=spec['reads'], client=client, ask=ask,
         capture_final=_capture_final, rule=spec.get('retry'),
         timeout_s=spec['model_context'].get('node_wall_s'), budget=getattr(client, '_budget', None),
-        workspace=dispatch_workspace, tool_policy=tool_policy)
+        workspace=dispatch_workspace, tool_policy=tool_policy,
+        keeps_tool_markup=bool(spec.get('keeps_tool_markup')))
     for check in spec.get('post_checks', []):
         artifact = _path(workdir, check['path'])
         if check.get('must_exist', True) and not artifact.exists():

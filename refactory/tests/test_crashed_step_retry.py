@@ -529,7 +529,8 @@ def test_the_rule_resolves_from_the_graph_and_lowers_to_the_spine():
 
 def test_a_crash_retry_without_a_node_bound_reserves_every_session_on_the_spine(tmp_path):
     """The spine's command outlasts every session a crash retry may start: each one's
-    harness backstop (the session has no wall) plus the dispatch overhead."""
+    harness backstop (the session has no wall) plus the dispatch overhead, and one more
+    for the session a no-tools solver whose reply writes out tool calls is asked again in."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
 
     graph = _straight()
@@ -539,7 +540,7 @@ def test_a_crash_retry_without_a_node_bound_reserves_every_session_on_the_spine(
     lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path, client.context(),
                                      lowering.node_declarations(state))
     one = 500 + NODE_DISPATCH_OVERHEAD_S
-    assert lowered.nodes["solve"].command_timeout_s == (1 + PASS_RETRY_TIMES) * one
+    assert lowered.nodes["solve"].command_timeout_s == (2 + PASS_RETRY_TIMES) * one
 
 
 def test_which_failures_are_crashes():
@@ -814,3 +815,36 @@ def test_an_outer_loop_ranks_and_exports_a_candidate_with_a_no_answer_item(tmp_p
         cache = seed_cache.export(root, project=Path("."))
         assert set(cache["parts"]) == {"train", "val"}
         assert cache["parts"]["train"]["result"]["exit_ok"]
+
+
+# ── a solver with no tools that writes out a tool call (D14) ─────────────────
+
+
+#: A reply that "ran" a check the solver has no tool for: never its answer.
+INVENTED = ('<tool_call>{"name": "python", "arguments": {"code": "solve()"}}</tool_call>\n'
+            '<tool_result>right</tool_result>\nright')
+TOLD = "This step has no tools"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_an_invented_tool_call_in_a_pass_is_asked_again_and_its_item_scored(tmp_path, runtime):
+    """[both runtimes] Item 0's solver writes out a call; told it has no tools, it answers.
+    Every item is scored, and its one retry is the told one, not the pass's crash rule."""
+    dsh = Scripted(tmp_path / "dsh", {"": [INVENTED, "right"], TOLD: ["right"]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == RIGHT
+    assert (dsh.calls(), dsh.calls(TOLD)) == (4, 1)
+    [retried] = _events(_pass(run, "0"), RETRY_EVENT)
+    assert retried["reason"] == node_retry.INVENTED_TOOL_CALLS
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_second_invented_tool_call_leaves_the_item_without_an_answer(tmp_path, runtime):
+    """[both runtimes] Told, it writes out a call again: the step is missing (two sessions),
+    its item is graded without an answer, and its siblings are scored."""
+    dsh = Scripted(tmp_path / "dsh", {"": [INVENTED, "right"], TOLD: [INVENTED]})
+    scores, run = _run(runtime, _straight(), tmp_path, dsh)
+    assert _keys(scores) == [("0", False, 0.0, None), *RIGHT[1:]]
+    [record] = [r for r in scores if str(r["id"]) == "0"]
+    assert record["missing_steps"]["solve"]["cause"] == node_retry.INVENTED_TOOL_CALLS
+    assert record["missing_steps"]["solve"]["sessions"] == 2

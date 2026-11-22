@@ -30,8 +30,9 @@ from refactory_dsh import lowering, workers
 from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, CompletionTimeout, DshModelClient
 from refactory_dsh.nn import Graph, GraphError, Node
 from refactory_dsh.nn.graph import retry_declaration
-from refactory_dsh.node_retry import (RETRY_EVENT, RetriesExhausted, attempt_walls, deliver,
-                                      failure_kind, node_allowance_s, retries)
+from refactory_dsh.node_retry import (INVENTED_TOOL_CALLS, RETRY_EVENT, RetriesExhausted,
+                                      attempt_walls, deliver, failure_kind, node_allowance_s,
+                                      retries)
 
 RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 REPORT = "reviews/report.md"
@@ -885,3 +886,197 @@ def test_an_optional_branch_whose_declared_retry_is_spent_at_its_wall_is_declare
                     retry=RULE)
     info = _missing_verifier(runtime, tmp_path, verifier, [{"active": 30}, {"active": 30}])
     assert info["cause"] == "declared_timeout", info
+
+
+# ── a step with no tools that writes out tool calls it never made (D14) ─────────────
+
+#: A reply that "ran" a check its step has no tool for and reports a made-up result
+#: (create benchmark H2: 1999997 = 19 x 105263).
+INVENTED = ('<tool_call>{"name": "sympy", "arguments": {"code": "isprime(1999997)"}}</tool_call>\n'
+            '<tool_result>True</tool_result>\n1999997 is prime.')
+#: Text of `node_retry.NO_TOOLS_NOTE`: a scripted plan keyed by it answers only a retry
+#: that was told.
+TOLD = "This step has no tools"
+CLEAN = "1999997 = 19 x 105263."
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _solver(**fields) -> Node:
+    return Node("solver", "agent", **{"prompt_template": "Is 1999997 prime?", "writes": (REPORT,),
+                                      "tool_policy": "none", **fields})
+
+
+def _no_tools_run(runtime: str, tmp_path: Path, plan: dict[str, list[dict]], budget=None,
+                  client: dict | None = None, **fields):
+    dsh = Scripted(tmp_path / "dsh", plan)
+    ok, error = _run(runtime, tmp_path / "run", _graph(_solver(**fields)),
+                     dsh.client(runtime_root=str(ROOT), **(client or {})), budget=budget)
+    calls = sum(json.loads(p.read_text()) for p in (tmp_path / "dsh").glob("calls.json*"))
+    return ok, error, calls
+
+
+def _lowered_timeout(tmp_path: Path, node: Node) -> int:
+    state = {"graph": _graph(node).to_state(), "knobs": {}}
+    client = Scripted(tmp_path / "dsh", []).client(runtime_root=str(ROOT))
+    lowered = workers.lower_workflow(lowering.to_workflow(state), tmp_path / "run", client.context(),
+                                     lowering.node_declarations(state))
+    return lowered.nodes[node.id].command_timeout_s
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_tool_less_reply_with_invented_tool_calls_is_retried_once_told_so(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {
+        "": [{"answer": INVENTED}], TOLD: [{"answer": CLEAN}]})
+    workdir = tmp_path / "run"
+    assert ok, error
+    assert calls == 2
+    assert (workdir / REPORT).read_text().strip() == CLEAN
+    [event] = _retried(workdir)
+    assert (event["node_id"], event["reason"]) == ("solver", INVENTED_TOOL_CALLS)
+    assert (event["attempt"], event["attempts"]) == (2, 2)
+    assert "<tool_call>, <tool_result>" in event["error"]
+    receipts = [json.loads(p.read_text()) for p in (workdir / ".refactory/agent-delivery").glob("*/receipt.json")]
+    assert sorted(r["status"] for r in receipts) == ["delivered", "superseded"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_second_invented_reply_fails_the_step_with_the_reason(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": INVENTED}]})
+    assert not ok
+    assert ("solver has no tools, but its reply wrote out tool calls or results "
+            "(<tool_call>, <tool_result>) again after it was told so") in error, error
+    assert calls == 2
+    assert not (tmp_path / "run" / REPORT).exists(), "the invented reply was delivered"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_step_with_tools_keeps_a_reply_that_writes_out_tool_calls(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": INVENTED}]},
+                                     tool_policy=None)
+    assert ok, error
+    assert calls == 1
+    assert (tmp_path / "run" / REPORT).read_text().strip() == INVENTED
+    assert _retried(tmp_path / "run") == []
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_step_that_keeps_tool_markup_takes_the_reply_as_it_is(tmp_path, runtime):
+    """LiveMath's steps reproduce SkillOpt's harness, which takes whatever the model wrote."""
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": INVENTED}]},
+                                     keeps_tool_markup=True)
+    assert ok, error
+    assert calls == 1
+    assert (tmp_path / "run" / REPORT).read_text().strip() == INVENTED
+    assert _retried(tmp_path / "run") == []
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("shown", [
+    f"The call it would make:\n```xml\n{INVENTED}\n```\nUnchecked here.",
+    # A verdict quoting a person's feedback (`design.classify_reloop`): JSON as a whole.
+    json.dumps({"verdict": "document",
+                "reason": "they pasted <invoke name='python'>isprime(1999997)</invoke> here"}),
+], ids=["fenced", "json-reply"])
+def test_a_reply_that_only_shows_tool_call_markup_is_kept(tmp_path, runtime, shown):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": shown}]})
+    assert ok, error
+    assert calls == 1
+    assert (tmp_path / "run" / REPORT).read_text().strip() == shown
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_the_told_retry_and_the_nodes_own_rule_share_one_count(tmp_path, runtime):
+    """Markup first; the told session goes silent and the node's own timeout rule retries it,
+    still told; it answers. The events number every session the node may run."""
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {
+        "": [{"answer": INVENTED}], TOLD: [{"sleep": 30}, {"answer": CLEAN}]},
+        timeout_s=2, retry=RULE)
+    assert ok, error
+    assert calls == 3
+    assert (tmp_path / "run" / REPORT).read_text().strip() == CLEAN
+    events = _retried(tmp_path / "run")
+    assert [(e["reason"], e["attempt"], e["attempts"]) for e in events] == [
+        (INVENTED_TOOL_CALLS, 2, 3), ("timeout", 3, 3)]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_slow_invented_reply_is_retried_under_its_wall(tmp_path, runtime):
+    """A tool-less step with its own timeout: the first reply takes 2 s and writes out a
+    call; the retry runs under the same 3 s wall, on both runtimes."""
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {
+        "": [{"sleep": 2, "answer": INVENTED}], TOLD: [{"answer": CLEAN}]},
+        client={"inactivity_s": 10}, timeout_s=3)
+    assert ok, error
+    assert calls == 2
+    [event] = _retried(tmp_path / "run")
+    assert (event["reason"], event["wall_s"], event["after_s"]) == (INVENTED_TOOL_CALLS, 3, 2)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_no_told_retry_starts_when_the_run_wall_is_spent(tmp_path, runtime):
+    from refactory_dsh.budgets import ResourceLimits, RunBudget
+
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=4))
+    budget.resume()
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {
+        "": [{"sleep": 2, "answer": INVENTED}], TOLD: [{"answer": CLEAN}]},
+        budget=budget, client={"inactivity_s": 10}, timeout_s=3)
+    assert not ok
+    assert "solver has no tools, but its reply wrote out tool calls or results" in error, error
+    assert "its retry was not started" in error
+    assert calls == 1 and _retried(workdir) == []
+
+
+def test_the_spine_reserves_the_told_retry(tmp_path):
+    """The extra session's wall and overhead, in the one dispatch the spine starts."""
+    one = 100 + NODE_DISPATCH_OVERHEAD_S
+    assert _lowered_timeout(tmp_path, _solver(timeout_s=100)) == 2 * one
+    assert _lowered_timeout(tmp_path, _solver(timeout_s=100, keeps_tool_markup=True)) == one
+    assert _lowered_timeout(tmp_path, _solver(timeout_s=100, tool_policy=None)) == one
+    # With a rule: every attempt, plus one more as long as the longest.
+    assert _lowered_timeout(tmp_path, _solver(timeout_s=100, retry=RULE)) == (
+        100 + 200 + 200 + 2 * NODE_DISPATCH_OVERHEAD_S)
+
+
+def test_livemath_and_the_skill_graph_keep_their_replies_as_skillopt_does():
+    from refactory_packages.livemath import blocks, skill_graph
+
+    builds = (blocks.build_baseline, blocks.build_solve_then_verify,
+              blocks.build_two_attempts_then_judge, blocks.build_solve_then_self_check)
+    nodes = [*(node for build in builds for node in build().nodes),
+             *skill_graph.SkillGraph().build().nodes.values()]
+    agents = [node for node in nodes if node.kind == "agent"]
+    assert agents and all(node.tool_policy == "none" and node.keeps_tool_markup for node in agents)
+
+
+@pytest.mark.parametrize("edit, copies", [
+    ({"op": "insert", "after": "solve"}, ["solve_next"]),
+    ({"op": "parallelize", "steps": ["solve"], "copies": 2}, ["solve_copy1", "solve_copy2"]),
+], ids=["insert", "parallelize"])
+def test_a_copy_of_livemaths_solve_keeps_its_replies_as_solve_does(edit, copies):
+    """A copy is sent what the step it copies is, and takes its reply the same way."""
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    graph = Graph.from_state(nn_edits.apply(edit, Solver().state_dict())["graph"])
+    assert graph.nodes["solve"].keeps_tool_markup
+    assert all(graph.nodes[copy].tool_policy == "none" and graph.nodes[copy].keeps_tool_markup
+               for copy in copies), edit
+
+
+def test_a_split_copy_keeps_its_replies_and_the_new_reviewer_refuses():
+    """LiveMath's solve alone reads frozen knobs, so split refuses it; on a step that keeps
+    its replies, split's copy keeps them and its new reviewer takes the platform's refusal."""
+    import structure_fuzz as sf
+    from refactory_dsh.nn import edits as nn_edits
+    from refactory_packages.livemath.mode import Solver
+
+    with pytest.raises(nn_edits.EditError, match="frozen knob"):
+        nn_edits.apply({"op": "split", "step": "solve"}, Solver().state_dict())
+    state = sf.seeds()["fuzz_draft_review"].state()
+    state["graph"]["nodes"]["review"]["keeps_tool_markup"] = True
+    graph = Graph.from_state(nn_edits.apply({"op": "split", "step": "review"}, state)["graph"])
+    assert graph.nodes["review_a"].tool_policy == "none" and graph.nodes["review_a"].keeps_tool_markup
+    assert not graph.nodes["review_b"].keeps_tool_markup

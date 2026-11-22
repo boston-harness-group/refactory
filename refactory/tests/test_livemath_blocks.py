@@ -252,8 +252,10 @@ def _make_route_client():
 #: ``use_theorem`` and ``use_sketch`` were removed (the theorem states the answer).
 #: Then format_prompt declared which outputs carry its knob (``knob_outputs``), lowered
 #: with its knobs and facts; its prompts are unchanged. Then the solve node lost its
-#: 1800 s wall (``timeout`` null): its session ends on inactivity only.
-BASELINE_SNAPSHOT_SHA256 = "884d48130c13028dbcef59bd6979b49deb9b4ed5f7bf90de28fbed9c167df741"
+#: 1800 s wall (``timeout`` null): its session ends on inactivity only. Then the solve
+#: node keeps a reply that writes out tool calls as it is (``keeps_tool_markup``), as
+#: SkillOpt's harness does.
+BASELINE_SNAPSHOT_SHA256 = "61f99cd1893147e186676273f173599891426c9c5a7957024b0997fcb192c259"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
