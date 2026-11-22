@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import sys
@@ -34,6 +35,7 @@ from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.nn import pipeline_view as pv
 from refactory_dsh.nn.executor import ExecutionError, RunContext
 from refactory_dsh.nn.graph import Graph, op_io
+from refactory_dsh.nn.graph import Node as nn_node
 from refactory_dsh.optim import Candidate, Optimizer, Proposal
 from refactory_dsh.optim import base as base_mod
 from refactory_dsh.task import (Task, TaskError, check_laid_item_files, checked_item_files,
@@ -302,6 +304,180 @@ def test_a_sealed_step_reads_the_item_file_and_nothing_golden(tmp_path, runtime)
     assert len(seen) == 2
     assert {s["input"] for s in seen} == {"INPUT-a", "INPUT-b"}
     assert all(s["grader"] == "DENIED" and s["other"] == "DENIED" for s in seen), seen
+
+
+#: A runner's scope prefix whose user bus has gone away since it was made (systemd's user
+#: manager stopped: its runtime directory goes with the person's last session, which on
+#: some machines comes and goes every few seconds).
+GONE_SCOPE = ("/usr/bin/env", "XDG_RUNTIME_DIR=/run/user/gone-for-the-test",
+              "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/gone-for-the-test/bus",
+              "/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--")
+
+#: A stand-in DSH CLI that runs one command through the step's runner, as DSH's bash tool
+#: would, and answers what it printed (`DENIED` when it printed nothing).
+ONE_COMMAND = """\
+import json, pathlib, subprocess, sys
+cwd = pathlib.Path.cwd()
+last = max(i for i, arg in enumerate(sys.argv) if arg == '--patch')
+patch = json.loads(pathlib.Path(sys.argv[last + 1]).read_text())
+runner = next(row['config']['runnerCommand'] for row in patch if row.get('id') == 'sandbox')
+done = subprocess.run([*runner, '--ro-bind', '/', '/', '--', 'bash', '-c', 'cat {file}'],
+                      cwd=cwd, capture_output=True, text=True, timeout=60)
+(cwd / 'answer.txt').write_text(done.stdout.strip() or 'DENIED')
+"""
+
+
+def _one_command_client(tmp_path: Path, file: str):
+    from refactory_dsh.model import DshModelClient
+
+    script = tmp_path / "agent-cli"
+    script.write_text(f"#!{sys.executable}\n" + ONE_COMMAND.replace("{file}", file))
+    script.chmod(0o755)
+    return DshModelClient(worker_backend="dsh", dsh_cli=str(script), attempts=1)
+
+
+def _spine_dispatch(tmp_path: Path, client) -> tuple[Path, dict]:
+    """A sealed step reading ``input.txt``, as the spine dispatches it (`worker_node`)."""
+    import shlex
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "input.txt").write_text("THE-INPUT")
+    graph = Graph()
+    graph.add(nn_node("look", "agent", prompt_template="Look.", reads=("input.txt",),
+                      writes=(ifo.ANSWER,), tools=("bash",), workspace="scratch"))
+    state = {"graph": graph.to_state(), "knobs": {}}
+    lowered = workers.lower_workflow(lowering.to_workflow(state), run, client.context(),
+                                     lowering.node_declarations(state))
+    return run, json.loads(Path(shlex.split(lowered.nodes["look"].dispatch_command)[-1])
+                           .read_text())
+
+
+LINUX_ONLY = pytest.mark.skipif(not sys.platform.startswith("linux"),
+                                reason="systemd's user scope and unshare are Linux's")
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def test_a_scope_bus_gone_mid_step_runs_the_command_unscoped(tmp_path, runtime, monkeypatch):
+    """[walker: a data pass in process; spine: its agent dispatch, `worker_node`] The
+    step's runner was made with a systemd scope whose bus has since gone: each command
+    runs sealed under the unscoped per-process limits, as a step started a moment later
+    would, and the step reads its input -- never a command that silently did nothing."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import seal
+
+    _sealable()
+    monkeypatch.setattr(seal, "linux_scope", lambda: GONE_SCOPE)
+    if runtime == "walker":
+        client = _one_command_client(tmp_path, ifo.INPUT)
+        records, ok = _records(ifo.SealedLook, "walker", tmp_path, model=client)
+        assert ok and sorted((r["id"], r["score"]) for r in records) == [("a", 1.0), ("b", 1.0)], \
+            records
+        return
+    from refactory_dsh import worker_node
+
+    run, spec = _spine_dispatch(tmp_path, _one_command_client(tmp_path, "input.txt"))
+    worker_node.execute(spec, run)
+    assert (run / ifo.ANSWER).read_text() == "THE-INPUT"
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("runtime", ["walker", "spine"])
+def test_a_seal_that_cannot_start_a_command_is_a_harness_incident(tmp_path, runtime, monkeypatch):
+    """[walker: a data pass in process; spine: its agent dispatch, `worker_node`] The
+    runner cannot start the sandbox: no command runs, and the step is a harness incident
+    naming why -- never an item that quietly scores 0."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import items as items_mod
+    from refactory_dsh import seal
+
+    _sealable()
+    monkeypatch.setattr(seal, "linux_scope", lambda: ())
+    real_which = seal.shutil.which
+    monkeypatch.setattr(seal.shutil, "which", lambda name, *a, **k: (
+        str(tmp_path / "no-such-unshare") if name == "unshare" else real_which(name, *a, **k)))
+    says = "SealFailed: harness incident: agent node 'look': "
+    if runtime == "walker":
+        client = _one_command_client(tmp_path, ifo.INPUT)
+        records, ok = _records(ifo.SealedLook, "walker", tmp_path, model=client)
+        assert not ok
+        assert [r["error_kind"] for r in records] == ["harness_incident"] * 2, records
+        assert all(says in str(r["error_text"]) and "cannot start the sandbox" in
+                   str(r["error_text"]) for r in records), records
+        return
+    from refactory_dsh import worker_node
+
+    run, spec = _spine_dispatch(tmp_path, _one_command_client(tmp_path, "input.txt"))
+    with pytest.raises(Exception) as raised:
+        worker_node.execute(spec, run)
+    text = f"look: {type(raised.value).__name__}: {raised.value}"
+    assert says in text and "cannot start the sandbox" in text, text
+    assert items_mod.error_kind(RuntimeError(text)) == "harness_incident"
+
+
+def test_a_scope_is_made_only_where_the_user_manager_outlives_the_process(tmp_path, monkeypatch):
+    """[the runner both runtimes make] A process outside the user's sessions and manager,
+    for a user who does not linger, gets no scope: the manager would stop with the last
+    session and take the scope's commands with it (killed mid-setup: "Terminated ...
+    cannot bind /etc/group"), so its commands run unscoped from the start."""
+    import pwd
+
+    from refactory_dsh import seal
+
+    uid = os.getuid()
+    name = pwd.getpwuid(uid).pw_name
+    service = "0::/system.slice/some-runner.service\n"
+    assert not seal.user_manager_kept(service, str(tmp_path))
+    assert seal.user_manager_kept(f"0::/user.slice/user-{uid}.slice/session-3.scope\n",
+                                  str(tmp_path))
+    assert seal.user_manager_kept(
+        f"0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/run.scope\n", str(tmp_path))
+    (tmp_path / name).write_text("")
+    assert seal.user_manager_kept(service, str(tmp_path))
+    monkeypatch.setattr(seal, "user_manager_kept", lambda *a, **k: False)
+    monkeypatch.setattr(seal.shutil, "which", lambda name, *a, **k: "/usr/bin/systemd-run")
+    monkeypatch.setattr(seal.os.path, "isdir", lambda path: True)
+    assert seal._scope_prefix() == []  # noqa: SLF001
+
+
+def test_a_kept_scope_whose_bus_is_gone_is_probed_again(monkeypatch):
+    """[the runner both runtimes make] A scope found earlier whose bus has gone is not
+    used again: later commands get a fresh probe's answer (unscoped where there is none)."""
+    from refactory_dsh import seal
+
+    monkeypatch.setattr(seal, "_SCOPE", [GONE_SCOPE])
+    monkeypatch.setattr(seal, "_scope_prefix", lambda: [])
+    assert seal.linux_scope() == ()
+    assert seal._SCOPE == []  # noqa: SLF001
+
+
+@LINUX_ONLY
+def test_the_runner_falls_back_unscoped_or_records_why_a_command_could_not_start(tmp_path):
+    """[the runner both runtimes put in front of a sealed command] With its scope's bus
+    gone, a runner of the seal's own shape runs unscoped under the tight limits; one it
+    cannot rewrite is refused (exit 97, the command never runs) and recorded beside the
+    workspace for `workspace.collect`."""
+    import subprocess as sp
+
+    from refactory_dsh import seal_reaper
+
+    scoped = ["unshare", "-Urnmp", "--", "bash", "script", "refactory-seal", "/w", "1", "1",
+              f"{seal_reaper.LIMITS} {seal_reaper.LINUX_LIMITS}", "close"]
+    assert seal_reaper.unscoped([*GONE_SCOPE, *scoped]) == [
+        *scoped[:9], f"{seal_reaper.LIMITS} {seal_reaper.LINUX_LIMITS_UNSCOPED}", "close"]
+    ws = tmp_path / "scratch-1"
+    ws.mkdir()
+    marker = tmp_path / "ran"
+    command = [*GONE_SCOPE, "/bin/sh", "-c", f"touch {marker}", "refactory-seal", str(ws)]
+    done = sp.run([sys.executable, "-I", seal_reaper.__file__, "--exec", *command],
+                  capture_output=True, text=True, timeout=60)
+    assert done.returncode == 97 and "user scope bus" in done.stderr
+    assert not marker.exists()
+    recorded = Path(seal_reaper.incidents_path(str(ws))).read_text().splitlines()
+    assert len(recorded) == 1 and "is gone" in json.loads(recorded[0])["reason"]
 
 
 # ── B. 'to' an agent whose prompt is no knob ──────────────────────────────

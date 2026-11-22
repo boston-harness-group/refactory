@@ -23,11 +23,84 @@ runner whose DSH was killed outright still ends.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
+
+#: Beside a sealed workspace (``<workspace>`` + this), where nothing sealed writes: one
+#: line per command the runner could not start. `workspace.collect` raises them as a
+#: harness incident (`incidents.SealFailed`), so a seal that failed is never a step whose
+#: commands quietly found nothing.
+INCIDENTS_SUFFIX = ".seal-incidents.jsonl"
+#: A sealed command's limits, as ``ulimit`` takes them (`seal`, which re-exports these):
+#: CPU seconds and the largest file (KiB), on both platforms.
+LIMITS = "-t 3600 -f 4194304"
+#: Linux, in a systemd user scope that caps the whole command: a loose per-process bound.
+LINUX_LIMITS = "-u 512"
+#: Linux without a user scope: a tight per-process bound (128 processes, 8 GiB each).
+LINUX_LIMITS_UNSCOPED = "-u 128 -v 8388608"
+
+
+def incidents_path(workspace: str) -> str:
+    """Where the runner records the commands it could not start in ``workspace``."""
+    return os.path.realpath(workspace) + INCIDENTS_SUFFIX
+
+
+def record_incident(workspace: str, reason: str) -> None:
+    """Record that a command of the sealed step in ``workspace`` could not start, and why."""
+    try:
+        with open(incidents_path(workspace), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time": round(time.time(), 3), "reason": reason}) + "\n")
+    except OSError as exc:
+        print(f"refactory-seal: cannot record the incident: {exc}", file=sys.stderr)
+
+
+def _workspace_of(command: list[str]) -> str:
+    """The workspace a Linux runner seals: the argument after ``refactory-seal``."""
+    if "refactory-seal" in command:
+        index = command.index("refactory-seal")
+        if index + 1 < len(command):
+            return command[index + 1]
+    return ""
+
+
+def scope_bus(command: list[str]) -> str | None:
+    """The user bus a runner's systemd scope is made through, or None for an unscoped one."""
+    if not any(os.path.basename(arg) == "systemd-run" for arg in command):
+        return None
+    prefix = "DBUS_SESSION_BUS_ADDRESS=unix:path="
+    return next((arg[len(prefix):] for arg in command if arg.startswith(prefix)), None)
+
+
+def _bus_up(path: str) -> bool:
+    """Whether systemd's user bus answers at ``path``."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(2)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def unscoped(command: list[str]) -> list[str] | None:
+    """``command`` without its systemd scope and under the unscoped per-process limits --
+    the runner `seal.runner_command` makes where there is no user scope -- or None when
+    it is not a scoped Linux runner of that shape."""
+    names = [os.path.basename(arg) for arg in command]
+    if "systemd-run" not in names or "--" not in command[names.index("systemd-run"):]:
+        return None
+    rest = command[command.index("--", names.index("systemd-run")) + 1:]
+    scoped = f"{LIMITS} {LINUX_LIMITS}"
+    if rest.count(scoped) != 1:
+        return None
+    return [f"{LIMITS} {LINUX_LIMITS_UNSCOPED}" if arg == scoped else arg for arg in rest]
 
 #: ``sandbox_check`` filter types (``sandbox/sandbox.h``).
 _FILTER_NONE = 0
@@ -161,22 +234,40 @@ def exec_runner(command: list[str]) -> int:
     """Linux: become ``command`` with a fresh, empty session keyring and killed when the
     process that started it dies. Either failing, nothing runs."""
     parent = os.getppid()
+    workspace = _workspace_of(command)
+
+    def refuse(reason: str) -> int:
+        # The command does not start: said to its caller, and recorded beside the
+        # workspace as the harness's failure (`record_incident`).
+        print(f"refactory-seal: {reason}", file=sys.stderr)
+        if workspace:
+            record_incident(workspace, reason)
+        return 97
+
+    bus = scope_bus(command)
+    if bus is not None and not _bus_up(bus):
+        # systemd's user manager went away since this runner was made (its runtime
+        # directory goes with the person's last session): the command runs as it would
+        # have had the step started a moment later, unscoped under the tight per-process
+        # limits (`seal.linux_scope`), rather than fail in systemd-run before it starts.
+        fallback = unscoped(command)
+        if fallback is None:
+            return refuse(f"systemd's user scope bus {bus} is gone, and the runner has no "
+                          "unscoped form")
+        command = fallback
     libc = ctypes.CDLL(None, use_errno=True)
     number = _KEYCTL.get(os.uname().machine)
     if number is None or libc.syscall(number, _KEYCTL_JOIN_SESSION_KEYRING, None) < 0:
-        print(f"refactory-seal: cannot make a session keyring of its own "
-              f"(errno {ctypes.get_errno()})", file=sys.stderr)
-        return 97
+        return refuse(f"cannot make a session keyring of its own (errno {ctypes.get_errno()})")
     if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent:
-        print("refactory-seal: cannot tie the runner to its parent", file=sys.stderr)
-        return 97
+        return refuse("cannot tie the runner to its parent")
     # Nothing of the caller's beyond stdin, stdout and stderr reaches the runner (the seal
     # closes them again, inside, as the command's last step).
     os.closerange(3, os.sysconf("SC_OPEN_MAX") if os.sysconf("SC_OPEN_MAX") > 0 else 65536)
     try:
         os.execv(command[0], command)
     except OSError as exc:
-        print(f"refactory-seal: cannot start the sandbox: {exc}", file=sys.stderr)
+        return refuse(f"cannot start the sandbox: {exc}")
     return 97
 
 
@@ -188,6 +279,7 @@ def main(argv: list[str]) -> int:
         child = subprocess.Popen(command)
     except OSError as exc:
         print(f"refactory-seal: cannot start the sandbox: {exc}", file=sys.stderr)
+        record_incident(workspace, f"cannot start the sandbox: {exc}")
         return 97
 
     def forward(signum: int, _frame: object) -> None:

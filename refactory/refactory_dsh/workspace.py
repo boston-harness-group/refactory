@@ -999,6 +999,28 @@ def _same_as(path: Path, base: str, names: list[str]) -> set[str]:
     return same
 
 
+def _raise_seal_incidents(node: str, incidents: Path) -> None:
+    """Raise `incidents.SealFailed` when a command of the sealed step could not start in
+    its seal (`seal_reaper.record_incident`): the step then ran without what it asked
+    for, so its outcome is the harness's failure, on both runtimes (`node_retry.deliver`
+    collects for each)."""
+    try:
+        lines = incidents.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    reasons = []
+    for line in lines:
+        try:
+            reasons.append(str(json.loads(line).get("reason") or "unknown"))
+        except (ValueError, AttributeError):
+            reasons.append(line.strip() or "unknown")
+    if reasons:
+        from refactory_dsh.incidents import HARNESS_INCIDENT_TEXT, SealFailed
+
+        raise SealFailed(f"{HARNESS_INCIDENT_TEXT}agent node {node!r}: {len(reasons)} sealed "
+                         f"command(s) could not start in the seal: {reasons[0]}")
+
+
 def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
             final_response: str | None = None) -> dict[str, Any]:
     """Make ``workspace``'s work the node's declared outputs, before delivery checks them.
@@ -1017,12 +1039,14 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     from refactory_dsh.agent_delivery import _path
 
     if workspace.runner:
-        from refactory_dsh.seal_reaper import reap
+        from refactory_dsh.seal_reaper import incidents_path, reap
 
+        incidents = Path(incidents_path(str(workspace.path)))
         reap(str(workspace.path))
         moved = workspace.path.with_name(workspace.path.name + ".collected")
         os.rename(workspace.path, moved)
         workspace.path = moved
+        _raise_seal_incidents(workspace.node, incidents)
         size = _tree_bytes(workspace.path)
         if size > SEALED_WORKSPACE_MAX_BYTES:
             raise WorkspaceError(f"agent node {workspace.node!r} left {size >> 20} MiB in its sealed "

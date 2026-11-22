@@ -1734,9 +1734,17 @@ state is promised, on any graph shape:
   answer, no other process's environment), writes only its workspace, has no network, and
   starts with an environment of its own (no credential) and, on Linux, an empty session
   keyring of its own. On Linux each command runs in a systemd user scope capped at 8 GiB
-  of memory and 256 processes where the person's user manager can make one, else with
-  128 processes and 8 GiB of address space per process; it dies with the DSH process
-  that started it. Before its outputs are collected, every process still sealed in its
+  of memory and 256 processes where the person's user manager can make one and runs as
+  long as the run does (the run is in one of the person's sessions or in the manager, or
+  the person lingers), else with 128 processes and 8 GiB of address space per process;
+  it dies with the DSH process that started it. A manager that stops with the person's
+  last session would kill a scope's commands mid-step, so a run outside the person's
+  sessions (a system service, a container's shell) uses no scope; one that goes away
+  anyway drops that step's later commands to the per-process limits, and the next step
+  is probed afresh. A command the runner cannot
+  start at all (a session keyring, the sandbox itself) is recorded beside the workspace,
+  and the step is a harness incident (`SealFailed`), never an answer from commands that
+  silently did nothing. Before its outputs are collected, every process still sealed in its
   workspace is killed (Linux: the runner and its PID namespace; macOS: `seal_reaper`), a
   workspace over 4 GiB is not collected, and each output is opened one name at a time
   relative to its folder's descriptor without following a link, so nothing it leaves or
