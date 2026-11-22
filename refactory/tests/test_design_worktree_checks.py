@@ -216,12 +216,18 @@ def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tm
 
 def test_a_setup_command_that_fails_fails_the_check_and_says_why(tmp_path):
     emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_setup = _design(tmp_path / "setup", FakeModel(_answers(emit1, emit2, emit3)), _mode(setup="exit 3"),
+    model = FakeModel(_answers(emit1))
+    failed_setup = _design(tmp_path / "setup", model, _mode(setup="exit 3"),
                            target=str(git_repo(tmp_path / "plain")))
-    assert failed_setup.exit_ok is False
-    assert "the setup command `exit 3` failed" in (failed_setup.error or "")
+    # A setup that always fails is not change-caused → draft, not a builder round (D13).
+    assert failed_setup.exit_ok is True
+    draft = failed_setup.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    assert "exit 3" in failed_setup.facts.get("validation", "")
+    # Exactly one emit — no builder round.
+    emits = [p for p in model.prompts if "Write the artifact `" in p]
+    assert len(emits) == 1
 
 
 def test_a_generate_command_amends_tracked_file_changes_into_the_attempt(repo, tmp_path):
@@ -253,13 +259,19 @@ def test_a_generate_command_that_changes_nothing_adds_no_commit(repo, tmp_path):
 
 def test_a_generate_command_that_fails_fails_the_check_and_says_why(tmp_path):
     emit1 = render({"tool.py": "print('built')\n"})
-    emit2 = render({"tool.py": "print('built')\n", "note.txt": "r1\n"})
-    emit3 = render({"tool.py": "print('built')\n", "note.txt": "r2\n"})
-    failed_generate = _design(tmp_path / "run", FakeModel(_answers(emit1, emit2, emit3)),
+    model = FakeModel(_answers(emit1))
+    failed_generate = _design(tmp_path / "run", model,
                               _mode(generate="exit 3"),
                               target=str(git_repo(tmp_path / "plain")))
-    assert failed_generate.exit_ok is False
-    assert "the generate command `exit 3` failed" in (failed_generate.error or "")
+    # A generate that always fails is not change-caused → draft, not a builder round (D13).
+    assert failed_generate.exit_ok is True
+    draft = failed_generate.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    assert "exit 3" in failed_generate.facts.get("validation", "")
+    # Exactly one emit — no builder round.
+    emits = [p for p in model.prompts if "Write the artifact `" in p]
+    assert len(emits) == 1
 
 
 def test_generate_runs_before_setup_so_setup_sees_generated_files(repo, tmp_path):

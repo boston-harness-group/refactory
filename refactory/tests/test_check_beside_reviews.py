@@ -690,8 +690,8 @@ def test_not_change_caused_prep_failure_ends_in_draft_on_walker(tmp_path, monkey
     draft = facts["draft_delivery"]
     assert draft["check_failing"] is True
     assert "code repair was not attempted" in draft["check_failure"]
-    # Exactly one materialise was run (the setup); no builder round happened.
-    assert facts.get("attempts_used", 0) <= 1
+    # No builder round happened: attempts_used stays at 0 (only the initial materialise ran).
+    assert facts.get("attempts_used", 0) == 0
 
 
 def test_change_caused_prep_failure_reaches_builder_on_walker(tmp_path, monkeypatch):
@@ -736,6 +736,8 @@ def test_unavailable_comparison_ends_in_draft_on_walker(tmp_path, monkeypatch):
     draft = facts["draft_delivery"]
     assert draft["check_failing"] is True
     assert "code repair was not attempted" in draft["check_failure"]
+    # No builder round happened.
+    assert facts.get("attempts_used", 0) == 0
 
 
 def test_not_change_caused_prep_failure_ends_in_draft_on_spine(tmp_path, monkeypatch):
@@ -758,6 +760,8 @@ def test_not_change_caused_prep_failure_ends_in_draft_on_spine(tmp_path, monkeyp
     facts = json.loads((run_dir / "facts.json").read_text())
     assert "draft_delivery" in facts
     assert "code repair was not attempted" in facts["draft_delivery"]["check_failure"]
+    # No builder round happened.
+    assert facts.get("attempts_used", 0) == 0
 
 
 def test_change_caused_prep_failure_reaches_builder_on_spine(tmp_path, monkeypatch):
@@ -855,6 +859,8 @@ def test_defensive_no_prep_fail_builds_synthetic_and_drafts(tmp_path, monkeypatc
     draft = final_facts["draft_delivery"]
     assert draft["check_failing"] is True
     assert "code repair was not attempted" in draft["check_failure"]
+    # No builder round happened.
+    assert final_facts.get("attempts_used", 0) == 0
 
 
 def test_real_failing_install_stub_ends_in_draft(tmp_path, monkeypatch):
@@ -923,4 +929,36 @@ def test_beside_reviews_check_copy_prep_fail_triaged(tmp_path, monkeypatch):
     result = repo_change.run_check(ctx, "true", 60, beside_reviews=True)
     assert result.prep_failure is not None
     assert result.prep_failure["step"] == "install"
+    assert result.change_caused_prep is None
+
+
+def test_check_in_worktree_defensive_synthetic_prep_failure(tmp_path, monkeypatch):
+    """Unit: C2b — _check_in_worktree builds a synthetic prep_failure when _prepare_in_worktree
+    returns problems but prep_fail is None (defensive case).  Without C2b, the result
+    would have prep_failure=None and the builder would be sent back."""
+    from types import SimpleNamespace
+
+    from refactory_dsh import repo_change, worktree
+    from refactory_dsh.sandbox import SandboxResult
+
+    found = SimpleNamespace(path=str(tmp_path), head="c1", target=str(tmp_path),
+                            base="b1", run=str(tmp_path))
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: found)
+    monkeypatch.setattr(worktree, "shared_change", lambda f: None)
+    monkeypatch.setattr(worktree, "restore", lambda workdir: (found, []))
+
+    # _prepare_in_worktree returns problems but prep_fail=None (defensive case).
+    monkeypatch.setattr(repo_change, "_prepare_in_worktree",
+                        lambda ctx, f, t: (f, {"PATH": "/bin"}, tmp_path / "home",
+                                           ["npm install failed: ETIMEOUT"], None))
+    # compare_prep_failure returns None (not change-caused / unavailable).
+    from refactory_dsh import base_check
+    monkeypatch.setattr(base_check, "compare_prep_failure", lambda *a, **k: None)
+
+    ctx = nn.RunContext(tmp_path, facts={"commit": "c1", "check": "true"})
+    result = repo_change.run_check(ctx, "true", 60)
+    # C2b: synthetic prep_failure is built from problems.
+    assert result.prep_failure is not None
+    assert result.prep_failure["step"] == "prepare"
+    assert "npm install failed" in result.prep_failure["error_text"]
     assert result.change_caused_prep is None
