@@ -127,12 +127,30 @@ LINUX_SCRIPT = Path(__file__).with_name("seal_linux.sh")
 CLOSE_SCRIPT = Path(__file__).with_name("seal_close.sh")
 
 
+#: Where a system program the seal runs is looked for when this process's PATH lacks it:
+#: a system service's PATH may leave out the sbin folders (``pivot_root`` lives there).
+SYSTEM_DIRS = ("/usr/sbin", "/sbin", "/usr/bin", "/bin")
+
+
+def system_tool(name: str) -> str:
+    """The path of the system program ``name`` the seal runs: found on PATH, else in
+    :data:`SYSTEM_DIRS`, else the bare name (which then fails, naming it)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for folder in SYSTEM_DIRS:
+        candidate = os.path.join(folder, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return name
+
+
 def linux_arguments(ws: str, reads: tuple[str, ...], limits: str) -> list[str]:
     """What follows ``bash`` in the Linux runner: the script and its arguments, none of
     which holds a ``$`` (`seal_linux.sh` says what each is)."""
     arguments = [str(LINUX_SCRIPT), "refactory-seal", ws, str(os.getuid()), str(os.getgid()),
                  f"{LIMITS} {limits}", str(CLOSE_SCRIPT), ":".join(reads), ":".join(LOCAL_KEPT),
-                 PATH, snippet.LOCALE]
+                 PATH, snippet.LOCALE, system_tool("pivot_root")]
     expanded = [argument for argument in arguments if "$" in argument or "\n" in argument]
     if expanded or any(":" in path for path in reads):
         raise SealError(f"a sealed runner's arguments hold no '$', newline or ':' in a path: {expanded}")
@@ -245,7 +263,7 @@ def runner_command(workspace: Path, cap: StepCap | None = None) -> list[str]:
     reaper = str(Path(__file__).with_name("seal_reaper.py"))
     return [sys.executable, "-I", reaper, "--exec",
             *([seal_reaper.CGROUP_FLAG, cgroup] if cgroup else []), *scope,
-            shutil.which("unshare") or "unshare", "-Urnmp", "--fork", "--kill-child",
+            system_tool("unshare"), "-Urnmp", "--fork", "--kill-child",
             "--mount-proc", "--", snippet.BASH,
             *linux_arguments(ws, LINUX_READS + LINUX_ETC,
                              LINUX_LIMITS if scope or cgroup else LINUX_LIMITS_UNSCOPED)]

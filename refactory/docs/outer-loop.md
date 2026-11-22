@@ -1760,7 +1760,10 @@ state is promised, on any graph shape:
   (memory.max=8589934592, memory.swap.max=0, pids.max=256) at <path>"` with that path in
   `cgroup`, or the reasons neither worked (no delegation, a missing controller, EBUSY). A
   runner that cannot join its cgroup runs the command under the per-process limits and the
-  record says so; the step never fails for it. The run's report says once when sealed
+  record says so; the step never fails for it. The step's limit files (`memory.max` and the
+  rest) belong to the run's own user, so the cap holds only because the seal hides `/sys`
+  and lets the command make no user or cgroup namespace of its own: a seal change that
+  exposes either lets a step lift its own cap. The run's report says once when sealed
   steps ran without a whole-step cap. The runner waits on the seal and is told, on a descriptor the
   command never holds, when the command starts: a seal that fails before that (a
   session keyring, the sandbox, its own setup exiting 97, a failing `unshare` or

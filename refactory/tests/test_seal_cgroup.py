@@ -600,26 +600,47 @@ def test_live_a_step_cannot_outgrow_its_delegated_cgroup(tmp_path, monkeypatch):
 
 
 @LINUX
-def test_a_planted_dispatch_record_never_releases_another_cgroup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("planted", ["another step's", "another unit's", "through ..",
+                                     "the user manager's"])
+def test_a_planted_dispatch_record_never_releases_another_cgroup(tmp_path, monkeypatch, planted):
     """[`workspace.prepare` and the run-end sweep, both runtimes] A dispatch record that
-    names a cgroup other than its own sealed workspace's (written by anything with the run
-    directory in reach) is ignored: that cgroup, a live step's, is never ended or removed."""
+    names a cgroup other than its own sealed workspace's in this run's delegated cgroup
+    (written by anything with the run directory in reach) is ignored: another live step's,
+    one of the same name under another unit or the user's manager, or one reached through
+    ``..``. That cgroup is never ended or removed, and its workspace is never reaped."""
     _sealable()
     fake = FakeCgroups(tmp_path).install(monkeypatch)
     run = _run_dir(tmp_path)
-    other = tmp_path / "other-ws"
-    other.mkdir()
-    victim, _held = seal_cgroup.make(other)
     place = _prepare(run)
+    name = Path(place.cgroup).name
+    if planted == "another step's":
+        other = tmp_path / "other-ws"
+        other.mkdir()
+        victim = Path(seal_cgroup.make(other)[0])
+        named = victim
+    else:
+        parent = {"another unit's": fake.root / "system.slice" / "OTHER.service",
+                  "through ..": tmp_path / "x",
+                  "the user manager's": fake.root / "user.slice" / "user-1000.slice"
+                                        / "user@1000.service"}[planted]
+        slice_dir = fake.root / "system.slice"
+        slice_dir.chmod(0o755)
+        parent.mkdir(parents=True, exist_ok=True)
+        slice_dir.chmod(0o555)
+        (parent / "cgroup.subtree_control").write_text("memory pids\n")
+        victim = parent / name
+        fake._make(victim)
+        named = (Path(f"{fake.base}/../../../x/{name}") if planted == "through .."
+                 else victim)
     record = json.loads((place.root / "dispatch.json").read_text())
-    record["cgroup"] = victim
+    record["cgroup"] = str(named)
     (place.root / "dispatch.json").write_text(json.dumps(record))
     reaped: list[str] = []
     monkeypatch.setattr(seal_reaper, "reap", lambda ws, *a: reaped.append(ws) or [])
     _prepare(run)
     workspace.sweep(run)
-    assert Path(victim).is_dir() and str(other) not in reaped
-    assert Path(victim).name in fake.steps()
+    assert victim.is_dir() and str(place.path) not in reaped, reaped
+    assert not [op for op in fake.ops if op[1].endswith("cgroup.kill")], fake.ops
 
 
 @LINUX
@@ -649,3 +670,31 @@ def test_collecting_a_step_removes_its_cgroup_after_its_processes_are_reaped(tmp
     rel = str(cgroup.relative_to(fake.root))
     assert [op[0] for op in fake.ops if op[1] == rel] == ["mkdir", "rmdir"], \
         "never busy: reaped first"
+
+
+@LINUX
+def test_a_step_a_test_prepared_and_never_collected_is_released_at_the_test_s_end(tmp_path,
+                                                                                monkeypatch):
+    """[the test harness, `step_cgroups` (conftest)] A step a test only prepares, with a
+    command still running in it, is ended and its cgroup removed when the test ends, so a
+    suite run in a delegated cgroup leaves no step cgroup behind."""
+    import step_cgroups
+
+    _sealable()
+    fake = FakeCgroups(tmp_path).install(monkeypatch)
+    made = step_cgroups.track(monkeypatch)
+    run = _run_dir(tmp_path)
+    place = _prepare(run)
+    running = subprocess.Popen([*place.runner, "--", "bash", "-c", "sleep 60"], cwd=place.path)
+    try:
+        for _ in range(500):
+            if fake.procs(Path(place.cgroup)):
+                break
+            time.sleep(0.01)
+        assert made == [(str(place.path), place.cgroup)] and fake.steps()
+        step_cgroups.release(made)
+        assert fake.steps() == [] and made == []
+        assert running.wait(timeout=10) == -signal.SIGKILL
+    finally:
+        running.kill()
+        running.wait()

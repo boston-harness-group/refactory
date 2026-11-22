@@ -42,6 +42,13 @@ from pathlib import Path
 
 from refactory_dsh import seal_reaper
 
+# A step's limit files (memory.max, memory.swap.max, pids.max) are owned by the run's
+# own user, the same uid its sealed commands run as. The cap holds only because the seal
+# hides /sys (`seal.LINUX_READS` never binds it) and lets a command make no user or cgroup
+# namespace of its own (`seal_linux.sh` limits user namespaces to the one it runs in), so
+# no command can reach or mount cgroupfs. A seal change that exposes either lets a step
+# lift its own cap.
+
 #: Where cgroup v2 is mounted.
 ROOT = "/sys/fs/cgroup"
 #: The leaf the delegated cgroup's own processes move into before the controllers are

@@ -161,6 +161,18 @@ def sb_python():
     return python
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="pivot_root is Linux's")
+def test_the_sandbox_runs_where_path_lacks_sbin(sb_python, monkeypatch):
+    """A run whose PATH lacks /usr/sbin and /sbin (a system service's can): the sandbox
+    still finds pivot_root by its path, and runs the code."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    sandbox._probe.cache_clear()
+    try:
+        assert sandbox.available(sb_python) == (True, "")
+    finally:
+        sandbox._probe.cache_clear()
+
+
 def test_interpreter_check_refuses_other_versions():
     """refactory's own venv has openpyxl 3.1.5 but not pandas: refused by name."""
     with pytest.raises(interpreter.InterpreterError, match="pandas"):

@@ -1124,3 +1124,15 @@ def test_a_run_offered_no_tool_step_says_why_once_in_its_journal_and_start_line(
                                                      allowed_ops=("set_knob",)),
                  project=Path("."), model=client)
     assert knobs._tools_not_offered() == ""
+
+
+@LINUX
+def test_a_seal_started_without_sbin_on_path_still_runs(tmp_path, monkeypatch):
+    """A run whose PATH lacks /usr/sbin and /sbin (a system service's can): the seal still
+    finds pivot_root (and unshare), and the command runs sealed."""
+    _sealable()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    _run, place = _layout(tmp_path)
+    assert any(arg.endswith("/pivot_root") for arg in place.runner), place.runner
+    done = _sealed(place, "cat input.txt")
+    assert done.returncode == 0 and done.stdout == "THE-INPUT", done

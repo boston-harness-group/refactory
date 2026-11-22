@@ -1083,16 +1083,21 @@ def _release_recorded(root: Path) -> None:
 
 def _recorded_cgroup_is_its_own(root: Path, record: dict[str, Any]) -> bool:
     """Whether a dispatch record's ``cgroup`` is the one `seal_cgroup.make` gives its own
-    workspace, a sealed scratch folder of ``root``: a record anything else wrote (a step
-    with tools in the run directory) never names another step's cgroup or workspace for
-    ending and removal."""
+    workspace, a sealed scratch folder of ``root``, in this process's delegated cgroup
+    (`seal_cgroup.delegated_base`), its path resolved: a record anything else wrote (a
+    step with tools in the run directory) never names another step's cgroup or workspace,
+    another unit's cgroup, or one reached through ``..`` or a link, for ending and removal."""
     from refactory_dsh import seal_cgroup
 
     path, cgroup = Path(str(record.get("path") or "")), Path(str(record["cgroup"]))
     name = path.name.removesuffix(".collected")
-    if (path.parent != Path(root).resolve() or not name.startswith("scratch-")
+    try:
+        base = seal_cgroup.delegated_base().resolve()
+    except seal_cgroup.Unavailable:
+        base = None
+    if (base is None or path.parent != Path(root).resolve() or not name.startswith("scratch-")
             or cgroup.name != seal_cgroup.step_name(path.parent / name)
-            or not cgroup.is_relative_to(seal_cgroup.ROOT)):
+            or cgroup.resolve().parent != base):
         _warn(f"{root}: its dispatch record names a cgroup that is not its own sealed step's "
               f"({cgroup}), so it was left")
         return False
