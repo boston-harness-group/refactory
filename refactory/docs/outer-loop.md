@@ -1800,6 +1800,25 @@ state is promised, on any graph shape:
   its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares
   none runs as before. Where the run offers a tool step, the request's operator lines (the
   proposer's and the analysts') state the summary as a fact.
+  A mode's own step may list Claude Code's tools instead (`seal.CLAUDE_CODE_TOOLS`: `Read`
+  and `Bash`, for a harness that runs Claude Code with `--tools Read,Bash`, as
+  `spreadsheetbench/agent` does). It stays on its claude_code route, in `skip`
+  (`bypassPermissions`) mode, and is refused on any other (`DshModelClient.
+  for_claude_sealed`). Its workspace is made and sealed as above; the patched adapter offers
+  and allows those tools only, loads no settings or MCP servers, and a `PreToolUse` hook
+  runs each Bash command under the same runner (the runner, `--`, `/bin/bash -c` and the
+  command) and refuses a Read whose real path is outside the workspace and any other tool.
+  Its prompt is sent alone (no execution contract: the harness's prompt names its files),
+  its reply is its first output, and each later output is a file it may leave in its
+  workspace, collected when it does and absent when it does not
+  (`workspace.optional_writes`). Where the item's Task declares a tool environment
+  (`Task.tool_environment`), its interpreter is `python` there too, with the Task's `hidden`
+  paths refused as for any sealed step. A Read runs in Claude
+  Code's own process, so on Linux the hook opens the file itself without following a last
+  link, checks the opened descriptor's own path is still inside the workspace, and gives
+  the Read a copy taken from it, beside the workspace (`<workspace>.reads/`): a link a
+  sealed command swaps in after the check is never followed. On macOS the Read opens the
+  path it was judged by, so such a swap in between could be followed.
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused

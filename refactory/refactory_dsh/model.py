@@ -830,6 +830,7 @@ class DshModelClient:
         setting_sources: str = "",
         dsh_sessions: str = "",
         claude_executable: str = "",
+        max_thinking_tokens: str = "",
     ) -> None:
         from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -894,6 +895,10 @@ class DshModelClient:
         #: Inherited only within the same product, as effort is: a DSH client in a
         #: Claude Code worker's child process must not take Claude Code's sources.
         self._setting_sources = setting_sources or inherited_route.get("setting_sources", "")
+        #: Claude Code's thinking budget (``--max-thinking-tokens``), a claude_code route's
+        #: ``max_thinking_tokens``; empty leaves Claude Code's own (adaptive) thinking.
+        #: Inherited only within the same product, as the settings sources are.
+        self._max_thinking_tokens = max_thinking_tokens or inherited_route.get("max_thinking_tokens", "")
         #: The Claude Code executable a claude_code worker runs; empty keeps the one
         #: bundled with the Agent SDK. Inherited only within the same product, as the
         #: settings sources are, then `workers.CLAUDE_EXECUTABLE_ENV` on claude_code.
@@ -985,6 +990,8 @@ class DshModelClient:
             result["setting_sources"] = self._setting_sources
         if getattr(self, "_claude_executable", ""):
             result["claude_executable"] = self._claude_executable
+        if getattr(self, "_max_thinking_tokens", ""):
+            result["max_thinking_tokens"] = self._max_thinking_tokens
         return result
 
     def output_limit(self) -> int | None:
@@ -1097,8 +1104,27 @@ class DshModelClient:
         client._provider, client._model = found[0][:2]
         client._setting_sources = ""
         client._claude_executable = ""
+        client._max_thinking_tokens = ""
         validate_route(client.route())
         return client
+
+    def for_claude_sealed(self) -> DshModelClient:
+        """A copy for a step that runs Claude Code's own tools sealed (`workspace.
+        sealed_backend` ``claude_code``): on this route, which must be the claude_code backend
+        in ``skip`` or ``bypassPermissions`` mode (`workspace.CLAUDE_SEALED_MODES`), as a
+        harness running ``claude -p --permission-mode bypassPermissions`` does; the seal, not
+        a permission prompt, confines its tools. Raises ValueError on any other route: such a
+        step is never moved to another product, nor run with less."""
+        from refactory_dsh.workspace import CLAUDE_SEALED_MODES
+
+        if self._worker_backend != "claude_code":
+            raise ValueError("a step with Claude Code's tools runs on the claude_code worker "
+                             f"backend, and this route is {self._worker_backend!r}")
+        if (self._permission_mode or "skip") not in CLAUDE_SEALED_MODES:
+            raise ValueError("a step with Claude Code's tools runs under permission mode "
+                             f"{' or '.join(map(repr, CLAUDE_SEALED_MODES))}, and this route has "
+                             f"{self._permission_mode!r}")
+        return copy.copy(self)
 
     def with_tool_policy(self, policy: str) -> DshModelClient:
         """A copy whose model call enforces the given tool policy."""
@@ -1197,6 +1223,8 @@ class DshModelClient:
                else {}),
             **({"setting_sources": ss} if (ss := getattr(self, "_setting_sources", "")) else {}),
             **({"claude_executable": ce} if (ce := getattr(self, "_claude_executable", "")) else {}),
+            **({"max_thinking_tokens": mtt} if (mtt := getattr(self, "_max_thinking_tokens", ""))
+               else {}),
             # Only the non-default choice, so a default context is the bytes it was.
             **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }
@@ -1345,8 +1373,10 @@ class DshModelClient:
         client._cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
         client._env_overrides = dict(env or {})
         client._confine = bool(confine and cwd is not None)
-        if seal is not None and (cwd is None or self._worker_backend != "dsh"):
-            raise ValueError("a sealed agent runs on the dsh worker backend, in a workspace")
+        if seal is not None and (cwd is None or self._worker_backend != (
+                "claude_code" if seal.get("backend") == "claude_code" else "dsh")):
+            raise ValueError("a sealed agent runs in a workspace, on the dsh worker backend, or "
+                             "on the claude_code backend for Claude Code's own tools")
         client._seal = dict(seal) if seal is not None else None
         client._checkpoint()
         if client._budget is not None:

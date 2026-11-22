@@ -39,6 +39,12 @@ the route says). The worker record's `actual_route` shows the
 effort and settings sources Claude Code was started with, and `enforced_tool_policy`
 is set only once the runtime has applied the policy.
 
+`claude_code` alone also accepts `max_thinking_tokens`, a positive whole number: Claude
+Code's thinking budget (`--max-thinking-tokens`), fixed thinking of that many tokens in
+place of its adaptive thinking, as a harness passing the flag gets. Unset, Claude Code
+chooses. A mode may put it on one step's route (`spreadsheetbench/agent` does, from its
+frozen `max_thinking_tokens` knob); `actual_route` records it.
+
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code
 2.1.281). Each model needs a recent enough one: the Claude 5 family (`claude-opus-5-*`,

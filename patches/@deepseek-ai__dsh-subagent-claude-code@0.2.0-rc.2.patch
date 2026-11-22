@@ -1,14 +1,14 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863a263299a 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb00026c788 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
  import { brandString } from "@deepseek-ai/dsh-brand";
  import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
  import { EventEmitter } from "node:events";
-+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
++import { closeSync, constants as fsConstants, copyFileSync, fstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 +import { homedir, tmpdir } from "node:os";
-+import { join } from "node:path";
++import { basename, dirname, isAbsolute, join, resolve } from "node:path";
  //#region lib/types/process.js
  /**
  * Projection from the shared managed-process handle to the official Claude
@@ -80,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +276,207 @@ function successfulResult(message) {
+@@ -231,20 +276,214 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -212,12 +212,19 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +					tool_observation_available: observedTools !== null,
 +					tool_policy_source: "claude-code-dont-ask", working_directory: sent.workingDirectory,
 +					...sent.routeSourcesIgnored?.length ? { setting_sources_ignored: sent.routeSourcesIgnored } : {}
++				} : sent?.sealed ? {
++					// Its tools only, each confined by the PreToolUse hook to its workspace.
++					enforced_tool_policy: "sealed", tools_offered: observedTools,
++					tool_observation_available: observedTools !== null,
++					tool_policy_source: "refactory-seal-hook", sealed_tools: sent.sealed.tools,
++					working_directory: sent.sealed.workspace
 +				} : {};
 +				if (sent && typeof message.session_id === "string") sent.sessionId = message.session_id;
 +				onRefactoryMetadata?.({ actual_route: { worker_backend: "claude_code", provider: null,
 +					model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
 +					...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources },
-+					...sent?.claudeExecutable === void 0 ? {} : { claude_executable: sent.claudeExecutable }, source: "native-sdk-init" },
++					...sent?.claudeExecutable === void 0 ? {} : { claude_executable: sent.claudeExecutable },
++					...sent?.maxThinkingTokens === void 0 ? {} : { max_thinking_tokens: sent.maxThinkingTokens }, source: "native-sdk-init" },
 +					product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false, ...toolFacts,
 +					auto_compact: { enabled: sent?.autoCompact === true, source: "claude-agent-sdk-flag-settings",
 +						env_dropped: sent?.compactEnvDropped ?? [] } });
@@ -265,7 +272,10 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +				stopQuiet();
 +				releaseInput?.();
 +			}
-+		}
+ 		}
+-		if (message.type !== "result") continue;
+-		onResult?.();
+-		answer = successfulResult(message);
 +	} finally {
 +		// Whatever ended the stream -- a failure, an abort, the CLI exiting -- must not
 +		// leave the prompt input waiting.
@@ -282,10 +292,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +			const asked = reasked ? ", also when asked once more for it" : "";
 +			const interim = answer === void 0 ? "" : `; its last text, written while background tasks still ran, was: ${answer.length > 300 ? `${answer.slice(0, 300)}...` : answer}`;
 +			throw new ClaudeCodeFailure({ ...emptyFacts, detail: `${emptyFacts.detail}${asked}${interim}` });
- 		}
--		if (message.type !== "result") continue;
--		onResult?.();
--		answer = successfulResult(message);
++		}
 +		answer = settled;
 +		onRefactoryMetadata?.({ answer_from_earlier_turn: true });
  	}
@@ -297,7 +304,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  	});
  	return {
  		output: [{
-@@ -295,15 +527,36 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +534,40 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -307,12 +314,16 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +	const _rfToolPolicy = (spec.env && spec.env.REFACTORY_TOOL_POLICY) || "";
 +	const _rfSettingSources = (spec.env && spec.env.REFACTORY_SETTING_SOURCES) || "";
 +	const _rfClaudeExecutable = (spec.env && spec.env.REFACTORY_CLAUDE_EXECUTABLE) || "";
++	const _rfMaxThinking = (spec.env && spec.env.REFACTORY_MAX_THINKING_TOKENS) || "";
++	const _rfSealedTools = (spec.env && spec.env.REFACTORY_SEALED_TOOLS) || "";
++	const _rfSealRunner = (spec.env && spec.env.REFACTORY_SEAL_RUNNER) || "";
++	const _rfSealWorkspace = (spec.env && spec.env.REFACTORY_SEAL_WORKSPACE) || "";
 +	const _rfEnv = {
 +		...scrubbedParentEnv(),
 +		...spec.env
 +	};
 +	// Adapter controls, not Claude Code's environment.
-+	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES", "REFACTORY_CLAUDE_EXECUTABLE", "REFACTORY_BACKGROUND_QUIET_S"]) delete _rfEnv[key];
++	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES", "REFACTORY_CLAUDE_EXECUTABLE", "REFACTORY_BACKGROUND_QUIET_S", "REFACTORY_MAX_THINKING_TOKENS", "REFACTORY_SEALED_TOOLS", "REFACTORY_SEAL_RUNNER", "REFACTORY_SEAL_WORKSPACE"]) delete _rfEnv[key];
 +	// An unattended worker that cannot compact ends with "Prompt is too long" once its
 +	// conversation outgrows the window, losing the step. These switches, inherited from
 +	// the shell that started the run (a Claude Code session sets one), turn compaction off
@@ -339,7 +350,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +580,83 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +591,195 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -396,12 +407,124 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +		options[SCRATCH_DIR] = { scratch, configDir, project: join(configDir, "projects", slug),
 +			temporary: join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug) };
 +	}
++	// A sealed step (refactory_dsh.seal, Claude Code's own tools): only the tools it lists,
++	// offered and allowed as `claude -p --tools T --allowedTools T` does, in its workspace
++	// (also its one added directory), with no settings, CLAUDE.md or MCP servers. Claude Code
++	// runs Read and Bash in its own process, so a PreToolUse hook confines them: each Bash
++	// command runs under refactory's seal runner (its workspace only, no network), a Read of
++	// a path whose real path is outside the workspace is refused, and any other tool is
++	// refused. Never run with less: a sealed step missing any of these is refused.
++	if (_rfSealedTools) {
++		const tools = _rfSealedTools.split(",");
++		let runner;
++		try { runner = JSON.parse(_rfSealRunner); } catch { runner = void 0; }
++		if (_rfToolPolicy) throw new Error(`subagent-claude-code: a sealed step takes no tool policy, not ${_rfToolPolicy}`);
++		if (!tools.length || !tools.every((tool) => SEALED_CLAUDE_TOOLS.includes(tool))) throw new Error(`subagent-claude-code: a sealed step lists tools from ${SEALED_CLAUDE_TOOLS.join(", ")}, not ${_rfSealedTools}`);
++		if (!Array.isArray(runner) || runner.length === 0 || !runner.every((part) => typeof part === "string")) throw new Error("subagent-claude-code: a sealed step needs its seal runner");
++		if (!_rfSealWorkspace || !isAbsolute(_rfSealWorkspace)) throw new Error("subagent-claude-code: a sealed step needs its workspace");
++		const root = realpathSync(_rfSealWorkspace);
++		options.cwd = _rfSealWorkspace;
++		options.additionalDirectories = [_rfSealWorkspace];
++		options.tools = tools;
++		options.allowedTools = tools;
++		options.settingSources = [];
++		options.mcpServers = {};
++		options.strictMcpConfig = true;
++		options.hooks = { PreToolUse: [{ hooks: [async (input) => sealedToolUse(input, tools, runner, root)] }] };
++		options[SEALED] = { tools, workspace: _rfSealWorkspace };
++	}
++	// A route's thinking budget (`--max-thinking-tokens`): fixed thinking of that many tokens
++	// in place of Claude Code's adaptive thinking, as a harness passing the flag gets.
++	if (_rfMaxThinking) {
++		const budget = Number(_rfMaxThinking);
++		if (!Number.isSafeInteger(budget) || budget <= 0) throw new Error(`subagent-claude-code: max_thinking_tokens is a positive whole number, not ${_rfMaxThinking}`);
++		options.maxThinkingTokens = budget;
++	}
 +	// A route's chosen Claude Code replaces the one bundled with the SDK.
 +	if (_rfClaudeExecutable) {
 +		options.pathToClaudeCodeExecutable = _rfClaudeExecutable;
 +	}
 +	options[COMPACT_ENV_DROPPED] = _rfCompactEnvDropped;
 +	return options;
++}
++/** The Claude Code tools a sealed step may list (refactory_dsh.seal.CLAUDE_CODE_TOOLS). */
++const SEALED_CLAUDE_TOOLS = ["Read", "Bash"];
++/** Where claudeQueryOptions leaves a sealed step's tools and workspace; not an SDK option. */
++const SEALED = Symbol("sealed");
++/** One argument for a POSIX shell, quoted so nothing in it is expanded. */
++function shellQuote(text) {
++	return `'${text.replace(/'/g, "'\\''")}'`;
++}
++/** Reads a sealed step's Read is given copies of, one folder per read (`sealedRead`). */
++let sealedReads = 0;
++/**
++* A sealed step's Read of `real`, a file inside the workspace `root`: opened without
++* following a last link, then (on Linux) its descriptor's own path checked inside the
++* workspace again, so a link a sealed command swaps in after the check is never followed;
++* the Read is given a copy taken from that descriptor, beside the workspace where no sealed
++* command can change it, under the file's own name. A file that cannot be opened is left
++* to the Read itself, which then fails as it would.
++* @returns the path the Read is to open, or a reason to refuse it.
++*/
++function sealedRead(real, root) {
++	let fd;
++	try {
++		fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
++	} catch (error) {
++		if (error?.code === "ELOOP") return { refuse: `${real} is a link; only the workspace's own files can be read` };
++		return { path: real };
++	}
++	try {
++		const opened = process.platform === "linux" ? readlinkSync(`/proc/self/fd/${fd}`) : real;
++		if (opened !== root && !opened.startsWith(`${root}/`)) return { refuse: `${real} is outside this step's workspace (${root}); only its files can be read` };
++		if (!fstatSync(fd).isFile()) return { path: real };
++		const folder = join(`${root}.reads`, String(++sealedReads));
++		mkdirSync(folder, { recursive: true });
++		const copy = join(folder, basename(real));
++		copyFileSync(`/proc/self/fd/${fd}`, copy);
++		return { path: copy };
++	} finally {
++		closeSync(fd);
++	}
++}
++/**
++* The sealed step's PreToolUse decision: a Bash command is rewritten to run under the seal
++* runner (the runner, `--`, `/bin/bash -c` and the command, each quoted); a Read is allowed
++* only for a path whose real path is the workspace or inside it (a path that does not exist
++* is judged by its parent's real path), and on Linux is given a copy taken from the file
++* it checked (`sealedRead`); any other tool is refused.
++* @param input - the hook's input: the tool's name and its input.
++* @param tools - the tools the step lists.
++* @param runner - the seal runner's argv.
++* @param root - the workspace's real path.
++* @returns the hook's output.
++*/
++function sealedToolUse(input, tools, runner, root) {
++	const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
++	const name = input?.tool_name;
++	const given = input?.tool_input && typeof input.tool_input === "object" ? input.tool_input : {};
++	if (!tools.includes(name)) return deny(`${name} is not one of this step's tools (${tools.join(", ")})`);
++	if (name === "Bash") {
++		if (typeof given.command !== "string") return deny("a Bash call needs a command");
++		const command = [...runner, "--", "/bin/bash", "-c", given.command].map(shellQuote).join(" ");
++		return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...given, command } } };
++	}
++	if (name === "Read") {
++		if (typeof given.file_path !== "string" || given.file_path.length === 0) return deny("a Read call needs a file_path");
++		const wanted = isAbsolute(given.file_path) ? given.file_path : resolve(root, given.file_path);
++		let real;
++		try {
++			real = realpathSync(wanted);
++		} catch {
++			try { real = join(realpathSync(dirname(wanted)), basename(wanted)); } catch { real = resolve(wanted); }
++		}
++		if (real !== root && !real.startsWith(`${root}/`)) return deny(`${given.file_path} is outside this step's workspace (${root}); only its files can be read`);
++		if (process.platform !== "linux") return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
++		const read = sealedRead(real, root);
++		if (read.refuse) return deny(read.refuse);
++		return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...given, file_path: read.path } } };
++	}
++	return deny(`${name} is not confined by this step's seal`);
 +}
 +/** The environment switches that disable Claude Code's compaction. */
 +const COMPACTION_SWITCHES = ["DISABLE_AUTO_COMPACT", "DISABLE_COMPACT", "DISABLE_MICROCOMPACT"];
@@ -424,7 +547,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +666,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +789,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -470,7 +593,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +725,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +848,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -479,7 +602,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +744,35 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +867,38 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -497,12 +620,15 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
 +			routeSourcesIgnored: ignoredSources,
 +			settingSources: options.settingSources,
 +			claudeExecutable: options.pathToClaudeCodeExecutable,
++			sealed: options[SEALED],
++			maxThinkingTokens: options.maxThinkingTokens,
 +			autoCompact: options.settings?.autoCompactEnabled === true,
 +			compactEnvDropped: options[COMPACT_ENV_DROPPED] ?? [],
 +			// How long consumeClaudeQuery waits on silent background tasks (default 600 s).
 +			backgroundQuietS: Number(spec.env?.REFACTORY_BACKGROUND_QUIET_S) > 0 ? Number(spec.env.REFACTORY_BACKGROUND_QUIET_S) : void 0
 +		};
 +		delete options[COMPACT_ENV_DROPPED];
++		delete options[SEALED];
  		query$1 = query({
 -			prompt,
 -			options: claudeQueryOptions(spec, controller, captureChild, capturePermissionDiagnostic)
@@ -517,7 +643,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +825,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +951,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -529,7 +655,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +852,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +978,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -538,7 +664,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +864,15 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +990,15 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -554,7 +680,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5fe256b80845fd5be8419292a8ec7863
  			}
  		}
  	});
-@@ -529,6 +926,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1052,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

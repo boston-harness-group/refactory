@@ -2191,12 +2191,13 @@ class Executor:
             raise ExecutionError(f"agent node {node.id!r} needs a model client")
         # Refuse an agent node with a tools field it cannot run sealed, matching the
         # spine's lowering refusal (`workers.lower_workflow`) — SWEEP-7 / gap 15.
-        from refactory_dsh.workspace import SEALED_TOOLS, is_sealed
+        from refactory_dsh.workspace import CLAUDE_CODE_TOOLS, SEALED_TOOLS, is_sealed
         if getattr(node, "tools", None) and not is_sealed(node):
             raise ValueError(
                 f"agent node {node.id!r} declares tools {list(node.tools)} it cannot run "
-                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)}, "
-                "in a 'scratch' workspace, with no tool_policy"
+                f"sealed: an agent node lists tools only from {', '.join(SEALED_TOOLS)} (or "
+                f"Claude Code's {', '.join(CLAUDE_CODE_TOOLS)}), in a 'scratch' workspace, "
+                "with no tool_policy"
             )
         from refactory_dsh.agent_delivery import _path, fill_feedback, previous_output, with_feedback
 
@@ -2219,7 +2220,7 @@ class Executor:
         # A sealed step runs on the dsh backend with the run's model, as on the spine
         # (`workspace.for_sealed_step`).
         from refactory_dsh.workspace import for_sealed_step
-        client = for_sealed_step(client, node.id, is_sealed(node))
+        client = for_sealed_step(client, node.id, is_sealed(node), node.tools)
         # ── no-tools enforcement ──────────────────────────────────────────
         from refactory_dsh import tool_policy as tool_policies
         tool_policy = tool_policies.check(node.tool_policy)
@@ -2340,7 +2341,9 @@ class Executor:
             return response
 
         _capture_final = route.get("worker_backend", "dsh") == "dsh"
-        if tool_policies.no_effect(tool_policy):
+        if tool_policies.no_effect(tool_policy) or is_sealed(node):
+            # A sealed step answers in its reply too: a Claude Code one's is its first
+            # output (`workspace.collect`), as a DSH one's is.
             _capture_final = True
         try:
             output, _receipt = deliver(
