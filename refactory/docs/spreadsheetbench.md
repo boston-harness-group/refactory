@@ -189,10 +189,11 @@ Where neither can run, code is not run.
    model calls; each message is shown stripped, as the History framing sends it.
 8. **Formula note**: SkillOpt's verification report ends, when cells read as text
    starting with `=`, with "WARNING: n cells contain Excel formulas (openpyxl cannot
-   evaluate them):" and the cells. Under `recalc` that is false, and a proposer cited it
-   to argue for writing plain values, so the line says instead that the grader
-   recalculates real formulas and compares these cells (which hold text, since a real
-   formula reads as its cached value) as text. `SB_GRADER=cached` keeps SkillOpt's line.
+   evaluate them):" and the cells. The cells it lists hold text starting with `=`, not
+   formulas (the report reads cached values, where a real formula reads as its value).
+   Under `recalc` SkillOpt's line is false, and a proposer cited it to argue for writing
+   plain values, so the line says "NOTE: n cells hold text that starts with '=' (stored
+   as text, not as formulas):". `SB_GRADER=cached` keeps SkillOpt's line.
    The report reaches the analysts and the proposer, not the solver: the gold feedback
    keeps only the wrong cells.
 

@@ -155,16 +155,15 @@ SKILLOPT_FORMULA_WARNING = \
 
 @pytest.mark.parametrize("choice", ["recalc", "cached"])
 def test_formula_line_says_what_the_grader_does(tmp_path, monkeypatch, choice):
-    """Deviation 7: the recalc grader recalculates formulas, so its report says so (the
-    cells listed still); the cached grader's is SkillOpt's report, byte for byte. The
+    """Deviation 7: under recalc the report says the cells it lists hold text starting
+    with ``=`` (listed still); the cached grader's is SkillOpt's report, byte for byte. The
     grader comes from `recalc.grader`, here through ``SB_GRADER``."""
     monkeypatch.setenv(recalc.GRADER_ENV, choice)
     gold = make_workbook(tmp_path / "gold.xlsx",
                          [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
     pred = _text_eq_pred(tmp_path / "pred.xlsx", 41)
-    head = {"recalc": "\n  NOTE: 1 cells hold text that starts with '=' (text, not formulas: "
-                      "the grader recalculates real formulas before comparing values, but "
-                      "compares these cells as text):",
+    head = {"recalc": "\n  NOTE: 1 cells hold text that starts with '=' (stored as text, "
+                      "not as formulas):",
             "cached": SKILLOPT_FORMULA_WARNING}[choice]
     assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
         "## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
@@ -766,8 +765,8 @@ def _text_eq(n: int) -> str:
 def test_the_formula_line_the_analysts_see_is_the_graders(tmp_path, sb_env, monkeypatch,
                                                           choice):
     """A train item with gold feedback, end to end: the verification report the analysts
-    and the proposer read (the record's ``prediction``) says the recalc grader
-    recalculates formulas, and is SkillOpt's under cached (deviation 7). The gold feedback
+    and the proposer read (the record's ``prediction``) says the listed cells hold text
+    under recalc, and is SkillOpt's under cached (deviation 7). The gold feedback
     the solver gets lists only wrong cells, so neither line reaches it."""
     if choice == "recalc":
         fake = tmp_path / "soffice"  # never run (no answer cell holds a formula): copies
@@ -783,9 +782,8 @@ def test_the_formula_line_the_analysts_see_is_the_graders(tmp_path, sb_env, monk
     (record,) = result.item_records
     assert record["gold_feedback"]["told_wrong"] == 1 and len(prompts) == 2
     assert "Sheet1!B1: your output = 41 (WRONG)" in prompts[1]
-    note = ("NOTE: 1 cells hold text that starts with '=' (text, not formulas: the grader "
-            "recalculates real formulas before comparing values, but compares these cells "
-            "as text):\n    Sheet1!C1==A1*42")
+    note = ("NOTE: 1 cells hold text that starts with '=' (stored as text, not as formulas):"
+            "\n    Sheet1!C1==A1*42")
     warning = SKILLOPT_FORMULA_WARNING.strip() + "\n    Sheet1!C1==A1*42"
     said, unsaid = (note, warning) if choice == "recalc" else (warning, note)
     assert said in record["prediction"] and unsaid not in record["prediction"]

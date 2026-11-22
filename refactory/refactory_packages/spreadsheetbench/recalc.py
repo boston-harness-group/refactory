@@ -240,7 +240,7 @@ def auto_verify_output(pred_path: str, gold_path: str, answer_position: str,
                        *, choice: str | None = None) -> str:
     """The verification report, read from the recalculated copy under ``recalc`` when
     the answer cells hold formulas; under ``recalc`` its line over the ``=`` cells says
-    the grader recalculates (deviation 7), under ``cached`` it is SkillOpt's."""
+    they hold text (deviation 7), under ``cached`` it is SkillOpt's."""
     recalculates = grader(choice) == "recalc"
     if recalculates and os.path.exists(pred_path) \
             and has_formula_answer(pred_path, answer_position):
