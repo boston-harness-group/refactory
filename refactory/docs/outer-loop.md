@@ -1129,19 +1129,18 @@ paired with a parent picker), on the train records the request carries:
   analysts. Each reads the pipeline in the proposer's words, from the same renderers:
   the pipeline view and each step's settings with their values (a paragraph the steps'
   texts share read once, since an analyst never patches) -- no node table or node JSON
-  -- with "The changes the optimizer can make" ending in "What edits are possible in
-  this run" (`analysts.buildable_lines`, failure and success analysts alike): plain
-  facts from the run's graph and settings, each what an attempt decides, and each only
-  where an operation the run allows can touch it. With `set_knob`, first, which
-  settings it moves (all but those frozen or read by a protected or grading step,
-  `E-frozen`); with structural operations, the seed's steps whose tool rule
-  (`tool_policy` `none` or `refused`) no edit may change (`E-tool-policy-escalation`),
-  whether a new agent step from an operation that takes `tools` (`insert`, `map`,
-  `fallback`) may list them -- sealed, in a fresh workspace with only the files it
-  reads and no network, when the run can run a sealed step, else not
-  (`E-new-node-tools`) -- and the protected steps (`E-protected`); a text-only run gets
-  the settings line and one line that the structure stays. No example and no
-  suggestion --
+  -- with "The changes the optimizer can make" opening, in every run, on "What edits
+  are possible in this run:" (`analysts.buildable_lines`, failure and success analysts
+  alike, before the operations): plain facts from the run's graph and settings, one
+  short sentence each, each what an attempt decides and each only where an operation
+  the run allows can touch it. With `set_knob`, first, which settings it moves (all but
+  those frozen or read by a protected or grading step, `E-frozen`); with structural
+  operations, the seed's steps whose tool rule (`tool_policy` `none` or `refused`) no
+  edit may change (`E-tool-policy-escalation`), whether a step an operation that takes
+  `tools` (`insert`, `map`, `fallback`) adds may list them, run sealed, when the run can
+  run a sealed step, else not (`E-new-node-tools`; what sealed means is the operators'
+  own lines), and the protected steps (`E-protected`). A text-only run gets the settings
+  line and one line that the structure stays. No example and no suggestion --
   and each item's full trace: its input, every step's input and output in the order
   they ran, the expected answer, the prediction, the score and the grader's feedback. Each item's heading
   carries the item fields its Task declares (`Task.item_metadata`, read by
@@ -1467,8 +1466,8 @@ The comparison the observations come from:
 - **When it fails.** The facts need no model, so a pass whose call fails (or that has
   nothing to compare) still writes them: the note is the record with this epoch's facts
   and the earlier observations, marked NOT UPDATED in that epoch with why (it added no
-  observations) in every request that shows it; the next pass that writes observations
-  clears the mark. The call is retried as every optimizer call
+  observations) in every request that shows it, and the tally beside it is that round's
+  (every pass recomputes it); the next pass that writes observations clears the mark. The call is retried as every optimizer call
   is. A spent budget, a cancelled run or a missing model choice is no answer about the
   memory: no pass is recorded, so a resume makes the pass; a spent budget or a person's
   stop ends the search as it does elsewhere, and the run's report is written either way.

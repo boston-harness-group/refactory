@@ -673,6 +673,10 @@ def test_a_failed_pass_keeps_the_earlier_note_marked_and_a_later_one_clears_it(
         (7, "gate: kept"), (8, "gate: current")]
     assert [o["text"] for o in failed["observations"]] == ["NOTE-2"]
     assert [p["epoch"] for p in failed["passes"]] == [2], "the failed pass compared nothing"
+    # The tally beside it is the failed epoch's round (8's), not the last written one (7's).
+    tally = third.split("The tally of the latest round's tries:\n", 1)[1].split("```", 1)[0]
+    ids = {_level(by_id[c["id"]]): c["id"] for c in failed["changes"]}
+    assert f"`{ids[8]}`" in tally and f"`{ids[7]}`" not in tally
     fourth = proposer.contexts[3].render()
     assert "NOTE-4" in fourth and "NOT UPDATED" not in fourth
     assert "NOTE-2" in fourth, "the failed pass lost no earlier observation"

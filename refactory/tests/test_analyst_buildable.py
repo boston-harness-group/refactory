@@ -14,6 +14,7 @@ import structure_fuzz as sf
 from refactory_dsh.nn import edits as nn_edits
 from refactory_dsh.optim import ProposalContext, analysts, base
 
+#: The label that opens "The changes the optimizer can make" (`analysts.POSSIBLE_HEADING`).
 HEADING = f"{analysts.POSSIBLE_HEADING}\n"
 
 
@@ -33,11 +34,16 @@ def _section(ctx: ProposalContext, kind: str = "failure") -> str:
     head, _tail = analysts._analyst_frame(ctx, kind, 1, 1, 0, "PIPE")
     assert head.count(HEADING) == 1, kind
     start = head.index(HEADING)
-    # Inside "The changes the optimizer can make", beside the operations it qualifies.
-    operations = head.index("## The changes the optimizer can make\n")
-    assert operations < start and "## What the score measures" not in head[operations:start]
-    assert "## The failed items" not in head[:start] and "## The passed items" not in head[:start]
-    return head[start:head.index("\n## ", start + len(HEADING))]
+    # First under "The changes the optimizer can make", in every run: under no other
+    # heading (not "## Structural operators"), before the operations.
+    assert head[:start].endswith("## The changes the optimizer can make\n"), kind
+    section = head[start:head.index("\n\n", start)]
+    lines = section.split("\n")[1:]
+    assert lines and all(line.startswith("- ") and line.endswith(").")
+                         or line.startswith("- Structure:") for line in lines), lines
+    # Each one short sentence: none says more than twice the shortest.
+    assert max(map(len, lines)) <= 2 * min(map(len, lines)) + 40, lines
+    return section
 
 
 def _reasons(outcome: Any) -> str:
@@ -50,15 +56,13 @@ def test_a_fixed_tool_rule_and_a_sealed_new_step_are_said_as_an_attempt_decides(
     applier.optimizer.sealed_tools = (True, "")
     parent = sf.Candidate.from_state(applier.seed_state)
     section = _section(_ctx(applier, sealed=True))
-    # Settings first, said as plainly as the structure.
-    assert section.split("\n")[1] == "- Settings: `set_knob` changes the value of any setting."
-    assert ("- Fixed tool rules: `draft` (no tools, tool_policy `none`); `finalize` (no tools, "
-            "tool_policy `none`); `review` (no tools, tool_policy `none`). No edit gives "
-            "these steps tools or changes their rule: an attempt that does is refused "
-            "(E-tool-policy-escalation).") in section
-    assert ("- New steps' tools: a new agent step (`fallback`, `insert`, `map`) may list "
-            "tools from `bash`; it runs sealed, in a fresh workspace holding only the files "
-            "it reads, with no other item's files, no grader files and no network.") in section
+    # Settings first, each line one short sentence of the same weight.
+    assert section.split("\n")[1:] == [
+        "- Settings: `set_knob` changes any setting's value (E-frozen).",
+        "- Tool rules: no edit changes the tool rule of `draft`, `finalize`, `review` "
+        "(E-tool-policy-escalation).",
+        "- New steps: a step added by `fallback`, `insert`, `map` may list tools from `bash`, "
+        "run sealed (E-new-node-tools)."]
     # The attempt agrees: `review` given `bash` is refused for the reason said ...
     review = applier.seed_state["graph"]["nodes"]["review"]
     regrant = {"edits": [{"op": "remove_node", "id": "review"},
@@ -79,8 +83,8 @@ def test_where_no_sealed_step_can_run_a_new_step_has_no_tools_as_an_attempt_deci
     applier = sf.Applier(sf.seeds()["fuzz_draft_review"])
     applier.optimizer.sealed_tools = (False, "no seal here")
     section = _section(_ctx(applier, sealed=False))
-    assert ("- New steps' tools: in this run a new agent step (`fallback`, `insert`, `map`) "
-            "has no tools; one that lists any is refused (E-new-node-tools).") in section
+    assert ("- New steps: a step added by `fallback`, `insert`, `map` has no tools in this "
+            "run (E-new-node-tools).") in section
     assert "may list tools" not in section
     sealed = {"op": "insert", "after": "draft", "kind": "agent", "text": "Check it.",
               "tools": ["bash"]}
@@ -91,24 +95,23 @@ def test_where_no_sealed_step_can_run_a_new_step_has_no_tools_as_an_attempt_deci
 def test_protected_steps_and_a_step_with_tools_are_said_from_the_graph():
     data = sf.Applier(sf.seeds()["fuzz_data_pass"])
     section = _section(_ctx(data, sealed=True))
-    assert ("- Protected steps: `items`, `check`. An edit may not remove them, change their "
-            "declarations or out-edges, move a knob they read, or let a run finish without "
-            "them (E-protected).") in section
+    assert "- Protected steps: no edit removes or rewires `items`, `check` (E-protected)." \
+        in section
     assert "E-protected" in _reasons(data.attempt(
         sf.Candidate.from_state(data.seed_state), {"op": "remove", "step": "check"}, set()))
     # A step whose tools are its backend's is no fixed rule; nor is a step the seed lacks.
     tools = sf.Applier(sf.seeds()["fuzz_tool_step"])
     said = _section(_ctx(tools, sealed=True))
-    assert "`reason` (no tools, tool_policy `none`)" in said and "`gather`" not in said
+    assert "the tool rule of `reason` (E-tool" in said and "`gather`" not in said
     ctx = _ctx(tools, sealed=True)
     ctx.fixed_tool_rules = {}
-    assert "Fixed tool rules" not in _section(ctx), "a step the seed lacks is not fixed"
+    assert "Tool rules" not in _section(ctx), "a step the seed lacks is not fixed"
     # Without a recorded seed an attempt holds the edited graph to its own rules.
     assert _section(_ctx(tools, sealed=True, seed=False)) == said
     # Knob-only runs offer no new step, and say nothing of its tools.
     knobs = _ctx(tools, sealed=True)
     knobs.catalogue = nn_edits.catalogue("knob_only")
-    assert "New steps' tools" not in _section(knobs)
+    assert "New steps" not in _section(knobs)
 
 
 def test_the_loop_hands_the_analysts_its_seeds_fixed_tool_rules(tmp_path, monkeypatch):
@@ -153,8 +156,8 @@ def test_a_setting_a_protected_step_reads_is_said_held_as_an_attempt_decides():
     ctx = _ctx(applier, sealed=True)
     ctx.catalogue = [c for c in ctx.catalogue if c["op"] == "set_knob"]
     line = _section(ctx).split("\n")[1]
-    assert line == ("- Settings: `set_knob` changes the value of any setting except these, "
-                    "which stay as they are: `review_task`, `review__system_prompt` (E-frozen).")
+    assert line == ("- Settings: `set_knob` changes any setting's value except `review_task`, "
+                    "`review__system_prompt` (E-frozen).")
     assert "E-frozen" in _reasons(applier.attempt(
         sf.Candidate.from_state(applier.seed_state),
         {"op": "set_knob", "name": "review_task", "value": "Review it."}, set()))

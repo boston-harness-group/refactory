@@ -6613,7 +6613,9 @@ class Loop(OuterLoop):
         from refactory_dsh.optim.base import _by_item
 
         if same:
-            # No call, but the facts need none: they are written all the same.
+            # No call, but the facts need none: they are written all the same, and the
+            # round's tally with them.
+            self._epoch_tally(tried, prev.id)
             facts = self._record_facts(epoch, tried, refused, current=current.id)
             self._keep_memory({"epoch": epoch, "generation": self.generation, "prev": prev.id,
                                "curr": current.id, "same": True, "evaluated": 0, "rollouts": 0,
@@ -6718,9 +6720,7 @@ class Loop(OuterLoop):
         gated = self.selection_mode() or False
         # The tally of each change tried against the noise (`memory.change_tally_lines`):
         # one source for this call and, with the note it writes, the proposer's request.
-        tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
-                                          spread=self._rescore_spread(prev.id), gated=gated)
-        self._pending_tally = tally
+        tally = self._epoch_tally(tried, prev.id)
         lineage = self._lineage_edits(prev, current)
         # The candidates whose edits the changes section shows whole (`memory.changes_lines`).
         section = (memory.changes_heading(rejected.get("noun") if rejected else None)
@@ -6789,6 +6789,18 @@ class Loop(OuterLoop):
         self._keep_memory({**record, **({"error": outcome.get("error")}
                                          if not note else {})}, note,
                           facts=None if note else build.facts_note())
+
+    def _epoch_tally(self, tried: list[dict[str, Any]], parent: str) -> list[str]:
+        """The tally of the round's tries against the noise (`memory.change_tally_lines`):
+        one source for the memory call and, beside the record, the proposer's request;
+        kept for this pass whatever it writes (`_keep_memory`), so it never lags the
+        record's facts."""
+        from refactory_dsh.optim import memory
+
+        self._pending_tally = memory.change_tally_lines(
+            tried, val_items=len(self._manifest_val_ids()),
+            spread=self._rescore_spread(parent), gated=self.selection_mode() or False)
+        return self._pending_tally
 
     def _record_facts(self, epoch: int, tried: list[dict[str, Any]],
                       refused: list[dict[str, Any]], *, current: str) -> dict[str, Any]:
@@ -6926,6 +6938,7 @@ class Loop(OuterLoop):
             self._memory = {**self._memory,
                             **({"text": facts["text"], "record": dict(facts["record"])}
                                if facts else {}),
+                            "tally": list(getattr(self, "_pending_tally", None) or ()),
                             "not_updated": {"epoch": record["epoch"],
                                             "why": str(record.get("error") or "no note")}}
             record = {**record, "updated": False}

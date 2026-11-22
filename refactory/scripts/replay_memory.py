@@ -407,9 +407,12 @@ def memory_section(prompt: str) -> tuple[int, int]:
     return offsets[found[0]], offsets[after[0]]
 
 
-def swap_proposal(run: Path, epoch: int, record_text: str, out: Path) -> dict[str, int]:
+def swap_proposal(run: Path, epoch: int, record_text: str, out: Path,
+                  record: dict[str, Any] | None = None) -> dict[str, int]:
     """Epoch ``epoch``'s last recorded proposal request three ways (`swap-proposal`), written
-    under ``out``; returns each variant's characters (system prompt and request)."""
+    under ``out``; returns each variant's characters (system prompt and request). The
+    swapped-in section's lead is the one the loop would write for ``record``
+    (`shown_memory`)."""
     calls = [c for c in _trace(run) if c.get("kind") == "proposal" and c.get("epoch") == epoch
              and c.get("prompt")]
     if not calls:
@@ -420,7 +423,7 @@ def swap_proposal(run: Path, epoch: int, record_text: str, out: Path) -> dict[st
     passes = [p for p in _passes(_events(run), epoch)]
     if not passes:
         raise SystemExit(f"no memory pass before epoch {epoch}'s proposal")
-    shown = {**dict(passes[-1].get("memory") or {}), "text": record_text}
+    shown = shown_memory(passes, record_text, record)
     section = prompt[start:end]
     tail = section[len(section.rstrip("\n")):]
     variants = {"old": prompt,
@@ -434,6 +437,31 @@ def swap_proposal(run: Path, epoch: int, record_text: str, out: Path) -> dict[st
         (out / f"proposal.{name}.system.txt").write_text(system)
         sizes[name] = len(system) + len(text)
     return sizes
+
+
+def shown_memory(passes: list[dict[str, Any]], record_text: str,
+                 record: dict[str, Any] | None) -> dict[str, Any]:
+    """The note as the proposer's request would say it (`memory.request_lines`) with
+    ``record`` in it: its lead names the latest epoch whose observations the record holds
+    and that pass's comparison (or says none has added any), its tally is the latest
+    pass's, and a failed pass is said only when it came after that epoch."""
+    latest = dict(passes[-1].get("memory") or {})
+    epochs = [int(o["epoch"]) for o in (record or {}).get("observations") or ()
+              if o.get("epoch") is not None]
+    shown: dict[str, Any] = {"text": record_text,
+                             **({"tally": latest["tally"]} if latest.get("tally") else {})}
+    if record is None:
+        return {**latest, "text": record_text}
+    if epochs:
+        at = next(p for p in passes if int(p.get("epoch") or 0) == max(epochs))
+        shown.update({"epoch": max(epochs), "prev": at.get("prev"), "curr": at.get("curr"),
+                      **({"rejected": dict(at["rejected"])} if at.get("rejected") else {})})
+    failed = [p for p in passes if not p.get("updated")
+              and int(p.get("epoch") or 0) > max(epochs, default=0)]
+    if failed:
+        shown["not_updated"] = {"epoch": failed[-1].get("epoch"),
+                                "why": str(failed[-1].get("error") or "no note")}
+    return shown
 
 
 def _trace(run: Path) -> list[dict[str, Any]]:
@@ -502,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"record: {folder / 'record.json'} ({len(text)} chars)")
         if args.swap_proposal:
             try:
-                sizes = swap_proposal(args.run, args.epoch, text, folder)
+                sizes = swap_proposal(args.run, args.epoch, text, folder, record)
             except ValueError as error:
                 raise SystemExit(f"--swap-proposal: {error}")
             for name, chars in sizes.items():

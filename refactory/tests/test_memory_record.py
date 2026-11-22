@@ -601,10 +601,14 @@ def test_the_replay_rebuilds_the_record_from_the_journal_and_swaps_it_into_a_pro
     assert record == old, "the loop's own note is that record: the swap changes nothing"
     # With another record (the facts alone) only the section's note changes.
     bare_text = memory.render_record(bare)
-    script.swap_proposal(run, 4, bare_text, tmp_path / "bare_out")
+    script.swap_proposal(run, 4, bare_text, tmp_path / "bare_out", bare)
     swapped = (tmp_path / "bare_out" / "proposal.record.prompt.txt").read_text()
     s_start, s_end = script.memory_section(swapped)
     assert swapped[:s_start] == old[:start] and swapped[s_end:] == old[end:]
+    # Its lead is the facts-only record's, not the stored note's.
+    assert "No memory pass has added observations yet." in swapped[s_start:s_end]
+    assert "Written in epoch" not in swapped[s_start:s_end]
+    assert "Written in epoch 4; " in old[start:end]
     assert "\n".join(evidence.exact_block(bare_text)) in swapped[s_start:s_end]
     assert "OBS for" not in swapped[s_start:s_end] and "OBS for" in old[start:end]
     assert "## Optimizer memory" not in none and none == old[:start] + old[end:]

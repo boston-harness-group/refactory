@@ -1565,7 +1565,7 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                         "observations." if text else "; there is no note yet."))
     tally = list(memory.get("tally") or ())
     if text and tally:
-        lines.append("The tally of that epoch's tries:")
+        lines.append("The tally of the latest round's tries:")
     return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
             *(exact_block(text) if text else [])]
 

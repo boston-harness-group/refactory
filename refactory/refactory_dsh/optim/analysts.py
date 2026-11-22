@@ -339,8 +339,9 @@ def buildable_lines(ctx: Any) -> list[str]:
     ``refused`` steps, as an attempt reads them), whether a new agent step may have tools
     -- the operations whose step takes ``tools`` (`nn.core_ops.OPERATORS`), sealed when the
     run can run a sealed step (``ctx.new_node_tools``, `workspace.sealed_steps`), else none
-    -- and which steps are protected. Settings come first and are said as plainly as the
-    structure, so neither kind reads as the favoured one. Each line is what an attempt
+    -- and which steps are protected. Settings come first; every line is one short
+    sentence, so neither kind reads as the favoured one (the details of a sealed step are
+    the operators' lines'). Each line is what an attempt
     accepts or refuses (``E-frozen``, ``E-tool-policy-escalation``, ``E-new-node-tools``,
     ``E-protected``)."""
     from refactory_dsh.nn.core_ops import OPERATORS
@@ -363,10 +364,9 @@ def buildable_lines(ctx: Any) -> list[str]:
                                    *(getattr(ctx, "graders", None) or ())])
         frozen = [str(k.get("name")) for k in getattr(ctx, "knobs", None) or ()
                   if isinstance(k, Mapping) and (k.get("frozen") or str(k.get("name")) in held)]
-        lines.append("- Settings: `set_knob` changes the value of any setting"
-                     + (f" except these, which stay as they are: "
-                        f"{', '.join(f'`{k}`' for k in frozen)} (E-frozen)" if frozen else "")
-                     + ".")
+        lines.append("- Settings: `set_knob` changes any setting's value"
+                     + (f" except {', '.join(f'`{k}`' for k in frozen)}" if frozen else "")
+                     + " (E-frozen).")
     if not structural:
         if lines:
             lines.append("- Structure: no operation of this run changes the steps, their "
@@ -378,41 +378,37 @@ def buildable_lines(ctx: Any) -> list[str]:
     if rules is None:
         rules = {node_id: str(n.get("tool_policy")) for node_id, n in steps.items()
                  if no_effect(n.get("tool_policy"))}
-    fixed = [(node_id, rule) for node_id, rule in rules.items() if node_id in steps]
+    fixed = [node_id for node_id in rules if node_id in steps]
     if fixed:
-        lines.append("- Fixed tool rules: " + "; ".join(
-            f"`{node_id}` ({'no tools' if rule == 'none' else 'tools refused'}, "
-            f"tool_policy `{rule}`)" for node_id, rule in fixed)
-            + ". No edit gives these steps tools or changes their rule: an attempt that does "
-            "is refused (E-tool-policy-escalation).")
+        lines.append(f"- Tool rules: no edit changes the tool rule of "
+                     f"{', '.join(f'`{n}`' for n in fixed)} (E-tool-policy-escalation).")
     adders = [str(c.get("op")) for c in catalogue
               if "tools" in ((OPERATORS.get(str(c.get("op"))) or {}).get("fields") or ())]
     if adders:
         named = ", ".join(f"`{op}`" for op in adders)
-        lines.append(
-            f"- New steps' tools: a new agent step ({named}) may list tools from "
-            f"{', '.join(f'`{t}`' for t in SEALED_TOOLS)}; it runs sealed, in a fresh "
-            "workspace holding only the files it reads, with no other item's files, no "
-            "grader files and no network." if getattr(ctx, "new_node_tools", False) else
-            f"- New steps' tools: in this run a new agent step ({named}) has no tools; one "
-            "that lists any is refused (E-new-node-tools).")
+        lines.append(f"- New steps: a step added by {named} may list tools from "
+                     f"{', '.join(f'`{t}`' for t in SEALED_TOOLS)}, run sealed "
+                     "(E-new-node-tools)." if getattr(ctx, "new_node_tools", False) else
+                     f"- New steps: a step added by {named} has no tools in this run "
+                     "(E-new-node-tools).")
     protected = [str(p) for p in getattr(ctx, "protected", None) or ()]
     if protected:
-        lines.append(f"- Protected steps: {', '.join(f'`{p}`' for p in protected)}. An edit "
-                     "may not remove them, change their declarations or out-edges, move a knob "
-                     "they read, or let a run finish without them (E-protected).")
+        lines.append(f"- Protected steps: no edit removes or rewires "
+                     f"{', '.join(f'`{p}`' for p in protected)} (E-protected).")
     return lines
 
 
-#: The subsection of "The changes the optimizer can make" that `buildable_lines` fills.
-POSSIBLE_HEADING = "### What edits are possible in this run"
+#: The label that opens "The changes the optimizer can make" (`buildable_lines`): a line,
+#: not a heading, so the operations after it (their own "## Structural operators" among
+#: them) are not read as its part, nor it as theirs.
+POSSIBLE_HEADING = "What edits are possible in this run:"
 
 
 def _buildable_text(ctx: Any) -> str:
-    """`buildable_lines` under `POSSIBLE_HEADING`, beside the operations; empty when it
-    says nothing."""
+    """`buildable_lines` under `POSSIBLE_HEADING`, first under "The changes the optimizer
+    can make", before the operations; empty when it says nothing."""
     lines = buildable_lines(ctx)
-    return f"\n\n{POSSIBLE_HEADING}\n" + "\n".join(lines) if lines else ""
+    return f"{POSSIBLE_HEADING}\n" + "\n".join(lines) + "\n\n" if lines else ""
 
 
 def _memory_text(ctx: Any) -> str:
@@ -626,8 +622,8 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
     return ((f"# Analysing {label} items -- batch {index} of {total}\n\n"
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
-             f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}"
-             f"{_buildable_text(ctx)}\n\n"
+             f"## The changes the optimizer can make\n{_buildable_text(ctx)}"
+             f"{_changes_text(ctx, kind)}\n\n"
              f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              f"Each item in full: {evidence.TRACE_FORM}.\n\n"),
