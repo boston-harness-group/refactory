@@ -1435,20 +1435,35 @@ def _fails_differently(returncode: Any, error_text: str, base_returncode: Any,
                        base_error: str, found_wt: worktree.Worktree) -> bool:
     """Whether the attempt's preparation failed otherwise than the base's at the same step.
 
-    A different exit code, when the base's is known, or a different error once each
-    worktree's own path reads as ``<root>`` (the attempt runs in the run's worktree, the
-    base in its base worktree, and a message that names a file names it by that path).
+    A different exit code, when the base's is known, or a different error once what
+    differs between the two places only by where they run reads alike: each worktree's
+    path as ``<root>``, each one's HOME as ``<home>``, the run directory as ``<run>`` and
+    the temporary directory as ``<tmp>``; and every run of digits as ``#``, since the
+    exit code is compared on its own and a PID, a timestamp, a duration or a log file
+    named by the time is not a different failure.
     """
+    import tempfile
+
+    from refactory_dsh.invocations import BASE_CHECK_HOME, CHECK_HOME
+
     if base_returncode is not None and returncode != base_returncode:
         return True
     run_id = Path(found_wt.path).name.removeprefix("run-")
-    roots = {str(found_wt.path), str(_base_worktree_path(Path(found_wt.target), run_id))}
-    roots |= {str(Path(root).resolve()) for root in roots}
+    run_dir = Path(found_wt.run)
+    places = {
+        str(found_wt.path): "<root>",
+        str(_base_worktree_path(Path(found_wt.target), run_id)): "<root>",
+        str(run_dir / CHECK_HOME): "<home>",
+        str(run_dir / BASE_CHECK_HOME): "<home>",
+        str(run_dir): "<run>",
+        tempfile.gettempdir(): "<tmp>",
+    }
+    places.update({str(Path(place).resolve()): name for place, name in list(places.items())})
 
     def normal(text: str) -> str:
-        for root in sorted(roots, key=len, reverse=True):
-            text = text.replace(root, "<root>")
-        return text.strip()
+        for place in sorted(places, key=len, reverse=True):
+            text = text.replace(place, places[place])
+        return re.sub(r"\d+", "#", text).strip()
 
     return normal(error_text) != normal(base_error)
 

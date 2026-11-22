@@ -890,13 +890,21 @@ def test_a_setup_the_change_breaks_goes_to_the_builder_on_the_spine(tmp_path, mo
     assert "exit 4" in facts["validation"] and not facts.get("draft_delivery")
 
 
-def test_a_setup_failing_the_same_way_on_the_base_ends_in_a_draft(tmp_path):
-    """The walker: the base's tool.py already fails setup (exit 3, ``boom``); the change
-    edits tool.py and it fails identically. That is the base's failure: a draft, one emit."""
+@pytest.mark.parametrize("says", [
+    "'boom'",
+    # Only the PID differs between the base's run and the attempt's.
+    "f'registry down (pid {os.getpid()})'",
+    # Only the HOME differs: each side's check runs with a HOME of its own.
+    "f'cannot write {os.environ[\"HOME\"]}/.cache/tool'",
+], ids=["same-text", "pid", "home"])
+def test_a_setup_failing_the_same_way_on_the_base_ends_in_a_draft(tmp_path, says):
+    """The walker: the base's tool.py already fails setup (exit 3); the change only adds a
+    comment to tool.py and it fails the same way, its message differing at most in a PID
+    or the HOME it ran with. That is the base's failure: a draft after one emit."""
     from tests_support import git
 
     target = git_repo(tmp_path / "target")
-    failing = "import sys\nprint('boom', file=sys.stderr)\nsys.exit(3)\n"
+    failing = f"import os, sys\nprint({says}, file=sys.stderr)\nsys.exit(3)\n"
     (target / "tool.py").write_text(failing)
     git(target, "add", "tool.py")
     git(target, "commit", "-q", "-m", "tool")
