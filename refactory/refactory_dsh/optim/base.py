@@ -202,10 +202,14 @@ def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str
     return reasons
 
 
+#: Why a run offers no tool step and refuses one when ``new_step_tools`` is off.
+NEW_STEP_TOOLS_OFF = "this run turns tools on new steps off (new_step_tools: false)"
+
+
 def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
                     sealed: tuple[bool, str] | None = None,
-                    check: Callable[[str, dict[str, Any]], tuple[bool, str]] | None = None
-                    ) -> list[str]:
+                    check: Callable[[str, dict[str, Any]], tuple[bool, str]] | None = None,
+                    allowed: bool = True) -> list[str]:
     """``E-new-node-tools`` for each agent node the search added that would run with tools
     outside a sealed workspace.
 
@@ -218,7 +222,9 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
     instead (`_tool_policy_escalated`). ``sealed`` is the run's answer to whether a
     sealed step can run (`workspace.sealed_steps`, which the request's offer takes too);
     without one, whether the seal runs here. ``check`` judges each new sealed step on the
-    client its dispatch takes, its own route included (`workspace.sealed_step`).
+    client its dispatch takes, its own route included (`workspace.sealed_step`). Without
+    ``allowed`` (the run's ``new_step_tools`` off) every new agent node with tools is
+    refused, a copy of a seed step's tools included.
     """
     from refactory_dsh.workspace import is_sealed, sealed_steps
 
@@ -234,6 +240,10 @@ def _new_node_tools(seed_state: dict[str, Any], candidate_state: dict[str, Any],
         if node_id in seed_nodes or node.get("kind") != "agent":
             continue
         if no_effect(node.get("tool_policy")) and not node.get("tools"):
+            continue
+        if not allowed:
+            reasons.append(f"E-new-node-tools: new agent node {node_id!r} has tools, and "
+                           f"{NEW_STEP_TOOLS_OFF}; give it none")
             continue
         if is_sealed(node):
             sealable, why = sealed if sealed is not None else sealed_steps(None)
@@ -1988,6 +1998,7 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
            "facts reads" if filled else "")
         + ". Any other knob is read as written, so a `{{fact}}` there would never arrive "
         "and is refused (V20).",
+        TOOLS_LINE if tools else NO_TOOLS_LINE,
     ]
     if code_nodes:
         lines += [
@@ -2063,6 +2074,18 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
             lines += [f"- {title}:",
                       "  " + json.dumps({"edits": bundle} if len(bundle) > 1 else bundle[0])]
     return lines + [""]
+
+
+#: What the request says of tools when a new step may have them: an existing step's own
+#: tool rules (its ``tool_policy``, its ``tools``) are not a limit on a step an edit adds.
+TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules (a step that has no "
+              "tools or refuses them stays so). A new agent step may still have `tools` "
+              "(`insert`, `map`, `fallback`): it runs sealed, in a fresh workspace holding "
+              "only the files it reads -- an item's own files too, which the pipeline view "
+              "lists -- with no network and no grader files.")
+#: The same when this run offers no tool step (no seal here, or ``new_step_tools`` off).
+NO_TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules, and in this run "
+                 "a new step has no tools.")
 
 
 #: The core operators a request explains, in its order (`nn.core_ops.CORE_OPS`).
@@ -2245,7 +2268,10 @@ def _view_lead() -> str:
         "(its inputs only); `told` is "
         "each knob whose text reaches the step, its opening words (`*` frozen; `?` read by "
         "an op with several outputs, for all of them), or a code step's code; `->` what it "
-        "writes; " + "; ".join(f"`{form}`" for form in FORMS.values())
+        "writes; a per-item block's `item files` are files the task lays into each item's "
+        "pass, under the same name for every item, and the steps that read them: a new step "
+        "reads one by naming it (or the data step) in 'sees'; "
+        + "; ".join(f"`{form}`" for form in FORMS.values())
         + "; a loop that does not go on with its last attempt past its cap says so: `"
         + EXHAUSTED.format(policy="fail_item").lstrip(", ") + "` (only that item fails) or `"
         + EXHAUSTED.format(policy="halt").lstrip(", ") + "` (the whole run stops)"
@@ -2253,6 +2279,12 @@ def _view_lead() -> str:
 
 
 PIPELINE_VIEW_LEAD = _view_lead()
+
+
+#: How the operator table names the one rewire it tries on a step: to the task alone. A
+#: rewire whose 'sees' keeps what the step sees and adds a new step's output is how a
+#: ``+ rewire S`` completion applies, so the label says which rewire was refused.
+REWIRE_TO_TASK = "rewire (sees task alone)"
 
 
 def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str, Any]]]:
@@ -2273,7 +2305,8 @@ def _fit_edits(node: Any, graph: Any, ops: set[str]) -> list[tuple[str, dict[str
         edits = [("insert", {"op": "insert", "after": node_id, "kind": "agent"}),
                  ("insert before", {"op": "insert", "before": node_id, "kind": "agent"}),
                  ("remove", {"op": "remove", "step": node_id}),
-                 *([("rewire", {"op": "rewire", "step": node_id, "sees": ["task"]})] if model
+                 *([(REWIRE_TO_TASK, {"op": "rewire", "step": node_id, "sees": ["task"]})]
+                   if model
                    else []),
                  ("loop", {"op": "loop", "step": node_id, "judge": "agent"}),
                  ("route", {"op": "route", "after": node_id, "judge": "agent"}),
@@ -2321,12 +2354,19 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
     steps, what the run was given, knobs), at most `CARRIES_DEPTH` ops deep. The knobs
     an output carries are those its op declares for it (``knob_outputs``,
     `operators.carried_knobs`); an op with several outputs that declares nothing carries
-    every knob it reads in each."""
+    every knob it reads in each.
+
+    Each op is followed once per cell: met again, it is said as ``op X, above``; an op that
+    runs after the step (it feeds it through a loop) is said as ``op X, from the loop's
+    previous round`` and not followed, so a cell stays short and ends for any graph."""
     from refactory_dsh import snippet
+    from refactory_dsh.nn.core_ops import _downstream
     from refactory_dsh.nn.operators import carried_knobs, made_by
     from refactory_dsh.nn.validate import consumed
 
     makers = made_by(graph)
+    later = _downstream(graph, node.id) - {node.id}
+    followed: set[str] = set()
 
     def described(kind: str, name: str, depth: int, seen: frozenset[str]) -> str:
         made = makers.get((kind, name)) or []
@@ -2338,6 +2378,13 @@ def _carries(node: Any, graph: Any, knob_values: Mapping[str, Any]) -> str:
             return f"{name} (op {', '.join(plain)}, not followed further)"
         parts = []
         for op_id in plain:
+            if op_id in later:
+                parts.append(f"op {op_id}, from the loop's previous round")
+                continue
+            if op_id in followed:
+                parts.append(f"op {op_id}, above")
+                continue
+            followed.add(op_id)
             op = graph.nodes[op_id]
             sources = [described(k, n, depth + 1, seen | {op_id})
                        for k, n in sorted(consumed(op, knob_values))]
@@ -2547,7 +2594,9 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
             "...)`: a fact a plain op builds, and everything that op reads), and which core "
             "operators an attempt accepts for each step as written with their default "
             "arguments (`split (replace)`: a split into one step of your own text that sees "
-            "the task) and which it refuses, in the refusal's own words (`+ X: ops`: refused alone "
+            "the task; `" + REWIRE_TO_TASK + "`: the only rewire tried, so its refusal says "
+            "nothing of a rewire whose 'sees' keeps what the step sees and adds more) and "
+            "which it refuses, in the refusal's own words (`+ X: ops`: refused alone "
             "only because nothing reads their new step, accepted with X added). A step that "
             "alone reads a frozen knob is not removed, and is split or merged only when the "
             "new step's prompt names each such knob as `{{knob}}` (never one named after the "
@@ -2665,7 +2714,8 @@ def _reader_edit(after: Mapping[str, Any], node_id: str, edit: Mapping[str, Any]
 def _completed(state: Mapping[str, Any], bundle: list[dict[str, Any]]
                ) -> list[dict[str, Any]] | None:
     """``bundle`` as an example an attempt takes: a step it adds that nothing reads gets
-    'to', the nearest prompt after it that can take it (`core_ops.reader_knobs`), where its
+    'to', the nearest prompt after it that can take it (`core_ops.reader_knobs`: a prompt
+    knob, or an agent whose prompt is no knob, which 'to' re-slots), where its
     operator takes one; else the edit its refusal's hint names (`_reader_edit`: rewire a
     later step to see it, or take over the graded step's outputs). None when one stays
     unread (``E-unread``) or an edit of it is refused here. A state built without the
@@ -2701,7 +2751,7 @@ def _completed(state: Mapping[str, Any], bundle: list[dict[str, Any]]
                 bundle[index] = {**edit, "id": unread[0]}
                 bundle.append(found[1])
                 continue
-        knobs = core_ops.reader_knobs(states[index], unread[0])
+        knobs = core_ops.reader_knobs(states[index], unread[0], steps=True)
         if edit.get("op") in _TAKES_TO and "to" not in edit and knobs:
             bundle[index] = {**edit, "to": knobs[0]}
             continue
@@ -5788,6 +5838,10 @@ class Optimizer:
     #: included (`workspace.sealed_step`, bound to the loop's model); ``None`` judges by
     #: ``sealed_tools`` alone.
     sealed_check: Any = None
+    #: Whether a step an edit adds may have tools at all; the loop sets it from
+    #: ``new_step_tools``. Off, every new agent step with tools is refused
+    #: (``E-new-node-tools``), sealed or not.
+    new_step_tools: bool = True
     #: The sandbox answer of the request being validated (``ProposalContext.sandbox``,
     #: set by ``propose_valid``); ``None`` asks `snippet.available` afresh.
     sandbox: tuple[bool, str] | None = None
@@ -6187,7 +6241,8 @@ class Optimizer:
             return escalation
         tooled = _new_node_tools(seed_state if seed_state is not None else parent.state, state,
                                  getattr(self, "sealed_tools", None),
-                                 getattr(self, "sealed_check", None))
+                                 getattr(self, "sealed_check", None),
+                                 bool(getattr(self, "new_step_tools", True)))
         if tooled:
             return tooled
         routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))

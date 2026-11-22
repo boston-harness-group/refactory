@@ -323,6 +323,43 @@ class RunContext:
     def exists(self, name: str) -> bool:
         return self.path(name).exists()
 
+    def item_file(self, role: str) -> Path | None:
+        """The file the item's Task laid into this pass under ``role`` (`Task.item_files`),
+        or ``None`` when this item has none. Refused (`ExecutionError`) outside an item's
+        pass, for a role the Task does not declare, and when this node does not list the
+        file in its ``reads``: what a step takes in is what it declares, so a read around
+        the declaration fails loudly instead of passing unseen. Both runtimes hand an op
+        this context (`run.build_op_context`)."""
+        import json
+
+        from refactory_dsh.items import PASS_MARKER
+        from refactory_dsh.task import TaskError, task_item_files
+
+        marker = self.workdir / PASS_MARKER
+        try:
+            ref = str(json.loads(marker.read_text()).get("task") or "")
+        except (OSError, ValueError, AttributeError):
+            ref = ""
+        if not ref:
+            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r} outside "
+                                 "an item's pass (no Task laid one in)")
+        try:
+            files = task_item_files(ref)
+        except (TaskError, ImportError) as exc:
+            raise ExecutionError(f"node {self.node_id!r}: the Task's item files cannot be "
+                                 f"read: {exc}") from exc
+        if role not in files:
+            raise ExecutionError(f"node {self.node_id!r} asks for item file {role!r}, which "
+                                 f"the Task does not lay in; it lays in: "
+                                 f"{', '.join(sorted(files)) or 'none'}")
+        name = files[role]
+        if name not in self._declared_reads:
+            raise ExecutionError(f"node {self.node_id!r} reads item file {name!r} ({role}), "
+                                 f"which it does not declare; declared reads: "
+                                 f"{list(self._declared_reads)}")
+        target = self.path(name)
+        return target if target.is_file() else None
+
     # ── facts ──────────────────────────────────────────────────────────────
     def set_fact(self, name: str, value: Any) -> None:
         """Set a run fact. A node may only set facts it declares in ``produces``."""
@@ -1260,6 +1297,11 @@ class Executor:
 
                         if task is not None:
                             task.setup(instance, self.ctx.workdir, **_setup_kwargs)
+                            # What it laid in as item files is files of the pass
+                            # (`Task.item_files`), on the spine too (`items.command_begin`).
+                            from refactory_dsh.task import check_laid_item_files
+
+                            check_laid_item_files(task, self.ctx.workdir)
                         # The item is written as the data node, so the declaration that
                         # governs it is the data node's — not the last node of the pass
                         # before it.

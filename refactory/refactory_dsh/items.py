@@ -1297,6 +1297,11 @@ def command_begin(node: Node, workdir: Path, index: int, *, concurrent: bool = F
                 instance_of(item), pass_dir,
                 **part_seed_kwargs(task.setup, part=subset_part, seed=subset_seed),
             )
+            # What it laid in as item files is files of the pass (`Task.item_files`), as
+            # on the walker.
+            from refactory_dsh.task import check_laid_item_files
+
+            check_laid_item_files(task, pass_dir)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:

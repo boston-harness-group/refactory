@@ -844,6 +844,23 @@ def _ctx(workdir: Path, **knobs: Any) -> RunContext:
     return RunContext(workdir, knobs={"max_turns": 30, **knobs}, enforce_writes=False)
 
 
+def _node_ctx(workdir: Path, node_id: str, **knobs: Any) -> RunContext:
+    """`_ctx` as node ``node_id`` of the solver's graph runs in an item's pass: the pass
+    names its Task, and the node's declared reads are the graph's (`RunContext.item_file`
+    finds the item's input through them)."""
+    from refactory_dsh.items import PASS_MARKER
+    from refactory_dsh.nn.graph import op_io
+
+    marker = workdir / PASS_MARKER
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"node": "data", "item": "t1", "index": 0, "task": sb_mode.TASK}))
+    ctx = _ctx(workdir, **knobs)
+    ctx.node_id = node_id
+    ctx._declared, ctx._declared_reads, ctx._declared_facts = op_io(  # noqa: SLF001
+        sb_mode.Solver().build().nodes[node_id])
+    return ctx
+
+
 def test_turn_gate_stops_with_ten_seconds_left_before_the_backstop(tmp_path, monkeypatch):
     from refactory_dsh import model
 
@@ -894,16 +911,17 @@ def test_the_solve_call_has_no_wall():
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
     task = tasks.SpreadsheetBenchTask()
     t1 = task.instances()[0]
-    ctx = _ctx(tmp_path)
-    task.setup(t1, tmp_path)
+    work = tmp_path / "run" / "passes" / "data" / "t1_0"  # where a pass runs
+    ctx = _node_ctx(work, "finalize")
+    task.setup(t1, work)
     ctx.write_json("current_item.json", task_module.node_item({"id": "t1", **t1.metadata}, task))
     code = port.extract_code(_good(42))
     ctx.write_json("turn.json", {"start": time.time(), "turn": 1, "status": "exec_error",
                                  "code": code})
     ctx.write_json("history.json", [{"role": "user", "content": "u"}])
     ops.finalize(ctx)
-    assert json.loads((tmp_path / tasks.FINAL).read_text())["fail_reason"] == ""
-    assert task.verify(t1, tmp_path).passed
+    assert json.loads((work / tasks.FINAL).read_text())["fail_reason"] == ""
+    assert task.verify(t1, work).passed
 
 
 # ── train-only gold feedback, in the library ────────────────────────────────

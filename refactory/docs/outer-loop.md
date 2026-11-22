@@ -2147,7 +2147,30 @@ whose default is a copy of one) keeps its tools only in a fresh workspace of its
 (`scratch`): the attempt path lets a new agent run with the same tools a step of the seed
 runs with when it works in such a workspace (`E-new-node-tools` otherwise; a step listing
 its own tools runs sealed instead). A step that uses tools in the run directory is not run
-beside a copy of itself, rewired or merged; the refusal says to give it a workspace.
+beside a copy of itself, rewired or merged; the refusal says to give it a workspace. A step
+of the seed keeps its own tool rules (a `refused` solve step stays refused), but a step an
+edit adds may still have tools, and the request says so. `new_step_tools` off
+(`LoopConfig.new_step_tools`, on by default; an ablation) offers no tool step and refuses
+every new agent step with tools, `E-new-node-tools`, naming the setting. A run that keeps
+the default produces the same digest as before, so it still resumes.
+
+**Item files.** A Task may lay files into each item's pass under fixed names
+(`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
+The data node declares each in its `writes` (V12), so any step of the pass can read one:
+a new sealed step names it in `sees` (or names the data node) and gets a copy in its
+workspace; an op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+both runtimes) a file the op does not list in its `reads`. An item file is what the item
+gives its solver, never its answer: a path the grader reads or writes is refused when the
+Task is checked, `setup` must lay each as a regular file (a link is refused and fails the
+item), and grader-only fields stay out of the pass as before. The pipeline view's
+`per item` line names each item file and the steps that read it.
+
+**`to` an agent whose prompt is no knob.** `insert` (and `branch`, `map`) with `to` naming
+an agent step whose prompt is a template rather than a knob (SpreadsheetBench's
+`solve`, whose prompt is `{{solver_prompt}}`, a fact `frame` builds) re-slots that step's
+prompt in place, as `rewire` does: a `## <Fact>` section with the new step's `{{fact}}`
+goes after it, and the prompt becomes the step's own `<id>__task` knob. A frozen knob
+stays frozen: `to` naming one is still refused (`E-wiring`).
 
 **Each kind tried, against the noise.** A kind tried once with a small result read as a
 run-long ban: after one loop broke 2 items, S1-s43's note said "AVOID loops"; S4-s44's,

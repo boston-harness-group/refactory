@@ -65,6 +65,7 @@ from refactory_dsh import nn
 from refactory_dsh.feedback import CALL as FEEDBACK_CALL
 
 from . import skillopt_port as port
+from .tasks import INPUT
 
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
@@ -111,9 +112,11 @@ class Solver(nn.Mode):
     def build(self) -> nn.Graph:
         g = nn.Graph()
         g.add(nn.Node("data", "data", subgraph_entry="prepare", subgraph_exit="finalize",
-                      task_ref=TASK, writes=("current_item.json",), produces=("item_scores",),
+                      task_ref=TASK, writes=("current_item.json", INPUT),
+                      produces=("item_scores",),
                       parallelism_knob="data_parallelism", knobs=("data_parallelism",)))
-        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare", reads=("current_item.json",),
+        g.add(nn.Node("prepare", "op", call=f"{OPS}:prepare",
+                      reads=("current_item.json", INPUT),
                       knobs=("skill",),
                       writes=("history.json", "turn.json", "target_system_prompt.txt",
                               "target_user_prompt.txt", "spreadsheet_preview.txt"),
@@ -135,7 +138,8 @@ class Solver(nn.Mode):
                       knobs=("max_completion_tokens", SYSTEM_PROMPT_KNOB),
                       field_bindings=(("system_prompt_template", SYSTEM_PROMPT_KNOB),)))
         g.add(nn.Node("run_turn", "op", call=f"{OPS}:run_turn",
-                      reads=("reply.txt", "history.json", "turn.json", "current_item.json"),
+                      reads=("reply.txt", "history.json", "turn.json", "current_item.json",
+                             INPUT),
                       knobs=("turn_pause_s",),
                       writes=("history.json", "turn.json", "code.py", "raw.txt", "pred.xlsx"),
                       produces=("turn_status",),
@@ -151,7 +155,8 @@ class Solver(nn.Mode):
                       max_iterations=MAX_TURNS - 1, on_exhausted="continue",
                       notes="another turn while turns and budget remain"))
         g.add(nn.Node("finalize", "op", call=f"{OPS}:finalize",
-                      reads=("current_item.json", "turn.json", "history.json", "code.py"),
+                      reads=("current_item.json", "turn.json", "history.json", "code.py",
+                             INPUT),
                       knobs=("max_turns",),
                       writes=("final.json", "conversation.json", "pred.xlsx"),
                       produces=("finished",),

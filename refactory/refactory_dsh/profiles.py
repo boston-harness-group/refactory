@@ -29,7 +29,8 @@ RUNTIME_FIELDS = {"runs_root", "resume", "progress", "print_events", "verbose",
 #: behaves as the setting's last default (``fresh_evidence`` on, at most
 #: ``MAX_EDITS_PER_PROPOSAL`` edits per proposal, ``val_gate`` decided by the parts
 #: manifest; a saved ``val_gate: false``, the default before #627, is read as unset;
-#: a new step's tools always run sealed, so ``allow_new_node_tools`` has no switch).
+#: a new step's tools always run sealed, so ``allow_new_node_tools`` has no switch;
+#: whether a new step may have tools at all is ``new_step_tools``).
 OBSOLETE_SETTINGS = frozenset({"fresh_evidence", "max_edits_per_proposal", "val_gate",
                                "allow_new_node_tools"})
 
@@ -164,6 +165,10 @@ def normalize(settings: dict[str, Any]) -> dict[str, Any]:
     if result.get("allow_code_nodes") not in (True, False, 0, 1, None):
         raise ProfileError("allow_code_nodes must be true or false (1 or 0 on the command line)")
     result["allow_code_nodes"] = result.get("allow_code_nodes") not in (False, 0)
+    # new_step_tools: likewise a switch, on unless turned off.
+    if result.get("new_step_tools") not in (True, False, 0, 1, None):
+        raise ProfileError("new_step_tools must be true or false (1 or 0 on the command line)")
+    result["new_step_tools"] = result.get("new_step_tools") not in (False, 0)
     # What the model proposer is shown (optim.feedback): switches, 0 or 1 on the command line.
     for key in ("run_ledger", "lessons", "step_review", "structure_guidance", "analysts"):
         if result.get(key) not in (True, False, 0, 1):
@@ -446,6 +451,9 @@ def resolve(project: Path, mode_id: str, *, name: str = "", version: int | None 
     # before the switch existed, so it still resumes.
     if evaluation_fields.get("allow_code_nodes", True) is True:
         evaluation_fields.pop("allow_code_nodes", None)
+    # And one that leaves tools on new steps on (the default).
+    if evaluation_fields.get("new_step_tools", True) is True:
+        evaluation_fields.pop("new_step_tools", None)
     # And a run with no parent picker (the default) as one started before the setting.
     if not evaluation_fields.get("parent_picker"):
         evaluation_fields.pop("parent_picker", None)
