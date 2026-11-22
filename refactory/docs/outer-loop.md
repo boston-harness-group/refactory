@@ -1792,7 +1792,9 @@ state is promised, on any graph shape:
   directory or a path the Task names as grader-side (`ToolEnvironment.hidden`;
   SpreadsheetBench names what model code may not see, `sandbox.hidden_paths`, its dataset
   among it), or that holds the home directory, is refused (`seal.refused_binding`, which
-  the model-code sandbox uses too). An interpreter that is missing or fails the Task's
+  the model-code sandbox uses too). A Task must list its grader-side data in `hidden`
+  whenever its interpreter could sit near it: an interpreter installed inside the dataset
+  with no `hidden` would bind the dataset. An interpreter that is missing or fails the Task's
   check fails the step; it never runs with the machine's python instead. The dispatch
   record says which (`tool_environment`). SpreadsheetBench declares the pinned interpreter
   its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares

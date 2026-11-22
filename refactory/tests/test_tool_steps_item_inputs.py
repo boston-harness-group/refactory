@@ -522,3 +522,59 @@ def test_dsh_s_own_sandbox_provider_runs_the_task_s_interpreter(tmp_path):
     assert observed["stdout"].strip() == _prefix(place.tool_environment["python"]), observed
     assert "GOLD" not in observed["stdout"] + observed["stderr"]
     workspace.collect(place, pass_dir, [])
+
+
+def _venv(path: Path) -> Path:
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(path)], check=True)
+    seal.interpreter_dirs.cache_clear()
+    return path / "bin" / "python"
+
+
+def test_an_interpreter_in_a_task_s_hidden_path_is_refused_through_the_workspace(
+        tmp_path, monkeypatch):
+    """[both runtimes' `workspace.prepare`] The Task's `ToolEnvironment.hidden` reaches the
+    seal: an interpreter installed inside the dataset it names is refused; outside, it is
+    given."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import workspace as workspaces
+
+    _sealable()
+    _run, pass_dir, _workspace = _layout(tmp_path)
+    (pass_dir / ".refactory" / "pass.json").write_text(
+        json.dumps({"task": f"{ifo.MODULE}:HiddenEnvTask"}))
+    dataset = tmp_path / "x" / "dataset"
+    (dataset / "gold.txt").parent.mkdir(parents=True)
+    (dataset / "gold.txt").write_text("GOLD-SECRET")
+    monkeypatch.setenv(ifo.HIDDEN_ENV, str(dataset))
+    monkeypatch.setenv(ifo.PYTHON_ENV, str(_venv(dataset / "venv")))
+    with pytest.raises(workspaces.WorkspaceError, match="may not read"):
+        workspaces.prepare(pass_dir, "look", "scratch", route={"worker_backend": "dsh"},
+                           tools=("bash",))
+    monkeypatch.setenv(ifo.PYTHON_ENV, str(_venv(tmp_path / "elsewhere" / "venv")))
+    place = workspaces.prepare(pass_dir, "look", "scratch", route={"worker_backend": "dsh"},
+                               tools=("bash",))
+    assert place is not None and place.tool_environment["task"].endswith(":HiddenEnvTask")
+
+
+def test_a_nested_pass_refuses_an_interpreter_in_a_sibling_item_s_pass(tmp_path, monkeypatch):
+    """[both runtimes' `workspace.prepare`, `items.run_roots`] A pass nested in an outer
+    item's pass is protected as the whole run: a venv in another outer item's pass is
+    refused, with no run record above to find the run by."""
+    from test_sealed_tools import _sealable
+
+    from refactory_dsh import workspace as workspaces
+    from refactory_dsh.items import PASS_MARKER, run_roots
+
+    _sealable()
+    run = tmp_path / "run"
+    outer = run / "passes" / "data" / "a"
+    inner = outer / "passes" / "inner" / "x"
+    for folder in (outer, inner):
+        (folder / ".refactory").mkdir(parents=True)
+        (folder / PASS_MARKER).write_text(json.dumps({"task": f"{ifo.MODULE}:ToolEnvTask"}))
+    assert run_roots(inner)[0] == str(run.resolve())
+    monkeypatch.setenv(ifo.PYTHON_ENV, str(_venv(run / "passes" / "data" / "b" / "venv")))
+    with pytest.raises(workspaces.WorkspaceError, match="may not read"):
+        workspaces.prepare(inner, "look", "scratch", route={"worker_backend": "dsh"},
+                           tools=("bash",))

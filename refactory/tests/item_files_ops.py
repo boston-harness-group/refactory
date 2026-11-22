@@ -213,6 +213,24 @@ class ToolEnvTask(FileTask):
     tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter)
 
 
+#: Names the grader-side path `HiddenEnvTask` declares (`ToolEnvironment.hidden`).
+HIDDEN_ENV = "ITEM_FILES_TEST_HIDDEN"
+
+
+def test_hidden(workdir: Path) -> list[str]:
+    import os
+
+    return [os.environ[HIDDEN_ENV]] if os.environ.get(HIDDEN_ENV) else []
+
+
+class HiddenEnvTask(FileTask):
+    """`ToolEnvTask` whose environment names a grader-side path no folder may show."""
+
+    name = "item_files_hidden_env"
+    tool_environment = ToolEnvironment(summary=TOOL_SUMMARY, python=test_interpreter,
+                                       hidden=test_hidden)
+
+
 def missing_interpreter() -> str:
     raise RuntimeError("the pinned interpreter is missing (build it first)")
 

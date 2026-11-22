@@ -94,8 +94,11 @@ def run_roots(workdir: Path) -> list[str]:
     from refactory_dsh.history import JOURNAL, RUN_FILE
 
     real = Path(workdir).resolve()
-    # ``<run>/passes/<node>/<item>``, else the directory itself.
-    run = real.parents[2] if (real / PASS_MARKER).exists() else real
+    # ``<run>/passes/<node>/<item>``, else the directory itself; a pass nested in an outer
+    # pass climbs on to the run the outermost pass belongs to.
+    run = real
+    while (run / PASS_MARKER).exists() and len(run.parents) > 2:
+        run = run.parents[2]
     roots = [str(run)]
     for parent in run.parents:
         if (parent / RUN_FILE).exists() or (parent / JOURNAL).exists():
