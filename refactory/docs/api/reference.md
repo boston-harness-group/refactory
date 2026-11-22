@@ -142,7 +142,7 @@ The edit algebra: every structural change is typed data.
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |
 | function | `core_ops_calls` | `() -> 'dict[str, str]'` |
-| function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]') -> 'list[str]'` |
+| function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', final: 'Mapping[str, Any] \| None' = None) -> 'list[str]'` |
 | function | `enabled` | `(preset: 'str' = 'broad') -> 'list[str]'` |
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |

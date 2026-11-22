@@ -34,9 +34,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from refactory_dsh.task import Task, TaskError, TaskInstance, VerifyResult
+from refactory_dsh.task import Task, TaskError, TaskInstance, ToolEnvironment, VerifyResult
 
-from . import recalc
+from . import interpreter, recalc
 # SandboxFailed, like RecalcFailed, must be known as a harness incident wherever a record
 # is classified (`model.HARNESS_INCIDENT_CLASSES`), the spine's item command included.
 from . import sandbox  # noqa: F401
@@ -109,6 +109,10 @@ class SpreadsheetBenchTask(Task):
     graded_files = (PRED, FINAL)
     #: The item's input workbook, the one item file (all the release's inputs are .xlsx).
     item_files = MappingProxyType({"input": INPUT})
+    #: A sealed tool step's commands run the interpreter model code runs under, checked
+    #: the same way (`interpreter.interpreter`), as ``python3`` and ``python``.
+    tool_environment = ToolEnvironment(summary=interpreter.SUMMARY,
+                                       python=interpreter.interpreter)
     grader_fields = ("gold_path", "input_path", "exclude")
     item_metadata = ("task_type",)
 

@@ -1779,6 +1779,20 @@ state is promised, on any graph shape:
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does
   not show a tool step. A node whose id the seed has keeps the seed's policy.
+  **A Task's tool environment.** A Task may declare what its sealed steps' commands run
+  with (`Task.tool_environment`, a `ToolEnvironment`: a summary in plain words and a
+  function returning its checked interpreter). In an item's pass whose Task declares one,
+  both runtimes (the walker's dispatch and the spine's `worker_node`, through
+  `workspace.prepare`, from the pass's `.refactory/pass.json`) put that interpreter first on
+  the command's PATH as `python3` and `python` (two-line scripts in a `tool-bin` folder
+  beside the workspace) and bind its directories read only (`seal.tool_path`); a folder
+  that holds the run, the workspace, the home directory or refactory's own, or lies inside
+  the run or refactory's own, is refused. An interpreter that is missing or fails the Task's
+  check fails the step; it never runs with the machine's python instead. The dispatch
+  record says which (`tool_environment`). SpreadsheetBench declares the pinned interpreter
+  its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares
+  none runs as before. Where the run offers a tool step, the request's operator lines (the
+  proposer's and the analysts') state the summary as a fact.
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -2190,8 +2204,13 @@ the default produces the same digest as before, so it still resumes.
 **Item files.** A Task may lay files into each item's pass under fixed names
 (`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
 The data node declares each in its `writes` (V12), so any step of the pass can read one:
-a new sealed step names it in `sees` (or names the data node) and gets a copy in its
-workspace; an op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+a step names it in `sees` (or names the data node). A sealed tool step a core operator
+adds or changes inside a pass is given the pass's item files in its declared `reads`
+beside what it names (`core_ops._with_item_files`; a written-out `add_node` stays as
+written), so it gets a copy of each in its workspace; the graph lists them and the
+candidate's notes say `<step> (tools, in the per-item part) is given the item's input
+file(s) ...`. A tool step outside a pass, or a step without tools, gets nothing it did not
+name. An op opens one through `ctx.item_file(role)`, which refuses (at run time, on
 both runtimes) a file the op does not list in its `reads`, as do the context's
 `read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
 never its answer: a path the grader reads or writes is refused when the Task is checked

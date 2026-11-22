@@ -190,6 +190,10 @@ class Workspace:
     #: under (`seal.runner_command`); empty for any other workspace.
     tools: tuple[str, ...] = ()
     runner: tuple[str, ...] = ()
+    #: A sealed step's tool environment, where the item's Task declares one
+    #: (`task.Task.tool_environment`): the Task, what the request says of it, and the
+    #: interpreter its commands run as ``python3``; empty otherwise.
+    tool_environment: dict[str, str] = field(default_factory=dict)
 
     def describe(self) -> dict[str, Any]:
         """The workspace as the execution contract and the receipt record it."""
@@ -200,6 +204,8 @@ class Workspace:
             **({"whole_step_cap": self.whole_step_cap[0], "cap": self.whole_step_cap[1]}
                if self.runner and self.whole_step_cap is not None else {}),
             **({"cgroup": self.cgroup} if self.runner and self.cgroup else {}),
+            **({"tool_environment": dict(self.tool_environment)}
+               if self.runner and self.tool_environment else {}),
             "sandbox": ("sealed: its files only, no network" if self.runner
                         else self.confine and f"workspace-write ({self.confine})"
                         or f"not confined: {self.unconfined}"),
@@ -483,9 +489,10 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
         finally:
             os.close(fd)
     workspace.tools = tools
+    tool_path = _tool_path(workspace, workdir)
     cap = seal.step_cap(workspace.path)
     try:
-        workspace.runner = tuple(seal.runner_command(workspace.path, cap))
+        workspace.runner = tuple(seal.runner_command(workspace.path, cap, tool_path))
     except BaseException:
         if cap.cgroup:
             release_cgroup(workspace.path, cap.cgroup)
@@ -497,6 +504,41 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
 
     for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path))):
         Path(record).unlink(missing_ok=True)
+
+
+#: Beside a sealed step's workspaces: the folder holding its Task's interpreter as
+#: ``python3`` and ``python`` (`seal.tool_path`).
+TOOL_BIN = "tool-bin"
+
+
+def _tool_path(workspace: Workspace, workdir: Path) -> Any:
+    """The tool environment the Task of the item's pass ``workdir`` declares for its sealed
+    steps (`task.pass_tool_environment`), made ready for ``workspace`` (`seal.tool_path`)
+    and recorded on it; ``None`` outside a pass or for a Task that declares none. One that
+    cannot be given (its interpreter is missing, fails the Task's check, or runs from a
+    folder the seal must not show) is refused: never run with less than declared."""
+    from refactory_dsh import seal
+    from refactory_dsh.task import TaskError, pass_tool_environment
+
+    try:
+        found = pass_tool_environment(workdir)
+    except (TaskError, ImportError) as exc:
+        raise WorkspaceError(f"agent node {workspace.node!r}: the Task's tool environment "
+                             f"cannot be read: {exc}") from exc
+    if found is None:
+        return None
+    ref, environment = found
+    try:
+        python = environment.python()
+        tool_path = seal.tool_path(python, workspace.root / TOOL_BIN, workspace=workspace.path,
+                                   run=workdir)
+    except Exception as exc:  # noqa: BLE001 - the Task's own check, said with its reason
+        raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed with Task "
+                             f"{ref!r}'s tool environment, which cannot be given: "
+                             f"{type(exc).__name__}: {exc}") from exc
+    workspace.tool_environment = {"task": ref, "summary": environment.summary,
+                                  "python": tool_path.python}
+    return tool_path
 
 
 def _opted_in(opt_in: tuple[str, str]) -> bool:

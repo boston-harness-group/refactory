@@ -661,6 +661,11 @@ def _respec(state: Mapping[str, Any], node_id: str, new_state: dict[str, Any],
     value, which it is declared again at (a rewire's new prompt, holding its new slots)."""
     graph = _edits()._graph(state)
     node = graph.nodes[node_id]
+    if new_state.get("kind") == "agent" and "tool_policy" not in new_state \
+            and node.tool_policy is None:
+        # An agent that runs with tools keeps them: a state leaves out a policy of None,
+        # which `add_node` would read as a new agent's default, no tools.
+        new_state = {**new_state, "tool_policy": None}
     knobs = state.get("knobs") or {}
     readers = graph.knob_consumers()
     steps: list[dict] = [{"op": "remove_node", "id": node_id}]
@@ -3256,8 +3261,61 @@ def _guarded_expand(expand):
             steps = expand(edit, state)
         except _Refused as exc:
             raise _edits().EditError(str(exc), code="E-precondition") from exc
-        return steps + _settle_optional(state, steps)
+        steps = steps + _settle_optional(state, steps)
+        return steps + _with_item_files(state, steps)
     return run
+
+
+# ── a tool step's item files ──────────────────────────────────────────────
+
+
+def item_files_before(graph: Graph, state: Mapping[str, Any], node_id: str) -> list[str]:
+    """The item's input files (`task.Task.item_files`) of the per-item pass ``node_id``
+    runs in -- its innermost data node's Task's -- that are there before it on every path;
+    none at the top level, or where the Task declares none or cannot be read (another
+    rule's to say). Never a grader-side file: an item file is checked never to be one."""
+    from refactory_dsh.task import TaskError, task_item_files
+
+    data_id = _pass_of(graph, node_id)
+    if data_id is None:
+        return []
+    try:
+        files = task_item_files(graph.nodes[data_id].task_ref or "")
+    except (TaskError, ImportError):
+        return []
+    there = _readable(graph, state, set(_available(graph).get(node_id, set())))
+    return sorted(path for path in files.values() if ("file", path) in there)
+
+
+def _with_item_files(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
+    """Steps that give each sealed tool step (`workspace.is_sealed`) a core operator added
+    or changed in ``steps`` the item's input files of the pass it runs in (`item_files_before`)
+    in its declared ``reads``, beside what it reads already: a tool step works on what is in
+    its sealed workspace, and the item's input is what an item gives its solver. What the
+    step names itself stays; the graph says each file outright, and the candidate's notes say
+    the step has them (`wiring_notes`)."""
+    from refactory_dsh.workspace import is_sealed
+
+    if not any(step.get("op") == "add_node" and is_sealed(step.get("node") or {})
+               for step in steps):
+        return []  # no step it adds or rebuilds runs its tools sealed
+    end = _simulate(start, steps)
+    old, new = _edits()._graph(start), _edits()._graph(end)
+    out: list[dict] = []
+    for node_id in sorted(new.nodes):
+        node = new.nodes[node_id]
+        if not is_sealed(node) or (node_id in old.nodes
+                                   and old.nodes[node_id].to_state() == node.to_state()):
+            continue
+        missing = [path for path in item_files_before(new, end, node_id)
+                   if path not in node.reads]
+        if not missing:
+            continue
+        more = _respec(end, node_id, {**node.to_state(), "reads": [*node.reads, *missing]})
+        out += more
+        end = _simulate(end, more)
+        new = _edits()._graph(end)
+    return out
 
 
 def _settle_optional(start: Mapping[str, Any], steps: Sequence[dict]) -> list[dict]:
@@ -3349,7 +3407,8 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
 INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 + "; a new step may have them though the steps beside it have none or refuse "
                 "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
-                "files it sees (an item's files too), no network, no grader files")
+                "files it sees, and in the per-item part the item's input files too, no "
+                "network, no grader files")
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
 
 
@@ -4061,7 +4120,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     def expand_loop(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_loop(edit):
             steps = old_loop.expand(edit, state)
-            return steps + _settle_optional(state, steps)
+            steps = steps + _settle_optional(state, steps)
+            return steps + _with_item_files(state, steps)
         return _guarded_expand(_expand_loop_line)(edit, state)
 
     def pre_split(edit: dict, state: dict) -> str | None:
@@ -4072,7 +4132,8 @@ def register(macro, macros: Mapping[str, Any]) -> None:
     def expand_split(edit: dict, state: dict) -> list[dict]:
         if not is_one_line_split(edit):
             steps = old_split.expand(edit, state)
-            return steps + _settle_optional(state, steps)
+            steps = steps + _settle_optional(state, steps)
+            return steps + _with_item_files(state, steps)
         return _guarded_expand(_expand_split_line)(edit, state)
 
     # Each core operator says only its one-line form, as the lead promises; a proposal
@@ -4088,10 +4149,14 @@ def register(macro, macros: Mapping[str, Any]) -> None:
 
 
 def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
-                 after: Mapping[str, Any]) -> list[str]:
+                 after: Mapping[str, Any], final: Mapping[str, Any] | None = None) -> list[str]:
     """What a core operator did beyond the steps it names: the steps it added and removed,
-    and the prompts of existing steps it put a new step's output into, so the candidate
-    says where an output went."""
+    the prompts of existing steps it put a new step's output into, and the item's input
+    files a tool step it added or changed works on (`_with_item_files`), so the candidate
+    says where an output went. ``after`` is the state the edit left; ``final`` (default
+    ``after``) the candidate's, after every edit of its proposal: what is true of the
+    candidate -- a new step's output that nothing reads, a knob that reaches no step --
+    is judged there, so a later edit that reads the output is not contradicted."""
     if not isinstance(edit, Mapping) or edit.get("op") not in CORE_OPS:
         return []
     if edit.get("op") == "loop" and not is_one_line_loop(edit):
@@ -4111,18 +4176,22 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
                            - set(re.findall(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}", str(was or ""))))
             if slots:
                 placed.append(f"{', '.join('{{' + s + '}}' for s in slots)} into knob {name!r}")
+    final = after if final is None else final
     unread: list[str] = []
     try:
-        graph = _edits()._graph(after)
-        taken_in = set().union(*(_consumed(n, after) for n in graph.nodes.values()))
+        graph = _edits()._graph(final)
+        taken_in = set().union(*(_consumed(n, final) for n in graph.nodes.values()))
         for node_id in added:
-            node = graph.nodes[node_id]
+            node = graph.nodes.get(node_id)
+            if node is None:
+                continue  # a later edit of the proposal took it out again
             if node.kind in ("agent", "op") and node.produces and not any(
                     ("fact", f) in taken_in for f in node.produces) and not any(
                     ("file", f) in taken_in for f in node.writes):
                 unread.append(node_id)
     except Exception:  # noqa: BLE001 - a note, never a refusal
         unread = []
+    given = _given_item_files(before, after)
     taken, toolless = _taken_away(before, after, added, removed)
     # A removed step's own settings (`<id>_...`, `<id>__...`) always go with it; the
     # others are news.
@@ -4135,6 +4204,9 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
         parts.append("removed " + ", ".join(removed))
     if placed:
         parts.append("put " + "; ".join(placed))
+    for node_id, files in given:
+        parts.append(f"{node_id} (tools, in the per-item part) is given the item's input "
+                     f"file(s) {', '.join(files)} in its sealed workspace")
     if unread:
         parts.append(f"no step reads what {', '.join(unread)} make(s) yet (name a reader with "
                      "'to', or insert one)")
@@ -4149,11 +4221,34 @@ def wiring_notes(edit: Mapping[str, Any], before: Mapping[str, Any],
         was_dead = dead_text_knobs(before)
         parts += [f"knob {name!r} now reaches no step ({op} fills it into "
                   f"{', '.join(outputs)}, which no step reads)"
-                  for name, (op, outputs) in sorted(dead_text_knobs(after).items())
+                  for name, (op, outputs) in sorted(dead_text_knobs(final).items())
                   if name not in was_dead]
     except Exception:  # noqa: BLE001 - a note, never a refusal
         pass
     return [f"{edit.get('op')}: " + "; ".join(parts)] if parts else []
+
+
+def _given_item_files(before: Mapping[str, Any], after: Mapping[str, Any]
+                      ) -> list[tuple[str, list[str]]]:
+    """Each sealed tool step ``after`` adds or changes, with the item's input files of its
+    pass it reads in ``after`` and did not in ``before`` (`_with_item_files`)."""
+    from refactory_dsh.workspace import is_sealed
+
+    try:
+        old, new = _edits()._graph(before), _edits()._graph(after)
+    except Exception:  # noqa: BLE001 - a note, never a refusal
+        return []
+    out = []
+    for node_id in sorted(new.nodes):
+        node = new.nodes[node_id]
+        if not is_sealed(node):
+            continue
+        had = set(old.nodes[node_id].reads) if node_id in old.nodes else set()
+        files = [path for path in item_files_before(new, after, node_id)
+                 if path in node.reads and path not in had]
+        if files:
+            out.append((node_id, files))
+    return out
 
 
 def _taken_away(before: Mapping[str, Any], after: Mapping[str, Any], added: Sequence[str],

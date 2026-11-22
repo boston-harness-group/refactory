@@ -40,7 +40,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 class TaskError(ValueError):
@@ -54,6 +54,20 @@ class TaskInstance:
     id: str
     path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolEnvironment:
+    """What the commands of a Task's sealed tool steps run with (`Task.tool_environment`):
+    an interpreter put first on their PATH as ``python3`` and ``python``."""
+
+    #: The facts the optimizer's request states about it, in plain words: what
+    #: ``python3`` is and what it holds (``"python3 (and python) = Python 3.12 with
+    #: openpyxl 3.1.5"``). Never advice.
+    summary: str
+    #: Returns the interpreter's path, checked as the Task checks it wherever else it
+    #: runs; raises when there is none or it is not the one declared.
+    python: Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,12 @@ class Task:
     #: and ``setup`` must lay each as a regular file (`check_laid_item_files`). An item
     #: without one (it has no such input) leaves it out. Default: none.
     item_files: Mapping[str, str] = MappingProxyType({})
+    #: What the commands of a sealed tool step in an item's pass run with
+    #: (`ToolEnvironment`): its interpreter first on their PATH, its directories readable
+    #: inside the seal, read only (`seal.tool_path`). Both runtimes read it from the class
+    #: of the pass's Task (`pass_tool_environment`). Default: none, so such a command runs
+    #: the machine's own programs only.
+    tool_environment: ToolEnvironment | None = None
     #: What the integrity judge (`optim.integrity`, ``LoopConfig.integrity_judge``) is to
     #: treat as legitimate for this task: ``{category: why, in plain words}``, e.g.
     #: ``{"answer_leak": "the task is to recall facts about these items"}``. A category
@@ -301,6 +321,33 @@ def task_item_files(ref: str) -> dict[str, str]:
     ``{}`` when it names none. A declaration that fails the check raises `TaskError`."""
     cls = _task_class(ref)
     return checked_item_files(cls) if cls is not None else {}
+
+
+def task_tool_environment(ref: str) -> ToolEnvironment | None:
+    """The `Task.tool_environment` of the Task ``ref`` names, read from its class; ``None``
+    when it names none or declares none. A declaration of anything else raises
+    `TaskError`."""
+    cls = _task_class(ref)
+    declared = getattr(cls, "tool_environment", None) if cls is not None else None
+    if declared is None:
+        return None
+    if not isinstance(declared, ToolEnvironment) or not callable(declared.python):
+        raise TaskError(f"Task {ref!r} tool_environment is a ToolEnvironment, not {declared!r}")
+    return declared
+
+
+def pass_tool_environment(workdir: Path) -> tuple[str, ToolEnvironment] | None:
+    """``(task ref, its tool environment)`` for the item's pass ``workdir`` is, read from
+    the pass's marker (`items.PASS_MARKER`) as both runtimes write it; ``None`` outside a
+    pass or when its Task declares none."""
+    from refactory_dsh.items import PASS_MARKER
+
+    try:
+        ref = str(json.loads((Path(workdir) / PASS_MARKER).read_text()).get("task") or "")
+    except (OSError, ValueError, AttributeError):
+        return None
+    environment = task_tool_environment(ref) if ref else None
+    return (ref, environment) if environment is not None else None
 
 
 def check_laid_item_files(task: Task | None, workspace: Path) -> None:

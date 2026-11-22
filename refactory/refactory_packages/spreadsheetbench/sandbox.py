@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Iterable
 
 from refactory_dsh.model import HarnessIncident
-from refactory_dsh.seal import system_tool
+# The interpreter's directories, found as a sealed tool step's are (`seal.tool_path`).
+from refactory_dsh.seal import _distinct, interpreter_dirs, system_tool  # noqa: F401
 
 #: Secret paths under the home directory, as the lab's wrapper hides them
 #: (``skillopt_sb.py`` ``_HIDE``). macOS hides them; Linux shows nothing it does not list.
@@ -104,37 +105,6 @@ def _linux_script(read_only: list[str], writable: list[str], links: dict[str, st
                f'exec unshare -U -r -m -- {SHELL} -c '
                f'\'printf ok > /proc/self/fd/{int(ready_fd)} && exec "$@"\' sh "$@"')]
     return "\n".join(lines) + "\n"
-
-
-@lru_cache(maxsize=None)
-def interpreter_dirs(python: str) -> tuple[str, ...]:
-    """The directories ``python`` runs from: its prefixes, as it reports them, and where
-    its executable resolves to. Read-only in the sandbox."""
-    import json
-
-    found = [os.path.dirname(os.path.dirname(os.path.realpath(python))),
-             os.path.dirname(os.path.dirname(os.path.abspath(python)))]
-    try:
-        proc = subprocess.run(
-            [python, "-I", "-c", "import json, sys; print(json.dumps([sys.prefix, "
-             "sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]))"],
-            capture_output=True, text=True, timeout=60)
-        found += json.loads(proc.stdout) if proc.returncode == 0 else []
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return tuple(_distinct(found))
-
-
-def _distinct(paths: Iterable[str]) -> list[str]:
-    """Absolute and resolved forms of ``paths``, existing ones only, in order, without
-    one that another of them contains."""
-    out: list[str] = []
-    for path in paths:
-        for form in (os.path.abspath(path), os.path.realpath(path)):
-            if os.path.exists(form) and form not in out:
-                out.append(form)
-    return [p for p in out
-            if not any(o != p and (p + "/").startswith(o.rstrip("/") + "/") for o in out)]
 
 
 class SandboxError(RuntimeError):

@@ -2083,8 +2083,9 @@ def composition_section(catalogue: Sequence[dict[str, Any]], node_states: Sequen
 TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules (a step that has no "
               "tools or refuses them stays so). A new agent step may still have `tools` "
               "(`insert`, `map`, `fallback`): it runs sealed, in a fresh workspace holding "
-              "only the files it reads -- an item's own files too, which the pipeline view "
-              "lists -- with no network and no grader files.")
+              "only the files it reads -- in the per-item part, the item's input files (the "
+              "pipeline view lists them) as well as what it sees -- with no network and no "
+              "grader files.")
 #: The same when this run offers no tool step (no seal here, or ``new_step_tools`` off).
 NO_TOOLS_LINE = ("- **tools**: every existing step keeps its own tool rules, and in this run "
                  "a new step has no tools.")
@@ -2678,6 +2679,30 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     if step_routes:
         lines.append(core_ops.route_field_line(step_routes))
+    if tools:
+        lines += tool_environment_lines(node_states)
+    return lines
+
+
+def tool_environment_lines(node_states: Sequence[Mapping[str, Any]]) -> list[str]:
+    """What a sealed tool step's commands run with in each per-item part whose Task declares
+    it (`task.Task.tool_environment`), in the Task's own words: a fact, said only where the
+    run offers a tool step. Nothing for a Task that declares none (or cannot be read)."""
+    from refactory_dsh.task import TaskError, task_tool_environment
+
+    lines: list[str] = []
+    for node in node_states:
+        if node.get("kind") != "data" or not node.get("task_ref"):
+            continue
+        try:
+            environment = task_tool_environment(str(node["task_ref"]))
+        except (TaskError, ImportError):
+            continue
+        if environment is not None:
+            line = (f"- in the per-item part `{node.get('id')}`, a step with `tools` runs its "
+                    f"commands with {environment.summary}")
+            if line not in lines:
+                lines.append(line)
     return lines
 
 
@@ -6176,7 +6201,9 @@ class Optimizer:
         # (`optim.repair`), each fix said in ``repairs``; the candidate records these.
         applied: list[dict[str, Any]] = []
         repairs: list[str] = []
-        wired_notes: list[str] = []
+        # Each applied edit with the states before and after it, for what a core operator
+        # wired (`core_ops.wiring_notes`), said once the whole proposal is applied.
+        wired: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
         for index, edit in enumerate(steps):
             edit, fixed, ambiguous = repair.fix_edit(edit, state, steps, index)
             if ambiguous:
@@ -6217,8 +6244,7 @@ class Optimizer:
             edit_reports.append(reports[0] if reports else None)
             prefixes.append(state)
             applied.append(edit)
-            # What a core operator wired beside the steps it names, said with the candidate.
-            wired_notes += nn_edits.core_wiring_notes(edit, before_step, state)
+            wired.append((edit, before_step, state))
 
         violation = nn_edits.protected_violation(parent.state, state, protected)
         if violation:
@@ -6242,12 +6268,12 @@ class Optimizer:
         # The wired state is held to the protected nodes again: a file_text op put in front
         # of a step must not rewire a protected one (as the same edit written by hand
         # would be refused). Then it is not made, and the validator says why (V15).
-        wired_state, wiring, wired = repair.wire_file_slots(parent.state, state)
+        wired_state, wiring, wired_fixes = repair.wire_file_slots(parent.state, state)
         if wiring and not nn_edits.protected_violation(parent.state, wired_state, protected):
             state = wired_state
             applied += wiring
             edit_reports += [None] * len(wiring)
-            repairs += wired
+            repairs += wired_fixes
 
         # ── tool-policy escalation check (anchored to the original seed) ──
         escalation = _tool_policy_escalated(seed_state if seed_state is not None else parent.state, state)
@@ -6355,6 +6381,12 @@ class Optimizer:
             edit_reports=[*parent_reports, *edit_reports],
             step_edits=len(applied),
         )
+        # What a core operator wired beside the steps it names, said with the candidate: what
+        # each edit did, and what is true of the candidate judged on its own state, after
+        # every edit (a reader a later edit adds is a reader).
+        wired_notes = [note for edit, before_step, after_step in wired
+                       for note in nn_edits.core_wiring_notes(edit, before_step, after_step,
+                                                              state)]
         candidate.repairs, candidate.notes = list(repairs), [*wired_notes, *notes]
         if repairs and record:
             self.record_call(kind="repair", how="deterministic", candidate=candidate.id,
