@@ -30,6 +30,7 @@ from refactory_dsh.base_check import (
     _parse_step_results,
     _run_chain_markers,
     _runner,
+    _runner_from_output,
     _step_would_run,
     compare_failures,
     design_comparison,
@@ -98,6 +99,65 @@ class TestChainSteps:
         assert result == [("echo 'a && b'", ""), ("c", "&&")]
         result2 = _chain_steps('echo "a && b" && c')
         assert result2 == [('echo "a && b"', ""), ("c", "&&")]
+
+    def test_reason_recorded_heredoc(self):
+        """When a heredoc prevents splitting, the reason is recorded."""
+        reason: list[str] = []
+        result = _chain_steps("cat <<EOF\ndata\nEOF && pytest", reason=reason)
+        assert result is None
+        assert len(reason) == 1
+        assert "heredoc" in reason[0]
+
+    def test_reason_recorded_keyword(self):
+        """When a shell keyword prevents splitting, the reason is recorded."""
+        reason: list[str] = []
+        result = _chain_steps("if true; then pytest; fi && lint", reason=reason)
+        assert result is None
+        assert len(reason) == 1
+        assert "keyword" in reason[0]
+        assert "'if'" in reason[0]
+
+    def test_reason_recorded_backtick(self):
+        """When a backtick substitution prevents splitting, the reason is recorded."""
+        reason: list[str] = []
+        result = _chain_steps("cmd `a && b` && c", reason=reason)
+        assert result is None
+        assert len(reason) == 1
+        assert "backtick" in reason[0]
+
+    def test_reason_empty_on_success(self):
+        """When splitting succeeds, no reason is recorded."""
+        reason: list[str] = []
+        result = _chain_steps("A && B", reason=reason)
+        assert result is not None
+        assert len(reason) == 0
+
+
+class TestRunnerFromOutput:
+    """Test _runner_from_output: detect runner from output when step text doesn't name it."""
+
+    def test_detects_pytest_from_summary(self):
+        """Pytest summary line in output detects pytest."""
+        output = "FAILED tests/test_a.py::test_x\n= 1 failed, 3 passed in 0.12s =\n"
+        assert _runner_from_output(output) == "pytest"
+
+    def test_detects_vitest_from_summary(self):
+        """Vitest summary line in output detects vitest."""
+        output = " FAIL  src/app.spec.ts > suite > test T\n Tests  1 failed | 9 passed (10)\n"
+        assert _runner_from_output(output) == "vitest"
+
+    def test_returns_none_for_non_runner_output(self):
+        """Non-runner output returns None."""
+        output = "build failed\nerror: some error\n"
+        assert _runner_from_output(output) is None
+
+    def test_runner_step_text_takes_priority(self):
+        """_runner from step text is used first; _runner_from_output is fallback."""
+        # Step text explicitly names pytest
+        assert _runner("pytest tests/") == "pytest"
+        # Step text doesn't name a runner, but output has pytest summary
+        assert _runner("./run_tests.sh") is None
+        assert _runner_from_output("FAILED tests/test_a.py::test_x\n= 1 failed in 0.12s =\n") == "pytest"
 
 
 class TestMarkerScriptAndParsing:

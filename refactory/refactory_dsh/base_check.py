@@ -139,7 +139,7 @@ _UNSPLITTABLE_KEYWORDS = frozenset({
 })
 
 
-def _chain_steps(command: str) -> list[tuple[str, str]] | None:
+def _chain_steps(command: str, *, reason: list[str] | None = None) -> list[tuple[str, str]] | None:
     """Split *command* on top-level ``&&``, ``||`` and ``;`` only.
 
     Returns a list of ``(step_text, operator)`` tuples where the first step's
@@ -147,7 +147,15 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
     step text.  Returns ``None`` when the command is unsplittable: a heredoc,
     a compound keyword (``if``/``case``/``for``/``while``), or a backtick
     substitution that spans an operator.
+
+    When *reason* is a list, appends a human-readable string explaining why
+    the command could not be split.
     """
+
+    def _refuse(msg: str) -> None:
+        if reason is not None:
+            reason.append(msg)
+
     steps: list[tuple[str, str]] = []
     current = ""
     depth = 0        # parenthesis depth
@@ -211,12 +219,14 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
             if char == "<" and command[i + 1:i + 2] == "<" and command[i + 2:i + 3] != "<":
                 # Check it's not preceded by another <
                 if not current.rstrip().endswith("<"):
-                    return None  # heredoc detected
+                    _refuse("heredoc (unquoted <<) detected")
+                    return None
 
             # Check for && or ||
             if char == "&" and command[i + 1:i + 2] == "&":
                 # Backtick substitution spans an operator: unsplittable
                 if backtick:
+                    _refuse("backtick substitution spans && operator")
                     return None
                 step_text = current.strip()
                 if step_text:
@@ -226,6 +236,7 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
                     except ValueError:
                         words = step_text.split()
                     if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
                         return None
                     steps.append((step_text, operator))
                 operator = "&&"
@@ -235,6 +246,7 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
 
             if char == "|" and command[i + 1:i + 2] == "|":
                 if backtick:
+                    _refuse("backtick substitution spans || operator")
                     return None
                 step_text = current.strip()
                 if step_text:
@@ -243,6 +255,7 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
                     except ValueError:
                         words = step_text.split()
                     if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
                         return None
                     steps.append((step_text, operator))
                 operator = "||"
@@ -252,6 +265,7 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
 
             if char == ";":
                 if backtick:
+                    _refuse("backtick substitution spans ; operator")
                     return None
                 step_text = current.strip()
                 if step_text:
@@ -260,6 +274,7 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
                     except ValueError:
                         words = step_text.split()
                     if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+                        _refuse(f"shell keyword '{words[0]}' in step")
                         return None
                     steps.append((step_text, operator))
                 operator = ";"
@@ -279,11 +294,13 @@ def _chain_steps(command: str) -> list[tuple[str, str]] | None:
         except ValueError:
             words = step_text.split()
         if words and words[0] in _UNSPLITTABLE_KEYWORDS:
+            _refuse(f"shell keyword '{words[0]}' in step")
             return None
         steps.append((step_text, operator))
 
     # If backtick is still open, the substitution spans operators
     if backtick:
+        _refuse("unclosed backtick substitution spans operators")
         return None
 
     return steps if steps else None
@@ -398,6 +415,18 @@ def _runner(step: str) -> str | None:
     return None
 
 
+def _runner_from_output(output: str) -> str | None:
+    """Detect the runner from its output when the step text does not name it.
+
+    Falls back to ``None`` when neither pytest's nor vitest's summary is found.
+    """
+    if _PYTEST_SUMMARY.search(output):
+        return "pytest"
+    if re.search(r"^\s*Tests\s+\d+\s+(?:failed|passed)", output, re.MULTILINE):
+        return "vitest"
+    return None
+
+
 def _accounted(runner: str, output: str, failures: set[str]) -> bool:
     """Whether the runner's own summary counts exactly the failures that were identified."""
     if runner == "pytest":
@@ -435,7 +464,7 @@ def excusal_blocker(command: str, output: str, failures: set[str],
             if not _step_would_run(sr["operator"], prev_exit):
                 prev_exit = sr["exit_code"]
                 continue
-            runner = _runner(sr["step"])
+            runner = _runner(sr["step"]) or _runner_from_output(sr["output"])
             step_failures = parse_test_failures(sr["output"])
             if runner is None:
                 if sr["exit_code"] != 0:
@@ -1103,7 +1132,12 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         # Per-step marker re-run: when the base failed and is incomplete, split the
         # chain and run all steps unconditionally to discover failures in later steps.
         if not check_result.ok and not result._base_complete:
-            chain = _chain_steps(command)
+            unsplit_reason: list[str] = []
+            chain = _chain_steps(command, reason=unsplit_reason)
+            if chain is None and unsplit_reason:
+                target_guard.warn(
+                    f"base chain not split: {unsplit_reason[0]}"
+                )
             if chain is not None and len(chain) > 1:
                 step_results = _run_chain_markers(
                     command, chain, base_path, timeout, budget_inner, env, home,
@@ -1122,7 +1156,7 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
                     prev_exit = 0
                     for sr in step_results:
                         if _step_would_run(sr["operator"], prev_exit):
-                            runner = _runner(sr["step"])
+                            runner = _runner(sr["step"]) or _runner_from_output(sr["output"])
                             if runner is not None:
                                 step_failures = parse_test_failures(sr["output"])
                                 if not _accounted(runner, sr["output"], step_failures):
@@ -1133,7 +1167,7 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
                     cache_steps = []
                     for sr in step_results:
                         step_failures = parse_test_failures(sr["output"])
-                        runner = _runner(sr["step"])
+                        runner = _runner(sr["step"]) or _runner_from_output(sr["output"])
                         accounted = False
                         if runner is not None and step_failures:
                             accounted = _accounted(runner, sr["output"], step_failures)
@@ -2541,7 +2575,8 @@ def _per_step_comparison(
                 keep_inherited = False
 
         # Non-test step gate: failures from non-test steps are never excused.
-        runner = _runner(attempt_sr["step"])
+        # Detect runner from step text first, then fall back to output detection.
+        runner = _runner(attempt_sr["step"]) or _runner_from_output(attempt_sr["output"])
         if runner is None:
             keep_inherited = False
 
@@ -2559,7 +2594,7 @@ def _per_step_comparison(
 
         # _accounted gate: both sides' runners must reach a valid summary.
         if keep_inherited:
-            base_runner = _runner(base_sr["step"])
+            base_runner = _runner(base_sr["step"]) or _runner_from_output(base_sr.get("output", ""))
             if base_runner is None:
                 keep_inherited = False
             else:
@@ -2660,7 +2695,12 @@ def filter_check(
 
     blocker = None
     if comparison.all_excused:
-        chain = _chain_steps(command)
+        unsplit_reason: list[str] = []
+        chain = _chain_steps(command, reason=unsplit_reason)
+        if chain is None and unsplit_reason:
+            target_guard.warn(
+                f"attempt chain not split: {unsplit_reason[0]}"
+            )
         if chain is not None and len(chain) > 1:
             revised = _per_step_comparison(
                 ctx, command, chain, base_result, result, timeout,
