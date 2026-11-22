@@ -305,6 +305,8 @@ def _agent(step: str, writes: str, timeout_s: int | None) -> nn.Node:
         system_prompt_template=step_system_prompt(step),
         writes=(writes,),
         tool_policy="none",
+        # As SkillOpt's harness takes its reply: whatever it writes (`keeps_tool_markup`).
+        keeps_tool_markup=True,
         role="solver",
         timeout_s=timeout_s,
         knobs=("max_completion_tokens", knob),

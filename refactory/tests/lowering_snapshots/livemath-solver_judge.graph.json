@@ -108,6 +108,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "merge_attempts": {
@@ -147,6 +148,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     },
     "solve_b": {
@@ -173,6 +175,7 @@
       },
       "missing_on_crash": true,
       "tool_policy": "none",
+      "keeps_tool_markup": true,
       "_type": "AgentNode"
     }
   },

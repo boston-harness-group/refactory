@@ -265,13 +265,15 @@ def test_shell_wrapped_install_crash_once_then_passing(tmp_path, monkeypatch):
     assert result.exit_ok, f"run failed unexpectedly: {result.error}"
 
 
-def test_shell_wrapped_install_crash_twice_stops_infrastructure(tmp_path, monkeypatch):
-    """A shell-wrapped command that always exits 134 stops as infrastructure
-    naming the signal (R1, correction 7).
+def test_shell_wrapped_install_crash_twice_ends_in_a_draft_naming_the_signal(tmp_path,
+                                                                            monkeypatch):
+    """A shell-wrapped command that always exits 134 stops the build loop as
+    infrastructure naming the signal (R1, correction 7), in a draft (D13).
 
     run_command retries once — exit 134 is in _AMBIGUOUS_SHELL_EXITS.
     After the retry the exit code is still 134, so is_signal_crash detects it,
-    the return code is normalised to -6, and the run stops as infrastructure.
+    the return code is normalised to -6, and the build loop stops: no code
+    repair, and a draft rather than a run with no pull request.
     """
     repo = _git_repo(tmp_path / "repo")
     (repo / "pyproject.toml").write_text("[project]\nname = 'app'\n")
@@ -288,15 +290,18 @@ def test_shell_wrapped_install_crash_twice_stops_infrastructure(tmp_path, monkey
     monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ['PATH']}")
 
     emit = _render({"tool.py": "print('built')\n"})
-    result = _design_run(tmp_path / "run", _FakeModel(_design_answers(emit, emit)), repo)
-    assert result.exit_ok is False
-    assert "SIGABRT" in (result.error or "") or "killed by" in (result.error or "").lower(), (
-        f"infrastructure stop must name the signal: {result.error}"
-    )
+    model = _FakeModel(_design_answers(emit, emit))
+    result = _design_run(tmp_path / "run", model, repo)
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert "was killed by signal 6" in draft["reason"], draft
+    assert draft["check_failure"].startswith("code repair was not attempted"), draft
+    assert sum("Write the artifact `" in prompt for prompt in model.prompts) == 1
 
 
-def test_signal_killed_install_twice_stops_as_infrastructure(tmp_path, monkeypatch):
-    """An install killed twice stops as infrastructure naming the signal.
+def test_signal_killed_install_twice_ends_in_a_draft_naming_the_signal(tmp_path, monkeypatch):
+    """An install killed twice stops the build loop as infrastructure naming the
+    signal, in a draft (D13).
 
     Driven as a scripted design run.  The stub uv always crashes with SIGABRT
     (direct signal).  run_command retries once, gets another crash.
@@ -318,11 +323,13 @@ def test_signal_killed_install_twice_stops_as_infrastructure(tmp_path, monkeypat
     monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ['PATH']}")
 
     emit = _render({"tool.py": "print('built')\n"})
-    result = _design_run(tmp_path / "run", _FakeModel(_design_answers(emit, emit)), repo)
-    assert result.exit_ok is False
-    assert "SIGABRT" in (result.error or "") or "killed by" in (result.error or "").lower(), (
-        f"infrastructure stop must name the signal: {result.error}"
-    )
+    model = _FakeModel(_design_answers(emit, emit))
+    result = _design_run(tmp_path / "run", model, repo)
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert "was killed by signal 6" in draft["reason"], draft
+    assert draft["check_failure"].startswith("code repair was not attempted"), draft
+    assert sum("Write the artifact `" in prompt for prompt in model.prompts) == 1
 
 
 # ── R2: base comparison crash → rebuild from scratch ───────────────────────
