@@ -169,6 +169,7 @@ _FIELDS: dict[str, tuple[Aspect, Aspect]] = {
     "tools": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "tool_policy": (_NEW, Gap("excluded by decision", "tools are not a configure setting")),
     "outputs_only": (_NEW, Gap("excluded by decision", "not a configure setting")),
+    "keeps_tool_markup": (_NEW, Gap("excluded by decision", "not a configure setting")),
     "knob_outputs": (_NEW, Gap("excluded by decision",
                                "the mode's declaration of what its op does")),
     # What a code step's run records its returned outputs under: set by an edit that gives

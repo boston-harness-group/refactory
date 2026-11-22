@@ -91,6 +91,8 @@ def _agent(node_id: str, prompt_template: str, writes: str, timeout_s: int | Non
         writes=(writes,),
         **({"produces": produces} if produces else {}),
         tool_policy="none",
+        # As SkillOpt's harness takes its reply: whatever it writes (`keeps_tool_markup`).
+        keeps_tool_markup=True,
         role="solver",
         timeout_s=timeout_s,
         **_bound_system_prompt(node_id),
@@ -121,6 +123,8 @@ def build_baseline(timeout_s: int | None = None) -> BlockResult:
         system_prompt_template=SYSTEM_PROMPT,
         writes=("answer.txt",),
         tool_policy="none",
+        # As SkillOpt's harness takes its reply: whatever it writes (`keeps_tool_markup`).
+        keeps_tool_markup=True,
         role="solver",
         timeout_s=timeout_s,
         **_bound_system_prompt("solve"),
