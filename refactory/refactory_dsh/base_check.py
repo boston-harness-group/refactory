@@ -144,6 +144,79 @@ def _runner(step: str) -> str | None:
     return None
 
 
+def _runner_from_output(output: str) -> str | None:
+    """Detect the test runner from its output when the command does not name it.
+
+    Called only during per-step recovery as a fallback when ``_runner(step)``
+    returns ``None`` (e.g. ``pnpm test`` wrapping vitest).
+    """
+    clean = strip_ansi(output)
+    if _PYTEST_SUMMARY.search(clean):
+        return "pytest"
+    # vitest: "Tests  N failed" or "Test Files  N failed" (no colon)
+    if re.search(r"^\s*Tests\s+\d+ failed", clean, re.MULTILINE) or \
+       re.search(r"^\s*Test Files\s+\d+ failed", clean, re.MULTILINE):
+        return "vitest"
+    # jest: "Tests:  N failed" (with colon)
+    if re.search(r"^\s*Tests:\s+.*\d+ failed", clean, re.MULTILINE):
+        return "jest"
+    return None
+
+
+def _chain_steps(command: str) -> list[str]:
+    """Split ``command`` on ``&&``, ``||`` and ``;`` only, keeping pipelines whole.
+
+    Unlike ``_steps`` (which also splits on ``|``), this preserves each pipeline
+    as a single step, so ``pytest ... | tee log.txt`` is not fragmented.  Used
+    only by per-step recovery.
+    """
+    steps: list[str] = []
+    current = ""
+    depth = 0
+    quote = ""
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote:
+            current += char
+            if char == "\\" and quote == '"' and i + 1 < len(command):
+                current += command[i + 1]
+                i += 1
+            elif char == quote:
+                quote = ""
+        elif char == "\\" and i + 1 < len(command):
+            current += command[i:i + 2]
+            i += 1
+        elif char in "'\"":
+            quote = char
+            current += char
+        elif char == "(":
+            depth += 1
+            current += char
+        elif char == ")":
+            depth -= 1
+            current += char
+        elif depth == 0 and char == "&" and command[i:i + 2] == "&&":
+            steps.append(current.strip())
+            current = ""
+            i += 1  # skip second &
+        elif depth == 0 and char == "|" and command[i:i + 2] == "||":
+            steps.append(current.strip())
+            current = ""
+            i += 1  # skip second |
+        elif depth == 0 and char == ";":
+            steps.append(current.strip())
+            current = ""
+        elif depth == 0 and char == "\n":
+            steps.append(current.strip())
+            current = ""
+        else:
+            current += char
+        i += 1
+    steps.append(current.strip())
+    return [s for s in steps if s]
+
+
 def _accounted(runner: str, output: str, failures: set[str]) -> bool:
     """Whether the runner's own summary counts exactly the failures that were identified."""
     if runner == "pytest":
@@ -806,8 +879,38 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
             output=output, exit_code=check_result.returncode or 0,
         )
         # Compute completeness for R5.
-        blocker = excusal_blocker(command, output, failures) if failures else None
-        result._base_complete = (blocker is None) if failures else check_result.ok  # type: ignore[attr-defined]
+        if check_result.ok:
+            result._base_complete = True  # type: ignore[attr-defined]
+        else:
+            blocker = excusal_blocker(command, output, failures)
+            result._base_complete = blocker is None  # type: ignore[attr-defined]
+
+        # Per-step recovery: when the whole-command run is incomplete, run each
+        # step of the chain individually so a failing early step does not hide
+        # the failures of later test-runner steps.
+        if (not result._base_complete
+                and not check_result.timed_out
+                and not result.environment_failure):
+            steps = _chain_steps(command)
+            if len(steps) > 1:
+                all_found_runners_accounted = True
+                for step in steps:
+                    step_result = sandbox.run_command(
+                        step, workdir=base_path, timeout_s=timeout,
+                        budget=budget_inner, env=env, home=home,
+                        exact_env=True,
+                    )
+                    step_output = "\n".join(
+                        (step_result.stdout or "", step_result.stderr or "")
+                    ).strip()
+                    runner = _runner(step) or _runner_from_output(step_output)
+                    if runner is not None:
+                        step_failures = parse_test_failures(step_output)
+                        result.failures |= step_failures
+                        if not _accounted(runner, step_output, step_failures):
+                            all_found_runners_accounted = False
+                result._base_complete = all_found_runners_accounted
+
         return result, False
 
     result, is_crash = _try_base()

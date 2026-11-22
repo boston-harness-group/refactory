@@ -1137,3 +1137,538 @@ def test_e2e_dsh_runner_survives_guarded_test(tmp_path, monkeypatch):
         f"expected reloop verdict, got {stdout_lines[-1]!r}:\n"
         f"stderr: {proc.stderr[-2000:]}"
     )
+
+
+# ── Per-step recovery tests ─────────────────────────────────────────────
+# guardedness-exempt: these tests pin new per-step recovery behaviour that
+# does not exist on the base commit.
+
+
+def _make_per_step_ctx(tmp_path: Path) -> tuple[_Ctx, Path]:
+    """Set up a minimal repo + run_dir + ctx for per-step recovery tests."""
+    repo = _git_init(tmp_path / "repo")
+    _commit(repo, ".gitignore", "node_modules/\n.venv/\n__pycache__/\n")
+    base_commit = _commit(repo, "app.py", "print('app')\n")
+    run_dir = tmp_path / "run"
+    found = worktree.create(repo, base_commit, "perstep001", run_dir)
+    ctx = _Ctx(run_dir, facts={"check": "true", "setup": "", "generate": ""})
+    return ctx, Path(found.path)
+
+
+# 1. test_per_step_recovery_finds_failures_hidden_by_early_step
+def test_per_step_recovery_finds_failures_hidden_by_early_step(tmp_path, monkeypatch):
+    """Command ``A && pytest X && grep -q Y f``.
+
+    The whole-command output has no test output (the canary-repair shape from
+    Gate 1). The base's whole run fails on A so later steps never run and
+    ``failures`` is empty.  Per-step recovery runs each step individually:
+    pytest finds one shared failure.  Then ``filter_check`` / ``design_comparison``
+    with an attempt that fails A, the same pytest test, a new pytest test, and the
+    grep: the shared pytest failure is inherited, the new pytest failure and the
+    grep remain the attempt's.
+    """
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "bash canary-repair-check.sh tok && pytest tests/ && grep -q marker output.txt"
+
+    call_count = 0
+
+    def fake_run_command(cmd, **kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Whole-command run: first step fails, no test output at all
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="canary-repair-check.sh: line 3: command failed\n",
+                stderr="",
+            )
+        # Per-step recovery calls:
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if "canary-repair-check" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="canary-repair-check.sh: line 3: command failed\n",
+                stderr="",
+            )
+        if "pytest" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    "FAILED tests/test_math.py::test_shared\n"
+                    "======= 1 failed in 0.5s =======\n"
+                ),
+                stderr="",
+            )
+        if "grep" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="", stderr="",
+            )
+        return sandbox.SandboxResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    # Bypass worktree preparation
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    # Per-step recovery should have found the pytest failure
+    assert "tests/test_math.py::test_shared" in result.failures
+    assert result._base_complete is True
+
+    # Now test through filter_check / design_comparison with an attempt that
+    # has: same test, a new test, and failing grep output
+    attempt_result = sandbox.SandboxResult(
+        ok=False, returncode=1,
+        stdout=(
+            "FAILED tests/test_math.py::test_shared\n"
+            "FAILED tests/test_math.py::test_new_one\n"
+            "======= 2 failed in 0.5s =======\n"
+            "grep: output.txt: No such file or directory\n"
+        ),
+        stderr="",
+    )
+    named_text = "implement the math helpers"
+
+    # Mock run_base_check to return our already-computed result
+    monkeypatch.setattr(base_check, "run_base_check", lambda *a, **kw: result)
+
+    filtered = base_check.filter_check(
+        ctx, attempt_result, command, 60.0,
+        named_text=named_text,
+    )
+
+    # The shared failure is inherited
+    assert "tests/test_math.py::test_shared" in filtered.inherited
+    # The new failure stays
+    assert "tests/test_math.py::test_new_one" in filtered.new_failures
+    # base_complete is True
+    assert filtered.base_complete is True
+
+
+# 2. test_per_step_skipped_when_whole_command_complete
+def test_per_step_skipped_when_whole_command_complete(tmp_path, monkeypatch):
+    """A single-step ``pytest tests/`` whose whole-command output has a matching
+    summary: ``_base_complete`` is True and ``sandbox.run_command`` is called
+    exactly once (no per-step recovery)."""
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "pytest tests/"
+
+    calls = []
+
+    def fake_run_command(cmd, **kw):
+        calls.append(cmd)
+        return sandbox.SandboxResult(
+            ok=False, returncode=1,
+            stdout=(
+                "FAILED tests/test_math.py::test_add\n"
+                "======= 1 failed in 0.3s =======\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert result._base_complete is True
+    assert len(calls) == 1, f"expected 1 run_command call, got {len(calls)}"
+
+
+# 3. test_passing_chain_skips_per_step_recovery
+def test_passing_chain_skips_per_step_recovery(tmp_path, monkeypatch):
+    """Command ``bash setup.sh && pytest tests/ && grep -q X f``.
+
+    Whole-command run passes (``check_result.ok``). ``_base_complete`` is True
+    and ``sandbox.run_command`` called exactly once (no per-step recovery).
+    """
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "bash setup.sh && pytest tests/ && grep -q X f"
+
+    calls = []
+
+    def fake_run_command(cmd, **kw):
+        calls.append(cmd)
+        return sandbox.SandboxResult(
+            ok=True, returncode=0,
+            stdout="all passed\n", stderr="",
+        )
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert result._base_complete is True
+    assert len(calls) == 1, f"expected 1 run_command call, got {len(calls)}"
+
+
+# 4. test_unavailable_base_inherits_nothing
+def test_unavailable_base_inherits_nothing(tmp_path, monkeypatch):
+    """``_ensure_base_worktree`` raises ``ValueError``.  ``result.environment_failure``
+    is set, ``result.failures`` is empty, no ``sandbox.run_command`` calls."""
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "pytest tests/"
+
+    calls = []
+    orig_run = sandbox.run_command
+
+    def counting_run(cmd, **kw):
+        calls.append(cmd)
+        return orig_run(cmd, **kw)
+
+    monkeypatch.setattr(sandbox, "run_command", counting_run)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (_ for _ in ()).throw(ValueError("cannot prepare base")),
+    )
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert result.environment_failure is not None
+    assert len(result.failures) == 0
+    assert len(calls) == 0
+
+
+# 5. test_pnpm_test_vitest_detected_from_output
+def test_pnpm_test_vitest_detected_from_output(tmp_path, monkeypatch):
+    """Command ``pnpm test && pytest tests/``.
+
+    The whole-command run fails early (pnpm exits before vitest produces its
+    summary), so the whole-command output has no vitest FAIL lines.
+    ``_runner('pnpm test')`` returns ``None``; per-step ``pnpm test`` output
+    contains vitest summary.  ``_runner_from_output`` detects ``'vitest'``.
+    The vitest failure appears only via per-step recovery.
+    Mutation-checked: removing ``_runner_from_output`` fallback drops the
+    vitest failure from ``result.failures``.
+    """
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "pnpm test && pytest tests/"
+
+    call_count = 0
+
+    def fake_run_command(cmd, **kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Whole-command run: pnpm test fails early with a build error,
+            # no vitest FAIL lines in the output
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL in /app\n",
+                stderr="",
+            )
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if "pnpm" in cmd_str:
+            # Per-step: pnpm test actually runs vitest
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    " FAIL  src/utils.test.ts > Utils > should validate\n"
+                    " Tests  1 failed\n"
+                    " Test Files  1 failed\n"
+                ),
+                stderr="",
+            )
+        if "pytest" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    "FAILED tests/test_math.py::test_add\n"
+                    "======= 1 failed in 0.3s =======\n"
+                ),
+                stderr="",
+            )
+        return sandbox.SandboxResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    # Vitest failure detected via _runner_from_output during per-step recovery
+    assert "src/utils.test.ts > Utils > should validate" in result.failures
+    # Pytest failure also detected
+    assert "tests/test_math.py::test_add" in result.failures
+    assert result._base_complete is True
+
+    # Now test inheritance through filter_check: attempt has same vitest
+    # failure plus a new one
+    attempt_result = sandbox.SandboxResult(
+        ok=False, returncode=1,
+        stdout=(
+            " FAIL  src/utils.test.ts > Utils > should validate\n"
+            " FAIL  src/utils.test.ts > Utils > should format\n"
+            " Tests  2 failed\n"
+            " Test Files  1 failed\n"
+            "FAILED tests/test_math.py::test_add\n"
+            "======= 1 failed in 0.3s =======\n"
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(base_check, "run_base_check", lambda *a, **kw: result)
+    filtered = base_check.filter_check(
+        ctx, attempt_result, command, 60.0,
+        named_text="implement the utils module",
+    )
+
+    # Shared vitest failure is inherited
+    assert "src/utils.test.ts > Utils > should validate" in filtered.inherited
+    # New vitest failure stays
+    assert "src/utils.test.ts > Utils > should format" in filtered.new_failures
+
+
+# 6. test_base_complete_requires_accounted_summary
+def test_base_complete_requires_accounted_summary(tmp_path, monkeypatch):
+    """Command ``bash setup.sh && pytest tests/``.  Per-step pytest returns 2
+    failures but summary says ``1 failed``.  ``_accounted`` returns False.
+    ``result._base_complete`` is False but both failures are in ``result.failures``.
+    """
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "bash setup.sh && pytest tests/"
+
+    call_count = 0
+
+    def fake_run_command(cmd, **kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Whole-command run: setup fails
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="setup.sh failed\n", stderr="",
+            )
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if "setup" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="setup.sh failed\n", stderr="",
+            )
+        if "pytest" in cmd_str:
+            # 2 failures but summary claims 1
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    "FAILED tests/test_a.py::test_one\n"
+                    "FAILED tests/test_a.py::test_two\n"
+                    "======= 1 failed in 0.5s =======\n"
+                ),
+                stderr="",
+            )
+        return sandbox.SandboxResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert result._base_complete is False
+    assert "tests/test_a.py::test_one" in result.failures
+    assert "tests/test_a.py::test_two" in result.failures
+
+
+# 7. test_timed_out_base_no_per_step_recovery
+def test_timed_out_base_no_per_step_recovery(tmp_path, monkeypatch):
+    """Whole-command run returns ``timed_out=True``.  ``sandbox.run_command``
+    called exactly once and ``result._base_complete`` is False."""
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "bash setup.sh && pytest tests/"
+
+    calls = []
+
+    def fake_run_command(cmd, **kw):
+        calls.append(cmd)
+        return sandbox.SandboxResult(
+            ok=False, returncode=124,
+            stdout="", stderr="timed out",
+            timed_out=True,
+        )
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert result._base_complete is False
+    assert len(calls) == 1
+
+
+# 8. test_per_step_cache_roundtrip
+def test_per_step_cache_roundtrip(tmp_path, monkeypatch):
+    """A BaseCheckResult with per-step-enriched failures and ``_base_complete=True``
+    survives cache write / read.  Then mock ``_ensure_base_worktree`` to raise
+    and call ``run_base_check``: the cached result is returned without calling
+    ``_ensure_base_worktree``.  No new cache fields (Gate 4)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+
+    result = base_check.BaseCheckResult(
+        ok=False,
+        failures={"tests/test_a.py::test_one", "tests/test_a.py::test_two"},
+        output="FAILED tests/test_a.py::test_one\nFAILED tests/test_a.py::test_two\n"
+               "======= 2 failed in 0.5s =======\n",
+        exit_code=1,
+    )
+    result._base_complete = True  # type: ignore[attr-defined]
+
+    key = "test_cache_key_42"
+    base_check._write_cache(run_dir, key, result)
+
+    cached = base_check._read_cache(run_dir, key)
+    assert cached is not None
+    assert cached.failures == result.failures
+    assert cached._base_complete is True
+
+    # Verify no new cache fields (Gate 4)
+    cache_data = json.loads((run_dir / base_check.CACHE_FILE).read_text())
+    expected_keys = {"cache_key", "ok", "failures", "output", "exit_code",
+                     "environment_failure", "base_complete", "base_clean"}
+    assert set(cache_data.keys()) == expected_keys
+
+    # Now set up a ctx where _ensure_base_worktree would raise
+    repo = _git_init(tmp_path / "repo")
+    base_commit = _commit(repo, "app.py", "print('hello')\n")
+    found = worktree.create(repo, base_commit, "cache_rt01", run_dir)
+    ctx = _Ctx(run_dir, facts={"setup": "", "generate": ""})
+
+    # Write cache with the correct key for this ctx
+    setup = ""
+    generate = ""
+    command = "pytest tests/"
+    real_key = base_check.cache_key(found.base, setup, generate, command)
+    base_check._write_cache(run_dir, real_key, result)
+
+    ensure_called = []
+
+    def raising_ensure(ctx):
+        ensure_called.append(True)
+        raise ValueError("should not be called — cached")
+
+    monkeypatch.setattr(base_check, "_ensure_base_worktree", raising_ensure)
+
+    cached_result = base_check.run_base_check(ctx, command, 60.0)
+
+    assert len(ensure_called) == 0, "_ensure_base_worktree should not be called"
+    assert cached_result.failures == result.failures
+    assert cached_result._base_complete is True
+
+
+# 9. test_runner_from_output_with_ansi
+def test_runner_from_output_with_ansi():
+    """``_runner_from_output`` with ANSI-escaped vitest, pytest, and jest output.
+
+    Jest input uses ``Tests:       1 failed, 2 passed`` (with colon).
+    """
+    # pytest with ANSI
+    pytest_output = "\x1b[31m======= 1 failed in 0.5s =======\x1b[0m\n"
+    assert base_check._runner_from_output(pytest_output) == "pytest"
+
+    # vitest with ANSI
+    vitest_output = "\x1b[31m Tests  1 failed\x1b[0m\n\x1b[31m Test Files  1 failed\x1b[0m\n"
+    assert base_check._runner_from_output(vitest_output) == "vitest"
+
+    # jest with ANSI (note: colon after "Tests")
+    jest_output = "\x1b[1m\x1b[31mTests:\x1b[0m       \x1b[31m1 failed\x1b[0m, 2 passed\n"
+    assert base_check._runner_from_output(jest_output) == "jest"
+
+    # No runner
+    plain_output = "some shell output\nexit 1\n"
+    assert base_check._runner_from_output(plain_output) is None
+
+
+# 10. test_piped_step_kept_whole
+def test_piped_step_kept_whole(tmp_path, monkeypatch):
+    """Command ``pytest tests/ | tee log.txt && grep -q X f``.
+
+    Per-step recovery splits into two steps: ``pytest tests/ | tee log.txt``
+    (kept whole) and ``grep -q X f``.  Pytest failures from the piped step
+    are detected.
+    """
+    ctx, attempt_path = _make_per_step_ctx(tmp_path)
+    command = "pytest tests/ | tee log.txt && grep -q X f"
+
+    call_count = 0
+    step_cmds = []
+
+    def fake_run_command(cmd, **kw):
+        nonlocal call_count
+        call_count += 1
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if call_count == 1:
+            # Whole-command run: fails, last step is grep (not recognised)
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    "FAILED tests/test_a.py::test_one\n"
+                    "======= 1 failed in 0.3s =======\n"
+                ),
+                stderr="",
+            )
+        # Per-step recovery
+        step_cmds.append(cmd_str)
+        if "pytest" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout=(
+                    "FAILED tests/test_a.py::test_one\n"
+                    "======= 1 failed in 0.3s =======\n"
+                ),
+                stderr="",
+            )
+        if "grep" in cmd_str:
+            return sandbox.SandboxResult(
+                ok=False, returncode=1,
+                stdout="", stderr="",
+            )
+        return sandbox.SandboxResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        base_check, "_ensure_base_worktree",
+        lambda ctx: (attempt_path, worktree.recorded(ctx.workdir), []),
+    )
+    monkeypatch.setattr("refactory_dsh.repo_change.prepare_commands",
+                        lambda *a, **kw: (None, [], None))
+
+    result = base_check.run_base_check(ctx, command, 60.0)
+
+    # The pipeline was kept whole
+    assert any("pytest tests/ | tee log.txt" in c for c in step_cmds), \
+        f"piped step should be kept whole, got: {step_cmds}"
+    # No fragmented "tee log.txt" step
+    assert not any(c.strip() == "tee log.txt" for c in step_cmds), \
+        f"pipeline was fragmented: {step_cmds}"
+    # Pytest failures detected from piped step
+    assert "tests/test_a.py::test_one" in result.failures
+    assert result._base_complete is True
