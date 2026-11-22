@@ -8074,10 +8074,10 @@ def _considered_lines(outcomes: Sequence[dict[str, Any]]) -> list[str]:
             *(f"- `{cid}` (epoch {epoch}): {text}" for cid, epoch, text in rows), ""]
 
 
-#: Where a sealed step's dispatch record sits in a candidate's run (`workspace.prepare`):
-#: in the run, or in an item's pass.
-_DISPATCH_RECORDS = ("*/.refactory/workspaces/*/dispatch.json",
-                     "*/passes/*/*/.refactory/workspaces/*/dispatch.json")
+#: Where a sealed step's dispatch record sits under a candidate's run directory
+#: (`workspace.prepare`), at any depth: the run, an item's pass, and every occasion
+#: (``occasions/<part>_N``, ``train_epoch_N``, memory rollouts, smoke runs) and its passes.
+_DISPATCH_RECORDS = "*/**/.refactory/workspaces/*/dispatch.json"
 
 
 def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
@@ -8085,14 +8085,15 @@ def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
     they ran without a whole-step cap (`seal.whole_step_cap`): how many, and the first
     reason; empty when none did."""
     found: list[str] = []
-    for pattern in _DISPATCH_RECORDS:
-        for path in sorted(Path(runs).glob(pattern)):
-            try:
-                record = json.loads(path.read_text())
-            except (OSError, ValueError):
-                continue
-            if isinstance(record, dict) and record.get("whole_step_cap") is False:
-                found.append(str(record.get("cap") or "no cap"))
+    # ``**`` does not follow links, so a concurrent pass's alias (``.refactory/live``) is
+    # not counted a second time.
+    for path in sorted(Path(runs).glob(_DISPATCH_RECORDS)):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("whole_step_cap") is False:
+            found.append(str(record.get("cap") or "no cap"))
     return {"dispatches": len(found), "why": found[0]} if found else {}
 
 

@@ -479,6 +479,27 @@ def test_an_incident_belongs_to_the_one_dispatch_that_recorded_it(tmp_path):
     workspace.collect(third, run, [])
 
 
+def test_the_report_counts_uncapped_steps_wherever_a_candidate_ran(tmp_path):
+    """[the run's report] Every dispatch record under a candidate's run directory counts:
+    its passes, its occasions (a fresh-evidence rescore, val, a smoke run) and theirs,
+    once each even where a concurrent pass is also reached through its alias."""
+    from refactory_dsh import loop as loop_mod
+
+    runs = tmp_path / "runs"
+    places = ["c1/passes/data/a_0", "c1/occasions/train_epoch_1/passes/data/a_0",
+              "c1/occasions/val_1/passes/data/b_1", "c2/occasions/smoke_1", "c2"]
+    for index, place in enumerate(places):
+        record = runs / place / ".refactory" / "workspaces" / "look" / "dispatch.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"sealed": True, "whole_step_cap": index == len(places) - 1,
+                                      "cap": f"no cap {index}"}))
+    alias = runs / "c1" / ".refactory" / "live" / "data" / "a_0"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(runs / "c1" / "passes" / "data" / "a_0")
+    found = loop_mod.uncapped_sealed_steps(runs)
+    assert found["dispatches"] == 4, found
+
+
 @LINUX_ONLY
 def test_a_sealed_step_says_whether_it_had_a_whole_step_cap(tmp_path, monkeypatch):
     """[the step's dispatch record, both runtimes; the run's report] Without a scope, the
