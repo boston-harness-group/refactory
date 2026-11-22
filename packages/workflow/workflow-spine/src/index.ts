@@ -1351,17 +1351,25 @@ export function apply(ctx: Context, config: Config): void {
    * @returns the message.
    */
   function limitMessage(spine: Spine, workdir: string | undefined): string | undefined {
-    const halted = spine.state().halted as { gate?: string; reason?: string } | undefined
-    if (halted?.reason !== 'max_iterations' || !halted.gate) return undefined
-    const spent = spine.reloops(halted.gate)
-    const limit = spent === undefined ? 'its reloop limit' : `its limit of ${spent.cap} reloops`
-    const target = spent?.target ?? 'the node it reloops to'
-    const run = workdir ?? 'RUN_DIR'
-    return `The run stopped: ${halted.gate} reached ${limit}. To go on, rerun ${target}: in the GUI, `
-      + 'choose it, then Preview affected results and Confirm correction and rerun; or run '
-      + `\`refactory graph-control preview --run ${run} --node ${target}\` and then `
-      + `\`refactory graph-control rerun --run ${run} --node ${target} --revision REVISION\` `
-      + 'with the revision it returns. A rerun by a person resets the limit.'
+    const halted = spine.state().halted as { gate?: string; reason?: string; detail?: string } | undefined
+    if (!halted) return undefined
+    if (halted.reason === 'max_iterations' && halted.gate) {
+      const spent = spine.reloops(halted.gate)
+      const limit = spent === undefined ? 'its reloop limit' : `its limit of ${spent.cap} reloops`
+      const target = spent?.target ?? 'the node it reloops to'
+      const run = workdir ?? 'RUN_DIR'
+      return `The run stopped: ${halted.gate} reached ${limit}. To go on, rerun ${target}: in the GUI, `
+        + 'choose it, then Preview affected results and Confirm correction and rerun; or run '
+        + `\`refactory graph-control preview --run ${run} --node ${target}\` and then `
+        + `\`refactory graph-control rerun --run ${run} --node ${target} --revision REVISION\` `
+        + 'with the revision it returns. A rerun by a person resets the limit.'
+    }
+    // A verdict halt carries its own reason text in `detail` (correction #4:
+    // the halt reason reaches the person on both runtimes).
+    if (halted.detail) {
+      return `gate ${halted.gate ?? '?'} halted the run: ${halted.detail}`
+    }
+    return undefined
   }
 
   /** The status {@link recordStatus} last wrote for the run, or undefined when there is none to read. */
@@ -3115,11 +3123,11 @@ export function apply(ctx: Context, config: Config): void {
       // A halt that stopped the run -- a gate halted at its iteration limit, a
       // verdict halt, or the run failed -- is not the CEO's to lift.
       const state = spine.state()
-      const halted = state.halted as { gate?: string; reason?: string } | undefined
+      const halted = state.halted as { gate?: string; reason?: string; detail?: string } | undefined
       const stopped = halted !== undefined
         ? (halted.reason === 'max_iterations'
           ? `run halted at gate ${halted.gate} after reaching its iteration limit`
-          : `run halted at gate ${halted.gate ?? '?'}: ${halted.reason ?? 'verdict'}`)
+          : `run halted at gate ${halted.gate ?? '?'}: ${halted.detail ?? halted.reason ?? 'verdict'}`)
         : recordedStatus(workdir) === 'failed' ? 'run has failed' : undefined
       if (stopped !== undefined) {
         throw new Error(`${stopped}; a CEO redo cannot spend more attempts. Use `

@@ -98,6 +98,8 @@ export interface TerminalHalt {
   reason: 'verdict' | 'max_iterations' | 'cancelled' | 'incomplete'
   /** Sink nodes the run never reached, when reason is 'incomplete'. */
   unreached?: string[]
+  /** The gate's own reason text (correction #4: halt reason reaches the person). */
+  detail?: string
 }
 
 /**
@@ -1283,8 +1285,9 @@ export class Spine {
       record()
       delete this.gateReasons[gate]
       if (target === undefined) {
-        // Terminal halt: end the whole run
-        this.halted = { gate, reason: 'verdict' }
+        // Terminal halt: end the whole run.  Carry the gate's reason text so
+        // recordStatus writes it to spine-status.json (correction #4).
+        this.halted = { gate, reason: 'verdict', ...(feedback ? { detail: feedback } : {}) }
         this.cursor = []
         this.afters = new Map()
       } else {

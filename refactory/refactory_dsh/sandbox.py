@@ -535,93 +535,95 @@ def run_sandboxed(
     activity = [started]
     backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=False, cwd=str(workdir), env=child_env,
-        start_new_session=os.name == "posix", **kwargs,
-    )
-    readers = [threading.Thread(target=_drain, args=(pipe, sink, activity), daemon=True,
-                                name="sandbox-drain")
-               for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
-    for reader in readers:
-        reader.start()
-
-    # Progress-file watcher thread.
-    _prev_progress: list[dict[str, Any]] = [{}]
-
-    def _watch_progress() -> None:
-        while proc.poll() is None:
-            try:
-                snap = _progress_at(workdir)
-            except Exception:
-                snap = {}
-            if snap != _prev_progress[0]:
-                activity[0] = time.monotonic()
-                _prev_progress[0] = snap
-            time.sleep(1)
-
-    progress_thread = threading.Thread(target=_watch_progress, daemon=True, name="sandbox-progress")
-    progress_thread.start()
-
-    stop: str | None = None
-    try:
-        while proc.poll() is None:
-            now = time.monotonic()
-            if now - activity[0] >= timeout_s:
-                stop = "inactivity"
-            elif now - started >= backstop_s:
-                stop = "backstop"
-            if stop is not None:
-                break
-            time.sleep(0.05)
-    except BaseException:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
-            proc.wait(timeout=2)
-        for reader in readers:
-            reader.join(timeout=5)
-        raise
-
-    if stop is not None:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
-            proc.wait(timeout=2)
-        for reader in readers:
-            reader.join(timeout=5)
-        return SandboxResult(
-            ok=False,
-            timed_out=True,
-            returncode=124,
-            timeout_s=timeout_s,
-            timeout_kind=stop,
-            elapsed_s=round(time.monotonic() - started, 3),
-            progress=_progress_at(workdir),
-            stdout=out.text(),
-            stderr=err.text() or f"timed out ({stop}) after {timeout_s}s",
+    from refactory_dsh.owned_process import _termination_as_exit
+    with _termination_as_exit():
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=False, cwd=str(workdir), env=child_env,
+            start_new_session=os.name == "posix", **kwargs,
         )
+        readers = [threading.Thread(target=_drain, args=(pipe, sink, activity), daemon=True,
+                                    name="sandbox-drain")
+                   for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
+        for reader in readers:
+            reader.start()
 
-    # Normal exit: join readers with a grace period.
-    grace_end = time.monotonic() + EXIT_GRACE_S
-    for reader in readers:
-        reader.join(timeout=max(0.0, grace_end - time.monotonic()))
+        # Progress-file watcher thread.
+        _prev_progress: list[dict[str, Any]] = [{}]
+
+        def _watch_progress() -> None:
+            while proc.poll() is None:
+                try:
+                    snap = _progress_at(workdir)
+                except Exception:
+                    snap = {}
+                if snap != _prev_progress[0]:
+                    activity[0] = time.monotonic()
+                    _prev_progress[0] = snap
+                time.sleep(1)
+
+        progress_thread = threading.Thread(target=_watch_progress, daemon=True, name="sandbox-progress")
+        progress_thread.start()
+
+        stop: str | None = None
+        try:
+            while proc.poll() is None:
+                now = time.monotonic()
+                if now - activity[0] >= timeout_s:
+                    stop = "inactivity"
+                elif now - started >= backstop_s:
+                    stop = "backstop"
+                if stop is not None:
+                    break
+                time.sleep(0.05)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait(timeout=2)
+            for reader in readers:
+                reader.join(timeout=5)
+            raise
+
+        if stop is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait(timeout=2)
+            for reader in readers:
+                reader.join(timeout=5)
+            return SandboxResult(
+                ok=False,
+                timed_out=True,
+                returncode=124,
+                timeout_s=timeout_s,
+                timeout_kind=stop,
+                elapsed_s=round(time.monotonic() - started, 3),
+                progress=_progress_at(workdir),
+                stdout=out.text(),
+                stderr=err.text() or f"timed out ({stop}) after {timeout_s}s",
+            )
+
+        # Normal exit: join readers with a grace period.
+        grace_end = time.monotonic() + EXIT_GRACE_S
+        for reader in readers:
+            reader.join(timeout=max(0.0, grace_end - time.monotonic()))
 
     stdout_text = out.text()
     stderr_text = err.text()

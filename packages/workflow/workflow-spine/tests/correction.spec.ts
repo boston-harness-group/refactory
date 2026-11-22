@@ -1194,6 +1194,41 @@ describe('applyControls integration', () => {
       .rejects.toThrow(/run halted at gate gate_smoke/)
   })
 
+  it('halt verdict carries the gate reason to halted.detail and spine-status.json', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'smoke',
+      nodes: {
+        smoke: { _type: 'AgentNode', id: 'smoke', role: 'builder', prompt_template: 'S', reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn', evaluator_command: 'true', reads: [] },
+        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'smoke', target: 'gate_smoke' },
+        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir })
+    await call(ctx, 'wf_next')       // smoke is due
+    await call(ctx, 'wf_done', { node: 'smoke' })
+    await call(ctx, 'wf_next')       // gate_smoke is due
+    // Pass a halt verdict with feedback (reason text), as a fn gate would.
+    const reason = 'smoke timed out (inactivity, limit 3600s); code repair was not attempted'
+    await call(ctx, 'wf_verdict', { gate: 'gate_smoke', verdict: 'halt', feedback: reason })
+    // The halted object carries reason='verdict' (type-safe) and detail=reason text.
+    const next = await call(ctx, 'wf_next') as { status: string; halted?: { reason: string; detail?: string; gate?: string } }
+    expect(next.status).toBe('done')
+    expect(next.halted?.gate).toBe('gate_smoke')
+    expect(next.halted?.reason).toBe('verdict')
+    expect(next.halted?.detail).toBe(reason)
+    // spine-status.json should contain the reason in its error field.
+    const statusPath = join(workdir, '.refactory', 'spine-status.json')
+    expect(existsSync(statusPath)).toBe(true)
+    const status = JSON.parse(readFileSync(statusPath, 'utf8'))
+    expect(status.status).toBe('halted')
+    expect(status.error).toContain(reason)
+  })
+
   it('wf_redo refuses when run has failed', async () => {
     const workdir = scratch()
     const graph: WorkflowGraph = {

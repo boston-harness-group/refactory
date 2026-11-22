@@ -1535,17 +1535,21 @@ def test_smoke_task_bound_runs_parallel_sample(tmp_path):
 
     # Assert items overlapped in time (ran concurrently, not sequentially).
     # With parallelism=3, the walker starts all 3 items concurrently.
-    # Verify via item_records: each item has timing info.
     assert len(result.item_records) == smoke_items, (
         f"expected {smoke_items} item records, got {len(result.item_records)}")
-    # Check that starts overlapped: at least 2 items should have started
-    # before the first one finished (parallel, not sequential).
-    starts = [r.get("started", 0) for r in result.item_records]
-    ends = [r.get("finished", 0) for r in result.item_records]
-    if starts and ends and all(s > 0 for s in starts) and all(e > 0 for e in ends):
-        first_end = min(ends)
-        started_before_first_end = sum(1 for s in starts if s < first_end)
-        assert started_before_first_end >= 2, (
-            f"expected at least 2 items to start before the first finished "
-            f"(parallel), but only {started_before_first_end} did. "
-            f"starts={starts}, ends={ends}")
+    # Read ITEM_STARTED timestamps from each pass directory to verify overlap.
+    # item_records don't have started/finished keys; the authoritative start
+    # time is in each pass's .refactory/item_started file.
+    from refactory_dsh.items import ITEM_STARTED
+    start_times: list[float] = []
+    for item_dir in sorted(passes_dir.iterdir()):
+        stamp_path = item_dir / ITEM_STARTED
+        assert stamp_path.exists(), f"no ITEM_STARTED in {item_dir}"
+        start_times.append(float(stamp_path.read_text().strip()))
+    assert len(start_times) == smoke_items
+    # With parallelism=3, all items start at nearly the same time (within ~1 s).
+    # Sequential execution would space starts by each item's full duration.
+    spread = max(start_times) - min(start_times)
+    assert spread < 2.0, (
+        f"expected near-simultaneous starts (parallel), but start times "
+        f"spread is {spread:.2f}s: {start_times}")
