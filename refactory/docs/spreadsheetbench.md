@@ -101,6 +101,17 @@ rollout and the parent's re-score) whenever the Task offers it (`Task.train_feed
 Neither asks on val or test, nor on the rollouts that only compare skills (SkillOpt's
 slow update, the default loop's memory pass).
 
+**The train score is the first attempt's.** An item told it was wrong scores 0 however
+its later turns end; its record keeps the conversation, the feedback included (all but
+feedback on a last turn, which no call saw), says
+`first attempt wrong (right after gold feedback)` (or `still wrong`) as its fail
+reason, and keeps its grade after the feedback under `gold_feedback`. So the turns the
+answer's feedback buys reach the analysts but never lift the score that drives either
+arm's search. SkillOpt scores the attempt after the feedback; with it the starting skill
+passed 75 or 76 of the 76 clean train items, leaving no failures to learn from. "First
+attempt" means the first clean run the grader judged: a turn whose code failed to run,
+then a right answer, still passes.
+
 ## Where model code runs
 
 A pinned interpreter with SkillOpt's versions (Python 3.12, openpyxl 3.1.5, pandas 2.3.3,

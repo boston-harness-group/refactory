@@ -52,6 +52,22 @@ IDLE_HOURS = 24
 #: How long such a run keeps its branch once its worktree is gone.
 FAILED_BRANCH_DAYS = 14
 
+#: How long a successful run keeps its worktree once it has gone quiet. Its branch is
+#: never deleted, and a run that goes on gets the worktree back from it (`_require_current`).
+SUCCEEDED_IDLE_HOURS = 72
+
+#: The disposable worktrees a run keeps beside its own `run-<id>`: its base checkout
+#: (`base_check`) and its check copy (`repo_change`). Each has an environment record,
+#: `run-<prefix><id>.json`, beside it.
+COMPANION_PREFIXES = ("base-", "check-")
+
+#: How often a run's start sweeps every target's worktrees, not only its own (:func:`sweep`).
+SWEEP_EVERY_S = 3600
+
+#: How long one sweep may hold up the run whose start it runs in; what it has not
+#: reached by then waits for the next one.
+SWEEP_BUDGET_S = 60
+
 #: Who commits a run's attempts. Each commit only records an attempt; who authors what
 #: is finally delivered is decided when it is delivered (#350).
 COMMITTER = {
@@ -1157,38 +1173,120 @@ def _remove(target: Path, found: dict[str, Any], path: Path) -> str:
     return f"removed the worktree of a run: {path}"
 
 
+def _limit(variable: str, default: float) -> float:
+    """An idle limit in hours, from ``variable`` when the environment sets it to a number."""
+    try:
+        return float(os.environ.get(variable, default))
+    except ValueError:
+        return default
+
+
+def _gone(target: Path) -> bool:
+    """Whether ``target`` was deleted, rather than sitting on a disk that is not mounted.
+
+    Its parent must still be there, hold something, and hold no mount point, nor a
+    link to one: an unmounted disk leaves an empty mount-point directory on Linux, and
+    a repository at the root of a volume sits in a directory of mount points, which on
+    macOS (`/Volumes`) may hold only the `Macintosh HD` link to `/`. A case this cannot
+    tell apart keeps its worktrees.
+    """
+    parent = target.parent
+    try:
+        if target.exists() or not parent.is_dir():
+            return False
+        entries = list(parent.iterdir())
+        return bool(entries) and not any(os.path.ismount(entry) or os.path.ismount(entry.resolve())
+                                         for entry in entries)
+    except OSError:
+        return False
+
+
+def _remove_companions(target: Path | None, here: Path, run_id: str) -> list[str]:
+    """Remove a run's base worktree and check copy (:data:`COMPANION_PREFIXES`) and their records.
+
+    Both are detached checkouts refactory rebuilds whenever a run needs them, so nothing
+    in them is anyone's work. ``target`` is None when the target is gone: git can no
+    longer remove them, so their directories are deleted.
+    """
+    notes: list[str] = []
+    for prefix in COMPANION_PREFIXES:
+        path = here / f"{prefix}{run_id}"
+        if path.is_dir():
+            try:
+                if target is None:
+                    raise ValueError("its target is gone")
+                git(target, "worktree", "remove", "--force", str(path))
+            except ValueError:
+                shutil.rmtree(path, ignore_errors=True)
+            notes.append(f"could not remove {path}" if path.exists()
+                         else f"removed the {prefix[:-1]} worktree of a run: {path}")
+        (here / f"run-{prefix}{run_id}.json").unlink(missing_ok=True)
+    return notes
+
+
+def _remove_orphans(target: Path | None, here: Path, runs: set[str], limit: float) -> list[str]:
+    """Remove base worktrees and check copies whose run has no record left in ``here``.
+
+    A run's record goes only after its worktree and branch have, so what is left is a
+    leftover of a run that is over; one changed within ``limit`` hours is spared.
+    """
+    notes: list[str] = []
+    for path in sorted(here.iterdir()):
+        prefix = next((p for p in COMPANION_PREFIXES if path.name.startswith(p)), None)
+        run_id = path.name.removeprefix(prefix or "")
+        if (prefix is None or not path.is_dir() or run_id in runs
+                or not re.fullmatch(r"[0-9a-f]{8,}", run_id)):
+            continue
+        if (time.time() - path.stat().st_mtime) / 3600 >= limit:
+            notes.extend(_remove_companions(target, here, run_id))
+    return notes
+
+
 def prune(target: Path, *, idle_hours: float | None = None, succeeded: bool = False) -> list[str]:
     """Remove what runs on ``target`` no longer need, and say what was removed or kept.
 
-    Only runs that ended without success are pruned. A successful run keeps its
-    worktree and branch until its work is delivered (#350), unless ``succeeded`` asks
-    for its worktree -- never its branch -- to go too; an active or resumable one is
-    never touched. An ended run loses its worktree after :data:`IDLE_HOURS` idle, never
-    discarding what someone did there after it (:func:`_remove`), and its branch after
-    :data:`FAILED_BRANCH_DAYS`, with `git branch -D`: a failed run's commits were never
-    merged. Only branches matching :data:`STANDARD_BRANCH` are ever deleted, and nothing
-    of the target's own worktrees is touched: git's own `worktree prune` would drop the
-    records of a person's worktree on a disk that is not mounted. A pruned run that goes
-    on gets its worktree back from its branch (:func:`_require_current`).
+    An active or resumable run is never touched. A run that ended without success loses
+    its worktree after :data:`IDLE_HOURS` idle, never discarding what someone did there
+    after it (:func:`_remove`), and its branch after :data:`FAILED_BRANCH_DAYS`, with
+    `git branch -D`: its commits were never merged. A successful run loses its worktree
+    after :data:`SUCCEEDED_IDLE_HOURS` idle, or at once when ``succeeded`` asks, and never
+    its branch: its work was delivered from it (#350), and a run that goes on gets its
+    worktree back from it (:func:`_require_current`). A run's base worktree and check copy
+    go with its worktree, and ones no run's record names go once idle. Only branches
+    matching :data:`STANDARD_BRANCH` are ever deleted, and nothing of the target's own
+    worktrees is touched: git's own `worktree prune` would drop the records of a
+    person's worktree on a disk that is not mounted.
     """
     target = Path(target).resolve()
-    limit = float(os.environ.get("REFACTORY_WORKTREE_IDLE_HOURS", IDLE_HOURS)) if idle_hours is None else idle_hours
+    limit = _limit("REFACTORY_WORKTREE_IDLE_HOURS", IDLE_HOURS) if idle_hours is None else idle_hours
+    done_limit = _limit("REFACTORY_SUCCEEDED_WORKTREE_IDLE_HOURS", SUCCEEDED_IDLE_HOURS)
     notes: list[str] = []
     here = slot(target)
     if not here.is_dir():
         return notes
     with _locked(here / ".lock"):
+        runs: set[str] = set()
         for record_path in sorted(here.glob("run-*.json")):
             found = _json(record_path)
             branch, path = str(found.get("branch") or ""), Path(str(found.get("path") or ""))
             if not STANDARD_BRANCH.match(branch):
                 continue
+            run_id = branch.removeprefix(BRANCH_PREFIX)
+            runs.add(run_id)
             outcome = run_state(found)
-            if outcome == "active" or (outcome == "succeeded" and not succeeded):
+            if outcome == "active":
                 continue
             idle = _idle_hours(target, found)
-            if path.is_dir() and (outcome == "succeeded" or idle >= limit):
-                notes.append(_remove(target, found, path))
+            if (idle >= limit if outcome == "ended"
+                    else succeeded or idle >= done_limit):
+                if path.is_dir():
+                    try:
+                        notes.append(_remove(target, found, path))
+                    except (OSError, ValueError) as error:  # one broken worktree never stops the rest
+                        notes.append(f"kept {path}: {error}. Once nothing in it is needed, remove it "
+                                     f"with `git -C {target} worktree remove --force {path}`, or delete "
+                                     "it when git cannot")
+                notes.extend(_remove_companions(target, here, run_id))
             if outcome == "ended" and not path.is_dir() and idle >= FAILED_BRANCH_DAYS * 24:
                 try:
                     if _registered(target, path, branch):
@@ -1200,6 +1298,103 @@ def prune(target: Path, *, idle_hours: float | None = None, succeeded: bool = Fa
                     notes.append(f"kept the branch {branch}: {error}")
                     continue
                 record_path.unlink(missing_ok=True)
+                runs.discard(run_id)
+        notes.extend(_remove_orphans(target, here, runs, limit))
+    return notes
+
+
+def prune_gone(target: Path, *, idle_hours: float | None = None) -> list[str]:
+    """Remove the worktrees of runs on ``target`` once ``target`` itself has been deleted.
+
+    git cannot remove them -- their repository went with the target, and nothing in
+    them can be committed any more -- so their directories are deleted, with their
+    base worktrees, check copies and records. Only a target :func:`_gone` judges deleted:
+    one on a disk that is not mounted keeps everything (see :func:`prune`). Only the
+    worktree a record names in its own slot is deleted, never a path a damaged record
+    points elsewhere. A run some process still owns is never touched; the rest go after
+    :data:`IDLE_HOURS` idle, dated by their run directory, or by their record when that
+    is gone too. A resumable run counts as over: there is nothing left to resume it on.
+    """
+    target = Path(target).resolve()
+    here = slot(target)
+    if not _gone(target) or not here.is_dir():
+        return []
+    limit = _limit("REFACTORY_WORKTREE_IDLE_HOURS", IDLE_HOURS) if idle_hours is None else idle_hours
+    notes: list[str] = []
+    with _locked(here / ".lock"):
+        runs: set[str] = set()
+        for record_path in sorted(here.glob("run-*.json")):
+            found = _json(record_path)
+            branch, path = str(found.get("branch") or ""), Path(str(found.get("path") or ""))
+            if not STANDARD_BRANCH.match(branch):
+                continue
+            run_id = branch.removeprefix(BRANCH_PREFIX)
+            runs.add(run_id)
+            run = Path(str(found.get("run") or ""))
+            if str(run) not in ("", ".") and run.is_dir() and held(run):
+                continue
+            last = _last_active(target, found)
+            if (time.time() - (record_path.stat().st_mtime if last is None else last)) / 3600 < limit:
+                continue
+            if path == here / f"run-{run_id}":  # never what a damaged record points elsewhere
+                shutil.rmtree(path, ignore_errors=True)
+            notes.extend(_remove_companions(None, here, run_id))
+            if path.exists():
+                notes.append(f"could not remove {path}")
+                continue
+            notes.append(f"removed the worktree of a run on {target}, which is gone: {path}")
+            record_path.unlink(missing_ok=True)
+            runs.discard(run_id)
+        notes.extend(_remove_orphans(None, here, runs, limit))
+    if {entry.name for entry in here.iterdir()} <= {".lock"}:
+        shutil.rmtree(here, ignore_errors=True)
+    return notes
+
+
+def _slot_target(here: Path) -> Path | None:
+    """The target whose runs' worktrees live in ``here``, as its records name it."""
+    for record_path in sorted(here.glob("run-*.json")):
+        named = str(_json(record_path).get("target") or "")
+        if named and slot(Path(named)) == here:
+            return Path(named)
+    return None
+
+
+def sweep(*, idle_hours: float | None = None) -> list[str]:
+    """Prune every target's worktrees, at most once every :data:`SWEEP_EVERY_S`.
+
+    A run's start prunes its own target, which alone leaves every target no later run
+    revisits -- a canary's fresh project, a measurement's copy, one deleted since --
+    holding its worktrees for good. So a start also sweeps them all, under a stamp that
+    keeps starts close together from repeating the walk, and within
+    :data:`SWEEP_BUDGET_S`. A target that is gone goes through :func:`prune_gone`; one
+    that cannot be pruned is reported, and never fails the run whose start swept it.
+    """
+    base = root()
+    stamp = base / ".last-sweep"
+    try:
+        if time.time() - stamp.stat().st_mtime < SWEEP_EVERY_S:
+            return []
+    except OSError:
+        pass
+    notes: list[str] = []
+    try:
+        stamp.touch()
+        slots = sorted(entry for entry in base.iterdir() if entry.is_dir())
+    except OSError as error:
+        return [f"did not sweep {base}: {error}"]
+    deadline = time.monotonic() + SWEEP_BUDGET_S
+    for here in slots:
+        if time.monotonic() > deadline:
+            notes.append(f"stopped sweeping after {SWEEP_BUDGET_S}s; the next sweep goes on")
+            break
+        try:
+            target = _slot_target(here)
+            if target is not None:
+                notes.extend(prune(target, idle_hours=idle_hours) if target.is_dir()
+                             else prune_gone(target, idle_hours=idle_hours))
+        except (OSError, ValueError) as error:
+            notes.append(f"kept the worktrees in {here}: {error}")
     return notes
 
 

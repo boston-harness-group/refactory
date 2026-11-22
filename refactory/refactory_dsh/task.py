@@ -137,7 +137,11 @@ class Task:
         or ``None`` for nothing. Called mid-pass, and only on a train evaluation the outer
         loop asked to give gold feedback (`gold_feedback_on`), by the one grader-side op
         that may hand grader-derived data to the pass (`refactory_dsh.feedback`). Never
-        called on val or test. Nothing by default."""
+        called on val or test. Nothing by default.
+
+        A value saying the attempt is wrong must be a mapping whose ``passed`` is
+        ``False``: an item told that once scores 0 on this evaluation, however its later
+        turns end (`feedback.SCORING`). Any other value is not counted."""
         return None
 
     def reply_correct(self, reply: str, metadata: Mapping[str, Any]) -> bool | None:

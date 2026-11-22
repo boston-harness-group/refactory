@@ -382,14 +382,15 @@ CLAUDE_CODE = {"worker_backend": "claude_code", "model": "claude-opus-4-6", "per
 
 
 def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                   gold_feedback: bool = False, parallelism: int = 1,
                    expect_ok: bool = True) -> tuple[list[dict], str]:
     """A part on the walker through the real model client and a scripted ``dsh``: its
     records and the run's error (empty when the run succeeded)."""
-    mode, state = _state()
+    mode, state = _state(data_parallelism=parallelism)
     work = tmp_path / "walk-dsh"
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
                                        if p != "train"}, train_ids=list(train))
-    task_module.write_subset(work, part, 0.0, gold_feedback=False)
+    task_module.write_subset(work, part, 0.0, gold_feedback=gold_feedback)
     result = WalkerEvaluator(model=dsh.client(**CLAUDE_CODE), project=Path("."), max_steps=4000) \
         .evaluate(mode, state, work)
     assert result.exit_ok is expect_ok, result.error
@@ -397,18 +398,19 @@ def _scripted_walk(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple 
 
 
 def _scripted_spine(tmp_path: Path, dsh: Any, *, part: str = "val", train: tuple = ("t1",),
+                    gold_feedback: bool = False, parallelism: int = 1,
                     expect_ok: bool = True) -> tuple[list[dict], str]:
     """A part on the spine, its solve step dispatched to the real worker (`worker_node`)
     with the same scripted ``dsh``, as a run on DSH lowers it: its records and the run's
     error (its last failure; empty when the run succeeded)."""
     from refactory_dsh import lowering, workers
 
-    mode, state = _state()
+    mode, state = _state(data_parallelism=parallelism)
     work = tmp_path / "spine-dsh"
     work.mkdir(parents=True)
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
                                        if p != "train"}, train_ids=list(train))
-    task_module.write_subset(work, part, 0.0, gold_feedback=False)
+    task_module.write_subset(work, part, 0.0, gold_feedback=gold_feedback)
     lowering.write_declarations(state, work)
 
     def dispatched(workflow: Any) -> Any:
@@ -511,6 +513,28 @@ def test_a_logged_out_worker_fails_the_item_at_once(tmp_path, sb_env, runtime):
     assert not t1.get("missing_steps"), t1
     assert port.NO_CODE not in json.dumps(t1)
     assert by_id["t2"]["passed"] and by_id["t2"]["error_kind"] is None, by_id["t2"]
+
+
+@pytest.mark.parametrize("parallelism", [1, 2])
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_train_item_is_scored_on_its_first_attempt(tmp_path, sb_env, runtime, parallelism):
+    """[both runtimes, one item at a time and both at once] With gold feedback, t1's first
+    clean run is wrong, it is told so and is right on its next turn: it scores 0, its
+    record keeping the feedback's turn and its grade after it. t2, right at once, is told
+    nothing and passes."""
+    from test_crashed_step_retry import Scripted
+
+    dsh = Scripted(tmp_path / "dsh", {"Put 42 in B1": [_good(41), _good(42)], "": [_good(9)]})
+    records, _ = _scripted(runtime, tmp_path, dsh, part="train", train=("t1", "t2"),
+                           gold_feedback=True, parallelism=parallelism)
+    by_id = {r["id"]: r for r in records}
+    t1, t2 = by_id["t1"], by_id["t2"]
+    assert (t1["passed"], t1["score"]) == (False, 0.0), t1
+    assert t1["gold_feedback"] == {"told_wrong": 1, "passed_after": True, "score_after": 1.0}
+    assert t1["fail_reason"] == "first attempt wrong (right after gold feedback)"
+    assert len(t1["exchanges"]) == 2 and EVAL_FEEDBACK_HEAD in t1["exchanges"][1]["prompt"]
+    assert (t2["passed"], t2["score"]) == (True, 1.0) and "gold_feedback" not in t2, t2
+    assert len(dsh.prompts("Put 42 in B1")) == 2
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
@@ -669,7 +693,11 @@ def test_train_rollout_gets_gold_feedback(tmp_path, sb_env):
     result, prompts = _walk(tmp_path, "train", ["no fence at all", _good(41), _good(42)],
                             gold_feedback=True)
     (record,) = result.item_records
-    assert record["passed"] and len(prompts) == 3
+    # Scored on its first attempt: told it was wrong, it fails, right after the feedback.
+    assert (record["passed"], record["score"]) == (False, 0.0) and len(prompts) == 3
+    assert record["gold_feedback"] == {"told_wrong": 1, "passed_after": True, "score_after": 1.0}
+    assert record["fail_reason"] == "first attempt wrong (right after gold feedback)"
+    assert "PASS" in record["prediction"] and len(record["exchanges"]) == 3
     assert "- User: The code raised an error during execution:" in prompts[1]
     assert "SyntaxError" in prompts[1]
     assert "No Python code block" not in prompts[1]
@@ -701,12 +729,15 @@ class _PerItem(FakeModel):
 
 def test_concurrent_items_get_their_own_gold_feedback(tmp_path, sb_env):
     """Two train items at once (the concurrent data pass): each wrong first answer is told
-    its own wrong cell, and each item passes on its second call."""
+    its own wrong cell, each item is right on its second call, and each scores its own
+    first attempt (each pass counts only its own feedback)."""
     model = _PerItem()
     result, prompts = _walk(tmp_path, "train", model, gold_feedback=True, train=["t1", "t2"],
                             data_parallelism=2)
-    assert [(r["id"], r["passed"], len(r["exchanges"])) for r in result.item_records] == \
-        [("t1", True, 2), ("t2", True, 2)]
+    assert [(r["id"], r["passed"], len(r["exchanges"]), r["gold_feedback"])
+            for r in result.item_records] == \
+        [(i, False, 2, {"told_wrong": 1, "passed_after": True, "score_after": 1.0})
+         for i in ("t1", "t2")]
     told = [p for p in prompts if EVAL_FEEDBACK_HEAD in p]
     assert len(told) == 2
     assert any("your output = 43 (WRONG)" in p and "Put 42" in p for p in told)
@@ -725,6 +756,46 @@ def test_without_gold_feedback_the_first_clean_run_ends_the_item(tmp_path, sb_en
     assert not any(EVAL_FEEDBACK_HEAD in p for p in prompts)
     assert record["passed"] is False
     assert record["fail_reason"].startswith("eval-mismatch: value@Sheet1!B1")
+
+
+def test_a_train_item_still_wrong_after_its_feedback_says_both(tmp_path, sb_env):
+    """Wrong on every turn: it fails, its fail reason saying it
+    was wrong first and still wrong after, then the grader's own reason."""
+    result, _ = _walk(tmp_path, "train", [_good(41), _good(40), _good(39)],
+                      gold_feedback=True, max_turns=3)
+    (record,) = result.item_records
+    assert (record["passed"], record["score"]) == (False, 0.0)
+    # Graded wrong on each of its three turns; the last one's feedback has no turn left.
+    assert record["gold_feedback"] == {"told_wrong": 3, "passed_after": False, "score_after": 0.0}
+    assert record["fail_reason"].startswith(
+        "first attempt wrong (still wrong after gold feedback); eval-mismatch: ")
+
+
+def test_no_edit_may_touch_the_gold_feedback_count():
+    """An added node that declares the count (or anything under .refactory/) as a write,
+    or as a read, is refused (V17): otherwise it could erase the count and give a
+    told-wrong item back its grade after the feedback."""
+    from refactory_dsh.nn import edits
+    from refactory_dsh.nn.validate import validate_state
+
+    solver = sb_mode.Solver()
+    for field, path in (("writes", ".refactory/gold_feedback.json"),
+                        ("writes", "x/../.refactory/gold_feedback.json"),
+                        ("reads", ".refactory/gold_feedback.json"),
+                        ("required_reads", "./.refactory/gold_feedback.json")):
+        # Only an op or a gate declares required_reads.
+        node = ({"kind": "op", "call": "refactory_packages.spreadsheetbench.ops:frame",
+                 "reads": [path]}
+                if field == "required_reads" else
+                {"kind": "agent", "prompt_template": "Write a short note."})
+        state = edits.apply({"op": "add_node", "position": {"after": "next_turn"},
+                             "node": {"id": "note", **node, field: [path]}},
+                            solver.state_dict(), protected=solver.protected_nodes())
+        issues = validate_state(state, **sb_mode.Solver(state=state).grader_scope())
+        assert any(i.code == "V17" and i.node == "note" and ".refactory" in i.message
+                   for i in issues), (field, path, issues)
+    assert not [i for i in validate_state(solver.state_dict(), **solver.grader_scope())
+                if ".refactory" in i.message]
 
 
 def test_turns_are_capped_and_the_last_code_runs_again(tmp_path, sb_env):
@@ -749,7 +820,8 @@ def test_code_that_removes_its_output_loses_the_prediction(tmp_path, sb_env):
     remove = "```python\nimport os\nos.remove(OUTPUT_PATH)\n```"
     result, _ = _walk(tmp_path, "train", [_good(41), remove], gold_feedback=True, max_turns=2)
     (record,) = result.item_records
-    assert record["fail_reason"].startswith("exec-error: FileNotFoundError")
+    assert record["fail_reason"].startswith(
+        "first attempt wrong (still wrong after gold feedback); exec-error: FileNotFoundError")
 
 
 def test_an_item_with_no_case_scores_zero_without_a_call(tmp_path, sb_env):
@@ -764,7 +836,8 @@ def test_an_empty_last_reply_fails_the_item_whatever_ran_before(tmp_path, sb_env
     """rollout.py:783-786 checks the last code before the prediction: a train item whose
     wrong clean run is followed by an empty reply fails as empty-code-block."""
     result, _ = _walk(tmp_path, "train", [_good(41), ""], gold_feedback=True, max_turns=2)
-    assert result.item_records[0]["fail_reason"] == "empty-code-block"
+    assert result.item_records[0]["fail_reason"] == \
+        "first attempt wrong (still wrong after gold feedback); empty-code-block"
 
 
 def _ctx(workdir: Path, **knobs: Any) -> RunContext:
@@ -1116,7 +1189,10 @@ def test_skillopt_view_rebuilds_the_rollout(tmp_path, sb_env):
     assert roles == ["assistant", "user", "assistant", "user", "assistant", "system"]
     assert view["conversation"][-1]["content"].startswith(
         "[POST-EXECUTION VERIFICATION]\n\n## Eval Result (case 1): PASS")
-    assert view["hard"] == 1 and view["n_turns"] == 3
+    assert view["n_turns"] == 3
+    # Right only after the gold feedback: a failure on its first attempt, for the analysts.
+    assert (view["hard"], view["fail_reason"]) == \
+        (0, "first attempt wrong (right after gold feedback)")
 
 
 # ── both runtimes ───────────────────────────────────────────────────────────
