@@ -1832,43 +1832,63 @@ _FAILING_LINE_LIMIT = 2_000
 _MERGE_REASON_LIMIT = 500
 _FAILING_TESTS = "failing tests ("
 _NONE_READ = "no failing test could be read from the check's output"
+_STOPPED = "stopped ("
+_KILLED = "killed by signal "
+
+
+def _merge_check_status(result: Any) -> str:
+    """How the check ended when it did not exit by itself: stopped (and why) or killed by a
+    signal; empty for an ordinary non-zero exit."""
+    import signal as _signal
+
+    if result.timed_out and result.stop_reason():
+        return f"{_STOPPED}{result.stop_reason()})"
+    rc = result.returncode
+    if isinstance(rc, int) and rc < 0:
+        try:
+            name = f" ({_signal.Signals(-rc).name})"
+        except ValueError:
+            name = ""
+        return f"{_KILLED}{-rc}{name}"
+    if result.timed_out:
+        return f"{_STOPPED}time limit)"
+    return ""
 
 
 def _merge_check_failure(result: Any) -> str:
     """The record of a check that failed on the merged result (D17).
 
-    First line, the failing tests `base_check.parse_test_failures` reads from either stream,
-    or that none could be read; then each stream's head and tail, labelled. A test runner
-    can print warnings on stderr and its failures and summary on stdout, so neither stream
-    alone says why the check failed.
+    First line: how the check ended when it was stopped or killed, then the failing tests
+    `base_check.parse_test_failures` reads from either stream, or that none could be read.
+    Then each stream's head and tail, labelled. A test runner can print warnings on stderr
+    and its failures and summary on stdout, so neither stream alone says why the check
+    failed. Credential values are hidden, as in the pull request (`_public`).
     """
     from refactory_dsh import base_check, sandbox
 
     streams = {label: base_check.strip_ansi(text or "").strip()
                for label, text in (("stdout", result.stdout), ("stderr", result.stderr))}
     failing = sorted(base_check.parse_test_failures("\n".join(streams.values())))
+    status = _merge_check_status(result)
     if failing:
-        first = _shorten(f"{_FAILING_TESTS}{len(failing)}): " + "; ".join(failing),
-                         _FAILING_LINE_LIMIT)
+        found = f"{_FAILING_TESTS}{len(failing)}): " + "; ".join(failing)
     else:
-        how = result.stop_reason() if result.timed_out else ""
-        first = f"{_NONE_READ} ({how or f'exit {result.returncode}'})"
-    parts = [first]
+        found = _NONE_READ + ("" if status else f" (exit {result.returncode})")
+    parts = [_shorten("; ".join(filter(None, (status, found))), _FAILING_LINE_LIMIT)]
     for label, text in streams.items():
         if text:
             kept = sandbox._Output(MERGE_CHECK_KEEP, MERGE_CHECK_TAIL)
             kept.add(text.encode())
             parts.append(f"[{label}]\n{kept.text()}")
-    if len(parts) == 1:
-        parts.append(result.problem() or "check failed")
-    return "\n".join(parts)
+    return _public("\n".join(parts))
 
 
 def _merge_check_reason(check_failed: str) -> str:
-    """What the kept-local reason says of ``check_failed``: the failing tests, or that none
-    could be read, within ``_MERGE_REASON_LIMIT``; any other failure's start."""
+    """What the kept-local reason says of ``check_failed``: how the check ended and its
+    failing tests, or that none could be read, within ``_MERGE_REASON_LIMIT``; any other
+    failure's start."""
     first = check_failed.split("\n", 1)[0]
-    if first.startswith((_FAILING_TESTS, _NONE_READ)):
+    if first.startswith((_FAILING_TESTS, _NONE_READ, _STOPPED, _KILLED)):
         return _shorten(first, _MERGE_REASON_LIMIT)
     return check_failed[:_MERGE_REASON_LIMIT]
 

@@ -696,7 +696,6 @@ def test_merged_result_fails_check(github, tmp_path, monkeypatch, capsys):
                 "worktree should not be marked succeeded when the merged check failed"
 
 
-
 #: What a vitest check prints on stdout when two tests fail: the failures, then the summary.
 _VITEST_FAILURES = """\
  RUN  v1.6.0 /repo
@@ -784,6 +783,65 @@ def test_merged_check_failure_says_when_no_test_could_be_read():
     assert len(kept) < 2 * delivery.MERGE_CHECK_KEEP + 500
     reason = delivery._merge_check_reason(kept)
     assert reason.startswith("no failing test could be read") and len(reason) <= 500
+
+
+def test_merged_check_failure_names_tests_the_bound_leaves_out():
+    """D17: the failing tests are read before each stream is cut to its head and tail, so
+    FAIL lines in the middle of a long output still reach the first line."""
+    from refactory_dsh import sandbox
+
+    noise = "\n".join(f"stdout line {i:04d} " + "x" * 60 for i in range(150))
+    stdout = (f"{noise}\n FAIL  src/a.test.ts > parser > rejects empty input\n"
+              f" FAIL  src/a.test.ts > parser > keeps the newline\n{noise}\n"
+              " Test Files  1 failed (1)\n")
+    assert len(stdout) > 2 * delivery.MERGE_CHECK_KEEP
+    kept = delivery._merge_check_failure(sandbox.SandboxResult(ok=False, returncode=1,
+                                                               stdout=stdout))
+    first, rest = kept.split("\n", 1)
+    assert "parser > rejects empty input" not in rest and "bytes of output not kept" in rest
+    assert first == ("failing tests (2): src/a.test.ts > parser > keeps the newline; "
+                     "src/a.test.ts > parser > rejects empty input"), first
+
+
+def test_merged_check_failure_says_a_stopped_check_was_stopped(tmp_path):
+    """D17: a check stopped for inactivity after printing a failure says it was stopped,
+    then names the failure, in the record and in the kept-local reason."""
+    from refactory_dsh import sandbox
+
+    result = sandbox.run_command(
+        f"{sys.executable} -c \"import time; print('FAILED tests/t.py::test_a - boom', "
+        f"flush=True); time.sleep(60)\"", workdir=tmp_path, timeout_s=3)
+    assert result.timed_out and result.timeout_kind == "inactivity", result
+    kept = delivery._merge_check_failure(result)
+    first = kept.split("\n", 1)[0]
+    assert first.startswith("stopped (inactivity, 3s silent)"), first
+    assert first.endswith("; failing tests (1): tests/t.py::test_a"), first
+    assert delivery._merge_check_reason(kept) == first
+
+
+def test_merged_check_failure_says_a_killed_check_was_killed_once():
+    """D17: a check killed by a signal with no stop reason (a budget kill) says which
+    signal, not ``exit -9``; output that is empty adds nothing after the first line."""
+    from refactory_dsh import sandbox
+
+    kept = delivery._merge_check_failure(sandbox.SandboxResult(ok=False, returncode=-9))
+    assert kept == f"killed by signal 9 (SIGKILL); {delivery._NONE_READ}", kept
+    plain = delivery._merge_check_failure(sandbox.SandboxResult(ok=False, returncode=1))
+    assert plain == f"{delivery._NONE_READ} (exit 1)", plain
+
+
+def test_merged_check_failure_hides_credentials():
+    """D17: a credential the check printed is hidden in the record, as `_flat` hides it in
+    the pull request."""
+    from refactory_dsh import sandbox
+
+    token = "ghp_" + "a1B2" * 9
+    kept = delivery._merge_check_failure(sandbox.SandboxResult(
+        ok=False, returncode=1, stdout="FAILED tests/t.py::test_a - boom",
+        stderr=f"env: GITHUB_TOKEN={token} HOME=/home/x"))
+    assert token not in kept and "GITHUB_TOKEN=***" in kept, kept
+    assert "HOME=/home/x" in kept
+
 
 def test_generated_content_equals_base_version_still_merges(github, tmp_path, monkeypatch):
     """When the merged generated content equals the base's version, the file is still
