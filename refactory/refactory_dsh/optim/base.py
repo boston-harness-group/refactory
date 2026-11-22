@@ -1186,6 +1186,11 @@ class ProposalContext:
     #: Whether a new step's tools can run sealed on this machine (`workspace.sealed_available`);
     #: only then do the compositions show a tool step.
     new_node_tools: bool = False
+    #: The run's original seed's agent steps whose tool rule no edit may change, by id,
+    #: with that rule (`analysts.fixed_tool_rules`: ``tool_policy`` ``none`` or
+    #: ``refused``, which `_tool_policy_escalated` holds every candidate to); ``None``
+    #: when the run recorded no seed, so an attempt holds the edited candidate to its own.
+    fixed_tool_rules: dict[str, str] | None = None
     #: What a new agent step may choose for its own route, field by field
     #: (`workers.StepRoutes.offered`); empty offers no route, and the request says none.
     step_routes: dict[str, list[str]] = field(default_factory=dict)

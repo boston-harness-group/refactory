@@ -11,7 +11,8 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   item whole would take its call past ``ANALYST_ROOM`` (`batches`, `packer`): no item
   is cut to fit, the evidence is split across more calls. One call per batch. Each analyst
   sees the pipeline in the proposer's words (`pipeline_text`: the pipeline view and each
-  step's settings, as SkillOpt's analyst sees the current skill) and each item's full trace
+  step's settings, as SkillOpt's analyst sees the current skill), what an edit can build
+  in this run (`buildable_lines`) and each item's full trace
   (`evidence.TRACE_FORM`). It writes at most
   ``FINDINGS_PER_ANALYST`` findings (SkillOpt's analyst edit budget L, 4): what goes
   wrong, where in the graph (nodes, edges, settings, the structure) and what change
@@ -315,6 +316,74 @@ def _changes_text(ctx: Any, kind: str = "failure") -> str:
                               getattr(ctx, "edit_check", None)) if kind == "failure" else ())])
 
 
+def fixed_tool_rules(seed_state: Mapping[str, Any] | None) -> dict[str, str] | None:
+    """The seed's agent steps whose tool rule no edit may change, by id, with that rule:
+    ``tool_policy`` ``none`` or ``refused``, which an attempt holds every candidate to
+    (`base._tool_policy_escalated`, ``E-tool-policy-escalation``). ``None`` without a seed."""
+    from refactory_dsh.tool_policy import no_effect
+
+    if not isinstance(seed_state, Mapping):
+        return None
+    nodes = (seed_state.get("graph") or {}).get("nodes") or {}
+    return {str(node_id): str(node.get("tool_policy")) for node_id, node in nodes.items()
+            if isinstance(node, Mapping) and node.get("kind") == "agent"
+            and no_effect(node.get("tool_policy"))}
+
+
+def buildable_lines(ctx: Any) -> list[str]:
+    """What an edit can build in this run, from its graph and settings, as plain facts
+    (no example, no suggestion): which existing steps' tool rules are fixed
+    (`fixed_tool_rules`, or without a recorded seed the edited graph's own ``none`` and
+    ``refused`` steps, as an attempt reads them); whether a new agent step may have tools
+    -- the operations of the run's catalogue whose step takes ``tools``
+    (`nn.core_ops.OPERATORS`), sealed when the run can run a sealed step
+    (``ctx.new_node_tools``, `workspace.sealed_steps`), else none; and which steps are
+    protected. Each line is what an attempt accepts or refuses (``E-tool-policy-escalation``,
+    ``E-new-node-tools``, ``E-protected``)."""
+    from refactory_dsh.nn.core_ops import OPERATORS
+    from refactory_dsh.seal import SEALED_TOOLS
+    from refactory_dsh.tool_policy import no_effect
+
+    steps = {str(n.get("id")): n for n in getattr(ctx, "node_states", None) or ()
+             if isinstance(n, Mapping) and n.get("kind") == "agent"}
+    rules = getattr(ctx, "fixed_tool_rules", None)
+    if rules is None:
+        rules = {node_id: str(n.get("tool_policy")) for node_id, n in steps.items()
+                 if no_effect(n.get("tool_policy"))}
+    fixed = [(node_id, rule) for node_id, rule in rules.items() if node_id in steps]
+    lines = []
+    if fixed:
+        lines.append("- Fixed tool rules: " + "; ".join(
+            f"`{node_id}` ({'no tools' if rule == 'none' else 'tools refused'}, "
+            f"tool_policy `{rule}`)" for node_id, rule in fixed)
+            + ". No edit gives these steps tools or changes their rule: an attempt that does "
+            "is refused (E-tool-policy-escalation).")
+    adders = [str(c.get("op")) for c in getattr(ctx, "catalogue", None) or ()
+              if "tools" in ((OPERATORS.get(str(c.get("op"))) or {}).get("fields") or ())]
+    if adders:
+        named = ", ".join(f"`{op}`" for op in adders)
+        lines.append(
+            f"- New steps' tools: a new agent step ({named}) may list tools from "
+            f"{', '.join(f'`{t}`' for t in SEALED_TOOLS)}; it runs sealed, in a fresh "
+            "workspace holding only the files it reads, with no other item's files, no "
+            "grader files and no network." if getattr(ctx, "new_node_tools", False) else
+            f"- New steps' tools: in this run a new agent step ({named}) has no tools; one "
+            "that lists any is refused (E-new-node-tools).")
+    protected = [str(p) for p in getattr(ctx, "protected", None) or ()]
+    if protected:
+        lines.append(f"- Protected steps: {', '.join(f'`{p}`' for p in protected)}. An edit "
+                     "may not remove them, change their declarations or out-edges, move a knob "
+                     "they read, or let a run finish without them (E-protected).")
+    return lines
+
+
+def _buildable_text(ctx: Any) -> str:
+    """"What an edit can build in this run" (`buildable_lines`); empty when it says nothing."""
+    lines = buildable_lines(ctx)
+    return ("## What an edit can build in this run\n" + "\n".join(lines) + "\n\n"
+            if lines else "")
+
+
 def _memory_text(ctx: Any) -> str:
     """The loop's memory note (`optim.memory`), as SkillOpt's analysts and merges read
     its optimizer meta skill; empty without one."""
@@ -527,7 +596,7 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
              f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}\n\n"
-             f"{_objective_text(ctx)}{_memory_text(ctx)}"
+             f"{_buildable_text(ctx)}{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              f"Each item in full: {evidence.TRACE_FORM}.\n\n"),
             f"\n\n## Answer\n{answer}")

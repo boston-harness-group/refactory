@@ -1129,7 +1129,15 @@ paired with a parent picker), on the train records the request carries:
   analysts. Each reads the pipeline in the proposer's words, from the same renderers:
   the pipeline view and each step's settings with their values (a paragraph the steps'
   texts share read once, since an analyst never patches) -- no node table or node JSON
-  -- and each item's full trace: its input, every step's input and output in the order
+  -- then "What an edit can build in this run" (`analysts.buildable_lines`, failure and
+  success analysts alike), plain facts from the run's graph and settings, each what an
+  attempt decides: the seed's steps whose tool rule (`tool_policy` `none` or `refused`)
+  no edit may change (`E-tool-policy-escalation`); whether a new agent step from an
+  operation of the run's catalogue that takes `tools` (`insert`, `map`, `fallback`) may
+  list them -- sealed, in a fresh workspace with only the files it reads and no
+  network, when the run can run a sealed step, else not (`E-new-node-tools`); and the
+  protected steps (`E-protected`); no example and no suggestion --
+  and each item's full trace: its input, every step's input and output in the order
   they ran, the expected answer, the prediction, the score and the grader's feedback. Each item's heading
   carries the item fields its Task declares (`Task.item_metadata`, read by
   `Task.item_meta`; LiveMath shows `task_type` exactly as SkillOpt's analysts see it,

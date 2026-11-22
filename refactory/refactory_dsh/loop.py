@@ -6019,6 +6019,8 @@ class Loop(OuterLoop):
                  else self.leaderboard(None if self.selection_mode() == "pool" else 8))
         described, graph_note = self._describe_parent(board)
         sandbox = self._sandbox_answer()
+        from refactory_dsh.optim import analysts
+
         return ProposalContext(
             epoch=self.epoch,
             generation=self.generation,
@@ -6105,6 +6107,7 @@ class Loop(OuterLoop):
             edit_levels=[l for l in self._levels_wanted if l not in self._levels_done],
             strategy_name=str(getattr(self._custom_strategy, "name", "") or self.name),
             new_node_tools=self._tools_offered(),
+            fixed_tool_rules=analysts.fixed_tool_rules(self._original_seed_state),
             step_routes=(self.optimizer.step_routes.offered()
                          if getattr(self.optimizer, "step_routes", None) is not None else {}),
             time_facts=self._time_facts(board),
