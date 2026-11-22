@@ -908,6 +908,76 @@ def test_the_solve_call_has_no_wall():
     assert "item_budget_s" not in sb_mode.Solver().values()
 
 
+#: The solver's state as main saved it before the input was an item file (e11cdc204b's
+#: ``Solver().state_dict()``): what a run started then holds for every candidate.
+STATE_BEFORE_ITEM_FILES = Path(__file__).parent / "fixtures" / \
+    "spreadsheetbench_state_before_item_files.json"
+
+
+def _walk_state(tmp_path: Path, state: dict[str, Any], name: str) -> tuple[Any, list[str], Path]:
+    from refactory_dsh.nn.edits import configure
+
+    for knob, value in {"data_parallelism": 1, "turn_pause_s": 0}.items():
+        state = configure(state, knob, value)
+    work = tmp_path / name
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=["t1"])
+    task_module.write_subset(work, "val", 0.0)
+    model = FakeModel([_good(7)])
+    result = WalkerEvaluator(model=model, project=Path("."), max_steps=4000).evaluate(
+        sb_mode.Solver(state=state), state, work)
+    return result, model.prompts, work
+
+
+def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_env):
+    """[walker end to end] A candidate state saved before item files (main's, verbatim) is
+    upgraded by the mode (`Solver.upgrade_state`): it becomes exactly this version's state,
+    says so, records it in its run, and scores as a fresh state with the same prompts."""
+    old = json.loads(STATE_BEFORE_ITEM_FILES.read_text())
+    with pytest.warns(UserWarning, match="a saved state was upgraded"):
+        upgraded = sb_mode.Solver(state=old)
+    assert upgraded.state_dict() == sb_mode.Solver().state_dict()
+    assert len(upgraded.state_upgrades) == 4
+    assert sb_mode.Solver(state=sb_mode.Solver().state_dict()).state_upgrades == ()
+    runs = {}
+    with pytest.warns(UserWarning):
+        runs["old"] = _walk_state(tmp_path, old, "old")
+    runs["new"] = _walk_state(tmp_path, sb_mode.Solver().state_dict(), "new")
+    seen = {}
+    for name, (result, prompts, work) in runs.items():
+        assert result.exit_ok, (name, result.error)
+        seen[name] = ([(r["id"], r["passed"], r["score"], r.get("fail_reason"))
+                       for r in result.item_records], prompts)
+    assert seen["old"] == seen["new"] and seen["new"][0] == [("v1", True, 1.0, None)], seen
+    from refactory_dsh.nn.mode import STATE_UPGRADES
+
+    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 4
+    assert not (runs["new"][2] / STATE_UPGRADES).exists()
+
+
+def test_the_spine_runs_a_state_saved_before_item_files_upgraded(tmp_path, monkeypatch):
+    """[the spine's entry, `dsh_runtime.evaluate_on_dsh`] The state lowered for DSH is the
+    upgraded one, and the run records the upgrade, as on the walker."""
+    from refactory_dsh import dsh_runtime
+    from refactory_dsh.nn.mode import STATE_UPGRADES
+
+    lowered = {}
+
+    class Lowered(Exception):
+        pass
+
+    def run_on_dsh(state, workdir, **kwargs):
+        lowered["state"] = state
+        raise Lowered
+
+    monkeypatch.setattr(dsh_runtime, "run_on_dsh", run_on_dsh)
+    old = json.loads(STATE_BEFORE_ITEM_FILES.read_text())
+    with pytest.raises(Lowered):
+        dsh_runtime.evaluate_on_dsh(sb_mode.Solver(), old, tmp_path)
+    assert lowered["state"] == sb_mode.Solver().state_dict()
+    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 4
+
+
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):
     task = tasks.SpreadsheetBenchTask()
     t1 = task.instances()[0]

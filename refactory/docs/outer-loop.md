@@ -2159,10 +2159,19 @@ the default produces the same digest as before, so it still resumes.
 The data node declares each in its `writes` (V12), so any step of the pass can read one:
 a new sealed step names it in `sees` (or names the data node) and gets a copy in its
 workspace; an op opens one through `ctx.item_file(role)`, which refuses (at run time, on
-both runtimes) a file the op does not list in its `reads`. An item file is what the item
-gives its solver, never its answer: a path the grader reads or writes is refused when the
-Task is checked, `setup` must lay each as a regular file (a link is refused and fails the
-item), and grader-only fields stay out of the pass as before. The pipeline view's
+both runtimes) a file the op does not list in its `reads`, as do the context's
+`read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
+never its answer: a path the grader reads or writes is refused when the Task is checked
+(names compared case- and width-folded), `item_files` is a class attribute read the same
+way everywhere, and `setup` must lay each as a regular file of its own (a symbolic or hard
+link is refused and fails the item); grader-only fields stay out of the pass as before.
+
+**Saved states of an earlier version.** A mode may upgrade a state an earlier version of
+it saved (`Mode.upgrade_state`): only declarations its own ops now need, never what an
+edit chose. Both runtimes apply it (`Mode.load_state_dict` on the walker,
+`dsh_runtime.evaluate_on_dsh` on the spine), warn, and record each change in the run's
+`.refactory/state-upgrades.json`. SpreadsheetBench uses it so a candidate saved before
+its input was an item file declares `item/input.xlsx` and runs as it did. The pipeline view's
 `per item` line names each item file and the steps that read it.
 
 **`to` an agent whose prompt is no knob.** `insert` (and `branch`, `map`) with `to` naming

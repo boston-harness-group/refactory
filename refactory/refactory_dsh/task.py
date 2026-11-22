@@ -36,6 +36,7 @@ import importlib
 import inspect
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -231,6 +232,14 @@ def _task_class(ref: str) -> type[Task] | None:
     return cls if isinstance(cls, type) and issubclass(cls, Task) else None
 
 
+def _folded(text: str) -> str:
+    """``text`` as names are compared: NFKC, without invisible format characters, and
+    case-folded, so ``Answer.txt`` or a full-width form names ``answer.txt``."""
+    kept = "".join(c for c in unicodedata.normalize("NFKC", text)
+                   if unicodedata.category(c) != "Cf")
+    return kept.casefold()
+
+
 def checked_item_files(task: Task | type[Task]) -> dict[str, str]:
     """``task``'s item files (`Task.item_files`) as ``{role: path}``, each checked: a role
     is a word; a path is relative, normalised and inside the pass (no ``..``, no ``.``
@@ -242,13 +251,20 @@ def checked_item_files(task: Task | type[Task]) -> dict[str, str]:
     from refactory_dsh.items import FACTS, GRADER_FILES, PASS_INFRA
     from refactory_dsh.nn.executor import CURRENT_ITEM
 
-    name = getattr(task, "name", "") or getattr(task, "__name__", "") or type(task).__name__
-    declared = getattr(task, "item_files", None) or {}
+    # One declaration for the class and every instance, read the one way: the validator
+    # and the view read the class, the runtimes an instance.
+    cls = task if isinstance(task, type) else type(task)
+    name = getattr(cls, "name", "") or cls.__name__
+    if not isinstance(task, type) and any(
+            key in vars(task) for key in ("item_files", "graded_files", "grader_outputs")):
+        raise TaskError(f"Task {name!r} sets item_files, graded_files or grader_outputs on an "
+                        "instance; they are class attributes, read the same everywhere")
+    declared = getattr(cls, "item_files", None) or {}
     if not isinstance(declared, Mapping):
         raise TaskError(f"Task {name!r} item_files is {{role: path}}, not {declared!r}")
-    grader = {str(n) for n in (*(getattr(task, "graded_files", ()) or ()),
-                               *(getattr(task, "grader_outputs", ()) or ()))}
-    runtime = {CURRENT_ITEM, FACTS, *GRADER_FILES, *PASS_INFRA}
+    grader = {_folded(str(n)) for n in (*(getattr(cls, "graded_files", ()) or ()),
+                                        *(getattr(cls, "grader_outputs", ()) or ()))}
+    runtime = {_folded(n) for n in (CURRENT_ITEM, FACTS, *GRADER_FILES, *PASS_INFRA)}
     out: dict[str, str] = {}
     for role, path in declared.items():
         if not isinstance(role, str) or not _ROLE.fullmatch(role):
@@ -260,15 +276,19 @@ def checked_item_files(task: Task | type[Task]) -> dict[str, str]:
                 or any(part in ("", ".", "..") for part in pure.parts)):
             raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is not a normalised "
                             "path inside the item's pass")
-        if pure.parts[0] == ".refactory" or path in runtime:
+        if any(unicodedata.category(c) in ("Cc", "Cf") for c in path):
+            raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} holds a control or "
+                            "invisible character")
+        folded = _folded(path)
+        if _folded(pure.parts[0]) == ".refactory" or folded in runtime:
             raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is one of the "
                             "runtime's own files")
-        if path in grader or pure.name in grader:
+        if folded in grader or _folded(pure.name) in grader:
             raise TaskError(f"Task {name!r} item_files[{role!r}] = {path!r} is a file the grader "
                             "reads or writes (graded_files, grader_outputs): an item file is "
                             "what the item gives its solver, never what it is graded on")
         out[role] = path
-    paths = sorted(out.values())
+    paths = sorted(_folded(p) for p in out.values())
     for index, path in enumerate(paths):
         if path in paths[index + 1:] or any(other.startswith(path + "/") for other in paths):
             raise TaskError(f"Task {name!r} item_files: {path!r} is named twice or is the "
@@ -305,8 +325,14 @@ def check_laid_item_files(task: Task | None, workspace: Path) -> None:
             if stat.S_ISLNK(mode) or (current != target and not stat.S_ISDIR(mode)):
                 raise TaskError(f"item file {path!r} ({role}) is reached through a link: "
                                 "setup must lay it into the pass as a file of its own")
-        if not stat.S_ISREG(os.lstat(target).st_mode):
+        found = os.lstat(target)
+        if not stat.S_ISREG(found.st_mode):
             raise TaskError(f"item file {path!r} ({role}) is not a regular file")
+        if found.st_nlink > 1:
+            # A hard link shares its content with a file outside the pass (the answer's,
+            # say): a copy of its own is what a step may read.
+            raise TaskError(f"item file {path!r} ({role}) is a hard link to another file: "
+                            "setup must lay it into the pass as a file of its own")
 
 
 def graded_files(state: Mapping[str, Any]) -> tuple[str, ...] | None:

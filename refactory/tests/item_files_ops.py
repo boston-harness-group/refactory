@@ -76,6 +76,29 @@ def read_input(ctx: Any) -> dict[str, Any]:
     return {"echo": text}
 
 
+def peek_input(ctx: Any) -> dict[str, Any]:
+    """Read the item's input by name through the context's read helper, not `item_file`."""
+    text = ctx.read_text(INPUT)
+    ctx.write_text(ANSWER, text)
+    return {"echo": text}
+
+
+class GoldHardLinkTask(FileTask):
+    """A Task whose ``setup`` lays the item file as a hard link to the answer kept outside
+    the pass: refused like a symbolic one."""
+
+    name = "item_files_gold_hard_link"
+
+    def setup(self, instance: TaskInstance, workspace: Path) -> None:
+        import os
+
+        outside = Path(workspace).parent / f"gold-{instance.id}.txt"
+        outside.write_text(gold(instance.id))
+        target = Path(workspace) / INPUT
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(outside, target)
+
+
 class ItemFilesMode(nn.Mode):
     """A data pass whose one op reads the item file: ``reads`` says whether the op
     declares it (`RunContext.item_file` refuses it when it does not)."""
@@ -84,6 +107,7 @@ class ItemFilesMode(nn.Mode):
     task_ref = f"{MODULE}:FileTask"
     reads: tuple[str, ...] = (INPUT,)
     data_writes: tuple[str, ...] = ("current_item.json", INPUT)
+    call = f"{MODULE}:read_input"
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
@@ -96,7 +120,7 @@ class ItemFilesMode(nn.Mode):
                           task_ref=self.task_ref, writes=self.data_writes,
                           produces=("item_scores",), parallelism_knob="data_parallelism",
                           knobs=("data_parallelism",)))
-        graph.add(nn.Node("read", "op", call=f"{MODULE}:read_input", reads=self.reads,
+        graph.add(nn.Node("read", "op", call=self.call, reads=self.reads,
                           writes=(ANSWER,), produces=("echo",)))
         return graph
 
@@ -110,6 +134,28 @@ class UndeclaredRead(ItemFilesMode):
 
     name = "item_files_undeclared"
     reads = ()
+
+
+class UndeclaredReadText(ItemFilesMode):
+    """The op reads the item file by name through ``ctx.read_text`` without declaring it."""
+
+    name = "item_files_undeclared_read_text"
+    reads = ()
+    call = f"{MODULE}:peek_input"
+
+
+class DeclaredReadText(UndeclaredReadText):
+    """The same op, declaring the item file: allowed."""
+
+    name = "item_files_declared_read_text"
+    reads = (INPUT,)
+
+
+class GoldHardLink(ItemFilesMode):
+    """The Task lays its item file as a hard link to the answer."""
+
+    name = "item_files_gold_hard_link"
+    task_ref = f"{MODULE}:GoldHardLinkTask"
 
 
 class GoldLink(ItemFilesMode):

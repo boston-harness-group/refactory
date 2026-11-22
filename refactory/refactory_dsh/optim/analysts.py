@@ -309,7 +309,8 @@ def _changes_text(ctx: Any, kind: str = "failure") -> str:
     return "\n".join([*operation_lines(
         ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
         knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-        step_routes=getattr(ctx, "step_routes", None)),
+        step_routes=getattr(ctx, "step_routes", None),
+        tools=bool(getattr(ctx, "new_node_tools", False))),
         *(applicability_lines(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
                               getattr(ctx, "edit_check", None)) if kind == "failure" else ())])
 

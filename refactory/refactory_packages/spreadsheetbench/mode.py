@@ -69,6 +69,8 @@ from .tasks import INPUT
 
 OPS = "refactory_packages.spreadsheetbench.ops"
 TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask"
+#: The ops that open the item's input (`RunContext.item_file`), so declare it in reads.
+INPUT_READERS = (f"{OPS}:prepare", f"{OPS}:run_turn", f"{OPS}:finalize")
 
 #: The Claude Code SkillOpt's runs used (the lab's ``claude --version``): its system
 #: prompt and tool text are what the solve call is compared with.
@@ -172,6 +174,31 @@ class Solver(nn.Mode):
         g.connect("turn_gate", "frame", condition="reloop")
         g.connect("turn_gate", "finalize", condition="proceed")
         return g
+
+    @classmethod
+    def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """A state saved before the input was an item file (`tasks.INPUT`): each data node
+        of this Task declares it in its writes, and each node running one of the ops that
+        open it (`ops.prepare`, ``run_turn``, ``finalize``, by call, whatever its id)
+        declares it in its reads, as this version's graph does. Nothing else changes."""
+        state = copy.deepcopy(dict(state))
+        nodes = (state.get("graph") or {}).get("nodes") or {}
+        notes: list[str] = []
+        if not any(n.get("kind") == "data" and n.get("task_ref") == TASK for n in nodes.values()):
+            return state, notes
+        for node_id, node in sorted(nodes.items()):
+            if node.get("kind") == "data" and node.get("task_ref") == TASK:
+                key = "writes"
+            elif node.get("call") in INPUT_READERS:
+                key = "reads"
+            else:
+                continue
+            declared = list(node.get(key) or [])
+            if INPUT not in declared:
+                node[key] = [*declared, INPUT]
+                notes.append(f"{node_id} now declares {INPUT} in its {key} (a state saved "
+                             "before the input was an item file)")
+        return state, notes
 
     def claude_code_versions(self) -> dict[str, str]:
         """The solve step runs on SkillOpt's Claude Code (`SKILLOPT_CLAUDE_CODE`)."""

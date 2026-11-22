@@ -1485,7 +1485,7 @@ class ProposalContext:
             *operation_lines(self.catalogue, self.node_states, self.edges,
                              protected=self.protected,
                              knob_values={k.get("name"): k.get("value") for k in self.knobs},
-                             step_routes=self.step_routes),
+                             step_routes=self.step_routes, tools=self.new_node_tools),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1589,12 +1589,13 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                     node_states: Sequence[dict[str, Any]] = (),
                     edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
                     knob_values: Mapping[str, Any] | None = None,
-                    step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
+                    step_routes: Mapping[str, Sequence[str]] | None = None,
+                    tools: bool = True) -> list[str]:
     """The operations a request offers, each said once: the written-out operations in a
     table (fields and description), then the core operators, one line and one example each
     (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
     use" and the analysts' "The changes the optimizer can make" are both this, word for
-    word."""
+    word. Without ``tools`` (the run offers no tool step) no operator offers 'tools'."""
     core = set(CORE_OPERATORS)
     written = [c for c in catalogue if c.get("op") not in core]
     lines = [_table(["op", "kind", "macro", "fields", "description"],
@@ -1602,7 +1603,8 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                       _edit_fields(c.get("fields") or ()), c.get("description")]
                      for c in written])] if written else []
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
-                                  knob_values=knob_values, step_routes=step_routes)
+                                  knob_values=knob_values, step_routes=step_routes,
+                                  tools=tools)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -2627,7 +2629,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
 def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                    knob_values: Mapping[str, Any] | None = None,
-                   step_routes: Mapping[str, Sequence[str]] | None = None) -> list[str]:
+                   step_routes: Mapping[str, Sequence[str]] | None = None,
+                   tools: bool = True) -> list[str]:
     """"Structural operators": what the system wires for every one, then each core operator
     the run permits in one line -- its fields and its catalogue description (its
     `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
@@ -2660,6 +2663,9 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
         description = str(entry.get("description") or f"{spec['line']}.")
         fields = [f for f in entry.get("fields") or spec["fields"]
                   if step_routes or f != core_ops.ROUTE_FIELD]
+        if not tools:
+            # A run that offers no tool step offers no 'tools' (`NO_TOOLS_LINE`).
+            description, fields = core_ops.without_tools(description, fields)
         lines.append(f"- `{name}` ({_core_fields(fields)}): "
                      f"{description} E.g. " + json.dumps(core_ops.example(name, own)))
     if step_routes:

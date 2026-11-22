@@ -3340,6 +3340,23 @@ def route_field_line(offered: Mapping[str, Sequence[str]]) -> str:
             + json.dumps({ROUTE_FIELD: {key: vals[0] for key, vals in offered.items()}}))
 
 
+#: What the insert line says of 'tools', and the map line: dropped from the request, with
+#: the 'tools' field, in a run that offers no tool step (`without_tools`).
+INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
+                + "; a new step may have them though the steps beside it have none or refuse "
+                "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
+                "files it sees (an item's files too), no network, no grader files")
+MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+
+
+def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
+    """An operator's request line and fields with no offer of tools: for a run where a new
+    step has none (no seal, or ``new_step_tools`` off)."""
+    for clause in (INSERT_TOOLS, MAP_TOOLS):
+        description = description.replace(clause, "")
+    return description, [f for f in fields if f != "tools"]
+
+
 #: Each operator: its catalogue fields, its one line for the request, and one example
 #: with placeholders (``<step>``, ``<next step>``, ``<fork>``, ``<gate>``).
 OPERATORS: dict[str, dict[str, Any]] = {
@@ -3351,10 +3368,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "'system' its system prompt), code (text = Python) or op (with 'call' and "
                 "'reads'); it sees what that step sees plus its outputs; "
                 + REACHES.format(where="after it")
-                + "; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
-                + "; a new step may have them though the steps beside it have none or "
-                "refuse theirs (an existing step keeps its own tool rules); it runs sealed: "
-                "only the files it sees (an item's files too), no network, no grader files"
+                + INSERT_TOOLS
                 + "; 'takes_over' an earlier step: the new step writes that step's outputs, "
                 "so what read them reads the new step's (a choice among attempts reaching "
                 "what is scored), and that step's own go under new names",
@@ -3473,7 +3487,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 f"{MAP_MAX[2]}; past it the first 'max', and the combine is told so); 'text' "
                 "says what to do with one element; 'combine' (a step as in insert) sees every "
                 "result and writes one output, placed as insert's is; 'system' as insert's, "
-                "for each run; 'tools' as insert's: each run sealed; remove the elements step or the combine and the whole map "
+                "for each run" + MAP_TOOLS + "; remove the elements step or the combine and the whole map "
                 "goes",
         "example": {"op": "map", "after": "<step>", "over": "<step>",
                     "text": "<what to do with one element>",

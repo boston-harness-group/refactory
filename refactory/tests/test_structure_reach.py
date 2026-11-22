@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -88,17 +89,56 @@ def test_an_op_that_does_not_declare_an_item_file_is_refused_it(tmp_path, runtim
         str(records[0].get("error_text")), records
 
 
+@pytest.mark.parametrize("parallelism", [1, 2])
+@pytest.mark.parametrize("mode_cls,says", [(ifo.GoldLink, "is reached through a link"),
+                                           (ifo.GoldHardLink, "is a hard link")],
+                         ids=["symlink", "hard link"])
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_an_item_file_laid_as_a_link_to_the_answer_fails_the_item(tmp_path, runtime):
-    """[walker, spine] A Task whose setup links an item file to the answer outside the pass
-    is refused before any step runs; the answer reaches no record."""
-    records, ok = _records(ifo.GoldLink, runtime, tmp_path)
+def test_an_item_file_laid_as_a_link_to_the_answer_fails_the_item(tmp_path, runtime, mode_cls,
+                                                                 says, parallelism):
+    """[walker, sequential and concurrent; spine] A Task whose setup links an item file
+    (symbolically or hard) to the answer outside the pass is refused before any step runs;
+    the answer reaches no record."""
+    if runtime == "spine" and parallelism != 1:
+        pytest.skip("the spine's pass begins in `items.command_begin` whatever the concurrency")
+    records, ok = _records(mode_cls, runtime, tmp_path, parallelism=parallelism)
     assert not ok
     assert all(r["score"] == 0.0 for r in records), records
-    assert "is reached through a link" in str(records[0].get("error_text")), records
+    assert says in str(records[0].get("error_text")), records
     # No step ran on it: nothing was answered, and no error repeats the answer.
     assert not list(tmp_path.glob(f"{runtime}/passes/*/*/{ifo.ANSWER}"))
     assert ifo.SECRET not in json.dumps([r.get("error_text") for r in records])
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_reading_an_undeclared_item_file_by_name_is_refused_too(tmp_path, runtime):
+    """[walker, spine] ``ctx.read_text`` (and ``read_json``, ``exists``) of an item file
+    the op does not declare fails the item as `item_file` does; declared, it is read."""
+    records, ok = _records(ifo.UndeclaredReadText, runtime, tmp_path / "undeclared")
+    assert not ok
+    assert "reads item file 'item/input.bin' (input), which it does not declare" in \
+        str(records[0].get("error_text")), records
+    records, ok = _records(ifo.DeclaredReadText, runtime, tmp_path / "declared")
+    assert ok and sorted(r["score"] for r in records) == [1.0, 1.0], records
+
+
+def test_every_read_helper_checks_item_files(tmp_path):
+    """[the context both runtimes build] read_text, read_json and exists all refuse."""
+    from refactory_dsh.items import PASS_MARKER
+
+    (tmp_path / PASS_MARKER).parent.mkdir(parents=True)
+    (tmp_path / PASS_MARKER).write_text(json.dumps({"task": f"{ifo.MODULE}:FileTask"}))
+    (tmp_path / ifo.INPUT).parent.mkdir()
+    (tmp_path / ifo.INPUT).write_text("{}")
+    ctx = RunContext(tmp_path)
+    ctx.node_id = "peek"
+    for read in (ctx.read_text, ctx.read_json, ctx.exists):
+        with pytest.raises(ExecutionError, match="which it does not declare"):
+            read(ifo.INPUT)
+        with pytest.raises(ExecutionError, match="which it does not declare"):
+            read(f"./{ifo.INPUT}")
+    ctx._declared_reads = (ifo.INPUT,)  # noqa: SLF001
+    assert ctx.read_json(ifo.INPUT) == {} and ctx.exists(ifo.INPUT)
 
 
 def test_item_file_accessor_refuses_outside_a_pass_and_unknown_roles(tmp_path):
@@ -133,6 +173,12 @@ def test_item_file_accessor_refuses_outside_a_pass_and_unknown_roles(tmp_path):
     ({"input": "grade.json"}, "the grader reads or writes"),
     ({"input": "item", "other": "item/x"}, "folder of another item file"),
     ({"in put": "item/x"}, "is not a word"),
+    ({"input": "Answer.txt"}, "the grader reads or writes"),
+    ({"input": "item/\uff41\uff4e\uff53\uff57\uff45\uff52.txt"}, "the grader reads or writes"),
+    ({"input": "item/GRADE.JSON"}, "the grader reads or writes"),
+    ({"input": "item/ans\u200bwer.txt"}, "control or invisible character"),
+    ({"input": "Current_Item.json"}, "runtime's own files"),
+    ({"input": ".Refactory/x"}, "runtime's own files"),
 ])
 def test_an_item_file_is_never_a_file_the_grader_or_runtime_owns(declared, says):
     """[declaration; both runtimes and the validator read it through here] A golden or graded
@@ -145,6 +191,18 @@ def test_an_item_file_is_never_a_file_the_grader_or_runtime_owns(declared, says)
 
     with pytest.raises(TaskError, match=says):
         checked_item_files(Bad)
+
+
+def test_item_files_are_a_class_declaration_read_one_way(tmp_path):
+    """[declaration] An instance cannot declare other item files than its class's: the
+    validator, the view and both runtimes read the same ones."""
+    task = ifo.FileTask()
+    assert checked_item_files(task) == checked_item_files(ifo.FileTask) == {"input": ifo.INPUT}
+    task.item_files = {"input": "answer.txt"}
+    with pytest.raises(TaskError, match="class attributes"):
+        checked_item_files(task)
+    with pytest.raises(TaskError, match="class attributes"):
+        check_laid_item_files(task, tmp_path)
 
 
 def test_a_golden_file_cannot_be_reached_through_spreadsheetbench_item_files(tmp_path):
@@ -327,6 +385,22 @@ def test_to_an_agent_whose_prompt_is_no_knob_reslots_it_in_every_shape(seed, edi
 
 
 # ── C. the request ────────────────────────────────────────────────────────
+
+
+def test_a_run_that_offers_no_tool_step_offers_no_tools_anywhere():
+    """[request text] With no tool step (no seal, or ``new_step_tools`` off) no operator
+    line or field offers 'tools'; with one, insert's and map's do."""
+    from refactory_dsh.optim.memory import state_view
+
+    view = state_view(sb_mode.Solver().state_dict())
+    off = "\n".join(base_mod.operation_lines(nn_edits.catalogue("broad"), view.node_states,
+                                             view.edges, tools=False))
+    on = "\n".join(base_mod.operation_lines(nn_edits.catalogue("broad"), view.node_states,
+                                            view.edges, tools=True))
+    core = [line for line in off.splitlines() if line.startswith("- `")]
+    assert core and not [line for line in core if "tools" in line], core
+    assert core_ops.INSERT_TOOLS in on and core_ops.MAP_TOOLS in on
+    assert base_mod.NO_TOOLS_LINE in _sections(tools=False)
 
 
 def test_the_request_says_new_steps_may_have_tools_whatever_the_existing_steps_rules():

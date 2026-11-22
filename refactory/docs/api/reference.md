@@ -99,11 +99,13 @@ A mode: a Python class whose architecture and parameters are serializable.
 | class | `RunResult` | `(facts: 'dict[str, Any]' = <factory>, iterations: 'int' = 0, duration_s: 'float' = 0.0, exit_ok: 'bool' = True, error: 'str \| None' = None, workdir: 'Path \| None' = None, score: 'float' = 0.0, model_calls: 'int' = 0, gate_stop: 'str \| None' = None, halted: 'bool' = False, gate_verdicts: 'dict[str, str]' = <factory>, gate_exhausted: 'list[str]' = <factory>, item_records: 'list[dict[str, Any]]' = <factory>) -> None` |
 | class | `StateError` | `` |
 | function | `graph_identity` | `(state: 'dict') -> 'dict'` |
+| function | `record_state_upgrades` | `(workdir: 'Path', notes: 'Any') -> 'None'` |
 
 - **`Mode`** — Base class for a mode. Subclasses declare knobs, build, score.
 - **`RunResult`** — What one inner run produced: the facts, the score, and how the run went.
 - **`StateError`** — A state dict is not a valid state for this mode.
 - **`graph_identity`** — Strip the steering block from all ``prompt_template`` values for comparison.
+- **`record_state_upgrades`** — Record in ``workdir`` what a saved state's upgrade changed (`Mode.upgrade_state`),
 
 
 <a id="refactory_dsh-nn-declarations"></a>
