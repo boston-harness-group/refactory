@@ -691,3 +691,54 @@ def test_a_note_from_before_the_record_is_dropped_on_resume_and_said(tmp_path, m
     assert resumed._memory["record"]["format"] == memory.RECORD_FORMAT
     progress = (resumed.root / "progress.jsonl").read_text()
     assert "written before the record's format" in progress
+
+
+#: The OL arm's settings on SpreadSheetBench v4 (its profile, as its run's config.json
+#: records them).
+V4_SETTINGS = {
+    "optimizer": "autoresearch", "edit_preset": "broad", "run_ledger": True, "lessons": True,
+    "step_review": True, "structure_guidance": True, "analysts": True,
+    "analyst_group_size": 8, "analyst_merge_batch_size": 8, "selection": "checkpoint",
+    "integrity_judge": "veto", "early_stop_patience": 3, "worker_backend": "claude_code",
+    "model": "claude-opus-4-6"}
+
+
+def test_the_replay_rebuilds_a_record_for_a_model_proposer_run_with_v4s_settings(
+        tmp_path, monkeypatch):
+    """A run of the model proposer (autoresearch) under `checkpoint`, its config.json then
+    holding every setting v4's OL arm used: the replay builds its loop (with a client
+    that refuses every call, so it makes none) and rebuilds the record the loop stored."""
+    from refactory_dsh.optim.random_optimizer import AutoresearchOptimizer
+    from refactory_dsh.outerloop import ValidationGate
+    from test_analysts import _with_traces
+    from test_gate_aware_context import _passes_by_level, _val
+    from test_skillopt import _patch_mode
+    from test_val_gate import LevelProbe, _loop
+
+    monkeypatch.setattr(ValidationGate, "val_score", staticmethod(_val))
+    _passes_by_level(monkeypatch)
+    _with_traces(monkeypatch)
+    script = _script()
+    with _patch_mode(LevelProbe):
+        loop = _loop(tmp_path, epochs=3, val_gate=True, selection="checkpoint")
+        loop.optimizer = AutoresearchOptimizer(_Proposing([7, 8]))
+        loop.run()
+        saved = json.loads((loop.root / "config.json").read_text())
+        assert saved["selection"] == "checkpoint"
+        (loop.root / "config.json").write_text(json.dumps({**saved, **V4_SETTINGS}))
+        stored = [json.loads(line) for line in (loop.root / "journal.jsonl").read_text()
+                  .splitlines() if '"optimizer_memory"' in line]
+        replies = {c["epoch"]: c["reply"] for c in map(json.loads, (
+            loop.root / "optimizer_trace.jsonl").read_text().splitlines()) if c["kind"] == "memory"}
+        assert [e["epoch"] for e in stored] == [2, 3]
+        for at in stored:
+            rebuilt = script.record_from_journal(loop.root, at["epoch"], replies, Path("."),
+                                                 tmp_path / f"scratch{at['epoch']}")
+            assert rebuilt == at["memory"]["record"], at["epoch"]
+        replay = script._loop_at(loop.root, [json.loads(line) for line in (
+            loop.root / "journal.jsonl").read_text().splitlines()], stored[-1], Path("."),
+            tmp_path / "built")
+    assert replay.config.optimizer == "autoresearch" and replay.config.analysts
+    assert replay.config.integrity_judge == "veto" and replay.selection_mode() == "checkpoint"
+    with pytest.raises(RuntimeError, match="makes no model calls"):
+        replay.optimizer._client.complete("anything", system="s")

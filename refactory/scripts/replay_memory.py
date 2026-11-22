@@ -267,6 +267,14 @@ def _passes(events: list[dict[str, Any]], epoch: int) -> list[dict[str, Any]]:
             and int(e.get("epoch") or 0) <= epoch]
 
 
+class NoModel:
+    """The replay's model client: every optimizer and strategy can be built with it, and
+    any call raises, so the replay makes no model call."""
+
+    def complete(self, *_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("replay_memory makes no model calls")
+
+
 def _loop_at(run: Path, events: list[dict[str, Any]], at: dict[str, Any], project: Path,
              scratch: Path) -> Any:
     """The run's `Loop`, its journal replayed up to (not including) the pass ``at``, in a
@@ -285,7 +293,9 @@ def _loop_at(run: Path, events: list[dict[str, Any]], at: dict[str, Any], projec
     journal.write_text("".join(json.dumps(e) + "\n" for e in events[:events.index(at)]))
     config = LoopConfig.from_dict(saved)
     config.runs_root = where
-    loop = Loop(mode, config, project=project)
+    # A model proposer (autoresearch) needs a client to be built; this one refuses every
+    # call, so the replay cannot make one.
+    loop = Loop(mode, config, project=project, model=NoModel())
     loop._replay(journal)
     return loop
 
