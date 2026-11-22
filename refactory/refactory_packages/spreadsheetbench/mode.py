@@ -177,15 +177,21 @@ class Solver(nn.Mode):
 
     @classmethod
     def upgrade_state(cls, state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        """A state saved before the input was an item file (`tasks.INPUT`): each data node
-        of this Task declares it in its writes, and each node running one of the ops that
-        open it (`ops.prepare`, ``run_turn``, ``finalize``, by call, whatever its id)
-        declares it in its reads, as this version's graph does. Nothing else changes."""
+        """A state saved before the input was an item file (`tasks.INPUT`): one whose data
+        node for this Task (protected, so no edit changes it) does not declare the input in
+        its writes. Then each such data node declares it, and each node running one of the
+        ops that open it (`ops.prepare`, ``run_turn``, ``finalize``, by call, whatever its
+        id) declares it in its reads, as this version's graph does. A state that already
+        declares it -- any state this version saved -- is returned as it is, with no note:
+        never a change to anything an edit chose."""
+        nodes = ((state.get("graph") or {}).get("nodes") or {}) if isinstance(state, Mapping) \
+            else {}
+        data = [n for n in nodes.values() if n.get("kind") == "data" and n.get("task_ref") == TASK]
+        if not data or all(INPUT in (n.get("writes") or ()) for n in data):
+            return dict(state), []
         state = copy.deepcopy(dict(state))
-        nodes = (state.get("graph") or {}).get("nodes") or {}
+        nodes = state["graph"]["nodes"]
         notes: list[str] = []
-        if not any(n.get("kind") == "data" and n.get("task_ref") == TASK for n in nodes.values()):
-            return state, notes
         for node_id, node in sorted(nodes.items()):
             if node.get("kind") == "data" and node.get("task_ref") == TASK:
                 key = "writes"

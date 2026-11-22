@@ -2171,7 +2171,8 @@ it saved (`Mode.upgrade_state`): only declarations its own ops now need, never w
 edit chose. Both runtimes apply it (`Mode.load_state_dict` on the walker,
 `dsh_runtime.evaluate_on_dsh` on the spine), warn, and record each change in the run's
 `.refactory/state-upgrades.json`. SpreadsheetBench uses it so a candidate saved before
-its input was an item file declares `item/input.xlsx` and runs as it did. The pipeline view's
+its input was an item file (its protected data node does not declare `item/input.xlsx`)
+declares it and runs as it did; a state this version saved is never changed. The pipeline view's
 `per item` line names each item file and the steps that read it.
 
 **`to` an agent whose prompt is no knob.** `insert` (and `branch`, `map`) with `to` naming

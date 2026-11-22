@@ -1495,7 +1495,7 @@ class ProposalContext:
                                  tools=self.new_node_tools, rotation=self.generation,
                                  knob_values={k.get("name"): k.get("value") for k in self.knobs}),
             *operator_fit_section(self.catalogue, self.node_states, self.edges, self.knobs,
-                                  self.edit_check),
+                                  self.edit_check, tools=self.new_node_tools),
             *_settings_lines(self.knobs),
             "## What the author says is worth doing",
             self.guidance or "(the mode's author offered no guidance)",
@@ -2478,12 +2478,14 @@ def _completion_label(edit: Mapping[str, Any], bundle: Sequence[Mapping[str, Any
 
 def _fit_rows(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[str, Any]],
               edges: Sequence[dict[str, Any]], knobs: Sequence[Mapping[str, Any]],
-              check: Callable[[dict[str, Any]], Any] | None
+              check: Callable[[dict[str, Any]], Any] | None, tools: bool = True
               ) -> tuple[list[list[str]], list[list[str]], dict[str, Any] | None, Any]:
     """The operator table's rows (step, what it carries, what applies, what is refused),
     each step's refusals whole, the state and its graph: worked out once per edited
     candidate and check (`_FIT_CACHE`), since the proposal and every analyst call of a
-    round show them. Nothing without a check or a core operator."""
+    round show them. Nothing without a check or a core operator. Without ``tools`` (the
+    run offers no tool step, the answer `operator_lines` takes) no refusal offers tools
+    (`core_ops.refusal_without_tools`)."""
     from refactory_dsh.nn.graph import Graph
 
     ops = {op.get("op") for op in catalogue} & set(CORE_OPERATORS)
@@ -2491,7 +2493,7 @@ def _fit_rows(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[st
     if state is None or check is None:
         return [], [], None, None
     # The check itself in the key (held, so its id is never reused by another).
-    key = (check, json.dumps([sorted(ops), state], sort_keys=True, default=str))
+    key = (check, bool(tools), json.dumps([sorted(ops), state], sort_keys=True, default=str))
     if key in _FIT_CACHE:
         return _FIT_CACHE[key]
     graph = Graph.from_state(state["graph"])
@@ -2525,6 +2527,10 @@ def _fit_rows(catalogue: Sequence[dict[str, Any]], node_states: Sequence[dict[st
                                                      else label)
                 continue
             reason = fit_reason(verdict, node_id)
+            if not tools:
+                from refactory_dsh.nn.core_ops import refusal_without_tools
+
+                reason = refusal_without_tools(reason)
             reasons.setdefault(reason, []).append(f"{label} {added}".strip())
         refused = [f"{', '.join(labels)}: {reason}" for reason, labels in reasons.items()]
         applied = "; ".join(", ".join(labels) if not added else f"{added}: {', '.join(labels)}"
@@ -2543,11 +2549,12 @@ _FIT_CACHE: dict[Any, Any] = {}
 def applicability_lines(catalogue: Sequence[dict[str, Any]],
                         node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                         knobs: Sequence[Mapping[str, Any]],
-                        check: Callable[[dict[str, Any]], Any] | None) -> list[str]:
+                        check: Callable[[dict[str, Any]], Any] | None,
+                        tools: bool = True) -> list[str]:
     """Which core operators apply at each step, as the operator table's "applies" column
     says it (`_fit_rows`, an attempt's verdict on each operator with its default
     arguments), one line per step, for the failure analysts. Nothing without a check."""
-    rows = _fit_rows(catalogue, node_states, edges, knobs, check)[0]
+    rows = _fit_rows(catalogue, node_states, edges, knobs, check, tools)[0]
     if not rows:
         return []
     return ["Operators an attempt accepts at each step with their default arguments (`+ X: "
@@ -2560,7 +2567,7 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
                          node_states: Sequence[dict[str, Any]], edges: Sequence[dict[str, Any]],
                          knobs: Sequence[Mapping[str, Any]],
                          check: Callable[[dict[str, Any]], Any] | None, *,
-                         limit: int = OPERATOR_FIT_CHARS) -> list[str]:
+                         limit: int = OPERATOR_FIT_CHARS, tools: bool = True) -> list[str]:
     """"What each step carries, and which operators apply to it": for each model step,
     what its prompt carries (a plain op's output followed back to what that op reads),
     and for each step which core operators, with their default arguments, apply as written
@@ -2569,7 +2576,8 @@ def operator_fit_section(catalogue: Sequence[dict[str, Any]],
     attempt makes but the model-judged integrity one). Information only; nothing without
     a check (a request built outside a run, whose verdicts would be guesses) or when the
     run permits no core operator."""
-    rows, full_refusals, state, graph = _fit_rows(catalogue, node_states, edges, knobs, check)
+    rows, full_refusals, state, graph = _fit_rows(catalogue, node_states, edges, knobs, check,
+                                                  tools)
     if not rows:
         return []
     from refactory_dsh.nn.core_ops import TASK, _readable, _Refused, _task_inputs

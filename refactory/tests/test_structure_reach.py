@@ -384,7 +384,42 @@ def test_to_an_agent_whose_prompt_is_no_knob_reslots_it_in_every_shape(seed, edi
     assert sf.check_state(applier, out.state, walker=True, spine=True) == []
 
 
+def test_a_state_this_version_saved_is_never_upgraded():
+    """[load, both runtimes' entry] An edit's node calling an op that opens the input, with
+    reads of its own choosing, in a state saved by this version: returned as it is, with
+    no note and no warning (its data node already declares the input)."""
+    import warnings
+
+    state = sb_mode.Solver().state_dict()
+    nodes = state["graph"]["nodes"]
+    nodes["run_turn_fallback"] = {**copy.deepcopy(nodes["run_turn"]), "reads": ["reply.txt"]}
+    if "id" in nodes["run_turn_fallback"]:
+        nodes["run_turn_fallback"]["id"] = "run_turn_fallback"
+    before = json.dumps(state, sort_keys=True)
+    out, notes = sb_mode.Solver.upgrade_state(state)
+    assert notes == [] and json.dumps(out, sort_keys=True) == before
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        mode = sb_mode.Solver(state=state)
+    assert mode.state_upgrades == ()
+    assert mode.state_dict()["graph"]["nodes"]["run_turn_fallback"]["reads"] == ["reply.txt"]
+
+
 # ── C. the request ────────────────────────────────────────────────────────
+
+
+def test_the_operator_table_offers_no_tools_when_the_run_has_none():
+    """[request text, the same tools answer as the operator lines] SpreadsheetBench's table:
+    with no tool step, no refusal says 'tools'; with one, its refusals are as before."""
+    from test_operator_fit import _section
+
+    mode = sb_mode.Solver()
+    state, protected = mode.state_dict(), tuple(mode.edit_protected())
+    on = "\n".join(_section(state, protected=protected, limit=10 ** 6, tools=True))
+    off = "\n".join(_section(state, protected=protected, limit=10 ** 6, tools=False))
+    assert "'tools'" not in off
+    assert "give it a code step, or 'tools'" in on
+    assert off == core_ops.refusal_without_tools(on)
 
 
 def test_a_run_that_offers_no_tool_step_offers_no_tools_anywhere():

@@ -1148,7 +1148,7 @@ def _pre_insert(edit: dict, state: dict) -> str | None:
         if spec["kind"] == "agent" and not spec.get("tools") and len(target.writes) > 1:
             raise _Refused(f"{target.id!r} writes {len(target.writes)} files, and a new agent "
                            "step without tools writes only its reply; take it over with a "
-                           "code step, or with 'tools'")
+                           f"code step{TOOLS_HINTS[0]}")
     return None
 
 
@@ -2877,8 +2877,8 @@ def _fallback_spec(edit: dict, step: Node) -> dict:
     spec = _spec({k: v for k, v in edit.items() if k not in ("op", "step")})
     if spec["kind"] == "agent" and not spec.get("tools") and len(step.writes) > 1:
         raise _Refused(f"{step.id!r} writes {len(step.writes)} files, and a new agent step "
-                       "without tools writes only its reply; give it a code step, or "
-                       "'tools'")
+                       "without tools writes only its reply; give it a code step"
+                       f"{TOOLS_HINTS[1]}")
     return spec
 
 
@@ -3347,6 +3347,19 @@ INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
                 "theirs (an existing step keeps its own tool rules); it runs sealed: only the "
                 "files it sees (an item's files too), no network, no grader files")
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
+
+
+#: How a refusal ends that names tools as the other way to write several files (a
+#: take-over's, a fallback's): said only where the run offers a tool step
+#: (`refusal_without_tools`).
+TOOLS_HINTS = (", or with 'tools'", ", or 'tools'")
+
+
+def refusal_without_tools(reason: str) -> str:
+    """A refusal as a run that offers no tool step says it: without `TOOLS_HINTS`."""
+    for hint in TOOLS_HINTS:
+        reason = reason.replace(hint, "")
+    return reason
 
 
 def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
