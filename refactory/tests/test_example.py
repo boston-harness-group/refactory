@@ -12,9 +12,7 @@ change that breaks the example fails the gate rather than one narrow unit test.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -22,6 +20,7 @@ import pytest
 from refactory_dsh import nn, registry
 from refactory_dsh.create import CreateConfig, create
 from refactory_dsh.loop import Loop, LoopConfig
+from refactory_dsh.paths import project_for_nodes
 from tests_support import FakeModel, create_answers, good_files, render
 
 CREATED = "example_pack"
@@ -29,21 +28,17 @@ TARGET = "circle_packing/adaptive"
 
 
 @pytest.fixture(autouse=True)
-def _clean_created():
-    root = registry.workspace_root(Path(".")) / CREATED
-    # Serialize access to the shared workspace package directory so that
-    # parallel xdist workers do not race on creation and cleanup.
-    lock_path = root.parent / ".test_example_lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = open(lock_path, "w")
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-    try:
-        shutil.rmtree(root, ignore_errors=True)
-        yield
-        shutil.rmtree(root, ignore_errors=True)
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+def _project(tmp_path, monkeypatch):
+    """Every run here writes its packages into a project of its own: never refactory's
+    checkout, which a run now refuses as a project (C1), and which these tests used to
+    fill with packages and lock files."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("REFACTORY_PROJECT", str(project))
+    # Started from inside it, as a person runs one: what a step finds relative to the
+    # working directory (`.factory/artifacts`, the workspace) is the same project.
+    monkeypatch.chdir(project)
+    return project
 
 
 def _config(root: Path, **overrides: object) -> LoopConfig:
@@ -73,7 +68,7 @@ def test_a_brief_becomes_a_registered_package_that_scores(tmp_path):
     assert result.package == CREATED
     assert result.smoke_score is not None
     assert (result.path / "mode.py").exists()
-    assert f"{CREATED}/counter" in registry.render_catalogue(Path("."))
+    assert f"{CREATED}/counter" in registry.render_catalogue(project_for_nodes())
 
 
 def test_the_created_mode_validates_with_all_its_calls_resolved(tmp_path):
@@ -81,7 +76,7 @@ def test_the_created_mode_validates_with_all_its_calls_resolved(tmp_path):
         _create_config(name=CREATED, brief="count", workdir=tmp_path / "create"),
         client=FakeModel(create_answers(CREATED, good_files(CREATED))),
     )
-    _package, mode_class = registry.resolve(Path("."), f"{CREATED}/counter")
+    _package, mode_class = registry.resolve(project_for_nodes(), f"{CREATED}/counter")
     mode = mode_class()
     assert nn.validate_state(
         mode.state_dict(), invariants=mode.invariants(), resolve_calls=True
@@ -90,7 +85,7 @@ def test_the_created_mode_validates_with_all_its_calls_resolved(tmp_path):
 
 # ── half two: the loop optimizes it, and the report says what happened ─────
 def _optimize(mode_id: str, root: Path, **overrides: object) -> dict:
-    return Loop(mode_id, _config(root, **overrides), project=Path(".")).run()
+    return Loop(mode_id, _config(root, **overrides), project=project_for_nodes()).run()
 
 
 def test_the_loop_improves_the_mode_it_is_given(tmp_path):
@@ -148,7 +143,7 @@ def test_every_evaluated_candidate_validated_first(tmp_path):
     bound ends the loop: 12 evaluations already include proposals that validation
     must refuse.
     """
-    loop = Loop(TARGET, _config(tmp_path / "runs", max_evaluations=12), project=Path("."))
+    loop = Loop(TARGET, _config(tmp_path / "runs", max_evaluations=12), project=project_for_nodes())
     loop.init()
     while True:
         evaluated = loop.forward()

@@ -1144,7 +1144,9 @@ export function apply(ctx: Context, config: Config): void {
   /** Call a runtime-owned bookkeeping bridge without editing artifact text. */
   function runtimeBridge(command: string, workdir: string, env: Record<string, string>, payload: unknown): Record<string, unknown> {
     const result = spawnSync(command, {
-      shell: true, cwd: workdir, env: { ...process.env, ...env },
+      // The node a bridged `begin` dispatches runs on in this process, not in the
+      // short-lived bridge command, so this process owns its checkout watches.
+      shell: true, cwd: workdir, env: { ...process.env, ...env, REFACTORY_WATCH_OWNER_PID: String(process.pid) },
       input: JSON.stringify(payload), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
       timeout: config.commandTimeoutMs,
     })

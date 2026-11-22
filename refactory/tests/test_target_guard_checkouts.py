@@ -4,8 +4,9 @@ An agent that runs a refactory tool with the contract's Python imports refactory
 driver checkout, or from a pinned run's pin, and the tool writes there from any directory
 (b32l, 2026-10-21). Each test pins one rule, on the walker (a scripted design run) and on
 the spine's worker bridge (`worker_node.execute`, which every spine agent node runs). The
-guard watches tracked files and HEAD only; what a refusal does to the files is
-`target_guard.CHECKOUT_POLICY`'s, and each policy is tested here.
+guard watches tracked files and HEAD, and every path under the checkout's package roots;
+what a refusal does to the tracked files is `target_guard.CHECKOUT_POLICY`'s, and each
+policy is tested here. A new path under a package root is always moved out.
 """
 
 from __future__ import annotations
@@ -179,7 +180,7 @@ def test_walker_run_whose_driver_is_its_target_is_unchanged(tmp_path, monkeypatc
     watched = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: watched.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: watched.append(list(paths)) or real(workdir, paths, **kw))
     before = _files(driver)
     model = Emit(_answers(render({"tool.py": "print('built')\n"})))
 
@@ -200,7 +201,7 @@ def test_walker_legitimate_writes_pass_with_the_driver_watched(tmp_path, monkeyp
     watched = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: watched.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: watched.append(list(paths)) or real(workdir, paths, **kw))
 
     class Scratch(FakeModel):
         def complete(self, prompt, *, system="", workdir=None, **_workspace):
@@ -325,7 +326,7 @@ def test_spine_run_whose_driver_is_its_target_is_unchanged(tmp_path, monkeypatch
     recorded = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: recorded.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: recorded.append(list(paths)) or real(workdir, paths, **kw))
 
     def act(execution, workdir):
         (workdir / "emit.txt").write_text("===FILE: tool.py===\nprint(1)\n")
@@ -616,3 +617,444 @@ def test_a_checkout_is_read_from_one_status_call(tmp_path):
     # Tracked files only, and a rename names its new path only, however its old one reads.
     assert sorted(found["changes"]) == ["refactory/refactory_dsh/mine.py", "renamed odd.py"]
     assert target_guard._porcelain_v2("# branch.oid (initial)\0")[0] is None
+
+
+# ── new paths under the checkout's package roots (create benchmark H1/H2, C1) ─────────
+#
+# A create run's emit agent wrote a test copy of its package into the driver's
+# `.factory/packages/`, and an overwatch agent linked one into `refactory/refactory_packages/`
+# (2026-11-20). Neither path is tracked, so only the package-root watch sees them.
+
+def _create_run(tmp_path: Path, *, project: Path | None = None) -> tuple[Path, Path, Path]:
+    """A create run as `prepare_create` leaves it: the project recorded, the driver named."""
+    driver = _checkout(tmp_path / "driver")
+    project = project or (tmp_path / "project")
+    project.mkdir(parents=True, exist_ok=True)
+    run = tmp_path / "run"
+    target_guard.record(run, project)
+    _record(run, checkout=driver)
+    return driver, project, run
+
+
+def _package(root: Path, name: str) -> Path:
+    package = root / ".factory" / "packages" / name
+    package.mkdir(parents=True)
+    for file in ("__init__.py", "mode.py", "ops.py"):
+        (package / file).write_text(f"# {file}\n")
+    return package
+
+
+def test_a_package_copy_written_into_the_driver_is_refused_and_left_in_place(tmp_path, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    (driver / ".factory" / "packages").mkdir(parents=True)
+    lock = driver / ".factory" / "packages" / ".created_pkg.lock"
+    lock.write_text("")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "h1_pkg")  # what H1's emit agent did to import its package
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/h1_pkg") as refused:
+        ad.finish(run, "emit")
+    assert (driver / ".factory" / "packages" / "h1_pkg" / "ops.py").exists(), "refactory moves nothing"
+    assert lock.exists()
+    text, said = str(refused.value), capsys.readouterr().err
+    assert "A node must not write under refactory's package roots" in text
+    assert "if a person or another tool made them, nothing needs doing" in text
+    assert text.count(".factory/packages/h1_pkg") == 1, "named once"
+    for reader in (text, said):  # a CEO agent reads both: nothing tells it to delete
+        assert "rm " not in reader and "remove them" not in reader.lower()
+
+
+def test_a_package_symlink_into_the_driver_is_refused_on_the_spine(tmp_path, monkeypatch):
+    driver, project, run = _create_run(tmp_path)
+    mine = _package(project, "h2_pkg")
+    installed = driver / "refactory" / "refactory_packages"
+    installed.mkdir(parents=True)
+
+    def act(execution, workdir):  # what H2's overwatch agent did, through the spine's worker bridge
+        (workdir / "overwatch.md").write_text("ok\n")
+        os.symlink(mine, installed / "h2_pkg")
+
+    with pytest.raises(ValueError, match="new paths under its package roots: refactory/refactory_packages/h2_pkg"):
+        _dispatch(run, "overwatch", ["overwatch.md"], monkeypatch, act)
+    assert os.path.islink(installed / "h2_pkg"), "reported, never moved"
+    assert sorted(p.name for p in mine.iterdir()) == ["__init__.py", "mode.py", "ops.py"]
+
+
+def test_a_path_already_under_the_package_roots_is_reported_not_reverted(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    old = _package(driver, "old_pkg")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    (old / "ops.py").write_text("# rewritten by the node, longer\n")
+    (old / "new.py").write_text("# new\n")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    with pytest.raises(ValueError) as refused:
+        ad.finish(run, "emit")
+    text = str(refused.value)
+    assert "paths that were already under its package roots changed: .factory/packages/old_pkg/ops.py" in text
+    assert "left as they are: .factory/packages/old_pkg/ops.py" in text
+    assert (old / "ops.py").read_text() == "# rewritten by the node, longer\n", "never reverted"
+    assert "new paths under its package roots: .factory/packages/old_pkg/new.py" in text
+    assert (old / "new.py").exists(), "a new path inside it is reported, not removed"
+
+
+def test_importing_a_package_in_the_driver_is_not_a_write(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    installed = driver / "refactory" / "refactory_packages" / "fix_pack"
+    installed.mkdir(parents=True)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "ops.cpython-312.pyc").write_bytes(b"pyc")
+    (installed / ".DS_Store").write_bytes(b"finder")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    assert ad.finish(run, "emit")["status"] == "delivered"
+
+
+def test_a_project_that_is_a_refactory_clone_may_write_its_own_packages(tmp_path):
+    project = _checkout(tmp_path / "clone")
+    driver, project, run = _create_run(tmp_path, project=project)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(project, "its_own")
+    (project / "refactory" / "refactory_packages").mkdir(parents=True)
+    os.symlink(project / ".factory" / "packages" / "its_own",
+               project / "refactory" / "refactory_packages" / "its_own")
+    (run / "emit.txt").write_text("===FILE: __init__.py===\n")
+    assert ad.finish(run, "emit")["status"] == "delivered"
+    assert (project / ".factory" / "packages" / "its_own" / "ops.py").exists()
+    assert target_guard.checkouts(run, tmp_path / "elsewhere") == [driver.resolve()], \
+        "the project is never watched as refactory's own, the driver is"
+
+
+def test_a_run_whose_project_is_the_driver_does_not_watch_it(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    target_guard.record(run, driver)
+    _record(run, checkout=driver)
+    assert target_guard.checkouts(run, driver / "refactory" / "refactory_dsh") == []
+
+
+def test_package_entries_are_paths_under_the_package_roots_only(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    _package(driver, "p")
+    (driver / "notes.txt").write_text("elsewhere\n")
+    found = target_guard._checkout_state(driver)["packages"]
+    assert sorted(found) == [".factory/packages/p", ".factory/packages/p/__init__.py",
+                             ".factory/packages/p/mode.py", ".factory/packages/p/ops.py"]
+    assert target_guard.package_differences(found, dict(found)) == ([], [])
+    added, _ = target_guard.package_differences({".factory/packages/p": "directory"}, found)
+    assert added == [".factory/packages/p/__init__.py", ".factory/packages/p/mode.py",
+                     ".factory/packages/p/ops.py"], "a new file in an old directory is new"
+    added, _ = target_guard.package_differences({}, found)
+    assert added == [".factory/packages/p"], "only the top of a new tree"
+
+
+# ── the reviewer's cases (PR 722): what is not the node's is never charged to it ──────
+
+def test_a_pulled_package_that_git_tracks_is_not_the_nodes(tmp_path):
+    """The person pulls a commit adding a package while a create node runs."""
+    driver, _project, run = _create_run(tmp_path)
+    git(driver, "stash", "-u")
+    git(driver, "checkout", "-q", "-b", "feature")
+    pulled = driver / "refactory" / "refactory_packages" / "newpkg"
+    pulled.mkdir(parents=True)
+    (pulled / "__init__.py").write_text("x = 1\n")
+    git(driver, "add", ".")
+    git(driver, "commit", "-q", "-m", "add pkg")
+    git(driver, "checkout", "-q", "-")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    git(driver, "merge", "-q", "--ff-only", "feature")
+    (pulled / "junk.py").write_text("# the node's\n")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError) as refused:  # its committed files moved: the tracked check's
+        ad.finish(run, "emit")
+    text = str(refused.value)
+    assert "new paths under its package roots: refactory/refactory_packages/newpkg/junk.py" in text
+    assert "refactory_packages/newpkg," not in text and "newpkg/__init__.py" not in text
+    assert (pulled / "__init__.py").exists() and (pulled / "junk.py").exists()
+    assert git(driver, "status", "--short", "--untracked-files=no") == ""
+
+
+def test_a_package_another_watcher_could_have_written_is_a_warning_naming_both(tmp_path, capsys):
+    """Two nodes watch the driver at once; a package appears: neither is refused for it."""
+    driver, _project, run = _create_run(tmp_path)
+    (run / "reviews").mkdir(parents=True)
+    ad.begin(run, "code_reviewer", "Review.", ["reviews/code.md"])
+    ad.begin(run, "qa_director", "QA.", ["reviews/qa.md"])
+    _package(driver, "whose_pkg")
+    (run / "reviews" / "code.md").write_text("VERDICT: pass\n")
+    (run / "reviews" / "qa.md").write_text("VERDICT: pass\n")
+    assert ad.finish(run, "code_reviewer")["status"] == "delivered"
+    assert ad.finish(run, "qa_director")["status"] == "delivered"
+    said = capsys.readouterr().err
+    assert "changed while more than one node watched it" in said
+    assert f"qa_director in {run}" in said and f"code_reviewer in {run}" in said
+    assert (driver / ".factory" / "packages" / "whose_pkg").exists()
+
+
+def test_a_watch_that_ended_before_the_node_began_does_not_shield_it(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    (run / "reviews").mkdir(parents=True)
+    ad.begin(run, "code_reviewer", "Review.", ["reviews/code.md"])
+    (run / "reviews" / "code.md").write_text("VERDICT: pass\n")
+    assert ad.finish(run, "code_reviewer")["status"] == "delivered"
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "h1_pkg")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(run, "emit")
+
+
+def test_a_package_written_into_the_driver_by_someone_else_is_never_removed(tmp_path):
+    """`refactory adopt` in the driver, or another run whose project is the driver."""
+    driver, _project, run = _create_run(tmp_path)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "persons_pkg")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError):
+        ad.finish(run, "emit")
+    assert (driver / ".factory" / "packages" / "persons_pkg" / "ops.py").exists()
+
+
+def test_a_differently_cased_driver_is_refused_as_a_project(tmp_path):
+    from refactory_dsh import paths
+
+    driver = _checkout(tmp_path / "driver")
+    variant = Path(str(driver).replace("/driver", "/DRIVER"))
+    if not variant.exists():
+        pytest.skip("case-sensitive filesystem")
+    run = tmp_path / "run"
+    _record(run, checkout=driver)
+    with pytest.raises(paths.CheckoutProjectError):
+        paths.project_for_writes(variant, workdir=run)
+    recorded = target_guard.record(run, variant)
+    assert Path(recorded["root"]).samefile(driver)
+    assert target_guard.checkouts(run, tmp_path / "elsewhere") == []
+
+
+def test_too_many_package_paths_to_watch_is_said(tmp_path, monkeypatch, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    _package(driver, "big")
+    monkeypatch.setattr(target_guard, "LIMIT", 2)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    assert "paths under its package roots, so a package an agent writes there is not watched" in \
+        capsys.readouterr().err
+
+
+def test_a_redo_closes_its_own_earlier_watch(tmp_path):
+    """An attempt whose bridge died never finished its watch; its redo is not shielded by it."""
+    driver, _project, run = _create_run(tmp_path)
+    watched = [driver.resolve()]
+    target_guard.watch_checkouts(run, watched, node="emit")
+    again = target_guard.watch_checkouts(run, watched, node="emit")
+    _package(driver, "h1_pkg")
+    changed = target_guard.strayed_checkouts(run, again)
+    assert "new paths under its package roots: .factory/packages/h1_pkg" in changed[str(driver.resolve())]
+
+
+
+# ── watches belong to a process (PR 722, round 2) ─────────────────────────────────────
+
+def test_a_killed_watchers_watch_stops_counting_as_an_overlap(tmp_path):
+    """A run killed mid-node never finishes its watch; a later lone writer is still charged."""
+    import signal
+
+    driver, project, run = _create_run(tmp_path)
+    script = ("import os, signal, sys\n"
+              "from pathlib import Path\n"
+              "from refactory_dsh import agent_delivery as ad\n"
+              "ad.begin(Path(sys.argv[1]), 'crashed', 'Write c.txt.', ['c.txt'])\n"
+              "os.kill(os.getpid(), signal.SIGKILL)\n")
+    killed = subprocess.run([sys.executable, "-c", script, str(run)], capture_output=True, text=True,
+                            timeout=120, check=False)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    later = tmp_path / "run2"
+    target_guard.record(later, project)
+    _record(later, checkout=driver)
+    ad.begin(later, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "stray_by_emit")
+    (later / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/stray_by_emit"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_is_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    first = target_guard._open_watch(driver, run, "emit", "2026-11-22T00:00:00+00:00")
+    def fail(*_args):
+        raise OSError("disk full")
+    monkeypatch.setattr(target_guard.os, "replace", fail)
+    with pytest.raises(OSError):
+        target_guard._close_watch(driver, first, "2026-11-22T00:01:00+00:00")
+    assert target_guard._read_watch(driver, first)["finished"] is None, "the old record is whole"
+
+
+def test_a_reused_dispatch_record_is_owned_by_the_process_that_carries_it_on(tmp_path):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    watched = target_guard.watch_checkouts(run, [driver.resolve()], node="emit")
+    identifier = watched[str(driver.resolve())]["watch_id"]
+    gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True,
+                          text=True, check=True)
+    dead = {**target_guard._read_watch(driver.resolve(), identifier), "pid": int(gone.stdout), "pid_start": "then"}
+    target_guard._write_watch(driver.resolve(), dead)
+    assert target_guard._gone(dead) is True, "setup: its first process is gone"
+    target_guard.claim_watches(watched)
+    assert target_guard._gone(target_guard._read_watch(driver.resolve(), identifier)) is False
+
+
+def test_an_open_watch_nothing_can_check_lapses_after_the_backstop(tmp_path, monkeypatch):
+    driver = _checkout(tmp_path / "driver")
+    run = tmp_path / "run"
+    mine = target_guard._open_watch(driver, run, "here", "2026-11-22T00:00:00+00:00")
+    elsewhere = target_guard._open_watch(driver, run, "there", "2026-11-22T00:00:00+00:00")
+    target_guard._write_watch(driver, {**target_guard._read_watch(driver, elsewhere), "host": "another-host"})
+    monkeypatch.setattr(target_guard, "WATCH_OPEN_S", 0)
+    left = {watch["id"] for watch in target_guard._read_watches(driver)}
+    assert left == {mine}, "a live process's watch stays open; one nobody can check lapses"
+
+
+def test_a_dispatch_reused_after_its_bridge_died_keeps_its_watch_open(tmp_path):
+    """The bridge that began the node is killed; the redo reuses the pending record."""
+    import signal
+
+    driver, _project, run = _create_run(tmp_path)
+    script = ("import os, signal, sys\n"
+              "from pathlib import Path\n"
+              "from refactory_dsh import agent_delivery as ad\n"
+              "ad.begin(Path(sys.argv[1]), 'emit', 'Write emit.txt.', ['emit.txt'], reuse=True)\n"
+              "os.kill(os.getpid(), signal.SIGKILL)\n")
+    killed = subprocess.run([sys.executable, "-c", script, str(run)], capture_output=True, text=True,
+                            timeout=120, check=False)
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    record = ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"], reuse=True)
+    watch = target_guard._read_watch(driver.resolve(), record["checkouts"][str(driver.resolve())]["watch_id"])
+    assert watch["pid"] == os.getpid() and target_guard._gone(watch) is False
+
+
+# ── the interactive spine's bridge (PR 722, round 3) ──────────────────────────────────
+#
+# The spine runs `python -m refactory_dsh.agent_delivery` for `begin` and again for
+# `finish`; the node runs on in the spine between them. Its watch belongs to the process
+# the spine names (`REFACTORY_WATCH_OWNER_PID`), never to the short-lived command.
+
+def _bridge(run: Path, request: dict, *, owner: int | None) -> subprocess.CompletedProcess:
+    env = {key: value for key, value in os.environ.items() if key != target_guard.OWNER_ENV}
+    if owner is not None:
+        env[target_guard.OWNER_ENV] = str(owner)
+    return subprocess.run([sys.executable, "-m", "refactory_dsh.agent_delivery"], cwd=str(run), env=env,
+                          input=json.dumps(request), capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_a_bridged_writer_overlapping_an_in_process_node_is_warned_not_refused(tmp_path, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    begun = _bridge(run, {"action": "begin", "node": "writer", "prompt": "Write writer.txt.",
+                          "writes": ["writer.txt"]}, owner=os.getpid())  # this test stands in for the spine
+    assert begun.returncode == 0, begun.stderr
+    ad.begin(run, "innocent", "Write innocent.txt.", ["innocent.txt"])
+    _package(driver, "by_writer")  # the bridged node writes it, while the in-process node runs
+    (run / "innocent.txt").write_text("ok\n")
+    assert ad.finish(run, "innocent")["status"] == "delivered", "the in-process node is not blamed"
+    said = capsys.readouterr().err
+    assert "not charged to any one node" in said and f"writer in {run}" in said
+    (run / "writer.txt").write_text("ok\n")
+    finished = _bridge(run, {"action": "finish", "node": "writer"}, owner=os.getpid())
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(finished.stdout)["status"] == "delivered"
+    assert "not charged to any one node" in finished.stderr
+
+
+def test_the_bridge_records_the_owner_the_spine_names_never_itself(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    # "named" twice: the spine reports a due node again, and the reused record is claimed.
+    for node, owner in (("named", os.getpid()), ("named", os.getpid()), ("unnamed", None)):
+        begun = _bridge(run, {"action": "begin", "node": node, "prompt": "Write it.", "writes": [f"{node}.txt"]},
+                        owner=owner)
+        assert begun.returncode == 0, begun.stderr
+    watches = {watch["node"]: watch for watch in target_guard._read_watches(driver.resolve())}
+    assert watches["named"]["pid"] == os.getpid() and target_guard._gone(watches["named"]) is False
+    assert watches["unnamed"]["pid"] is None, "an unnamed owner is unknown, not the exited command"
+    assert target_guard._gone(watches["unnamed"]) is None
+
+
+def test_the_spine_names_itself_as_the_owner_of_bridged_watches():
+    from refactory_dsh.paths import REPO_ROOT
+
+    spine = (REPO_ROOT / "packages" / "workflow" / "workflow-spine" / "src" / "index.ts").read_text()
+    bridge = spine[spine.index("function runtimeBridge("):]
+    bridge = bridge[:bridge.index("\n  }\n")]
+    assert f"{target_guard.OWNER_ENV}: String(process.pid)" in bridge
+
+
+# ── a node that ends without a finish ends its watch (PR 722, round 4) ─────────────────
+
+def _lone_writer(tmp_path: Path, driver: Path, project: Path, name: str):
+    """Another run's node that writes a package into the driver on its own."""
+    later = tmp_path / f"run-{name}"
+    target_guard.record(later, project)
+    _record(later, checkout=driver)
+    ad.begin(later, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, name)
+    (later / "emit.txt").write_text("ok\n")
+    return later
+
+
+def test_an_invalidated_bridged_node_no_longer_shields_a_lone_writer(tmp_path):
+    driver, project, run = _create_run(tmp_path)
+    begun = _bridge(run, {"action": "begin", "node": "abandoned", "prompt": "Write it.",
+                          "writes": ["abandoned.txt"]}, owner=os.getpid())  # the spine lives on
+    assert begun.returncode == 0, begun.stderr
+    skipped = _bridge(run, {"action": "invalidate", "nodes": ["abandoned"], "reason": "skip abandoned"},
+                      owner=os.getpid())
+    assert skipped.returncode == 0, skipped.stderr
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/by_lone_writer"):
+        ad.finish(later, "emit")
+
+
+@pytest.mark.parametrize("status, refused", [("cancelled", True), ("failed", True), ("halted", True),
+                                             ("ready", False)])
+def test_a_stopped_runs_open_watch_no_longer_shields_a_lone_writer(tmp_path, monkeypatch, status, refused):
+    driver, project, run = _create_run(tmp_path)
+    assert _bridge(run, {"action": "begin", "node": "stopped", "prompt": "Write it.",
+                         "writes": ["stopped.txt"]}, owner=os.getpid()).returncode == 0
+    (run / ".refactory" / "spine-status.json").write_text(json.dumps({"status": status}))
+    monkeypatch.setattr(target_guard, "WATCH_SETTLING_S", 0)
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    if refused:
+        with pytest.raises(ValueError, match="new paths under its package roots"):
+            ad.finish(later, "emit")
+    else:
+        assert ad.finish(later, "emit")["status"] == "delivered", "a running run's node still overlaps"
+
+
+def test_a_watch_whose_delivery_record_is_gone_is_over(tmp_path, monkeypatch):
+    driver, project, run = _create_run(tmp_path)
+    ad.begin(run, "dropped", "Write it.", ["dropped.txt"])
+    ad._pending(run, "dropped").unlink()  # its delivery ended by a path that closed nothing
+    monkeypatch.setattr(target_guard, "WATCH_SETTLING_S", 0)
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_older_than_any_node_may_run_is_over_with_its_owner_alive(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    driver, project, run = _create_run(tmp_path)
+    record = ad.begin(run, "stuck", "Write it.", ["stuck.txt"])
+    identifier = record["checkouts"][str(driver.resolve())]["watch_id"]
+    long_ago = datetime.now(timezone.utc) - timedelta(seconds=target_guard._max_open_s() + 60)
+    target_guard._write_watch(driver.resolve(), {**target_guard._read_watch(driver.resolve(), identifier),
+                                                 "started": long_ago.isoformat()})
+    assert target_guard._gone(target_guard._read_watch(driver.resolve(), identifier)) is False
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(later, "emit")
+
+
+def test_a_watch_just_opened_counts_before_its_delivery_record_exists(tmp_path, capsys):
+    driver, project, run = _create_run(tmp_path)
+    target_guard.watch_checkouts(run, [driver.resolve()], node="starting")  # its record comes next
+    later = _lone_writer(tmp_path, driver, project, "by_lone_writer")
+    assert ad.finish(later, "emit")["status"] == "delivered"
+    assert "not charged to any one node" in capsys.readouterr().err
