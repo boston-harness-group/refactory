@@ -54,6 +54,10 @@ it with ``--claude-executable``.
    later turns end (`refactory_dsh.feedback.SCORING`); SkillOpt scores the attempt after
    the feedback, which passed nearly every clean train item and left the search nothing
    to learn from. The conversation, the feedback included, is unchanged.
+7. *Formula note*: the verification report (the analysts' view) lists cells holding text
+   that starts with ``=``, not formulas; under ``recalc`` it says so
+   (`skillopt_port.FORMULA_NOTE_RECALC`), not SkillOpt's "openpyxl cannot evaluate them",
+   which is false there and led a proposer to argue for plain values; ``cached`` keeps it.
 """
 from __future__ import annotations
 
