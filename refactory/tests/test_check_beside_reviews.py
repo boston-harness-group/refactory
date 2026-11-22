@@ -716,16 +716,19 @@ def _spine_run(tmp_path, monkeypatch, target: Path, emission: str, *, setup: str
     return run_dir, labels
 
 
-def _assert_copy_only_draft(run_dir: Path, draft: dict, how: str) -> None:
-    """The draft names both facts: the copy failed twice, and the run's own worktree
-    prepared cleanly at the same commit. Its clipped check_failure still says no repair
-    was tried."""
+def _assert_copy_only_draft(run_dir: Path, draft: dict, how: str, *,
+                            where: str = "in the check copy, twice") -> None:
+    """The draft names both facts: the copy failed (twice, unless it timed out), and the
+    run's own worktree prepared cleanly at the same commit, both kept by the draft's
+    clipped reason. How the step ended is in the check record's full reason. The clipped
+    check_failure still says no repair was tried."""
     assert draft["check_failing"] is True
-    assert "in the check copy, twice" in draft["reason"], draft["reason"]
+    assert where in draft["reason"], draft["reason"]
     assert "run's own worktree prepared cleanly at the same commit" in draft["reason"]
-    assert how in draft["reason"], draft["reason"]
     assert draft["check_failure"].startswith("code repair was not attempted"), draft
-    assert json.loads((run_dir / "check-record.json").read_text())["status"] == "prep_failure"
+    record = json.loads((run_dir / "check-record.json").read_text())
+    assert record["status"] == "prep_failure"
+    assert how in record["validation"], record["validation"]
 
 
 def test_an_install_failing_only_in_the_check_copy_ends_in_a_draft(tmp_path, monkeypatch):
@@ -776,20 +779,29 @@ def test_a_copy_install_that_fails_once_is_prepared_again_and_the_check_goes_on(
     assert once.exists() and _installs(log, "check-") == 2, log.read_text()
 
 
-@pytest.mark.parametrize(("body", "knobs", "how"), [
-    ("kill -9 $$", {}, "was killed by signal 9"),
-    ("sleep 40", {"check_timeout_s": 3}, "did not finish (stopped at its time limit)"),
+@pytest.mark.parametrize(("body", "knobs", "how", "where", "runs"), [
+    # Killed: two preparations, each run twice, as the sandbox reruns a signal death once.
+    ("kill -9 $$", {}, "was killed by signal 9", "in the check copy, twice", 4),
+    ("sleep 40", {"check_timeout_s": 3}, "did not finish (stopped at its time limit)",
+     "in the check copy (once: not retried after a timeout)", 1),
 ], ids=["killed", "timed-out"])
 def test_a_killed_or_timed_out_copy_setup_ends_in_a_draft_on_the_spine(
-        tmp_path, monkeypatch, body, knobs, how):
+        tmp_path, monkeypatch, body, knobs, how, where, runs):
     """The spine: a ``setup`` killed by a signal, or silent past its inactivity limit, in the
-    check copy only. Each ends in a draft; neither stops the run with no pull request."""
-    setup = f"if {IN_COPY}; then {body}; fi"
+    check copy only. Each ends in a draft; neither stops the run with no pull request. The
+    killed one is prepared twice; the silent one once, as a hang would cost a second wait.
+    The step is long, so the reason's facts must come before it to survive the clip."""
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
+    # Logged in the copy's own HOME: a short setup, so the clipped draft reason keeps both facts.
+    setup = f'if {IN_COPY}; then echo ran >> "$HOME/setups.log"; {body}; fi'
     run_dir, labels = _spine_run(tmp_path, monkeypatch, git_repo(tmp_path / "target"), UPDATED,
                                  setup=setup, **knobs)
+    log = run_dir.resolve() / CHECK_COPY_HOME / "setups.log"
     assert labels["prepare_check"] == "proceed" and labels["gate_check"] == "draft", labels
     _assert_copy_only_draft(run_dir, json.loads((run_dir / "facts.json").read_text())[
-        "draft_delivery"], f"`{setup}` {how}")
+        "draft_delivery"], f"`{setup}` {how}", where=where)
+    assert len(log.read_text().splitlines()) == runs
 
 
 def test_a_killed_copy_setup_ends_in_a_draft(tmp_path):
@@ -837,6 +849,64 @@ def test_a_change_caused_install_failure_goes_to_the_builder_on_the_spine(tmp_pa
     facts = json.loads((run_dir / "facts.json").read_text())
     assert "ERR_PNPM_NO_MATCHING_VERSION" in facts["validation"]
     assert not facts.get("draft_delivery")
+
+
+def test_a_setup_calling_a_missing_tool_ends_in_a_draft_on_the_spine(tmp_path, monkeypatch):
+    """The spine: a setup that runs a tool nobody installed (exit 127) in the run's own
+    worktree makes prepare_check print ``draft``, naming the tool."""
+    run_dir, labels = _spine_run(tmp_path, monkeypatch, git_repo(tmp_path / "target"), UPDATED,
+                                 setup="nosuchtool-d13 --build", through="prepare_check")
+    assert labels["prepare_check"] == "draft", labels
+    draft = json.loads((run_dir / "facts.json").read_text())["draft_delivery"]
+    assert "`nosuchtool-d13` is not installed (exit 127)" in draft["reason"], draft
+
+
+#: A setup that runs the attempt's tool.py, which the base does not have.
+TOOL_SETUP = f"{sys.executable} tool.py"
+
+
+def test_a_setup_the_change_breaks_goes_to_the_builder_though_the_base_fails_it_too(tmp_path):
+    """The walker: setup runs tool.py; the change's tool.py exits 4, and the base, which has
+    no tool.py, fails the same step otherwise ("can't open file"). The base failed on what
+    the change replaced, so the failure is the change's: the builder gets it, two emits."""
+    broken = render({"tool.py": "import sys\nsys.exit(4)\n"})
+    fixed = render({"tool.py": "print('built')\n"})
+    run, emits = _stub_run(tmp_path, git_repo(tmp_path / "target"),
+                           [broken, fixed, *STUB_REVIEWS, "VERDICT: PASS"], setup=TOOL_SETUP)
+    assert run.exit_ok, run.error
+    assert len(emits) == 2
+    assert "exit 4" in emits[1]
+    assert not run.facts.get("draft_delivery")
+
+
+def test_a_setup_the_change_breaks_goes_to_the_builder_on_the_spine(tmp_path, monkeypatch):
+    """The spine: the same probe makes prepare_check print ``reloop``, with the setup's
+    failure as the feedback."""
+    run_dir, labels = _spine_run(tmp_path, monkeypatch, git_repo(tmp_path / "target"),
+                                 render({"tool.py": "import sys\nsys.exit(4)\n"}),
+                                 setup=TOOL_SETUP, through="prepare_check")
+    assert labels["prepare_check"] == "reloop", labels
+    facts = json.loads((run_dir / "facts.json").read_text())
+    assert "exit 4" in facts["validation"] and not facts.get("draft_delivery")
+
+
+def test_a_setup_failing_the_same_way_on_the_base_ends_in_a_draft(tmp_path):
+    """The walker: the base's tool.py already fails setup (exit 3, ``boom``); the change
+    edits tool.py and it fails identically. That is the base's failure: a draft, one emit."""
+    from tests_support import git
+
+    target = git_repo(tmp_path / "target")
+    failing = "import sys\nprint('boom', file=sys.stderr)\nsys.exit(3)\n"
+    (target / "tool.py").write_text(failing)
+    git(target, "add", "tool.py")
+    git(target, "commit", "-q", "-m", "tool")
+    run, emits = _stub_run(tmp_path, target,
+                           [render({"tool.py": "# edited\n" + failing}), *STUB_REVIEWS,
+                            *[""] * 10], setup=TOOL_SETUP)
+    assert run.exit_ok, run.error
+    assert len(emits) == 1
+    draft = run.facts["draft_delivery"]
+    assert "not caused by the change" in draft["reason"] and "(exit 3)" in draft["reason"], draft
 
 
 def test_real_failing_install_stub_ends_in_draft(tmp_path, monkeypatch):
@@ -962,8 +1032,31 @@ def test_the_check_copy_is_prepared_once_more_before_its_failure_stands(tmp_path
     assert calls == ["c1", "c1"]
     assert result.prep_failure == {"step": "install", "returncode": 1, "timed_out": False,
                                    "error_text": "install failed", "check_copy": True,
-                                   "commit": "c1"}
+                                   "commit": "c1", "attempts": 2}
     assert result.change_caused_prep is None
+
+
+def test_a_check_copy_preparation_that_timed_out_is_not_prepared_again(tmp_path, monkeypatch):
+    """Unit: a copy preparation that timed out is returned at once, not retried."""
+    from types import SimpleNamespace
+
+    from refactory_dsh import repo_change, worktree
+
+    found = SimpleNamespace(path=str(tmp_path), head="c1", target=str(tmp_path),
+                            base="b1", run=str(tmp_path))
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: found)
+    calls = []
+
+    def silent_copy(ctx, found, timeout):
+        calls.append(found.head)
+        return (found, {"PATH": "/bin"}, tmp_path / "home", ["install timed out"],
+                {"step": "install", "returncode": None, "timed_out": True})
+
+    monkeypatch.setattr(repo_change, "_check_copy", silent_copy)
+    ctx = nn.RunContext(tmp_path, facts={"commit": "c1", "check": "true"})
+    result = repo_change.run_check(ctx, "true", 60, beside_reviews=True)
+    assert calls == ["c1"]
+    assert result.prep_failure["attempts"] == 1 and result.prep_failure["timed_out"] is True
 
 
 def test_check_in_worktree_defensive_synthetic_prep_failure(tmp_path, monkeypatch):

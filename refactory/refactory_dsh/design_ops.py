@@ -1748,24 +1748,49 @@ def check_artifact(ctx: Any, *, check_attempt: str | None = None) -> str:
                        beside_reviews=False, check_attempt=check_attempt)
 
 
-def _prep_stop_reason(prep: dict[str, Any]) -> str:
-    """Why a preparation failure stopped the build loop, on one line (`_full_check`)."""
+def _prep_stop_reason(prep: dict[str, Any], error_text: str = "") -> str:
+    """Why a preparation failure stopped the build loop, on one line (`_full_check`).
+
+    ``error_text`` is what the preparation printed: a missing command is named from it
+    when the failure's record does not name it."""
     step = str(prep.get("step") or "the preparation")
     rc = prep.get("returncode")
     if prep.get("timed_out"):
         how = f"`{step}` did not finish (stopped at its time limit)"
     elif isinstance(rc, int) and rc < 0:
         how = f"`{step}` was killed by signal {-rc}"
+    elif rc in (126, 127):
+        missing = prep.get("missing") or _missing_command(error_text)
+        what = f"`{missing}`" if missing else "a command it runs"
+        how = (f"`{step}` could not run: {what} is not installed (exit 127)" if rc == 127
+               else f"`{step}` could not run: {what} is not executable (exit 126)")
     else:
         how = f"`{step}` failed (exit {rc})"
     if prep.get("check_copy"):
         commit = str(prep.get("commit") or "")[:12]
-        return (f"Check environment preparation failed in the check copy, twice: {how}; the "
-                f"run's own worktree prepared cleanly at the same commit {commit}, so the "
-                "change did not cause it")
+        where = ("in the check copy, twice" if int(prep.get("attempts") or 1) > 1
+                 else "in the check copy (once: not retried after a timeout)")
+        # The facts first: a long step is what the draft's clip may cut.
+        return (f"Check environment preparation failed {where}, while the run's own "
+                f"worktree prepared cleanly at the same commit {commit}, so the change did "
+                f"not cause it: {how}")
     if prep.get("timed_out") or (isinstance(rc, int) and rc < 0):
         return f"Check environment preparation did not finish: {how}"
+    if rc in (126, 127):
+        return f"Check environment preparation could not run: {how}"
     return f"Check environment preparation failed (not caused by the change): {how}"
+
+
+#: How sh, dash and bash say a command is missing or not executable:
+#: ``sh: 1: tool: not found``, ``bash: line 1: tool: command not found``,
+#: ``bash: ./tool: Permission denied``.
+_MISSING = _re.compile(r"([^\s:'`]+): (?:command not found|not found|Permission denied)")
+
+
+def _missing_command(error_text: str) -> str:
+    """The command a shell said it could not find or run, or empty."""
+    found = _MISSING.search(error_text)
+    return found.group(1) if found else ""
 
 
 def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
@@ -1896,17 +1921,16 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     # A preparation failure the change did not cause stops the build loop: a draft, no
     # builder round. So does one that timed out or was killed by a signal, which is not
     # the code's either; a failure in the check copy alone is never the change's, as the
-    # run's own worktree prepared cleanly at that commit (`repo_change.run_check`). Only
-    # an exhausted budget, and an installer missing from the run's own worktree, stop
-    # the run as unrepairable below.
+    # run's own worktree prepared cleanly at that commit (`repo_change.run_check`); and so
+    # does a command missing from the preparation, which the draft names. Only an
+    # exhausted budget stops the run as unrepairable below.
     _prep_fail = getattr(result, "prep_failure", None)
     _ccp_early = getattr(result, "change_caused_prep", None)
-    if (_prep_fail and not _ccp_early and outcome["status"] != "resource_exhausted"
-            and (outcome["status"] != "unavailable" or _prep_fail.get("check_copy"))):
+    if _prep_fail and not _ccp_early and outcome["status"] != "resource_exhausted":
         from refactory_dsh.run import BuildLoopStop
 
-        reason = _prep_stop_reason(_prep_fail)
         _error_text = str(_prep_fail.get("error_text") or result.stderr or "")
+        reason = _prep_stop_reason(_prep_fail, _error_text)
         _tail = "\n".join(_error_text.strip().splitlines()[-20:])
         # What the draft keeps of it is clipped (`_draft_for_stop`): the line that says no
         # repair was tried comes first, so a long error cannot push it out.

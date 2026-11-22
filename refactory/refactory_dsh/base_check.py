@@ -1431,6 +1431,28 @@ def _step_label(step_cmd: str, generate: str, setup: str) -> str:
 _STEP_ORDER = {"install": 0, "generate": 1, "setup": 2}
 
 
+def _fails_differently(returncode: Any, error_text: str, base_returncode: Any,
+                       base_error: str, found_wt: worktree.Worktree) -> bool:
+    """Whether the attempt's preparation failed otherwise than the base's at the same step.
+
+    A different exit code, when the base's is known, or a different error once each
+    worktree's own path reads as ``<root>`` (the attempt runs in the run's worktree, the
+    base in its base worktree, and a message that names a file names it by that path).
+    """
+    if base_returncode is not None and returncode != base_returncode:
+        return True
+    run_id = Path(found_wt.path).name.removeprefix("run-")
+    roots = {str(found_wt.path), str(_base_worktree_path(Path(found_wt.target), run_id))}
+    roots |= {str(Path(root).resolve()) for root in roots}
+
+    def normal(text: str) -> str:
+        for root in sorted(roots, key=len, reverse=True):
+            text = text.replace(root, "<root>")
+        return text.strip()
+
+    return normal(error_text) != normal(base_error)
+
+
 def _resolve_prep_comparison(
     base_ok: bool,
     base_step: str | None,
@@ -1441,10 +1463,15 @@ def _resolve_prep_comparison(
     step_label_val: str,
     generate: str,
     setup: str,
+    base_returncode: int | None = None,
 ) -> dict[str, Any] | None:
     """Given a base-prep result, decide whether the failure is change-caused.
 
-    Returns a change-caused dict or None (inherited / infrastructure).
+    Returns a change-caused dict or None (inherited / infrastructure). When both fail
+    the same step, the attempt's failure is the change's if it names a file the change
+    touched that the base's does not, or if the base's names a file the change touched
+    and the attempt fails differently (`_fails_differently`): the base failed on what
+    the change replaced, so its failure says nothing about the attempt's.
     """
     error_text = "\n".join(problems)
     step = prep_fail["step"]
@@ -1471,6 +1498,16 @@ def _resolve_prep_comparison(
                         "returncode": prep_fail["returncode"],
                         "error_text": error_text, "command": step,
                     }
+            base_names_changed = any(f in safe_base_error or Path(f).name in safe_base_error
+                                     for f in changed)
+            if base_names_changed and _fails_differently(
+                    prep_fail.get("returncode"), error_text, base_returncode,
+                    safe_base_error, found_wt):
+                return {
+                    "step": step, "step_label": step_label_val,
+                    "returncode": prep_fail["returncode"],
+                    "error_text": error_text, "command": step,
+                }
         return None  # Same failure, no changed file uniquely named → inherited.
 
     # Different steps.
@@ -1537,6 +1574,7 @@ def compare_prep_failure(
             cached["base_ok"], cached.get("base_step"),
             cached.get("base_error"),
             prep_fail, problems, found_wt, step_label_val, generate, setup,
+            cached.get("base_returncode"),
         )
 
     # ── 4. Prepare the base worktree and run its prep commands ───────────
@@ -1605,6 +1643,7 @@ def compare_prep_failure(
         result_dict["base_ok"], result_dict.get("base_step"),
         result_dict.get("base_error"),
         prep_fail, problems, found_wt, step_label_val, generate, setup,
+        result_dict.get("base_returncode"),
     )
 
 

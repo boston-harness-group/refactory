@@ -1403,20 +1403,23 @@ def run_check(ctx: Any, command: str, timeout: float,
             raise ValueError("the worktree is not at the attempt its check was prepared for; "
                              "prepare the check again")
         copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
-        if problems:
+        attempts = 1
+        if problems and not (prep_fail or {}).get("timed_out"):
             # The run's own worktree prepared cleanly at this commit: the check beside the
             # reviews runs only on an attempt `prepare_check` prepared without a problem
             # (it decides a failed preparation itself), and the commit was compared above.
             # So a failure in the copy alone is not the change's. It may be a passing
             # fault, so the copy is prepared once more; a second failure stops the build
-            # loop as a draft (`design_ops._full_check`), never a builder round.
+            # loop as a draft (`design_ops._full_check`), never a builder round. One that
+            # timed out is not prepared again: a silent hang would cost a second wait.
             copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
+            attempts = 2
         if problems:
             _stderr = "the check copy's environment could not be prepared:\n" + "\n".join(problems)
             failed = dict(prep_fail) if prep_fail else {"step": "prepare", "returncode": 1,
                                                         "timed_out": False}
             failed.setdefault("error_text", "\n".join(problems))
-            failed.update(check_copy=True, commit=found.head)
+            failed.update(check_copy=True, commit=found.head, attempts=attempts)
             return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
                                          prep_failure=failed, stderr=_stderr)
         result = sandbox.run_command(command, workdir=Path(copy.path), timeout_s=timeout,

@@ -196,8 +196,10 @@ def test_the_setup_command_runs_in_the_worktree_before_each_check(repo, tmp_path
     assert result.exit_ok, result.error
 
 
-def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tmp_path, monkeypatch):
-    """No code change can install uv; the run says so instead of asking emit to try again."""
+def test_a_missing_installer_ends_in_a_draft_without_spending_its_repairs(repo, tmp_path,
+                                                                         monkeypatch):
+    """No code change can install uv; the run ends in a draft naming it, instead of asking
+    emit to try again or ending with no pull request (D13)."""
     only_git = tmp_path / "only-git"
     only_git.mkdir()
     (only_git / "git").symlink_to(next(Path(entry) / "git" for entry in os.environ["PATH"].split(os.pathsep)
@@ -207,11 +209,28 @@ def test_a_missing_installer_stops_the_run_without_spending_its_repairs(repo, tm
     git(repo, "commit", "-q", "-m", "manifest")
     monkeypatch.setenv("PATH", str(only_git))
     emit = render({"tool.py": "print('built')\n"})
-    result = _design(tmp_path / "run", FakeModel(_answers(emit, emit)), target=str(repo))
-    assert result.exit_ok is False
-    assert "UNAVAILABLE: uv is not installed" in (result.error or "")
+    model = FakeModel(_answers(emit, emit))
+    result = _design(tmp_path / "run", model, target=str(repo))
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "`uv` is not installed (exit 127)" in draft["reason"], draft
+    assert "UNAVAILABLE: uv is not installed" in draft["check_failure"]
+    assert len([p for p in model.prompts if "Write the artifact `" in p]) == 1
     found = worktree.recorded(tmp_path / "run")
     assert git(repo, "rev-list", "--count", f"{found.base}..{found.branch}") == "1", "no repair was attempted"
+
+
+def test_a_setup_calling_a_missing_tool_ends_in_a_draft_naming_it(tmp_path):
+    """A setup command that runs a tool nobody installed exits 127: a draft naming the tool,
+    after one emit, not a run with no pull request (D13)."""
+    model = FakeModel(_answers(render({"tool.py": "print('built')\n"})))
+    result = _design(tmp_path / "run", model, _mode(setup="nosuchtool-d13 --build"),
+                     target=str(git_repo(tmp_path / "plain")))
+    assert result.exit_ok, result.error
+    draft = result.facts["draft_delivery"]
+    assert "`nosuchtool-d13` is not installed (exit 127)" in draft["reason"], draft
+    assert len([p for p in model.prompts if "Write the artifact `" in p]) == 1
 
 
 def test_a_setup_command_that_fails_fails_the_check_and_says_why(tmp_path):
