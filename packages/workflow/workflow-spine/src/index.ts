@@ -214,10 +214,17 @@ export const Config = z.object({
   steerCommand: z.string().default(''),
   steerArgs: z.array(z.string()).default([]),
   /**
-   * Wall-clock timeout for bookkeeping ``spawnSync`` calls only
-   * (``runtimeBridge``, ``steerCommand``).  Deterministic ops that have a
-   * lowered envelope from ``lowering.command_timeout_s`` use that envelope
-   * as their wall cap instead; ``commandTimeoutMs`` does not cap them.
+   * Wall-clock limit for every command the spine runs without a lowered envelope
+   * of its own: deterministic ops and fn gates with no `command_timeout_s`
+   * (`execute.ts` `requestFor`, `runDeterministic`), data-node item commands
+   * (`runDataCommand`, through the command runner's `timeoutMs`), the runtime
+   * bookkeeping bridge (`runtimeBridge`) and the steer command run at a user
+   * gate. An op or gate with a lowered envelope (`lowering.command_timeout_s`)
+   * uses that as its wall cap instead. The other `spawnSync` calls do not use
+   * it: the budget ledger check before and after a node (`execute.ts`
+   * `resourceCheck`, `python -m refactory_dsh.budgets`, 10 s), the `_open`
+   * tool's `openCommand`, which starts a run, and the `_steer` tool's
+   * `steerCommand`, which records a steer; those two have no limit.
    */
   commandTimeoutMs: z.natural().default(600_000),
   maxConcurrentNodes: z.natural().default(0),

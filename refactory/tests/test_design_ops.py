@@ -819,13 +819,15 @@ def _check_writes_tuple() -> tuple[str, ...]:
     return tuple(check_node.writes)
 
 
-def test_timed_out_check_produces_draft_pr(tmp_path, monkeypatch):
-    """A check returning SandboxResult(timed_out=True, timeout_kind='inactivity') routes
-    to a draft PR (draft_delivery fact is set), not to stop_unrepairable.
+def test_timed_out_check_stops_the_build_loop_for_a_draft(tmp_path, monkeypatch):
+    """A check returning SandboxResult(timed_out=True, timeout_kind='inactivity') stops
+    the build loop (BuildLoopStop, which its callers make a draft through
+    `_draft_for_stop`), not stop_unrepairable; the check's last output is the validation.
 
     Uses the production check_writes as the write guard, so removing
     timeout-output.txt from the declaration crashes the test.
     """
+    from refactory_dsh.run import BuildLoopStop
     from refactory_dsh.sandbox import SandboxResult
     from refactory_dsh.design_ops import _full_check
     from refactory_dsh import authoring_evidence as evidence
@@ -850,13 +852,13 @@ def test_timed_out_check_produces_draft_pr(tmp_path, monkeypatch):
     monkeypatch.setattr(evidence, "record", lambda ctx, outcome: outcome)
     monkeypatch.setattr(worktree, "recorded", lambda workdir: None)
 
-    result = _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
+    with pytest.raises(BuildLoopStop, match="Check did not finish.*inactivity"):
+        _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
 
-    assert result == "draft"
-    assert "draft_delivery" in ctx.facts
-    draft = ctx.facts["draft_delivery"]
-    assert draft["check_failing"] is True
-    assert "inactivity" in draft["check_failure"]
+    # The check node declares no draft_delivery: the gates after it set that.
+    assert "draft_delivery" not in ctx.facts
+    assert "inactivity" in ctx.facts["validation"]
+    assert "[stdout] test output line 2" in ctx.facts["validation"]
 
 
 def test_timeout_output_txt_written_next_to_check(tmp_path, monkeypatch):
@@ -887,7 +889,10 @@ def test_timeout_output_txt_written_next_to_check(tmp_path, monkeypatch):
     monkeypatch.setattr(evidence, "record", lambda ctx, outcome: outcome)
     monkeypatch.setattr(worktree, "recorded", lambda workdir: None)
 
-    _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
+    from refactory_dsh.run import BuildLoopStop
+
+    with pytest.raises(BuildLoopStop):
+        _full_check(ctx, "echo test", 180, {}, None, beside_reviews=False)
 
     timeout_output = (tmp_path / "timeout-output.txt").read_text()
     assert "[stdout] line_1" in timeout_output

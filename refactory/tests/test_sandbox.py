@@ -371,6 +371,116 @@ def test_problem_includes_timeout_kind_and_output_tail(tmp_path):
     assert "visible_line" in problem
 
 
+def test_problem_keeps_both_streams_tails(tmp_path):
+    """What a stopped command printed last on stderr is kept beside its stdout."""
+    result = sandbox.run_command('echo out_line; echo err_line >&2; sleep 10',
+                                 workdir=tmp_path / "w", timeout_s=1)
+    assert result.timed_out
+    problem = result.problem()
+    assert "[stdout] out_line" in problem and "[stderr] err_line" in problem
+    report = sandbox.timeout_output(result)
+    assert "[stdout] out_line" in report and "[stderr] err_line" in report
+
+
+_MEMORY_PROBE = """
+import json, pathlib, resource, sys
+from refactory_dsh import sandbox
+scale = 1 if sys.platform == "darwin" else 1024
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+result = sandbox.run_command(sys.argv[2], workdir=pathlib.Path(sys.argv[1]), timeout_s=60)
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+print(json.dumps({"growth": after - before, "ok": result.ok, "bytes": result.output_bytes,
+                  "kept": len(result.stdout), "end": result.stdout[-12:]}))
+"""
+
+
+@pytest.mark.parametrize("writer", [
+    "sys.stdout.write('y\\n' * 25_000_000)",       # 50 MB of short lines
+    "sys.stdout.write('x' * 50_000_000)",           # 50 MB with no newline at all
+])
+def test_a_large_output_is_kept_within_bounded_memory(tmp_path, writer):
+    """50 MB of output keeps the driver's memory growth modest: the output is read in
+    chunks into a bounded buffer (head and tail), never as one list of lines or one
+    re-copied buffer. Measured in a fresh interpreter, so the peak is this run's own."""
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import sys; ' + writer)}"
+    env = {**os.environ, "PYTHONPATH": str(Path(sandbox.__file__).resolve().parent.parent)}
+    import subprocess
+    probe = subprocess.run([sys.executable, "-c", _MEMORY_PROBE, str(tmp_path / "w"), command],
+                           capture_output=True, text=True, env=env, timeout=60,
+                           check=False)
+    assert probe.returncode == 0, probe.stderr
+    measured = json.loads(probe.stdout.strip().splitlines()[-1])
+    assert measured["ok"] and measured["bytes"] == 50_000_000
+    assert measured["kept"] <= sandbox.OUTPUT_KEEP_BYTES + 100, measured
+    assert measured["end"].strip("\n")[-1] in "xy", measured
+    assert measured["growth"] < 96 * 1024 * 1024, f"driver grew {measured['growth'] / 2**20:.0f} MiB"
+
+
+def test_output_beyond_the_cap_keeps_its_head_and_tail(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "OUTPUT_KEEP_BYTES", 4000)
+    monkeypatch.setattr(sandbox, "OUTPUT_TAIL_BYTES", 1000)
+    result = sandbox.run_command(
+        'echo FIRST; i=0; while [ $i -lt 2000 ]; do echo "line $i"; i=$((i+1)); done; echo LAST',
+        workdir=tmp_path / "w", timeout_s=10)
+    assert result.ok
+    assert result.stdout.startswith("FIRST\n") and result.stdout.endswith("LAST\n")
+    assert "bytes of output not kept" in result.stdout
+    assert len(result.stdout) < 4200
+
+
+def test_a_never_ending_printer_is_stopped_at_the_output_limit(tmp_path, monkeypatch):
+    """A logging loop never goes silent; it is stopped at the output limit, not the backstop."""
+    monkeypatch.setattr(sandbox, "OUTPUT_LIMIT_BYTES", 2 * 1024 * 1024)
+    start = time.monotonic()
+    result = sandbox.run_command("while true; do echo spam-spam-spam; done",
+                                 workdir=tmp_path / "w", timeout_s=30)
+    assert time.monotonic() - start < 5
+    assert result.timed_out and result.timeout_kind == "output_limit"
+    assert result.output_bytes > 2 * 1024 * 1024
+    assert result.stdout.rstrip().endswith("spam-spam-spam")
+    assert "output limit" in result.problem() and "[stdout] spam-spam-spam" in result.problem()
+
+
+def test_carriage_returns_read_as_newlines(tmp_path):
+    """As the old ``text=True`` path did (universal newlines)."""
+    result = sandbox.run_command(r"printf 'a\r\nb\rc\n'; printf 'e\r\n' >&2",
+                                 workdir=tmp_path / "w", timeout_s=5)
+    assert result.ok
+    assert result.stdout == "a\nb\nc\n" and result.stderr == "e\n"
+
+
+def test_what_a_command_leaves_running_does_not_survive_it(tmp_path, monkeypatch):
+    """A background child that still holds the output is stopped after a short grace
+    once the command's own process exits, and the reader threads are done."""
+    import threading
+
+    monkeypatch.setattr(sandbox, "EXIT_GRACE_S", 0.5)
+    pidfile = tmp_path / "bg.pid"
+    start = time.monotonic()
+    result = sandbox.run_command(
+        f"sh -c 'echo $$ > {pidfile}; exec sleep 20' & echo early",
+        workdir=tmp_path / "w", timeout_s=30)
+    assert time.monotonic() - start < 4
+    assert result.ok and result.stdout == "early\n"
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("the background sleep outlived its command")
+    assert not [t for t in threading.enumerate() if t.name == "sandbox-drain" and t.is_alive()]
+
+
+def test_refactory_env_writes_python_unbuffered():
+    """A check outside any worktree, a fast run's check and the probe use this environment."""
+    assert sandbox.refactory_env()["PYTHONUNBUFFERED"] == "1"
+
+
 def test_a_check_reads_no_input(tmp_path):
     """A check runs unattended, so nothing it runs can read or wait on the launcher's stdin."""
     with on_stdin("y\n"):

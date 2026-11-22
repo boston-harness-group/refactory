@@ -44,7 +44,7 @@
       "command": "python -m refactory_dsh.run refactory_dsh.fast_ops:focused_check",
       "callable_name": "refactory_dsh.fast_ops:focused_check",
       "notes": "run the explicitly requested bounded check; no implicit full evaluation",
-      "command_timeout_s": 15000,
+      "command_timeout_s": 130200,
       "_type": "FnNode"
     },
     "focused_qa": {

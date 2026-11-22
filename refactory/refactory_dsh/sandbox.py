@@ -61,6 +61,24 @@ DEFAULT_FILE_MB = 16384
 #: before this.  Overridable with ``REFACTORY_COMMAND_BACKSTOP_S``.
 COMMAND_BACKSTOP_S = int(os.environ.get("REFACTORY_COMMAND_BACKSTOP_S", "14400"))
 
+#: What `run_command` keeps of each output stream: all of it up to this many bytes, and
+#: beyond it the first part and the last ``OUTPUT_TAIL_BYTES`` with a note of what was
+#: left out.  This repository's own full pytest logs measure 0.46-0.64 MB (2026-11-22),
+#: so 8 MiB keeps a log more than ten times that size whole.
+OUTPUT_KEEP_BYTES = 8 * 1024 * 1024
+#: Of a stream longer than ``OUTPUT_KEEP_BYTES``, how much of its end is kept.
+OUTPUT_TAIL_BYTES = 1024 * 1024
+#: A command whose stdout and stderr together pass this many bytes is stopped, reported
+#: as ``output_limit`` with its output kept, as an inactivity or backstop stop is: a
+#: logging loop keeps the inactivity limit from firing and would otherwise run to the
+#: backstop.  400 times the largest real pytest log above.
+OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024
+#: How long `run_command` waits, after the command's own process exits, for what it
+#: started in the background to close its output, before that is stopped.
+EXIT_GRACE_S = 2.0
+#: What can stop a command before it exits (`SandboxResult.timeout_kind`).
+STOP_KINDS = ("inactivity", "backstop", "output_limit")
+
 #: Shell exit codes for signals that may be the change's own fault (SIGABRT, SIGBUS,
 #: SIGSEGV).  Retried once in run_command; if they persist, the base comparison decides
 #: whether the crash is the change's fault or infrastructure.
@@ -132,21 +150,32 @@ class SandboxResult:
     cwd_outside: str | None = None
     change_caused_prep: dict[str, Any] | None = None
     #: When ``timed_out`` is True, what stopped the command: ``'inactivity'`` (no output
-    #: for the inactivity limit), ``'backstop'`` (the absolute wall-clock cap), or ``None``
-    #: (a budget-exhaustion or legacy timeout).
+    #: for the inactivity limit), ``'backstop'`` (the absolute wall-clock cap),
+    #: ``'output_limit'`` (more output than ``OUTPUT_LIMIT_BYTES``), or ``None`` (a
+    #: budget-exhaustion or legacy timeout).
     timeout_kind: str | None = None
+    #: Bytes the command wrote to stdout and stderr together, when `run_command` ran it.
+    output_bytes: int | None = None
+
+    def stop_reason(self) -> str:
+        """What stopped a command before it exited, in words; empty when nothing did."""
+        if not self.timed_out or self.timeout_kind not in STOP_KINDS:
+            return ""
+        if self.timeout_kind == "inactivity":
+            return f"inactivity, {self.timeout_s}s silent"
+        if self.timeout_kind == "output_limit":
+            return f"output limit, {self.output_bytes or 0} bytes of output"
+        elapsed = f" {self.elapsed_s:.0f}s elapsed" if self.elapsed_s is not None else ""
+        return f"backstop,{elapsed}"
 
     def problem(self) -> str:
         if self.timed_out:
-            if self.timeout_kind == "inactivity":
-                tail = _output_tail(self.stdout, 5)
+            stopped = self.stop_reason()
+            if stopped:
+                tail = output_tail(self.stdout, self.stderr, 5)
                 suffix = f" — last output:\n{tail}" if tail else ""
-                return f"timed out (inactivity, {self.timeout_s}s silent){suffix}"
-            if self.timeout_kind == "backstop":
-                elapsed = f" {self.elapsed_s:.0f}s elapsed" if self.elapsed_s is not None else ""
-                tail = _output_tail(self.stdout, 5)
-                suffix = f" — last output:\n{tail}" if tail else ""
-                return f"timed out (backstop,{elapsed}){suffix}"
+                verb = "stopped" if self.timeout_kind == "output_limit" else "timed out"
+                return f"{verb} ({stopped}){suffix}"
             limit = f" of {self.timeout_s}s" if self.timeout_s is not None else ""
             return f"the run exceeded its time limit{limit}; partial artifacts remain in the workdir"
         if self.returncode != 0:
@@ -155,10 +184,95 @@ class SandboxResult:
         return ""
 
 
-def _output_tail(text: str, n: int) -> str:
-    """The last *n* non-empty lines of *text* for display in timeout messages."""
-    lines = [line for line in (text or "").splitlines() if line.strip()]
-    return "\n".join(lines[-n:])
+def output_tail(stdout: str | None, stderr: str | None, n: int) -> str:
+    """The last *n* non-empty lines of each stream, each line labelled with its stream.
+
+    For the messages a stopped command leaves: what it printed last can be on either
+    stream (pytest reports on stdout, a build tool on stderr), so both are kept.
+    """
+    if n <= 0:
+        return ""
+    out: list[str] = []
+    for label, text in (("stdout", stdout), ("stderr", stderr)):
+        lines = [line for line in (text or "").splitlines() if line.strip()]
+        out.extend(f"[{label}] {line}" for line in lines[-n:])
+    return "\n".join(out)
+
+
+def timeout_output(result: SandboxResult, n: int = 200) -> str:
+    """The text of ``timeout-output.txt`` for a command stopped before it exited.
+
+    Why it was stopped, then the last *n* lines of each stream, labelled (`output_tail`).
+    """
+    elapsed = f"{result.elapsed_s:.0f}" if result.elapsed_s is not None else "unknown"
+    limit = result.timeout_s if result.timeout_s is not None else "unknown"
+    header = (f"Stopped: {result.stop_reason() or 'timeout'} "
+              f"(elapsed {elapsed}s, inactivity limit {limit}s)")
+    return header + "\n\n" + output_tail(result.stdout, result.stderr, n) + "\n"
+
+
+class _Output:
+    """One output stream of a command, kept within ``keep`` bytes.
+
+    Whole up to ``keep`` bytes; beyond that, the first ``keep - tail`` bytes and the
+    last ``tail`` bytes, with a note of how much was left out between them.  Chunks are
+    appended as they arrive and never re-copied, so reading is linear in the output.
+    """
+
+    def __init__(self, keep: int, tail: int) -> None:
+        self.tail_cap = max(0, min(tail, keep))
+        self.head_cap = max(0, keep - self.tail_cap)
+        self.head = bytearray()
+        self.tail: collections.deque[bytes] = collections.deque()
+        self.tail_len = 0
+        self.total = 0
+        self.lock = threading.Lock()
+
+    def add(self, chunk: bytes) -> None:
+        with self.lock:
+            self.total += len(chunk)
+            room = self.head_cap - len(self.head)
+            if room > 0:
+                self.head += chunk[:room]
+                chunk = chunk[room:]
+            if not chunk:
+                return
+            self.tail.append(chunk)
+            self.tail_len += len(chunk)
+            # Drop whole chunks from the front while what remains still covers the cap.
+            while self.tail and self.tail_len - len(self.tail[0]) >= self.tail_cap:
+                self.tail_len -= len(self.tail.popleft())
+
+    def text(self) -> str:
+        """The kept output, decoded, with newlines normalised as ``text=True`` did."""
+        with self.lock:
+            tail = b"".join(self.tail)
+            if self.tail_len > self.tail_cap:
+                tail = tail[self.tail_len - self.tail_cap:]
+            dropped = self.total - len(self.head) - len(tail)
+            parts = [bytes(self.head)]
+        if dropped > 0:
+            parts.append(f"\n[... {dropped} bytes of output not kept ...]\n".encode())
+        parts.append(tail)
+        decoded = b"".join(parts).decode("utf-8", errors="replace")
+        return decoded.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _drain(pipe: Any, output: _Output, activity: list[float]) -> None:
+    """Read *pipe* to its end in chunks into *output*, noting when output last arrived."""
+    try:
+        fd = pipe.fileno()
+    except (OSError, ValueError):
+        return
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except (OSError, ValueError):
+            return
+        if not chunk:
+            return
+        activity[0] = time.monotonic()
+        output.add(chunk)
 
 
 # ── validation without execution ───────────────────────────────────────────
@@ -363,7 +477,10 @@ def refactory_env(env: dict[str, str] | None = None) -> dict[str, str]:
 
     For a check of an artifact built for refactory outside any worktree (create mode, a
     fast run with no target): its ``python`` must import ``refactory_dsh`` however the
-    launching shell's PATH reads, and `scrub` does not add it.
+    launching shell's PATH reads, and `scrub` does not add it. Its Python writes
+    unbuffered (``PYTHONUNBUFFERED``), as a worktree check's does
+    (`worktree.check_environment`): output held in a pipe's buffer looks like silence to
+    `run_command`'s inactivity limit.
     """
     from refactory_dsh.paths import venv_bin
 
@@ -372,6 +489,7 @@ def refactory_env(env: dict[str, str] | None = None) -> dict[str, str]:
     rest = [entry for entry in out.get("PATH", "").split(os.pathsep) if entry and entry != bindir]
     out["PATH"] = os.pathsep.join([bindir, *rest])
     out["VIRTUAL_ENV"] = str(Path(bindir).parent)
+    out["PYTHONUNBUFFERED"] = "1"
     return out
 
 
@@ -464,17 +582,22 @@ def run_command(
     stdin: Any = None,
     worktree_root: Path | None = None,
 ) -> SandboxResult:
-    """Run a shell command in the sandbox, bounded by time rather than memory.
+    """Run a shell command in the sandbox, bounded by inactivity rather than memory.
 
     A command is what a brief declares as its check ("run the tests", "build it"),
     and it is arbitrary, so it gets the same scrubbed environment and file limit as
-    anything else we did not write. What bounds it is ``timeout_s``. It has no memory cap
+    anything else we did not write. It is stopped when it has written nothing to stdout
+    or stderr for ``timeout_s`` seconds, at the ``COMMAND_BACKSTOP_S`` wall clock however
+    much it writes, or once its output passes ``OUTPUT_LIMIT_BYTES``; the result says
+    which (``timeout_kind``) and keeps its output (`_Output`). It has no memory cap
     unless ``memory_mb`` sets one, because V8 reserves far more address space than it
     uses, so Node fails under any practical address-space limit once it starts worker
     threads, as vitest does (#325).
-    Its CPU limit, unless ``cpu_s`` sets one, is that time on every core, so a test
-    runner's worker threads are not stopped before the timeout. When the time runs out,
-    everything the command started is stopped with it, not only its shell. ``exact_env``
+    Its CPU limit, unless ``cpu_s`` sets one, is the backstop on every core, so a test
+    runner's worker threads are not stopped before it. When it is stopped, everything
+    the command started is stopped with it, not only its shell; so is what it left
+    running in the background that still holds its output ``EXIT_GRACE_S`` after it
+    exits. ``exact_env``
     runs it with ``env`` as given instead -- a design run's worktree builds its own,
     without refactory's interpreter or variables (`worktree.check_environment`) -- and
     ``home`` moves HOME out of ``workdir``, so tool caches stay out of what is checked.
@@ -515,160 +638,136 @@ def run_command(
         )
     else:
         wrapped = command
-    # text=False: we read raw bytes from the pipes in reader threads, decode at the end.
+    # text=False: reader threads take raw bytes from the pipes (`_drain`), decoded at the end.
     options = dict(shell=True, text=False, cwd=str(workdir), env=child_env,
                    stdin=subprocess.DEVNULL if stdin is None else stdin, **kwargs)
 
-    # Shared mutable state for the reader threads and the timeout result, in the outer
-    # scope so the timeout handler can read the output the threads have already captured.
-    _timeout_kind: list[str | None] = [None]
-    # Full lists for normal completion (all output); deques for timeout tail (last 200).
-    _all_stdout_lines: list[str] = []
-    _all_stderr_lines: list[str] = []
-    _tail_stdout: collections.deque[str] = collections.deque(maxlen=200)
-    _tail_stderr: collections.deque[str] = collections.deque(maxlen=200)
-    # Track whether the stream ended with a newline so the reconstructed text matches.
-    _stdout_trailing_nl: list[bool] = [False]
-    _stderr_trailing_nl: list[bool] = [False]
+    def _stop_session(proc: subprocess.Popen[bytes], readers: list[threading.Thread]) -> None:
+        """Stop everything the command started, then let the readers drain to the end.
 
-    def _reader(fd, all_lines, tail_lines, activity, trailing_nl):
-        """Drain *fd* (a raw binary file descriptor) line by line, updating *activity*."""
-        buf = b""
-        while True:
-            try:
-                chunk = os.read(fd.fileno(), 8192)
-            except (OSError, ValueError):
-                break
-            if not chunk:
-                break
-            activity[0] = time.monotonic()
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                decoded = line.decode("utf-8", errors="replace")
-                all_lines.append(decoded)
-                tail_lines.append(decoded)
-        # Flush remainder
-        if buf:
-            decoded = buf.decode("utf-8", errors="replace")
-            all_lines.append(decoded)
-            tail_lines.append(decoded)
-            trailing_nl[0] = False
-        else:
-            trailing_nl[0] = bool(all_lines)
+        This session was created by this call and contains only this command's shell and
+        tools. No descendant discovery or name matching.
+        """
+        try:
+            os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            # Whatever ignored SIGTERM, or outlived its shell, still holds the pipes.
+            os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=2)
+        for reader in readers:
+            reader.join(timeout=5)
 
-    def _once() -> subprocess.CompletedProcess[str]:
-        """Run the command once, bounded by inactivity and backstop; raise on timeout or budget."""
-        backstop_deadline = time.monotonic() + COMMAND_BACKSTOP_S
+    def _once() -> tuple[int | None, str, str, str | None, int]:
+        """Run the command once: (returncode, stdout, stderr, stop kind, output bytes).
 
+        It is stopped when it has been silent for ``timeout_s``, at the backstop, or once
+        its output passes ``OUTPUT_LIMIT_BYTES``; the stop kind says which, with the
+        returncode None. A budget stop raises. Each call has its own output and reader
+        threads, and joins them before it returns, so a retry shares nothing with it.
+        """
+        backstop, limit = COMMAND_BACKSTOP_S, OUTPUT_LIMIT_BYTES
+        out = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
+        err = _Output(OUTPUT_KEEP_BYTES, OUTPUT_TAIL_BYTES)
+        began = time.monotonic()
         proc = subprocess.Popen(wrapped, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=os.name == "posix", **options)
-
-        # Clear accumulators for this invocation (retries reuse them).
-        _all_stdout_lines.clear()
-        _all_stderr_lines.clear()
-        _tail_stdout.clear()
-        _tail_stderr.clear()
-        _stdout_trailing_nl[0] = False
-        _stderr_trailing_nl[0] = False
-        # activity[0] = last time output was seen.  GIL-atomic float assignment.
-        activity = [time.monotonic()]
-
-        t_out = threading.Thread(target=_reader, args=(proc.stdout, _all_stdout_lines, _tail_stdout, activity, _stdout_trailing_nl), daemon=True)
-        t_err = threading.Thread(target=_reader, args=(proc.stderr, _all_stderr_lines, _tail_stderr, activity, _stderr_trailing_nl), daemon=True)
-        t_out.start()
-        t_err.start()
-
+        # activity[0]: when output last arrived (a float assignment, atomic under the GIL).
+        activity = [began]
+        readers = [threading.Thread(target=_drain, args=(pipe, sink, activity), daemon=True,
+                                    name="sandbox-drain")
+                   for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
+        for reader in readers:
+            reader.start()
+        stop: str | None = None
         try:
-            while True:
+            while proc.poll() is None:
                 if budget is not None:
                     budget.checkpoint()
-                # Check if child is done
-                retcode = proc.poll()
-                if retcode is not None:
+                now = time.monotonic()
+                if out.total + err.total > limit:
+                    stop = "output_limit"
+                elif now - activity[0] >= timeout_s:
+                    stop = "inactivity"
+                elif now - began >= backstop:
+                    stop = "backstop"
+                if stop is not None:
                     break
-                # Inactivity check: no output for timeout_s seconds
-                silent = time.monotonic() - activity[0]
-                if silent >= timeout_s:
-                    _timeout_kind[0] = "inactivity"
-                    raise subprocess.TimeoutExpired(command, timeout_s)
-                # Backstop check: total elapsed >= backstop
-                if time.monotonic() >= backstop_deadline:
-                    _timeout_kind[0] = "backstop"
-                    raise subprocess.TimeoutExpired(command, COMMAND_BACKSTOP_S)
-                time.sleep(0.1)
+                time.sleep(0.05)
         except BaseException:
-            # This session was created by this call and contains only this
-            # check's shell/tools. No descendant discovery or name matching.
-            try:
-                os.killpg(proc.pid, signal.SIGTERM) if os.name == "posix" else proc.terminate()
-            except ProcessLookupError:
-                pass
-            # Join reader threads with 5 s timeout to drain kernel-buffered output.
-            t_out.join(timeout=5)
-            t_err.join(timeout=5)
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
-                except ProcessLookupError:
-                    pass
-                proc.wait(timeout=2)
+            _stop_session(proc, readers)
             raise
-
-        # Normal exit: join reader threads, return ALL output (not truncated).
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
-        stdout_text = "\n".join(_all_stdout_lines) + ("\n" if _stdout_trailing_nl[0] else "")
-        stderr_text = "\n".join(_all_stderr_lines) + ("\n" if _stderr_trailing_nl[0] else "")
-        return subprocess.CompletedProcess(command, retcode, stdout_text, stderr_text)
+        if stop is not None:
+            _stop_session(proc, readers)
+            return None, out.text(), err.text(), stop, out.total + err.total
+        # The command's own process exited. What it started in the background may still
+        # hold the pipes: it gets a short grace to finish, then is stopped as at a timeout,
+        # so nothing the command started outlives it.
+        grace_end = time.monotonic() + EXIT_GRACE_S
+        for reader in readers:
+            reader.join(timeout=max(0.0, grace_end - time.monotonic()))
+        if any(reader.is_alive() for reader in readers):
+            _stop_session(proc, readers)
+        return proc.returncode, out.text(), err.text(), None, out.total + err.total
 
     started = time.monotonic()
-    try:
-        if budget is not None:
-            budget.checkpoint()
-        result = _once()
-        if result.returncode < 0:
-            # Killed by a signal — retry once; the first death is transient.
-            result = _once()
-            if result.returncode < 0:
-                sig_num = -result.returncode
-                try:
-                    sig_name = signal.Signals(sig_num).name
-                except (ValueError, KeyError):
-                    sig_name = f"signal {sig_num}"
-                sig_label = f"killed by {sig_name}"
-                if sentinel_path is not None:
-                    sentinel_path.unlink(missing_ok=True)
-                return SandboxResult(
-                    ok=False,
-                    timeout_s=timeout_s,
-                    elapsed_s=round(time.monotonic() - started, 3),
-                    returncode=result.returncode,
-                    stdout=result.stdout,
-                    stderr=f"{sig_label}\n{result.stderr}" if result.stderr else sig_label,
-                )
-        elif result.returncode in _AMBIGUOUS_SHELL_EXITS:
-            # Shell-wrapped SIGABRT/SIGBUS/SIGSEGV — retry once (#377, extended to
-            # 128+N shells).  If the retry still crashes, the result falls through to
-            # the caller's base comparison, which decides whether the crash is the
-            # change's fault or infrastructure.
-            result = _once()
-    except subprocess.TimeoutExpired:
+
+    def _stopped(stdout: str, stderr: str, kind: str, total: int) -> SandboxResult:
         if sentinel_path is not None:
             sentinel_path.unlink(missing_ok=True)
-        # Keep the last 200 lines of output from the reader threads (tail deques).
-        kept_stdout = "\n".join(_tail_stdout)
-        kept_stderr = "\n".join(_tail_stderr)
-        kind = _timeout_kind[0]
         return SandboxResult(
             ok=False, timed_out=True, returncode=124, timeout_s=timeout_s,
             elapsed_s=round(time.monotonic() - started, 3), progress=_progress_at(workdir),
-            stdout=kept_stdout,
-            stderr=kept_stderr or f"timed out after {timeout_s}s",
-            timeout_kind=kind,
+            stdout=stdout, stderr=stderr or f"timed out after {timeout_s}s",
+            timeout_kind=kind, output_bytes=total,
         )
+
+    if budget is not None:
+        budget.checkpoint()
+    returncode, stdout, stderr, kind, total = _once()
+    if kind is not None:
+        return _stopped(stdout, stderr, kind, total)
+    assert returncode is not None
+    if returncode < 0:
+        # Killed by a signal — retry once; the first death is transient.
+        returncode, stdout, stderr, kind, total = _once()
+        if kind is not None:
+            return _stopped(stdout, stderr, kind, total)
+        assert returncode is not None
+        if returncode < 0:
+            sig_num = -returncode
+            try:
+                sig_name = signal.Signals(sig_num).name
+            except (ValueError, KeyError):
+                sig_name = f"signal {sig_num}"
+            sig_label = f"killed by {sig_name}"
+            if sentinel_path is not None:
+                sentinel_path.unlink(missing_ok=True)
+            return SandboxResult(
+                ok=False,
+                timeout_s=timeout_s,
+                elapsed_s=round(time.monotonic() - started, 3),
+                returncode=returncode,
+                stdout=stdout,
+                stderr=f"{sig_label}\n{stderr}" if stderr else sig_label,
+                output_bytes=total,
+            )
+    elif returncode in _AMBIGUOUS_SHELL_EXITS:
+        # Shell-wrapped SIGABRT/SIGBUS/SIGSEGV — retry once (#377, extended to
+        # 128+N shells).  If the retry still crashes, the result falls through to
+        # the caller's base comparison, which decides whether the crash is the
+        # change's fault or infrastructure.
+        returncode, stdout, stderr, kind, total = _once()
+        if kind is not None:
+            return _stopped(stdout, stderr, kind, total)
+        assert returncode is not None
     cwd_outside: str | None = None
     if sentinel_path is not None:
         try:
@@ -678,13 +777,14 @@ def run_command(
         finally:
             sentinel_path.unlink(missing_ok=True)
     return SandboxResult(
-        ok=result.returncode == 0,
+        ok=returncode == 0,
         timeout_s=timeout_s,
         elapsed_s=round(time.monotonic() - started, 3),
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
         cwd_outside=cwd_outside,
+        output_bytes=total,
     )
 
 

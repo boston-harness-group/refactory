@@ -480,24 +480,16 @@ def focused_check(ctx: Any) -> dict[str, Any]:
         kind = evidence.check_failure_kind(result, budget=getattr(ctx, "budget", None))
         if kind == "check_timeout":
             # Intercept check_timeout before stop_unrepairable (brief item 5, PIT-004).
-            # Preserve the timeout output and stop with a descriptive message.
-            _tk = getattr(result, "timeout_kind", "timeout")
-            if _tk == "inactivity":
-                _reason = f"Check did not finish (inactivity timeout after {result.timeout_s}s of silence)"
-            else:
-                _elapsed = f"{result.elapsed_s:.0f}" if result.elapsed_s is not None else "unknown"
-                _reason = f"Check did not finish (backstop timeout after {_elapsed}s elapsed)"
-            _tail = sandbox._output_tail(result.stdout, 20)
+            # Preserve the output of both streams and stop with a descriptive message.
+            _reason = f"Check did not finish (stopped: {result.stop_reason()})"
+            _tail = sandbox.output_tail(result.stdout, result.stderr, 20)
             evidence.record(ctx, {**payload, "status": "check_timeout"})
             ctx.write_json("check-record.json", {
                 "status": "check_timeout", "validation": _reason,
                 "check_mode": "full", "command": command,
             })
             # Write timeout-output.txt alongside the check record.
-            _tout_lines = (result.stdout or "").splitlines()[-200:]
-            _tout_header = f"# {_reason}\n# timeout_kind={_tk}\n\n"
-            ctx.write_text("timeout-output.txt",
-                _tout_header + "\n".join(_tout_lines) + "\n")
+            ctx.write_text("timeout-output.txt", sandbox.timeout_output(result))
             _detail = f"{_reason}\n\nLast output:\n{_tail}" if _tail else _reason
             raise ValueError(f"validation check_timeout: {_detail}")
         if kind != "code_failure":

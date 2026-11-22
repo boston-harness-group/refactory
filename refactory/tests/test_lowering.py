@@ -233,12 +233,12 @@ def _fix_pack_state(*, check_timeout_s: int = 300) -> dict:
     }
 
 
-def test_check_gate_envelope_is_backstop_based():
-    """The check envelope is COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S, not a wall-clock sum."""
+def test_check_gate_envelope_covers_each_command_phase():
+    """The check envelope covers each of its commands up to the backstop, in sequence."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
     from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.CHECK_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     for timeout in (180, 600, 1500):
         state = _check_gate_state(check_timeout_s=timeout)
         workflow = lowering.to_workflow(state, name="design")
@@ -259,7 +259,7 @@ def test_focused_check_op_gets_check_envelope():
     state = _check_op_state(check_timeout_s=timeout)
     workflow = lowering.to_workflow(state, name="design_fast")
     lowered = workflow.nodes["focused_check"]
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.CHECK_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > timeout
 
@@ -272,7 +272,7 @@ def test_fix_pack_check_gate_gets_check_envelope():
     state = _fix_pack_state(check_timeout_s=timeout)
     workflow = lowering.to_workflow(state, name="fix_pack")
     lowered = workflow.nodes["check"]
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.CHECK_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > timeout
 
@@ -308,7 +308,7 @@ def test_real_modes_get_check_envelope(mode_cls, check_node_id):
     from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
     from refactory_packages.fix_pack.mode import MakePass  # noqa: F811
 
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.CHECK_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
     classes = {"design": DesignMode, "design_fast": DesignFastMode, "make_pass": MakePass}
     mode = classes[mode_cls]()
@@ -382,7 +382,7 @@ def _deliver_op_state(*, check_timeout_s: int = 180) -> dict:
 
 def test_deliver_node_gets_delivery_envelope():
     """The real DesignMode's deliver node gets a backstop-based command_timeout_s.
-    Both the check and delivery envelopes are now COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S.
+    It covers the merged check's commands and the merged tree's install and regeneration.
     """
     from refactory_dsh.design import DesignMode
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
@@ -392,17 +392,17 @@ def test_deliver_node_gets_delivery_envelope():
     state = mode.state_dict()
     workflow = lowering.to_workflow(state, name="design")
 
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.DELIVERY_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
 
     lowered_deliver = workflow.nodes["deliver"]
     assert lowered_deliver.command_timeout_s == expected, (
         f"deliver: expected {expected}, got {lowered_deliver.command_timeout_s}"
     )
-    # Both envelopes are equal (backstop-based)
+    # The delivery runs the merged check and more, so its envelope exceeds the check's.
     lowered_check = workflow.nodes["check"]
-    assert lowered_deliver.command_timeout_s == lowered_check.command_timeout_s, (
-        f"deliver ({lowered_deliver.command_timeout_s}) must equal "
-        f"check ({lowered_check.command_timeout_s}) with backstop-based formula"
+    assert lowered_deliver.command_timeout_s > lowered_check.command_timeout_s, (
+        f"deliver ({lowered_deliver.command_timeout_s}) must exceed "
+        f"check ({lowered_check.command_timeout_s})"
     )
 
 
@@ -414,7 +414,7 @@ def test_deliver_timeout_exceeds_spine_default():
     state = _deliver_op_state(check_timeout_s=1800)
     workflow = lowering.to_workflow(state, name="design")
     lowered = workflow.nodes["deliver"]
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.DELIVERY_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected
     assert lowered.command_timeout_s > 600, (
         f"delivery envelope {lowered.command_timeout_s} must exceed "
@@ -461,18 +461,18 @@ def test_synthetic_deliver_op_gets_delivery_envelope():
     }
     workflow = lowering.to_workflow(state, name="custom_mode")
     lowered = workflow.nodes["ship_it"]
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.DELIVERY_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert lowered.command_timeout_s == expected, (
         f"ship_it: expected {expected}, got {lowered.command_timeout_s}"
     )
 
 
-def test_deliver_envelope_is_constant_backstop_based():
-    """The delivery envelope is now constant (backstop-based), independent of check_timeout_s."""
+def test_deliver_envelope_covers_each_command_phase():
+    """The delivery envelope covers its commands up to the backstop, whatever check_timeout_s is."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
     from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
 
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering.DELIVERY_COMMAND_PHASES * COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     for timeout in (180, 600, 1500):
         state = _deliver_op_state(check_timeout_s=timeout)
         workflow = lowering.to_workflow(state, name="design")
@@ -640,3 +640,23 @@ def test_design_lowers_the_sizer_and_widening():
         "research-plan.json", "research/"}
     agents = [node for node, entry in declared.items() if entry["kind"] == "agent"]
     assert [node for node in agents if "sizing.json" in declared[node]["reads"]] == []
+
+
+def test_an_op_envelope_never_fires_before_its_commands_own_limits(monkeypatch):
+    """A check op runs its install, generate, setup, check and base commands one after
+    another, each allowed up to the backstop while it prints; the lowered envelope covers
+    them all, on both runtimes (the walker reads the same ``command_timeout_s``)."""
+    from refactory_dsh import sandbox
+    from refactory_dsh.design import DesignMode
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
+    monkeypatch.setattr(sandbox, "COMMAND_BACKSTOP_S", 1000)
+    workflow = lowering.to_workflow(DesignMode().state_dict(), name="design")
+    for node_id in ("prepare_check", "check", "gate_check"):
+        envelope = workflow.nodes[node_id].command_timeout_s
+        # Install, generate, setup and the check alone are four commands in sequence.
+        assert envelope >= 4 * 1000 + NODE_DISPATCH_OVERHEAD_S, (node_id, envelope)
+        assert envelope == lowering.CHECK_COMMAND_PHASES * 1000 + NODE_DISPATCH_OVERHEAD_S
+    deliver = workflow.nodes["deliver"].command_timeout_s
+    assert deliver == lowering.DELIVERY_COMMAND_PHASES * 1000 + NODE_DISPATCH_OVERHEAD_S
+    assert deliver > workflow.nodes["check"].command_timeout_s
