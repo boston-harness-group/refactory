@@ -142,7 +142,7 @@ The edit algebra: every structural change is typed data.
 | function | `catalogue` | `(preset: 'str' = 'broad') -> 'list[dict[str, Any]]'` |
 | function | `configure` | `(state: 'Mapping[str, Any]', name: 'str', value: 'Any') -> 'State'` |
 | function | `core_ops_calls` | `() -> 'dict[str, str]'` |
-| function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]') -> 'list[str]'` |
+| function | `core_wiring_notes` | `(edit: 'Any', before: 'Mapping[str, Any]', after: 'Mapping[str, Any]', final: 'Mapping[str, Any] \| None' = None) -> 'list[str]'` |
 | function | `enabled` | `(preset: 'str' = 'broad') -> 'list[str]'` |
 | function | `is_macro` | `(name: 'str') -> 'bool'` |
 | function | `names` | `() -> 'list[str]'` |
@@ -722,9 +722,11 @@ Running code we did not write.
 | function | `mark_activity` | `(path: 'Path') -> 'None'` |
 | function | `missing_init` | `(root: 'Path') -> 'str'` |
 | function | `model_readiness` | `(workdir: 'Path', *, model_context: 'dict[str, str] \| None' = None, require_ready: 'bool' = True) -> 'dict[str, Any]'` |
+| function | `next_look_s` | `(cost_s: 'float') -> 'float'` |
 | function | `output_tail` | `(stdout: 'str \| None', stderr: 'str \| None', n: 'int') -> 'str'` |
 | function | `promote` | `(project: 'Path', name: 'str', *, note: 'str' = '') -> 'dict[str, Any]'` |
 | function | `refactory_env` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
+| function | `run_activity` | `(workdir: 'Path', *, ignore: 'tuple[Path, ...]' = ()) -> 'tuple[int, int, int]'` |
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
 | function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
@@ -746,9 +748,11 @@ Running code we did not write.
 - **`mark_activity`** — Leave the mark `_run_watched` reads as work: the time, in ``path``.
 - **`missing_init`** — Why a package root has no `__init__.py`, and what it holds instead.
 - **`model_readiness`** — Check the model path after the same scrub/HOME rewrite as real smoke.
+- **`next_look_s`** — How long a watcher waits before its next `run_activity` look, given what the last
 - **`output_tail`** — The last *n* non-empty lines of each stream, each line labelled with its stream.
 - **`promote`** — Mark a package trusted, explicitly, and record who did it.
 - **`refactory_env`** — ``scrub(env)`` with refactory's own interpreter first on PATH.
+- **`run_activity`** — What a watcher compares to tell a working run from an idle one: every file under
 - **`run_command`** — Run a shell command in the sandbox, bounded by inactivity rather than memory.
 - **`run_sandboxed`** — Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 - **`scrub`** — The environment a sandboxed run sees: an allowlist, with secrets dropped.
@@ -1142,6 +1146,7 @@ The per-item half of a data node, from the command line.
 | function | `record_lock` | `(path: 'Path') -> 'Iterator[None]'` |
 | function | `record_visit` | `(workdir: 'Path', visit: 'dict[str, Any]', reloop: 'Mapping[str, Any] \| None' = None) -> 'None'` |
 | function | `refused_at_cap` | `(earlier: 'Sequence[Mapping[str, Any]]', visit: 'Mapping[str, Any]', reloop: 'Mapping[str, Any] \| None') -> 'bool'` |
+| function | `run_roots` | `(workdir: 'Path') -> 'list[str]'` |
 | function | `sanitize_item_id` | `(item_id: 'str') -> 'str'` |
 | function | `source_override` | `(workdir: 'Path', node_id: 'str') -> 'dict[str, Any]'` |
 | function | `update_record_file` | `(path: 'Path', change: 'Callable[[Any], Any]', empty: 'Callable[[], Any]') -> 'Any'` |
@@ -1183,6 +1188,7 @@ The per-item half of a data node, from the command line.
 - **`record_lock`** — Hold the exclusive lock of the record file ``path`` (``<name>.lock`` beside it):
 - **`record_visit`** — Append one op or gate visit (`op_visit`, `gate_visit`) to the per-item sidecar,
 - **`refused_at_cap`** — Whether a gate visit's verdict is a reloop its cap refuses: one of the gate's
+- **`run_roots`** — The run an item's pass belongs to and, above it, the outer loop's root (every
 - **`sanitize_item_id`** — Make an item id safe for use as a directory name.
 - **`source_override`** — What this run says the data node should read, or an empty answer.
 - **`update_record_file`** — Read, change and rewrite the JSON record file ``path`` under an exclusive lock

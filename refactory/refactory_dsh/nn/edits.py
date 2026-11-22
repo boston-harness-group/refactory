@@ -1450,9 +1450,12 @@ _core_ops.register(_macro, _MACROS)
 CORE_OPS = _core_ops.CORE_OPS
 
 
-def core_wiring_notes(edit: Any, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
-    """What a core operator wired beside the steps it names (`core_ops.wiring_notes`)."""
-    return _core_ops.wiring_notes(edit, before, after)
+def core_wiring_notes(edit: Any, before: Mapping[str, Any], after: Mapping[str, Any],
+                      final: Mapping[str, Any] | None = None) -> list[str]:
+    """What a core operator wired beside the steps it names (`core_ops.wiring_notes`).
+
+    ``final`` is the candidate's state after its proposal's last edit."""
+    return _core_ops.wiring_notes(edit, before, after, final)
 
 
 def core_ops_calls() -> dict[str, str]:

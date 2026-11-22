@@ -38,6 +38,11 @@ PINS: dict[str, str] = {
     "six": "1.17.0",
 }
 ENV = "SB_PYTHON"
+#: The packages a request names when it says what a sealed tool step's ``python3`` is.
+NAMED = ("openpyxl", "pandas", "numpy")
+#: What it is, as the request says it (`tasks.SpreadsheetBenchTask.tool_environment`).
+SUMMARY = (f"python3 (and python) = Python {PYTHON} with "
+           + ", ".join(f"{name} {PINS[name]}" for name in NAMED))
 
 
 class InterpreterError(RuntimeError):

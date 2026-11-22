@@ -80,8 +80,9 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
 The item's input workbook is its item file (`Task.item_files`): `setup` copies it into
 each pass as `item/input.xlsx`, the data node declares it, and `prepare`, `run_turn` and
 `finalize` list it in their reads and open it through `ctx.item_file("input")`. A step
-the outer loop adds can read it the same way, a sealed one getting a copy in its
-workspace. Model code still gets it under the input's own name in its sandbox, as
+the outer loop adds can read it the same way; a sealed tool step it adds in the pass gets
+a copy in its workspace by default (unless its `sees` names other inputs), and its commands run the pinned interpreter
+as `python3` (`SpreadsheetBenchTask.tool_environment`). Model code still gets it under the input's own name in its sandbox, as
 SkillOpt's did.
 
 The grader (`recalc.evaluate`) is SkillOpt's cell comparison on cached values, then, when

@@ -146,18 +146,20 @@ def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
 def _run_roots(workdir: Path) -> list[str]:
     """The run the pass belongs to and, above it, the outer loop's root (every
     candidate's records): what model code must not see. A concurrent pass works through
-    an alias (``.refactory/live/<node>/<item>``), so the pass is resolved first."""
-    from refactory_dsh.history import JOURNAL, RUN_FILE
-    from refactory_dsh.items import PASS_MARKER
+    an alias (``.refactory/live/<node>/<item>``), so the pass is resolved first
+    (`items.run_roots`)."""
+    from refactory_dsh.items import run_roots
 
-    real = workdir.resolve()
-    # ``<run>/passes/<node>/<item>``, else the directory itself.
-    run = real.parents[2] if (real / PASS_MARKER).exists() else real
-    roots = [str(run)]
-    for parent in run.parents:
-        if (parent / RUN_FILE).exists() or (parent / JOURNAL).exists():
-            roots.append(str(parent))
-    return roots
+    return run_roots(workdir)
+
+
+def tool_hidden(workdir: Path) -> list[str]:
+    """What no folder of a sealed tool step's environment may hold or lie inside
+    (`ToolEnvironment.hidden`): what model code may not see (`sandbox.hidden_paths`), the
+    dataset among it."""
+    from . import sandbox
+
+    return sandbox.hidden_paths([*_run_roots(Path(workdir)), *_data_roots()])
 
 
 def _data_roots() -> list[str]:

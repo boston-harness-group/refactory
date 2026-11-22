@@ -1779,6 +1779,27 @@ state is promised, on any graph shape:
   The step runs only on the dsh worker backend in `skip` mode, where the seal runs
   (`seal.available`); elsewhere it is refused, never run with less, and the request does
   not show a tool step. A node whose id the seed has keeps the seed's policy.
+  **A Task's tool environment.** A Task may declare what its sealed steps' commands run
+  with (`Task.tool_environment`, a `ToolEnvironment`: a summary in plain words and a
+  function returning its checked interpreter). In an item's pass whose Task declares one,
+  both runtimes (the walker's dispatch and the spine's `worker_node`, through
+  `workspace.prepare`, from the pass's `.refactory/pass.json`) put that interpreter first on
+  the command's PATH as `python3` and `python` (two-line scripts in a `tool-bin` folder
+  beside the workspace) and bind read only only the folders it reports running from (its
+  prefixes and the folder its executable resolves to, never one guessed from where it is
+  named; `seal.interpreter_dirs`, `seal.tool_path`). A folder that holds or lies inside the
+  run's roots (the run every item's pass is in, and the outer loop's root), refactory's own
+  directory or a path the Task names as grader-side (`ToolEnvironment.hidden`;
+  SpreadsheetBench names what model code may not see, `sandbox.hidden_paths`, its dataset
+  among it), or that holds the home directory, is refused (`seal.refused_binding`, which
+  the model-code sandbox uses too). A Task must list its grader-side data in `hidden`
+  whenever its interpreter could sit near it: an interpreter installed inside the dataset
+  with no `hidden` would bind the dataset. An interpreter that is missing or fails the Task's
+  check fails the step; it never runs with the machine's python instead. The dispatch
+  record says which (`tool_environment`). SpreadsheetBench declares the pinned interpreter
+  its model code runs under (`interpreter.interpreter`, `SB_PYTHON`). A Task that declares
+  none runs as before. Where the run offers a tool step, the request's operator lines (the
+  proposer's and the analysts') state the summary as a fact.
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -2190,8 +2211,16 @@ the default produces the same digest as before, so it still resumes.
 **Item files.** A Task may lay files into each item's pass under fixed names
 (`Task.item_files`, `{role: path}`, e.g. SpreadsheetBench's `{"input": "item/input.xlsx"}`).
 The data node declares each in its `writes` (V12), so any step of the pass can read one:
-a new sealed step names it in `sees` (or names the data node) and gets a copy in its
-workspace; an op opens one through `ctx.item_file(role)`, which refuses (at run time, on
+a step names it in `sees` (or names the data node). A new sealed tool step inside a pass
+whose inputs the proposal does not name (no `sees` for a core operator's step, no `reads`
+in a node object written out whole) is given the pass's item files in its declared
+`reads` by default (`core_ops._with_item_files`, `core_ops.default_item_inputs`; the edit
+recorded holds them), so it gets a copy of each in its workspace. A default, never a
+limit: a step whose inputs are named keeps exactly those, and a rewire sees exactly what
+it says. The candidate's notes say, for each sealed tool step the proposal adds or changes
+in a pass, `<step> (tools, in the per-item part) has the item's input file(s) ...` or
+`... does not see the item's input file(s) ...`. A tool step outside a pass, or a step
+without tools, gets nothing it did not name. An op opens one through `ctx.item_file(role)`, which refuses (at run time, on
 both runtimes) a file the op does not list in its `reads`, as do the context's
 `read_text`, `read_json` and `exists`. An item file is what the item gives its solver,
 never its answer: a path the grader reads or writes is refused when the Task is checked
