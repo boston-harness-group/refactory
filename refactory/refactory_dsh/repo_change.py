@@ -1284,7 +1284,7 @@ def _check_copy_path(target: Path, run_id: str) -> Path:
 
 
 def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
-                ) -> tuple[worktree.Worktree, dict[str, str], Path, list[str]]:
+                ) -> tuple[worktree.Worktree, dict[str, str], Path, list[str], dict[str, Any] | None]:
     """The run's check copy at the attempt's commit, with its environment prepared.
 
     It is kept across attempts -- moved to the new commit with what the last check left
@@ -1312,10 +1312,10 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
 
     home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
     home.mkdir(parents=True, exist_ok=True)
-    copy, env, problems, _fail = prepare_check_environment(
+    copy, env, problems, prep_fail = prepare_check_environment(
         copy, ctx.facts, amend=False, commit_lockfiles=False, run=ctx.workdir, home=home,
         timeout=timeout, budget=getattr(ctx, "budget", None))
-    return copy, env, home, problems
+    return copy, env, home, problems, prep_fail
 
 
 def remove_check_copy(target: Path, run_id: str) -> None:
@@ -1347,7 +1347,9 @@ def _check_in_worktree(ctx: Any, found: worktree.Worktree, command: str, timeout
                     stderr=triage["error_text"],
                     change_caused_prep=triage,
                 )
-        return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, prep_failure=prep_fail,
+        _pf = prep_fail if prep_fail else {"step": "prepare", "returncode": 1,
+                                             "timed_out": False, "error_text": "\n".join(problems)}
+        return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, prep_failure=_pf,
                                      stderr=(
             "the worktree's environment could not be prepared:\n" + "\n".join(problems)))
     result = sandbox.run_command(command, workdir=Path(found.path), timeout_s=timeout,
@@ -1399,10 +1401,29 @@ def run_check(ctx: Any, command: str, timeout: float,
         if found.head != str(ctx.facts.get("commit")):
             raise ValueError("the worktree is not at the attempt its check was prepared for; "
                              "prepare the check again")
-        copy, env, home, problems = _check_copy(ctx, found, timeout)
+        copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
         if problems:
-            return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0, stderr=(
-                "the check copy's environment could not be prepared:\n" + "\n".join(problems)))
+            _stderr = "the check copy's environment could not be prepared:\n" + "\n".join(problems)
+            if prep_fail:
+                from refactory_dsh import base_check as _bc
+                triage = _bc.compare_prep_failure(
+                    ctx, prep_fail, problems, copy, env, home, timeout,
+                )
+                if triage is not None:
+                    return sandbox.SandboxResult(
+                        ok=False,
+                        returncode=triage["returncode"],
+                        elapsed_s=0.0,
+                        stderr=triage["error_text"],
+                        change_caused_prep=triage,
+                    )
+                return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
+                                             prep_failure=prep_fail, stderr=_stderr)
+            # Defensive: problems without a structured prep_fail — build a synthetic one.
+            synthetic = {"step": "prepare", "returncode": 1, "timed_out": False,
+                         "error_text": "\n".join(problems)}
+            return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
+                                         prep_failure=synthetic, stderr=_stderr)
         result = sandbox.run_command(command, workdir=Path(copy.path), timeout_s=timeout,
                                      budget=getattr(ctx, "budget", None), env=env, home=home,
                                      exact_env=True, worktree_root=Path(copy.path))

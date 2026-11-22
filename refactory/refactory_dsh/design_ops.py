@@ -1875,6 +1875,28 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         )
     evidence.stop_unrepairable(outcome["status"], detail)
 
+    # A not-change-caused preparation failure stops the build loop: draft, no builder round.
+    _prep_fail = getattr(result, "prep_failure", None)
+    _ccp_early = getattr(result, "change_caused_prep", None)
+    if _prep_fail and not _ccp_early:
+        from refactory_dsh.run import BuildLoopStop
+
+        reason = "Check environment preparation failed (not caused by the change)"
+        _error_text = _prep_fail.get("error_text", result.stderr or "")
+        _tail = "\n".join(_error_text.strip().splitlines()[-20:])
+        check_failure = (f"{reason}\n\n```\n{_tail}\n```\n\ncode repair was not attempted"
+                         if _tail else f"{reason}\n\ncode repair was not attempted")
+        ctx.set_fact("validation", check_failure)
+        record_check_history(ctx, "full", reason, command)
+        ctx.write_json("check-record.json", {
+            "status": "prep_failure",
+            "validation": reason,
+            "attempt": int(ctx.facts.get("attempts_used", 0)),
+            "check_mode": "full",
+            "targeted_command": targeted_command,
+        })
+        raise BuildLoopStop(reason)
+
     # Route change-caused preparation failures to the builder for repair.
     _ccp = getattr(result, "change_caused_prep", None)
     if _ccp:

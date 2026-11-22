@@ -10,6 +10,7 @@ changed.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -609,3 +610,317 @@ def test_the_check_beside_the_reviews_runs_in_its_own_copy(tmp_path, monkeypatch
     assert "where.txt" not in (home / "seen.txt").read_text()
     repo_change.remove_check_copy(target, "abc123")
     assert not ran_in.exists()
+
+
+# ── D13: check-copy prep failure handling ──────────────────────────────────────
+
+
+def _prep_fail_mock(original, prep_result):
+    """Return *prep_result* only for beside_reviews calls; delegate everything else."""
+
+    def _mock(ctx, command, timeout, **kw):
+        if kw.get("beside_reviews"):
+            return prep_result
+        return original(ctx, command, timeout, **kw)
+
+    return _mock
+
+
+def _spine_prep_attempt(tmp_path, monkeypatch, prep_result):
+    """Set up a spine-shaped run with one applied attempt and a mocked run_check for the
+    beside_reviews path.  Returns the run directory and a helper to call spine nodes."""
+    import io
+
+    from refactory_dsh import repo_change, worktree
+    from refactory_dsh.run import main
+
+    monkeypatch.setattr(repo_change, "run_check",
+                        _prep_fail_mock(repo_change.run_check, prep_result))
+    repo = git_repo(tmp_path / "repo")
+    run_dir = tmp_path / "run"
+    worktree.create(repo, "HEAD", "prepfail01234", run_dir)
+    lowering.write_declarations(DesignMode().state_dict(), run_dir)
+    (run_dir / "facts.json").write_text(json.dumps({
+        "name": "prep_tool", "brief": "Make tool.py print built.",
+        "check": f"{sys.executable} tool.py"}))
+    (run_dir / "emit.txt").write_text(render({"tool.py": "print('built')\n"}))
+    from refactory_dsh.run import run_node
+    run_node(f"{repo_change.OPS}:materialise", workdir=run_dir, node_id="materialise")
+    facts = json.loads((run_dir / "facts.json").read_text())
+    (run_dir / CHECK_PREP).write_text(json.dumps({
+        "attempt": "a1", "commit": facts["commit"],
+        "root": str(facts.get("artifact") or ""),
+        "targeted_command": None}))
+    monkeypatch.setenv("REFACTORY_WORKDIR", str(run_dir))
+
+    def spine_node(call, node_id, kind):
+        monkeypatch.setenv("DSH_WORKFLOW_NODE", json.dumps({"id": node_id, "type": kind}))
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        try:
+            code = main([f"refactory_dsh.design_ops:{call}", "--node", node_id])
+        finally:
+            out = sys.stdout.getvalue()
+            sys.stdout, sys.stderr = old_out, old_err
+        lines = [l for l in out.splitlines() if l.strip()]
+        return code, lines[-1] if lines and kind == "gate" else ""
+
+    return run_dir, spine_node
+
+
+def test_not_change_caused_prep_failure_ends_in_draft_on_walker(tmp_path, monkeypatch):
+    """Walker path (via run_node): a prep failure with prep_failure set (not change-caused)
+    ends in a draft.  The check beside reviews records BuildLoopStop, and gate_check
+    converts it to a draft — exactly one materialise, no builder round."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    prep_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=0.0,
+        prep_failure={"step": "pnpm install", "returncode": 1, "timed_out": False,
+                      "error_text": "ERR_PNPM_REGISTRY_FAILURE something went wrong"},
+        stderr="the check copy's environment could not be prepared:\npnpm install failed",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, prep_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "draft", f"expected 'draft', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    draft = facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    # Exactly one materialise was run (the setup); no builder round happened.
+    assert facts.get("attempts_used", 0) <= 1
+
+
+def test_change_caused_prep_failure_reaches_builder_on_walker(tmp_path, monkeypatch):
+    """Walker path (via run_node): a change-caused prep failure sends the builder back
+    (gate_check returns reloop), so draft_delivery is NOT set."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    prep_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=0.0,
+        change_caused_prep={"step_label": "install", "command": "pnpm install",
+                            "returncode": 1, "error_text": "missing dependency foo"},
+        stderr="install failed",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, prep_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "reloop", f"expected 'reloop', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    assert "draft_delivery" not in facts or not facts.get("draft_delivery")
+
+
+def test_unavailable_comparison_ends_in_draft_on_walker(tmp_path, monkeypatch):
+    """Walker path (via run_node): prep_failure set with no change_caused_prep (unavailable
+    comparison) ends in a draft — same as not-change-caused."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    prep_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=0.0,
+        prep_failure={"step": "pnpm install", "returncode": 1, "timed_out": False,
+                      "error_text": "registry down"},
+        stderr="the check copy's environment could not be prepared:\nregistry down",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, prep_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "draft", f"expected 'draft', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    draft = facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+
+
+def test_not_change_caused_prep_failure_ends_in_draft_on_spine(tmp_path, monkeypatch):
+    """Spine: prep_failure routed through check_beside_reviews → gate_check → draft,
+    running each node through main() as the spine does."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    prep_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=0.0,
+        prep_failure={"step": "pnpm install", "returncode": 1, "timed_out": False,
+                      "error_text": "ERR_PNPM_FETCH something went wrong"},
+        stderr="the check copy's environment could not be prepared:\npnpm install failed",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, prep_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "draft", f"expected 'draft', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    assert "draft_delivery" in facts
+    assert "code repair was not attempted" in facts["draft_delivery"]["check_failure"]
+
+
+def test_change_caused_prep_failure_reaches_builder_on_spine(tmp_path, monkeypatch):
+    """Spine: change-caused prep failure → gate_check returns reloop (builder sent back)."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    prep_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=0.0,
+        change_caused_prep={"step_label": "install", "command": "pnpm install",
+                            "returncode": 1, "error_text": "missing dependency foo"},
+        stderr="install failed",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, prep_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "reloop", f"expected 'reloop', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    assert "draft_delivery" not in facts or not facts.get("draft_delivery")
+
+
+def test_code_failure_check_unchanged(tmp_path, monkeypatch):
+    """A normal code failure (no prep_failure, no change_caused_prep) goes to the builder
+    as today — gate_check returns reloop, no BuildLoopStop, no draft."""
+    from refactory_dsh.sandbox import SandboxResult
+
+    code_result = SandboxResult(
+        ok=False, returncode=1, elapsed_s=1.0,
+        stdout="FAILED test_x\n1 failed in 0.01s\n", stderr="",
+    )
+    run_dir, spine_node = _spine_prep_attempt(tmp_path, monkeypatch, code_result)
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    # A code failure sends the builder back, not a draft.
+    assert verdict == "reloop", f"expected 'reloop', got '{verdict}'"
+    facts = json.loads((run_dir / "facts.json").read_text())
+    assert "draft_delivery" not in facts or not facts.get("draft_delivery")
+
+
+def test_defensive_no_prep_fail_builds_synthetic_and_drafts(tmp_path, monkeypatch):
+    """When problems exist but prep_fail is None (defensive case), a synthetic prep_failure
+    is built and the run ends in a draft, not a builder round."""
+    import io
+
+    from refactory_dsh import repo_change, worktree
+    from refactory_dsh.run import main, run_node
+    from refactory_dsh.sandbox import SandboxResult
+
+    # Mock _check_copy to return problems but no prep_fail (5th element is None).
+    original_check_copy = repo_change._check_copy
+
+    def fake_check_copy(ctx, found, timeout):
+        copy, env, home, _problems, _pf = original_check_copy(ctx, found, timeout)
+        return copy, env, home, ["install failed: some reason"], None
+
+    monkeypatch.setattr(repo_change, "_check_copy", fake_check_copy)
+
+    repo = git_repo(tmp_path / "repo")
+    run_dir = tmp_path / "run"
+    worktree.create(repo, "HEAD", "defens012345", run_dir)
+    lowering.write_declarations(DesignMode().state_dict(), run_dir)
+    (run_dir / "facts.json").write_text(json.dumps({
+        "name": "defensive_tool", "brief": "Make tool.py print built.",
+        "check": f"{sys.executable} tool.py"}))
+    (run_dir / "emit.txt").write_text(render({"tool.py": "print('built')\n"}))
+    run_node(f"{repo_change.OPS}:materialise", workdir=run_dir, node_id="materialise")
+    facts = json.loads((run_dir / "facts.json").read_text())
+    (run_dir / CHECK_PREP).write_text(json.dumps({
+        "attempt": "a1", "commit": facts["commit"],
+        "root": str(facts.get("artifact") or ""),
+        "targeted_command": None}))
+    monkeypatch.setenv("REFACTORY_WORKDIR", str(run_dir))
+
+    def spine_node(call, node_id, kind):
+        monkeypatch.setenv("DSH_WORKFLOW_NODE", json.dumps({"id": node_id, "type": kind}))
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        try:
+            code = main([f"refactory_dsh.design_ops:{call}", "--node", node_id])
+        finally:
+            out = sys.stdout.getvalue()
+            sys.stdout, sys.stderr = old_out, old_err
+        lines = [l for l in out.splitlines() if l.strip()]
+        return code, lines[-1] if lines and kind == "gate" else ""
+
+    code_check, _ = spine_node("check_beside_reviews", "check", "op")
+    assert code_check == 0
+    code_gate, verdict = spine_node("gate_check", "gate_check", "gate")
+    assert code_gate == 0
+    assert verdict == "draft", f"expected 'draft', got '{verdict}'"
+    final_facts = json.loads((run_dir / "facts.json").read_text())
+    draft = final_facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+
+
+def test_real_failing_install_stub_ends_in_draft(tmp_path, monkeypatch):
+    """Real failing install through _check_in_worktree → compare_prep_failure → _full_check,
+    with the base failing the same way, ends in a draft (no builder round)."""
+    from tests_support import git, stub
+
+    from refactory_dsh import repo_change, worktree
+
+    monkeypatch.setenv("REFACTORY_HOME", str(tmp_path / "home"))
+
+    # Create a repo with a pnpm-lock.yaml so the worktree installs pnpm.
+    target = git_repo(tmp_path / "target")
+    (target / "package.json").write_text('{"name": "stub-test", "dependencies": {}}\n')
+    (target / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (target / "app.py").write_text("print('app')\n")
+    git(target, "add", ".")
+    git(target, "commit", "-q", "-m", "with-pnpm")
+
+    # Stub pnpm that always fails.
+    bin_dir = tmp_path / "bin"
+    stub(bin_dir, "pnpm", "echo 'ERR_PNPM_FETCH: network error' >&2; exit 1")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+    repo = target
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    reviews = ["health: ok", "code review: ok", "qa: ok", VERIFICATION_ANSWER]
+    model = FakeModel([SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER,
+                       render({"app.py": "print('updated')\n"}), *reviews, *[""] * 10])
+    run = mode.run(tmp_path / "run", model=model, verdicts={"gate_strategy": "proceed"},
+                   task={"name": "stub_install", "brief": "Update app.py",
+                         "check": f"{sys.executable} app.py", "target": str(repo)})
+    assert run.exit_ok, run.error
+    draft = run.facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "code repair was not attempted" in draft["check_failure"]
+    emits = [p for p in model.prompts if "Write the artifact `stub_install`" in p]
+    assert len(emits) == 1, f"expected exactly 1 emit, got {len(emits)}"
+
+
+def test_beside_reviews_check_copy_prep_fail_triaged(tmp_path, monkeypatch):
+    """Unit: C1+C2 plumbing — _check_copy returns prep_fail, run_check triages it,
+    and sets prep_failure on the result when not change-caused."""
+    from types import SimpleNamespace
+
+    from refactory_dsh import base_check, repo_change, worktree
+    from refactory_dsh.sandbox import SandboxResult
+
+    found = SimpleNamespace(path=str(tmp_path), head="c1", target=str(tmp_path),
+                            base="b1", run=str(tmp_path))
+    monkeypatch.setattr(worktree, "recorded", lambda workdir: found)
+    monkeypatch.setattr(worktree, "shared_change", lambda f: None)
+
+    fake_copy = SimpleNamespace(path=str(tmp_path), head="c1", target=str(tmp_path),
+                                base="b1", run=str(tmp_path))
+    monkeypatch.setattr(repo_change, "_check_copy", lambda ctx, found, timeout: (
+        fake_copy, {"PATH": "/bin"}, tmp_path / "home",
+        ["install failed"], {"step": "install", "returncode": 1, "timed_out": False,
+                             "error_text": "install failed"}))
+    monkeypatch.setattr(base_check, "compare_prep_failure", lambda *a, **k: None)
+
+    ctx = nn.RunContext(tmp_path, facts={"commit": "c1", "check": "true"})
+    result = repo_change.run_check(ctx, "true", 60, beside_reviews=True)
+    assert result.prep_failure is not None
+    assert result.prep_failure["step"] == "install"
+    assert result.change_caused_prep is None
