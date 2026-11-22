@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 import re
 import sys
 import uuid
@@ -546,13 +547,14 @@ def _pending(workdir: Path, node: str) -> Path:
     return workdir / ROOT / 'pending' / (hashlib.sha256(node.encode()).hexdigest() + '.json')
 
 
-def _watch_checkouts(workdir: Path) -> dict[str, Any]:
+def _watch_checkouts(workdir: Path, node: str, owner_pid: int | None = None) -> dict[str, Any]:
     """Snapshot refactory's own checkouts that are not the run's target (dm-164).
 
     Found from the directory this module, and so the contract's Python, imports
     refactory from -- the contract's ``refactory_source`` -- and from the run's record.
     """
-    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent))
+    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent),
+                                        node=node, owner_pid=owner_pid)
 
 
 def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) -> None:
@@ -573,8 +575,11 @@ def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) 
 def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bool = False,
           reads: list[str] | None = None, model_context: dict[str, Any] | None = None,
           workspace: dict[str, Any] | None = None,
-          tool_policy: str = "") -> dict[str, Any]:
+          tool_policy: str = "", owner_pid: int | None = None) -> dict[str, Any]:
     """Snapshot outputs and supply the current ledger before dispatching one agent.
+
+    ``owner_pid`` names the process that runs the node, which owns its watches of
+    refactory's checkouts (`target_guard._owner`): this process when None.
 
     DSH can report the same due node repeatedly; reuse keeps its original output
     snapshot until completion rather than mistaking an in-flight write for old data.
@@ -614,6 +619,9 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
         previous = json.loads(pending.read_text())
         if previous['writes'] != writes:
             raise ValueError(f'agent {node!r} output declarations changed during delivery')
+        # The process that opened this record's watches may be gone; this one carries the
+        # node on, so the watches are its now (a gone owner's watch reads as closed).
+        target_guard.claim_watches(previous.get('checkouts'), owner_pid=owner_pid)
         if ((previous.get('target') is not None or previous.get('checkouts'))
                 and _attempt_failed(workdir, previous)):
             # A refused attempt keeps its record for the retry. Judging the retry against
@@ -626,7 +634,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
                 if baseline_dir.exists():
                     baseline_dir.rename(baseline_dir.with_name(f"target-baseline-{uuid.uuid4().hex[:8]}"))
                 target_guard.save_baseline(Path(rewatched['root']), rewatched['changes'], baseline_dir)
-            previous['checkouts'] = _watch_checkouts(workdir)
+            previous['checkouts'] = _watch_checkouts(workdir, node, owner_pid)
             _save_checkout_baselines(workdir / ROOT / previous['id'], previous['checkouts'])
             pending.write_text(json.dumps(previous, indent=2) + '\n')
     ledger = Ledger(workdir)
@@ -651,7 +659,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     # prepare (#319, dm-159).
     target = previous.get('target') if previous is not None else target_guard.watch(workdir, node)
     # Refactory's own checkout, when it is not the target: every agent node, any route (dm-164).
-    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir)
+    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir, node, owner_pid)
     identifier = previous['id'] if previous is not None else uuid.uuid4().hex
     directory = workdir / ROOT / identifier
     directory.mkdir(parents=True, exist_ok=True)
@@ -883,6 +891,8 @@ def invalidate(workdir: Path, nodes: list[str], reason: str) -> None:
         previous = json.loads(receipt.read_text())
         previous.update(status='superseded', finished=_now(), reason=reason)
         receipt.write_text(json.dumps(previous, indent=2) + '\n')
+        # The node is over without a finish: its watches of refactory's checkouts end here.
+        target_guard.close_watches(record.get('checkouts'), previous['finished'])
         pending.unlink()
 
 
@@ -909,6 +919,14 @@ def receipts_in(workdir: Path) -> dict[str, dict[str, Any]]:
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return found
+
+
+def _bridge_owner() -> int:
+    """The process that runs a bridged node: the one the spine names, never this short-lived
+    command (it exits when ``begin`` returns, while the node runs on). Unnamed, the owner
+    is unknown and the watch falls to the backstop (`target_guard.WATCH_OPEN_S`)."""
+    named = os.environ.get(target_guard.OWNER_ENV, "").strip()
+    return int(named) if named.isdigit() and int(named) > 0 else target_guard.UNKNOWN_OWNER
 
 
 def main() -> int:
@@ -945,7 +963,8 @@ def main() -> int:
             try:
                 result = begin(workdir, request['node'], rendered, request['writes'],
                                reuse=True, reads=request.get('reads'),
-                               tool_policy=request.get('tool_policy', ''))
+                               tool_policy=request.get('tool_policy', ''),
+                               owner_pid=_bridge_owner())
             except Exception as refused:
                 if not request.get('optional'):
                     raise

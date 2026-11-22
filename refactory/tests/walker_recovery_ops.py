@@ -35,6 +35,22 @@ def hanging_gate(ctx: Any) -> str:
     return "proceed"  # pragma: no cover
 
 
+def active_op(ctx: Any) -> dict[str, Any]:
+    """An op that runs a command printing output for about 2 seconds.
+
+    Uses sandbox.run_command with a short inactivity limit; the command keeps
+    printing so it must NOT be killed before the backstop.
+    """
+    from refactory_dsh import sandbox
+    result = sandbox.run_command(
+        'for i in $(seq 1 10); do echo "line_$i"; sleep 0.2; done',
+        workdir=ctx.workdir, timeout_s=1,
+    )
+    if not result.ok:
+        raise RuntimeError(f"active command was killed: {result.problem()}")
+    return {"active_ok": True}
+
+
 def succeed_op(ctx: Any) -> dict[str, Any]:
     """An op that always succeeds."""
     return {"done": True}

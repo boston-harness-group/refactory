@@ -44,7 +44,13 @@ BASE_CHECK_HOME = Path(".refactory") / "base-check-home"
 #: the copy, not at the run's worktree.
 CHECK_COPY_HOME = Path(".refactory") / "check-copy-home"
 
-#: How long one install may take before it is reported as failed.
+#: Inactivity limit for environment install (seconds of no stdout/stderr).
+#: The command is stopped when it has produced no output for this many seconds.
+#: The shared backstop (``sandbox.COMMAND_BACKSTOP_S``) is the absolute wall-clock cap.
+#:
+#: Measured: ``./install.sh`` has a 1.8 s max silent gap (2026-11-21).
+#: 3× that is 5.4 s; today's value (1800 s) is kept because installs on large
+#: targets can legitimately compile native extensions for minutes.
 INSTALL_TIMEOUT_S = 1800
 
 #: Suppress git hook managers so installs and commands do not rewrite hooks (#347).

@@ -40,9 +40,12 @@ def test_smoke_predicate_is_sole_discriminator():
         "ports": [],
         "memory": [],
     }
-    # With the predicate active, the gate gets the smoke envelope.
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
+    # With the predicate active, the gate gets the smoke envelope (backstop-based).
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = 2 * 3600 + 600
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert workflow.nodes["smoke"].command_timeout_s == expected, (
         f"expected {expected}, got {workflow.nodes['smoke'].command_timeout_s}"
     )
@@ -86,8 +89,11 @@ def test_smoke_predicate_op_path():
         "ports": [],
         "memory": [],
     }
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = 3 * 3600 + 600
+    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
     assert workflow.nodes["smoke_op"].command_timeout_s == expected
 
 
@@ -244,3 +250,23 @@ def test_lowered_graph_byte_identical_smoke_modes_at_1800():
         if current != expected:
             failures.append(f"{key}_smoke1800: graph.json differs from snapshot")
     assert not failures, "byte-identity failures at smoke_timeout_s=1800:\n" + "\n".join(f"  {f}" for f in failures)
+
+
+def test_a_smoke_envelope_never_shrinks_below_its_sandboxed_runs():
+    """A smoke op makes up to three sandboxed runs, each on a wall clock of the smoke budget
+    (`sandbox.run_sandboxed`); past a budget of 4800 s that exceeds the backstop envelope,
+    and the envelope follows the larger of the two."""
+    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+
+    backstop = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    for budget in (1800, 6000, 20000):
+        state = {"knobs": {"smoke_timeout_s": {"value": budget}}}
+        op = Node("smoke_op", "op", call="m:f", produces=("smoke_score", "smoke_ok"),
+                  knobs=("smoke_timeout_s",))
+        gate = Node("smoke", "gate", evaluator="m:g", produces=("smoke_score", "smoke_ok"),
+                    knobs=("smoke_timeout_s",))
+        assert lowering.command_timeout_s(op, state) == max(3 * budget + 600, backstop)
+        assert lowering.command_timeout_s(gate, state) == max(2 * budget + 600, backstop)
+    state = {"knobs": {"smoke_timeout_s": {"value": 6000}}}
+    assert lowering.command_timeout_s(op, state) == 18600 > backstop

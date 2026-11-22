@@ -19,7 +19,7 @@ from typing import Any
 
 from refactory_dsh import registry
 from refactory_dsh.run import BuildLoopStop
-from refactory_dsh.paths import project_root, project_for_nodes
+from refactory_dsh.paths import project_root, project_for_nodes, project_for_writes
 from refactory_dsh.nn import Package, PackageError, Verdict, validate_state
 from refactory_dsh.repo_change import refuse_truncated, EMISSION_PATH, unprintable_refusal
 
@@ -124,6 +124,16 @@ The context offers `ctx.knob(name, default)`, `ctx.read_json(name, default)`,
 `ctx.read_text`, `ctx.exists`, `ctx.set_fact(name, value)`, `ctx.facts`,
 `ctx.task` (what the run was started with), `ctx.workdir`, `ctx.iteration` and
 `ctx.model`.
+
+An agent's reply is text, and a model wraps more than JSON around its answer: prose, a
+fence, even a tool-call transcript it invented. An operation that reads an agent's JSON
+answer parses it with `refactory_dsh.agent_json.parse_agent_json(text, expect=(...))`,
+naming the keys the answer has, never with `json.loads` or a fence-stripper of its own:
+
+    from refactory_dsh.agent_json import parse_agent_json
+
+    def finish(ctx):
+        replies = parse_agent_json(ctx.read_text("replies.json"), expect=("replies",))
 
 A gate is an operation that returns its verdict: one of its out-edges' conditions.
 When it sends the run back, return the verdict as `nn.Verdict(label, reason)`, so
@@ -836,7 +846,7 @@ def materialise(ctx: Any) -> dict[str, Any]:
     if staging_root:
         root = Path(staging_root)
     else:
-        root = registry.workspace_root(project_for_nodes()) / name
+        root = registry.workspace_root(project_for_writes(workdir=ctx.workdir)) / name
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
@@ -1198,9 +1208,11 @@ def register(ctx: Any) -> dict[str, Any]:
     """
     name = str(ctx.facts["name"])
     staging_root = ctx.facts.get("package_root")
+    # The one project this step writes into and reads back from (C1).
+    project = project_for_writes(workdir=ctx.workdir)
     if staging_root:
         import tempfile
-        shared = registry.workspace_root(project_for_nodes()) / name
+        shared = registry.workspace_root(project) / name
         # Detect whether the shared package changed since prepare.
         source_hash = ctx.facts.get("source_hash", "")
         source_existed = ctx.facts.get("source_existed", source_hash != "")
@@ -1210,7 +1222,7 @@ def register(ctx: Any) -> dict[str, Any]:
         _revision_of_fact = str(ctx.facts.get("revision_of") or "")
         _source_pkg = _revision_of_fact.split("/")[0] if _revision_of_fact else ""
         if _source_pkg and _source_pkg != name:
-            source_loc = registry.workspace_root(project_for_nodes()) / _source_pkg
+            source_loc = registry.workspace_root(project) / _source_pkg
             if source_existed:
                 if source_loc.exists():
                     current_source = _dir_hash(source_loc)
@@ -1297,19 +1309,19 @@ def register(ctx: Any) -> dict[str, Any]:
                 shutil.rmtree(old_aside, ignore_errors=True)
             if temp.exists():
                 shutil.rmtree(temp, ignore_errors=True)
-    elif (registry.workspace_root(project_for_nodes()) / name).is_dir():
+    elif (registry.workspace_root(project) / name).is_dir():
         # Written in place by `materialise`: it is listed from now on, unverified.
-        registry.record_smoke(registry.workspace_root(project_for_nodes()) / name,
+        registry.record_smoke(registry.workspace_root(project) / name,
                               registry.SMOKE_PENDING)
-    registry.install_workspace(project_for_nodes())
+    registry.install_workspace(project)
     importlib.invalidate_caches()
-    if name not in registry.discover_names(project_for_nodes()):
+    if name not in registry.discover_names(project):
         raise ValueError(f"the registry does not list a package named {name!r}")
     # Read the manifest where it is safe to load it. Reporting what was registered
     # must not run the package in the driver's process to find out.
     from refactory_dsh import sandbox
 
-    described = sandbox.describe_package(name, project=project_for_nodes())
+    described = sandbox.describe_package(name, project=project)
     if not described.ok:
         raise ValueError(
             f"the package is registered but not readable: {described.problem()}"
@@ -1320,7 +1332,7 @@ def register(ctx: Any) -> dict[str, Any]:
         # Point package_path to the shared location so downstream steps
         # (smoke / _revision) write provenance into the installed package,
         # not the per-run staging copy that register already consumed.
-        result["package_path"] = str(registry.workspace_root(project_for_nodes()) / name)
+        result["package_path"] = str(registry.workspace_root(project) / name)
     return result
 
 
@@ -1475,9 +1487,16 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
     in this repository, so a git worktree of the project contains no
     ``.factory/packages/``, and nothing written there can become a commit.
     """
+    # The project the package is written into, said before anything is: never
+    # refactory's own checkout (C1). Then the baseline that has every agent node watch
+    # refactory's checkout for paths written under its package roots (dm-164).
+    from refactory_dsh import target_guard
+
+    project = project_for_writes(workdir=ctx.workdir)
     # First, run the original prepare to get all the standard facts.
     prepared = prepare(ctx)
     name = str(prepared["name"])
+    target_guard.record(ctx.workdir, project)
 
     # Set up the staging directory.  Resolve to an absolute path so that
     # downstream subprocess calls (verify_sandboxed) can find the package when

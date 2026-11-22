@@ -455,3 +455,119 @@ def test_edit_into_existing_destination_succeeds(tmp_path, monkeypatch):
     # Register succeeds because the destination has not changed since prepare.
     register(ctx)
     assert (dest_shared / "__init__.py").read_text() == "EDITED = True\n"
+
+
+# ── the project is never refactory's own checkout (C1) ──────────────────────────────
+
+def _prepared(monkeypatch, project: Path) -> None:
+    monkeypatch.setattr("refactory_dsh.paths.project_for_nodes", lambda: project)
+    monkeypatch.setattr("refactory_dsh.create_ops.project_for_nodes", lambda: project)
+    monkeypatch.setattr("refactory_dsh.create_ops.prepare", lambda ctx: {"name": "mypkg", "brief": "b"})
+
+
+def test_prepare_create_refuses_refactory_own_checkout_as_the_project(tmp_path, monkeypatch):
+    from refactory_dsh.paths import REPO_ROOT, CheckoutProjectError
+
+    _prepared(monkeypatch, REPO_ROOT)
+    before = sorted((REPO_ROOT / ".factory" / "packages").glob("*"))
+    with pytest.raises(CheckoutProjectError, match="refusing to write packages into refactory's own checkout"):
+        prepare_create(FakeCtx(tmp_path / "run"))
+    assert sorted((REPO_ROOT / ".factory" / "packages").glob("*")) == before
+    assert not (tmp_path / "run" / STAGING_DIR).exists(), "refused before anything is written"
+
+
+def test_prepare_create_refuses_the_runs_recorded_driver_as_the_project(tmp_path, monkeypatch):
+    from refactory_dsh.paths import CheckoutProjectError
+
+    driver = git_repo(tmp_path / "driver")
+    run = tmp_path / "run"
+    (run / ".refactory").mkdir(parents=True)
+    (run / ".refactory" / "run-config.json").write_text(json.dumps({"driver": {"checkout": str(driver)}}))
+    _prepared(monkeypatch, driver)
+    with pytest.raises(CheckoutProjectError, match=str(driver.resolve())):
+        prepare_create(FakeCtx(run))
+
+
+def test_prepare_create_records_the_project_so_agents_are_watched(tmp_path, monkeypatch):
+    """The baseline that turns the per-node watch of refactory's checkout on for create/edit."""
+    from refactory_dsh import target_guard
+
+    project = _make_project(tmp_path)
+    driver = git_repo(tmp_path / "driver")
+    run = tmp_path / "run"
+    (run / ".refactory").mkdir(parents=True)
+    (run / ".refactory" / "run-config.json").write_text(json.dumps({"driver": {"checkout": str(driver)}}))
+    _prepared(monkeypatch, project)
+    prepare_create(FakeCtx(run))
+    assert target_guard._read(run)["root"] == str(project.resolve())
+    assert target_guard.checkouts(run, tmp_path / "nowhere") == [driver.resolve()]
+
+
+def test_register_refuses_when_the_project_became_the_checkout(tmp_path, monkeypatch):
+    from refactory_dsh.paths import REPO_ROOT, CheckoutProjectError
+
+    project = _make_project(tmp_path)
+    _prepared(monkeypatch, project)
+    run = tmp_path / "run"
+    ctx = FakeCtx(run)
+    ctx.facts.update(prepare_create(ctx))
+    _prepared(monkeypatch, REPO_ROOT)
+    with pytest.raises(CheckoutProjectError):
+        register(ctx)
+    assert not (REPO_ROOT / ".factory" / "packages" / "mypkg").exists()
+
+
+def test_a_project_that_is_another_refactory_clone_is_written_to(tmp_path, monkeypatch):
+    from refactory_dsh.paths import project_for_writes
+
+    clone = git_repo(tmp_path / "clone")
+    (clone / "refactory" / "refactory_dsh").mkdir(parents=True)
+    assert project_for_writes(clone) == clone.resolve()
+    monkeypatch.chdir(clone)
+    monkeypatch.delenv("REFACTORY_PROJECT", raising=False)
+    assert project_for_writes() == clone.resolve(), "running from inside a project keeps working"
+
+
+def test_spine_register_writes_the_stated_project_and_refuses_the_checkout(tmp_path):
+    """`register` as the spine runs it: `python -m refactory_dsh.run` in the run directory,
+    with the project the graph bundle states (`REFACTORY_PROJECT`, startup.ts). A bundle
+    started from refactory's checkout states the checkout, and that is refused."""
+    import os
+    import subprocess
+    import sys
+
+    from refactory_dsh import lowering
+    from refactory_dsh.paths import REPO_ROOT
+    from refactory_dsh.run import FACTS, NODE_ENV
+    from tests_support import good_files
+
+    name = "c1_spine_pkg"
+    project = _make_project(tmp_path)
+    run = tmp_path / "run"
+    staged = run / STAGING_DIR / ".factory" / "packages" / name
+    staged.mkdir(parents=True)
+    for relative, content in good_files(name).items():
+        (staged / relative).parent.mkdir(parents=True, exist_ok=True)
+        (staged / relative).write_text(content)
+    (run / FACTS).write_text(json.dumps({"name": name, "package_root": str(staged),
+                                         "source_hash": "", "source_existed": False}))
+    (run / lowering.DECLARATIONS).parent.mkdir(parents=True, exist_ok=True)
+    (run / lowering.DECLARATIONS).write_text(json.dumps({"register": {
+        "reads": [], "writes": ["registered.json", "staging/package-diff.json"],
+        "produces": ["registered", "package_path"]}}))
+
+    def register_on_the_spine(stated: Path) -> subprocess.CompletedProcess:
+        env = {**os.environ, "REFACTORY_PROJECT": str(stated), "REFACTORY_WORKDIR": str(run),
+               NODE_ENV: json.dumps({"id": "register", "type": "FnNode", "reads": [], "writes": []})}
+        return subprocess.run([sys.executable, "-m", "refactory_dsh.run", "refactory_dsh.create_ops:register"],
+                              cwd=str(run), env=env, capture_output=True, text=True, timeout=120, check=False)
+
+    refused = register_on_the_spine(REPO_ROOT)
+    assert refused.returncode != 0
+    assert "refusing to write packages into refactory's own checkout" in refused.stderr, refused.stderr
+    assert not (REPO_ROOT / ".factory" / "packages" / name).exists()
+
+    done = register_on_the_spine(project)
+    assert done.returncode == 0, done.stderr
+    assert (project / ".factory" / "packages" / name / "__init__.py").exists()
+    assert not (REPO_ROOT / ".factory" / "packages" / name).exists()

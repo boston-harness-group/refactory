@@ -14,7 +14,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_packages.fix_pack.ops:check",
-      "command_timeout_s": 6900,
+      "command_timeout_s": 130200,
       "gate_prompt": "run the check where the run works; reloop with what it said until it passes",
       "max_iterations": 5,
       "_type": "GateNode"
@@ -228,7 +228,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "seconds the check may take",
+      "description": "inactivity limit for the check (seconds of no output); the shared backstop is the absolute wall cap",
       "required": false
     },
     "target": {

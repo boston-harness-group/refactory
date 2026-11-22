@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Mapping
 
-from refactory_dsh.paths import SOURCE_CLI_ENTRY, dsh_command, dsh_root, node_bin, venv_bin
+from refactory_dsh.paths import SOURCE_CLI_ENTRY, dsh_command, dsh_root, node_bin, project_for_nodes, venv_bin
 import importlib.metadata
 
 from refactory_dsh.invocations import HOOK_SUPPRESS, WORKTREE_RECORD
@@ -837,7 +837,7 @@ class DshModelClient:
             raise ValueError("REFACTORY_WORKER_CONTEXT must contain an object")
         if not routes_resolved and (project is not None or inherited.get("routes_resolved")):
             from refactory_dsh.worker_config import resolve
-            selected = resolve(project or Path("."), {key: value for key, value in {
+            selected = resolve(project or project_for_nodes(), {key: value for key, value in {
                 "worker_backend": worker_backend, "provider": provider, "model": model,
                 "effort": effort, "permission_mode": permission_mode,
                 "setting_sources": setting_sources, "claude_executable": claude_executable,

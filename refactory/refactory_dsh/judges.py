@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from refactory_dsh import agent_json
+
 #: What the QA judge writes, and the verdicts it may give.
 QA_JUDGE = "qa-judge.json"
 QA_VERDICTS = ("proceed", "redo")
@@ -170,24 +172,8 @@ def _met(value: Any) -> bool | None:
     return None
 
 
-def _objects(text: str) -> list[Any]:
-    """Every top-level JSON object in ``text``, bare, fenced or among prose, in order.
-
-    A brace that does not start a JSON object (prose such as ``{x}``) is skipped, and an
-    object's own nested objects are part of it, not further objects.
-    """
-    decoder = json.JSONDecoder()
-    found: list[Any] = []
-    index = text.find("{")
-    while index >= 0:
-        try:
-            value, end = decoder.raw_decode(text, index)
-        except ValueError:
-            index = text.find("{", index + 1)
-            continue
-        found.append(value)
-        index = text.find("{", end)
-    return found
+#: Every top-level JSON object in a reply: the one shared scanner (`agent_json`).
+_objects = agent_json.objects
 
 
 def parse(text: str, verdicts: tuple[str, ...], *, name: str = "the judge's file") -> Judgment:
