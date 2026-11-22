@@ -929,3 +929,57 @@ def test_a_dispatch_reused_after_its_bridge_died_keeps_its_watch_open(tmp_path):
     record = ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"], reuse=True)
     watch = target_guard._read_watch(driver.resolve(), record["checkouts"][str(driver.resolve())]["watch_id"])
     assert watch["pid"] == os.getpid() and target_guard._gone(watch) is False
+
+
+# ── the interactive spine's bridge (PR 722, round 3) ──────────────────────────────────
+#
+# The spine runs `python -m refactory_dsh.agent_delivery` for `begin` and again for
+# `finish`; the node runs on in the spine between them. Its watch belongs to the process
+# the spine names (`REFACTORY_WATCH_OWNER_PID`), never to the short-lived command.
+
+def _bridge(run: Path, request: dict, *, owner: int | None) -> subprocess.CompletedProcess:
+    env = {key: value for key, value in os.environ.items() if key != target_guard.OWNER_ENV}
+    if owner is not None:
+        env[target_guard.OWNER_ENV] = str(owner)
+    return subprocess.run([sys.executable, "-m", "refactory_dsh.agent_delivery"], cwd=str(run), env=env,
+                          input=json.dumps(request), capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_a_bridged_writer_overlapping_an_in_process_node_is_warned_not_refused(tmp_path, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    begun = _bridge(run, {"action": "begin", "node": "writer", "prompt": "Write writer.txt.",
+                          "writes": ["writer.txt"]}, owner=os.getpid())  # this test stands in for the spine
+    assert begun.returncode == 0, begun.stderr
+    ad.begin(run, "innocent", "Write innocent.txt.", ["innocent.txt"])
+    _package(driver, "by_writer")  # the bridged node writes it, while the in-process node runs
+    (run / "innocent.txt").write_text("ok\n")
+    assert ad.finish(run, "innocent")["status"] == "delivered", "the in-process node is not blamed"
+    said = capsys.readouterr().err
+    assert "not charged to any one node" in said and f"writer in {run}" in said
+    (run / "writer.txt").write_text("ok\n")
+    finished = _bridge(run, {"action": "finish", "node": "writer"}, owner=os.getpid())
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(finished.stdout)["status"] == "delivered"
+    assert "not charged to any one node" in finished.stderr
+
+
+def test_the_bridge_records_the_owner_the_spine_names_never_itself(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    # "named" twice: the spine reports a due node again, and the reused record is claimed.
+    for node, owner in (("named", os.getpid()), ("named", os.getpid()), ("unnamed", None)):
+        begun = _bridge(run, {"action": "begin", "node": node, "prompt": "Write it.", "writes": [f"{node}.txt"]},
+                        owner=owner)
+        assert begun.returncode == 0, begun.stderr
+    watches = {watch["node"]: watch for watch in target_guard._read_watches(driver.resolve())}
+    assert watches["named"]["pid"] == os.getpid() and target_guard._gone(watches["named"]) is False
+    assert watches["unnamed"]["pid"] is None, "an unnamed owner is unknown, not the exited command"
+    assert target_guard._gone(watches["unnamed"]) is None
+
+
+def test_the_spine_names_itself_as_the_owner_of_bridged_watches():
+    from refactory_dsh.paths import REPO_ROOT
+
+    spine = (REPO_ROOT / "packages" / "workflow" / "workflow-spine" / "src" / "index.ts").read_text()
+    bridge = spine[spine.index("function runtimeBridge("):]
+    bridge = bridge[:bridge.index("\n  }\n")]
+    assert f"{target_guard.OWNER_ENV}: String(process.pid)" in bridge

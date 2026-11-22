@@ -960,8 +960,10 @@ def _process_start(pid: int) -> str | None:
     except (OSError, IndexError):
         return None
     try:
+        # The C locale, so the start reads the same in every process that compares it.
         out = subprocess.run(["ps", "-o", "stat=,lstart=", "-p", str(pid)], capture_output=True,
-                             text=True, timeout=10, check=False).stdout.strip()
+                             text=True, timeout=10, check=False,
+                             env={**os.environ, "LC_ALL": "C"}).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
     if not out or out.startswith("Z"):
@@ -969,10 +971,25 @@ def _process_start(pid: int) -> str | None:
     return out.split(None, 1)[1] if " " in out else None
 
 
-def _owner() -> dict[str, Any]:
+#: ``owner_pid`` for a watch whose owner cannot be named: it falls to :data:`WATCH_OPEN_S`.
+UNKNOWN_OWNER = 0
+
+#: The variable through which the spine names the process that owns a bridged node's
+#: watch: itself, because the `python -m refactory_dsh.agent_delivery` it runs for
+#: ``begin`` exits as soon as ``begin`` returns, and the node runs on in the spine.
+OWNER_ENV = "REFACTORY_WATCH_OWNER_PID"
+
+
+def _owner(owner_pid: int | None = None) -> dict[str, Any]:
+    """Who owns a watch: the process that runs the node. ``None`` is this process (the
+    walker, the worker bridge); a pid is the one the caller names (the spine, for its
+    bridge); :data:`UNKNOWN_OWNER` records no process at all."""
     import socket
 
-    return {"host": socket.gethostname(), "pid": os.getpid(), "pid_start": _process_start(os.getpid())}
+    pid = os.getpid() if owner_pid is None else owner_pid
+    if pid == UNKNOWN_OWNER:
+        return {"host": socket.gethostname(), "pid": None, "pid_start": None}
+    return {"host": socket.gethostname(), "pid": pid, "pid_start": _process_start(pid)}
 
 
 def _write_watch(root: Path, watch: dict[str, Any]) -> None:
@@ -985,9 +1002,9 @@ def _write_watch(root: Path, watch: dict[str, Any]) -> None:
     os.replace(pending, final)
 
 
-def _open_watch(root: Path, workdir: Path, node: str, at: str) -> str:
-    """Record a watch of ``root`` by this run's ``node`` from ``at``, owned by this process;
-    its id. An earlier open watch by the same run and node is a redo's predecessor, and is
+def _open_watch(root: Path, workdir: Path, node: str, at: str, owner_pid: int | None = None) -> str:
+    """Record a watch of ``root`` by this run's ``node`` from ``at``, owned by the process
+    that runs the node (:func:`_owner`); its id. An earlier open watch by the same run and node is a redo's predecessor, and is
     closed."""
     import uuid
 
@@ -996,18 +1013,18 @@ def _open_watch(root: Path, workdir: Path, node: str, at: str) -> str:
             _close_watch(root, other["id"], at)
     identifier = uuid.uuid4().hex
     _write_watch(root, {"id": identifier, "run": str(workdir), "node": node, "started": at,
-                        "finished": None, **_owner()})
+                        "finished": None, **_owner(owner_pid)})
     return identifier
 
 
-def claim_watches(checkouts: dict[str, dict[str, Any]] | None) -> None:
-    """Make this process the owner of watches a reused dispatch record carries: the
-    process that opened them may be gone while the node goes on here."""
+def claim_watches(checkouts: dict[str, dict[str, Any]] | None, owner_pid: int | None = None) -> None:
+    """Make the process that now runs the node (:func:`_owner`) the owner of the watches a
+    reused dispatch record carries: the process that opened them may be gone."""
     for path, snapshot in (checkouts or {}).items():
         identifier = snapshot.get("watch_id")
         watch = _read_watch(Path(path), identifier) if identifier else None
         if watch is not None and not watch.get("finished"):
-            _write_watch(Path(path), {**watch, **_owner()})
+            _write_watch(Path(path), {**watch, **_owner(owner_pid)})
 
 
 def _read_watch(root: Path, identifier: str) -> dict[str, Any] | None:
@@ -1069,7 +1086,8 @@ def _overlapping(root: Path, identifier: str, start: str, end: str) -> list[dict
             and (not watch.get("finished") or watch["finished"] > start)]
 
 
-def watch_checkouts(workdir: Path, paths: list[Path], node: str = "") -> dict[str, dict[str, Any]]:
+def watch_checkouts(workdir: Path, paths: list[Path], node: str = "",
+                    owner_pid: int | None = None) -> dict[str, dict[str, Any]]:
     """Each checkout's state before an agent node runs, keyed by its path.
 
     A checkout git cannot report on is left unwatched with a warning, not a refusal: the
@@ -1089,7 +1107,7 @@ def watch_checkouts(workdir: Path, paths: list[Path], node: str = "") -> dict[st
                  f"roots, so a package an agent writes there is not watched during this node")
         at = datetime.now(timezone.utc).isoformat()
         try:
-            watch_id = _open_watch(Path(path), Path(workdir), node, at)
+            watch_id = _open_watch(Path(path), Path(workdir), node, at, owner_pid)
         except OSError as error:
             warn(f"the watch of refactory's own checkout {path} could not be recorded, so a path "
                  f"written under its package roots during this node is reported, not refused: {error}")
