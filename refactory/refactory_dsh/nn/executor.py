@@ -588,6 +588,14 @@ def full_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
 
         part, seed = subset_part_seed(workdir)
         items = task_items(load_task(node.task_ref, workdir), part=part, seed=seed)
+        # Apply the node's limit to task-ref items as well, so a smoke run that
+        # sets limit=N on the data node runs only N items from the bound task.
+        from refactory_dsh.items import source_override
+
+        override = source_override(workdir, node.id)
+        limit = override.get("limit") or node.limit
+        if limit:
+            items = items[: int(limit)]
     return items
 
 

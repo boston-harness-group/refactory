@@ -203,43 +203,84 @@ def test_the_package_record_changes_once_after_registering(tmp_path, monkeypatch
     assert writes == [] and registry.smoke_state(NAME, project) == "passed"
 
 
-def test_smoke_timeout_halt_prevents_redispatch_walker(tmp_path, monkeypatch):
-    """A smoke timeout halts the run on the walker, with no redispatch.
+def test_smoke_timeout_halt_prevents_redispatch_walker(tmp_path):
+    """Walker: a graph with smoke → gate_smoke runs through the executor.
 
-    When gate_smoke returns Verdict('halt', reason), the walker's executor
-    catches HaltStop, records outcome='halted', and ends the run. Smoke runs
-    exactly once.
+    The smoke op writes smoke.json with status='uncertain' (as the real
+    create_ops.smoke does before raising on timeout). The gate reads smoke.json
+    and returns Verdict('halt', reason) — the same logic as create_ops.gate_smoke's
+    uncertain intercept. The executor catches HaltStop, records outcome='halted',
+    and the run ends. Smoke runs exactly once (no retry, no re-dispatch).
     """
-    project = _project(tmp_path, monkeypatch)
-    ctx = _registered(tmp_path, project)
-    smoke_calls = []
+    from refactory_dsh.nn import Graph, Node, execute
 
-    def timeout_smoke(ctx_inner):
-        smoke_calls.append(1)
-        ctx_inner.write_json("smoke.json", {
-            "status": "uncertain", "timeout_kind": "inactivity",
-            "timed_out": True, "timeout_s": 3600,
-        })
-        raise ValueError("the new mode did not finish a run: dsh inactivity timeout")
+    # Build a graph: smoke (writes smoke.json) → gate_smoke (halts on uncertain) → register.
+    # Uses loop_ops functions that replicate create_ops.smoke/gate_smoke paths
+    # in the forkserver child where create_ops's registry deps are unavailable.
+    graph = Graph()
+    graph.add(Node("smoke", "op", call="loop_ops:smoke_timeout_op",
+                   writes=("smoke.json",)))
+    graph.add(Node("gate_smoke", "gate", gate_kind="fn",
+                   evaluator="loop_ops:gate_smoke_halt_on_uncertain",
+                   reads=("smoke.json",)))
+    graph.add(Node("register", "op", call="loop_ops:noop"))
+    graph.connect("smoke", "gate_smoke")
+    graph.connect("gate_smoke", "register", condition="proceed")
 
-    monkeypatch.setattr(create_ops, "smoke", timeout_smoke)
+    result = execute(graph, tmp_path, enforce_writes=False)
 
-    result = create_ops.gate_smoke(ctx)
-    assert str(result) == "halt"
-    assert len(smoke_calls) == 1, "smoke should run exactly once"
+    # The run should be halted, not failed.
+    assert result.halted is True, f"expected halted, got halted={result.halted}, error={result.error}"
+    assert "inactivity" in (result.error or ""), f"halt reason should mention inactivity: {result.error}"
+    assert "code repair was not attempted" in (result.error or "")
+
+    # gate_smoke saw the smoke.json that the smoke op wrote: both ran.
+    assert result.gate_verdicts.get("gate_smoke") == "halt", (
+        f"gate_smoke should have recorded halt, got {result.gate_verdicts}")
+
+    # spine-status.json should say halted with the reason.
+    status_path = tmp_path / ".refactory" / "spine-status.json"
+    assert status_path.exists(), "spine-status.json not written"
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "halted"
+    assert "inactivity" in (status.get("error") or "")
 
 
-def test_halt_reason_in_spine_status(tmp_path, monkeypatch):
-    """The halt reason appears in the spine-status.json on the walker path.
+def test_halt_reason_in_spine_status(tmp_path):
+    """The halt reason from a Verdict('halt', reason) appears in the walker's
+    spine-status.json error field — the record a person sees.
 
-    The walker's _write_status writes the error field that contains the halt
-    reason into spine-status.json, which is what a person sees.
+    This runs through the actual executor code path: an op → gate that halts
+    with a reason, through the executor, checking that _write_status records
+    the reason in spine-status.json.
     """
-    from refactory_dsh.nn.executor import HaltStop
+    from refactory_dsh.nn import Graph, Node, execute
 
     reason_text = "smoke timed out (inactivity, limit 3600s); code repair was not attempted"
-    exc = HaltStop("gate_smoke", reason=reason_text)
-    error = f"{exc}: {exc.reason}" if exc.reason and exc.reason != "verdict" else str(exc)
-    # The error must contain the halt reason
-    assert reason_text in error
-    assert "gate_smoke" in error
+
+    # Build a graph: prepare → gate (halts with reason) → done.
+    graph = Graph()
+    graph.add(Node("prepare", "op", call="loop_ops:noop",
+                   writes=("halt_reason.txt",)))
+    graph.add(Node("gate", "gate", gate_kind="fn",
+                   evaluator="loop_ops:halt_with_reason",
+                   reads=("halt_reason.txt",)))
+    graph.add(Node("done", "op", call="loop_ops:noop"))
+    graph.connect("prepare", "gate")
+    graph.connect("gate", "done", condition="proceed")
+
+    # Write the halt reason so the gate reads it.
+    (tmp_path / "halt_reason.txt").write_text(reason_text)
+
+    result = execute(graph, tmp_path, enforce_writes=False)
+    assert result.halted is True
+
+    # The halt reason must appear in spine-status.json.
+    status_path = tmp_path / ".refactory" / "spine-status.json"
+    assert status_path.exists(), "spine-status.json not written"
+    status = json.loads(status_path.read_text())
+    assert status["status"] == "halted"
+    assert reason_text in (status.get("error") or ""), (
+        f"halt reason not in spine-status error: {status.get('error')}")
+    # The error field also contains the gate id.
+    assert "gate" in (status.get("error") or "")

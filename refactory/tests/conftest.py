@@ -461,6 +461,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "accepts; the tests/model_credential.py hook skips it with a stated reason "
         "when this machine has none",
     )
+    config.addinivalue_line(
+        "markers",
+        "no_integration: opt out of the integration skip for a test inside an "
+        "integration-marked module; the test runs without --run-integration",
+    )
 
 
 #: nodeid -> tool, for every test that declares it needs a real external tool.

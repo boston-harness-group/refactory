@@ -885,3 +885,75 @@ class SmokeTask(Task):
     def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
         passed = instance.id in self.PASSED
         return VerifyResult(passed=passed, score=1.0 if passed else 0.0)
+
+
+class BigTask(Task):
+    """177 items for testing task-bound smoke sampling."""
+
+    name = "big_task"
+
+    def instances(self, **kw: Any) -> list[TaskInstance]:
+        return [TaskInstance(id=f"item_{i:03d}", metadata={}) for i in range(177)]
+
+    def setup(self, instance: TaskInstance, workspace: Any, **kw: Any) -> None:
+        pass
+
+    def verify(self, instance: TaskInstance, workspace: Any, **kw: Any) -> VerifyResult:
+        return VerifyResult(passed=True, score=1.0)
+
+
+def record_timing(ctx: Any) -> None:
+    """Write start and end timestamps for the current item to timing.json."""
+    import json
+    import time as _time
+    from pathlib import Path
+
+    item = ctx.read_json("current_item.json", {}) or {}
+    start = _time.monotonic()
+    timing_path = ctx.workdir / "timing.json"
+    timing_path.write_text(json.dumps({"item": item.get("id"), "start": start, "end": start}))
+
+
+def halt_with_reason(ctx: Any) -> str:
+    """A gate that returns Verdict('halt', reason) for testing halt propagation."""
+    from refactory_dsh.nn.executor import Verdict
+    reason = ctx.read_text("halt_reason.txt") if ctx.exists("halt_reason.txt") else "test halt"
+    return Verdict("halt", reason)
+
+
+def smoke_timeout_op(ctx: Any) -> None:
+    """An op that simulates a smoke timeout by writing smoke.json with uncertain status,
+    as the real create_ops.smoke does before raising on timeout."""
+    ctx.write_json("smoke.json", {
+        "status": "uncertain", "timeout_kind": "inactivity",
+        "timed_out": True, "timeout_s": 3600,
+        "item_limit": 3, "total_items": 177,
+    })
+
+
+def gate_smoke_halt_on_uncertain(ctx: Any) -> str:
+    """A gate that reads smoke.json and halts on 'uncertain', replicating
+    the real gate_smoke logic for the uncertain path.
+
+    This is a minimal reproduction of create_ops.gate_smoke's uncertain intercept,
+    running in-process in the forkserver child where the real gate_smoke's
+    registry/evidence dependencies are unavailable.
+    """
+    from refactory_dsh.nn.executor import Verdict
+    receipt = ctx.read_json("smoke.json", {})
+    kind = receipt.get("status")
+    if kind == "uncertain":
+        timeout_kind = receipt.get("timeout_kind")
+        if timeout_kind:
+            items_info = ""
+            if receipt.get("item_limit"):
+                items_info = (f"; {receipt.get('item_limit')} of "
+                              f"{receipt.get('total_items', '?')} items requested")
+            reason = (f"smoke timed out ({timeout_kind}, limit "
+                      f"{receipt.get('timeout_s', '?')}s{items_info}); "
+                      f"code repair was not attempted")
+        else:
+            reason = (f"smoke outcome uncertain; "
+                      f"code repair was not attempted")
+        return Verdict("halt", reason)
+    return "proceed"
