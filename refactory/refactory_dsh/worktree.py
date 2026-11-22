@@ -1428,6 +1428,9 @@ def check_environment(path: Path, home: Path) -> dict[str, str]:
     # Suppress git hook managers so commands run through the worktree's
     # environment do not rewrite the shared repository's hooks (#347).
     env.update(HOOK_SUPPRESS)
+    # Prevent pipe block-buffering from causing false silence for the inactivity
+    # watchdog: Python output written to a pipe is block-buffered by default.
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -1699,6 +1702,9 @@ def _install_env() -> dict[str, str]:
     # shared repository's hooks (#347).  Nobody answers an install's prompts
     # either, so it is told it runs unattended.
     env.update(**HOOK_SUPPRESS, CI="true")
+    # Prevent pipe block-buffering from causing false silence for the inactivity
+    # watchdog: Python output written to a pipe is block-buffered by default.
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 

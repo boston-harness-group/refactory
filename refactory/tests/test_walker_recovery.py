@@ -201,6 +201,35 @@ def test_fork_branch_op_under_timeout_limit(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Test: op producing output survives past old envelope
+# ---------------------------------------------------------------------------
+def test_op_producing_output_survives_past_old_envelope(tmp_path):
+    """An op whose command prints continuously for 2 s with inactivity=1 s and backstop=3 s
+    survives without being killed. The op envelope is now backstop-based, and the
+    command's inactivity limit never fires because output keeps arriving.
+    """
+    from refactory_dsh.invocations import CHECK_PRODUCES
+
+    graph = nn.Graph()
+    graph.add(nn.Node(
+        "active_check", "op",
+        call="walker_recovery_ops:active_op",
+        produces=(*CHECK_PRODUCES, "active_ok"),
+        knobs=("check_timeout_s",),
+    ))
+
+    result = nn.execute(
+        graph, tmp_path,
+        knobs={"check_timeout_s": 1},
+        enable_recovery=True,
+        resource_limits={"max_elapsed_s": 30},
+    )
+
+    assert result.exit_ok is True, f"active op should not be killed: {result.error}"
+    assert result.facts.get("active_ok") is True
+
+
+# ---------------------------------------------------------------------------
 # Test 6: resume after timeout reruns the node (outcome='failed' not 'unknown')
 # ---------------------------------------------------------------------------
 def test_resume_after_timeout_outcome_is_failed(tmp_path):

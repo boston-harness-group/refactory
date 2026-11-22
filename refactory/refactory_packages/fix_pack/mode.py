@@ -33,7 +33,7 @@ class MakePass(nn.Mode):
             "brief": nn.Knob("", "str", frozen=True, description="what the fix should do, if the check does not say"),
             "check": nn.Knob("", "str", frozen=True, description="the command to make pass"),
             "attempts": nn.Knob(3, "int", lo=1, hi=5, description="how many fixes may be tried"),
-            "check_timeout_s": nn.Knob(300, "int", lo=10, hi=3600, description="seconds the check may take"),
+            "check_timeout_s": nn.Knob(300, "int", lo=10, hi=3600, description="inactivity limit for the check (seconds of no output); the shared backstop is the absolute wall cap"),
             **repo_change.knobs(),
         }
 
