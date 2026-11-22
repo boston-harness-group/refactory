@@ -180,7 +180,7 @@ def test_walker_run_whose_driver_is_its_target_is_unchanged(tmp_path, monkeypatc
     watched = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: watched.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: watched.append(list(paths)) or real(workdir, paths, **kw))
     before = _files(driver)
     model = Emit(_answers(render({"tool.py": "print('built')\n"})))
 
@@ -201,7 +201,7 @@ def test_walker_legitimate_writes_pass_with_the_driver_watched(tmp_path, monkeyp
     watched = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: watched.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: watched.append(list(paths)) or real(workdir, paths, **kw))
 
     class Scratch(FakeModel):
         def complete(self, prompt, *, system="", workdir=None, **_workspace):
@@ -326,7 +326,7 @@ def test_spine_run_whose_driver_is_its_target_is_unchanged(tmp_path, monkeypatch
     recorded = []
     real = target_guard.watch_checkouts
     monkeypatch.setattr(target_guard, "watch_checkouts",
-                        lambda workdir, paths: recorded.append(list(paths)) or real(workdir, paths))
+                        lambda workdir, paths, **kw: recorded.append(list(paths)) or real(workdir, paths, **kw))
 
     def act(execution, workdir):
         (workdir / "emit.txt").write_text("===FILE: tool.py===\nprint(1)\n")
@@ -644,7 +644,7 @@ def _package(root: Path, name: str) -> Path:
     return package
 
 
-def test_a_package_copy_written_into_the_driver_is_refused_and_moved_out(tmp_path, capsys):
+def test_a_package_copy_written_into_the_driver_is_refused_and_left_in_place(tmp_path, capsys):
     driver, _project, run = _create_run(tmp_path)
     (driver / ".factory" / "packages").mkdir(parents=True)
     lock = driver / ".factory" / "packages" / ".created_pkg.lock"
@@ -654,16 +654,14 @@ def test_a_package_copy_written_into_the_driver_is_refused_and_moved_out(tmp_pat
     (run / "emit.txt").write_text("===FILE: __init__.py===\n")
     with pytest.raises(ValueError, match="new paths under its package roots: .factory/packages/h1_pkg") as refused:
         ad.finish(run, "emit")
-    assert not (driver / ".factory" / "packages" / "h1_pkg").exists()
-    assert lock.exists(), "a path that was there before is never touched"
-    receipt = ad.receipts_in(run)["emit"]
-    moved = run / ad.ROOT / receipt["id"] / "checkouts"
-    assert [p.name for p in moved.rglob("h1_pkg")], "moved aside, not deleted"
-    assert "moved out of the checkout" in str(refused.value)
-    assert "new paths it added were moved out" in capsys.readouterr().err
+    assert (driver / ".factory" / "packages" / "h1_pkg" / "ops.py").exists(), "refactory moves nothing"
+    assert lock.exists()
+    command = f"rm -rf -- {driver.resolve() / '.factory' / 'packages' / 'h1_pkg'}"
+    assert command in str(refused.value), "the person is given the command"
+    assert command in capsys.readouterr().err
 
 
-def test_a_package_symlink_into_the_driver_is_refused_and_removed_on_the_spine(tmp_path, monkeypatch):
+def test_a_package_symlink_into_the_driver_is_refused_on_the_spine(tmp_path, monkeypatch):
     driver, project, run = _create_run(tmp_path)
     mine = _package(project, "h2_pkg")
     installed = driver / "refactory" / "refactory_packages"
@@ -673,11 +671,10 @@ def test_a_package_symlink_into_the_driver_is_refused_and_removed_on_the_spine(t
         (workdir / "overwatch.md").write_text("ok\n")
         os.symlink(mine, installed / "h2_pkg")
 
-    with pytest.raises(ValueError, match="refactory/refactory_packages/h2_pkg"):
+    with pytest.raises(ValueError, match="new paths under its package roots: refactory/refactory_packages/h2_pkg"):
         _dispatch(run, "overwatch", ["overwatch.md"], monkeypatch, act)
-    assert not os.path.lexists(installed / "h2_pkg")
-    assert sorted(p.name for p in mine.iterdir()) == ["__init__.py", "mode.py", "ops.py"], \
-        "the link is moved, never what it points at"
+    assert os.path.islink(installed / "h2_pkg"), "reported, never moved"
+    assert sorted(p.name for p in mine.iterdir()) == ["__init__.py", "mode.py", "ops.py"]
 
 
 def test_a_path_already_under_the_package_roots_is_reported_not_reverted(tmp_path):
@@ -693,7 +690,8 @@ def test_a_path_already_under_the_package_roots_is_reported_not_reverted(tmp_pat
     assert "paths that were already under its package roots changed: .factory/packages/old_pkg/ops.py" in text
     assert "left as they are: .factory/packages/old_pkg/ops.py" in text
     assert (old / "ops.py").read_text() == "# rewritten by the node, longer\n", "never reverted"
-    assert not (old / "new.py").exists(), "but a new path inside it is removed"
+    assert "new paths under its package roots: .factory/packages/old_pkg/new.py" in text
+    assert (old / "new.py").exists(), "a new path inside it is reported, not removed"
 
 
 def test_importing_a_package_in_the_driver_is_not_a_write(tmp_path):
@@ -744,3 +742,106 @@ def test_package_entries_are_paths_under_the_package_roots_only(tmp_path):
                      ".factory/packages/p/ops.py"], "a new file in an old directory is new"
     added, _ = target_guard.package_differences({}, found)
     assert added == [".factory/packages/p"], "only the top of a new tree"
+
+
+# ── the reviewer's cases (PR 722): what is not the node's is never charged to it ──────
+
+def test_a_pulled_package_that_git_tracks_is_not_the_nodes(tmp_path):
+    """The person pulls a commit adding a package while a create node runs."""
+    driver, _project, run = _create_run(tmp_path)
+    git(driver, "stash", "-u")
+    git(driver, "checkout", "-q", "-b", "feature")
+    pulled = driver / "refactory" / "refactory_packages" / "newpkg"
+    pulled.mkdir(parents=True)
+    (pulled / "__init__.py").write_text("x = 1\n")
+    git(driver, "add", ".")
+    git(driver, "commit", "-q", "-m", "add pkg")
+    git(driver, "checkout", "-q", "-")
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    git(driver, "merge", "-q", "--ff-only", "feature")
+    (pulled / "junk.py").write_text("# the node's\n")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError) as refused:  # its committed files moved: the tracked check's
+        ad.finish(run, "emit")
+    text = str(refused.value)
+    assert "new paths under its package roots: refactory/refactory_packages/newpkg/junk.py" in text
+    assert "refactory_packages/newpkg," not in text and "newpkg/__init__.py" not in text
+    assert (pulled / "__init__.py").exists() and (pulled / "junk.py").exists()
+    assert git(driver, "status", "--short", "--untracked-files=no") == ""
+
+
+def test_a_package_another_watcher_could_have_written_is_a_warning_naming_both(tmp_path, capsys):
+    """Two nodes watch the driver at once; a package appears: neither is refused for it."""
+    driver, _project, run = _create_run(tmp_path)
+    (run / "reviews").mkdir(parents=True)
+    ad.begin(run, "code_reviewer", "Review.", ["reviews/code.md"])
+    ad.begin(run, "qa_director", "QA.", ["reviews/qa.md"])
+    _package(driver, "whose_pkg")
+    (run / "reviews" / "code.md").write_text("VERDICT: pass\n")
+    (run / "reviews" / "qa.md").write_text("VERDICT: pass\n")
+    assert ad.finish(run, "code_reviewer")["status"] == "delivered"
+    assert ad.finish(run, "qa_director")["status"] == "delivered"
+    said = capsys.readouterr().err
+    assert "changed while more than one node watched it" in said
+    assert f"qa_director in {run}" in said and f"code_reviewer in {run}" in said
+    assert (driver / ".factory" / "packages" / "whose_pkg").exists()
+
+
+def test_a_watch_that_ended_before_the_node_began_does_not_shield_it(tmp_path):
+    driver, _project, run = _create_run(tmp_path)
+    (run / "reviews").mkdir(parents=True)
+    ad.begin(run, "code_reviewer", "Review.", ["reviews/code.md"])
+    (run / "reviews" / "code.md").write_text("VERDICT: pass\n")
+    assert ad.finish(run, "code_reviewer")["status"] == "delivered"
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "h1_pkg")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError, match="new paths under its package roots"):
+        ad.finish(run, "emit")
+
+
+def test_a_package_written_into_the_driver_by_someone_else_is_never_removed(tmp_path):
+    """`refactory adopt` in the driver, or another run whose project is the driver."""
+    driver, _project, run = _create_run(tmp_path)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    _package(driver, "persons_pkg")
+    (run / "emit.txt").write_text("ok\n")
+    with pytest.raises(ValueError):
+        ad.finish(run, "emit")
+    assert (driver / ".factory" / "packages" / "persons_pkg" / "ops.py").exists()
+
+
+def test_a_differently_cased_driver_is_refused_as_a_project(tmp_path):
+    from refactory_dsh import paths
+
+    driver = _checkout(tmp_path / "driver")
+    variant = Path(str(driver).replace("/driver", "/DRIVER"))
+    if not variant.exists():
+        pytest.skip("case-sensitive filesystem")
+    run = tmp_path / "run"
+    _record(run, checkout=driver)
+    with pytest.raises(paths.CheckoutProjectError):
+        paths.project_for_writes(variant, workdir=run)
+    recorded = target_guard.record(run, variant)
+    assert Path(recorded["root"]).samefile(driver)
+    assert target_guard.checkouts(run, tmp_path / "elsewhere") == []
+
+
+def test_too_many_package_paths_to_watch_is_said(tmp_path, monkeypatch, capsys):
+    driver, _project, run = _create_run(tmp_path)
+    _package(driver, "big")
+    monkeypatch.setattr(target_guard, "LIMIT", 2)
+    ad.begin(run, "emit", "Write emit.txt.", ["emit.txt"])
+    assert "paths under its package roots, so a package an agent writes there is not watched" in \
+        capsys.readouterr().err
+
+
+def test_a_redo_closes_its_own_earlier_watch(tmp_path):
+    """An attempt whose bridge died never finished its watch; its redo is not shielded by it."""
+    driver, _project, run = _create_run(tmp_path)
+    watched = [driver.resolve()]
+    target_guard.watch_checkouts(run, watched, node="emit")
+    again = target_guard.watch_checkouts(run, watched, node="emit")
+    _package(driver, "h1_pkg")
+    changed = target_guard.strayed_checkouts(run, again)
+    assert "new paths under its package roots: .factory/packages/h1_pkg" in changed[str(driver.resolve())]

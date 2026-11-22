@@ -6,6 +6,7 @@ object nested inside a broken answer; no proposer-key preference (that is
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -149,10 +150,37 @@ def test_h3s_replies_are_read_past_the_invented_transcript(path):
     assert parse_agent_json(reply) == answer, "the transcript never holds the answer"
 
 
-def test_the_first_object_with_the_expected_keys_is_the_answer():
-    reply = 'Shape: {"replies": "..."} is the format; first {"note": 1}\n{"replies": [], "n": 0}'
-    assert parse_agent_json(reply, expect=("replies", "n")) == {"replies": [], "n": 0}
-    assert parse_agent_json(reply) == {"replies": "..."}
+def test_the_last_object_with_the_expected_keys_is_the_answer():
+    """A draft, then the corrected final answer: the final one."""
+    reply = ('Draft: {"replies": [{"id": "001", "reply": "draft"}]}\nOn reflection, final:\n'
+             '{"replies": [{"id": "001", "reply": "final"}]}\n{"note": 1}')
+    assert parse_agent_json(reply, expect=("replies",))["replies"][0]["reply"] == "final"
+    assert parse_agent_json(reply) == {"note": 1}, "with no keys named, simply the last object"
+
+
+def test_a_fenced_example_does_not_beat_the_answer_outside_it():
+    reply = ('The format is:\n```json\n{"replies": ["EXAMPLE"]}\n```\n'
+             'My answer: {"replies": ["real"]}')
+    assert parse_agent_json(reply, expect=("replies",)) == {"replies": ["real"]}
+    fenced_only = 'Answer:\n```json\n{"replies": ["in a fence"]}\n```\n'
+    assert parse_agent_json(fenced_only, expect=("replies",)) == {"replies": ["in a fence"]}
+    example_after = ('My answer: {"replies": ["real"]}\nFor reference, the format:\n'
+                     '```json\n{"replies": ["EXAMPLE"]}\n```\n')
+    assert parse_agent_json(example_after, expect=("replies",)) == {"replies": ["real"]}
+    later_example = ('```json\n{"replies": ["first"]}\n```\n```json\n{"replies": ["second"]}\n```\n')
+    assert parse_agent_json(later_example, expect=("replies",)) == {"replies": ["second"]}
+
+
+@pytest.mark.parametrize("tag", ["tool_call", "tool_result", "invoke", "function_calls", "function_results"])
+def test_every_transcript_spelling_is_left_out(tag):
+    reply = f'<{tag} name="bash">{{"replies": ["invented"]}}</{tag}>\n{{"replies": ["real"]}}\n<{tag}>{{"replies": ["after"]}}</{tag}>'
+    assert parse_agent_json(reply, expect=("replies",)) == {"replies": ["real"]}
+
+
+def test_an_answer_that_mentions_a_transcript_tag_reads_as_written():
+    answer = {"replies": [{"id": "001", "reply": "Your log shows <tool_call>retry</tool_call> twice."}]}
+    reply = f"<tool_call>{{\"name\": \"bash\"}}</tool_call>\n{json.dumps(answer)}"
+    assert parse_agent_json(reply, expect=("replies",)) == answer
 
 
 def test_an_object_nested_in_another_is_never_the_answer():

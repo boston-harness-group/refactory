@@ -84,6 +84,17 @@ def refactory_checkouts(workdir: Path | None = None) -> list[Path]:
     return found
 
 
+def _same_path(one: Path, other: Path) -> bool:
+    """Whether two paths name one directory: by the filesystem when both exist, so a
+    differently-cased spelling on a case-insensitive disk (macOS) is the same one."""
+    if one == other:
+        return True
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return False
+
+
 def project_for_writes(project: Path | None = None, *, workdir: Path | None = None) -> Path:
     """The project a node may write packages into: ``project``, else
     :func:`project_for_nodes`, resolved -- refused when it is refactory's own checkout.
@@ -97,7 +108,7 @@ def project_for_writes(project: Path | None = None, *, workdir: Path | None = No
     """
     resolved = Path(project if project is not None else project_for_nodes()).expanduser().resolve()
     for checkout in refactory_checkouts(workdir):
-        if resolved == checkout:
+        if _same_path(resolved, checkout):
             raise CheckoutProjectError(
                 f"refusing to write packages into refactory's own checkout {checkout}: that is "
                 "not a project. Set REFACTORY_PROJECT to the project the packages belong to, "

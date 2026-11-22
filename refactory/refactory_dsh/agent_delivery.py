@@ -546,13 +546,14 @@ def _pending(workdir: Path, node: str) -> Path:
     return workdir / ROOT / 'pending' / (hashlib.sha256(node.encode()).hexdigest() + '.json')
 
 
-def _watch_checkouts(workdir: Path) -> dict[str, Any]:
+def _watch_checkouts(workdir: Path, node: str) -> dict[str, Any]:
     """Snapshot refactory's own checkouts that are not the run's target (dm-164).
 
     Found from the directory this module, and so the contract's Python, imports
     refactory from -- the contract's ``refactory_source`` -- and from the run's record.
     """
-    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent))
+    return target_guard.watch_checkouts(workdir, target_guard.checkouts(workdir, Path(__file__).resolve().parent),
+                                        node=node)
 
 
 def _save_checkout_baselines(directory: Path, checkouts: dict[str, Any] | None) -> None:
@@ -626,7 +627,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
                 if baseline_dir.exists():
                     baseline_dir.rename(baseline_dir.with_name(f"target-baseline-{uuid.uuid4().hex[:8]}"))
                 target_guard.save_baseline(Path(rewatched['root']), rewatched['changes'], baseline_dir)
-            previous['checkouts'] = _watch_checkouts(workdir)
+            previous['checkouts'] = _watch_checkouts(workdir, node)
             _save_checkout_baselines(workdir / ROOT / previous['id'], previous['checkouts'])
             pending.write_text(json.dumps(previous, indent=2) + '\n')
     ledger = Ledger(workdir)
@@ -651,7 +652,7 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     # prepare (#319, dm-159).
     target = previous.get('target') if previous is not None else target_guard.watch(workdir, node)
     # Refactory's own checkout, when it is not the target: every agent node, any route (dm-164).
-    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir)
+    checkouts = previous.get('checkouts') if previous is not None else _watch_checkouts(workdir, node)
     identifier = previous['id'] if previous is not None else uuid.uuid4().hex
     directory = workdir / ROOT / identifier
     directory.mkdir(parents=True, exist_ok=True)

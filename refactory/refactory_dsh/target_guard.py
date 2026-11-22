@@ -11,7 +11,8 @@ when it changes the target while it ran (dm-159). An output-only agent also fail
 when the run's own worktree changed. Every agent node of a recorded run also fails
 when it changes refactory's own checkout -- the driver, or the run's pin -- where that
 is not the target (:func:`checkouts`, dm-164), including a path it adds under that
-checkout's package roots (:data:`PACKAGE_ROOTS`; create benchmark H1/H2).
+checkout's package roots (:data:`PACKAGE_ROOTS`; create benchmark H1/H2), which is
+reported and never moved.
 """
 
 from __future__ import annotations
@@ -116,6 +117,12 @@ def state(root: Path, *, exclude: tuple[Path, ...] = ()) -> dict[str, Any]:
     # its status would list nothing there, and the guard would be off without a word.
     if inside == "true" and top_line and _git(root, "check-ignore", "-q", str(root)) is None:
         top = Path(top_line.strip() or str(root)).resolve()
+        if root != top and not root.is_relative_to(top) and _same_dir(root, top):
+            # The same checkout spelled with other case, on a case-insensitive disk: git's
+            # spelling, so everything below is relative to the top it reports.
+            root = top
+            skipped = [root / ".factory", *(Path(path).resolve() for path in exclude)]
+            found["root"] = str(root)
         specs = [f":(exclude,literal){path.relative_to(root)}" for path in skipped if path.is_relative_to(root)]
         # HEAD, the branch and what is uncommitted, in one call.
         listing = _git(root, "status", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z",
@@ -471,6 +478,13 @@ def save_baseline(root: Path, changes: dict[str, str], baseline_dir: Path) -> li
         except OSError as error:
             not_saved.append(f"{rel_path} ({error})")
     return not_saved
+
+
+def _same_dir(one: Path, other: Path) -> bool:
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return False
 
 
 def _target_slot(root: Path) -> str:
@@ -889,59 +903,114 @@ def package_differences(before: dict[str, str] | None,
     return added, changed
 
 
-def remove_additions(root: Path, added: list[str], before: dict[str, str] | None,
-                     aside: Path) -> tuple[list[str], list[str]]:
-    """Move each path in ``added`` out of ``root`` into ``aside``; ``(moved, errors)``.
+def _tracked_package_paths(root: Path, heads: set[str]) -> set[str]:
+    """The paths under :data:`PACKAGE_ROOTS` git tracks at any of ``heads``.
 
-    Only a path that did not exist when the node began (absent from ``before``) is
-    ever touched: what was there before is the person's, and is reported, never
-    changed. Moved rather than deleted, so what the node wrote can still be read.
+    A tracked path is the person's (a pull, a commit, a design run on refactory itself)
+    and the tracked-file check above already judges what a node does to one; only what
+    no commit holds is this watch's.
     """
-    moved: list[str] = []
-    errors: list[str] = []
-    for relative in added:
-        if before is None or relative in before:
-            continue
-        source = Path(root) / relative
-        if not source.is_symlink() and not source.exists():
-            continue
-        destination = Path(aside) / relative
+    found: set[str] = set()
+    roots = [relative.as_posix() for relative in PACKAGE_ROOTS]
+    for head in sorted(head for head in heads if head):
+        listing = _git(Path(root), "ls-tree", "-r", "--name-only", head, "--", *roots)
+        found.update(line for line in (listing or "").splitlines() if line)
+    return found
+
+
+def _untracked(entries: dict[str, str] | None, tracked: set[str]) -> dict[str, str] | None:
+    """``entries`` without what git tracks: a tracked file, or a directory holding one."""
+    if entries is None or not tracked:
+        return entries
+    prefixes = {"/".join(parts[:depth]) for parts in (path.split("/") for path in tracked)
+                for depth in range(1, len(parts))}
+    return {path: kind for path, kind in entries.items() if path not in tracked and path not in prefixes}
+
+
+def removal_command(root: Path, added: list[str]) -> str:
+    """The command that removes ``added`` from ``root``; refactory never runs it."""
+    import shlex
+
+    return "rm -rf -- " + " ".join(shlex.quote(str(Path(root) / path)) for path in added)
+
+
+# ── who was watching: one record per watch of a checkout ─────────────────────
+#
+# Two runs on one driver, or two branches of a fork, watch the same checkout at once,
+# and a path either of them writes appears in both windows. A path is charged to a node
+# only when no other watch of the checkout was open at any time in its window; otherwise
+# every overlapping run and node is named in a warning, and none is refused for it.
+
+#: How long a finished watch is kept for others to see, and how long an open one is
+#: trusted to still be open (a bridge that died never finishes its watch).
+WATCH_KEPT_S = 24 * 3600
+WATCH_OPEN_S = 7 * 24 * 3600
+
+
+def _watches(root: Path) -> Path:
+    return _stray_record_path(Path(root)) / "watches"
+
+
+def _open_watch(root: Path, workdir: Path, node: str, at: str) -> str:
+    """Record a watch of ``root`` by this run's ``node`` from ``at``; its id.
+
+    An earlier open watch by the same run and node is a redo's predecessor, and is closed.
+    """
+    import uuid
+
+    directory = _watches(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    for other in _read_watches(root):
+        if other.get("run") == str(workdir) and other.get("node") == node and not other.get("finished"):
+            _close_watch(root, other["id"], at)
+    identifier = uuid.uuid4().hex
+    path = directory / f"{identifier}.json"
+    path.write_text(json.dumps({"id": identifier, "run": str(workdir), "node": node, "started": at,
+                                "finished": None}))
+    return identifier
+
+
+def _read_watches(root: Path) -> list[dict[str, Any]]:
+    found = []
+    now = datetime.now(timezone.utc)
+    for path in sorted(_watches(root).glob("*.json")) if _watches(root).is_dir() else []:
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if _same_device(source, destination.parent):
-                os.rename(source, destination)
-            else:
-                _move(source, destination)
-        except OSError as error:
-            errors.append(f"{relative}: {error}")
+            watch = json.loads(path.read_text())
+            ended = watch.get("finished") or watch.get("started")
+            age = (now - datetime.fromisoformat(ended)).total_seconds()
+        except (OSError, ValueError, TypeError):
             continue
-        moved.append(relative)
-    return moved, errors
+        if age > (WATCH_KEPT_S if watch.get("finished") else WATCH_OPEN_S):
+            path.unlink(missing_ok=True)
+            continue
+        found.append(watch)
+    return found
 
 
-def _same_device(path: Path, directory: Path) -> bool:
+def _close_watch(root: Path, identifier: str, at: str) -> None:
+    path = _watches(root) / f"{identifier}.json"
     try:
-        return os.lstat(path).st_dev == os.stat(directory).st_dev
-    except OSError:
-        return False
+        watch = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    watch["finished"] = at
+    path.write_text(json.dumps(watch))
 
 
-def _move(source: Path, destination: Path) -> None:
-    """A move across devices that keeps a symlink a symlink."""
-    import shutil
-
-    if source.is_symlink():
-        os.symlink(os.readlink(source), destination)
-        source.unlink()
-    else:
-        shutil.move(str(source), str(destination))
+def _overlapping(root: Path, identifier: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Every other watch of ``root`` open at some time between ``start`` and ``end``."""
+    return [watch for watch in _read_watches(root)
+            if watch.get("id") != identifier and watch.get("started", "") <= end
+            and (not watch.get("finished") or watch["finished"] > start)]
 
 
-def watch_checkouts(workdir: Path, paths: list[Path]) -> dict[str, dict[str, Any]]:
+def watch_checkouts(workdir: Path, paths: list[Path], node: str = "") -> dict[str, dict[str, Any]]:
     """Each checkout's state before an agent node runs, keyed by its path.
 
     A checkout git cannot report on is left unwatched with a warning, not a refusal: the
-    node has done nothing yet, and the target's own guard still holds.
+    node has done nothing yet, and the target's own guard still holds. Each watch is
+    recorded (:func:`_open_watch`), so a path written under the package roots is charged
+    only to a node that watched alone.
     """
     found: dict[str, dict[str, Any]] = {}
     for path in paths:
@@ -950,8 +1019,29 @@ def watch_checkouts(workdir: Path, paths: list[Path]) -> dict[str, dict[str, Any
         except (OSError, ValueError) as error:
             warn(f"refactory's own checkout {path} cannot be watched during this node: {error}")
             continue
-        found[str(path)] = {**snapshot, "watched_at": datetime.now(timezone.utc).isoformat()}
+        if snapshot.get("packages") is None:
+            warn(f"refactory's own checkout {path} has more than {LIMIT} paths under its package "
+                 f"roots, so a package an agent writes there is not watched during this node")
+        at = datetime.now(timezone.utc).isoformat()
+        try:
+            watch_id = _open_watch(Path(path), Path(workdir), node, at)
+        except OSError as error:
+            warn(f"the watch of refactory's own checkout {path} could not be recorded, so a path "
+                 f"written under its package roots during this node is reported, not refused: {error}")
+            watch_id = None
+        found[str(path)] = {**snapshot, "watched_at": at, "watch_id": watch_id}
     return found
+
+
+def _package_strays(root: Path, earlier: dict[str, Any], now: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """``(added, changed)`` under the package roots between two states, leaving out what
+    git tracks at either state's HEAD."""
+    added, altered = package_differences(earlier.get("packages"), now.get("packages"))
+    if not added and not altered:
+        return [], []
+    tracked = _tracked_package_paths(root, {earlier.get("head"), now.get("head")})
+    return package_differences(_untracked(earlier.get("packages"), tracked),
+                               _untracked(now.get("packages"), tracked))
 
 
 def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -> dict[str, list[str]]:
@@ -961,6 +1051,11 @@ def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -
     and a change another node's refusal already undid is not this node's
     (:func:`_discount_strays`). A checkout git cannot report on afterwards is unknown, not
     changed: it is named in a warning, and the node is not refused for it.
+
+    Untracked paths under the package roots are charged to this node only when no other
+    watch of the checkout overlapped its window; otherwise they are a warning naming every
+    overlapping run and node. What is charged is kept on the checkout's entry in ``before``
+    (``charged_packages``) for :func:`settle_checkout` to report.
     """
     changed: dict[str, list[str]] = {}
     for path, earlier in (before or {}).items():
@@ -971,11 +1066,29 @@ def strayed_checkouts(workdir: Path, before: dict[str, dict[str, Any]] | None) -
                  f"this node, so whether the node changed it is unknown: {error}")
             continue
         differences = _compare(earlier, now, commits=False)
-        added, altered = package_differences(earlier.get("packages"), now.get("packages"))
-        if added:
-            differences.append(f"new paths under its package roots: {_named(added)}")
-        if altered:
-            differences.append(f"paths that were already under its package roots changed: {_named(altered)}")
+        added, altered = _package_strays(Path(path), earlier, now)
+        end = datetime.now(timezone.utc).isoformat()
+        identifier = earlier.get("watch_id")
+        if identifier:
+            _close_watch(Path(path), identifier, end)
+        if added or altered:
+            others = (_overlapping(Path(path), identifier, earlier.get("watched_at", ""), end)
+                      if identifier else [{"run": "an unrecorded watch", "node": "?"}])
+            what = "; ".join(part for part in (
+                f"new: {_named(added)}" if added else "",
+                f"changed: {_named(altered)}" if altered else "") if part)
+            if others:
+                named = ", ".join(sorted({f"{watch.get('node') or '?'} in {watch.get('run')}" for watch in others}))
+                warn(f"paths under the package roots of refactory's own checkout {path} changed while "
+                     f"more than one node watched it ({what}). They are not charged to any one node; "
+                     f"the nodes that overlapped: {named}. Check them; to remove the new ones: "
+                     f"{removal_command(Path(path), added) if added else 'nothing new'}")
+            else:
+                earlier["charged_packages"] = {"added": added, "changed": altered}
+                if added:
+                    differences.append(f"new paths under its package roots: {_named(added)}")
+                if altered:
+                    differences.append(f"paths that were already under its package roots changed: {_named(altered)}")
         if differences:
             changed[path] = differences
     return changed
@@ -1053,8 +1166,9 @@ def _settled(path: str, node: str, result: dict[str, Any]) -> str:
     if result.get("restored"):
         text += (f"; put back as before the node: {_named(result['restored'])}; the changed copies "
                  f"are in {result['set_aside']}")
-    if result.get("removed"):
-        text += f"; new paths it added were moved out to {result['removed_to']}: {_named(result['removed'])}"
+    if result.get("new_paths"):
+        text += (f"; new paths under its package roots were left in place: {_named(result['new_paths'])}; "
+                 f"remove them with `{result['remove']}`")
     if result.get("left"):
         text += f"; left as they are: {_named(result['left'])}"
     if result.get("errors"):
@@ -1090,17 +1204,15 @@ def settle_checkout(path: str, before: dict[str, Any], directory: Path, workdir:
             result = {"mode": "reported", "restored": [], "left": left, "set_aside": None, "errors": [],
                       "head_moved": now.get("head") != before.get("head"),
                       "diff": (diff or "")[:DIFF_SHOWN]}
-        # Untracked paths under the package roots: whatever policy above, a new one is
-        # moved out (it cannot be anyone's but the node's), and one that was already
-        # there is reported and left as it is.
-        added, altered = package_differences(before.get("packages"), now.get("packages"))
+        # Untracked paths under the package roots charged to this node: never moved or
+        # deleted, whatever the policy -- a path refactory did not write may be anyone's --
+        # but reported, the new ones with the command that removes them.
+        charged = before.get("charged_packages") or {}
+        added, altered = list(charged.get("added") or []), list(charged.get("changed") or [])
         if added or altered:
-            aside = checkout_baseline(directory, path).parent / "added"
-            removed, failed = remove_additions(root, added, before.get("packages"), aside)
-            result.update(removed=removed, removed_to=str(aside) if removed else None,
+            result.update(new_paths=added, remove=removal_command(root, added) if added else None,
                           left=[*result.get("left", []), *(name for name in altered
-                                                           if name not in result.get("left", []))],
-                          errors=[*result.get("errors", []), *failed])
+                                                           if name not in result.get("left", []))])
     result.update(before_head=before.get("head"), head=now.get("head"))
     note = _settled(path, node, result)
     warn(note + (f"\n{result['diff']}" if result.get("diff") else ""))
@@ -1124,9 +1236,9 @@ def checkout_refusal(node: str, target: str | None, changed: dict[str, list[str]
         if result.get("restored"):
             text += (f" Its changed files were put back as they were before the node: "
                      f"{_named(result['restored'])}. The changed copies are in {result['set_aside']}.")
-        if result.get("removed"):
-            text += (f" The new paths it added were moved out of the checkout to {result['removed_to']}: "
-                     f"{_named(result['removed'])}.")
+        if result.get("new_paths"):
+            text += (f" The new paths under its package roots were left in place; refactory moves "
+                     f"nothing there. Remove them with `{result['remove']}`.")
         if result.get("left"):
             text += f" They were left as they are: {_named(result['left'])}."
         if result.get("errors"):
