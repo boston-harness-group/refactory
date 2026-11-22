@@ -14,6 +14,12 @@ object in the reply is then the invented call, not the answer (create benchmark 
 2026-11-20). So nothing inside a transcript is read as the answer, and a caller names
 the keys its answer has (``expect``): the answer is the last top-level object outside a
 transcript that has them all.
+
+The same transcript in the reply of a step with no tools at all is the reply itself
+being wrong, not noise around it: the step "ran" a check it could not run and reports
+its invented result (``isprime(1999997)=True``; 1999997 = 19 x 105263; create benchmark H2).
+:func:`invented_tool_calls` finds one outside fenced code blocks, for `node_retry.deliver`
+to refuse such a reply.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-__all__ = ["objects", "parse_agent_json"]
+__all__ = ["invented_tool_calls", "objects", "parse_agent_json"]
 
 #: A tool-call transcript written into a reply as text: a call or its result, in the
 #: tag spellings models use. Never the agent's answer -- an agent that really called a
@@ -31,6 +37,40 @@ __all__ = ["objects", "parse_agent_json"]
 TRANSCRIPT = re.compile(
     r"<(tool_call|tool_result|tool_use|invoke|function_calls?|function_results?)\b[^>]*>.*?</\1\s*>",
     re.DOTALL)
+
+#: A code fence line (CommonMark): up to three spaces, then three or more backticks or
+#: tildes. A fence closes on a line of the same character, at least as long, and nothing
+#: else; an unclosed one runs to the end of the text.
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+
+
+def _outside_fences(text: str) -> str:
+    """``text`` without its fenced code blocks, fence lines included."""
+    kept: list[str] = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        match = _FENCE.match(line)
+        if not fence:
+            # A backtick fence's info string has no backticks, or the line is inline code.
+            if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
+                fence = match.group(1)
+            else:
+                kept.append(line)
+        elif (match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence)
+              and not match.group(2).strip()):
+            fence = ""
+    return "".join(kept)
+
+
+def invented_tool_calls(text: str) -> list[str]:
+    """The tag of each tool-call transcript (`TRANSCRIPT`) ``text`` writes outside its
+    fenced code blocks, in order; empty when it writes none.
+
+    A transcript inside a fenced block is the reply showing markup, not making a call, so
+    it is left alone; a transcript whose tags sit outside a fence counts even when its
+    body is fenced (``<tool_call>`` then a fenced snippet then ``</tool_call>``).
+    """
+    return [match.group(1) for match in TRANSCRIPT.finditer(_outside_fences(text))]
 
 def _spans(text: str) -> list[tuple[int, int, Any]]:
     """Every top-level JSON object in ``text`` with where it starts and ends."""

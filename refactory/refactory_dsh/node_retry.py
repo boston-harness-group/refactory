@@ -65,6 +65,17 @@ OUTPUT_LIMIT_NOTE = ("Note: your previous attempt at this step ran out of output
                      "before it gave an answer. Keep your working short and commit to an "
                      "answer well before the limit.")
 
+#: What the retry of a step with no tools (``tool_policy`` ``none``) adds to its prompt
+#: when its reply wrote out tool calls or their results (`agent_json.invented_tool_calls`):
+#: nothing ran, so any result in it was made up.
+NO_TOOLS_NOTE = ("Note: your previous reply to this step was refused because it wrote out "
+                 "tool calls or tool results. This step has no tools, so nothing was run and "
+                 "those results were invented. Answer directly from the prompt and your own "
+                 "reasoning, without writing tool calls or their results.")
+
+#: The ``reason`` of the `RETRY_EVENT` for that retry.
+INVENTED_TOOL_CALLS = "invented_tool_calls"
+
 
 #: Where a step whose retries were spent records why, beside its
 #: ``reviews/<step>-missing.txt``: ``<step>.json`` with its cause and session count
@@ -91,6 +102,11 @@ class RetriesExhausted(RuntimeError):
         self.kind = kind
         self.cause = cause or kind
         self.sessions = sessions
+
+
+class InventedToolCalls(RuntimeError):
+    """A step with no tools answered with tool calls or results it wrote itself, again
+    after it was told it has none: its reply is refused, never taken as its output."""
 
 
 def leaves_no_answer(error: BaseException) -> bool:
@@ -400,6 +416,8 @@ def _record_retry(workdir: Path, node: str, *, attempt: int, tries: int, waited_
 
     if kind == "timeout":
         what = f"timed out after {waited_s}s"
+    elif kind == INVENTED_TOOL_CALLS:
+        what = f"has no tools but wrote out tool calls after {waited_s}s"
     elif _output_limit(error):
         what = f"reached its output limit without answering after {waited_s}s"
     else:
@@ -451,9 +469,16 @@ def deliver(
     receipt. With no rule, or a failure the rule does not answer, the first failure is
     raised unchanged. When the last allowed attempt fails too,
     :class:`RetriesExhausted` says how long each session ran.
+
+    A step with no tools (``tool_policy`` ``none``) whose reply writes out tool calls or
+    their results outside a fenced code block (`agent_json.invented_tool_calls`) is asked
+    once more, told it has none (`NO_TOOLS_NOTE`), whatever its rule; a second such reply
+    fails it (:class:`InventedToolCalls`). A step with tools is never judged so. Both
+    runtimes come here, so both refuse such a reply alike.
     """
     from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import begin, finish
+    from refactory_dsh.agent_json import invented_tool_calls
 
     workdir = Path(workdir)
     if rule and int(rule["times"]) <= 0:
@@ -467,25 +492,32 @@ def deliver(
     ran: list[int] = []
     attempt_client = client
     attempt_prompt = prompt
-    for index in range(tries):
+    # A step with no tools that writes out tool calls (`agent_json.invented_tool_calls`)
+    # gets one more session, told it has none, whatever its rule; ``told`` once it has.
+    no_tools = tool_policy == "none"
+    told = False
+    index = 0
+    while True:
         worktree = _worktree_state(workdir) if rule else None
         started = None
+        invented: list[str] = []
         try:
-            with workspace(index > 0) if workspace is not None else nullcontext(None) as place:
+            with workspace(index > 0 or told) if workspace is not None else nullcontext(None) as place:
                 delivery = begin(workdir, node, attempt_prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}),
                                  tool_policy=tool_policy)
                 started = time.monotonic()
                 output = ask(attempt_client, delivery["prompt"], place)
-                if place is not None:
+                invented = invented_tool_calls(output) if no_tools else []
+                if place is not None and not invented:
                     workspaces.collect(place, workdir, writes, final_response=output)
         except Exception as error:
             kind = failure_kind(error)
             if started is not None and isinstance(error, RuntimeError):
                 # How many sessions ran, for the step's no-answer record (`record_spent`).
                 try:
-                    error.sessions = index + 1  # type: ignore[attr-defined]
+                    error.sessions = index + 1 + told  # type: ignore[attr-defined]
                 except AttributeError:
                     pass
             if started is None or rule is None or kind not in rule["on"]:
@@ -498,7 +530,7 @@ def deliver(
                 raise RetriesExhausted(
                     f"{node} {failed} {_times(len(ran))} (after {spent}); {its} "
                     f"is spent. Last error: {error}", kind=kind, cause=_cause(error, kind),
-                    sessions=len(ran)) from error
+                    sessions=len(ran) + told) from error
             limit: int | None = None
             if walls:
                 # The retry's own limit, within what is left of the node's envelope (every
@@ -514,7 +546,7 @@ def deliver(
                         f"{node} {failed} (after {spent}) and {its} was not "
                         f"started: {max(0, limit)}s is left of the node's envelope and the "
                         f"run's wall. Last error: {error}", kind=kind,
-                        cause=_cause(error, kind), sessions=len(ran)) from error
+                        cause=_cause(error, kind), sessions=len(ran) + told) from error
             if budget is not None:
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"{failed} after {ran[-1]}s; retried by the "
@@ -523,12 +555,36 @@ def deliver(
                           wall_s=limit, error=error, kind=kind)
             attempt_client = _with_wall(client, limit) if limit is not None else client
             # A session that used its whole output allowance tends to do so again on the
-            # same prompt; the retry is told, and the note is not carried further.
-            attempt_prompt = f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt
+            # same prompt; the retry is told, and the note is not carried further. A step
+            # told it has no tools stays told.
+            attempt_prompt = (f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt) \
+                + (f"\n\n{NO_TOOLS_NOTE}" if told else "")
+            index += 1
+            continue
+        if invented:
+            # The reply "ran" what this step cannot run, and reports what it made up: never
+            # its output. Its bracket is settled as a timed-out attempt's is, so the retry
+            # writes the output afresh and nothing of this reply is delivered.
+            tags = ", ".join(f"<{tag}>" for tag in dict.fromkeys(invented))
+            waited = int(round(time.monotonic() - started)) if started is not None else 0
+            if told:
+                raise InventedToolCalls(
+                    f"{node} has no tools, but its reply wrote out tool calls or results "
+                    f"({tags}) again after it was told so; the reply is refused, not "
+                    "taken as its output")
+            if budget is not None:
+                budget.checkpoint()
+            settle_for_retry(workdir, node, f"its reply wrote out tool calls ({tags}) though "
+                                            "it has no tools; retried once, told so",
+                             failed="wrote out tool calls")
+            _record_retry(workdir, node, attempt=index + 2, tries=tries + 1, waited_s=waited,
+                          wall_s=None, error=InventedToolCalls(f"its reply wrote {tags}"),
+                          kind=INVENTED_TOOL_CALLS)
+            told = True
+            attempt_prompt = f"{attempt_prompt}\n\n{NO_TOOLS_NOTE}"
             continue
         receipt = finish(workdir, node, final_response=output, capture_final=capture_final)
         # A step a gate sent back after it went missing has answered now: it is no
         # longer missing (`items.missing_steps`).
         clear_spent(workdir, node)
         return output, receipt
-    raise AssertionError("unreachable: every attempt returns or raises")  # pragma: no cover

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from refactory_dsh.agent_json import parse_agent_json
+from refactory_dsh.agent_json import invented_tool_calls, parse_agent_json
 from refactory_dsh.optim.random_optimizer import answer_json, extract_json, reply_object
 
 
@@ -178,6 +178,28 @@ def test_the_last_answer_wins_fenced_or_not():
 def test_every_transcript_spelling_is_left_out(tag):
     reply = f'<{tag} name="bash">{{"replies": ["invented"]}}</{tag}>\n{{"replies": ["real"]}}\n<{tag}>{{"replies": ["after"]}}</{tag}>'
     assert parse_agent_json(reply, expect=("replies",)) == {"replies": ["real"]}
+
+
+@pytest.mark.parametrize("path", H3_REPLIES, ids=["bare", "fenced"])
+def test_h3s_invented_transcripts_are_found(path):
+    """What `node_retry.deliver` refuses from a step with no tools (D14)."""
+    assert "tool_call" in invented_tool_calls(path.read_text())
+
+
+@pytest.mark.parametrize("reply, found", [
+    ('<function_calls><invoke name="py">isprime(7)</invoke></function_calls>', ["function_calls"]),
+    ("<function_call>f()</function_call> then <function_results>1</function_results>",
+     ["function_call", "function_results"]),
+    # Tags outside a fence count even when the call's body is fenced.
+    ("<tool_call>\n```python\nisprime(1999997)\n```\n</tool_call>", ["tool_call"]),
+    # Inside a fence, closed or not, backticks or tildes, it is shown, not made.
+    ("Shape:\n```xml\n<tool_call>x</tool_call>\n```\nDone.", []),
+    ("~~~~\n<tool_result>r</tool_result>\n~~~\n~~~~\nafter", []),
+    ("```\n<tool_result>r</tool_result>", []),
+    ("A bare <tool_call> mention, unclosed.", []),
+])
+def test_invented_tool_calls_are_found_outside_fences_only(reply, found):
+    assert invented_tool_calls(reply) == found
 
 
 def test_an_answer_that_mentions_a_transcript_tag_reads_as_written():

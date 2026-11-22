@@ -30,8 +30,9 @@ from refactory_dsh import lowering, workers
 from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, CompletionTimeout, DshModelClient
 from refactory_dsh.nn import Graph, GraphError, Node
 from refactory_dsh.nn.graph import retry_declaration
-from refactory_dsh.node_retry import (RETRY_EVENT, RetriesExhausted, attempt_walls, deliver,
-                                      failure_kind, node_allowance_s, retries)
+from refactory_dsh.node_retry import (INVENTED_TOOL_CALLS, RETRY_EVENT, RetriesExhausted,
+                                      attempt_walls, deliver, failure_kind, node_allowance_s,
+                                      retries)
 
 RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 REPORT = "reviews/report.md"
@@ -885,3 +886,72 @@ def test_an_optional_branch_whose_declared_retry_is_spent_at_its_wall_is_declare
                     retry=RULE)
     info = _missing_verifier(runtime, tmp_path, verifier, [{"active": 30}, {"active": 30}])
     assert info["cause"] == "declared_timeout", info
+
+
+# ── a step with no tools that writes out tool calls it never made (D14) ─────────────
+
+#: A reply that "ran" a check its step has no tool for and reports a made-up result
+#: (create benchmark H2: 1999997 = 19 x 105263).
+INVENTED = ('<tool_call>{"name": "sympy", "arguments": {"code": "isprime(1999997)"}}</tool_call>\n'
+            '<tool_result>True</tool_result>\n1999997 is prime.')
+#: Text of `node_retry.NO_TOOLS_NOTE`: a scripted plan keyed by it answers only a retry
+#: that was told.
+TOLD = "This step has no tools"
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _solver(**fields) -> Node:
+    return Node("solver", "agent", **{"prompt_template": "Is 1999997 prime?", "writes": (REPORT,),
+                                      "tool_policy": "none", **fields})
+
+
+def _no_tools_run(runtime: str, tmp_path: Path, plan: dict[str, list[dict]], **fields):
+    dsh = Scripted(tmp_path / "dsh", plan)
+    ok, error = _run(runtime, tmp_path / "run", _graph(_solver(**fields)),
+                     dsh.client(runtime_root=str(ROOT)))
+    calls = sum(json.loads(p.read_text()) for p in (tmp_path / "dsh").glob("calls.json*"))
+    return ok, error, calls
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_tool_less_reply_with_invented_tool_calls_is_retried_once_told_so(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {
+        "": [{"answer": INVENTED}], TOLD: [{"answer": "1999997 = 19 x 105263."}]})
+    workdir = tmp_path / "run"
+    assert ok, error
+    assert calls == 2
+    assert (workdir / REPORT).read_text().strip() == "1999997 = 19 x 105263."
+    [event] = _retried(workdir)
+    assert (event["node_id"], event["reason"]) == ("solver", INVENTED_TOOL_CALLS)
+    assert "<tool_call>, <tool_result>" in event["error"]
+    receipts = [json.loads(p.read_text()) for p in (workdir / ".refactory/agent-delivery").glob("*/receipt.json")]
+    assert sorted(r["status"] for r in receipts) == ["delivered", "superseded"]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_second_invented_reply_fails_the_step_with_the_reason(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": INVENTED}]})
+    assert not ok
+    assert ("solver has no tools, but its reply wrote out tool calls or results "
+            "(<tool_call>, <tool_result>) again after it was told so") in error, error
+    assert calls == 2
+    assert not (tmp_path / "run" / REPORT).exists(), "the invented reply was delivered"
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_step_with_tools_keeps_a_reply_that_writes_out_tool_calls(tmp_path, runtime):
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": INVENTED}]},
+                                     tool_policy=None)
+    assert ok, error
+    assert calls == 1
+    assert (tmp_path / "run" / REPORT).read_text().strip() == INVENTED
+    assert _retried(tmp_path / "run") == []
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_tool_call_markup_inside_a_fenced_block_is_kept(tmp_path, runtime):
+    shown = f"The call it would make:\n```xml\n{INVENTED}\n```\nUnchecked here."
+    ok, error, calls = _no_tools_run(runtime, tmp_path, {"": [{"answer": shown}]})
+    assert ok, error
+    assert calls == 1
+    assert (tmp_path / "run" / REPORT).read_text().strip() == shown
