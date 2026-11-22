@@ -227,7 +227,7 @@ def test_every_call_that_weighs_a_change_says_the_same_compute_policy(tmp_path):
             parsimony=parsimony), project=Path("."))
         memory_text = memory_mod.build_prompt(
             epoch=1, mode_name="m", prev={"id": "a"}, curr={"id": "a"}, changes=[],
-            previous_note="", entries=[], objective=loop._objective())[0]
+            entries=[], objective=loop._objective())[0]
         assert memory_text.count(base.compute_policy(
             parsimony, item_mean=bool(loop._score_is_item_mean),
             gated=bool(loop.selection_mode()))) == 1

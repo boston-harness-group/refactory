@@ -93,7 +93,11 @@ class Client:
                 json.loads(prompt.split("## Success findings\n")[1].split("\n\n## Answer")[0])]
             return json.dumps({"findings": [f for found in lists for f in found]})
         if system == memory.MEMORY_SYSTEM:
-            return json.dumps({"reasoning": "r", "memory": "MEMORY-NOTE"})
+            import re
+
+            items = re.findall(r"^#### Task (\S+?)(?::| --|$)", prompt, re.M)
+            return json.dumps({"observations": [{"change": "", "items": items[:1],
+                                                 "observation": "MEMORY-NOTE"}]})
         return json.dumps({"diagnosis": "d", "proposals": []})
 
     def of(self, systems: tuple[str, ...]) -> list[str]:
@@ -777,7 +781,7 @@ def test_the_memory_note_reaches_every_analyst_and_merge_and_the_proposal():
     assert len(shown) == 4 + 3, "every analyst, every merge"
     for prompt in shown:
         assert "## Optimizer memory" in prompt and "NOTE-TEXT: prefer checks" in prompt
-        assert memory.MEMORY_WEIGHT in prompt
+        assert memory.RECORD_LEAD in prompt
     assert "NOTE-TEXT: prefer checks" in client.proposal()
     stale = Client()
     AutoresearchOptimizer(stale).propose(replace(ctx, memory={

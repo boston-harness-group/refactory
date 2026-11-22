@@ -1056,8 +1056,8 @@ The Python walker and the optimizer only; nothing here touches the TypeScript sp
   rest counted); a change tried once and listed is said in its row only. The newest
   40 rows (within 9000 characters) are listed; older ones are only in the tally.
 - **Optimizer memory** (`lessons`, default `1`). The memory pass's note (below, "The
-  memory pass"): the loop's cross-round memory, shown in the request, to every analyst
-  and to every merge. The proposer writes no `lessons` any more; the answer format has
+  memory pass"): the run's record, the loop's cross-round memory, shown in the request,
+  to every analyst and to every merge. The proposer writes no `lessons` any more; the answer format has
   no such field.
 - **Did the added steps contribute?** (`step_review`, default `1`). For every step a
   candidate of the last round added (an insert, a split's halves, a fork's branches, a
@@ -1275,9 +1275,9 @@ traces close batches early), then the merges (one per side with more than one
 list, at most 8 lists each, plus the final one when both sides found something), then
 the proposal: on 35 train items, about 5-6 analyst and 3 merge calls, as SkillOpt's
 analysts and merges make. SkillOpt's rank call (it trims its merged edits to the edit
-budget) and slow update are not run: the proposer chooses and writes the edits. Its
-meta skill is the memory pass (below), whose note the analysts and merges read, as
-SkillOpt's read its meta skill.
+budget) and slow update are not run: the proposer chooses and writes the edits. In
+place of its meta skill, the memory pass (below) writes the run's record, which the
+analysts and merges read where SkillOpt's read its meta skill.
 
 Where the analysis still differs from SkillOpt's: SkillOpt's LiveMath arm uses
 LiveMath-specific analyst prompts (`livemath/skillopt_prompts/analyst_error.md`), while
@@ -1291,12 +1291,49 @@ with its error. A failure finding here may also say how the steps took part (`st
 which SkillOpt's single-skill analysts have no use for; the SkillOpt strategy's own
 analyst prompts (`refactory_packages/skillopt`) are unchanged.
 
-### The memory pass: SkillOpt's meta skill (`lessons`, default `1`)
+### The memory pass: the run's record (`lessons`, default `1`)
 
 Once per epoch, from epoch 2, before a model proposer (`autoresearch`, alone, under
-`portfolio` or paired with a parent picker) writes the epoch's proposal, the
-optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta skill
-(`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does:
+`portfolio` or paired with a parent picker) writes the epoch's proposal, the loop
+writes ONE memory note (`optim/memory.py`): the run's record, a factual note in one
+fixed format for every task and graph (JSON, `refactory-memory-record/1`). It gives no
+advice. Its facts are the harness's; only its observations are a model's:
+
+- **The facts** (`memory.record_facts`, from the run's own data over every round so
+  far): for each change tried, its id, round and parent, its kind and what it touches,
+  what it was (its edits, with the text it gave a new step or judge, as "What was tried
+  this epoch" says it below), where a step it added sits and how a structural change
+  moved its items, its outcome -- `kept`, `not kept` or `refused` -- and why (the gate's
+  word, a failed train run, not evaluated, without a gate whether it is the train
+  leader, or a refusal's reasons), and the train items it fixed and broke, by id, of how
+  many it shared with its parent (`null` when its parent was not scored with the same
+  seed); and `keeps_failing`: each train item wrong under every change that scored it,
+  when at least two did, with those changes' ids. No model writes or can change them.
+- **The observations**: one optimizer-model call (or a split pass's calls, below)
+  compares two rollouts on the same train items, as SkillOpt's meta skill
+  (`skillopt/optimizer/meta_skill.py`, `trainer.py:2088-2199`) does, and says what the
+  traces show happened on them: `{"observations": [{"change", "items", "observation",
+  "evidence"}]}`, at most 12, together within 6000 characters (`MEMORY_CHARS`). Each
+  names the compared items it covers and, when it is about one change, that change's
+  id. The prompt is one text for every task: describe what happened, in the past tense;
+  nothing about what to do next (no recommendations, suggestions, principles, rules,
+  lessons, priorities or risks), no claim about what can or cannot be built, edited,
+  reached or unfrozen, no judgement of a kind of change, no instructions for the
+  pipeline's steps. The answer is checked, not trusted: an observation whose text is
+  advice or a buildability claim (`memory.ADVICE_PATTERNS`: "should", "try", "next
+  round", "in future", "principle", "only unfrozen", "cannot be built" and the like;
+  its quotes are not read) or that names no compared item is stripped, and the pass's
+  journal entry lists each stripped one with why (`stripped`). A change id the facts do
+  not hold makes it an observation about the comparison as a whole. Earlier passes'
+  observations are carried (a re-made pass of one epoch replaces its own), so the
+  record holds every pass's.
+- **The note** (`memory.render_record`): the JSON, one change, failing item or
+  observation per line, each change with the observations about it. Within 20000
+  characters (`RECORD_CHARS`): past that, the oldest changes and the oldest observations
+  about a comparison as a whole are left out first and named under `omitted` (the
+  journal keeps them); the newest change always stays.
+
+The comparison the observations come from:
 
 - **Which two pipelines.** SkillOpt compares the previous epoch's last-step skill with
   this epoch's. Here: the candidate current when the previous epoch proposed (journaled
@@ -1307,7 +1344,8 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   round tried changes, the pass sets the current against the round's rejected child of
   it that fixed or broke the most train items (the newest on a tie), on the items that
   child changed (broken first, at most 20), both sides' records from the child's
-  evaluation round (one train seed), so the note can say why the tried change failed;
+  evaluation round (one train seed), so the observations can say what the tried change
+  did on those items;
   the request labels the sides `Incumbent` and `Rejected change` (without the gate, where
   the current is only the train leader, `Unkept change`, and it says why), shows both pipelines
   and what the rejected change changed, says how many it fixed and broke and that the
@@ -1360,10 +1398,9 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   characters (`TRIED_CHARS`); past it the entries listed last are cut -- refusals first,
   then the oldest evaluated -- and the cut says how many. So a pass in an epoch that
   kept nothing sees what was tried rather than "no changes" (a round that proposed
-  nothing says so). Then the
-  previous note with SkillOpt's "reflect on whether it improved or harmed"; and the
-  comparison as SkillOpt formats it: a summary, then regressions (right -> wrong,
-  highest priority), persistent failures, improvements -- each item headed by what it
+  nothing says so). No earlier note: the record carries earlier observations itself.
+  Then the comparison as SkillOpt formats it: a summary, then regressions (right ->
+  wrong), persistent failures, improvements -- each item headed by what it
   asks (SkillOpt's `Task <id>: <question>`), with both outcomes,
   answers and grader reasons, its declared metadata and both full traces (every step's
   input and output, as the analysts render them) -- then stable successes without
@@ -1378,18 +1415,14 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
     call, both traces whole, in SkillOpt's comparison format. Each call also reads the
     pipelines and what changed between them, exactly as the single call shows them (so
     an observation can say where in the pipeline a problem starts), what the score
-    measures and the counts over all items, and writes up to 8 observations for the
-    future optimizer: what regressed, improved or still fails, and why, each citing its
-    items with short quotes. Its prompt is the memory prompt's, adapted: address the
-    future optimizer, use the traces' evidence, report what the traces show and leave
-    verdicts on the changes tried to the synthesis (which weighs each against them),
-    judging no kind of change in general, no instructions for the pipeline's steps.
-    Domain-free.
+    measures and the counts over all items, and writes up to 8 observations: what the
+    traces show happened on its items, each citing them with short quotes, under the
+    memory prompt's rules (an advice observation is dropped here too). Domain-free.
   - **One synthesis call.** The single call's request -- both pipelines, what changed,
-    what was tried, the objective, the previous note with SkillOpt's reflect wording
-    -- with every comparison call's observations in place of the traces. It writes
-    the note exactly as the single call does, under the same system prompt with its
-    rules (one line says the comparison was read in parts). The comparison calls are
+    what was tried, the objective -- with every comparison call's observations in place
+    of the traces. It writes the note's observations exactly as the single call does,
+    under the same system prompt with its rules (one item says the comparison was read
+    in parts, and to combine observations about the same thing). The comparison calls are
     asked for at most 6000 characters each; a part's observations past 12000 are cut
     to fit, the longest texts first, each cut marked `… [cut: N chars]`. When the
     pipelines are so large that they and the observations pass the room, the
@@ -1403,29 +1436,14 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   comparison call (likewise for analyst and merge calls). Any call refused as too long
   is retried once at half the length (a
   comparison call with its traces cut to fit, counted; the synthesis with its pipeline
-  texts clipped, the observations whole). The prompt is SkillOpt's `meta_skill.md` for a graph: address
-  the future optimizer, regression risks, revise or drop what did not help, no
-  instructions for the pipeline's own steps -- with what SkillOpt needs no counterpart
-  of, having one kind of edit: lessons about each change tried (what it was -- the step
-  it changed or added, what a new step or judge was told to do or check, where it sits
-  and sends work back, its limits, the text it changed -- how it moved the items and
-  why) and what to try next given that, in place of SkillOpt's "which kinds of edit
-  help"; a statement about a kind of change in general only when several different
-  designs of that kind were tried and agree, never from one design whatever its effect;
-  a result inside the tally's noise is weak evidence even about that change; advice
-  only on changes with evidence in front of it (this epoch's tries, or what the
-  previous note records), none for or against changes nobody tried. Domain-free; train
-  items only.
-- **What it writes.** `{"reasoning", "memory"}`. SkillOpt sets no length (its real runs
-  wrote 3.4-5.8k characters); the note is asked for and kept within 6000 characters,
-  a longer one cut with the cut said.
-- **Who reads it.** Every analyst call and every merge call (with SkillOpt's
-  `format_meta_skill_context` wording, its "prefer it when the evidence is ambiguous"
-  replaced so an early note cannot become sticky: weigh it as evidence about the changes
-  it names, follow it where the current traces agree or say nothing, let them override
-  it, and never let it rule out a change nobody has tried or a different design of one
-  that failed; `memory.MEMORY_WEIGHT`) and the proposal request ("Optimizer memory"). It replaces the proposer's former `lessons`; the run ledger and the step
-  reviews stay. It never edits the graph.
+  texts clipped, the observations whole). Domain-free; train items only.
+- **Who reads it.** Every analyst call and every merge call (under SkillOpt's "Optimizer
+  memory" heading) and the proposal request ("Optimizer memory", with the tally of the
+  epoch's tries), each told the same lead (`memory.RECORD_LEAD`): what the record's
+  facts are and where they come from, that each observation says what a pass's traces
+  showed on the items it names, and that it records what happened and says nothing
+  about what to try. It replaces the proposer's former `lessons`; the run ledger and the
+  step reviews stay. It never edits the graph.
 - **When it fails.** Where SkillOpt then has no meta skill, the loop keeps the previous
   note, marked NOT UPDATED in that epoch with why, in every request that shows it; the
   next pass that writes one clears the mark. The call is retried as every optimizer call
@@ -1437,12 +1455,24 @@ optimizer's model writes ONE memory note (`optim/memory.py`), as SkillOpt's meta
   `<run root>/analyst_findings/` like an analyst call; each pass is journaled
   (`optimizer_memory`: the two candidates, whether they are one, the sample, the items
   compared and missing, the counts per category, the evaluations and rollouts it made,
-  the comparison calls (`parts`) when split, the calls' clipping and retry, and the
-  note); a resume replays the note and the passes and does not make a pass again. A
+  the comparison calls (`parts`) when split, the calls' clipping and retry, the
+  observations the answer added and each one stripped with why, and the note with the
+  whole record under `memory.record`); a resume replays the note, the record and the
+  passes and does not make a pass again. A
   pass stopped part way is made again on resume: its answered calls come from their
   cache, and the synthesis, whose request holds every observation, is reused only when
   every comparison answered the same. report.json's `optimizer_memory` and report.md's
-  "Optimizer memory" list every pass and the latest note.
+  "Optimizer memory" list every pass and the latest record.
+- **Replaying a run's requests.** `refactory/scripts/replay_memory.py RUN_DIR` reads the
+  run's `optimizer_trace.jsonl` (read only) and writes each recorded memory request as
+  the current code would send it (a request recorded under the earlier optimizer-coach
+  prompt is converted: its evidence sections are kept byte for byte), with no model
+  call; `--reply FILE` reads one reply as the record would, saying what it keeps and
+  strips.
+
+The SkillOpt strategy (`refactory_packages/skillopt`) is not this pass: it keeps its
+published meta skill (`prompts.META_SKILL_SYSTEM`, its `meta_skill_content` note), and
+a test holds its prompt, user message and context block byte-identical.
 
 `lessons` `0` turns it off: no pass, no note, no section. A custom strategy (the
 SkillOpt port) keeps its own meta skill and runs no pass; an optimizer that asks no

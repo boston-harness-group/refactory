@@ -176,13 +176,13 @@ def test_every_reader_of_traces_is_told_a_reply_is_a_claim():
     assert evidence.CLAIMS in random_optimizer.READER_SYSTEM
     assert base.ITEM_FORM.endswith(evidence.CLAIMS)
     head, _tail = memory._frame(epoch=2, mode_name="m", prev={"id": "a"}, curr={"id": "b"},
-                                same=False, changes=[], previous_note="", entries=[])
+                                same=False, changes=[], entries=[])
     assert head.count(evidence.CLAIMS) == 1
     record = _annotated(_record())
     entries, _missing = memory.pairs([record], [record], [record["id"]])
     side = {"id": "c1", "pipeline": "(pipeline)", "rollout": "train"}
     request = memory.MemoryRequest(epoch=3, mode_name="m", prev=side, curr=side, changes=[],
-                                   previous_note="", entries=entries)
+                                   entries=entries)
     part = request.compare_prompt(entries, 1, 2)[0]
     assert part.count(evidence.CLAIMS) == 1 and NO_TOOLS in part
     for form in (evidence.TRACE_FORM, base.ITEM_FORM, random_optimizer.READER_FORM):

@@ -492,13 +492,15 @@ class LoopConfig:
     #: counts against its parent and the gate's word, after a tally per change (never per
     #: kind). On by default.
     run_ledger: bool = True
-    #: The memory pass (`optim.memory`, SkillOpt's optimizer meta skill): once per
-    #: epoch from epoch 2, before a model proposer's proposal, one optimizer-model call
-    #: compares the candidate current when the previous epoch proposed with the one
-    #: current now on 20 sampled train items (reusing the epoch's own rollouts; only
-    #: what is missing is evaluated) and writes one memory note that every analyst
-    #: call, every merge call and the proposal request read. Journaled, kept across a
-    #: resume; a failed pass keeps the earlier note, marked not updated. On by default.
+    #: The memory pass (`optim.memory`, the run's record): once per epoch from epoch 2,
+    #: before a model proposer's proposal, the loop writes one note that every analyst
+    #: call, every merge call and the proposal request read: each change tried with its
+    #: outcome and the train items it fixed and broke (the harness's facts), and what one
+    #: optimizer-model call comparing the candidate current when the previous epoch
+    #: proposed with the one current now on 20 sampled train items (reusing the epoch's
+    #: own rollouts; only what is missing is evaluated) saw in the traces. Journaled, kept
+    #: across a resume; a failed pass keeps the earlier note, marked not updated. On by
+    #: default.
     lessons: bool = True
     #: Each step a candidate of the last round added is reviewed before the next
     #: proposal: its train fixed/broken counts, how often the final answer changed,
@@ -6699,7 +6701,6 @@ class Loop(OuterLoop):
         view = {c.id: analysts.pipeline_text(memory.state_view(c.state),
                                             memory.PIPELINE_TEXT_CHARS)
                 for c in {prev.id: prev, current.id: current}.values()}
-        previous = str(self._memory.get("text") or "")
         record: dict[str, Any] = {
             "epoch": epoch, "generation": self.generation, "prev": prev.id, "curr": current.id,
             "same": same, "sample": sample, "pairs": len(entries), "missing": missing,
@@ -6723,6 +6724,16 @@ class Loop(OuterLoop):
                                          current=prev.id if rejected else current.id,
                                          gated=gated, tally=tally, shown_in=shown_in)
         objective = self._objective()
+        # The record's facts, from this run's own data over every round so far
+        # (`memory.record_facts`): the model adds observations only.
+        rounds = sorted({int(r["epoch"]) for r in self.proposals.values()
+                         if isinstance(r, Mapping) and r.get("epoch") is not None
+                         and int(r["epoch"]) < epoch}
+                        | {r for r in self._round_refusals if r < epoch} | {epoch - 1})
+        every = [(tried, refused) if r == epoch - 1 else self._tried_in_round(r) for r in rounds]
+        facts = memory.record_facts([t for done, _f in every for t in done],
+                                    [f for _d, failed in every for f in failed], gated=gated,
+                                    current=prev.id if rejected else current.id)
 
         # The request: one call when it fits the room whole, else split into comparison
         # calls and a synthesis, never cut (`memory.MemoryRequest`).
@@ -6738,7 +6749,8 @@ class Loop(OuterLoop):
                 "curr": (memory.pipeline_homes(current.state),
                          f"the {memory.noun({'rejected': rejected})}'s pipeline" if rejected
                          else "the pipeline now")}),
-            previous_note=previous, entries=entries, tried=tried_lines, objective=objective)
+            entries=entries, tried=tried_lines, objective=objective, facts=facts,
+            earlier=self._memory.get("record"))
 
         outcome: dict[str, Any] = {}
         if not entries:
@@ -6761,6 +6773,10 @@ class Loop(OuterLoop):
         note = outcome.get("note")
         if note:
             record["reasoning"] = note.get("reasoning", "")
+            # What the answer added, and what was stripped from it and why (`memory.note_from`).
+            record["observations"] = sum(1 for o in (note.get("record") or {}).get(
+                "observations") or () if o.get("epoch") == epoch)
+            record["stripped"] = list(note.get("stripped") or ())
         self._keep_memory({**record, **({"error": outcome.get("error")}
                                          if not note else {})}, note)
 
@@ -6788,7 +6804,7 @@ class Loop(OuterLoop):
         from refactory_dsh.optim import memory
         from refactory_dsh.optim.base import Proposal, _structural_edit
         from refactory_dsh.optim.feedback import (change_kind, knob_values, ledger_entry,
-                                                  placement_lines)
+                                                  placement_lines, touched)
 
         by_id = {c.id: c for c in self.population}
         tried = []
@@ -6808,6 +6824,10 @@ class Loop(OuterLoop):
                                  integrity=self._integrity_of(candidate.id))
             from refactory_dsh.optim.edit_effect import edit_effect
 
+            # The item ids behind its fixed/broken counts, for the memory record
+            # (`memory.item_ids`): only where the counts are (one seed, shared items).
+            if isinstance(entry.get("fixed"), int):
+                entry["items"] = memory.item_ids(parent_records, child_records)
             effect = (edit_effect(parent_records, child_records, self._reply_judge(),
                                   new_steps=_new_steps(by_id.get(candidate.parent or ""),
                                                        candidate))
@@ -6828,6 +6848,7 @@ class Loop(OuterLoop):
                 "round": round_, "attempt": rejection.attempt,
                 "kind": change_kind(readable) if readable else "",
                 "structural": any(_structural_edit(s) for s in readable) if readable else None,
+                "touched": touched(readable) if readable else [],
                 "edits": memory.edits_text(steps), "reasons": list(rejection.reasons)})
         return tried, refused
 
@@ -6838,6 +6859,7 @@ class Loop(OuterLoop):
             self._memory = {"text": note["text"], "epoch": record["epoch"],
                             "generation": record.get("generation"), "prev": record.get("prev"),
                             "curr": record.get("curr"),
+                            **({"record": dict(note["record"])} if note.get("record") else {}),
                             **({"rejected": dict(record["rejected"])}
                                if record.get("rejected") else {}),
                             **({"tally": list(self._pending_tally)}

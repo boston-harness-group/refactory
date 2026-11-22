@@ -121,7 +121,7 @@ def requests(tmp_path, monkeypatch) -> dict[str, list[tuple[str, list[dict[str, 
         compared = [*before[:6], *after[:6]]
         side = {"id": seed.id, "pipeline": pipeline, "rollout": "train"}
         request = memory.MemoryRequest(epoch=3, mode_name=mode_name, prev=side, curr=side,
-                                       changes=[], previous_note="", entries=entries)
+                                       changes=[], entries=entries)
         built.setdefault("memory", []).append((request()[0], compared))
         built.setdefault("memory_compare", []).append(
             (request.compare_prompt(entries, 1, 1)[0], compared))

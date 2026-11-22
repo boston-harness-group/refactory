@@ -263,7 +263,6 @@ def test_the_memory_request_says_a_change_s_text_once(rejected):
                                   curr=curr,
                                   changes=memory.changes_lines(lineage, homes={
                                       "curr": (memory.pipeline_homes(child), "the new pipeline")}),
-                                  previous_note="",
                                   entries=entries, tried=tried)
     assert text.count(JUDGE_TEXT) == 1
     assert f'its edits are under "{section}" above' in text

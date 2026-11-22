@@ -301,14 +301,18 @@ def test_a_cut_to_nothing_keeps_neither_end():
     assert evidence.clip(text, 2) == "H\n[… 106 chars omitted]\nL"
 
 
-def test_the_memory_pass_reads_its_previous_note_byte_exact():
+def test_the_memory_note_is_read_byte_exact_and_the_memory_pass_reads_none():
+    """Every reader gets the note in a fence no line of it closes; the memory request
+    carries no earlier note at all (the record is the harness's to carry)."""
     note = "## Lessons\n- keep the check\nTitle\n---"
+    for text in (memory.context_block({"text": note, "epoch": 2}),
+                 "\n".join(memory.request_lines({"text": note, "epoch": 2}))):
+        assert "\n".join(evidence.exact_block(note)) in text and "\\#" not in text
+        assert "## Lessons" not in own_headings(text)
     side = {"id": "c1", "pipeline": "(pipeline)", "rollout": "train"}
     request = memory.MemoryRequest(epoch=3, mode_name="m", prev=side, curr=side, changes=[],
-                                   previous_note=note, entries=[])
-    text = request()[0]
-    assert "\n".join(evidence.exact_block(note)) in text and "\\#" not in text
-    assert "## Lessons" not in own_headings(text)
+                                   entries=[])
+    assert "keep the check" not in request()[0]
 
 
 def test_a_first_pick_past_the_room_is_said_and_recorded():

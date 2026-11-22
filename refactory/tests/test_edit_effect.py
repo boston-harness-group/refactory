@@ -179,10 +179,10 @@ def test_memory_gets_each_change_s_tries_and_the_noise_they_sit_in(name, fixed, 
     assert "maximalist trap" in S45_LABEL and "- loop/gate:" not in text
     assert text.count(f"fixed {fixed} / broken {broken}") == 1
     assert "first reply was already right" in text
-    # The noise rule is the memory call's, once: in its system prompt, not again here.
-    assert "inside the noise" in memory_mod.MEMORY_SYSTEM
+    # The memory call judges no change (it records what the traces show): its request
+    # carries the noise as numbers, and no rule about weighing them.
     request = memory_mod.MEMORY_SYSTEM + "\n" + text
-    assert request.count("weak evidence") == 1, "the memory request repeats the noise rule"
+    assert "noise" not in memory_mod.MEMORY_SYSTEM and "weak evidence" not in request
 
 
 def test_the_proposer_sees_the_same_tally_once_beside_the_note():

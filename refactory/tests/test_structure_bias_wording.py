@@ -58,13 +58,14 @@ def test_a_vote_or_selector_over_the_pipelines_own_attempts_is_legitimate():
     assert "picks, copies or defaults to an answer" in integrity.CATEGORIES["task_bypass"]
 
 
-def test_the_note_is_weighed_as_evidence_never_a_rule_against_untried_designs():
+def test_the_note_is_said_as_a_record_never_as_advice():
     note = {"text": "NOTE", "epoch": 2}
     for shown in (memory.context_block(note), "\n".join(memory.request_lines(note))):
         flat = _flat(shown)
         assert "Prefer it when the current evidence is ambiguous" not in flat
-        assert ("do not let it rule out a change nobody has tried, or a different design "
-                "(other instructions, criteria, place or limit) of a change that failed") in flat
+        assert "Use it to improve how you" not in flat
+        assert _flat(memory.RECORD_LEAD) in flat
+        assert "It records what happened and says nothing about what to try." in flat
     rejected = "\n".join(memory.request_lines(
         {**note, "prev": "inc", "rejected": {"child": "rej"}}))
     assert "the unchanged incumbent `inc` and its rejected change `rej`" in rejected

@@ -647,8 +647,11 @@ class AutoresearchOptimizer(Optimizer):
         of the optimizer's model, SkillOpt's, traced (kind ``memory``), retried and
         cached as an analyst call is (`_ask`), retried at half size after a context
         overflow. When it does not fit, the evidence is split, never cut
-        (`memory.MemoryRequest`, `_write_memory_split`). Returns ``{"note" ({"text",
-        "reasoning"}) or None, "error", "context_retry", "cached", "calls",
+        (`memory.MemoryRequest`, `_write_memory_split`). The answer is read into the
+        note by ``build.parse_note`` (`memory.MemoryRequest.parse_note`: the record of the
+        harness's facts and the answer's observations), or by `memory.parse_note` for a
+        build without one. Returns ``{"note" ({"text", "reasoning", "record",
+        "stripped"}) or None, "error", "context_retry", "cached", "calls",
         "clipped_items", "clipped_chars", "prompt_chars"}`` (and ``"parts"`` when split);
         a spent budget, a cancelled run or a missing model choice raise."""
         from . import memory
@@ -669,8 +672,8 @@ class AutoresearchOptimizer(Optimizer):
 
         found, error, retried, cached = self._ask(
             ProposalContext(epoch=epoch, generation=generation), memory.MEMORY_SYSTEM, prompt,
-            {"kind": "memory"}, memory.parse_note, counts, rebuild=smaller,
-            missing='the answer has no "memory" note')
+            {"kind": "memory"}, getattr(build, "parse_note", None) or memory.parse_note,
+            counts, rebuild=smaller, missing='the answer has no "observations" list')
         return {"note": found, "error": error, "context_retry": retried, "cached": cached,
                 "calls": counts["calls"], "clipped_items": int(clip.get("items") or 0),
                 "clipped_chars": int(clip.get("chars") or 0), "prompt_chars": len(prompt)}
@@ -741,8 +744,8 @@ class AutoresearchOptimizer(Optimizer):
 
         found, error, retried, cached = self._ask(
             ctx, memory.SYNTHESIS_SYSTEM, prompt, {"kind": "memory", "parts": total},
-            memory.parse_note, counts, rebuild=smaller,
-            missing='the answer has no "memory" note')
+            getattr(request, "parse_note", None) or memory.parse_note, counts,
+            rebuild=smaller, missing='the answer has no "observations" list')
         return {**out, "note": found, "error": error, "calls": counts["calls"],
                 "context_retry": retried or any(r["context_retry"] for r in results),
                 "cached": cached and all(r["cached"] for r in results),

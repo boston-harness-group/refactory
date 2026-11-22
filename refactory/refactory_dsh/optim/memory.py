@@ -1,62 +1,69 @@
-"""The memory pass: SkillOpt's optimizer meta skill, for the model proposer, over a graph.
+"""The memory pass: the run's record of every change tried, for the model proposer, over a graph.
 
-Once per epoch, from epoch 2, before the epoch's proposal, the optimizer's model
-compares two rollouts on the same train items and writes ONE memory note: an
-optimizer-only note on how to analyse, merge and propose changes in this run. It is
-the loop's cross-round memory, shown to every analyst call, every merge call and the
-proposal request (`format_context`, `request_lines`). It never edits the graph.
+Once per epoch, from epoch 2, before the epoch's proposal, the loop writes ONE note: a
+factual record, the same format for every task and graph (`RECORD_FORMAT`, JSON,
+`render_record`). It is the loop's cross-round memory, shown to every analyst call,
+every merge call and the proposal request (`context_block`, `request_lines`). It never
+edits the graph and gives no advice: it records what happened.
 
-SkillOpt's mechanism (``skillopt/optimizer/meta_skill.py``, ``slow_update.py``, and
-``skillopt/engine/trainer.py:2088-2199``), mirrored here:
+- **The facts are the harness's** (`record_facts`, from the run's journal via
+  `Loop._tried_in_round` over every round so far): for each change tried, what it was
+  (its step, kind and edits, with the text it gave a new step or judge, where a new step
+  sits, how a structural change moved its items), its outcome -- kept, not kept or
+  refused -- and why (the gate's word, a failed train run, a refusal's reasons), and the
+  train items it fixed and broke, by id; and the train items wrong under every change
+  that scored them (``keeps_failing``), with those changes. No model writes them.
+- **The observations are the model's**: one optimizer-model call compares two rollouts
+  on the same train items and says what the traces show happened on them, each
+  observation citing its items and, when it is about one change, that change's id. Its
+  prompt (`MEMORY_SYSTEM`) asks for nothing forward-looking -- no next steps, principles,
+  rules, recommendations or claims about what can be built -- and the answer is checked:
+  an observation that is advice (`advice_in`) or names no compared item is stripped and
+  journaled as stripped (`note_from`). Earlier passes' observations are carried, so the
+  record holds every pass's.
+
+The comparison is SkillOpt's meta-skill mechanism (``skillopt/optimizer/meta_skill.py``,
+``slow_update.py``, ``skillopt/engine/trainer.py:2088-2199``), which this pass keeps:
 
 - **When**: at the end of every epoch from the second (trainer.py:2097-2103 skips the
   first); the note it writes is read in the next epoch (trainer.py:1190-1194). Our
   loop's epoch ``e`` scores and gates the proposals epoch ``e - 1`` wrote and then
   proposes, so its pass runs after the gate and before the proposal: the note is read
   by the proposal it precedes and by every later one until the next pass.
-- **Which two pipelines**: the previous epoch's last-step skill against this epoch's
-  (trainer.py:2111-2114, 2176-2180): here the candidate that was current when the
-  previous epoch proposed and the one current now (the validation gate's current, or
-  without the gate the train leader). When they are one candidate (nothing kept this
-  epoch), SkillOpt rolls the same skill out twice; here the two rollouts are that
-  candidate's previous-epoch rollout and this epoch's under the gate, and without it its
-  rollout when it was scored and a fresh one made for the pass.
+- **Which two pipelines**: the candidate that was current when the previous epoch
+  proposed and the one current now (the validation gate's current, or without the gate
+  the train leader). When they are one candidate (nothing kept this epoch), the two
+  rollouts are that candidate's previous-epoch rollout and this epoch's under the gate,
+  and without it its rollout when it was scored and a fresh one made for the pass; or,
+  when a change tried this epoch moved items, the incumbent against that change.
 - **Which items**: ``slow_update_samples`` (20, default.yaml:99) train items, the train
   ids shuffled with ``seed + epoch * 2000`` (trainer.py:2118-2119, as the slow update's
   sample, :1843-1844). Rolled out with the epoch's own train seed rather than SkillOpt's
   ``seed + epoch * 2000``, so the loop's own rollouts of the epoch are reused; only the
   sampled items a side has no record of are evaluated.
 - **What is shown**: both pipelines, what the score measures (`base.objective_text`),
-  every change the optimizer tried in the epoch, by what it was (its edits with the text
-  it gave a new step or judge, where each new step sits and what it sends back) --
-  evaluated, with its train fixed/broken counts and the gate's word, or refused before it
-  ran, with why (`tried_lines`; the facts the proposal request already shows, never a
-  validation score), and a tally per change, never per kind -- so a pass with
-  nothing kept still sees what was tried; the previous note with "reflect on whether it
-  improved or harmed" (meta_skill.py:51-60), and the comparison by category
-  (slow_update.py:287-349): a summary, then regressions (highest priority),
+  every change the optimizer tried in the epoch with its id (`tried_lines`: the facts
+  the proposal request already shows, never a validation score) and a tally per change,
+  and the comparison by category (slow_update.py:287-349): a summary, then regressions,
   persistent failures, improvements, each item with both outcomes, answers, grader
-  reasons and both full traces, then stable successes without traces. SkillOpt never
-  clips, and neither does this pass: when the whole request fits ``MEMORY_ROOM`` (the
-  analysts' room, tied to the optimizer model's context) it is one call, SkillOpt's;
-  when it does not, the evidence is split (`MemoryRequest`): comparison calls each read
-  the pipelines and as many whole item pairs as fit and write observations for the
-  optimizer (``COMPARE_SYSTEM``), then one synthesis call reads both pipelines, the tries, the
-  previous note and every part's observations and writes the note
-  (``SYNTHESIS_SYSTEM``). A larger room makes fewer calls; no trace is cut, except a
-  pair longer than the room on its own (counted). A call refused as longer than the
-  model's context is retried once at half size.
-- **What it writes**: ``{"reasoning", "memory"}`` (``meta_skill_content``), the prompt
-  being SkillOpt's ``meta_skill.md`` for a graph, its "which kinds of edit help" asked
-  instead per change tried: what it was, how it moved the items and why, and what to
-  try next; a kind judged in general only from several different designs that agree. SkillOpt sets no length; its real runs
-  wrote 3.4-5.8k characters, so the note is asked for and kept within ``MEMORY_CHARS``.
-- **How it is shown**: SkillOpt's ``format_meta_skill_context`` wording (meta_skill.py
-  18-30), to analysts, merges and the proposal request.
+  reasons and both full traces, then stable successes without traces. No earlier note:
+  the record is the harness's to carry. SkillOpt never clips, and neither does this
+  pass: when the whole request fits ``MEMORY_ROOM`` (the analysts' room, tied to the
+  optimizer model's context) it is one call; when it does not, the evidence is split
+  (`MemoryRequest`): comparison calls each read the pipelines and as many whole item
+  pairs as fit and write observations (``COMPARE_SYSTEM``), then one synthesis call reads
+  both pipelines, the tries and every part's observations and writes the note's
+  observations (``SYNTHESIS_SYSTEM``). A larger room makes fewer calls; no trace is cut,
+  except a pair longer than the room on its own (counted). A call refused as longer than
+  the model's context is retried once at half size.
+- **What it writes**: ``{"observations": [{"change", "items", "observation",
+  "evidence"}]}``, at most ``NOTE_OBSERVATIONS``, together within ``MEMORY_CHARS``; the
+  rendered record within ``RECORD_CHARS``, the oldest entries left out first and named.
 
-SkillOpt's slow update (which edits the skill) is not copied. Where SkillOpt leaves no
-note after a failed call (trainer.py:384-397), the loop keeps the previous note and
-marks it not updated in that epoch, and why.
+SkillOpt's own meta skill (the SkillOpt strategy, ``refactory_packages/skillopt``) is
+not this module: a custom strategy keeps its own and runs no pass (`Loop._memory_on`).
+Where a pass makes no note (a failed call), the loop keeps the previous note and marks
+it not updated in that epoch, and why.
 
 Domain-free: the prompts name no dataset or task. Train records only.
 """
@@ -65,6 +72,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Mapping, Sequence
 
 from . import evidence
@@ -83,7 +91,7 @@ MEMORY_ROOM = ANALYST_ROOM
 #: The categories in the order SkillOpt lists them (slow_update.py:308-313), whether
 #: each shows the two traces, and its heading.
 CATEGORIES = (
-    ("regressed", True, "Regressions (right -> wrong) -- HIGHEST PRIORITY"),
+    ("regressed", True, "Regressions (right -> wrong)"),
     ("persistent_fail", True, "Persistent failures (wrong -> wrong)"),
     ("improved", True, "Improvements (wrong -> right)"),
     ("stable_success", False, "Stable successes (right -> right)"),
@@ -115,6 +123,15 @@ EVIDENCE_PER_OBSERVATION = 4
 #: ``OBSERVATION_FLOOR``, each cut marked and counted (`fit_observations`).
 PART_OBSERVATION_CHARS = 2 * OBSERVATION_CHARS
 OBSERVATION_FLOOR = 200
+#: The most observations one note call (the single call, or a split pass's synthesis)
+#: writes; together they are asked to stay within ``MEMORY_CHARS`` and cut past it.
+NOTE_OBSERVATIONS = 12
+#: The record's format, the first key of every note (`render_record`).
+RECORD_FORMAT = "refactory-memory-record/1"
+#: The most characters the rendered record takes: past it the oldest changes and the
+#: oldest observations not tied to a change are left out, oldest first, and their ids
+#: named under ``omitted`` (they stay in the journal's records).
+RECORD_CHARS = 20000
 
 
 def sample_ids(train_ids: Sequence[str], seed: int, epoch: int,
@@ -168,87 +185,65 @@ def counts(entries: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 
 
 MEMORY_SYSTEM = """\
-You are an optimizer-coach for a system that optimizes an AI pipeline: a graph of steps
-(nodes) connected by edges, each step configured by settings (knobs) such as its prompt.
+You add observations to the record of a run that optimizes an AI pipeline: a graph of
+steps (nodes) connected by edges, each step configured by settings (knobs) such as its
+prompt. Each change the optimizer tried was evaluated on train items and then kept or
+not kept, or it was refused before it ran.
 
-Your job is not to solve tasks directly and not to write instructions for the pipeline.
-Your job is to write a compact OPTIMIZER-SIDE memory that helps future optimizer calls
-produce better changes to the pipeline in this run.
+The harness writes the record's facts itself, from the run's journal: what each change
+was, whether it was kept, not kept or refused and why, and the train items it fixed and
+broke. You do not write or restate those facts.
+
+Your job is to say what the traces show happened on the compared items: for an item a
+change fixed or broke, and for an item that failed under both pipelines, what the steps
+did and where its outcome was decided (a step's reply, a setting, the data passed along
+an edge, the output of a step or judge a change added), citing the items and quoting
+the traces briefly.
 
 ## What You Receive
 
-1. The pipeline at the start of this epoch.
-2. The pipeline now, and what changed between them -- or, when nothing replaced it, a
-   change tried this epoch and rejected, compared with it on the items that change moved.
-3. Every change the optimizer tried this epoch: each one evaluated, with what it fixed
-   and broke and whether it was kept, and each one refused before it ran, with why.
-4. A longitudinal comparison on the SAME sampled items under those two pipelines.
-5. The previous optimizer memory, if one existed.
+1. The pipeline(s) compared and what changed between them.
+2. Every change the optimizer tried this epoch, each with its id and the harness's facts.
+3. A comparison of the SAME train items under the two pipelines (or two rollouts of one
+   pipeline): each changed or failing item with both full traces.
 
-## Your Goal
+## Rules
 
-Write a concise memory that improves future optimizer behavior in stages such as
-failure analysis, success analysis, merging findings, and proposing and ranking
-changes.
-
-This memory should capture things like:
-- For each change tried: what it was -- the step it changed or added, what a new step
-  or judge was told to do or check, where it sits and where it sends work back, its
-  limits, what text it changed -- how it moved the items (which it fixed, which it
-  broke) and why, from the comparison and the traces.
-- What to try next given that: what to keep, what in a change that hurt to revise (its
-  instructions or criteria, its place, what it sends back, its limit), and what to try
-  instead.
-- What level of detail works best for a change here: a prompt's wording, a new step's
-  job, a judge's criteria, a step's place, its limits.
-- What failure-repair patterns should be prioritized.
-- What regression risks future optimizer calls should guard against.
-
-## Important Constraints
-
-- Address the FUTURE OPTIMIZER directly, not the pipeline.
-- Focus on how to choose and write better changes.
-- Use evidence from the comparison, not generic advice.
-- Write each lesson about the change that was tried, named by what it did (for example
-  "the judge after step X that checks Y sent right answers back, and step X then
-  dropped them"), not about every change of its kind (every loop, every new step,
-  every prompt edit): two changes of one kind differ in what decides their effect.
-- Say something about a kind of change in general only when several different designs
-  of that kind were tried (this epoch, or as the previous memory records) and agree.
-  Never from one design, however large its effect.
-- A result inside the noise the tally gives is weak evidence even about that change:
-  say how it moved its items, not that it failed.
-- Advise only on changes with evidence in front of you: this epoch's tries, or what
-  the previous memory records of earlier ones. Do not advise for or against changes
-  nobody tried, and do not list them.
-- Keep it compact and high-signal. Prefer a few durable principles.
-- Revise or remove parts of the previous memory if they did not help, or if they
-  judge a kind of change from one design.
-- Do not output instructions for the pipeline's own steps.
-- Do not restate the whole pipeline; summarize editing strategy.
+- Describe what happened, in the past tense, from the traces in front of you.
+- Every observation names the items it covers (ids from the comparison) and, when it is
+  about one change, that change's id.
+- Write nothing about what to do next: no recommendations, suggestions, principles,
+  rules, lessons, priorities or risks to guard against, and nothing a change should,
+  could or must do, keep or avoid.
+- Make no claim about what can or cannot be built, edited, reached or unfrozen.
+- Do not judge a kind of change in general, and write no instructions for the
+  pipeline's steps.
+- An observation that breaks a rule, or names no item of the comparison, is removed
+  before the record is saved.
 
 You reply with JSON only."""
 
 #: The memory system prompt for the synthesis call of a split pass: the same rules, the
 #: comparison read through the comparison calls' observations.
 SYNTHESIS_SYSTEM = MEMORY_SYSTEM.replace(
-    "4. A longitudinal comparison on the SAME sampled items under those two pipelines.",
-    "4. A longitudinal comparison on the SAME sampled items under those two pipelines,\n"
-    "   read in parts by comparison calls: their observations, each citing its items.",
-).replace("- Use evidence from the comparison, not generic advice.",
-          "- Use evidence from the comparison (the observations), not generic advice.")
+    "3. A comparison of the SAME train items under the two pipelines (or two rollouts of one\n"
+    "   pipeline): each changed or failing item with both full traces.",
+    "3. A comparison of the SAME train items under the two pipelines (or two rollouts of one\n"
+    "   pipeline), read in parts by comparison calls: their observations, each citing its\n"
+    "   items. Combine the observations about the same thing; keep their items and quotes.",
+).replace("- Describe what happened, in the past tense, from the traces in front of you.",
+          "- Describe what happened, in the past tense, from the observations in front of you.")
 
 COMPARE_SYSTEM = """\
-You read evidence for an optimizer-coach in a system that optimizes an AI pipeline: a
-graph of steps (nodes) connected by edges, each step configured by settings (knobs)
-such as its prompt.
+You read evidence for the record of a run that optimizes an AI pipeline: a graph of
+steps (nodes) connected by edges, each step configured by settings (knobs) such as its
+prompt.
 
-Your job is not to solve tasks directly and not to write instructions for the pipeline.
-You read one part of a longitudinal comparison: the SAME sampled items under two
-pipelines (or two rollouts of one pipeline), each item with both full traces. Another
-call reads your observations, with those of the other parts, and writes a compact
-OPTIMIZER-SIDE memory that helps future optimizer calls produce better changes to the
-pipeline in this run.
+You read one part of a comparison: the SAME train items under two pipelines (or two
+rollouts of one pipeline), each changed or failing item with both full traces. Another
+call reads your observations, with those of the other parts, and adds them to the
+record. The record's facts (what each change was, whether it was kept, the items it
+fixed and broke) are written by the harness, not by you.
 
 ## What You Receive
 
@@ -256,22 +251,18 @@ pipeline in this run.
 2. Part of the comparison: items that regressed, persistently failed, improved or
    stayed right, with both outcomes, the grader's reasons and both traces.
 
-## Your Goal
+## Rules
 
-Write observations for the future optimizer: what regressed, what improved, what
-persistently fails, and why -- where in the pipeline the traces show it starts (a step,
-a setting, the data passed along an edge, the structure), and whether the change
-between the pipelines explains it.
-
-## Important Constraints
-
-- Address the FUTURE OPTIMIZER directly, not the pipeline.
-- Use evidence from the traces, not generic advice: cite the items and quote briefly.
+- Say what the traces show happened on these items: what the steps did and where each
+  outcome was decided (a step, a setting, the data passed along an edge, the structure).
+- Describe what happened, in the past tense. Cite the items and quote the traces briefly.
 - Patterns shared by several items first; say when one holds for a single item.
-- Report what these traces show; leave verdicts on the changes tried to the call that
-  weighs each of them against these observations, and judge no kind of change in
-  general.
-- Do not output instructions for the pipeline's own steps.
+- Write nothing about what to do next: no recommendations, suggestions, principles,
+  rules, lessons, priorities or risks to guard against, and nothing a change should,
+  could or must do, keep or avoid.
+- Make no claim about what can or cannot be built, edited, reached or unfrozen.
+- Do not judge a kind of change in general, and write no instructions for the
+  pipeline's steps.
 
 You reply with JSON only."""
 
@@ -280,7 +271,7 @@ def compare_answer_text() -> str:
     return ("Respond ONLY with a valid JSON object:\n"
             "{\n"
             '  "observations": [{"category": "regressed|persistent_fail|improved|stable_success",\n'
-            '                    "observation": "<what happened and why, for the optimizer>",\n'
+            '                    "observation": "<what the traces show happened, past tense>",\n'
             '                    "items": ["<item id>", ...],\n'
             '                    "evidence": ["<a short verbatim quote from a trace>", ...]}]\n'
             "}\n"
@@ -289,10 +280,39 @@ def compare_answer_text() -> str:
             "(ids from this part).")
 
 
+#: What makes an observation advice, or a claim about what can be built, rather than a
+#: record of what happened (`advice_in`): read on its text only, never on its quotes
+#: (a trace may say anything). Task-general: no word here names a dataset or a step.
+ADVICE_PATTERNS = (
+    r"\bshould(?:n't| not)?\b", r"\bought to\b", r"\bmust\b", r"\bneeds? to\b",
+    r"\brecommend", r"\bsuggest", r"\badvis", r"\bconsider(?:ing)?\b", r"\bprefer",
+    r"\bavoid", r"\bprioriti[sz]", r"\bguard against\b", r"\btry\b", r"\bgoing forward\b",
+    r"\bnext (?:time|round|epoch|attempt|proposal|change)\b", r"\bin (?:the )?future\b",
+    r"\bfuture (?:optimizer|proposals?|changes?|rounds?|epochs?|edits?|calls?)\b",
+    r"\bprinciples?\b", r"\brule of thumb\b", r"\blessons?\b", r"\bbest practice",
+    r"\btakeaway", r"\bworth (?:trying|adding|keeping|testing|revisiting)\b",
+    r"\b(?:would|could|might) (?:likely |probably )?(?:fix|help|improve|work better)\b",
+    r"\bit (?:would|might|could) be (?:better|worth|useful)\b",
+    r"\b(?:can(?:not|'t)?|could(?:n't| not)?) (?:not )?be (?:built|edited|changed|added|"
+    r"reached|unfrozen|given|modified|moved)\b",
+    r"\bonly (?:unfrozen|editable|reachable|changeable|movable)\b", r"\bunfrozen\b",
+    r"\b(?:un)?reachable\b", r"\b(?:is|are) frozen\b", r"\b(?:un)?buildable\b",
+)
+_ADVICE = re.compile("|".join(ADVICE_PATTERNS), re.I)
+
+
+def advice_in(text: str) -> str | None:
+    """The first words of ``text`` that make it advice or a claim about what can be built
+    (`ADVICE_PATTERNS`), or ``None`` when it only records what happened."""
+    found = _ADVICE.search(str(text or ""))
+    return found.group(0) if found else None
+
+
 def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
     """A comparison call's observations (at most ``OBSERVATIONS_PER_CALL``, each with
     its category, text, items and up to ``EVIDENCE_PER_OBSERVATION`` quotes), or
-    ``None`` when the answer carries no ``observations`` list. Texts are kept whole."""
+    ``None`` when the answer carries no ``observations`` list. Texts are kept whole; an
+    observation that is advice (`advice_in`) is dropped, as the record's own are."""
     listed = payload.get("observations") if isinstance(payload, Mapping) else None
     if not isinstance(listed, list):
         return None
@@ -301,7 +321,7 @@ def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
         if not isinstance(raw, Mapping):
             continue
         text = str(raw.get("observation") or "").strip()
-        if not text:
+        if not text or advice_in(text):
             continue
         names = {name for name, _t, _l in CATEGORIES}
         kind = str(raw.get("category") or "").strip()
@@ -318,25 +338,276 @@ def parse_observations(payload: Any) -> list[dict[str, Any]] | None:
 def answer_text(chars: int = MEMORY_CHARS) -> str:
     return ("Respond ONLY with a valid JSON object:\n"
             "{\n"
-            '  "reasoning": "<brief reflection on what changes helped or hurt>",\n'
-            '  "memory": "<compact optimizer-side guidance for future analysis, merging '
-            f'and proposals, at most {chars} characters>"\n'
-            "}")
+            '  "observations": [{"change": "<the id of the change it is about, from \\"What was '
+            'tried this epoch\\", or \\"\\" when it is about the comparison as a whole>",\n'
+            '                    "items": ["<item id>", ...],\n'
+            '                    "observation": "<what the traces show happened on these '
+            'items, past tense>",\n'
+            '                    "evidence": ["<a short verbatim quote from a trace>", ...]}]\n'
+            "}\n"
+            f"At most {NOTE_OBSERVATIONS} observations, together at most {chars} characters; "
+            "every one names the items it covers (ids from the comparison). An empty list is "
+            "an answer.")
 
 
-def parse_note(payload: Any) -> dict[str, str] | None:
-    """The answer's note within ``MEMORY_CHARS`` (cut with the cut said) and its
-    reasoning, or ``None`` when it carries no note (meta_skill.py:70-75)."""
-    if not isinstance(payload, Mapping):
+# ── the record: the harness's facts, the model's observations ──────────────
+
+
+def item_ids(parent_records: Sequence[Mapping[str, Any]] | None,
+             child_records: Sequence[Mapping[str, Any]] | None) -> dict[str, list[str]]:
+    """Which train items a change moved, by id, on the items it and its parent were both
+    scored on (`base.edit_change`, an item the harness timed out on left out): ``fixed``,
+    ``broken``, ``failing`` (wrong under the change: broken, or wrong under both) and
+    ``shared``. The ids behind the fixed/broken counts the ledger and the tally show."""
+    from .base import edit_change
+
+    moved = edit_change(list(parent_records or ()), list(child_records or ()))
+    parent = _by_item(list(parent_records or ()))
+    child = _by_item(list(child_records or ()))
+    timed = set(moved["timed_out"])
+    shared = sorted(item for item in set(parent) & set(child) if item not in timed)
+    return {"fixed": list(moved["fixed"]), "broken": list(moved["broken"]),
+            "failing": [item for item in shared if not child[item].get("passed")],
+            "shared": shared}
+
+
+def outcome(entry: Mapping[str, Any], *, gated: bool | str, current: str | None
+            ) -> tuple[str, str]:
+    """A tried change's outcome for the record, ``kept`` or ``not kept``, and why, from the
+    harness's own words: not evaluated, its train run failed, or the gate's word
+    (``kept``/``current``/``in pool``/``left pool`` are kept); without a gate, whether it
+    is the train leader (``current``) now."""
+    from .feedback import KEPT_WORDS
+
+    if not entry.get("evaluated", True):
+        return "not kept", "not evaluated"
+    if entry.get("exit_ok") is False:
+        return "not kept", "its train run failed"
+    gate = entry.get("gate")
+    if gated:
+        return ("kept" if gate in KEPT_WORDS else "not kept"), f"gate: {gate or 'not gated'}"
+    if current is not None and str(entry.get("id")) == str(current):
+        return "kept", "no validation gate: it is the train leader now"
+    return "not kept", "no validation gate: it is not the train leader now"
+
+
+def record_facts(tried: Sequence[Mapping[str, Any]], refused: Sequence[Mapping[str, Any]], *,
+                 gated: bool | str, current: str | None) -> dict[str, Any]:
+    """The record's facts, from the harness's own data only (`Loop._tried_in_round` over
+    every round so far): ``changes``, one per change tried, oldest round first (in a
+    round the evaluated ones, then the refused ones) -- its id, round and parent, its
+    kind and the steps it names, what it was (`edits_text`: the text it gave a new step
+    or judge, a knob's changed lines), where a step it added sits and how a structural
+    change moved its items, its outcome and why (`outcome`; a refusal's reasons), and the
+    train items it fixed and broke, by id, of how many it shared with its parent --
+    ``None`` where its parent was not scored with the same seed; and ``keeps_failing``:
+    each train item wrong under every change that scored it, at least two, with those
+    changes' ids (`keeps_failing`)."""
+    from .edit_effect import effect_lines
+
+    rows = []
+    for order, entry in enumerate(tried):
+        result, why = outcome(entry, gated=gated, current=current)
+        ids = entry.get("items") if isinstance(entry.get("items"), Mapping) else None
+        rows.append((entry.get("round") or 0, 0, order, {
+            "id": str(entry.get("id")), "round": entry.get("round"),
+            "parent": entry.get("parent"), "kind": _change_text(entry),
+            "touches": [str(n) for n in entry.get("touched") or ()],
+            "edits": str(entry.get("edits") or ""),
+            **({"placed": [str(line) for line in entry["placed"]]} if entry.get("placed") else {}),
+            **({"effect": effect_lines(entry["effect"])}
+               if isinstance(entry.get("effect"), Mapping) and effect_lines(entry["effect"])
+               else {}),
+            "outcome": result, "why": why,
+            **({"integrity": str(entry["integrity"])} if entry.get("integrity") else {}),
+            "fixed": list(ids["fixed"]) if ids else None,
+            "broken": list(ids["broken"]) if ids else None,
+            "of": len(ids["shared"]) if ids else None}))
+    for order, entry in enumerate(refused):
+        reasons = [str(r) for r in entry.get("reasons") or () if r]
+        rows.append((entry.get("round") or 0, 1, order, {
+            "id": None, "round": entry.get("round"), "attempt": entry.get("attempt"),
+            "kind": _change_text(entry), "touches": [str(n) for n in entry.get("touched") or ()],
+            "edits": str(entry.get("edits") or ""), "outcome": "refused",
+            "why": " | ".join(_clip(r, TRIED_REASON_CHARS) for r in reasons[:2])
+                   or "(no reason recorded)"}))
+    return {"changes": [row for *_key, row in sorted(rows, key=lambda r: r[:3])],
+            "keeps_failing": keeps_failing(tried)}
+
+
+def keeps_failing(tried: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Each train item wrong under every evaluated change that scored it with its parent
+    (``items``: `item_ids`), when at least two did: ``{"item", "failed_under"}`` (those
+    changes' ids, oldest first), the items failed under the most changes first."""
+    scored: dict[str, list[str]] = {}
+    failed: dict[str, list[str]] = {}
+    for entry in tried:
+        ids = entry.get("items")
+        if not entry.get("evaluated", True) or not isinstance(ids, Mapping):
+            continue
+        failing = set(ids.get("failing") or ())
+        for item in ids.get("shared") or ():
+            scored.setdefault(str(item), []).append(str(entry.get("id")))
+            if item in failing:
+                failed.setdefault(str(item), []).append(str(entry.get("id")))
+    out = [{"item": item, "failed_under": under} for item, under in scored.items()
+           if len(under) >= 2 and failed.get(item) == under]
+    return sorted(out, key=lambda e: (-len(e["failed_under"]), e["item"]))
+
+
+def note_from(payload: Any, *, epoch: int | None = None,
+              facts: Mapping[str, Any] | None = None, earlier: Mapping[str, Any] | None = None,
+              items: Sequence[str] | None = None, compared: Mapping[str, Any] | None = None,
+              chars: int = MEMORY_CHARS) -> dict[str, Any] | None:
+    """The note a memory answer makes: the record (`render_record`) of the harness's
+    ``facts`` (`record_facts`), the passes so far and every observation -- the ``earlier``
+    record's, of other epochs, then this answer's. ``None`` when the answer carries no
+    ``observations`` list (an empty one is an answer: the facts alone).
+
+    Each observation of the answer is kept only when it records what happened: one that
+    is advice or a claim about what can be built (`advice_in`) or that names no item of
+    the comparison (``items``; any item when ``None``) is stripped, with why, as is one
+    past ``NOTE_OBSERVATIONS`` or ``chars`` (its text and quotes counted). Its ``change``
+    is kept when it is the id of a change in the facts, else the observation is about the
+    comparison as a whole. Returns ``{"text", "reasoning", "record", "stripped"}``."""
+    listed = payload.get("observations") if isinstance(payload, Mapping) else None
+    if not isinstance(listed, list):
         return None
-    note = payload.get("memory", payload.get("meta_skill_content"))
-    note = str(note).strip() if note not in (None, "") else ""
-    if not note:
-        return None
-    if len(note) > MEMORY_CHARS:
-        cut = len(note) - MEMORY_CHARS
-        note = f"{note[:MEMORY_CHARS]}… [cut: {cut} chars]"
-    return {"text": note, "reasoning": str(payload.get("reasoning") or "").strip()}
+    facts = facts or {}
+    known = {str(c.get("id")) for c in facts.get("changes") or () if c.get("id")}
+    allowed = None if items is None else {str(i) for i in items}
+    kept: list[dict[str, Any]] = []
+    stripped: list[dict[str, str]] = []
+    used = 0
+    for raw in listed:
+        if not isinstance(raw, Mapping):
+            continue
+        text = str(raw.get("observation") or "").strip()
+        if not text:
+            continue
+        cited = [str(i) for i in (raw.get("items") if isinstance(raw.get("items"), list) else ())
+                 if i not in (None, "")]
+        cited = [i for i in dict.fromkeys(cited) if allowed is None or i in allowed]
+        phrase = advice_in(text)
+        if phrase or not cited:
+            stripped.append({"text": text, "why": f"advice: {phrase!r}" if phrase
+                             else "it names no item of the comparison"})
+            continue
+        change = str(raw.get("change") or "").strip().strip("`")
+        quotes = [str(q) for q in (raw.get("evidence") if isinstance(raw.get("evidence"), list)
+                                   else ()) if q not in (None, "")][:EVIDENCE_PER_OBSERVATION]
+        size = len(text) + sum(len(q) for q in quotes)
+        if len(kept) >= NOTE_OBSERVATIONS or used + size > chars:
+            stripped.append({"text": text, "why": "past the note's limit"})
+            continue
+        used += size
+        kept.append({"epoch": epoch, "change": change if change in known else None,
+                     "items": cited, "text": text, "evidence": quotes})
+    before = dict(earlier or {}) if (earlier or {}).get("format") == RECORD_FORMAT else {}
+    record = {"format": RECORD_FORMAT, "epoch": epoch,
+              "passes": [*(p for p in before.get("passes") or () if p.get("epoch") != epoch),
+                         *([dict(compared)] if compared else [])],
+              "changes": [dict(c) for c in facts.get("changes") or ()],
+              "keeps_failing": [dict(k) for k in facts.get("keeps_failing") or ()],
+              "observations": [*(o for o in before.get("observations") or ()
+                                 if o.get("epoch") != epoch), *kept]}
+    return {"text": render_record(record), "reasoning": "", "record": record,
+            "stripped": stripped}
+
+
+def parse_note(payload: Any) -> dict[str, Any] | None:
+    """A memory answer read without a request's facts (`note_from`): its observations
+    only. A `MemoryRequest` reads its answers with its own facts (`MemoryRequest.parse_note`)."""
+    return note_from(payload)
+
+
+#: The record's keys in the order the note says them.
+RECORD_KEYS = ("format", "epoch", "passes", "changes", "keeps_failing", "observations",
+               "omitted")
+
+
+def _record_view(record: Mapping[str, Any], dropped: set[tuple[str, int]],
+                 failing: int | None = None) -> dict[str, Any]:
+    """The record as the note says it: each change with the observations about it,
+    the observations about a comparison as a whole after them; the changes and
+    observations in ``dropped`` (``("change"|"observation", index)``) left out and named,
+    and ``keeps_failing`` cut to its first ``failing`` entries (counted)."""
+    def shown(o: Mapping[str, Any], *keys: str) -> dict[str, Any]:
+        return {key: o[key] for key in keys if o.get(key) not in (None, [], "")}
+
+    about: dict[str, list[dict[str, Any]]] = {}
+    general = []
+    for index, o in enumerate(record.get("observations") or ()):
+        if ("observation", index) in dropped:
+            continue
+        if o.get("change"):
+            about.setdefault(str(o["change"]), []).append(shown(o, "epoch", "items", "text",
+                                                                 "evidence"))
+        else:
+            general.append(shown(o, "epoch", "items", "text", "evidence"))
+    changes, left_out = [], []
+    for index, change in enumerate(record.get("changes") or ()):
+        if ("change", index) in dropped:
+            left_out.append(change.get("id") or f"refused in round {change.get('round')}, "
+                                                 f"attempt {change.get('attempt')}")
+            continue
+        changes.append({**change, **({"observations": about[str(change.get("id"))]}
+                                     if change.get("id") and str(change["id"]) in about else {})})
+    failing_all = list(record.get("keeps_failing") or ())
+    omitted = {**({"changes": left_out} if left_out else {}),
+               **({"observations": sum(1 for kind, _i in dropped if kind == "observation")}
+                  if any(kind == "observation" for kind, _i in dropped) else {}),
+               **({"keeps_failing": len(failing_all) - failing}
+                  if failing is not None and failing < len(failing_all) else {})}
+    view = {"format": record.get("format"), "epoch": record.get("epoch"),
+            "passes": list(record.get("passes") or ()), "changes": changes,
+            "keeps_failing": failing_all if failing is None else failing_all[:failing],
+            "observations": general}
+    return {**view, **({"omitted": omitted} if omitted else {})}
+
+
+def _layout(view: Mapping[str, Any]) -> str:
+    """The record's JSON, one entry of a list per line, so a reader (and a diff) can find
+    each change and observation, and ``json.loads`` reads it back whole."""
+    parts = []
+    for key in [k for k in RECORD_KEYS if k in view]:
+        value = view[key]
+        if isinstance(value, list) and value:
+            inner = ",\n".join("  " + json.dumps(entry, ensure_ascii=False) for entry in value)
+            parts.append(f" {json.dumps(key)}: [\n{inner}\n ]")
+        else:
+            parts.append(f" {json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}")
+    return "{\n" + ",\n".join(parts) + "\n}"
+
+
+def render_record(record: Mapping[str, Any], chars: int = RECORD_CHARS) -> str:
+    """The note: the record as JSON (`_layout`), within ``chars`` -- whole when it fits;
+    else the oldest changes and the oldest observations about a comparison as a whole
+    are left out, oldest first (a change by its round, such an observation by the round
+    its epoch judged), then the end of ``keeps_failing``, each named or counted under
+    ``omitted``. The newest change is never left out, so a record whose newest change
+    alone passes ``chars`` is longer."""
+    units = sorted(
+        [((c.get("round") or 0), 0, ("change", i))
+         for i, c in enumerate(record.get("changes") or ())]
+        + [((o.get("epoch") or 1) - 1, 1, ("observation", i))
+           for i, o in enumerate(record.get("observations") or ()) if not o.get("change")],
+        key=lambda u: u[:2])
+    changes = sum(1 for u in units if u[2][0] == "change")
+    dropped: set[tuple[str, int]] = set()
+    text = _layout(_record_view(record, dropped))
+    for _age, _kind, unit in units:
+        if len(text) <= chars:
+            return text
+        if unit[0] == "change" and sum(1 for k, _i in dropped if k == "change") == changes - 1:
+            continue  # the newest change stays
+        dropped.add(unit)
+        text = _layout(_record_view(record, dropped))
+    failing = len(record.get("keeps_failing") or ())
+    while len(text) > chars and failing:
+        failing -= 1
+        text = _layout(_record_view(record, dropped, failing))
+    return text
 
 
 def _answer(record: Mapping[str, Any]) -> str:
@@ -446,7 +717,7 @@ def _reason(record: Mapping[str, Any]) -> str:
 
 
 def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
-                 curr: Mapping[str, Any], changes: Sequence[str], previous_note: str,
+                 curr: Mapping[str, Any], changes: Sequence[str],
                  entries: Sequence[Mapping[str, Any]], room: int = MEMORY_ROOM,
                  system: str = MEMORY_SYSTEM, tried: Sequence[str] = (),
                  objective: str = "") -> tuple[str, dict[str, int]]:
@@ -463,8 +734,7 @@ def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
     same, look = prev.get("id") == curr.get("id"), _look(prev, curr)
     shown = [e for e in entries if dict((n, t) for n, t, _ in CATEGORIES)[e["category"]]]
     head, tail = _frame(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
-                        changes=changes, previous_note=previous_note, entries=entries,
-                        tried=tried, objective=objective)
+                        changes=changes, entries=entries, tried=tried, objective=objective)
     settled = _settled(prev, curr, entries)
     wholes = {(e["id"], side): _trace(e, side, look, settled)
               for e in shown for side in ("prev", "curr")}
@@ -484,12 +754,10 @@ def build_prompt(*, epoch: int, mode_name: str, prev: Mapping[str, Any],
 
 
 def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping[str, Any],
-           same: bool, changes: Sequence[str], previous_note: str,
-           entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
-           objective: str = "") -> tuple[str, str]:
+           same: bool, changes: Sequence[str], entries: Sequence[Mapping[str, Any]],
+           tried: Sequence[str] = (), objective: str = "") -> tuple[str, str]:
     head = (_intro(epoch=epoch, mode_name=mode_name, prev=prev, curr=curr, same=same,
-                   changes=changes, previous_note=previous_note, tried=tried,
-                   objective=objective)
+                   changes=changes, tried=tried, objective=objective)
             + f"## Longitudinal comparison (the same {len(entries)} train items, "
             + _what(curr, same) + ")\n"
             f"{_sides(prev, curr)} Each trace is the item in full: "
@@ -497,25 +765,22 @@ def _frame(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping
     return head, f"\n\n## Answer\n{answer_text()}"
 
 
+#: The memory request's first line (`_intro`), without its epoch.
+REQUEST_TITLE = "# Observations for the run's record"
+
+
 def _intro(*, epoch: int, mode_name: str, prev: Mapping[str, Any], curr: Mapping[str, Any],
-           same: bool, changes: Sequence[str], previous_note: str,
-           tried: Sequence[str] = (), objective: str = "") -> str:
+           same: bool, changes: Sequence[str], tried: Sequence[str] = (),
+           objective: str = "") -> str:
     """The memory request up to its comparison: the objective, the pipelines and what
-    changed, what was tried and the previous note to reflect on."""
+    changed, and what was tried. No earlier note: the record's facts and earlier
+    observations are the harness's to carry (`note_from`), not the model's to rewrite."""
     pipelines = _pipelines_text(prev=prev, curr=curr, same=same, changes=changes, tried=tried)
-    # The note byte-exact in a fence (`evidence.exact_block`): the memory pass rewrites it,
-    # so it must read as no heading here and gain no escape.
-    note = ("\n".join(exact_block(previous_note.strip())) if previous_note.strip()
-            else "(No previous optimizer memory -- this is the first update.)")
-    return (f"# Writing the optimizer's memory -- epoch {epoch}\n\n"
+    return (f"{REQUEST_TITLE} -- epoch {epoch}\n\n"
             f"Mode: `{mode_name}`.\n\n"
             + (f"## What the score measures\n{objective}\n\n" if objective else "")
             + pipelines
-            + ("\n".join(tried) + "\n\n" if tried else "")
-            + "## Previous optimizer memory\n"
-            "The following optimizer memory was available during this epoch. Reflect on "
-            "whether it improved or harmed the quality of the changes.\n\n"
-            f"{note}\n\n")
+            + ("\n".join(tried) + "\n\n" if tried else ""))
 
 
 def _pipelines_text(*, prev: Mapping[str, Any], curr: Mapping[str, Any], same: bool,
@@ -702,16 +967,23 @@ class MemoryRequest:
     many whole pairs as fit, in the comparison's order), `compare_prompt` makes each
     one's request, and `synthesis_prompt` the one request that writes the note from
     their observations. No trace is cut, except a pair longer than the room on its own,
-    counted as clipped."""
+    counted as clipped.
+
+    ``facts`` (`record_facts`) and the ``earlier`` record are not part of any request:
+    `parse_note` reads every answer into the record with them, so the facts are the
+    harness's and only the observations are the model's."""
 
     def __init__(self, *, epoch: int, mode_name: str, prev: Mapping[str, Any],
-                 curr: Mapping[str, Any], changes: Sequence[str], previous_note: str,
+                 curr: Mapping[str, Any], changes: Sequence[str],
                  entries: Sequence[Mapping[str, Any]], tried: Sequence[str] = (),
-                 objective: str = "") -> None:
+                 objective: str = "", facts: Mapping[str, Any] | None = None,
+                 earlier: Mapping[str, Any] | None = None) -> None:
         self.epoch, self.mode_name = epoch, mode_name
         self.prev, self.curr = dict(prev), dict(curr)
-        self.changes, self.previous_note = list(changes), previous_note
+        self.changes = list(changes)
         self.entries, self.tried, self.objective = list(entries), list(tried), objective
+        self.facts = dict(facts or {"changes": [], "keeps_failing": []})
+        self.earlier = dict(earlier or {})
         self.same = self.prev.get("id") == self.curr.get("id")
         self.look = _look(self.prev, self.curr)
         self._texts: dict[tuple[str, str], str] = {}
@@ -719,9 +991,20 @@ class MemoryRequest:
 
     def __call__(self, room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
         return build_prompt(epoch=self.epoch, mode_name=self.mode_name, prev=self.prev,
-                            curr=self.curr, changes=self.changes,
-                            previous_note=self.previous_note, entries=self.entries,
+                            curr=self.curr, changes=self.changes, entries=self.entries,
                             room=room, tried=self.tried, objective=self.objective)
+
+    def compared(self) -> dict[str, Any]:
+        """This pass as the record lists it: its epoch, the two candidates, what the
+        comparison sets side by side and on how many train items."""
+        return {"epoch": self.epoch, "prev": self.prev.get("id"), "curr": self.curr.get("id"),
+                "compared": _what(self.curr, self.same), "items": len(self.entries)}
+
+    def parse_note(self, payload: Any) -> dict[str, Any] | None:
+        """An answer (the single call's or the synthesis's) read into the record
+        (`note_from`) with this pass's facts, its earlier record and its compared items."""
+        return note_from(payload, epoch=self.epoch, facts=self.facts, earlier=self.earlier,
+                         items=[str(e["id"]) for e in self.entries], compared=self.compared())
 
     def _whole(self, entry: Mapping[str, Any], side: str) -> str:
         key = (str(entry["id"]), side)
@@ -750,8 +1033,7 @@ class MemoryRequest:
         measured as `build_prompt` measures it."""
         head, tail = _frame(epoch=self.epoch, mode_name=self.mode_name, prev=self.prev,
                             curr=self.curr, same=self.same, changes=self.changes,
-                            previous_note=self.previous_note, entries=self.entries,
-                            tried=self.tried, objective=self.objective)
+                            entries=self.entries, tried=self.tried, objective=self.objective)
         texts = {(str(e["id"]), side): self._whole(e, side) for e in self.entries
                  for side in ("prev", "curr") if self._traced(e)}
         return len(MEMORY_SYSTEM) + len(head) + len(_comparison(self.entries, texts, self.look)) \
@@ -772,7 +1054,7 @@ class MemoryRequest:
         # tried: weighing each change tried is the synthesis call's).
         changed = _pipelines_text(prev=self.prev, curr=self.curr, same=self.same,
                                   changes=self.changes)
-        return (f"# Comparing two rollouts for the optimizer's memory -- epoch {self.epoch}, "
+        return (f"# Comparing two rollouts for the run's record -- epoch {self.epoch}, "
                 f"part {index} of {total}\n\n"
                 f"Mode: `{self.mode_name}`.\n\n"
                 + (f"## What the score measures\n{self.objective}\n\n" if self.objective
@@ -813,10 +1095,10 @@ class MemoryRequest:
 
     def synthesis_prompt(self, results: Sequence[Mapping[str, Any]],
                          room: int = MEMORY_ROOM) -> tuple[str, dict[str, int]]:
-        """The request that writes the note from the comparison calls' ``results``
-        (each ``{"part", "items", "observations"}``) and what it cut: the same request
-        as the single call's -- the objective, both pipelines and what changed, what was
-        tried, the previous note -- with every part's observations in place of the
+        """The request that writes the note's observations from the comparison calls'
+        ``results`` (each ``{"part", "items", "observations"}``) and what it cut: the same
+        request as the single call's -- the objective, both pipelines and what changed,
+        what was tried -- with every part's observations in place of the
         traces. Each part's observations are kept within ``PART_OBSERVATION_CHARS``
         (`fit_observations`; a model asked for at most ``OBSERVATION_CHARS`` rarely
         passes it). When the request is still past ``room`` -- pipelines so large that
@@ -840,8 +1122,7 @@ class MemoryRequest:
                              + ("\n".join(_observation_line(o) for o in found)
                                 or "(no observation)"))
             return (_intro(epoch=self.epoch, mode_name=self.mode_name, prev=prev, curr=curr,
-                           same=self.same, changes=self.changes,
-                           previous_note=self.previous_note, tried=self.tried,
+                           same=self.same, changes=self.changes, tried=self.tried,
                            objective=self.objective)
                     + f"## Longitudinal comparison (the same {len(self.entries)} train items, "
                     + _what(self.curr, self.same) + ")\n"
@@ -850,7 +1131,7 @@ class MemoryRequest:
                     f"fit one request, so {len(results)} comparison calls each read part of "
                     "them whole (every item in exactly one part, regressions first, then "
                     "persistent failures, improvements and stable successes) and wrote these "
-                    "observations for you. They are your evidence from the comparison.\n\n"
+                    "observations. They are your evidence from the comparison.\n\n"
                     + "\n\n".join(parts)
                     + f"\n\n## Answer\n{answer_text()}")
 
@@ -1014,7 +1295,8 @@ def change_tally_lines(tried: Sequence[Mapping[str, Any]], *, val_items: int = 0
     return lines
 
 
-#: What the proposer is told beside the tally; the memory call has it in MEMORY_SYSTEM.
+#: What the proposer is told beside the tally (the memory call judges no change, so it
+#: has no such rule).
 TALLY_NOISE_RULE = ("Each line is one change: its result is evidence about that change -- "
                     "its step, what it was told to do or check, where it sends work back, "
                     "its limits -- not about other changes of its kind. A result inside "
@@ -1209,26 +1491,26 @@ def state_view(state: Mapping[str, Any]) -> Any:
 # ── what the optimizer is shown ────────────────────────────────────────────
 
 
-#: How a reader is told to weigh the note: evidence about the changes it names, never a
-#: rule against a change nobody tried or a different design of one that failed.
-MEMORY_WEIGHT = ("Weigh it as evidence about the changes it names: follow it where the "
-                 "current traces agree or say nothing, let the current traces override it, "
-                 "and do not let it rule out a change nobody has tried, or a different design "
-                 "(other instructions, criteria, place or limit) of a change that failed.")
+#: How every reader is told what the note is: the harness's facts and the traces'
+#: observations, a record and not advice (the same words for every task and graph).
+RECORD_LEAD = ("It is this run's record, as JSON, of every change tried so far. The harness "
+               "wrote each change's facts from the run's journal: what it was, whether it was "
+               "kept, not kept or refused and why, and the train items it fixed and broke, by "
+               "id (`fixed`/`broken`, of the `of` items it shared with its parent); "
+               "`keeps_failing` lists each train item wrong under every change that scored it, "
+               "with those changes. Each observation says what the traces of a memory pass "
+               "showed on the items it names. It records what happened and says nothing about "
+               "what to try.")
 
 
 def context_block(memory: Mapping[str, Any] | None) -> str:
-    """The note for an analyst or merge call (SkillOpt's ``format_meta_skill_context``,
-    meta_skill.py:18-30, with its "prefer it when the current evidence is ambiguous"
-    replaced by `MEMORY_WEIGHT`, so an early note cannot rule out designs nobody has
-    tried); empty without one."""
+    """The note for an analyst or merge call, under SkillOpt's heading for its meta skill,
+    said as the record it is (`RECORD_LEAD`); empty without one."""
     text = str((memory or {}).get("text") or "").strip()
     if not text:
         return ""
     return ("## Optimizer memory\n"
-            "This is optimizer-side memory distilled from earlier epochs of this run. Use it "
-            f"to improve how you analyse, merge and rank findings. {MEMORY_WEIGHT}"
-            f"{_stale_text(memory)}\n\n" + "\n".join(exact_block(text)) + "\n\n")
+            f"{RECORD_LEAD}{_stale_text(memory)}\n\n" + "\n".join(exact_block(text)) + "\n\n")
 
 
 def _stale_text(memory: Mapping[str, Any] | None) -> str:
@@ -1257,9 +1539,8 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                     "the train items that change moved"
                     if rejected else "the same train items under the pipeline at the start "
                     "of that epoch and after it")
-        lines.append(f"Optimizer-side memory written in epoch {memory.get('epoch', '?')} from a "
-                     f"comparison of {compared}. Use it to improve how you choose and write "
-                     f"changes. {MEMORY_WEIGHT}")
+        lines.append(f"Written in epoch {memory.get('epoch', '?')}; that epoch's observations "
+                     f"come from a comparison of {compared}. {RECORD_LEAD}")
     if stale:
         lines.append(f"NOT UPDATED in epoch {stale.get('epoch', '?')}: the memory pass failed "
                      f"({_clip(stale.get('why'), 300)})"
@@ -1267,8 +1548,7 @@ def request_lines(memory: Mapping[str, Any] | None) -> list[str]:
                         else "; there is no note yet."))
     tally = list(memory.get("tally") or ())
     if text and tally:
-        lines.append("The note was written from this tally of the epoch's tries, so the note "
-                     "can be weighed against it:")
+        lines.append("The tally of that epoch's tries:")
     return [*lines, *([*tally, TALLY_NOISE_RULE] if text and tally else []),
             *(exact_block(text) if text else [])]
 
@@ -1282,7 +1562,8 @@ def report(passes: Sequence[Mapping[str, Any]], memory: Mapping[str, Any] | None
     which is in the journal) and the latest note."""
     keys = ("epoch", "prev", "curr", "same", "rejected", "sample", "pairs", "missing", "counts",
             "evaluated", "rollouts", "calls", "parts", "context_retry", "clipped_items",
-            "clipped_chars", "synthesis_cuts", "chars", "updated", "error", "skipped")
+            "clipped_chars", "synthesis_cuts", "chars", "observations", "stripped", "updated",
+            "error", "skipped")
     return {"passes": [{key: p.get(key) for key in keys if key in p} for p in passes],
             "updated": sum(1 for p in passes if p.get("updated")),
             "failed": sum(1 for p in passes if p.get("error")),
@@ -1330,7 +1611,7 @@ def report_lines(rep: Mapping[str, Any] | None) -> list[str]:
                   "of the pipelines' texts.", ""]
     latest = rep.get("latest") or {}
     if latest.get("text"):
-        lines += [f"The latest note (epoch {latest.get('epoch')}):", "",
+        lines += [f"The latest record (epoch {latest.get('epoch')}):", "",
                   *(f"> {line}" if line else ">" for line in str(latest["text"]).splitlines()),
                   ""]
     return lines

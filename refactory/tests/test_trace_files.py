@@ -403,10 +403,11 @@ NAMES = re.compile(r"\btraces\b|\bitem\.json\b|\bsteps\.json\b")
 OTHER_USES = {
     ("refactory_dsh/nn/executor.py", "item.json"): 2,
     ("refactory_dsh/optim/base.py", "traces"): 2,
-    # Prompt prose, no file names: "both full traces", split-evidence #655; #705's memory
-    # prompt ("from the comparison and the traces"), the rejected-change comparison ("their
-    # traces are not shown") and MEMORY_WEIGHT ("the current traces agree ... override it").
-    ("refactory_dsh/optim/memory.py", "traces"): 10,
+    # Prompt prose, no file names: "both full traces", split-evidence #655; the record's
+    # prompts ("what the traces show happened", "from the traces in front of you", "quoting
+    # the traces"), the rejected-change comparison ("their traces are not shown") and
+    # RECORD_LEAD ("what the traces of a memory pass showed").
+    ("refactory_dsh/optim/memory.py", "traces"): 15,
     ("refactory_dsh/tools/gen_tutorial.py", "traces"): 2,
     ("refactory_packages/java_build_pack/mode.py", "item.json"): 2,
     ("refactory_packages/java_build_pack/ops.py", "item.json"): 1,

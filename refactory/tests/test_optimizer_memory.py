@@ -82,35 +82,34 @@ def test_items_fall_in_skillopts_four_categories_and_missing_sides_are_said():
                                       "stable_success": 1}
 
 
-def _built(entries: list[dict[str, Any]], *, same: bool = False, room: int = memory.MEMORY_ROOM,
-           note: str = "") -> tuple[str, dict[str, int]]:
+def _built(entries: list[dict[str, Any]], *, same: bool = False, room: int = memory.MEMORY_ROOM
+           ) -> tuple[str, dict[str, int]]:
     return memory.build_prompt(
         epoch=3, mode_name="m",
         prev={"id": "c1" if not same else "c2", "pipeline": "PIPE-START", "rollout": "R-PREV"},
         curr={"id": "c2", "pipeline": "PIPE-NOW", "rollout": "R-NOW"},
-        changes=["- `c2` (from `c1`): EDITS"], previous_note=note, entries=entries, room=room)
+        changes=["- `c2` (from `c1`): EDITS"], entries=entries, room=room)
 
 
 def test_the_request_lists_regressions_first_with_both_traces_and_stable_ones_without():
     prev = [_rec("a", False, "A-BEFORE"), _rec("b", True, "B-BEFORE"), _rec("d", True, "D-BEFORE")]
     curr = [_rec("a", True, "A-NOW"), _rec("b", False, "B-NOW"), _rec("d", True, "D-NOW")]
     entries, _ = memory.pairs(prev, curr, ["a", "b", "d"])
-    text, clip = _built(entries, note="EARLIER-NOTE")
+    text, clip = _built(entries)
     assert clip == {"items": 0, "chars": 0}
     order = [text.index(h) for h in ("### Regressions", "### Persistent failures",
                                      "### Improvements", "### Stable successes")]
     assert order == sorted(order), "SkillOpt's order: regressions first"
-    assert "HIGHEST PRIORITY" in text and "- Regressed (right -> wrong): 1" in text
+    assert "### Regressions (right -> wrong)\n" in text and "- Regressed (right -> wrong): 1" in text
     regressed = _section(text, "### Regressions")
     assert "B-BEFORE" in text and "B-NOW" in regressed and "Grader: WHY-b" in regressed
     assert "A-BEFORE" in text and "A-NOW" in text
     stable = text[text.index("### Stable successes"):]
     assert "#### Task d: d" in stable and "D-NOW" not in text and "D-BEFORE" not in text
     assert "PIPE-START" in text and "PIPE-NOW" in text and "EDITS" in text
-    assert "EARLIER-NOTE" in text and "Reflect on whether it improved or harmed" in text
-    assert '"memory": "<compact optimizer-side guidance' in text
-    first, _ = _built(entries)
-    assert "(No previous optimizer memory -- this is the first update.)" in first
+    assert text.startswith(f"{memory.REQUEST_TITLE} -- epoch 3\n")
+    assert "Previous optimizer memory" not in text and "Reflect on" not in text
+    assert text.endswith(memory.answer_text())
 
 
 def test_an_unchanged_candidate_is_compared_with_its_own_earlier_rollout():
@@ -120,16 +119,6 @@ def test_an_unchanged_candidate_is_compared_with_its_own_earlier_rollout():
     assert "PIPE-START" not in text and "## What changed between them" not in text
     assert "Item a (First rollout) — passed" in text
     assert "Item a (Second rollout) — answered wrong" in text
-
-
-def test_the_coach_is_told_not_to_rule_on_kinds_of_change_never_tried():
-    # Round 2 (2026-11-14): with no structural change tried, notes said "do not add new
-    # steps -- the pipeline is sound" and proposers cited them; SkillOpt, one edit kind,
-    # never meets this. The rule is symmetric: no advice either way on an untried kind.
-    flat = " ".join(memory.MEMORY_SYSTEM.split())
-    assert ("Advise only on changes with evidence in front of you: this epoch's tries, or "
-            "what the previous memory records of earlier ones. Do not advise for or against "
-            "changes nobody tried, and do not list them.") in flat
 
 
 def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted():
@@ -146,20 +135,33 @@ def test_the_traces_share_the_room_each_cut_said_and_the_system_prompt_counted()
     assert "x" * 9000 in whole and "y" * 9000 in whole
 
 
-def test_a_note_is_kept_within_its_cap_and_the_cut_said():
-    assert memory.parse_note({"memory": "  "}) is None and memory.parse_note([]) is None
-    kept = memory.parse_note({"reasoning": "R", "memory": "N" * (memory.MEMORY_CHARS + 50)})
-    assert kept["text"].startswith("N" * memory.MEMORY_CHARS)
-    assert kept["text"].endswith("… [cut: 50 chars]") and kept["reasoning"] == "R"
-    assert memory.parse_note({"meta_skill_content": "M"})["text"] == "M", "SkillOpt's key too"
-
-
 # ── the optimizer's call ────────────────────────────────────────────────────
 
 
+def _cited(prompt: str) -> list[str]:
+    """The items a memory request shows: its traced items' ids, or a synthesis's parts'
+    items; ``["x"]`` for a request with neither (a test's plain build)."""
+    import re
+
+    parts = [i.strip() for line in re.findall(r"^### Part \d+ of \d+: items (.*)$", prompt, re.M)
+             for i in line.split(",")]
+    return _tasks(prompt) or parts or ["x"]
+
+
+def _observed(text: str, prompt: str = "") -> str:
+    """A memory answer with one observation, ``text``, citing the request's items."""
+    return json.dumps({"observations": [{"change": "", "items": _cited(prompt)[:2],
+                                         "observation": text}]})
+
+
+def _said(note: dict[str, Any] | None) -> list[str]:
+    """The observations a note's record holds, oldest first."""
+    return [o["text"] for o in ((note or {}).get("record") or {}).get("observations") or ()]
+
+
 class Client:
-    """Answers the memory call with ``note`` (or raises it); anything else proposes
-    nothing."""
+    """Answers the memory call with one observation, ``note`` (or raises it); anything
+    else proposes nothing."""
 
     def __init__(self, note: Any = "THE-NOTE") -> None:
         self.note = note
@@ -172,7 +174,7 @@ class Client:
                 raise self.note
             if callable(self.note):
                 return self.note(prompt)
-            return json.dumps({"reasoning": "R", "memory": self.note})
+            return _observed(self.note, prompt)
         return json.dumps({"diagnosis": "d", "proposals": []})
 
     def memory_calls(self) -> list[str]:
@@ -188,7 +190,7 @@ def test_the_memory_call_is_traced_as_memory_and_cached_for_a_resume(tmp_path):
     optimizer = AutoresearchOptimizer(Client())
     optimizer.trace_path = tmp_path / "optimizer_trace.jsonl"
     made = optimizer.write_memory(epoch=2, generation=1, build=_build)
-    assert made["note"]["text"] == "THE-NOTE" and made["error"] is None and made["calls"] == 1
+    assert _said(made["note"]) == ["THE-NOTE"] and made["error"] is None and made["calls"] == 1
     (trace,) = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
     assert trace["kind"] == "memory" and trace["epoch"] == 2 and trace["attempt"] == 1
     again = Client()
@@ -228,13 +230,13 @@ def test_a_memory_call_too_long_is_retried_shorter_once_and_never_at_the_same_si
     def too_long(prompt: str) -> str:
         if len(prompt) > 3000:
             raise RuntimeError("prompt is too long: 250000 tokens > 200000 maximum")
-        return json.dumps({"memory": "SHORT-NOTE"})
+        return _observed("SHORT-NOTE")
 
     client = Client(too_long)
     made = AutoresearchOptimizer(client).write_memory(epoch=2, generation=1, build=_build)
     first, second = client.memory_calls()
     assert len(second) <= len(first) // 2 and made["context_retry"] is True
-    assert made["note"]["text"] == "SHORT-NOTE" and made["clipped_items"] == 1
+    assert _said(made["note"]) == ["SHORT-NOTE"] and made["clipped_items"] == 1
 
     def fixed(room: int) -> tuple[str, dict[str, int]]:
         return "R" * 5000, {"items": 0, "chars": 0}
@@ -275,9 +277,15 @@ def _request(entries: list[dict[str, Any]], **overrides: Any) -> memory.MemoryRe
         "epoch": 3, "mode_name": "m",
         "prev": {"id": "c1", "pipeline": "PIPE-START", "rollout": "R-PREV"},
         "curr": {"id": "c2", "pipeline": "PIPE-NOW", "rollout": "R-NOW"},
-        "changes": ["- `c2` (from `c1`): EDITS"], "previous_note": "EARLIER-NOTE",
-        "entries": entries, "tried": ["## What was tried this epoch", "- TRIED-ENTRY"],
-        "objective": "OBJECTIVE-TEXT", **overrides})
+        "changes": ["- `c2` (from `c1`): EDITS"], "entries": entries,
+        "tried": ["## What was tried this epoch", "- TRIED-ENTRY"],
+        "objective": "OBJECTIVE-TEXT", "facts": FACTS, **overrides})
+
+
+#: The record's facts a request carries (`memory.record_facts`): its note holds them,
+#: whatever the answer says.
+FACTS = {"changes": [{"id": "c2", "round": 2, "outcome": "kept", "why": "gate: kept",
+                      "fixed": ["i0"], "broken": ["r0"], "of": 8}], "keeps_failing": []}
 
 
 def _tasks(prompt: str) -> list[str]:
@@ -309,7 +317,7 @@ class Splitting(Client):
             self.calls.append((system, prompt))
             if self.synthesis is not None:
                 return self.synthesis(prompt)
-            return json.dumps({"reasoning": "R", "memory": "SPLIT-NOTE"})
+            return _observed("SPLIT-NOTE", prompt)
         return super().complete(prompt, system=system, **kwargs)
 
     def of(self, system: str) -> list[str]:
@@ -359,11 +367,15 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     assert read[:2] == ["r0", "r1"] and read[-2:] == ["s0", "s1"], "regressions first"
     for number in range(1, len(compares) + 1):
         assert f"OBS-PART-{number}" in synthesis
-    assert "EARLIER-NOTE" in synthesis and "Reflect on whether it improved or harmed" in synthesis
+    assert "Previous optimizer memory" not in synthesis and "Reflect on" not in synthesis
     assert "- TRIED-ENTRY" in synthesis and "OBJECTIVE-TEXT" in synthesis
     assert "PIPE-START" in synthesis and "PIPE-NOW" in synthesis
-    assert '"memory": "<compact optimizer-side guidance' in synthesis
-    assert made["note"]["text"] == "SPLIT-NOTE" and made["error"] is None
+    assert synthesis.endswith(memory.answer_text())
+    assert _said(made["note"]) == ["SPLIT-NOTE"] and made["error"] is None
+    assert made["note"]["record"]["changes"] == FACTS["changes"], "the request's facts"
+    # The synthesis's items are the compared ones: every one of them is the request's.
+    (kept,) = made["note"]["record"]["observations"]
+    assert kept["items"] and set(kept["items"]) <= set(SPLIT_ITEMS)
     assert made["parts"] == len(compares) and made["clipped_items"] == 0
     assert made["calls"] == len(compares) + 1
     trace = [json.loads(line) for line in optimizer.trace_path.read_text().splitlines()]
@@ -374,7 +386,7 @@ def test_a_pass_too_long_for_one_call_is_split_into_comparisons_and_a_synthesis(
     resumed = AutoresearchOptimizer(again)
     resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
     redo = resumed.write_memory(epoch=3, generation=2, build=_request(_long_entries()))
-    assert again.calls == [] and redo["cached"] is True and redo["note"]["text"] == "SPLIT-NOTE"
+    assert again.calls == [] and redo["cached"] is True and _said(redo["note"]) == ["SPLIT-NOTE"]
 
 
 def test_a_pass_that_fits_is_one_call_and_its_request_is_the_single_one():
@@ -385,12 +397,13 @@ def test_a_pass_that_fits_is_one_call_and_its_request_is_the_single_one():
     client = Splitting()
     made = AutoresearchOptimizer(client).write_memory(epoch=3, generation=2, build=request)
     (system, prompt), = client.calls
-    assert system == memory.MEMORY_SYSTEM and made["note"]["text"] == "THE-NOTE"
+    assert system == memory.MEMORY_SYSTEM and _said(made["note"]) == ["THE-NOTE"]
+    assert made["note"]["record"]["changes"] == FACTS["changes"], "the request's facts"
     assert prompt == memory.build_prompt(
         epoch=3, mode_name="m",
         prev={"id": "c1", "pipeline": "PIPE-START", "rollout": "R-PREV"},
         curr={"id": "c2", "pipeline": "PIPE-NOW", "rollout": "R-NOW"},
-        changes=["- `c2` (from `c1`): EDITS"], previous_note="EARLIER-NOTE", entries=entries,
+        changes=["- `c2` (from `c1`): EDITS"], entries=entries,
         tried=["## What was tried this epoch", "- TRIED-ENTRY"], objective="OBJECTIVE-TEXT")[0]
     assert "parts" not in made
 
@@ -410,7 +423,7 @@ def test_a_half_done_split_pass_pays_only_for_what_it_did_not_finish(tmp_path):
     resumed.trace_path = tmp_path / "optimizer_trace.jsonl"
     redo = resumed.write_memory(epoch=3, generation=2, build=_request(_long_entries()))
     assert again.of(memory.COMPARE_SYSTEM) == [] and len(again.of(memory.SYNTHESIS_SYSTEM)) == 1
-    assert redo["note"]["text"] == "SPLIT-NOTE" and redo["calls"] == 1 and parts > 1
+    assert _said(redo["note"]) == ["SPLIT-NOTE"] and redo["calls"] == 1 and parts > 1
 
     def second_down(prompt: str) -> str:
         if "part 2 of" in prompt:
@@ -539,23 +552,22 @@ def test_a_spent_budget_or_a_stop_in_a_comparison_call_stops_the_pass(fatal):
             epoch=3, generation=2, build=_request(_long_entries()))
 
 
-def test_the_synthesis_keeps_the_memory_rules_and_the_comparison_prompt_is_domain_free():
+def test_the_synthesis_keeps_the_record_rules_and_the_comparison_prompt_reads_observations():
     flat = " ".join(memory.SYNTHESIS_SYSTEM.split())
     assert memory.SYNTHESIS_SYSTEM != memory.MEMORY_SYSTEM
     assert "read in parts by comparison calls" in flat
-    assert ("Do not advise for or against changes nobody tried, and do not list them.") in flat
-    assert "Never from one design, however large its effect." in flat
-    assert "Address the FUTURE OPTIMIZER directly" in memory.COMPARE_SYSTEM
-    assert ("Report what these traces show; leave verdicts on the changes tried to the call "
-            "that weighs each of them against these observations, and judge no kind of "
-            "change in general.") in " ".join(memory.COMPARE_SYSTEM.split())
-    assert "Do not output instructions for the pipeline's own steps." in memory.COMPARE_SYSTEM
+    for system in (memory.MEMORY_SYSTEM, memory.SYNTHESIS_SYSTEM, memory.COMPARE_SYSTEM):
+        flat = " ".join(system.split())
+        assert "Write nothing about what to do next" in flat
+        assert "Make no claim about what can or cannot be built" in flat
+        assert "write no instructions for the pipeline's steps" in flat
     assert memory.parse_observations({"findings": []}) is None
     kept = memory.parse_observations({"observations": [
         {"category": "nope", "observation": " X ", "items": ["a", None], "evidence": list("abcdef")},
-        {"observation": ""}, "junk"]})
+        {"observation": ""}, "junk",
+        {"observation": "Future proposals should add a judge.", "items": ["a"]}]})
     assert kept == [{"category": "", "observation": "X", "items": ["a"],
-                     "evidence": list("abcd")}]
+                     "evidence": list("abcd")}], "advice is dropped here too"
 
 
 # ── in the loop ─────────────────────────────────────────────────────────────
@@ -563,7 +575,9 @@ def test_the_synthesis_keeps_the_memory_rules_and_the_comparison_prompt_is_domai
 
 class Remembering(Recording):
     """The scripted proposer, with a memory call that records what it was asked and
-    writes ``NOTE-<epoch>``; it fails in the epochs listed in ``fail``."""
+    answers one observation, ``NOTE-<epoch>``, on the first compared item, read into the
+    record by the request (`MemoryRequest.parse_note`); it fails in the epochs listed in
+    ``fail``."""
 
     def __init__(self, plan: list[list[tuple[int, int]]], fail: tuple[int, ...] = ()) -> None:
         super().__init__(plan)
@@ -575,7 +589,9 @@ class Remembering(Recording):
         self.asked.append({"epoch": epoch, "prompt": text})
         if epoch in self.fail:
             return {"note": None, "error": f"RuntimeError: DOWN-{epoch}", "calls": 3}
-        return {"note": {"text": f"NOTE-{epoch}", "reasoning": "R"}, "error": None, "calls": 1,
+        note = build.parse_note({"observations": [
+            {"change": "", "items": [str(build.entries[0]["id"])], "observation": f"NOTE-{epoch}"}]})
+        return {"note": note, "error": None, "calls": 1,
                 "clipped_items": clip["items"], "clipped_chars": clip["chars"]}
 
 
@@ -632,11 +648,14 @@ def test_the_note_reaches_the_request_it_precedes_and_replaces_the_lessons(tmp_p
     first, second, third = (c.render() for c in proposer.contexts)
     assert "## Optimizer memory" not in first, "no note in epoch 1"
     assert "NOTE-2" in _section(second, "## Optimizer memory")
-    assert "written in epoch 2" in second
-    assert "NOTE-3" in third and "NOTE-2" not in third
+    assert "Written in epoch 2" in second
+    # The record keeps every pass's observations: epoch 2's and epoch 3's.
+    assert "NOTE-3" in third and "NOTE-2" in third and "written in epoch 3" not in third
+    assert "Written in epoch 3" in third
     assert '"lessons"' not in third and "Your lessons so far" not in third
-    assert "NOTE-2" in proposer.asked[1]["prompt"], "the previous note, to reflect on"
-    assert loop._memory["text"] == "NOTE-3"
+    assert "NOTE-2" not in proposer.asked[1]["prompt"], "no earlier note in the request"
+    assert [o["text"] for o in loop._memory["record"]["observations"]] == ["NOTE-2", "NOTE-3"]
+    assert json.loads(loop._memory["text"])["format"] == memory.RECORD_FORMAT
 
 
 def test_a_failed_pass_keeps_the_earlier_note_marked_and_a_later_one_clears_it(
@@ -648,6 +667,7 @@ def test_a_failed_pass_keeps_the_earlier_note_marked_and_a_later_one_clears_it(
     assert "this is the earlier note, unchanged" in third
     fourth = proposer.contexts[3].render()
     assert "NOTE-4" in fourth and "NOT UPDATED" not in fourth
+    assert "NOTE-2" in fourth, "the failed pass lost no earlier observation"
     passes = _events(loop, "optimizer_memory")
     assert [p["updated"] for p in passes] == [True, False, True]
     assert passes[1]["memory"]["not_updated"]["why"] == "RuntimeError: DOWN-3"
@@ -662,8 +682,9 @@ def test_a_resume_replays_the_note_and_does_not_redo_a_pass(tmp_path, monkeypatc
         resumed.optimizer = again
         resumed.run()
     assert [a["epoch"] for a in again.asked] == [4], "epochs 2 and 3 are not made again"
-    assert "NOTE-2" in again.asked[0]["prompt"], "the replayed note, to reflect on"
-    assert resumed._memory["text"] == "NOTE-4" and "not_updated" not in resumed._memory
+    assert "NOTE-2" not in again.asked[0]["prompt"], "no earlier note in the request"
+    assert _said(resumed._memory) == ["NOTE-2", "NOTE-4"], "the replayed record carried on"
+    assert "not_updated" not in resumed._memory
     assert [p["epoch"] for p in resumed._memory_passes] == [2, 3, 4]
 
 
@@ -702,7 +723,7 @@ def test_a_parent_picker_hands_the_memory_call_to_its_proposer():
 
     proposer = AutoresearchOptimizer(Client())
     paired = compose.PickedParent(policies.HillClimbSelector(), proposer)
-    assert paired.write_memory(epoch=2, generation=1, build=_build)["note"]["text"] == "THE-NOTE"
+    assert _said(paired.write_memory(epoch=2, generation=1, build=_build)["note"]) == ["THE-NOTE"]
     sampler = compose.PickedParent(policies.HillClimbSelector(), random_optimizer.RandomOptimizer())
     assert getattr(sampler, "write_memory", None) is None, "no model, no memory pass"
 
@@ -719,9 +740,11 @@ def test_the_report_says_each_pass_and_shows_the_latest_note(tmp_path, monkeypat
     report = loop.report()
     rep = report["optimizer_memory"]
     assert [p["epoch"] for p in rep["passes"]] == [2, 3] and rep["updated"] == 2
-    assert rep["latest"]["text"] == "NOTE-3"
+    assert "NOTE-3" in rep["latest"]["text"]
+    assert [p["observations"] for p in rep["passes"]] == [1, 1]
     text = (loop.root / "report.md").read_text()
-    assert "## Optimizer memory" in text and "> NOTE-3" in text
+    assert "## Optimizer memory" in text and "The latest record (epoch 3)" in text
+    assert "NOTE-3" in text
 
 
 def test_the_autoresearch_proposer_writes_the_note_in_a_real_loop(tmp_path, monkeypatch):
@@ -738,7 +761,7 @@ def test_the_autoresearch_proposer_writes_the_note_in_a_real_loop(tmp_path, monk
         loop.optimizer = AutoresearchOptimizer(client)
         loop.run()
     (prompt,) = client.of((memory.MEMORY_SYSTEM,))
-    assert "# Writing the optimizer's memory -- epoch 2" in prompt
+    assert f"{memory.REQUEST_TITLE} -- epoch 2" in prompt
     assert "### Improvements" in prompt or "### Regressions" in prompt
     proposals = [p for s, p in client.calls if s not in (memory.MEMORY_SYSTEM,)]
     assert "MEMORY-NOTE" in _section(proposals[-1], "## Optimizer memory")
@@ -764,7 +787,7 @@ def test_a_split_pass_in_a_real_loop_journals_its_parts_and_its_note_is_read(
         loop.run()
     (passed,) = _events(loop, "optimizer_memory")
     assert passed["parts"] == passed["pairs"] == len(client.of(memory.COMPARE_SYSTEM)) > 1
-    assert passed["updated"] is True and loop._memory["text"] == "SPLIT-NOTE"
+    assert passed["updated"] is True and _said(loop._memory) == ["SPLIT-NOTE"]
     assert "SPLIT-NOTE" in _section(client.calls[-1][1], "## Optimizer memory")
     trace = [json.loads(line) for line in (loop.root / "optimizer_trace.jsonl").read_text()
              .splitlines()]
@@ -1147,7 +1170,7 @@ def test_a_cancelled_memory_call_records_no_pass_so_a_resume_makes_it(tmp_path, 
         resumed = _loop(tmp_path, epochs=2, val_gate=True, resume=True)
         resumed.optimizer = again
         resumed.run()
-    assert [a["epoch"] for a in again.asked] == [2] and resumed._memory["text"] == "NOTE-2"
+    assert [a["epoch"] for a in again.asked] == [2] and _said(resumed._memory) == ["NOTE-2"]
 
 
 def test_a_cancelled_model_client_ends_the_run_but_leaves_its_report(tmp_path, monkeypatch):
@@ -1321,7 +1344,7 @@ def test_memory_shows_each_item_s_input_once_and_names_the_rollout_it_refers_to(
                                        prev={"id": "c1" if not same else "c2", "pipeline": "P",
                                              "rollout": "R"},
                                        curr={"id": "c2", "pipeline": "P", "rollout": "R"},
-                                       changes=[], previous_note="", entries=entries)
+                                       changes=[], entries=entries)
         for text in (request()[0], request.compare_prompt(entries, 1, 1)[0]):
             assert text.count("QUESTION-q1 which holds?") == 1, same
             assert text.count("Expected:") == 1, same
@@ -1368,7 +1391,7 @@ def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
         prev={"id": fixture["parent_id"], "pipeline": "PIPE-INCUMBENT", "rollout": at},
         curr={"id": fixture["child_id"], "pipeline": "PIPE-REJECTED", "rollout": at,
               "rejected": rejected},
-        changes=["- the loop above"], previous_note="", entries=entries, tried=tried)
+        changes=["- the loop above"], entries=entries, tried=tried)
     assert build.parts(memory.MEMORY_ROOM) is None, "one call"
     text, clip = build(memory.MEMORY_ROOM)
     assert clip == {"items": 0, "chars": 0}
@@ -1389,11 +1412,10 @@ def test_s1_s45_the_memory_reads_the_rejected_loop_its_judge_and_its_traces():
     judged = [e for item in changed for e in child[item]["exchanges"]
               if e.get("node") == "solve_check_judge"]
     assert judged and any(e["response"].strip()[:120] in text for e in judged)
-    # Asked about this change, never verdicts on kinds of change.
+    # Asked what the traces show of this change, never verdicts on kinds of change.
     system = " ".join(memory.MEMORY_SYSTEM.split())
     assert "Which kinds of changes" not in system and "tend to help" not in system
-    assert "For each change tried: what it was" in system
-    assert "Never from one design, however large its effect." in system
+    assert "Do not judge a kind of change in general" in system
     assert f"- {_tried('s1_s45_loop.json')[0]['change']} (loop/gate): 1 try" in text
     assert "- loop/gate:" not in text
 

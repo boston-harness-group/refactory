@@ -26,8 +26,9 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   finding (SkillOpt's fallback concatenation).
 
 SkillOpt's patch and slow-update steps are not here: the proposer writes the edits (it
-is the step SkillOpt's rank and patch are). Its meta skill is the loop's memory pass
-(`optim.memory`): the per-epoch note every analyst and merge call reads here. The
+is the step SkillOpt's rank and patch are). In place of its meta skill, the loop's memory
+pass (`optim.memory`) writes the run's record: the per-epoch note every analyst and merge
+call reads here. The
 ranked findings reach the proposal request as "What the analysts found, ranked" and
 replace the readers' summaries (``AutoresearchOptimizer._analyse``).
 

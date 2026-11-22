@@ -188,7 +188,7 @@ def test_with_nothing_tried_the_unchanged_pipeline_points_nowhere():
 
     def built(tried: list[str]) -> str:
         return memory.build_prompt(epoch=3, mode_name="m", prev=side, curr=side, changes=[],
-                                   previous_note="", entries=entries, tried=tried)[0]
+                                   entries=entries, tried=tried)[0]
 
     nothing = built(memory.tried_lines([], [], round_=2, current="c1", gated=True))
     assert "Nothing this epoch replaced it: the comparison" in nothing
@@ -220,7 +220,7 @@ def test_a_clipped_trace_names_the_memory_requests_room():
     entries, _ = memory.pairs(prev, curr, [f"i{n}" for n in range(4)])
     text, _clip = memory.build_prompt(
         epoch=3, mode_name="m", prev={"id": "c1", "pipeline": "P", "rollout": "R"},
-        curr={"id": "c2", "pipeline": "P", "rollout": "R"}, changes=[], previous_note="",
+        curr={"id": "c2", "pipeline": "P", "rollout": "R"}, changes=[],
         entries=entries, room=200000)
     assert "to fit the memory request's room." in text and "analyst's room" not in text
     big = arec("t1", False, steps={"draft": ("z" * 90000, "z" * 90000)})
