@@ -27,6 +27,7 @@ from refactory_dsh.base_check import (
     _runner,
     _runner_from_output,
     _step_record,
+    _without_errexit,
     filter_check,
 )
 
@@ -256,7 +257,9 @@ class TestShellOperatorSemantics:
         assert self._ran(tmp_path, command) == [(True, 0, ""), (False, None, ""), (True, 0, "built")]
 
     def test_unreadable_markers_warn_and_return_none(self, tmp_path, capsys):
-        assert _run_chain_markers(_chain_steps("echo a && exit 3 && echo c"), _shell(tmp_path)) is None
+        # `_chain_steps` refuses an `exit` step; one that ends the shell anyway loses its markers.
+        steps = [("echo a", ""), ("exit 3", "&&"), ("echo c", "&&")]
+        assert _run_chain_markers(steps, _shell(tmp_path)) is None
         assert "could not be read: 1 of 3 step markers" in capsys.readouterr().err
 
 
@@ -290,7 +293,8 @@ def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_step
     ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
                           read_text=lambda name: "", budget=None)
     attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
-    found = SimpleNamespace(path=str(tmp_path / "attempt"), base="abc", head="def")
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
     with patch.object(base_check, "run_base_check", return_value=base), \
          patch.object(base_check, "_run_chain_markers", return_value=attempt_steps), \
          patch.object(base_check.worktree, "recorded", return_value=found), \
@@ -411,6 +415,58 @@ def test_heredoc_is_not_split():
     assert "heredoc" in reason[0]
 
 
+@pytest.mark.parametrize("step, rewritten", [
+    ("set -e", ":"),
+    ("set -euo pipefail", "set -u -o pipefail"),
+    ("set -o errexit -o nounset", "set -o nounset"),
+    ("set -ex", "set -x"),
+    ("set +e", "set +e"),
+    ("set -- a -e", "set -- a -e"),
+    ("pytest -e", "pytest -e"),
+])
+def test_set_step_drops_errexit_only(step, rewritten):
+    assert _without_errexit(step) == rewritten
+
+
+@pytest.mark.parametrize("command, why", [
+    ("pytest unit; exit 1", "exit"),
+    ("trap 'rm -f x' EXIT; pytest unit", "trap"),
+    ("set $OPTS && pytest unit", "set"),
+    ("shopt -s -o errexit; pytest unit", "errexit"),
+    ("eval set -e; pytest unit", "errexit"),
+])
+def test_steps_the_shared_shell_cannot_run_are_not_split(command, why):
+    reason: list[str] = []
+    assert _chain_steps(command, reason=reason) is None
+    assert why in reason[0]
+
+
+def test_set_euo_pipefail_keeps_pipefail(tmp_path):
+    """errexit goes, so the later steps run; pipefail stays, so a later pipeline's failure shows."""
+    steps = _chain_steps("set -euo pipefail; false | true && echo after")
+    assert "set -u -o pipefail" in _build_marker_script(steps, "x")
+    results = _run_chain_markers(steps, _shell(tmp_path))
+    assert [(r["exit_code"], r["output"]) for r in results] == [(0, ""), (1, ""), (0, "after")]
+
+
+def test_base_with_unreadable_steps_charges(tmp_path):
+    """The base's per-step run could not be read: nothing is excused."""
+    out = _pytest_out([S])
+    base = BaseCheckResult(ok=False, failures={S}, output="", exit_code=1)
+    base._steps_unreadable = True  # type: ignore[attr-defined]
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=out, stderr="", returncode=1)
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check, "_run_chain_markers") as markers, \
+         patch.object(base_check.worktree, "recorded",
+                      return_value=SimpleNamespace(path=str(tmp_path), base="a", head="b")), \
+         patch.object(base_check, "_all_changed_files", return_value=[]):
+        filtered = filter_check(ctx, attempt, "tok.sh && pytest tests/", 60.0)
+    assert not filtered.all_excused and not filtered.inherited
+    markers.assert_not_called()
+
+
 # ── end to end: run_base_check and filter_check on real worktrees ───────
 
 
@@ -433,6 +489,15 @@ case "$mode" in
 esac
 if [ "$n" -gt 0 ]; then echo "========== $n failed, 3 passed in 0.10s =========="; exit 1; fi
 echo "========== 3 passed in 0.10s =========="
+"""
+
+#: A lint or build stand-in: ``results/<tool>.txt`` lists its errors, each printed with
+#: the absolute paths a real tool prints (the worktree's and HOME's), which differ by side.
+_FAKE_TOOL = """#!/bin/sh
+f="results/$(basename "$0").txt"
+[ -s "$f" ] || { echo "$(basename "$0"): ok"; exit 0; }
+while IFS= read -r e; do echo "$PWD/src/app.py:1: $e (cache $HOME/.cache)"; done < "$f"
+exit 1
 """
 
 UNIT_S = "tests/test_unit.py::test_S"
@@ -474,7 +539,7 @@ def _commit_files(repo: Path, files: dict[str, str]) -> str:
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-        if name.endswith("/pytest"):
+        if name.startswith("node_modules/.bin/"):
             path.chmod(0o755)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "change")
@@ -505,6 +570,8 @@ def _run(tmp_path: Path, base: dict[str, str], attempt: dict[str, str]) -> _Run:
     _git(repo, "config", "user.name", "T")
     base_commit = _commit_files(repo, {
         "node_modules/.bin/pytest": _FAKE_PYTEST.format(log=log),
+        "node_modules/.bin/lint": _FAKE_TOOL,
+        "node_modules/.bin/build": _FAKE_TOOL,
         **{f"results/{suite}.txt": text for suite, text in base.items()},
     })
     run_dir = tmp_path / "run"
@@ -603,3 +670,77 @@ def test_cut_output_charges(tmp_path, monkeypatch, capsys):
     assert not filtered.inherited
     assert "could not be read" in filtered.inherited_detail
     assert "step markers in its kept output" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("tool", ["lint", "build"])
+@pytest.mark.parametrize("attempt_errors, excused", [("E1", True), ("E1\nE2", False)])
+def test_new_error_in_a_step_failing_on_the_base(tmp_path, tool, attempt_errors, excused):
+    """The base's lint (or build) fails with E1 and its tests with S. The same E1 -- printed
+    with each side's own paths -- leaves S excused; an added E2 is the attempt's."""
+    run = _run(tmp_path, base={tool: "E1", "unit": UNIT_S},
+               attempt={tool: attempt_errors, "unit": UNIT_S})
+    filtered = _check(run, f"{tool} && pytest unit")
+    assert filtered.all_excused is excused
+    assert filtered.inherited == ({UNIT_S} if excused else set())
+    if not excused:
+        assert f"`{tool}` exited 1" in filtered.new_failure_detail
+
+
+@pytest.mark.parametrize("command", ["set -e; pytest unit",
+                                     "set -euo pipefail; pytest unit && pytest integ"])
+def test_errexit_chain_excuses_the_base_failure(tmp_path, command):
+    """errexit would end the marker shell at S; the marker script drops it, so S is compared."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    filtered = _check(run, command)
+    assert filtered.all_excused
+    assert filtered.inherited == {UNIT_S}
+
+
+def test_cache_without_steps_takes_the_whole_command_path(tmp_path):
+    """A base cache written before per-step results existed is read as before (correction 2):
+    the whole-command blocker decides, and the attempt's steps are not run again."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    command = "pytest unit && pytest integ"
+    cache = run.ctx.workdir / base_check.CACHE_FILE
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({
+        "cache_key": base_check.cache_key(run.found.base, "", "", command),
+        "ok": False, "failures": [UNIT_S], "output": "", "exit_code": 1,
+        "environment_failure": None, "base_complete": True, "base_clean": True,
+    }))
+    filtered = _check(run, command)
+    assert filtered.all_excused  # what main decides for this cache
+    run_id = Path(run.found.path).name.removeprefix("run-")
+    assert not repo_change._check_copy_path(Path(run.found.target), run_id).exists()
+    assert run.base_calls() == []
+
+
+def test_cut_base_output_charges(tmp_path, monkeypatch):
+    """The base's per-step output is cut between its markers: recorded as unreadable, so
+    nothing is excused -- unlike a cache from before per-step results, which is not."""
+    monkeypatch.setattr(sandbox, "OUTPUT_KEEP_BYTES", 4096)
+    monkeypatch.setattr(sandbox, "OUTPUT_TAIL_BYTES", 512)
+    run = _run(tmp_path, base={"unit": UNIT_S, "integ": "@spam 200", "e2e": "@spam 200"},
+               attempt={"unit": UNIT_S, "integ": "", "e2e": ""})
+    filtered = _check(run, "pytest unit && pytest integ && pytest e2e")
+    assert not filtered.all_excused
+    assert "base's per-step results could not be read" in filtered.inherited_detail
+    cached = json.loads((run.ctx.workdir / base_check.CACHE_FILE).read_text())
+    assert cached["steps_unreadable"] is True
+
+
+def test_signature_ignores_each_sides_own_paths():
+    """The same error printed under each side's worktree, HOME and temporary files matches;
+    another error does not. (The end-to-end tests' worktrees all sit under /tmp, so they
+    cannot tell the root and HOME replacement from the temporary-directory one.)"""
+    from refactory_dsh.base_check import _roots, _signature
+
+    base = _roots((Path("/work/wt/base-1"), "<root>"), (Path("/work/run/.base-home"), "<home>"))
+    attempt = _roots((Path("/work/wt/check-1"), "<root>"), (Path("/work/run/.copy-home"), "<home>"))
+
+    def lint(root: str, home: str, error: str) -> str:
+        return f"{root}/src/app.py:1: {error} (cache {home}/.cache, scratch /tmp/tmpq8x1/out)"
+
+    same = _signature(lint("/work/wt/base-1", "/work/run/.base-home", "E1"), base)
+    assert same == _signature(lint("/work/wt/check-1", "/work/run/.copy-home", "E1"), attempt)
+    assert same != _signature(lint("/work/wt/check-1", "/work/run/.copy-home", "E2"), attempt)
