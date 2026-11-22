@@ -1144,7 +1144,7 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
     elif not draft_delivery:
         if merge.check_failed:
             raise NotDelivered(
-                f"the check failed on the merged result: {merge.check_failed[:500]}; "
+                f"the check failed on the merged result: {_merge_check_reason(merge.check_failed)}; "
                 "delivery does not push",
                 merge=merge,
             )
@@ -1817,8 +1817,60 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
 
     # Check failed — reset to reviewed commit and report.
     worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-    failure = (result.stderr or result.stdout or result.problem() or "check failed").strip()
-    return failure[:2000], False
+    return _merge_check_failure(result), False
+
+
+#: How much of each stream of a check that failed on the merged result the delivery record
+#: keeps: whole up to ``MERGE_CHECK_KEEP`` bytes, else its head and its last
+#: ``MERGE_CHECK_TAIL`` bytes, the rule `sandbox.run_command` keeps output by
+#: (`sandbox._Output`). The tail holds a vitest or pytest summary and the failures above it.
+MERGE_CHECK_KEEP = 8_000
+MERGE_CHECK_TAIL = 6_000
+#: The longest the record's first line, the failing tests, gets.
+_FAILING_LINE_LIMIT = 2_000
+#: The longest the kept-local reason quotes of the record.
+_MERGE_REASON_LIMIT = 500
+_FAILING_TESTS = "failing tests ("
+_NONE_READ = "no failing test could be read from the check's output"
+
+
+def _merge_check_failure(result: Any) -> str:
+    """The record of a check that failed on the merged result (D17).
+
+    First line, the failing tests `base_check.parse_test_failures` reads from either stream,
+    or that none could be read; then each stream's head and tail, labelled. A test runner
+    can print warnings on stderr and its failures and summary on stdout, so neither stream
+    alone says why the check failed.
+    """
+    from refactory_dsh import base_check, sandbox
+
+    streams = {label: base_check.strip_ansi(text or "").strip()
+               for label, text in (("stdout", result.stdout), ("stderr", result.stderr))}
+    failing = sorted(base_check.parse_test_failures("\n".join(streams.values())))
+    if failing:
+        first = _shorten(f"{_FAILING_TESTS}{len(failing)}): " + "; ".join(failing),
+                         _FAILING_LINE_LIMIT)
+    else:
+        how = result.stop_reason() if result.timed_out else ""
+        first = f"{_NONE_READ} ({how or f'exit {result.returncode}'})"
+    parts = [first]
+    for label, text in streams.items():
+        if text:
+            kept = sandbox._Output(MERGE_CHECK_KEEP, MERGE_CHECK_TAIL)
+            kept.add(text.encode())
+            parts.append(f"[{label}]\n{kept.text()}")
+    if len(parts) == 1:
+        parts.append(result.problem() or "check failed")
+    return "\n".join(parts)
+
+
+def _merge_check_reason(check_failed: str) -> str:
+    """What the kept-local reason says of ``check_failed``: the failing tests, or that none
+    could be read, within ``_MERGE_REASON_LIMIT``; any other failure's start."""
+    first = check_failed.split("\n", 1)[0]
+    if first.startswith((_FAILING_TESTS, _NONE_READ)):
+        return _shorten(first, _MERGE_REASON_LIMIT)
+    return check_failed[:_MERGE_REASON_LIMIT]
 
 
 #: GitHub's refusal of a push that changes a workflow file, from a credential without the

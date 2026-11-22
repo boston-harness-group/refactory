@@ -696,6 +696,95 @@ def test_merged_result_fails_check(github, tmp_path, monkeypatch, capsys):
                 "worktree should not be marked succeeded when the merged check failed"
 
 
+
+#: What a vitest check prints on stdout when two tests fail: the failures, then the summary.
+_VITEST_FAILURES = """\
+ RUN  v1.6.0 /repo
+
+ \u276f src/parse.test.ts (3 tests | 2 failed) 12ms
+   \u00d7 parser > rejects empty input
+   \u00d7 parser > keeps the trailing newline
+ \u2713 src/render.test.ts (4 tests) 3ms
+
+ FAIL  src/parse.test.ts > parser > rejects empty input
+AssertionError: expected true to be false
+ FAIL  src/parse.test.ts > parser > keeps the trailing newline
+AssertionError: expected 'a' to be 'a\\n'
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  2 failed | 5 passed (7)
+"""
+
+
+def _noisy_check(bin_dir: Path) -> None:
+    """``noisy-check`` on PATH: passes while config.txt is ok; else about 3000 characters
+    of warnings on stderr, `_VITEST_FAILURES` on stdout, and exit 1, as `pnpm test` does."""
+    bin_dir.mkdir()
+    script = bin_dir / "noisy-check"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "if open('config.txt').read().strip() != 'broken':\n"
+        "    sys.exit(0)\n"
+        "for i in range(40):\n"
+        "    print(f'vite-tsconfig-paths: skipping /repo/packages/p{i:02d}/tsconfig.json; '\n"
+        "          'Sourcemap points to missing source files ENOENT', file=sys.stderr)\n"
+        f"sys.stdout.write({_VITEST_FAILURES!r})\n"
+        "sys.exit(1)\n")
+    script.chmod(0o755)
+
+
+def test_merged_check_failure_keeps_the_failing_tests(github, tmp_path, monkeypatch):
+    """D17: the check fails on the merged result with warnings on stderr and its failing
+    tests and summary on stdout. delivery.json's record keeps both streams with the failing
+    tests first, and the kept-local reason names them.
+
+    Fails without the change: the record kept the first 2000 characters of stderr, all
+    warnings, and the reason its first 500, so neither named a failing test.
+    """
+    _noisy_check(tmp_path / "check-bin")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'check-bin'}{os.pathsep}{os.environ['PATH']}")
+    repo = git_repo(tmp_path / "repo")
+    (repo / "config.txt").write_text("ok\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base config ok")
+    slug = "acme/merge-noisy"
+    _published(github, slug, repo)
+    _child().setattr(delivery, "deliver_design", delivery_fakes.deliver_after, steps=[["move_main", {
+        "slug": slug, "clone": str(tmp_path / "other"), "files": {"config.txt": "broken\n"},
+        "message": "base breaks config"}]])
+    _child().setattr(delivery, "evaluate_delivery_conflicts", delivery_fakes.proceed)
+
+    run = tmp_path / "run"
+    result = _design(run, {"tool.py": "print('built')\n"}, target=str(repo), check="noisy-check")
+    assert result.exit_ok, result.error
+
+    record = _record(run)
+    assert record["status"] == "kept local"
+    kept, why = record["merge_check_failed"], record["why"]
+    names = ["src/parse.test.ts > parser > rejects empty input",
+             "src/parse.test.ts > parser > keeps the trailing newline"]
+    first = kept.splitlines()[0]
+    assert first.startswith("failing tests (") and all(name in first for name in names), first
+    assert "Tests  2 failed | 5 passed (7)" in kept and "ENOENT" in kept
+    assert all(name in why for name in names), why
+
+
+def test_merged_check_failure_says_when_no_test_could_be_read():
+    """D17: output naming no test says so, within the reason's limit, and keeps both streams'
+    head and tail."""
+    from refactory_dsh import sandbox
+
+    result = sandbox.SandboxResult(ok=False, returncode=2, stdout="start\n" + "o" * 20_000 + "\nend",
+                                   stderr="warn " * 2_000)
+    kept = delivery._merge_check_failure(result)
+    assert kept.startswith("no failing test could be read from the check's output (exit 2)")
+    assert "[stdout]\nstart" in kept and kept.split("[stderr]")[0].rstrip().endswith("end")
+    assert "bytes of output not kept" in kept
+    assert len(kept) < 2 * delivery.MERGE_CHECK_KEEP + 500
+    reason = delivery._merge_check_reason(kept)
+    assert reason.startswith("no failing test could be read") and len(reason) <= 500
+
 def test_generated_content_equals_base_version_still_merges(github, tmp_path, monkeypatch):
     """When the merged generated content equals the base's version, the file is still
     classified as generated (A == B from both sides' generate), and the merge succeeds.
