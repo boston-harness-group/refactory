@@ -74,7 +74,7 @@ from refactory_dsh.optim.memory import report_lines as memory_report_lines
 from refactory_dsh.outerloop import (
     BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate, train_batch_seed,
 )
-from refactory_dsh.paths import project_root
+from refactory_dsh.paths import project_for_nodes, project_root
 from refactory_dsh.workers import StepRoutes
 
 #: The append-only record of everything a run did. Resume replays it.
@@ -724,7 +724,7 @@ class Loop(OuterLoop):
     ) -> None:
         self.mode_id = mode_id
         self.config = config or LoopConfig()
-        self.project = Path(project or Path("."))
+        self.project = Path(project or project_for_nodes())
         self.root = Path(self.config.runs_root)
         self.model = model
         # A library caller may provide a configured client directly. Its actual

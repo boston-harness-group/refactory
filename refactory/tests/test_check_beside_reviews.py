@@ -132,6 +132,92 @@ def test_a_failed_check_sends_the_build_back_with_its_feedback_after_the_reviews
     assert json.loads((tmp_path / "run" / "check-record.json").read_text())["status"] == "pass"
 
 
+class _QuickCheckDesign(DesignMode):
+    """Design mode whose inactivity limit may be 1 s, so a silent check stops at once."""
+
+    def declare(self):
+        from refactory_dsh.nn import Knob
+
+        knobs = super().declare()
+        knobs["check_timeout_s"] = Knob(1, "int", lo=1, hi=1800,
+                                        description=knobs["check_timeout_s"].description)
+        return knobs
+
+
+#: A check that prints one line and then goes silent: stopped at the inactivity limit.
+SILENT_TOOL = "import time\nprint('STARTED-MARKER', flush=True)\ntime.sleep(30)\n"
+
+
+def _assert_silent_check_draft(run_dir: Path, facts: dict) -> None:
+    draft = facts["draft_delivery"]
+    assert draft["check_failing"] is True
+    assert "did not finish" in draft["reason"] and "inactivity" in draft["reason"]
+    assert "STARTED-MARKER" in draft["check_failure"]
+    assert "STARTED-MARKER" in (run_dir / "timeout-output.txt").read_text()
+    assert json.loads((run_dir / "check-record.json").read_text())["status"] == "check_timeout"
+
+
+def test_a_check_beside_the_reviews_stopped_for_inactivity_ends_in_a_draft(tmp_path):
+    """The walker, on design mode's real graph: the check in the review fork goes silent,
+    is stopped, and gate_check delivers the attempt as a draft marked check failing."""
+    repo = git_repo(tmp_path / "repo")
+    mode = _QuickCheckDesign()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    reviews = ["health: ok", "code review: ok", "qa: ok", VERIFICATION_ANSWER]
+    model = FakeModel([SCOPED_RESEARCH_ANSWER, PITFALLS_ANSWER, "one plan", DESIGN_DOC_ANSWER,
+                       render({"tool.py": SILENT_TOOL}), *reviews, *[""] * 10])
+    run = mode.run(tmp_path / "run", model=model, verdicts={"gate_strategy": "proceed"},
+                   task={"name": "silent_tool", "brief": "Make tool.py print built.",
+                         "check": f"{sys.executable} tool.py", "target": str(repo)})
+    assert run.exit_ok, run.error
+    _assert_silent_check_draft(tmp_path / "run", run.facts)
+    # One attempt: the stop went to the report, not back to the builder.
+    assert len([p for p in model.prompts if "Write the artifact `silent_tool`" in p]) == 1
+
+
+def test_a_check_beside_the_reviews_stopped_for_inactivity_ends_in_a_draft_on_the_spine(
+        tmp_path):
+    """The same route as the spine runs it: each node through ``python -m refactory_dsh.run``
+    in its own process, with the lowered declarations, so an undeclared fact fails."""
+    import os
+    import subprocess
+
+    from refactory_dsh import repo_change, worktree
+    from refactory_dsh.run import NODE_ENV, WORKDIR_ENV, run_node
+
+    repo = git_repo(tmp_path / "repo")
+    run_dir = tmp_path / "run"
+    worktree.create(repo, "HEAD", "silent0123456", run_dir)
+    lowering.write_declarations(DesignMode().state_dict(), run_dir)
+    (run_dir / "facts.json").write_text(json.dumps({
+        "name": "silent_tool", "brief": "Make tool.py print built.",
+        "check": f"{sys.executable} tool.py"}))
+    (run_dir / "emit.txt").write_text(render({"tool.py": SILENT_TOOL}))
+    run_node(f"{repo_change.OPS}:materialise", workdir=run_dir, node_id="materialise")
+    facts = json.loads((run_dir / "facts.json").read_text())
+    (run_dir / CHECK_PREP).write_text(json.dumps({
+        "attempt": "a1", "commit": facts["commit"], "root": str(facts.get("artifact") or ""),
+        "targeted_command": None}))
+    env = {**os.environ, WORKDIR_ENV: str(run_dir),
+           "REFACTORY_KNOBS": json.dumps({"check_timeout_s": 1})}
+
+    def node(call: str, node_id: str, kind: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "refactory_dsh.run", f"{design_ops.__name__}:{call}",
+             "--node", node_id],
+            env={**env, NODE_ENV: json.dumps({"id": node_id, "type": kind})},
+            capture_output=True, text=True, timeout=60, cwd=str(run_dir), check=False)
+
+    checked = node("check_beside_reviews", "check", "OpNode")
+    assert checked.returncode == 0, checked.stderr[-2000:]
+    gated = node("gate_check", "gate_check", "GateNode")
+    assert gated.returncode == 0, gated.stderr[-2000:]
+    assert gated.stdout.strip().splitlines()[-1] == "draft", gated.stdout[-2000:]
+    _assert_silent_check_draft(run_dir, json.loads((run_dir / "facts.json").read_text()))
+
+
 def _ctx(tmp_path, **facts):
     ctx = nn.RunContext(tmp_path, facts={"check": "true", "commit": "c1", "brief": "b",
                                          "artifact": str(tmp_path), **facts})

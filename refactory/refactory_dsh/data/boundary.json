@@ -4,6 +4,7 @@
     "refactory_dsh._v1_compat",
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
+    "refactory_dsh.agent_json",
     "refactory_dsh.budgets",
     "refactory_dsh.control",
     "refactory_dsh.dsh_profile",

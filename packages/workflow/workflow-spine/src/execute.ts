@@ -268,6 +268,9 @@ export function dataCommandOf(
 /**
  * Run one of a data node's item commands and read the JSON it prints.
  *
+ * Data-node commands stay on their current wall-clock limits; the inactivity-
+ * based timeout applies only to deterministic ops (via `runDeterministic`).
+ *
  * The item loop is three commands because the pass between them can contain agent
  * nodes: the runtime drives the subgraph, so it has to learn the selection, start
  * one pass, and close it, rather than owning the whole loop the way the walking
@@ -326,6 +329,16 @@ export async function runDataCommand(
  * A nonzero exit, a timeout, an abort, or (for a gate) empty stdout fails the
  * node rather than advancing the cursor: a graph step that did not happen must
  * not look like one that did.
+ *
+ * **Two-tier timeout.** An op (e.g. `prepare`) prints nothing on its own stdout
+ * while its child commands run, because `sandbox.run_command` captures their
+ * output.  There is no inactivity watchdog on the op's own process: a 180 s
+ * watchdog would kill `prepare` during its install, earlier than today's 600 s.
+ * Instead, child commands enforce their own inactivity limits via
+ * `sandbox.run_command` on the Python side, and this function's wall cap is the
+ * lowered envelope from `lowering.command_timeout_s` (backstop-based), the same
+ * mechanism as the walker's `_run_op_timed`.  `config.timeoutMs`
+ * (`commandTimeoutMs`, 600 s) no longer caps an op that has a lowered envelope.
  *
  * Exit code 3 with the `--- refactory failure ---` marker in stderr is a
  * build-loop limit stop: the spine records `failed` (terminal), not `ready`

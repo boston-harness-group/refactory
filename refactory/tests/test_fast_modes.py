@@ -286,3 +286,42 @@ def test_a_fast_repair_says_why_it_sends_the_build_back(tmp_path):
     ctx.write_json("brief.json", {"task_refs": [], "data_node": False})
     verdict = fast_ops.validate_package(ctx)
     assert verdict == "reloop" and verdict.reason and verdict.reason == ctx.facts["repair_feedback"]
+
+
+def test_fast_focused_check_timeout_writes_timeout_output_txt(tmp_path, monkeypatch):
+    """A timed-out focused_check writes timeout-output.txt via ctx.write_text
+    and raises ValueError with the timeout reason.
+
+    Mutation: reverting the check_timeout intercept at fast_ops.py:481 would route
+    through stop_unrepairable instead, raising a different error.
+    """
+    from refactory_dsh import fast_ops, repo_change
+    from refactory_dsh.sandbox import SandboxResult
+    from refactory_dsh import authoring_evidence as evidence
+
+    ctx = nn.RunContext(tmp_path, knobs={"check_timeout_s": 60, "repair_attempts": 0},
+                        facts={"name": "timeout-test", "artifact": str(tmp_path / "art"),
+                               "check": "echo test"}, task={})
+    # Create a minimal artifact directory and emit.txt
+    art = tmp_path / "art"
+    art.mkdir()
+    (art / "answer.py").write_text("x = 1\n")
+    ctx.write_text("emit.txt", "===FILE: answer.py===\nx = 1\n")
+
+    timed_out_result = SandboxResult(
+        ok=False, timed_out=True, returncode=124,
+        timeout_kind="inactivity", timeout_s=60,
+        stdout="progress line 1\nprogress line 2\n",
+        stderr="", elapsed_s=60.0,
+    )
+    monkeypatch.setattr(repo_change, "run_check",
+        lambda ctx_arg, command, timeout, **kw: timed_out_result)
+    monkeypatch.setattr(evidence, "record", lambda ctx, outcome: outcome)
+
+    with pytest.raises(ValueError, match="check_timeout"):
+        fast_ops.focused_check(ctx)
+
+    # timeout-output.txt was written via ctx.write_text
+    timeout_out = (tmp_path / "timeout-output.txt").read_text()
+    assert "inactivity" in timeout_out
+    assert "progress line 1" in timeout_out

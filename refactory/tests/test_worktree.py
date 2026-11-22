@@ -970,9 +970,20 @@ def test_a_check_in_a_worktree_sees_none_of_refactorys_variables(repo, tmp_path,
     monkeypatch.setenv("DSH_WORKFLOW_NODE", "{}")
     found = worktree.create(repo, "HEAD", "7777cccc2222", _run(tmp_path))
     env = worktree.check_environment(Path(found.path), tmp_path / "home")
-    assert set(env) <= {"PATH", "HOME", "VIRTUAL_ENV", *worktree.CHECK_ENV, *worktree.HOOK_SUPPRESS}
+    assert set(env) <= {"PATH", "HOME", "VIRTUAL_ENV", "PYTHONUNBUFFERED", *worktree.CHECK_ENV, *worktree.HOOK_SUPPRESS}
     assert env["HOME"] == str(tmp_path / "home")
     assert env["PATH"].split(os.pathsep)[0] == str(venv_bin()), "none of its own, so refactory's"
+    # PYTHONUNBUFFERED prevents pipe block-buffering that makes an active command look
+    # silent to the inactivity watchdog (correction 3).
+    assert env.get("PYTHONUNBUFFERED") == "1", "check env must set PYTHONUNBUFFERED=1"
+
+
+def test_install_env_sets_pythonunbuffered(monkeypatch):
+    """The install environment sets PYTHONUNBUFFERED=1 to prevent pipe block-buffering
+    from causing false silence for the inactivity watchdog (correction 3)."""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    env = worktree._install_env()
+    assert env.get("PYTHONUNBUFFERED") == "1", "install env must set PYTHONUNBUFFERED=1"
 
 
 def test_a_managed_environment_comes_first_and_an_unmarked_one_is_not_adopted(repo, tmp_path):
