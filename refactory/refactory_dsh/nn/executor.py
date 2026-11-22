@@ -2271,7 +2271,7 @@ class Executor:
                 reads=list(node.reads), client=client, ask=ask,
                 capture_final=_capture_final, rule=self.graph.retry_rule(node.id),
                 timeout_s=node.timeout_s, budget=self.ctx.budget, workspace=dispatch_workspace,
-                tool_policy=tool_policy)
+                tool_policy=tool_policy, keeps_tool_markup=node.keeps_tool_markup)
         finally:
             # SWEEP-6: clean up temporarily injected refilled keys, even on error.
             for k, prev in _refilled_snap.items():

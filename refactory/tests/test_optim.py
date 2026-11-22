@@ -1043,7 +1043,10 @@ def test_no_tools_agent_nodes_and_the_optimizer_get_a_no_tools_client(tmp_path, 
         rebuilt = rebuilt.with_tool_policy(spec.get("tool_policy") or "")  # as worker_node does
         assert (rebuilt._tool_policy == "none") is (policy == "none")
         assert rebuilt.retry_attempts() == attempts
-        assert node.command_timeout_s == DEFAULT_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+        # A no-tools node's envelope also holds the session a reply that writes out tool
+        # calls is asked again in (`node_retry.refuses_tool_markup`).
+        assert node.command_timeout_s == (1 + (policy == "none")) * (
+            DEFAULT_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S)
 
     # The walker: the executor hands an agent node the for_node client with the node's
     # tool policy applied.

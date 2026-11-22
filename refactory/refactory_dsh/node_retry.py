@@ -106,15 +106,31 @@ class RetriesExhausted(RuntimeError):
 
 class InventedToolCalls(RuntimeError):
     """A step with no tools answered with tool calls or results it wrote itself, again
-    after it was told it has none: its reply is refused, never taken as its output."""
+    after it was told it has none (or with no time left to ask again): its reply is
+    refused, never taken as its output. In a data pass it leaves the step without an
+    answer, as the output limit does (`leaves_no_answer`). ``sessions`` is how many ran."""
+
+    def __init__(self, message: str, *, sessions: int | None = None) -> None:
+        super().__init__(message)
+        self.sessions = sessions
+
+
+def refuses_tool_markup(tool_policy: Any, keeps_tool_markup: Any = False) -> bool:
+    """Whether a step's reply that writes out tool calls is refused and the step asked once
+    more (`deliver`): a step with no tools (``tool_policy`` ``none``) that does not keep
+    such a reply (`nn.graph.Node.keeps_tool_markup`). The spine reserves that extra session
+    in the step's envelope by the same test (`workers.lower_workflow`)."""
+    return tool_policy == "none" and not keeps_tool_markup
 
 
 def leaves_no_answer(error: BaseException) -> bool:
     """Whether ``error`` leaves a data-pass step missing rather than failing its item:
     its retries are spent (`RetriesExhausted`), or the model used its whole output
     allowance without answering, which is the model failing the question and is not
-    retried unless the step opts in (``retry.on: ["output_limit"]``)."""
-    return isinstance(error, RetriesExhausted) or failure_kind(error) == "output_limit"
+    retried unless the step opts in (``retry.on: ["output_limit"]``), or a step with no
+    tools wrote out tool calls again after it was told (`InventedToolCalls`)."""
+    return (isinstance(error, (RetriesExhausted, InventedToolCalls))
+            or failure_kind(error) == "output_limit")
 
 
 #: How the walker's op child hands back a `subprocess.TimeoutExpired` it cannot rebuild
@@ -263,6 +279,8 @@ def record_spent(workdir: Path, node: str, error: BaseException) -> None:
         cause: str | None = error.cause
     elif failure_kind(error) == "output_limit":
         cause = "output_limit"
+    elif isinstance(error, InventedToolCalls):
+        cause = INVENTED_TOOL_CALLS
     else:
         cause = missing_cause(error)
     target = Path(workdir) / MISSING_DIR / f"{node}.json"
@@ -346,9 +364,23 @@ def attempt_walls(base_s: int, rule: dict[str, Any]) -> list[int]:
     return [int(math.ceil(base_s * factor ** index)) for index in range(int(rule["times"]) + 1)]
 
 
-def node_allowance_s(base_s: int, rule: dict[str, Any] | None) -> int:
-    """The model time a node's dispatch reserves for all its attempts, before overhead."""
-    return sum(attempt_walls(base_s, rule)) if rule else int(base_s)
+def node_allowance_s(base_s: int, rule: dict[str, Any] | None, *,
+                     markup_retry: bool = False) -> int:
+    """The model time a node's dispatch reserves for all its attempts, before overhead:
+    with ``markup_retry`` (`refuses_tool_markup`), one more session as long as its longest
+    attempt, which a reply that writes out tool calls may take after any of them."""
+    walls = attempt_walls(base_s, rule) if rule else [int(base_s)]
+    return sum(walls) + (max(walls) if markup_retry else 0)
+
+
+def _retry_limit(declared: int, envelope_left: int, budget: Any) -> int:
+    """A retry session's limit: its declared wall, within what is left of the node's
+    envelope (with `ENVELOPE_SLACK_S` of the dispatch overhead) and of the run's wall."""
+    bounds = [declared, envelope_left + ENVELOPE_SLACK_S]
+    remaining = budget.remaining_s() if budget is not None else None
+    if remaining is not None:
+        bounds.append(remaining)
+    return int(min(bounds))
 
 
 def _times(count: int) -> str:
@@ -457,6 +489,7 @@ def deliver(
     budget: Any = None,
     workspace: Callable[[bool], AbstractContextManager[Any]] | None = None,
     tool_policy: str = "",
+    keeps_tool_markup: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
@@ -470,11 +503,14 @@ def deliver(
     raised unchanged. When the last allowed attempt fails too,
     :class:`RetriesExhausted` says how long each session ran.
 
-    A step with no tools (``tool_policy`` ``none``) whose reply writes out tool calls or
-    their results outside a fenced code block (`agent_json.invented_tool_calls`) is asked
-    once more, told it has none (`NO_TOOLS_NOTE`), whatever its rule; a second such reply
-    fails it (:class:`InventedToolCalls`). A step with tools is never judged so. Both
-    runtimes come here, so both refuse such a reply alike.
+    A step with no tools (``tool_policy`` ``none``) whose reply writes out tool calls
+    (`agent_json.invented_tool_calls`) is asked once more, told it has none
+    (`NO_TOOLS_NOTE`), whatever its rule, unless it keeps such a reply
+    (``keeps_tool_markup``, `refuses_tool_markup`). That session runs under the wall of the
+    attempt it replaces, within what is left of the node's envelope -- which counts it
+    (`node_allowance_s`) -- and of the run's wall, as a rule's retry does; with no time
+    left, or a second such reply, the step fails (:class:`InventedToolCalls`). A step with
+    tools is never judged so. Both runtimes come here, so both refuse such a reply alike.
     """
     from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import begin, finish
@@ -486,15 +522,23 @@ def deliver(
     if rule and timeout_s is None and "timeout" in rule["on"]:
         raise ValueError(f"{node} declares a retry but no timeout_s for it to multiply")
     tries = 1 + (int(rule["times"]) if rule else 0)
-    walls = attempt_walls(int(timeout_s), rule) if rule and timeout_s is not None else []
-    #: How long each failed session actually ran: what the failure reports, and what
-    #: the node's envelope is charged with.
+    # A step with no tools that writes out tool calls gets one more session, told it has
+    # none, whatever its rule (`refuses_tool_markup`); ``told`` once it has had it.
+    markup = refuses_tool_markup(tool_policy, keeps_tool_markup)
+    #: Each attempt's wall, and the time the node's envelope holds for all its sessions
+    #: (`node_allowance_s`, as `workers.lower_workflow` reserves it), when it has a bound.
+    walls = ((attempt_walls(int(timeout_s), rule) if rule else [int(timeout_s)])
+             if timeout_s is not None else [])
+    allowance = (node_allowance_s(int(timeout_s), rule, markup_retry=markup)
+                 if timeout_s is not None else 0)
+    #: How long each failed session actually ran: what the failure reports.
     ran: list[int] = []
+    #: How long every session that delivered nothing ran: what the envelope is charged with.
+    spent_s: list[int] = []
+    #: Every session the node may run, for the retry events' "attempt N of M".
+    most = tries + markup
     attempt_client = client
     attempt_prompt = prompt
-    # A step with no tools that writes out tool calls (`agent_json.invented_tool_calls`)
-    # gets one more session, told it has none, whatever its rule; ``told`` once it has.
-    no_tools = tool_policy == "none"
     told = False
     index = 0
     while True:
@@ -509,7 +553,7 @@ def deliver(
                                  tool_policy=tool_policy)
                 started = time.monotonic()
                 output = ask(attempt_client, delivery["prompt"], place)
-                invented = invented_tool_calls(output) if no_tools else []
+                invented = invented_tool_calls(output) if markup else []
                 if place is not None and not invented:
                     workspaces.collect(place, workdir, writes, final_response=output)
         except Exception as error:
@@ -523,6 +567,7 @@ def deliver(
             if started is None or rule is None or kind not in rule["on"]:
                 raise
             ran.append(int(round(time.monotonic() - started)))
+            spent_s.append(ran[-1])
             spent = ", then ".join(f"{seconds}s" for seconds in ran)
             failed = {"timeout": "timed out", "output_limit": "ran out of output"}.get(kind, "crashed")
             its = "its declared retry" if kind == "timeout" else "its retry"
@@ -536,11 +581,7 @@ def deliver(
                 # The retry's own limit, within what is left of the node's envelope (every
                 # attempt's limit plus some of the dispatch overhead) and of the run's wall.
                 declared = walls[index + 1]
-                bounds = [declared, sum(walls) + ENVELOPE_SLACK_S - sum(ran)]
-                remaining = budget.remaining_s() if budget is not None else None
-                if remaining is not None:
-                    bounds.append(remaining)
-                limit = int(min(bounds))
+                limit = _retry_limit(declared, allowance - sum(spent_s), budget)
                 if limit < min(MIN_RETRY_WALL_S, declared):
                     raise RetriesExhausted(
                         f"{node} {failed} (after {spent}) and {its} was not "
@@ -551,7 +592,7 @@ def deliver(
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"{failed} after {ran[-1]}s; retried by the "
                                             "node's retry rule", worktree=worktree, failed=failed)
-            _record_retry(workdir, node, attempt=index + 2, tries=tries, waited_s=ran[-1],
+            _record_retry(workdir, node, attempt=index + 2 + told, tries=most, waited_s=ran[-1],
                           wall_s=limit, error=error, kind=kind)
             attempt_client = _with_wall(client, limit) if limit is not None else client
             # A session that used its whole output allowance tends to do so again on the
@@ -567,20 +608,35 @@ def deliver(
             # writes the output afresh and nothing of this reply is delivered.
             tags = ", ".join(f"<{tag}>" for tag in dict.fromkeys(invented))
             waited = int(round(time.monotonic() - started)) if started is not None else 0
+            spent_s.append(waited)
+            wrote = (f"{node} has no tools, but its reply wrote out tool calls or results "
+                     f"({tags})")
             if told:
-                raise InventedToolCalls(
-                    f"{node} has no tools, but its reply wrote out tool calls or results "
-                    f"({tags}) again after it was told so; the reply is refused, not "
-                    "taken as its output")
+                raise InventedToolCalls(f"{wrote} again after it was told so; the reply is "
+                                        "refused, not taken as its output",
+                                        sessions=index + 1 + told)
+            limit = None
+            if walls:
+                # The wall of the attempt it replaces, within what is left of the node's
+                # envelope and of the run's wall: the deadline a rule's retry keeps.
+                declared = walls[index]
+                limit = _retry_limit(declared, allowance - sum(spent_s), budget)
+                if limit < min(MIN_RETRY_WALL_S, declared):
+                    raise InventedToolCalls(
+                        f"{wrote}, and its retry was not started: {max(0, limit)}s is left "
+                        "of the node's envelope and the run's wall; the reply is refused, "
+                        "not taken as its output", sessions=index + 1)
             if budget is not None:
                 budget.checkpoint()
             settle_for_retry(workdir, node, f"its reply wrote out tool calls ({tags}) though "
                                             "it has no tools; retried once, told so",
                              failed="wrote out tool calls")
-            _record_retry(workdir, node, attempt=index + 2, tries=tries + 1, waited_s=waited,
-                          wall_s=None, error=InventedToolCalls(f"its reply wrote {tags}"),
+            _record_retry(workdir, node, attempt=index + 2, tries=most, waited_s=waited,
+                          wall_s=limit, error=InventedToolCalls(f"its reply wrote {tags}"),
                           kind=INVENTED_TOOL_CALLS)
             told = True
+            if limit is not None:
+                attempt_client = _with_wall(client, limit)
             attempt_prompt = f"{attempt_prompt}\n\n{NO_TOOLS_NOTE}"
             continue
         receipt = finish(workdir, node, final_response=output, capture_final=capture_final)

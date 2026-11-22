@@ -54,7 +54,7 @@ FIELD_SNAPSHOT: dict[str, frozenset[str]] = {
         "role", "model", "prompt_template", "tools", "timeout",
         "max_iterations", "post_checks", "dispatch_command", "command_timeout_s",
         "retry", "missing_on_crash", "falls_back", "workspace", "system_prompt", "tool_policy",
-        "route",
+        "route", "keeps_tool_markup",
     }),
     "FnNode": frozenset({
         "id", "reads", "writes", "blocking", "resource_role",

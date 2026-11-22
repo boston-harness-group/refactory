@@ -187,19 +187,34 @@ def test_h3s_invented_transcripts_are_found(path):
 
 
 @pytest.mark.parametrize("reply, found", [
-    ('<function_calls><invoke name="py">isprime(7)</invoke></function_calls>', ["function_calls"]),
-    ("<function_call>f()</function_call> then <function_results>1</function_results>",
-     ["function_call", "function_results"]),
-    # Tags outside a fence count even when the call's body is fenced.
-    ("<tool_call>\n```python\nisprime(1999997)\n```\n</tool_call>", ["tool_call"]),
-    # Inside a fence, closed or not, backticks or tildes, it is shown, not made.
-    ("Shape:\n```xml\n<tool_call>x</tool_call>\n```\nDone.", []),
-    ("~~~~\n<tool_result>r</tool_result>\n~~~\n~~~~\nafter", []),
-    ("```\n<tool_result>r</tool_result>", []),
-    ("A bare <tool_call> mention, unclosed.", []),
+    ('<function_calls><invoke name="py">isprime(7)</invoke></function_calls>\n'
+     "<function_results>True</function_results>", ["function_calls", "function_results"]),
+    ('<invoke name="bash">ls</invoke>', ["invoke"]),
+    ('<function_call>{"name": "f", "arguments": {}}</function_call>', ["function_call"]),
+    # The tags outside a fence count even when the call's body is fenced.
+    ('<tool_call>\n```json\n{"name": "sympy"}\n```\n</tool_call>', ["tool_call"]),
 ])
-def test_invented_tool_calls_are_found_outside_fences_only(reply, found):
+def test_a_call_written_as_made_is_found(reply, found):
     assert invented_tool_calls(reply) == found
+
+
+@pytest.mark.parametrize("reply", [
+    "Use `<invoke>` or `<tool_call>{\"name\": \"x\"}</tool_call>` in your answer.",
+    "The <tool_call> tag opens a call.\nMuch later in the text, </tool_call> closes it.",
+    # JSON as a whole: a verdict quoting a person's feedback, markup and all.
+    json.dumps({"verdict": "document",
+                "reason": "they pasted <invoke name='bash'>ls</invoke> into design.md"}),
+    'Example:\n\n    <tool_call>{"name": "x"}</tool_call>\n    <tool_result>1</tool_result>\n\nDone.',
+    '> <tool_call>{"name": "x"}</tool_call>\n> <tool_result>1</tool_result>\nTheir log.',
+    'Shape:\n```xml\n<tool_call>{"name": "x"}</tool_call>\n```\nDone.',
+    '~~~~\n<invoke name="x">y</invoke>\n~~~\n~~~~\nafter',
+    '```\n<invoke name="x">y</invoke>',
+    "<tool_call>prose, not a call</tool_call>",
+    "<tool_result>a result with no call before it</tool_result>",
+], ids=["inline-code", "prose-tags", "json-reply", "indented-code", "quote", "fenced", "tildes",
+        "unclosed-fence", "no-call-body", "result-alone"])
+def test_a_reply_that_only_shows_or_names_markup_is_left_alone(reply):
+    assert invented_tool_calls(reply) == []
 
 
 def test_an_answer_that_mentions_a_transcript_tag_reads_as_written():

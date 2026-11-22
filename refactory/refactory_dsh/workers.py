@@ -768,6 +768,8 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             payload['system_prompt'] = node.system_prompt
         if getattr(node, 'tool_policy', None):
             payload['tool_policy'] = node.tool_policy
+        if getattr(node, 'keeps_tool_markup', None):
+            payload['keeps_tool_markup'] = True
         if node.tools:
             payload['tools'] = list(node.tools)
         if is_optional:
@@ -806,13 +808,18 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
         # so the dispatch outlasts the backstop, not a per-completion wall.
         envelope_s = (selected.backstop_limit() + NODE_DISPATCH_OVERHEAD_S if selected.observes_activity()
                       else node_session_budget_s(attempts, per_completion))
+        # A step with no tools that writes out tool calls is asked once more, inside this
+        # same dispatch (`node_retry.deliver`): one more session, under the wall of the
+        # attempt it replaces, with the startup and shutdown time any session has.
+        from refactory_dsh.node_retry import node_allowance_s, refuses_tool_markup
+        markup = refuses_tool_markup(node.tool_policy, getattr(node, 'keeps_tool_markup', None))
         if retry:
             # Every attempt's session -- the first under the node's bound, each retry
             # longer by its factor -- plus the one dispatch overhead,
             # so the retry runs inside the command the spine started.
-            from refactory_dsh.node_retry import node_allowance_s
             if node.timeout is not None:
-                command_timeout_s = node_allowance_s(node.timeout, retry) + NODE_DISPATCH_OVERHEAD_S
+                command_timeout_s = (node_allowance_s(node.timeout, retry, markup_retry=markup)
+                                     + (1 + markup) * NODE_DISPATCH_OVERHEAD_S)
                 if 'crash' in retry['on']:
                     # A crashed session's retry is a new dispatch of its own: each one
                     # gets the startup and shutdown time the first one has.
@@ -822,19 +829,20 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
             else:
                 # A crash retry with no node bound runs each session under the route's
                 # envelope, so the dispatch reserves one per attempt.
-                command_timeout_s = (1 + int(retry['times'])) * envelope_s
+                command_timeout_s = (1 + int(retry['times']) + markup) * envelope_s
         elif node.timeout is not None:
             # The session inside stops at the node's own bound; the dispatch keeps
             # the overhead a derived envelope has, so the session ends first.
-            command_timeout_s = node.timeout + NODE_DISPATCH_OVERHEAD_S
+            command_timeout_s = (node_allowance_s(node.timeout, None, markup_retry=markup)
+                                 + (1 + markup) * NODE_DISPATCH_OVERHEAD_S)
         else:
-            command_timeout_s = envelope_s
+            command_timeout_s = (1 + markup) * envelope_s
         if node.workspace:
             # The workspace is prepared before the session starts -- a clone, its
             # installs, generate and setup -- so the dispatch outlasts the session by
             # that much more per attempt, or the spine stops a retry still preparing.
             from refactory_dsh.workspace import preparation_budget_s
-            command_timeout_s += (1 + int(retry["times"]) if retry else 1) * preparation_budget_s(
+            command_timeout_s += (1 + (int(retry["times"]) if retry else 0) + markup) * preparation_budget_s(
                 node.workspace, workflow.knob_values.get('check_timeout_s'))
         node.dispatch_command = f'{sys.executable} -m refactory_dsh.worker_node ' + shlex.quote(str(spec))
         node.command_timeout_s = command_timeout_s
