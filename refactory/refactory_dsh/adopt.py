@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from refactory_dsh import registry
+from refactory_dsh.paths import project_for_nodes
 
 #: Where the pinned state and the provenance of an adoption live, beside the mode.
 ADOPTED = ".adopted.json"
@@ -368,7 +369,7 @@ def adopt(
     it changes selection records, without evaluating or proposing candidates.
     """
     run_root = Path(run_root)
-    project = Path(project or Path("."))
+    project = Path(project) if project is not None else project_for_nodes()
     # The name is checked by the same rule the package it writes is held to, and it
     # is checked here rather than after the directory exists: a name that is not a
     # package name used to fail as a half-written package, or as whatever the

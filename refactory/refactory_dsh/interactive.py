@@ -24,7 +24,7 @@ from typing import Any
 
 from refactory_dsh import lowering, registry, steering
 from refactory_dsh.dsh_runtime import TASK
-from refactory_dsh.paths import REPO_ROOT, dsh_command, require_build, venv_bin, project_root
+from refactory_dsh.paths import REPO_ROOT, dsh_command, require_build, venv_bin, project_root, project_for_nodes
 from refactory_dsh.run_ownership import ownership
 from refactory_dsh.owned_process import run_owned
 
@@ -264,7 +264,7 @@ def command(
         # Already the JSON string `--knobs` wants; see `run_on_dsh`.
         "--knobs", lowering.knob_environment(
             with_knobs(
-                registry.resolve(Path(project or "."), identifier)[1]().state_dict(),
+                registry.resolve(Path(project or project_for_nodes()), identifier)[1]().state_dict(),
                 list(knobs or []),
             )
         )[lowering.KNOBS_ENV],

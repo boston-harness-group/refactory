@@ -1782,6 +1782,13 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         # check binds to it (`authoring_evidence.current_problems`).
         outcome["check_attempt"] = check_attempt
     apply_cwd_escaped(result, outcome)
+
+    # A command stopped before it finished (inactivity, the backstop or the output limit)
+    # leaves what it printed last, from both streams, in timeout-output.txt beside check.txt.
+    if result.timed_out and getattr(result, "timeout_kind", None) in sandbox.STOP_KINDS:
+        ctx.write_text("timeout-output.txt", sandbox.timeout_output(result))
+        detail = detail + "\n\n(see timeout-output.txt for the last output before it was stopped)"
+
     ctx.write_text("check.txt", detail or "ok\n")
 
     # Whether the new tests fail without the change is evidence for the reviewers, passing
@@ -1835,6 +1842,29 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             "targeted_command": targeted_command,
         })
         return "proceed"
+
+    # A check stopped before it finished (inactivity, the backstop or the output limit)
+    # ends the build in a draft PR saying so, with its last output: a stop of the build
+    # loop, which every caller makes a draft (`_draft_for_stop`) -- `prepare_check` and
+    # `gate_check` when they ran it, and `gate_check` from the decision the check beside
+    # the reviews recorded. Without an applied commit with current evidence the stop ends
+    # the run, as other build-loop stops do.
+    if outcome["status"] == "check_timeout":
+        from refactory_dsh.run import BuildLoopStop
+
+        reason = f"Check did not finish (stopped: {result.stop_reason()})"
+        output_tail = sandbox.output_tail(result.stdout, result.stderr, 20)
+        check_failure = f"{reason}\n\n```\n{output_tail}\n```" if output_tail else reason
+        ctx.set_fact("validation", check_failure)
+        record_check_history(ctx, "full", reason, command)
+        ctx.write_json("check-record.json", {
+            "status": "check_timeout",
+            "validation": reason,
+            "attempt": int(ctx.facts.get("attempts_used", 0)),
+            "check_mode": "full",
+            "targeted_command": targeted_command,
+        })
+        raise BuildLoopStop(reason)
 
     # Name the specific resource limit when a file-size stop occurs.
     rc = result.returncode

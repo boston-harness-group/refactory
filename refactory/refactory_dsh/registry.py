@@ -15,7 +15,7 @@ from typing import Any
 import structlog
 
 from refactory_dsh.nn.package import Package, PackageError, mode_id, split
-from refactory_dsh.paths import project_root
+from refactory_dsh.paths import project_for_nodes, project_root
 
 log = structlog.get_logger()
 
@@ -183,7 +183,7 @@ def _evict_workspace(name: str, project: Path) -> None:
 
 def _origin_file(name: str, project: Path | None = None) -> Path | None:
     """The writer's record for a package, following the project it belongs to."""
-    roots = [workspace_root(Path(project)) if project is not None else Path.cwd() / WORKSPACE]
+    roots = [workspace_root(Path(project) if project is not None else project_for_nodes())]
     roots.append(packages_root())
     for root in roots:
         path = root / name / ORIGIN

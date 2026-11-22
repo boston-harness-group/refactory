@@ -8483,7 +8483,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
     },
     "check_timeout_s": {
       "default": 60,
-      "description": "seconds allowed for the explicit focused check",
+      "description": "inactivity limit for the explicit focused check (seconds of no output); the shared backstop is the absolute wall cap",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8670,7 +8670,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "41233acd1cc77eefeb003544de07d703ade12656f4505144a24ba543eb0efaa6"
+    "reviewed_schema": "1f3437b748a7372075d53eaff9a6e1d1527c82be8d9abf70289bf86fe47f04a3"
   }
 }
 ```
@@ -9699,7 +9699,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     "check_timeout_s": {
       "default": 180,
-      "description": "how long the brief's check may run",
+      "description": "inactivity limit for the brief's check (seconds of no output); the command is stopped only when it has produced no stdout/stderr for this many seconds, and the shared backstop is the absolute wall cap",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -10075,7 +10075,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
     },
     "self_check_timeout_s": {
       "default": 300,
-      "description": "how long the self-check's tests may run before the reviews; never more than a third of check_timeout_s",
+      "description": "inactivity limit for the self-check's tests (seconds of no output); never more than a third of check_timeout_s",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -10208,7 +10208,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails. Before sizing, a code knowledge graph of the worktree is built in the background (on by default; `code_graph=0`, --no-graph, REFACTORY_CODE_GRAPH=0 or the \"code_graph\" object in refactory.workers.json turn it off) (graphify, outside the checkout; `code_graph_timeout_s` and `code_graph_max_files` bound the build), and before sizing a code explorer (`explore_code`, 600 s, read only) waits up to `code_graph_wait_s` for it, maps the code the brief names with `refactory graph query|explain|path` (or, without a graph, from the files) into graph-context.md, headed by which it was made from; the sizer (told to confirm it in the code), research, strategy, design and the builder read it, and may query the graph for more; design.json counts the queries per node.",
-    "reviewed_schema": "3b4117aaf69aa0a84dee8ed39aa9bd013343f1e568286120feba992f0b681838"
+    "reviewed_schema": "8288b453e75aabe8e3e8666f6d17f96407af841350870a4b2a81d9e4af500aae"
   }
 }
 ```
@@ -10501,7 +10501,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
     },
     "check_timeout_s": {
       "default": 180,
-      "description": "how long the brief's check may run",
+      "description": "inactivity limit for the brief's check (seconds of no output); the command is stopped only when it has produced no stdout/stderr for this many seconds, and the shared backstop is the absolute wall cap",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -10697,7 +10697,7 @@ Build a small artifact with one sequential strategist, coder and QA agent, as co
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small artifact with one sequential strategist, coder and QA agent, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none (`worktree=0` writes .factory/artifacts instead; `source_project` copies a directory there). The check runs in that worktree before focused QA. It has no approval gate, so it opens no pull request: the branch is left for you to push. The coder works in a prepared clone of the last attempt, whose diff becomes the attempt.",
-    "reviewed_schema": "1a5a7378cb3c8c73e814a7a537c8c023c9c2d1b884a90a5e0a9217dca05c58a3"
+    "reviewed_schema": "ecdbfd6155bc3da981ee6b547d76ef8228b08a2c4a053bd31d024ef52fc723fa"
   }
 }
 ```
@@ -11733,7 +11733,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
     },
     "check_timeout_s": {
       "default": 60,
-      "description": "seconds allowed for the explicit focused check",
+      "description": "inactivity limit for the explicit focused check (seconds of no output); the shared backstop is the absolute wall cap",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11908,7 +11908,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "ee4d0aff2ca3f3d22a1c20d530b705c406de516b4bd39fcb55a0114d0c067179"
+    "reviewed_schema": "a030bca98b76bd46b990b05b557fa2ea0040aaa3d25b8b2d0c683434301f7054"
   }
 }
 ```
@@ -12102,7 +12102,7 @@ Change a repository until a failing check passes, on a branch of its own, throug
     },
     "check_timeout_s": {
       "default": 300,
-      "description": "seconds the check may take",
+      "description": "inactivity limit for the check (seconds of no output); the shared backstop is the absolute wall cap",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -12229,7 +12229,7 @@ Change a repository until a failing check passes, on a branch of its own, throug
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Change a repository until a failing check passes, on a branch of its own, through the steps any mode that changes a repository attaches (`repo_change`): the example mode authors copy. It opens no pull request; unscored, so not an optimization target.",
-    "reviewed_schema": "7e2300aca926fbfcc175946ecf3d1ea42c9834c5a2e1293d09f8ba8ab32a44e3"
+    "reviewed_schema": "f8a8af2a8b668afed29eaf63a3c9a489ed91d3c8b31ffc916443adc40a22d1a6"
   }
 }
 ```

@@ -478,6 +478,20 @@ def focused_check(ctx: Any) -> dict[str, Any]:
     if payload["status"] == "fail":
         detail = f"requested runtime check failed (exit {payload.get('returncode')}): {payload.get('stderr') or payload.get('stdout')}"
         kind = evidence.check_failure_kind(result, budget=getattr(ctx, "budget", None))
+        if kind == "check_timeout":
+            # Intercept check_timeout before stop_unrepairable (brief item 5, PIT-004).
+            # Preserve the output of both streams and stop with a descriptive message.
+            _reason = f"Check did not finish (stopped: {result.stop_reason()})"
+            _tail = sandbox.output_tail(result.stdout, result.stderr, 20)
+            evidence.record(ctx, {**payload, "status": "check_timeout"})
+            ctx.write_json("check-record.json", {
+                "status": "check_timeout", "validation": _reason,
+                "check_mode": "full", "command": command,
+            })
+            # Write timeout-output.txt alongside the check record.
+            ctx.write_text("timeout-output.txt", sandbox.timeout_output(result))
+            _detail = f"{_reason}\n\nLast output:\n{_tail}" if _tail else _reason
+            raise ValueError(f"validation check_timeout: {_detail}")
         if kind != "code_failure":
             evidence.record(ctx, {**payload, "status": kind})
             evidence.stop_unrepairable(kind, detail)
