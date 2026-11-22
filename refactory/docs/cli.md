@@ -153,6 +153,7 @@ installed copy.
 | `--profile <name>` / `--profile-version <n>` | load an immutable saved configuration; explicit overrides remain visible in the snapshot | none / latest |
 | `--seed <n>` | seed the search RNG, and the seed every evaluation passes its Task (LiveMath shuffles each item's choices by item and seed, as SkillOpt does). The same seed shuffles the order of every data node's items within their part (which items are train or holdout, and `limit`, are unchanged), so items run and are recorded in a seeded order; model outputs can still vary | 0 |
 | `--max-evaluations <n>` | a hard ceiling on evaluated candidates | 64 |
+| `--max-rollouts <n>` | a hard ceiling on item rollouts, every part counted. Like the other bounds it is outside the evaluation context, so `--resume --max-rollouts <larger>` continues a run that stopped at its ceiling | none |
 | `--max-items-in-flight <n>` | run-wide cap on items evaluated concurrently across all concurrent evaluations; when unset, uses the mode's data_parallelism | the mode's data_parallelism |
 | `--runs-root <dir>` | the run directory itself; read it back with `--run <this path>` | `.factory/loop` |
 | `--project <dir>` | the project root packages resolve against | the checkout |
@@ -180,7 +181,6 @@ Set these in a profile (`refactory profile-save --name NAME --spec '{"settings":
 | `frozen` | additional knobs protected from edits (a list of names) | mode-declared frozen knobs |
 | `repeats` | independent trials per candidate and winner audit, from 1 to 10 | 1 |
 | `elite` | how many parents each round proposes against | 3 |
-| `max_rollouts` | per-item budget: how many item-level evaluations the run may perform | unlimited |
 | `max_concurrent_evaluations` | how many evaluations run at once in evaluate_many and in each round of the default loop (its train evaluations, then its val-gate rollouts); 1 runs them one at a time | 4 |
 | `holdout` | the share of a Task's items kept out of the search and used to audit the winner afterwards; one item cannot be split, which the audit records. With `parts_manifest` the audit runs the manifest's val items instead (none, or `holdout` 0: no holdout) and never its test items; under the validation gate those are the items the search selected on, and the audit says so (`split`, `independent`). The fraction is never used for selection | 0.3 |
 | `parsimony` | what each node of a candidate's graph costs its score: the search compares `raw_score − parsimony × nodes` | 0.01 |
