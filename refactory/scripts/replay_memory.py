@@ -40,8 +40,9 @@ come from the reply given for it (``--reply E=FILE``, read as the loop reads one
 `memory.note_from`, pinned only to the changes that pass compared), or none (the facts
 alone; a pass that failed in the run and gets no reply is left out of the passes, as
 the loop leaves it). The record of epoch N, rendered as the
-readers see it (`memory.render_record`), goes to ``OUT/epoch_N/record.json`` (and the
-whole record, nothing left out, to ``record.full.json``). The mode's package must be
+readers see it (`memory.render_record`: each change with the observations pinned to
+it), goes to ``OUT/epoch_N/record.json``, and the same view with nothing left out to
+``record.full.json``; each pass's count of pinned observations is printed. The mode's package must be
 importable (``--project``).
 
 ``--swap-proposal`` (with ``--journal``) takes epoch N's last recorded proposal request
@@ -464,6 +465,14 @@ def shown_memory(passes: list[dict[str, Any]], record_text: str,
     return shown
 
 
+def pin_counts(record: dict[str, Any]) -> list[tuple[int, int, int]]:
+    """Per pass, its observations pinned to a change and those about the comparison."""
+    counts: dict[int, list[int]] = {}
+    for o in record.get("observations") or ():
+        counts.setdefault(int(o.get("epoch") or 0), [0, 0])[0 if o.get("change") else 1] += 1
+    return [(e, *counts[e]) for e in sorted(counts)]
+
+
 def _trace(run: Path) -> list[dict[str, Any]]:
     out = []
     for line in (run / "optimizer_trace.jsonl").read_text().splitlines():
@@ -526,8 +535,12 @@ def main(argv: list[str] | None = None) -> int:
         folder.mkdir(parents=True, exist_ok=True)
         text = memory.render_record(record)
         (folder / "record.json").write_text(text)
-        (folder / "record.full.json").write_text(json.dumps(record, indent=1))
+        # The same view, nothing left out: each change with the observations pinned to it.
+        (folder / "record.full.json").write_text(memory.render_record(record, chars=10 ** 12))
         print(f"record: {folder / 'record.json'} ({len(text)} chars)")
+        for epoch, pinned, loose in pin_counts(record):
+            print(f"epoch {epoch}: {pinned} observation(s) pinned to a change, {loose} about "
+                  "the comparison as a whole")
         if args.swap_proposal:
             try:
                 sizes = swap_proposal(args.run, args.epoch, text, folder, record)

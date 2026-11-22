@@ -60,7 +60,7 @@ The comparison is SkillOpt's meta-skill mechanism (``skillopt/optimizer/meta_ski
   the model's context is retried once at half size.
 - **What it writes**: ``{"observations": [{"change", "items", "observation",
   "evidence"}]}``, at most ``NOTE_OBSERVATIONS``, together within ``MEMORY_CHARS``; the
-  rendered record within ``RECORD_CHARS``, the oldest entries left out first and named.
+  rendered record within ``RECORD_CHARS``, every change's facts kept (`render_record`).
 
 SkillOpt's own meta skill (the SkillOpt strategy, ``refactory_packages/skillopt``) is
 not this module: a custom strategy keeps its own and runs no pass (`Loop._memory_on`).
@@ -129,10 +129,16 @@ OBSERVATION_FLOOR = 200
 NOTE_OBSERVATIONS = 12
 #: The record's format, the first key of every note (`render_record`).
 RECORD_FORMAT = "refactory-memory-record/1"
-#: The most characters the rendered record takes: past it the oldest changes and the
-#: oldest observations not tied to a change are left out, oldest first, and their ids
-#: named under ``omitted`` (they stay in the journal's records).
-RECORD_CHARS = 20000
+#: The most characters the rendered record takes: a tenth of the room of the requests that
+#: show it (the proposal's and the analysts', 400000 each), so it never crowds out their
+#: evidence, and at 0.4-2k characters a change it holds every change of a long run.
+#: Past it, observations go first (oldest first), then the oldest changes' edit texts are
+#: shortened and their item lists cut to counts, never a change's facts (`render_record`).
+RECORD_CHARS = 40000
+#: How short a change's edit text, and how many of its fixed/broken ids, the record keeps
+#: when it must shorten them (`render_record`).
+RECORD_EDITS_FLOOR = 300
+RECORD_IDS_KEPT = 5
 
 
 def sample_ids(train_ids: Sequence[str], seed: int, epoch: int,
@@ -528,37 +534,57 @@ RECORD_KEYS = ("format", "epoch", "passes", "changes", "keeps_failing", "observa
                "omitted")
 
 
-def _record_view(record: Mapping[str, Any], dropped: set[tuple[str, int]],
+def _record_view(record: Mapping[str, Any], dropped: frozenset[int] = frozenset(),
+                 brief: frozenset[int] = frozenset(), counted: frozenset[int] = frozenset(),
                  failing: int | None = None) -> dict[str, Any]:
-    """The record as the note says it: each change with the observations about it,
-    the observations about a comparison as a whole after them; the changes and
-    observations in ``dropped`` (``("change"|"observation", index)``) left out and named,
-    and ``keeps_failing`` cut to its first ``failing`` entries (counted)."""
+    """The record as the note says it: each change with the observations about it, the
+    observations about a comparison as a whole after them. Every change is there with its
+    facts. To fit, the observations at the indexes in ``dropped`` are left out (counted by
+    epoch), the changes in ``brief`` keep a shortened edit text and no placement or effect
+    lines, those in ``counted`` keep their first ``RECORD_IDS_KEPT`` fixed/broken ids and
+    the totals, and ``keeps_failing`` keeps its first ``failing`` entries; each is said
+    under ``omitted``."""
     def shown(o: Mapping[str, Any], *keys: str) -> dict[str, Any]:
         return {key: o[key] for key in keys if o.get(key) not in (None, [], "")}
 
     about: dict[str, list[dict[str, Any]]] = {}
     general = []
+    gone: dict[int, int] = {}
     for index, o in enumerate(record.get("observations") or ()):
-        if ("observation", index) in dropped:
+        if index in dropped:
+            gone[int(o.get("epoch") or 0)] = gone.get(int(o.get("epoch") or 0), 0) + 1
             continue
         if o.get("change"):
             about.setdefault(str(o["change"]), []).append(shown(o, "epoch", "items", "text",
                                                                  "evidence"))
         else:
             general.append(shown(o, "epoch", "items", "text", "evidence"))
-    changes, left_out = [], []
+    changes, shortened, cut = [], [], []
     for index, change in enumerate(record.get("changes") or ()):
-        if ("change", index) in dropped:
-            left_out.append(change.get("id") or f"refused in round {change.get('round')}, "
-                                                 f"attempt {change.get('attempt')}")
-            continue
-        changes.append({**change, **({"observations": about[str(change.get("id"))]}
-                                     if change.get("id") and str(change["id"]) in about else {})})
+        entry = dict(change)
+        name = change.get("id") or f"refused in round {change.get('round')}, " \
+                                   f"attempt {change.get('attempt')}"
+        if index in brief:
+            entry["edits"] = _middle(str(entry.get("edits") or ""), RECORD_EDITS_FLOOR)
+            entry.pop("placed", None)
+            entry.pop("effect", None)
+            shortened.append(name)
+        if index in counted:
+            for key in ("fixed", "broken"):
+                ids = entry.get(key)
+                if isinstance(ids, list) and len(ids) > RECORD_IDS_KEPT:
+                    entry[key] = ids[:RECORD_IDS_KEPT]
+                    entry[f"{key}_total"] = len(ids)
+                    if name not in cut:
+                        cut.append(name)
+        if change.get("id") and str(change["id"]) in about:
+            entry["observations"] = about[str(change["id"])]
+        changes.append(entry)
     failing_all = list(record.get("keeps_failing") or ())
-    omitted = {**({"changes": left_out} if left_out else {}),
-               **({"observations": sum(1 for kind, _i in dropped if kind == "observation")}
-                  if any(kind == "observation" for kind, _i in dropped) else {}),
+    omitted = {**({"observations_by_epoch": {str(e): n for e, n in sorted(gone.items())}}
+                  if gone else {}),
+               **({"edits_shortened": shortened} if shortened else {}),
+               **({"ids_cut_to_counts": cut} if cut else {}),
                **({"keeps_failing": len(failing_all) - failing}
                   if failing is not None and failing < len(failing_all) else {})}
     view = {"format": record.get("format"), "epoch": record.get("epoch"),
@@ -583,33 +609,39 @@ def _layout(view: Mapping[str, Any]) -> str:
 
 
 def render_record(record: Mapping[str, Any], chars: int = RECORD_CHARS) -> str:
-    """The note: the record as JSON (`_layout`), within ``chars`` -- whole when it fits;
-    else the oldest changes and the oldest observations about a comparison as a whole
-    are left out, oldest first (a change by its round, such an observation by the round
-    its epoch judged), then the end of ``keeps_failing``, each named or counted under
-    ``omitted``. The newest change is never left out, so a record whose newest change
-    alone passes ``chars`` is longer."""
-    units = sorted(
-        [((c.get("round") or 0), 0, ("change", i))
-         for i, c in enumerate(record.get("changes") or ())]
-        + [((o.get("epoch") or 1) - 1, 1, ("observation", i))
-           for i, o in enumerate(record.get("observations") or ()) if not o.get("change")],
-        key=lambda u: u[:2])
-    changes = sum(1 for u in units if u[2][0] == "change")
-    dropped: set[tuple[str, int]] = set()
-    text = _layout(_record_view(record, dropped))
-    for _age, _kind, unit in units:
-        if len(text) <= chars:
-            return text
-        if unit[0] == "change" and sum(1 for k, _i in dropped if k == "change") == changes - 1:
-            continue  # the newest change stays
-        dropped.add(unit)
-        text = _layout(_record_view(record, dropped))
+    """The note: the record as JSON (`_layout`), within ``chars``. Every change's facts
+    always stay (its id, round, parent, kind, outcome and why, and its fixed/broken
+    items); to fit, in this order, each step taken only while the text is too long:
+    observations are left out, oldest first; the oldest changes' edit texts are
+    shortened (to ``RECORD_EDITS_FLOOR``, placement and effect lines left out); the
+    oldest changes' fixed/broken ids are cut to the first ``RECORD_IDS_KEPT`` and their
+    totals; the end of ``keeps_failing`` is left out. Each is said under ``omitted``. A
+    record still too long after all of that is longer than ``chars``: no change goes."""
+    observations = sorted(range(len(record.get("observations") or ())),
+                          key=lambda i: (int(record["observations"][i].get("epoch") or 0), i))
+    changes = list(range(len(record.get("changes") or ())))
+    dropped: set[int] = set()
+    brief: set[int] = set()
+    counted: set[int] = set()
     failing = len(record.get("keeps_failing") or ())
-    while len(text) > chars and failing:
+
+    def text() -> str:
+        return _layout(_record_view(record, frozenset(dropped), frozenset(brief),
+                                    frozenset(counted),
+                                    failing if failing < len(record.get("keeps_failing") or ())
+                                    else None))
+
+    out = text()
+    for step, pool in ((dropped, observations), (brief, changes), (counted, changes)):
+        for index in pool:
+            if len(out) <= chars:
+                return out
+            step.add(index)
+            out = text()
+    while len(out) > chars and failing:
         failing -= 1
-        text = _layout(_record_view(record, dropped, failing))
-    return text
+        out = text()
+    return out
 
 
 def _answer(record: Mapping[str, Any]) -> str:

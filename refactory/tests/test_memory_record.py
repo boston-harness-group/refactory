@@ -177,11 +177,55 @@ def test_the_record_is_one_fixed_json_form_and_its_oldest_entries_go_first():
         ("c2", "kept"), ("c3", "not kept"), (None, "refused")]
     assert changes[2]["why"].startswith("E-tool-policy-escalation")
     assert json.loads(text)["keeps_failing"] == [{"item": "c", "failed_under": ["c2", "c3"]}]
-    # Past its room the oldest change is left out first, and named.
-    tight = memory.render_record(note["record"], chars=len(text) - 1)
-    shown = json.loads(tight)
-    assert shown["omitted"] == {"changes": ["c2"]} and len(tight) < len(text)
-    assert [c["id"] for c in shown["changes"]] == ["c3", None]
+    # No room: still every change, with its facts; nothing else is said.
+    tight = json.loads(memory.render_record(note["record"], chars=10))
+    assert [(c["id"], c["outcome"], c["why"][:6]) for c in tight["changes"]] == [
+        (c["id"], c["outcome"], c["why"][:6]) for c in changes]
+
+
+def _cut_record() -> dict[str, Any]:
+    """A record past its room: two changes with long edits and long fixed lists, an
+    observation about each from an older and a newer pass."""
+    tried = [{**_tried(c, r, "c1", gate="kept", fixed=[f"t{n}" for n in range(40)],
+                       broken=[], failing=[], shared=[f"t{n}" for n in range(40)]),
+              "edits": f"EDITS-{c} " + "e" * 2000, "placed": [f"PLACED-{c}"]}
+             for c, r in (("c2", 1), ("c3", 2))]
+    note = memory.note_from({"observations": [
+        {"change": "c2", "items": ["t1"], "observation": "OLD " + "o" * 600}]}, epoch=2,
+        facts=memory.record_facts(tried, [], gated=True, current="c3"), items=["t1"])
+    return memory.note_from({"observations": [
+        {"change": "c3", "items": ["t1"], "observation": "NEW " + "n" * 600}]}, epoch=3,
+        facts=memory.record_facts(tried, [], gated=True, current="c3"), earlier=note["record"],
+        items=["t1"])["record"]
+
+
+def test_past_its_room_the_record_drops_observations_then_shortens_never_a_change():
+    record = _cut_record()
+    whole = memory.render_record(record, chars=10 ** 9)
+    steps = []
+    for chars in range(len(whole), 0, -10):
+        shown = json.loads(memory.render_record(record, chars=chars))
+        # Every change's facts, at every size.
+        assert [(c["id"], c["round"], c["outcome"], c["why"]) for c in shown["changes"]] == [
+            ("c2", 1, "kept", "gate: kept"), ("c3", 2, "kept", "gate: kept")]
+        assert all(c["fixed"][:5] == [f"t{n}" for n in range(5)] for c in shown["changes"])
+        steps.append(json.dumps(shown.get("omitted") or {}, sort_keys=True))
+    order = [json.loads(o) for o in dict.fromkeys(steps)]
+    # Oldest observation first, then the newer; then edit texts, oldest change first;
+    # then the id lists, oldest first.
+    assert order[:3] == [{}, {"observations_by_epoch": {"2": 1}},
+                         {"observations_by_epoch": {"2": 1, "3": 1}}]
+    assert order[3]["edits_shortened"] == ["c2"] and "ids_cut_to_counts" not in order[3]
+    assert order[4]["edits_shortened"] == ["c2", "c3"]
+    assert order[5]["ids_cut_to_counts"] == ["c2"] and order[-1]["ids_cut_to_counts"] == ["c2", "c3"]
+    last = json.loads(memory.render_record(record, chars=1))
+    c2 = last["changes"][0]
+    assert (c2["fixed"], c2["fixed_total"]) == ([f"t{n}" for n in range(5)], 40)
+    assert "PLACED-c2" not in json.dumps(last) and "EDITS-c2" in c2["edits"]
+    from refactory_dsh.optim.analysts import ANALYST_ROOM
+    from refactory_dsh.optim.base import PROPOSAL_ROOM
+
+    assert memory.RECORD_CHARS == min(ANALYST_ROOM, PROPOSAL_ROOM) // 10
 
 
 def _journal_oracle(events: list[dict[str, Any]], at: dict[str, Any]) -> dict[str, Any]:
@@ -742,7 +786,65 @@ def test_the_replay_rebuilds_a_record_for_a_model_proposer_run_with_v4s_settings
         replay = script._loop_at(loop.root, [json.loads(line) for line in (
             loop.root / "journal.jsonl").read_text().splitlines()], stored[-1], Path("."),
             tmp_path / "built")
+    # Each pass compared one applied change (parent -> child): the observation pinned to it
+    # stays pinned to it, in the rebuilt record and in both files the command writes.
+    last = rebuilt
+    own = {p["epoch"]: p["curr"] for p in last["passes"]}
+    assert [(o["epoch"], o["change"]) for o in last["observations"]
+            if o["text"].startswith("OBS for")] == [(2, own[2]), (3, own[3])]
+    with _patch_mode(LevelProbe):
+        files = []
+        for epoch, text in sorted(replies.items()):
+            files += ["--reply", f"{epoch}={_write(tmp_path, f'v4r{epoch}', text)}"]
+        assert script.main([str(loop.root), "--epoch", "3", "--journal", "--project", ".",
+                            "--out", str(tmp_path / "v4out"), *files]) == 0
+    for name in ("record.json", "record.full.json"):
+        view = json.loads((tmp_path / "v4out" / "epoch_3" / name).read_text())
+        nested = {c["id"]: [o["text"][:7] for o in c.get("observations") or ()]
+                  for c in view["changes"]}
+        assert nested[own[2]][:1] == ["OBS for"] and nested[own[3]][:1] == ["OBS for"], name
     assert replay.config.optimizer == "autoresearch" and replay.config.analysts
     assert replay.config.integrity_judge == "veto" and replay.selection_mode() == "checkpoint"
     with pytest.raises(RuntimeError, match="makes no model calls"):
         replay.optimizer._client.complete("anything", system="s")
+
+
+def test_a_ten_epoch_run_keeps_every_changes_facts_within_the_room(tmp_path, monkeypatch):
+    """Ten epochs, a change each round and observations long enough to pass the room: the
+    rendered record the proposer reads holds every change's facts, within the room, and
+    leaves out the oldest observations, naming them."""
+    from test_optimizer_memory import Remembering
+
+    class Wordy(Remembering):
+        def write_memory(self, *, epoch, generation, build):  # type: ignore[no-untyped-def]
+            text, _clip = build(memory.MEMORY_ROOM)
+            self.asked.append({"epoch": epoch, "prompt": text})
+            item = str(build.entries[0]["id"])
+            note = build.parse_note({"observations": [
+                {"change": c, "items": [item], "observation": f"E{epoch}-{n} " + "w" * 1400}
+                for n, c in enumerate([*(build.compared_changes or []), ""] * 3)]})
+            return {"note": note, "error": None, "calls": 1}
+
+    # Ten rounds: 6, 7, 8, 9 kept; 12 refused (past the knob's range); 4, 3, 2, 1, 0 tried
+    # from 9 and rejected.
+    plan = [[(5, 6)], [(6, 7)], [(7, 8)], [(8, 9)], [(9, 12)], *([(9, n)] for n in (4, 3, 2, 1, 0)),
+            []]
+    loop, _ = _run(tmp_path, monkeypatch, plan, proposer=Wordy(plan))
+    record = loop._memory["record"]
+    assert len(record["changes"]) == 10 and sum(1 for c in record["changes"] if not c["id"]) == 1
+    assert len(memory.render_record(record, chars=10 ** 9)) > memory.RECORD_CHARS, "past the room"
+    shown = json.loads(loop._memory["text"])
+    assert len(loop._memory["text"]) <= memory.RECORD_CHARS
+    facts = ("id", "round", "parent", "outcome", "why")
+    assert [{k: c.get(k) for k in facts} for c in shown["changes"]] == [
+        {k: c.get(k) for k in facts} for c in record["changes"]]
+    for full, said in zip(record["changes"], shown["changes"]):
+        for key in ("fixed", "broken"):
+            # Whole, or (past the room) its first ids and the total: never left out.
+            assert said.get(key) == full.get(key) or (
+                said[key] == full[key][:5] and said[f"{key}_total"] == len(full[key]))
+    dropped = shown["omitted"]["observations_by_epoch"]
+    assert min(map(int, dropped)) == 2, "the oldest observations go first"
+    kept = {o["epoch"] for c in shown["changes"] for o in c.get("observations") or ()} | {
+        o["epoch"] for o in shown["observations"]}
+    assert 11 in kept and max(map(int, dropped)) <= min(kept), (dropped, kept)

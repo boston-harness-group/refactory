@@ -1347,10 +1347,15 @@ advice. Its facts are the harness's; only its observations are a model's:
   carry it: the next pass journals `memory_note_dropped` and says it in the progress
   log.
 - **The note** (`memory.render_record`): the JSON, one change, failing item or
-  observation per line, each change with the observations about it. Within 20000
-  characters (`RECORD_CHARS`): past that, the oldest changes and the oldest observations
-  about a comparison as a whole are left out first and named under `omitted` (the
-  journal keeps them); the newest change always stays.
+  observation per line, each change with the observations about it. Within 40000
+  characters (`RECORD_CHARS`: a tenth of the 400000-character rooms of the proposal and
+  analyst requests that show it, so it never crowds out their evidence; a change takes
+  0.4-2k). Every change's facts always stay. Past the room, in order: observations are
+  left out, oldest first (counted by epoch under `omitted`); the oldest changes' edit
+  texts are shortened and their placement and effect lines left out; the oldest
+  changes' fixed/broken ids are cut to the first 5 and their totals; the end of
+  `keeps_failing` is left out. Each is named under `omitted`, and the journal keeps the
+  whole record.
 
 The comparison the observations come from:
 
