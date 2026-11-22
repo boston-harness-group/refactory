@@ -155,7 +155,7 @@ SKILLOPT_FORMULA_WARNING = \
 
 @pytest.mark.parametrize("choice", ["recalc", "cached"])
 def test_formula_line_says_what_the_grader_does(tmp_path, monkeypatch, choice):
-    """Deviation 7: under recalc the report says the cells it lists hold text starting
+    """`mode` deviation 7 (docs item 8): under recalc the report says the cells it lists hold text starting
     with ``=`` (listed still); the cached grader's is SkillOpt's report, byte for byte. The
     grader comes from `recalc.grader`, here through ``SB_GRADER``."""
     monkeypatch.setenv(recalc.GRADER_ENV, choice)
@@ -168,6 +168,57 @@ def test_formula_line_says_what_the_grader_does(tmp_path, monkeypatch, choice):
     assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
         "## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
         + head + "\n    Sheet1!C1==A1*42")
+
+
+def test_the_recalculated_copys_report_has_the_note(tmp_path, monkeypatch):
+    """The common recalc case: an answer cell holds a formula, so the report is read from
+    LibreOffice's recalculated copy (stubbed here: the copy as LibreOffice would write
+    it, the formula's value cached), and another cell holds text starting with '='."""
+    monkeypatch.setenv(recalc.GRADER_ENV, "recalc")
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    pred = _text_eq_pred(tmp_path / "pred.xlsx", 41)
+    import openpyxl
+
+    wb = openpyxl.load_workbook(pred)
+    wb.active["B1"] = "=A1*42"  # a real formula in the answer cell
+    wb.save(pred)
+    copy = _text_eq_pred(tmp_path / "recalculated.xlsx", 42)
+    seen: list[str] = []
+    monkeypatch.setattr(recalc, "recalculated", lambda p: seen.append(p) or str(copy))
+    assert recalc.auto_verify_output(str(pred), str(gold), "B1") == (
+        "## Output Verification\n  Sheet1!B1: got=42, expected=42 \u2713\n"
+        "\n  NOTE: 1 cells hold text that starts with '=' (stored as text, not as formulas):"
+        "\n    Sheet1!C1==A1*42")
+    assert seen == [str(pred)]
+
+
+@pytest.mark.parametrize("choice", ["recalc", "cached"])
+def test_a_capped_formula_count_says_at_least_under_recalc(tmp_path, monkeypatch, choice):
+    """The scan stops at 10 cells (rollout.py): under recalc the note says "at least";
+    under cached the line is SkillOpt's, its count capped."""
+    import openpyxl
+
+    monkeypatch.setenv(recalc.GRADER_ENV, choice)
+    gold = make_workbook(tmp_path / "gold.xlsx",
+                         [{"title": "Sheet1", "cells": {"A1": 1, "B1": 42}}])
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"], ws["B1"] = 1, 41
+    for i in range(1, 13):
+        ws[f"C{i}"] = f"=A1*{i}"
+        ws[f"C{i}"].data_type = "s"
+    wb.save(tmp_path / "pred.xlsx")
+    report = recalc.auto_verify_output(str(tmp_path / "pred.xlsx"), str(gold), "B1")
+    head, tail = {
+        "recalc": ("\n  NOTE: at least 10 cells hold text that starts with '=' "
+                   "(stored as text, not as formulas):", "    ... and at least 5 more"),
+        "cached": ("\n  WARNING: 10 cells contain Excel formulas (openpyxl cannot evaluate "
+                   "them):", "    ... and 5 more")}[choice]
+    cells = "".join(f"\n    Sheet1!C{i}==A1*{i}" for i in range(1, 6))
+    assert report == ("## Output Verification\n  Sheet1!B1: got=41, expected=42 \u2717\n"
+                      + head + cells + "\n" + tail)
 
 
 def test_no_code_and_exec_error_texts():
@@ -766,7 +817,7 @@ def test_the_formula_line_the_analysts_see_is_the_graders(tmp_path, sb_env, monk
                                                           choice):
     """A train item with gold feedback, end to end: the verification report the analysts
     and the proposer read (the record's ``prediction``) says the listed cells hold text
-    under recalc, and is SkillOpt's under cached (deviation 7). The gold feedback
+    under recalc, and is SkillOpt's under cached (`mode` deviation 7, docs item 8). The gold feedback
     the solver gets lists only wrong cells, so neither line reaches it."""
     if choice == "recalc":
         fake = tmp_path / "soffice"  # never run (no answer cell holds a formula): copies
