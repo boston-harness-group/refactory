@@ -515,6 +515,8 @@ def test_a_sealed_step_says_whether_it_had_a_whole_step_cap(tmp_path, monkeypatc
     run.mkdir(parents=True)
     (run / "input.txt").write_text("IN")
     monkeypatch.setattr(seal, "linux_scope", lambda: ())
+    # No delegated cgroup either (`test_seal_cgroup` covers one), wherever this runs.
+    monkeypatch.setattr(seal.seal_cgroup, "_proc_cgroup", lambda: "")
     place = workspace.prepare(run, "look", "scratch", route={"worker_backend": "dsh"},
                               tools=("bash",), reads=("input.txt",))
     record = json.loads((place.root / "dispatch.json").read_text())

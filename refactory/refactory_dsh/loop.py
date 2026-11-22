@@ -5447,7 +5447,7 @@ class Loop(OuterLoop):
             # those a rerun recovered, and those left out of its score (`_settle_incidents`).
             "harness_incidents": list(self._harness_incidents),
             # Sealed steps that ran without a whole-step memory and process cap, said once
-            # (`seal.whole_step_cap`, each step's dispatch record).
+            # (`seal.step_cap`, each step's dispatch record).
             **({"sealed_without_cap": uncapped}
                if (uncapped := uncapped_sealed_steps(self.root / "runs")) else {}),
         }
@@ -8082,7 +8082,7 @@ _DISPATCH_RECORDS = "*/**/.refactory/workspaces/*/dispatch.json"
 
 def uncapped_sealed_steps(runs: Path) -> dict[str, Any]:
     """The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says
-    they ran without a whole-step cap (`seal.whole_step_cap`): how many, and the first
+    they ran without a whole-step cap (`seal.step_cap`): how many, and the first
     reason; empty when none did."""
     found: list[str] = []
     # ``**`` does not follow links, so a concurrent pass's alias (``.refactory/live``) is

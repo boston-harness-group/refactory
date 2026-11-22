@@ -7,12 +7,13 @@
 #
 # Arguments: refactory-seal, the workspace, the caller's uid and gid, the ulimit
 # options, the close step's file, the paths to bind (colon-separated), the names of
-# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale;
-# then whatever DSH appends, its command after "--".
+# /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale, and
+# pivot_root's path (resolved by refactory: a service's PATH may lack /usr/sbin); then
+# whatever DSH appends, its command after "--".
 [ "$1" = refactory-seal ] || { echo "refactory-seal: bad arguments" >&2; exit 97; }
 ws="$2"; uid="$3"; gid="$4"; limits="$5"; closer="$6"; reads="$7"; kept="$8"
-cmd_path="$9"; locale="${10}"
-shift 10
+cmd_path="$9"; locale="${10}"; pivot="${11}"
+shift 11
 fail() { echo "refactory-seal: $1" >&2; exit 97; }
 exec 3<"$ws" || fail "cannot open the workspace"
 # The close step's code, read now: it runs as `bash -c` (a script file would hold a
@@ -65,7 +66,7 @@ done
 mount -n -t proc proc "$r/proc" || fail "cannot mount /proc"
 { mkdir -p "$r$ws" && mount -n --bind /proc/self/fd/3 "$r$ws"; } || fail "cannot bind the workspace"
 exec 3<&-
-{ cd "$r" && mkdir .old && pivot_root . .old; } || fail "cannot pivot to the new root"
+{ cd "$r" && mkdir .old && "$pivot" . .old; } || fail "cannot pivot to the new root"
 { cd / && umount -n -l /.old && rmdir /.old; } || fail "cannot detach the old root"
 # The new root itself (/, /tmp, the folders above the workspace) is read only, as
 # macOS's is: the workspace is the one place a sealed command writes.
