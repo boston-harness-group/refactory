@@ -1748,6 +1748,26 @@ def check_artifact(ctx: Any, *, check_attempt: str | None = None) -> str:
                        beside_reviews=False, check_attempt=check_attempt)
 
 
+def _prep_stop_reason(prep: dict[str, Any]) -> str:
+    """Why a preparation failure stopped the build loop, on one line (`_full_check`)."""
+    step = str(prep.get("step") or "the preparation")
+    rc = prep.get("returncode")
+    if prep.get("timed_out"):
+        how = f"`{step}` did not finish (stopped at its time limit)"
+    elif isinstance(rc, int) and rc < 0:
+        how = f"`{step}` was killed by signal {-rc}"
+    else:
+        how = f"`{step}` failed (exit {rc})"
+    if prep.get("check_copy"):
+        commit = str(prep.get("commit") or "")[:12]
+        return (f"Check environment preparation failed in the check copy, twice: {how}; the "
+                f"run's own worktree prepared cleanly at the same commit {commit}, so the "
+                "change did not cause it")
+    if prep.get("timed_out") or (isinstance(rc, int) and rc < 0):
+        return f"Check environment preparation did not finish: {how}"
+    return f"Check environment preparation failed (not caused by the change): {how}"
+
+
 def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[str, Any],
                 targeted_command: str | None, *, beside_reviews: bool,
                 check_attempt: str | None = None) -> Any:
@@ -1873,19 +1893,26 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             f"the check exceeded the file-size limit ({sandbox.DEFAULT_FILE_MB} MB, "
             "set as DEFAULT_FILE_MB in refactory_dsh/sandbox.py). " + detail
         )
-    evidence.stop_unrepairable(outcome["status"], detail)
-
-    # A not-change-caused preparation failure stops the build loop: draft, no builder round.
+    # A preparation failure the change did not cause stops the build loop: a draft, no
+    # builder round. So does one that timed out or was killed by a signal, which is not
+    # the code's either; a failure in the check copy alone is never the change's, as the
+    # run's own worktree prepared cleanly at that commit (`repo_change.run_check`). Only
+    # an exhausted budget, and an installer missing from the run's own worktree, stop
+    # the run as unrepairable below.
     _prep_fail = getattr(result, "prep_failure", None)
     _ccp_early = getattr(result, "change_caused_prep", None)
-    if _prep_fail and not _ccp_early:
+    if (_prep_fail and not _ccp_early and outcome["status"] != "resource_exhausted"
+            and (outcome["status"] != "unavailable" or _prep_fail.get("check_copy"))):
         from refactory_dsh.run import BuildLoopStop
 
-        reason = "Check environment preparation failed (not caused by the change)"
-        _error_text = _prep_fail.get("error_text", result.stderr or "")
+        reason = _prep_stop_reason(_prep_fail)
+        _error_text = str(_prep_fail.get("error_text") or result.stderr or "")
         _tail = "\n".join(_error_text.strip().splitlines()[-20:])
-        check_failure = (f"{reason}\n\n```\n{_tail}\n```\n\ncode repair was not attempted"
-                         if _tail else f"{reason}\n\ncode repair was not attempted")
+        # What the draft keeps of it is clipped (`_draft_for_stop`): the line that says no
+        # repair was tried comes first, so a long error cannot push it out.
+        check_failure = f"code repair was not attempted: {reason}"
+        if _tail:
+            check_failure += f"\n\n```\n{_tail}\n```"
         ctx.set_fact("validation", check_failure)
         record_check_history(ctx, "full", reason, command)
         ctx.write_json("check-record.json", {
@@ -1896,6 +1923,7 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
             "targeted_command": targeted_command,
         })
         raise BuildLoopStop(reason)
+    evidence.stop_unrepairable(outcome["status"], detail)
 
     # Route change-caused preparation failures to the builder for repair.
     _ccp = getattr(result, "change_caused_prep", None)

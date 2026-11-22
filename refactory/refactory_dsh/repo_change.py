@@ -1290,8 +1290,9 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
     It is kept across attempts -- moved to the new commit with what the last check left
     in tracked and untracked files put back, its installed environment kept -- and its
     hooks and HOME are its own, as the base worktree's are. It goes when the run's base worktree
-    does (`remove_check_copy`). Returns the copy, its environment and home, and the
-    problems that stopped its preparation.
+    does (`remove_check_copy`). Returns the copy, its environment and home, the
+    problems that stopped its preparation, and the prep-failure dict of the step that
+    failed (None when it worked).
     """
     target = Path(found.target)
     run_id = Path(found.path).name.removeprefix("run-")
@@ -1403,27 +1404,21 @@ def run_check(ctx: Any, command: str, timeout: float,
                              "prepare the check again")
         copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
         if problems:
+            # The run's own worktree prepared cleanly at this commit: the check beside the
+            # reviews runs only on an attempt `prepare_check` prepared without a problem
+            # (it decides a failed preparation itself), and the commit was compared above.
+            # So a failure in the copy alone is not the change's. It may be a passing
+            # fault, so the copy is prepared once more; a second failure stops the build
+            # loop as a draft (`design_ops._full_check`), never a builder round.
+            copy, env, home, problems, prep_fail = _check_copy(ctx, found, timeout)
+        if problems:
             _stderr = "the check copy's environment could not be prepared:\n" + "\n".join(problems)
-            if prep_fail:
-                from refactory_dsh import base_check as _bc
-                triage = _bc.compare_prep_failure(
-                    ctx, prep_fail, problems, copy, env, home, timeout,
-                )
-                if triage is not None:
-                    return sandbox.SandboxResult(
-                        ok=False,
-                        returncode=triage["returncode"],
-                        elapsed_s=0.0,
-                        stderr=triage["error_text"],
-                        change_caused_prep=triage,
-                    )
-                return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
-                                             prep_failure=prep_fail, stderr=_stderr)
-            # Defensive: problems without a structured prep_fail — build a synthetic one.
-            synthetic = {"step": "prepare", "returncode": 1, "timed_out": False,
-                         "error_text": "\n".join(problems)}
+            failed = dict(prep_fail) if prep_fail else {"step": "prepare", "returncode": 1,
+                                                        "timed_out": False}
+            failed.setdefault("error_text", "\n".join(problems))
+            failed.update(check_copy=True, commit=found.head)
             return sandbox.SandboxResult(ok=False, returncode=1, elapsed_s=0.0,
-                                         prep_failure=synthetic, stderr=_stderr)
+                                         prep_failure=failed, stderr=_stderr)
         result = sandbox.run_command(command, workdir=Path(copy.path), timeout_s=timeout,
                                      budget=getattr(ctx, "budget", None), env=env, home=home,
                                      exact_env=True, worktree_root=Path(copy.path))
