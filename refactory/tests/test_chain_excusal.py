@@ -1005,3 +1005,66 @@ class TestAndGatingMustNotApply:
         # S is inherited even though tok.sh (step before it) failed
         # This proves && gating is NOT applied
         assert "tests/test_a.py::test_S" in filtered.inherited
+
+
+class TestNonTestStepRegressionAfterTestSteps:
+    """pytest X && check-output.sh scenario.
+
+    Both sides fail pytest with S, check-output.sh exits 0 on base and 1 on attempt.
+    Expected: all_excused=False — the non-test step regression blocks excusal.
+    Brief Change 3: "A non-test step that fails on the attempt is never excused."
+    """
+
+    def test_non_test_step_regression_blocks_excusal(self, tmp_path):
+        command = "pytest X && check-output.sh"
+
+        pytest_out = _make_pytest_output(["tests/test_a.py::test_S"])
+
+        base_step_results = [
+            {"step": "pytest X", "operator": "", "exit_code": 1,
+             "output": pytest_out,
+             "failures": ["tests/test_a.py::test_S"], "accounted": True},
+            {"step": "check-output.sh", "operator": "&&", "exit_code": 0,
+             "output": "all good\n", "failures": [], "accounted": True},
+        ]
+
+        base_failures = {"tests/test_a.py::test_S"}
+        base_result = _make_base_result(
+            ok=False, failures=base_failures, complete=True,
+            step_results=base_step_results,
+        )
+
+        attempt_step_results = [
+            {"step": "pytest X", "operator": "", "exit_code": 1,
+             "output": pytest_out},
+            {"step": "check-output.sh", "operator": "&&", "exit_code": 1,
+             "output": "check failed\n"},
+        ]
+
+        attempt_original_out = pytest_out
+        attempt_sandbox = _make_sandbox_result(
+            ok=False, stdout=attempt_original_out, returncode=1,
+        )
+
+        ctx = _make_ctx(tmp_path)
+
+        with patch("refactory_dsh.base_check.run_base_check", return_value=base_result), \
+             patch("refactory_dsh.base_check._run_chain_markers", return_value=attempt_step_results), \
+             patch("refactory_dsh.base_check.worktree") as mock_wt, \
+             patch("refactory_dsh.base_check._all_changed_files", return_value=[]):
+            mock_wt.recorded.return_value = SimpleNamespace(
+                path=str(tmp_path / "attempt"), base="abc123", target="/tmp/target",
+                head="def456", branch="test", run=str(tmp_path),
+            )
+            mock_wt.CHECK_HOME = Path(".refactory") / "check-home"
+            mock_wt.check_environment.return_value = {"PATH": "/usr/bin"}
+
+            filtered = filter_check(ctx, attempt_sandbox, command, 60.0)
+
+        # S is inherited (same test failure on both sides)
+        assert "tests/test_a.py::test_S" in filtered.inherited
+        # But all_excused must be False because the non-test step regressed
+        assert not filtered.all_excused, (
+            "_per_step_comparison must block excusal when a non-test step "
+            "passes on base (exit 0) but fails on attempt (exit 1)"
+        )

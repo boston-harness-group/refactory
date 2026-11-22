@@ -16,7 +16,7 @@ When a check command chains steps with `&&` (e.g. `tok.sh && pytest X && grep -q
 - **`_step_would_run`**: Operator gating for `||` only — `&&` and `;` steps are never dropped.
 - **`_run_chain_markers`**: Shared helper that builds, runs, and parses the marker script through `sandbox.run_command`.
 - **`_runner_from_output`**: Detects pytest/vitest from output patterns when the step text does not name a runner.
-- **`_per_step_comparison`**: Core function that re-runs the attempt with markers, compares per-step exit codes and summaries against the base's cached per-step results, and refines the inherited/new classification.
+- **`_per_step_comparison`**: Core function that re-runs the attempt with markers, compares per-step exit codes and summaries against the base's cached per-step results, and refines the inherited/new classification. After the per-failure loop, a non-test step regression gate checks every attempt step: if any step has no runner, exited non-zero on the attempt, and the corresponding base step exited zero, `all_excused` is forced to `False`.
 - **`_try_base`**: Conditional second marker run on the base when the check failed and is incomplete. Enriches `failures`, recomputes `_base_complete`, and caches per-step results in a `steps` field.
 - **`filter_check`**: Dispatches to `_per_step_comparison` for chain commands when `all_excused` is True.
 - **`excusal_blocker`**: Added optional `step_results` keyword for per-step accounting; existing callers unchanged.
@@ -50,6 +50,7 @@ Unit tests, scenario tests, cache integration tests, and a real-shell fidelity t
 - `test_cache_round_trip`, `test_old_cache_without_steps`, `test_cache_hit_does_not_rerun_base`.
 - `test_unaccounted_base_step_blocks_inheritance`: `_accounted` gate prevents inheritance.
 - `test_and_gating_would_break_inheritance`: `&&` gating is NOT applied; S still inherited.
+- `test_non_test_step_regression_blocks_excusal`: Non-test step regression after test steps blocks excusal.
 
 ## Verification
 
@@ -60,6 +61,7 @@ Unit tests, scenario tests, cache integration tests, and a real-shell fidelity t
 - **Marking base_complete without `_accounted`**: `test_unaccounted_base_step_blocks_inheritance` fails (S incorrectly inherited from unaccounted base).
 - **Re-adding `&&` gating**: `test_and_gating_would_break_inheritance` fails (pytest failures excluded after failed tok.sh).
 - **Re-running the base on a cache hit**: `test_cache_hit_does_not_rerun_base` fails (cached steps present but base re-run would occur).
+- **Dropping the non-test step regression gate**: `test_non_test_step_regression_blocks_excusal` fails (all_excused incorrectly True when non-test step regresses).
 
 ### Runtime coverage
 
@@ -72,6 +74,6 @@ Both runtimes reach all four ops through the same code path:
 
 ## Follow-ups
 
-- Remove the dead `_MARKER_RE_TEMPLATE` constant and the unused `command` parameter in `_run_chain_markers`.
 - Consider per-step timeout reporting when individual steps are slow.
 - The `steps` cache field stores per-step output (truncated to 5000 chars); monitor cache size.
+- `excusal_blocker`'s `step_results` keyword parameter is tested but never called from production code (the per-step path skips `excusal_blocker`). Keep for API completeness.

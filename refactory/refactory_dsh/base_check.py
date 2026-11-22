@@ -319,9 +319,6 @@ def _build_marker_script(steps: list[tuple[str, str]], marker_id: str) -> str:
     return "\n".join(lines)
 
 
-_MARKER_RE_TEMPLATE = r'___REFACTORY_STEP_{marker_id}_(\d+)_EXIT_(\d+)'
-
-
 def _parse_step_results(
     stdout: str, marker_id: str, steps: list[tuple[str, str]],
 ) -> list[dict] | None:
@@ -376,7 +373,7 @@ def _step_would_run(operator: str, prev_exit: int) -> bool:
 
 
 def _run_chain_markers(
-    command: str, steps: list[tuple[str, str]],
+    steps: list[tuple[str, str]],
     workdir: Path, timeout_s: float, budget: Any,
     env: dict, home: Path,
 ) -> list[dict] | None:
@@ -401,8 +398,6 @@ def _run_chain_markers(
 
 def _runner(step: str) -> str | None:
     """``pytest`` or ``vitest`` when ``step`` names that runner (jest reports like vitest)."""
-    import shlex
-
     try:
         words = shlex.split(step)
     except ValueError:
@@ -1140,7 +1135,7 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
                 )
             if chain is not None and len(chain) > 1:
                 step_results = _run_chain_markers(
-                    command, chain, base_path, timeout, budget_inner, env, home,
+                    chain, base_path, timeout, budget_inner, env, home,
                 )
                 if step_results is not None:
                     # Merge newly discovered failures from each step.
@@ -2513,7 +2508,7 @@ def _per_step_comparison(
     budget = getattr(ctx, "budget", None)
 
     attempt_step_results = _run_chain_markers(
-        command, steps, attempt_path, timeout, budget, env, home,
+        steps, attempt_path, timeout, budget, env, home,
     )
     if attempt_step_results is None:
         return None
@@ -2629,10 +2624,33 @@ def _per_step_comparison(
     # Also keep any new_failures from the initial comparison.
     revised_new |= comparison.new_failures
 
+    # Non-test step regression gate: a non-test step that fails on the attempt
+    # but passed on the base means the attempt introduced a regression that is
+    # invisible to the test-failure loop above (it produces no test IDs).
+    # Brief Change 3: "A non-test step that fails on the attempt is never excused."
+    all_excused = len(revised_new) == 0 and len(revised_inherited) > 0
+    if all_excused:
+        for idx, a_sr in enumerate(attempt_step_results):
+            runner = _runner(a_sr["step"]) or _runner_from_output(a_sr["output"])
+            if runner is not None:
+                continue  # test step — handled by the per-failure loop above
+            if a_sr["exit_code"] == 0:
+                continue  # non-test step passed on the attempt — no regression
+            # Non-test step failed on the attempt: check the base.
+            if idx < len(base_steps):
+                if base_steps[idx]["exit_code"] == 0:
+                    # Regression: passed on base, failed on attempt.
+                    all_excused = False
+                    break
+            else:
+                # Step doesn't exist on the base side — treat as regression.
+                all_excused = False
+                break
+
     return ComparisonResult(
         inherited=revised_inherited,
         new_failures=revised_new,
-        all_excused=len(revised_new) == 0 and len(revised_inherited) > 0,
+        all_excused=all_excused,
         base_ok=comparison.base_ok,
     )
 
