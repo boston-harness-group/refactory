@@ -452,6 +452,12 @@ export function query({ prompt, options }) {
         mkdirSync(dirname(saved), { recursive: true })
         writeFileSync(saved, 'BIG OUTPUT')
         record.decisions.read_own_output = (await ask('Read', { file_path: saved }))?.permissionDecision
+        // Claude Code 2.1.299 makes an empty memory folder in each project folder.
+        mkdirSync(join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'memory'), { recursive: true })
+        record.ownProject = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug)
+      }
+      if (process.env.CLAUDE_CONFIG_DIR && !process.env.FAKE_AGENT_ALONE) {
+        const slug = realpathSync(options.cwd).replace(/[^a-zA-Z0-9]/g, '-')
         // Another session's folder of the same name (an earlier attempt's, or a workspace
         // whose name differs only in punctuation): its transcript and its tool results.
         const other = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'other-session', 'tool-results', 'theirs.txt')
@@ -544,6 +550,7 @@ def _adapter_sent(record: Path) -> dict[str, Any]:
     # The session's own folders go with it; another session's of the same name stay.
     own = Path(sent["ownProject"])
     assert not (own / "fake-session").exists() and (own / "other-session").exists()
+    assert not (own / "memory").exists()  # empty, so it went; the folder stays for the other
     _sealed_and_pinned(sent["bash"]["probe"])
     # The golden file, the dataset and other items: neither Bash nor Read reaches them.
     assert len(sent["forbidden"]) == 5
@@ -893,3 +900,42 @@ def test_the_search_never_binds_a_route_setting_to_a_knob_of_its_own(mode_cls):
     knob = "max_thinking_tokens" if mode_cls is agent_mode.Agent else "max_completion_tokens"
     copied["knobs"][knob] = dict(copied["knobs"][knob], value=99999)
     assert _route_binding_refusals(applier.seed_state, copied)
+
+
+@needs_adapter
+def test_a_lone_sessions_project_folder_goes_with_it(tmp_path, sealed_sdk, monkeypatch):
+    """With no other session of the same folder name, the whole project folder goes: the
+    session's own files, then the empty memory folder Claude Code makes, then the folder."""
+    monkeypatch.setenv("FAKE_AGENT_ALONE", "1")
+    _guarded_records("walker", tmp_path)
+    projects = tmp_path / "claude-config" / "projects"
+    assert projects.is_dir() and list(projects.iterdir()) == []
+
+
+def test_a_duplicate_of_the_solve_step_keeps_its_frozen_budget():
+    """The real ``duplicate`` edit of the agent's solve step gives the copy a frozen copy of
+    its thinking-budget knob (``solve2__route.max_thinking_tokens``, the same spec and
+    value): accepted, so the search can copy a solve step without changing its budget; a
+    copy whose knob is not frozen, or holds another value, is refused."""
+    import structure_fuzz as sf
+    from refactory_dsh.optim import Candidate
+    from refactory_dsh.optim.base import _route_binding_refusals
+
+    applier = sf.Applier(sf.Seed("sb-agent", agent_mode.Agent))
+    parent = Candidate.from_state(applier.seed_state)
+    out = applier.attempt(parent, {"op": "duplicate", "target": "solve", "new_id": "solve2"},
+                          {parent.id})
+    assert isinstance(out, Candidate), out  # the copy keeps its tools, sealed, and budget
+    copy = out.state["graph"]["nodes"]["solve2"]
+    assert copy["tools"] == ["Read", "Bash"] and copy.get("tool_policy") is None
+    from refactory_dsh.nn import edits
+
+    copied = edits.apply_many([{"op": "duplicate", "target": "solve", "new_id": "solve2"}],
+                              applier.seed_state)
+    knob = "solve2__route.max_thinking_tokens"
+    assert copied["knobs"][knob]["spec"]["frozen"]
+    assert _route_binding_refusals(applier.seed_state, copied) == []
+    for change in ({"value": 99999}, {"spec": {**copied["knobs"][knob]["spec"], "frozen": False}}):
+        changed = json.loads(json.dumps(copied))
+        changed["knobs"][knob].update(change)
+        assert _route_binding_refusals(applier.seed_state, changed), change

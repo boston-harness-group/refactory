@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88e8a27c91 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa13363988cfe7b17 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -353,7 +353,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +594,267 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +594,269 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -513,7 +513,9 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
 +	if (seal === void 0 || typeof seal.sessionId !== "string" || !/^[0-9a-zA-Z-]{1,80}$/.test(seal.sessionId)) return;
 +	for (const place of [join(seal.project, seal.sessionId), join(seal.project, `${seal.sessionId}.jsonl`),
 +		join(seal.temporary, seal.sessionId), join(seal.configDir, "session-env", seal.sessionId)]) rmSync(place, { recursive: true, force: true });
-+	for (const place of [seal.project, seal.temporary]) {
++	// Claude Code makes an empty memory folder in each project folder; it goes too, only
++	// when empty, then the folders themselves, only when empty.
++	for (const place of [join(seal.project, "memory"), seal.project, seal.temporary]) {
 +		try { rmdirSync(place); } catch {}
 +	}
 +}
@@ -622,7 +624,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +864,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +866,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -668,7 +670,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +923,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +925,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -677,7 +679,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +942,38 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +944,38 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -718,7 +720,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +1026,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +1028,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -730,7 +732,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +1053,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +1055,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -739,7 +741,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +1065,16 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +1067,16 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -756,7 +758,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88
  			}
  		}
  	});
-@@ -529,6 +1128,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1130,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),
