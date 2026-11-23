@@ -405,7 +405,8 @@ def focused_check(ctx: Any) -> dict[str, Any]:
             # Where design checks: the run's worktree, in its own environment, or the
             # artifact directory. A chain runs step by step from the start, so the base
             # comparison reads each step's result from this run (`base_check.run_chain`).
-            result = repo_change.run_check(ctx, command, timeout, per_step=True)
+            result = repo_change.check_steps(ctx, command, lambda script: repo_change.run_check(
+                ctx, script, timeout), beside_reviews=False)
         else:
             # An artifact built for refactory: its check imports refactory_dsh.
             result = sandbox.run_command(command, workdir=Path(output), timeout_s=timeout,

@@ -247,13 +247,15 @@ def test_a_self_check_pass_is_not_run_again_by_the_full_check(tmp_path):
     assert set(prepass.passed_ids) == ids
     passed = design_ops.self_check_passed(fx.ctx, check)
     command, used = base_check.with_deselected(check, passed)
-    assert set(used) == ids
+    # The last always runs, so a step never deselects all it collects (pytest exit 5).
+    assert used == passed[:-1] and passed[-1] == "tests/test_two.py::test_new"
     result = repo_change.run_check(fx.ctx, command, 120, beside_reviews=True, per_step=True)
     assert result.ok
     # The full check ran only what the self-check had not merged.
     assert sorted(fx.tests("copy")) == ["tests/test_three.py::test_more",
+                                        "tests/test_two.py::test_new",
                                         "tests/test_two.py::test_two"]
-    assert "3 deselected" in result.stdout
+    assert "2 deselected" in result.stdout
 
 
 def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
@@ -267,8 +269,10 @@ def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
     assert prepass.passed_ids == ["tests/test_two.py::test_one"]
     command, used = base_check.with_deselected(check, design_ops.self_check_passed(fx.ctx, check))
     result = repo_change.run_check(fx.ctx, command, 120, beside_reviews=True, per_step=True)
-    assert result.ok and sorted(fx.tests("copy")) == [
-        "tests/test_two.py::test_two", "tests/test_two.py::test_two_more"]
+    # test_one, the only pass, is the one that always runs (`with_deselected`).
+    assert used == [] and result.ok and sorted(fx.tests("copy")) == [
+        "tests/test_two.py::test_one", "tests/test_two.py::test_two",
+        "tests/test_two.py::test_two_more"]
 
 
 def test_self_check_passes_hold_only_for_their_commit(tmp_path):
@@ -325,8 +329,9 @@ def test_xdist_lines_are_read_per_worker():
 
 
 @pytest.mark.parametrize("command, added", [
-    (f"{PYTEST} -q tests", " -vv"), (f"{PYTEST} tests", " -v"),
-    (f"{PYTEST} -v tests", ""), (f"{PYTEST} -qq -rA tests", " -vvv"),
+    (f"{PYTEST} -q tests", " -o verbosity_test_cases=1"),
+    (f"{PYTEST} tests", " -o verbosity_test_cases=1"),
+    (f"{PYTEST} -v tests", ""),
 ])
 def test_the_chunk_prints_a_line_per_test(command, added):
     assert failfast._with_test_lines(command) == command + added
@@ -334,9 +339,12 @@ def test_the_chunk_prints_a_line_per_test(command, added):
 
 def test_deselect_reaches_only_a_single_plain_pytest_step():
     ids = ["tests/test_a.py::test_x[a b]"]
+    assert base_check.with_deselected("pnpm test && pytest -q tests", ids) == (
+        "pnpm test && pytest -q tests", [])  # the last id always runs
+    ids = [*ids, "tests/test_a.py::test_y"]
     command, used = base_check.with_deselected("pnpm test && pytest -q tests", ids)
     assert command == "pnpm test && pytest -q tests '--deselect=tests/test_a.py::test_x[a b]'"
-    assert used == ids
+    assert used == ids[:1]
     for refused in ("pytest a && pytest b", "pytest tests | tee log", "pytest tests > out",
                     "pnpm test"):
         assert base_check.with_deselected(refused, ids) == (refused, [])
@@ -389,6 +397,20 @@ def test_a_timed_out_guardedness_run_is_not_kept(tmp_path):
     assert not (fx.ctx.workdir / base_check.GUARDEDNESS_CACHE_FILE).exists()
 
 
+def test_a_timed_out_run_that_named_failures_is_not_kept(tmp_path, monkeypatch):
+    """A run stopped part way that had named a failure is still not kept."""
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {"tests/test_g.py": "def test_g():\n    pass\n"},
+                 {"tests/test_s.py": "def test_s():\n    assert False\n"}, check=check)
+    base_check._ensure_base_worktree(fx.ctx)
+    stopped = sandbox.SandboxResult(ok=False, timed_out=True, returncode=124,
+                                    stdout="FAILED tests/test_s.py::test_s - assert False\n")
+    monkeypatch.setattr(base_check.sandbox, "run_command", lambda *a, **k: stopped)
+    record = base_check.compute_test_guardedness(fx.ctx, check, 120)
+    assert record["summary"]["guarding"] == 1
+    assert not (fx.ctx.workdir / base_check.GUARDEDNESS_CACHE_FILE).exists()
+
+
 # ── 5. the check copy is prepared once per commit ─────────────────────────────
 
 def test_the_check_copy_is_prepared_once_for_the_check_and_its_targeted_reruns(tmp_path):
@@ -419,7 +441,7 @@ def test_a_check_copy_whose_files_changed_is_prepared_again(tmp_path):
 # ── the graph, on each runtime: suite runs across two QA passes ───────────────
 #
 # Design mode's real graph on a target whose check is one pytest suite. Attempt 1 touches
-# test_pin.py (so the self-check runs test_pin, which passes) and breaks data.txt
+# test_pin.py (so the self-check runs its two tests, which pass) and breaks data.txt
 # (test_data, which only the full check finds; test_env fails on the base too). The full
 # check sends it back; attempt 2 fixes data.txt and its check passes, test_env excused.
 
@@ -443,7 +465,8 @@ def _emissions() -> tuple[str, str]:
     from tests_support import render
 
     first = render({"tests/test_pin.py": "import tool\n\n\ndef test_pin():\n"
-                                         "    assert tool.VERSION == 1  # pinned\n",
+                                         "    assert tool.VERSION == 1  # pinned\n\n\n"
+                                         "def test_version_set():\n    assert tool.VERSION\n",
                     "data.txt": "two\n"})
     return first, render({"data.txt": "one\n", "extra.txt": "x\n"})
 

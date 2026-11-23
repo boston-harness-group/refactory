@@ -1456,22 +1456,9 @@ def run_check(ctx: Any, command: str, timeout: float,
     run's worktree is not touched.
     """
     if per_step:
-        from refactory_dsh import base_check
-
-        plan = base_check.chain_plan(command)
-        if plan is None:
-            result = run_check(ctx, command, timeout, triage_prep=triage_prep,
-                               prepared=prepared, beside_reviews=beside_reviews)
-            result.step_results = None
-            return result
-        result = run_check(ctx, plan.script, timeout, triage_prep=triage_prep,
-                           prepared=prepared, beside_reviews=beside_reviews)
-        if result.prep_failure is not None or result.change_caused_prep is not None:
-            result.step_results = None  # nothing of the command ran
-        else:
-            result.step_results = base_check.read_chain_run(result, plan, _check_roots(
-                ctx, beside_reviews))
-        return result
+        return check_steps(ctx, command, lambda script: run_check(
+            ctx, script, timeout, triage_prep=triage_prep, prepared=prepared,
+            beside_reviews=beside_reviews), beside_reviews=beside_reviews)
     found = worktree.recorded(ctx.workdir)
     if found is None:
         root = _artifact_root(str(ctx.facts["name"]))
@@ -1539,6 +1526,28 @@ def run_check(ctx: Any, command: str, timeout: float,
         target_guard.warn(f"the check changed tracked files in the run's worktree; they were put back, so "
                           f"the reviews and the next attempt see the committed attempt: "
                           f"{target_guard._named(changed)}")
+    return result
+
+
+def check_steps(ctx: Any, command: str, run: Any, *, beside_reviews: bool) -> Any:
+    """Run ``command`` once through ``run`` (a `run_check` call), as its marker script when
+    it is a chain (`base_check.run_chain`), and return the result with ``step_results``:
+    each step's record from that run, or None when the command is not a chain, its steps
+    could not be read, or its preparation failed before any of it ran."""
+    from refactory_dsh import base_check
+
+    plan = base_check.chain_plan(command)
+    if plan is None:
+        result = run(command)
+        result.step_results = None
+        return result
+    result = run(plan.script)
+    if getattr(result, "prep_failure", None) is not None or \
+            getattr(result, "change_caused_prep", None) is not None:
+        result.step_results = None  # nothing of the command ran
+    else:
+        result.step_results = base_check.read_chain_run(result, plan,
+                                                        _check_roots(ctx, beside_reviews))
     return result
 
 

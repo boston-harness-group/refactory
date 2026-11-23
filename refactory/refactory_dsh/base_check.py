@@ -754,15 +754,17 @@ def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
     deselects: none when it has no single plain pytest step (`plain_pytest_step`).
 
     The full check uses it for the tests the self-check already passed on the same commit
-    (`design_ops._full_check`). Past `DESELECT_LIMIT_BYTES` the rest are left to run.
+    (`design_ops._full_check`). The last id is never deselected: a step whose every test
+    was deselected would exit 5 (no tests ran) and fail the check, so one passed test runs
+    again rather than that. Past `DESELECT_LIMIT_BYTES` the rest are left to run.
     """
-    found = plain_pytest_step(command) if test_ids else None
+    found = plain_pytest_step(command) if len(test_ids) > 1 else None
     if found is None:
         return command, []
     steps, index = found
     used: list[str] = []
     size = 0
-    for test_id in test_ids:
+    for test_id in test_ids[:-1]:
         argument = shlex.quote(f"--deselect={test_id}")
         if size + len(argument) + 1 > DESELECT_LIMIT_BYTES:
             break

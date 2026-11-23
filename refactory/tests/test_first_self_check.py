@@ -894,11 +894,11 @@ def test_combined_sendback_carries_check_failures_and_review_findings(tmp_path, 
 # ── the check is the person's contract: && short-circuits ─────────────────────
 
 
-def test_the_check_command_runs_exactly_as_written(tmp_path, monkeypatch):
-    """``a && b`` is one command and goes to the shell whole: a failed build stops the
-    check and ``b`` never runs.  Splitting it would run ``b`` after the failed build and
-    report failures the change did not cause, which is why the check is the person's
-    contract and is not rewritten."""
+def test_the_check_command_runs_once_with_the_shells_own_status(tmp_path, monkeypatch):
+    """``a && b`` runs once, step by step from the start (`base_check.run_chain`): each step
+    exactly as written, in one shell, and the run exits with the chain's own status, so a
+    failed first step still fails the check. The later step runs too, so its result is
+    known without a second run (the owner's decision A)."""
     broken = SandboxResult(ok=False, returncode=1, elapsed_s=0.1,
                            stdout="FAILED tests/test_pin.py::test_pin\n1 failed\n")
     real = repo_change.run_check
@@ -920,8 +920,10 @@ def test_the_check_command_runs_exactly_as_written(tmp_path, monkeypatch):
                              monkeypatch)
     assert code == 0 and T._label(out) == "proceed", err
     _check_node(run, monkeypatch)
-    # One call, the person's exact command: no generated script, no second segment.
-    assert beside_seen == [two_steps], f"the check was rewritten: {beside_seen}"
+    # One call: the marker script that runs the person's steps as written.
+    [script] = beside_seen
+    assert "\ncd tests\n" in script and "\npython -m pytest -q\n" in script
+    assert script.rstrip().endswith('exit "$__refactory_status"')
 
 
 # ── correction 3 and dm-270: what the builder is told ─────────────────────────

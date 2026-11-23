@@ -1992,7 +1992,7 @@ def test_a_real_pytest_chunk_records_its_tests_seconds_from_junit_outside_the_wo
     assert timing["durations"][0]["seconds"] >= 0
     [command] = [command for command in sent if "pytest" in command]
     assert command.startswith(record["commands"][0] + " --junitxml=")
-    junit = Path(command.split("--junitxml=", 1)[1])
+    junit = Path(command.split("--junitxml=", 1)[1].split()[0])
     found = worktree.recorded(run)
     assert junit.is_absolute() and not junit.exists()
     assert not junit.resolve().is_relative_to(Path(found.path).resolve())
@@ -2006,7 +2006,9 @@ def test_a_real_pytest_chunk_records_its_tests_seconds_from_junit_outside_the_wo
 
     failfast.targeted_prepass({}, "python -m pytest -q tests && python tools/lint.py", run_fn, 180,
                               root=str(repo), selection=["tests/test_pin.py"], self_check_timeout_s=60)
-    assert several == ["python -m pytest -q tests/test_pin.py && python tools/lint.py"]
+    # No --junitxml; only the pytest step prints a line per test (`failfast._with_test_lines`).
+    assert several == ["python -m pytest -q tests/test_pin.py -o verbosity_test_cases=1 "
+                       "&& python tools/lint.py"]
 
 
 def test_two_consecutive_empty_diff_fixups_with_fixups_1_exhausts(tmp_path, monkeypatch):

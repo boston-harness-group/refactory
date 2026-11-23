@@ -234,8 +234,9 @@ def _chunk_report(result: Any, inherited: set[str]) -> tuple[set[str], str]:
 #: ``[gw0] [ 50%] PASSED tests/test_a.py::test_x``.
 _OUTCOMES = "PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS"
 _VERBOSE_LINE = re.compile(
-    rf"^(?:\[(?P<worker>gw\d+)\]\s+\[\s*\d+%\]\s+(?P<xout>{_OUTCOMES})\s+(?P<xid>\S+::.*?\S)"
-    rf"|(?P<id>\S+::.*?\S)\s+(?P<out>{_OUTCOMES})(?:\s+\[\s*\d+%\])?)\s*$", re.MULTILINE)
+    rf"^(?:\[(?P<worker>gw\d+)\][ \t]+\[[ \t]*\d+%\][ \t]+(?P<xout>{_OUTCOMES})[ \t]+"
+    rf"(?P<xid>\S+::.*?\S)|(?P<id>\S+::.*?\S)[ \t]+(?P<out>{_OUTCOMES})"
+    rf"(?:[ \t]+\[[ \t]*\d+%\])?)[ \t]*$", re.MULTILINE)
 
 
 def _verbosity(command: str) -> int | None:
@@ -274,10 +275,15 @@ def _at_verbosity(command: str, target: int) -> str:
 
 
 def _with_test_lines(command: str) -> str:
-    """``command``, a single pytest invocation, made to print one line per test it runs
-    (verbosity at least 1), so what it reported survives a run stopped part way."""
+    """``command``, a single pytest invocation, made to print one line per test it runs,
+    so what it reported survives a run stopped part way. Only the test lines change
+    (pytest's ``verbosity_test_cases``): the rest of its output, which the builder reads,
+    stays at the command's own verbosity. A pytest that does not know the option warns
+    and prints no lines, and then no pass is kept."""
     level = _verbosity(command)
-    return command if level is None or level >= 1 else _at_verbosity(command, 1)
+    if level is None or level >= 1 or "verbosity_test_cases" in command:
+        return command
+    return f"{command} -o verbosity_test_cases=1"
 
 
 def _with_chunk_lines(command: str) -> tuple[str, bool]:
@@ -490,11 +496,11 @@ def _self_check(
         actual_command = command
         # One line per test, so what passed is known by id -- also from a chunk the limit
         # stops part way, whose junit file is never written.
-        actual_command, pytest_lines = _with_chunk_lines(command)
         if _is_single_pytest_command(command):
             fd, junit_path = tempfile.mkstemp(suffix=".xml", prefix=f"refactory-chunk-{number}-")
             os.close(fd)
-            actual_command = f"{actual_command} --junitxml={junit_path}"
+            actual_command = f"{command} --junitxml={junit_path}"
+        actual_command, pytest_lines = _with_chunk_lines(actual_command)
         began = time.monotonic()
         result = run_check_fn(actual_command, remaining)
         last = result
@@ -535,7 +541,7 @@ def _self_check(
             for later in queue:
                 cut.extend(later)
             notes.append(f"chunk {number} of {of} was stopped at the "
-                         f"{limit_s:.0f} s limit, so the rest of it and the rest did not report"
+                         f"{limit_s:.0f} s limit, so it and the rest did not report"
                          + (f"; {len(kept)} test(s) it reported before then are kept"
                             if kept else ""))
             break

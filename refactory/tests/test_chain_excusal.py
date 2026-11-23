@@ -651,9 +651,11 @@ def test_runner_step_failing_without_naming_a_test(tmp_path, base_integ, excused
 
 
 def test_marker_run_leaves_no_files_in_the_run_worktree(tmp_path):
-    """H3: the attempt's steps run in its check copy, as its check beside the reviews does."""
+    """H3: the attempt's check beside the reviews runs its steps in its check copy."""
     run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
-    filtered = _check(run, "pytest unit && touch made_by_marker")
+    command = "pytest unit && touch made_by_marker"
+    result = repo_change.run_check(run.ctx, command, 60, beside_reviews=True, per_step=True)
+    filtered = filter_check(run.ctx, result, command, 60, named_text="")
     assert filtered.all_excused
     assert not (Path(run.found.path) / "made_by_marker").exists()
     run_id = Path(run.found.path).name.removeprefix("run-")

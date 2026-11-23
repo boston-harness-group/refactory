@@ -1819,8 +1819,12 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     # with the base reads each step's result from this run.
     merged = self_check_passed(ctx, command)
     run_command, merged = base_check.with_deselected(command, merged)
-    result = repo_change.run_check(ctx, run_command, check_timeout,
-                                   beside_reviews=beside_reviews, per_step=True)
+    if beside_reviews:
+        result = repo_change.check_steps(ctx, run_command, lambda script: repo_change.run_check(
+            ctx, script, check_timeout, beside_reviews=True), beside_reviews=True)
+    else:
+        result = repo_change.check_steps(ctx, run_command, lambda script: repo_change.run_check(
+            ctx, script, check_timeout), beside_reviews=False)
     detail = "\n".join((result.problem(), result.stdout or "", result.stderr or "")).strip()
     outcome = {"command": command, "status": "pass" if result.ok else evidence.check_failure_kind(
         result, budget=getattr(ctx, "budget", None)),
