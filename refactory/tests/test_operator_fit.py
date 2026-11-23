@@ -480,7 +480,7 @@ def test_the_lead_names_what_sees_task_gives_on_this_pipeline():
 
 def test_the_loop_line_says_what_the_judge_sees_and_how_often_the_step_runs():
     line = core_ops.OPERATORS["loop"]["line"]
-    assert "The judge sees what the step read and wrote, unless 'sees' says otherwise" in line
+    assert "The judge is handed what the step read and wrote, unless 'sees' says otherwise" in line
     default = core_ops.LOOP_ITERATIONS[0]
     assert f"default {default}: up to {default + 1} runs" in line
 
