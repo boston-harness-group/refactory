@@ -2032,6 +2032,8 @@ def test_a_redo_after_main_moved_again_reruns_the_merged_check(github, tmp_path,
 
 
 # ── merge-check excusal tests (correction 6) ───────────────────────────
+#
+# The reference path itself runs on real worktrees in test_judge_paths.py.
 
 import subprocess as _sp
 from types import SimpleNamespace as _NS
@@ -2071,72 +2073,6 @@ def _merge_check_ctx(tmp_path, *, base_commit="abc123", check="pytest tests/"):
     return ctx, found, commit
 
 
-def test_merge_check_excuses_main_failures(tmp_path):
-    """_check_merged with all failures from main returns ('', False) — delivery proceeds.
-
-    Drives _check_merged with mocked sandbox.run_command and targeted_base_failures.
-    When the correction-6 hunk is reverted, this test must fail.
-    """
-    test_a = "tests/test_a.py::test_x"
-    failure_output = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
-    target_tip = "def456"
-
-    ctx, found, commit = _merge_check_ctx(tmp_path)
-    # The check fails with test_a
-    check_result = sandbox.SandboxResult(
-        ok=False, stdout=failure_output, stderr="", returncode=1)
-    # Targeted base at target_tip also has test_a
-    targeted_base = _bc.BaseCheckResult(
-        ok=False, failures={test_a}, output=failure_output, exit_code=1)
-    # Targeted attempt also has test_a
-    targeted_attempt = {test_a}
-
-    with _patch.object(sandbox, "run_command", return_value=check_result), \
-         _patch.object(_bc, "targeted_base_failures",
-                       return_value=(targeted_base, "targeted")) as tbf, \
-         _patch.object(_bc, "targeted_attempt_failures",
-                       return_value=targeted_attempt), \
-         _patch.object(worktree, "git", return_value=""), \
-         _patch("refactory_dsh.delivery.record_full_check"):
-        reason, infra = delivery._check_merged(
-            ctx, found, commit, commit, 60.0, target_tip=target_tip)
-
-    assert reason == "", f"expected empty reason, got: {reason}"
-    assert infra is False
-    # Verify targeted_base_failures was called with reference=target_tip
-    tbf.assert_called_once()
-    call_kwargs = tbf.call_args
-    assert call_kwargs[1].get("reference") == target_tip
-
-
-def test_merge_check_charges_new_failures(tmp_path):
-    """_check_merged with a genuinely new failure returns a non-empty failure string."""
-    test_a = "tests/test_a.py::test_new"
-    failure_output = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
-    target_tip = "def456"
-
-    ctx, found, commit = _merge_check_ctx(tmp_path)
-    check_result = sandbox.SandboxResult(
-        ok=False, stdout=failure_output, stderr="", returncode=1)
-    # Targeted base at target_tip does NOT have test_a (clean base)
-    targeted_base = _bc.BaseCheckResult(
-        ok=True, failures=set(), output="all passed", exit_code=0)
-    # Targeted attempt has test_a (reproduces)
-    targeted_attempt = {test_a}
-
-    with _patch.object(sandbox, "run_command", return_value=check_result), \
-         _patch.object(_bc, "targeted_base_failures",
-                       return_value=(targeted_base, "targeted")), \
-         _patch.object(_bc, "targeted_attempt_failures",
-                       return_value=targeted_attempt), \
-         _patch.object(worktree, "git", return_value=""):
-        reason, infra = delivery._check_merged(
-            ctx, found, commit, commit, 60.0, target_tip=target_tip)
-
-    assert reason != "", "new failure should not be excused"
-    assert infra is False
-
-
 def test_target_tip_carried_on_clean_merge():
     """MergeResult constructed with target_tip carries it through to the caller.
 
@@ -2150,35 +2086,6 @@ def test_target_tip_carried_on_clean_merge():
     # Without target_tip, default is empty string
     merge2 = delivery.MergeResult(merge_commit="abc123")
     assert merge2.target_tip == ""
-
-
-def test_merge_check_separate_worktree(tmp_path):
-    """targeted_base_failures is called with reference=target_tip, causing targeted
-    runs in a separate worktree with a cache key that includes target_tip."""
-    test_a = "tests/test_a.py::test_x"
-    failure_output = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
-    target_tip = "separate_ref_123"
-
-    ctx, found, commit = _merge_check_ctx(tmp_path)
-    check_result = sandbox.SandboxResult(
-        ok=False, stdout=failure_output, stderr="", returncode=1)
-    targeted_base = _bc.BaseCheckResult(
-        ok=False, failures={test_a}, output=failure_output, exit_code=1)
-
-    with _patch.object(sandbox, "run_command", return_value=check_result), \
-         _patch.object(_bc, "targeted_base_failures",
-                       return_value=(targeted_base, "targeted")) as tbf, \
-         _patch.object(_bc, "targeted_attempt_failures",
-                       return_value={test_a}), \
-         _patch.object(worktree, "git", return_value=""), \
-         _patch("refactory_dsh.delivery.record_full_check"):
-        delivery._check_merged(
-            ctx, found, commit, commit, 60.0, target_tip=target_tip)
-
-    # Verify targeted_base_failures was called with reference=target_tip
-    tbf.assert_called_once()
-    _, kwargs = tbf.call_args
-    assert kwargs.get("reference") == target_tip
 
 
 def test_merge_check_reuses_inrun_base(tmp_path):

@@ -8,12 +8,13 @@ to the comparison; the real tests run the chain in a shell, and the end-to-end o
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -295,10 +296,21 @@ def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_step
     attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
     found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
                             target=str(tmp_path / "target"))
-    with patch.object(base_check, "run_base_check", return_value=base), \
-         patch.object(base_check, "_run_chain_markers", return_value=attempt_steps), \
-         patch.object(base_check.worktree, "recorded", return_value=found), \
-         patch.object(base_check, "_all_changed_files", return_value=[]):
+    with contextlib.ExitStack() as stack:
+        if not isinstance(base_check.targeted_attempt_failures, Mock):
+            # No targeted run here: a failure the base never had reproduces on the
+            # attempt and passes on the base, unless the test says otherwise.
+            stack.enter_context(patch.object(base_check, "targeted_attempt_failures",
+                                             side_effect=lambda ctx, cmd, ids, **kw: set(ids)))
+            stack.enter_context(patch.object(
+                base_check, "targeted_base_failures",
+                return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0),
+                              "test")))
+        stack.enter_context(patch.object(base_check, "run_base_check", return_value=base))
+        stack.enter_context(patch.object(base_check, "_run_chain_markers",
+                                         return_value=attempt_steps))
+        stack.enter_context(patch.object(base_check.worktree, "recorded", return_value=found))
+        stack.enter_context(patch.object(base_check, "_all_changed_files", return_value=[]))
         return filter_check(ctx, attempt, command, 60.0)
 
 
@@ -474,14 +486,23 @@ def test_base_with_unreadable_steps_charges(tmp_path):
 
 
 #: A pytest stand-in, on the check's PATH through the worktree's ``node_modules/.bin``
-#: (`worktree.check_environment`). ``results/<suite>.txt`` names the tests that fail;
+#: (`worktree.check_environment`). ``results/<suite>.txt`` names the tests that fail (a
+#: targeted run of an id or a file fails what a suite on its side names);
 #: ``@notests`` collects nothing (exit 5), ``@unaccounted`` counts one failure more than
 #: it names, ``@spam N`` prints N lines of noise. Every call is logged with its directory.
 _FAKE_PYTEST = """#!/bin/sh
 echo "$PWD $1" >> "{log}"
 f="results/$1.txt"
 names=""; mode=""
-if [ -f "$f" ]; then names=$(grep -v '^@' "$f"); mode=$(grep '^@' "$f" | head -n 1); fi
+if [ -f "$f" ]; then names=$(grep -v '^@' "$f"); mode=$(grep '^@' "$f" | head -n 1)
+else
+  # A targeted run (a test id, or a test file run whole): the ids it names that a suite
+  # on this side fails.
+  for r in results/*.txt; do
+    [ -f "$r" ] || continue
+    names="$names $(grep -v '^@' "$r" | grep -F -x -e "$1"; grep -v '^@' "$r" | grep -F -e "$1::")"
+  done
+fi
 n=0
 for t in $names; do echo "FAILED $t - assert False"; n=$((n + 1)); done
 case "$mode" in
