@@ -197,6 +197,7 @@
     "review_pack": "core",
     "livemath": "core",
     "spreadsheetbench": "core",
+    "spreadsheetbench_v2": "core",
     "skillopt": "core",
     "sympy_pack": "core"
   },
