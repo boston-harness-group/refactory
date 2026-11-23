@@ -781,3 +781,122 @@ def test_source_and_exec_take_the_whole_command_path(tmp_path, command):
     assert filtered.all_excused
     run_id = Path(run.found.path).name.removeprefix("run-")
     assert not repo_change._check_copy_path(Path(run.found.target), run_id).exists()
+
+
+# ── d16 scenario: flaky base failure through filter_check (correction 1) ──
+
+
+def test_d16_flaky_base_excused(tmp_path):
+    """d16 scenario: base has {test_a, test_b}, attempt has {test_a, test_b}, per-step
+    re-run of the attempt produces only {test_b} (test_a is flaky). Assert test_a is
+    excused, not charged.
+
+    Drives filter_check with recorded step records and mocked run_base_check
+    to prove the inverted _per_step_comparison keeps first-pass excusals even when
+    the flaky test passes on the per-step re-run.
+    """
+    test_a = "tests/test_a.py::test_flaky"
+    test_b = "tests/test_a.py::test_stable"
+    base_failures = {test_a, test_b}
+    # Base step records: both tests fail in step "pytest tests/"
+    base_step_records = _recs(
+        ("pytest tests/", "", 1, _pytest_out([test_a, test_b])),
+    )
+    # Attempt step records (the re-run): test_a is flaky and passes, only test_b fails
+    attempt_step_records = _recs(
+        ("pytest tests/", "", 1, _pytest_out([test_b])),
+    )
+    # Attempt's original output has both failures
+    attempt_out = _pytest_out([test_a, test_b])
+
+    filtered = _scenario(tmp_path, "pytest tests/", base_step_records, attempt_step_records,
+                         attempt_out)
+    # test_a is excused (the d16 fix): it was in the base's failures
+    # and passed in the per-step re-run — stays excused via inverted logic.
+    assert test_a in filtered.inherited
+    assert test_a not in filtered.new_failures
+    # test_b is also excused (same step, same failure on both sides)
+    assert test_b in filtered.inherited
+    assert filtered.all_excused
+
+
+def test_per_step_excused_when_all_base_failures(tmp_path):
+    """When all attempt failures are in the base, the per-step comparison still
+    correctly excuses them — the inverted logic ensures first-pass excusals are
+    never revoked by the re-run results."""
+    base = BaseCheckResult(ok=False, failures={S}, output="", exit_code=1)
+    base._base_complete = True  # type: ignore[attr-defined]
+    base._step_results = _recs(("tok.sh", "", 0, ""), ("pytest tests/", "&&", 1, _pytest_out([S])))  # type: ignore[attr-defined]
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt_out = _pytest_out([S])
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check, "_run_chain_markers",
+                      return_value=_recs(("tok.sh", "", 0, ""), ("pytest tests/", "&&", 1, _pytest_out([S])))), \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]), \
+         patch.object(base_check, "_attempt_marker_run",
+                      return_value=(lambda script: sandbox.run_command(
+                          script, workdir=tmp_path, timeout_s=60), lambda *a: {})):
+        filtered = filter_check(ctx, attempt, "tok.sh && pytest tests/", 60.0)
+    assert filtered.all_excused
+    assert S in filtered.inherited
+
+
+def test_mixed_chain_still_reruns(tmp_path):
+    """A chain with both excused and new failures still triggers the per-step re-run."""
+    test_excused = "tests/test_a.py::test_base_fail"
+    test_new = "tests/test_a.py::test_new_fail"
+    base_failures = {test_excused}  # only test_excused in base
+    base_step_records = _recs(
+        ("pytest tests/", "", 1, _pytest_out([test_excused])),
+    )
+    # Attempt re-run finds both failures in its step
+    attempt_step_records = _recs(
+        ("pytest tests/", "", 1, _pytest_out([test_excused, test_new])),
+    )
+    attempt_out = _pytest_out([test_excused, test_new])
+
+    # Need to also mock targeted confirmation for the per-step-new failure
+    with patch.object(base_check, "targeted_attempt_failures",
+                      return_value={test_new}) as t_attempt, \
+         patch.object(base_check, "targeted_base_failures",
+                      return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")) as t_base:
+        filtered = _scenario(tmp_path, "pytest tests/", base_step_records,
+                             attempt_step_records, attempt_out)
+    assert test_excused in filtered.inherited
+    # test_new was confirmed by targeted runs (attempt=fail, base=pass) → charged
+    assert test_new in filtered.new_failures
+
+
+def test_per_step_only_failures_targeted(tmp_path):
+    """Failures found only in the per-step re-run go through targeted confirmation
+    (attempt + base) before being charged."""
+    test_base = "tests/test_a.py::test_base"
+    test_per_step_only = "tests/test_b.py::test_per_step"
+    base_step_records = _recs(
+        ("pytest tests/test_a.py", "", 1, _pytest_out([test_base])),
+        ("pytest tests/test_b.py", "&&", 0, "3 passed in 0.1s"),
+    )
+    # Attempt re-run: test_a passes (flaky), test_b fails (new, per-step-only)
+    attempt_step_records = _recs(
+        ("pytest tests/test_a.py", "", 0, "3 passed in 0.1s"),
+        ("pytest tests/test_b.py", "&&", 1, _pytest_out([test_per_step_only])),
+    )
+    # Original attempt output had only test_base
+    attempt_out = _pytest_out([test_base])
+
+    # Mock targeted to show test_per_step_only fails on attempt, passes on base → charged
+    with patch.object(base_check, "targeted_attempt_failures",
+                      return_value={test_per_step_only}), \
+         patch.object(base_check, "targeted_base_failures",
+                      return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")):
+        filtered = _scenario(tmp_path, "pytest tests/test_a.py && pytest tests/test_b.py",
+                             base_step_records, attempt_step_records, attempt_out)
+    # test_base is excused (in base, flaky in re-run → still excused by d16 fix)
+    assert test_base in filtered.inherited
+    # test_per_step_only was confirmed new by targeted runs → charged
+    assert test_per_step_only in filtered.new_failures

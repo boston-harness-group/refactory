@@ -1505,11 +1505,18 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         # not as failure-free.  Applied AFTER the per-step re-run.
         if not check_result.ok and not result.failures:
             if check_result.timed_out:
-                env_msg = (f"the base check was stopped at its time limit "
-                           f"(exit {check_result.returncode})")
-                result.environment_failure = env_msg
-            # Don't cache d4b-shaped entries: ok=false, no failures, no env.
-            # The _read_cache guard rejects them too, but not writing is cleaner.
+                result.environment_failure = (
+                    f"the base check was stopped at its time limit "
+                    f"(exit {check_result.returncode})")
+            elif _runner(command) or _runner_from_output(output):
+                # The check command names or produced output from a test runner
+                # (pytest/vitest/etc.) but named no failures: environment refusal
+                # (canary-repair case — credentials guard, etc.).
+                result.environment_failure = (
+                    f"the base check exited {check_result.returncode} "
+                    "without naming a failing test")
+            # Not cached at all — neither as clean nor as environment failure
+            # (correction 2).  The _read_cache guard rejects existing entries.
             return result, False  # not a crash, but not cached either
 
         return result, False
@@ -1746,9 +1753,10 @@ def targeted_attempt_failures(ctx: Any, command: str, test_ids: list[str], *,
         return None
     output = "\n".join((result.stdout or "", result.stderr or "")).strip()
     if not result.ok:
-        # Non-zero exit: some tests might not have run (a collection error
-        # stops pytest before later tests).  Return None so the judge treats
-        # the confirmation as inconclusive and charges the failure.
+        # Exit code 1 means test failures — parse which tests failed vs passed.
+        # Exit code 2+ means collection errors, interrupts — inconclusive.
+        if (result.returncode or 0) == 1:
+            return self_check_failures(output)
         return None
     return self_check_failures(output)
 
@@ -3350,9 +3358,11 @@ def filter_check(
     base_sigs = extract_failure_signatures(base_result.output, base_result.failures) if base_result.failures else None
 
     # First-pass comparison: judge with whole-run base observations only.
+    # changed_files is passed in both fast and design mode so the signature
+    # check for touched test files (correction 3) fires in every mode.
     judge_kwargs: dict[str, Any] = dict(
         named_text=named_text,
-        changed_files=changed_files if named_text is None else None,
+        changed_files=changed_files,
         brief_text=brief_text if named_text is None else "",
         design_text=design_text if named_text is None else "",
         attempt_signatures=attempt_sigs,
@@ -3362,13 +3372,13 @@ def filter_check(
 
     # Targeted confirmation (correction 1): run new failures targeted on
     # both the attempt and the base, then re-judge with that information.
-    # Only needed when the base also failed — if the base passed, every
-    # attempt failure IS new, and there is no base observation to compare
-    # with. Targeted runs are expensive subprocess calls.
+    # Even when the base passed, a flaky test that passes on the attempt
+    # re-run is excused with "not-reproduced" (brief: "A failure that does
+    # not reproduce in a re-run is never charged by default").
     new_from_first = set(first_jr.charged)
     targeted_base_set: set[str] | None = None
     targeted_attempt_set: set[str] | None = None
-    if new_from_first and not base_result.ok:
+    if new_from_first:
         ids_to_confirm = sorted(new_from_first)
         try:
             targeted_attempt_set = targeted_attempt_failures(

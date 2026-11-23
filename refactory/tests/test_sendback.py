@@ -134,3 +134,127 @@ def test_summary_lines_extracted():
     """The final summary line is extracted."""
     lines = _extract_summary_lines(ATTEMPT_OUTPUT)
     assert any("2 failed" in l for l in lines)
+
+
+# ── integration tests: positive selection through filter_check ──────────
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from refactory_dsh import base_check, sandbox
+from refactory_dsh.base_check import BaseCheckResult, filter_check
+
+
+def _make_attempt_output(charged_ids, excused_ids):
+    """Build a pytest output with failures and tracebacks."""
+    all_ids = sorted(charged_ids | excused_ids)
+    failure_blocks = []
+    for tid in all_ids:
+        short_name = tid.split("::")[-1]
+        failure_blocks.append(
+            f"___________________________ {short_name} ___________________________\n"
+            f"tests/test_a.py:10: in {short_name}\n"
+            f"    assert False\n"
+            f"E   AssertionError: {short_name} failed\n"
+        )
+    failed_lines = [f"FAILED {tid} - AssertionError" for tid in all_ids]
+    summary = f"= {len(all_ids)} failed in 0.1s ="
+    return (
+        "=========================== FAILURES ===========================\n"
+        + "\n".join(failure_blocks)
+        + "\n=========================== short test summary info ===========================\n"
+        + "\n".join(failed_lines) + "\n"
+        + summary + "\n"
+    )
+
+
+def test_filter_check_positive_selection_integration(tmp_path):
+    """Drives filter_check to verify positive-selection detail building
+    for correction 4: the builder sees only charged failures.
+
+    When the correction-4 hunk (the _build_positive_detail call) is reverted,
+    this test must fail.
+    """
+    charged_id = "tests/test_a.py::test_new"
+    excused_id = "tests/test_a.py::test_base"
+    attempt_out = _make_attempt_output({charged_id}, {excused_id})
+
+    base = BaseCheckResult(
+        ok=False, failures={excused_id}, output="", exit_code=1)
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
+    # Mock targeted to confirm charged_id: attempt=fail, base=pass → charged
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]), \
+         patch.object(base_check, "targeted_attempt_failures",
+                      return_value={charged_id}), \
+         patch.object(base_check, "targeted_base_failures",
+                      return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")):
+        filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    assert charged_id in filtered.new_failures
+    assert excused_id in filtered.inherited
+    detail = filtered.new_failure_detail
+    # Charged test's FAILED line and block must be present
+    assert "test_new" in detail
+    assert "FAILED tests/test_a.py::test_new" in detail
+    # Excused test's FAILURES block must NOT be present
+    assert "test_base failed" not in detail
+    # Excused listing line must be present
+    assert "Excused (not charged)" in detail
+    assert "test_base" in detail
+    # No fallback to full output
+    assert "=========================== FAILURES ===========================" not in detail or detail.count("FAILURES") <= 2
+
+
+def test_filter_check_no_fallback_integration(tmp_path):
+    """When all failures are excused, the detail says 'no charged failure detail found',
+    not the full output."""
+    excused_id = "tests/test_a.py::test_base"
+    attempt_out = _make_attempt_output(set(), {excused_id})
+
+    base = BaseCheckResult(
+        ok=False, failures={excused_id}, output="", exit_code=1)
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]):
+        filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    assert filtered.all_excused
+    assert "no charged failure detail found" in filtered.new_failure_detail
+
+
+def test_filter_check_verdict_has_reasons(tmp_path):
+    """check-verdict.json reasons show charged and excused IDs separately."""
+    charged_id = "tests/test_a.py::test_new"
+    excused_id = "tests/test_a.py::test_base"
+    attempt_out = _make_attempt_output({charged_id}, {excused_id})
+
+    base = BaseCheckResult(
+        ok=False, failures={excused_id}, output="", exit_code=1)
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]), \
+         patch.object(base_check, "targeted_attempt_failures",
+                      return_value={charged_id}), \
+         patch.object(base_check, "targeted_base_failures",
+                      return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")):
+        filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    assert filtered.reasons is not None
+    assert filtered.reasons[excused_id] == "base-whole-run"
+    assert filtered.reasons[charged_id] == "new-failure"

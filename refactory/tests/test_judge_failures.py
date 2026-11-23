@@ -453,3 +453,273 @@ def test_positive_detail_no_fallback():
     result = _build_positive_detail("full output here", set(), {"test_a"}, {"test_a": "base-whole-run"})
     assert result == "no charged failure detail found"
     assert "full output here" not in result
+
+
+# ── mutation tests for filter_check integration ─────────────────────────
+
+
+def test_mutation_filter_check_targeted_confirmation():
+    """Without the targeted confirmation hunk in filter_check, a not-reproduced
+    failure would be charged instead of excused.
+
+    This test drives filter_check (not judge_failures directly) to verify the
+    integration between filter_check and targeted_attempt_failures is wired
+    correctly. When the targeted confirmation hunk (lines ~3381-3402) is
+    reverted, this test must fail.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import tempfile
+    from pathlib import Path
+    from refactory_dsh import base_check, sandbox
+    from refactory_dsh.base_check import BaseCheckResult, filter_check
+
+    test_a = "tests/test_a.py::test_flaky"
+    attempt_out = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
+    base = BaseCheckResult(ok=True, failures=set(), output="all passed", exit_code=0)
+
+    with tempfile.TemporaryDirectory() as td:
+        ctx = SimpleNamespace(workdir=Path(td), facts={}, exists=lambda n: False,
+                              read_text=lambda n: "", budget=None)
+        attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+        found = SimpleNamespace(path=str(Path(td) / "run-x"), base="abc", head="def",
+                                target=str(Path(td) / "target"))
+        # targeted_attempt_failures returns empty set → test passed on re-run → not-reproduced
+        with patch.object(base_check, "run_base_check", return_value=base), \
+             patch.object(base_check.worktree, "recorded", return_value=found), \
+             patch.object(base_check, "_all_changed_files", return_value=[]), \
+             patch.object(base_check, "targeted_attempt_failures",
+                          return_value=set()), \
+             patch.object(base_check, "targeted_base_failures",
+                          return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")):
+            filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    # With correction 1: test_a should be excused as not-reproduced
+    assert test_a in filtered.inherited, f"not-reproduced should be excused; got {filtered}"
+    assert test_a not in filtered.new_failures
+    assert filtered.reasons[test_a] == "not-reproduced"
+
+
+def test_mutation_filter_check_base_unavailable_fallback():
+    """Without the base-unavailable targeted fallback hunk in filter_check, a base
+    with environment_failure would not fall back to targeted base runs.
+
+    When the base-unavailable fallback hunk (lines ~3301-3338) is reverted,
+    this test must fail.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import tempfile
+    from pathlib import Path
+    from refactory_dsh import base_check, sandbox
+    from refactory_dsh.base_check import BaseCheckResult, filter_check
+
+    test_a = "tests/test_a.py::test_x"
+    attempt_out = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
+    # Base has environment_failure (canary-repair)
+    canary_base = BaseCheckResult(
+        ok=False, failures=set(), output="credentials guard",
+        exit_code=1, environment_failure="the base check exited 1 without naming a failing test",
+    )
+    # Targeted base has the same failure → excused
+    targeted_base = BaseCheckResult(
+        ok=False, failures={test_a}, output="FAILED tests/test_a.py::test_x", exit_code=1)
+
+    with tempfile.TemporaryDirectory() as td:
+        ctx = SimpleNamespace(workdir=Path(td), facts={}, exists=lambda n: False,
+                              read_text=lambda n: "", budget=None)
+        attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+        found = SimpleNamespace(path=str(Path(td) / "run-x"), base="abc", head="def",
+                                target=str(Path(td) / "target"))
+        with patch.object(base_check, "run_base_check", return_value=canary_base), \
+             patch.object(base_check.worktree, "recorded", return_value=found), \
+             patch.object(base_check, "_all_changed_files", return_value=[]), \
+             patch.object(base_check, "targeted_base_failures",
+                          return_value=(targeted_base, "targeted")), \
+             patch.object(base_check, "targeted_attempt_failures",
+                          return_value={test_a}):
+            filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    # With correction 2 fallback: test_a should be excused (found in targeted base)
+    assert filtered.all_excused, f"should be all_excused; got {filtered}"
+    assert test_a in filtered.inherited
+
+
+def test_mutation_filter_check_positive_selection():
+    """Without the positive-selection hunk in filter_check, the send-back detail
+    would include excused failures or fall back to the whole output.
+
+    When the _build_positive_detail call (lines ~3453-3456) is reverted,
+    this test must fail.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import tempfile
+    from pathlib import Path
+    from refactory_dsh import base_check, sandbox
+    from refactory_dsh.base_check import BaseCheckResult, filter_check
+
+    charged_id = "tests/test_a.py::test_new"
+    excused_id = "tests/test_a.py::test_base"
+    attempt_out = (
+        "=========================== FAILURES ===========================\n"
+        "___________________________ test_new ___________________________\n"
+        "tests/test_a.py:10: in test_new\n"
+        "    assert False\n"
+        "E   AssertionError: test_new failed\n"
+        "\n"
+        "___________________________ test_base ___________________________\n"
+        "tests/test_a.py:20: in test_base\n"
+        "    assert False\n"
+        "E   AssertionError: test_base failed\n"
+        "\n"
+        "=========================== short test summary info ===========================\n"
+        f"FAILED {charged_id} - AssertionError\n"
+        f"FAILED {excused_id} - AssertionError\n"
+        "= 2 failed in 0.1s =\n"
+    )
+    base = BaseCheckResult(ok=False, failures={excused_id}, output="", exit_code=1)
+
+    with tempfile.TemporaryDirectory() as td:
+        ctx = SimpleNamespace(workdir=Path(td), facts={}, exists=lambda n: False,
+                              read_text=lambda n: "", budget=None)
+        attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+        found = SimpleNamespace(path=str(Path(td) / "run-x"), base="abc", head="def",
+                                target=str(Path(td) / "target"))
+        with patch.object(base_check, "run_base_check", return_value=base), \
+             patch.object(base_check.worktree, "recorded", return_value=found), \
+             patch.object(base_check, "_all_changed_files", return_value=[]), \
+             patch.object(base_check, "targeted_attempt_failures",
+                          return_value={charged_id}), \
+             patch.object(base_check, "targeted_base_failures",
+                          return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0), "cache")):
+            filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    # Positive selection: excused block content not in detail
+    assert "test_base failed" not in filtered.new_failure_detail
+    # Excused listing line present
+    assert "Excused (not charged)" in filtered.new_failure_detail
+    # Charged test present
+    assert "test_new" in filtered.new_failure_detail
+
+
+def test_mutation_d16_per_step_inversion():
+    """Without the d16 fix (per-step inversion at base_check.py:3071-3074),
+    a flaky base failure that passes on the per-step re-run would be charged.
+
+    When the `if not steps_with: excused.add(failure)` branch is reverted,
+    this test must fail.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import tempfile
+    from pathlib import Path
+    from refactory_dsh import base_check, sandbox
+    from refactory_dsh.base_check import BaseCheckResult, filter_check
+
+    test_flaky = "tests/test_a.py::test_flaky"
+    test_stable = "tests/test_a.py::test_stable"
+    base_failures = {test_flaky, test_stable}
+
+    def _pytest_out(failures):
+        lines = [f"FAILED {f} - assert False" for f in failures]
+        lines.append(f"========== {len(failures)} failed in 0.1s ==========")
+        return "\n".join(lines) + "\n"
+
+    def _step_rec(step, op, code, out):
+        from refactory_dsh.base_check import _step_record
+        return _step_record({"step": step, "operator": op, "ran": True, "output": out, "exit_code": code})
+
+    # Base step records: both tests fail
+    base_step_records = [_step_rec("pytest tests/", "", 1, _pytest_out([test_flaky, test_stable]))]
+    # Attempt re-run: only test_stable fails (test_flaky is flaky, passes)
+    attempt_step_records = [_step_rec("pytest tests/", "", 1, _pytest_out([test_stable]))]
+
+    attempt_out = _pytest_out([test_flaky, test_stable])
+    base = BaseCheckResult(ok=False, failures=base_failures, output="", exit_code=1)
+    base._base_complete = True
+    base._step_results = base_step_records
+
+    with tempfile.TemporaryDirectory() as td:
+        ctx = SimpleNamespace(workdir=Path(td), facts={}, exists=lambda n: False,
+                              read_text=lambda n: "", budget=None)
+        attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+        found = SimpleNamespace(path=str(Path(td) / "run-x"), base="abc", head="def",
+                                target=str(Path(td) / "target"))
+        with patch.object(base_check, "run_base_check", return_value=base), \
+             patch.object(base_check, "_run_chain_markers", return_value=attempt_step_records), \
+             patch.object(base_check.worktree, "recorded", return_value=found), \
+             patch.object(base_check, "_all_changed_files", return_value=[]), \
+             patch.object(base_check, "_attempt_marker_run",
+                          return_value=(lambda s: None, lambda *a: {})):
+            filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+
+    # test_flaky should be excused (the d16 fix): it was in the base's
+    # failures and passed on the per-step re-run → stays excused
+    assert test_flaky in filtered.inherited, (
+        f"d16 fix: flaky base failure should be excused; got inherited={filtered.inherited}"
+    )
+    assert test_flaky not in filtered.new_failures
+
+
+def test_mutation_delivery_merge_excusal():
+    """Without the delivery merge-check excusal hunk (delivery.py:1823-1863),
+    all failures on the merge check would be charged, blocking delivery.
+
+    When the judge_failures excusal hunk in _check_merged is reverted,
+    this test must fail.
+    """
+    from types import SimpleNamespace as NS
+    from unittest.mock import patch
+    import tempfile
+    from pathlib import Path
+    from refactory_dsh import base_check, sandbox, delivery, worktree
+
+    test_a = "tests/test_a.py::test_x"
+    failure_output = f"FAILED {test_a} - assert False\n= 1 failed in 0.1s =\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        run = td_path / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        repo = td_path / "repo"
+        repo.mkdir()
+        import subprocess
+        subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True, capture_output=True)
+        (repo / "tool.py").write_text("print('ok')\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True, capture_output=True)
+        commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+
+        ctx = NS(workdir=run, facts={"check": "pytest tests/", "setup": "", "generate": ""}, budget=None)
+        ctx.knob = lambda n, d=None: d
+        ctx.exists = lambda n: (run / n).exists()
+        ctx.read_text = lambda n: (run / n).read_text()
+        ctx.set_fact = lambda n, v: ctx.facts.__setitem__(n, v)
+        ctx.write_text = lambda n, t: (run / n).write_text(t) or (run / n)
+
+        found = worktree.Worktree(
+            path=str(repo), branch="main", base="base123",
+            head=commit, target=str(repo), run=str(run),
+        )
+
+        check_result = sandbox.SandboxResult(
+            ok=False, stdout=failure_output, stderr="", returncode=1)
+        targeted_base = base_check.BaseCheckResult(
+            ok=False, failures={test_a}, output=failure_output, exit_code=1)
+
+        with patch.object(sandbox, "run_command", return_value=check_result), \
+             patch.object(base_check, "targeted_base_failures",
+                          return_value=(targeted_base, "targeted")), \
+             patch.object(base_check, "targeted_attempt_failures",
+                          return_value={test_a}), \
+             patch.object(worktree, "git", return_value=""), \
+             patch("refactory_dsh.delivery.record_full_check"):
+            reason, infra = delivery._check_merged(
+                ctx, found, commit, commit, 60.0, target_tip="target_tip_123")
+
+        # With correction 6: all failures from target_tip are excused
+        assert reason == "", f"expected excused; got: {reason}"
