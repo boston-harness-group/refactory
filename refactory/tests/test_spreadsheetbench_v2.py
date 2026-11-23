@@ -896,7 +896,6 @@ def test_the_health_check_after_a_failure_is_fresh(tmp_path, sb2_data, monkeypat
         task.grade(item, pred)
 
 
-
 def _fake_office(tmp_path, monkeypatch, *, bundled: bool):
     """A LibreOffice stand-in whose ``python`` records how it was started (argv, PYTHON*
     variables) and copies the helper's input to its output."""
