@@ -180,16 +180,16 @@ FLAKY_ID = "tests/test_flaky.py::test_flaky"
 
 
 def test_a_per_step_only_failure_that_does_not_reproduce_is_excused(tmp_path):
-    """``pytest old && pytest flaky``: the check stops at the pre-existing failure; the
-    attempt's per-step re-run reaches test_flaky, which fails once and then passes.
-    Only the per-step re-run found it, so it goes through targeted confirmation and is
-    excused as not reproduced."""
+    """``pytest old && pytest flaky``: the pre-existing failure would stop the chain; run
+    step by step from the start, the check also reaches test_flaky, which fails once and
+    then passes. It goes through targeted confirmation and is excused as not reproduced."""
     repo, base = _target(tmp_path, {"tests/test_old.py": TEST_OLD,
                                     "tests/test_flaky.py": FLAKY})
     command = f"{PYTEST} tests/test_old.py && {PYTEST} tests/test_flaky.py"
     ctx, _ = _run(tmp_path, repo, base, {"flaky_on": "1\n"}, check=command)
-    result = repo_change.run_check(ctx, command, 120)
-    assert not result.ok and parse_test_failures(result.stdout) == {OLD}
+    result = repo_change.run_check(ctx, command, 120, beside_reviews=True, per_step=True)
+    assert not result.ok and parse_test_failures(result.stdout) == {OLD, FLAKY_ID}
+    assert [step["exit_code"] for step in result.step_results] == [1, 1]
     filtered = filter_check(ctx, result, command, 120, named_text="")
     assert filtered.reasons[FLAKY_ID] == "not-reproduced", filtered.reasons
     assert filtered.all_excused and {OLD, FLAKY_ID} <= filtered.inherited
@@ -208,7 +208,7 @@ def test_the_per_step_detail_shows_no_excused_failure(tmp_path):
                                     "tests/test_integ.py": integ, "app.py": "VALUE = 1\n"})
     command = f"{PYTEST} tests/test_old.py && {PYTEST} tests/test_integ.py"
     ctx, _ = _run(tmp_path, repo, base, {"app.py": "VALUE = 2\n"}, check=command)
-    result = repo_change.run_check(ctx, command, 120)
+    result = repo_change.run_check(ctx, command, 120, per_step=True)
     filtered = filter_check(ctx, result, command, 120, named_text="")
     assert N_ID in filtered.new_failures and M_ID in filtered.inherited
     detail = filtered.new_failure_detail
@@ -358,9 +358,9 @@ def test_the_merged_check_excuses_what_the_prepared_reference_fails(tmp_path):
 
 
 def test_the_merged_check_charges_a_skipped_step(tmp_path):
-    """``pytest old && pytest new``: step one's failure is the reference's too, but the
-    step after it never ran in the check -- and fails when it does. Not delivered as
-    passing."""
+    """``pytest old && pytest new``: step one's failure is the reference's too; the step
+    the shell would skip after it runs anyway, in the check's one step-by-step run, and
+    its new failure is charged. Not delivered as passing."""
     new_broken = "def test_new():\n    assert False, 'NEW-DETAIL'\n"
     ctx, found, merge, tip = _merged(
         tmp_path, {"tests/test_old.py": TEST_OLD, "tests/test_new.py": "def test_new():\n    pass\n"},
@@ -369,7 +369,7 @@ def test_the_merged_check_charges_a_skipped_step(tmp_path):
     reason, infra = delivery._check_merged(ctx, found, merge, found.head, 120, target_tip=tip)
     assert not infra and reason
     first = reason.split("\n", 1)[0]
-    assert "never ran" in first and OLD in first, first
+    assert "charged: tests/test_new.py::test_new" in first and "NEW-DETAIL" in reason, reason
     assert _git(Path(found.path), "rev-parse", "HEAD") == found.head, "reset to the reviewed commit"
 
 

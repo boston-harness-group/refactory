@@ -1294,10 +1294,24 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
     problems that stopped its preparation, and the prep-failure dict of the step that
     failed (None when it worked).
     """
+    from refactory_dsh import base_check
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
     target = Path(found.target)
     run_id = Path(found.path).name.removeprefix("run-")
     path = _check_copy_path(target, run_id)
+    copy = worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}check-{run_id}",
+                             base=found.base, head=found.head, target=found.target, run=found.run)
+    home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
+    home.mkdir(parents=True, exist_ok=True)
+    key = base_check.prepared_key(ctx, found.head)
     if path.exists():
+        # Prepared for this commit already, and nothing has changed its files since but
+        # caches: reused as it is, without installing, generating or setting up again.
+        state = base_check.prepared_state(path, found.head, key)
+        if state and state == _copy_state(copy):
+            return copy, worktree.check_environment(path, home), home, [], None
+        base_check.clear_prepared(path)
         try:
             worktree.git(path, "checkout", "-q", "--force", "--detach", found.head)
             worktree.git(path, "clean", "-fdq")
@@ -1307,16 +1321,64 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
         worktree.git(target, *worktree.NO_HOOKS, "worktree", "add", "-q", "--detach",
                      str(path), found.head)
     worktree._isolate_hooks(target, path)
-    copy = worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}check-{run_id}",
-                             base=found.base, head=found.head, target=found.target, run=found.run)
-    from refactory_dsh.invocations import CHECK_COPY_HOME
-
-    home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
-    home.mkdir(parents=True, exist_ok=True)
     copy, env, problems, prep_fail = prepare_check_environment(
         copy, ctx.facts, amend=False, commit_lockfiles=False, run=ctx.workdir, home=home,
         timeout=timeout, budget=getattr(ctx, "budget", None))
+    if not problems:
+        base_check.mark_prepared(path, key, _copy_state(copy))
     return copy, env, home, problems, prep_fail
+
+
+#: What a check copy's state leaves out: caches a run writes and nothing prepares.
+_STATE_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def _copy_state(copy: worktree.Worktree) -> str:
+    """One hash of what the check copy's files are, beside what the installs made and
+    caches: its tracked changes, its untracked files' bytes, and each ignored file's
+    size and modification time. Equal before and after a run, the run changed nothing
+    that preparing the copy makes, so the copy is still prepared."""
+    import hashlib
+
+    path = Path(copy.path)
+    installed = {name.rstrip("/").split("/")[0] for name in
+                 worktree._json(worktree._record_path(copy)).get("installed", [])}
+    digest = hashlib.sha256()
+    try:
+        digest.update(worktree.git(path, "diff", "--binary", "HEAD").encode())
+        untracked = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
+        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
+                               "--exclude-standard", "--directory")
+    except ValueError:
+        return ""
+
+    def skipped(name: str) -> bool:
+        parts = name.rstrip("/").split("/")
+        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
+
+    for name in sorted(filter(None, untracked.split("\0"))):
+        if skipped(name):
+            continue
+        digest.update(b"U" + name.encode() + b"\0")
+        try:
+            digest.update((path / name).read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    for entry in sorted(filter(None, ignored.split("\0"))):
+        if skipped(entry):
+            continue
+        root = path / entry
+        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+        for file in files:
+            relative = file.relative_to(path).as_posix()
+            if skipped(relative):
+                continue
+            try:
+                info = file.stat()
+            except OSError:
+                continue
+            digest.update(f"I{relative}\0{info.st_size}\0{info.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
 
 
 def remove_check_copy(target: Path, run_id: str) -> None:
@@ -1369,8 +1431,13 @@ def refused(ctx: Any) -> str:
 
 def run_check(ctx: Any, command: str, timeout: float,
               *, triage_prep: bool = True, prepared: bool = False,
-              beside_reviews: bool = False) -> Any:
+              beside_reviews: bool = False, per_step: bool = False) -> Any:
     """Run ``command`` where the run works, and return its `sandbox.SandboxResult`.
+
+    With ``per_step``, a chained command runs as its marker script (`base_check.run_chain`):
+    the result is the command's own, and its ``step_results`` are each step's record from
+    this one run (None when the command is not a chain, or its steps could not be read),
+    so the comparison with the base never runs the chain again.
 
     In the run's worktree it runs on the committed attempt -- what a check or reviewer
     changed is put back first -- in the worktree's own environment: its dependencies
@@ -1388,6 +1455,23 @@ def run_check(ctx: Any, command: str, timeout: float,
     instead (`_check_copy`): neither can see, or delete, what the other leaves, and the
     run's worktree is not touched.
     """
+    if per_step:
+        from refactory_dsh import base_check
+
+        plan = base_check.chain_plan(command)
+        if plan is None:
+            result = run_check(ctx, command, timeout, triage_prep=triage_prep,
+                               prepared=prepared, beside_reviews=beside_reviews)
+            result.step_results = None
+            return result
+        result = run_check(ctx, plan.script, timeout, triage_prep=triage_prep,
+                           prepared=prepared, beside_reviews=beside_reviews)
+        if result.prep_failure is not None or result.change_caused_prep is not None:
+            result.step_results = None  # nothing of the command ran
+        else:
+            result.step_results = base_check.read_chain_run(result, plan, _check_roots(
+                ctx, beside_reviews))
+        return result
     found = worktree.recorded(ctx.workdir)
     if found is None:
         root = _artifact_root(str(ctx.facts["name"]))
@@ -1456,6 +1540,25 @@ def run_check(ctx: Any, command: str, timeout: float,
                           f"the reviews and the next attempt see the committed attempt: "
                           f"{target_guard._named(changed)}")
     return result
+
+
+def _check_roots(ctx: Any, beside_reviews: bool) -> list[tuple[str, str]]:
+    """The run-specific paths a check's step output names where it ran (`base_check._roots`)."""
+    from refactory_dsh import base_check
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+
+    found = worktree.recorded(ctx.workdir)
+    run = Path(ctx.workdir).resolve()
+    if found is None:
+        return base_check._roots((run, "<run>"))
+    places: list[tuple[Path | str, str]] = [(Path(found.path), "<root>")]
+    if beside_reviews:
+        run_id = Path(found.path).name.removeprefix("run-")
+        places += [(_check_copy_path(Path(found.target), run_id), "<root>"),
+                   (run / CHECK_COPY_HOME, "<home>")]
+    else:
+        places.append((run / worktree.CHECK_HOME, "<home>"))
+    return base_check._roots(*places, (ctx.workdir, "<run>"))
 
 
 def report(ctx: Any, name: str, payload: dict[str, Any]) -> dict[str, Any]:

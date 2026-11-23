@@ -286,7 +286,7 @@ def _recs(*steps: tuple[str, str, int, str]) -> list[dict]:
 
 def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_steps: list[dict],
               attempt_out: str, *, base_complete: bool = True) -> Any:
-    """`filter_check` on a failed base with ``base_steps`` and an attempt whose re-run gives ``attempt_steps``."""
+    """`filter_check` on a failed base with ``base_steps`` and an attempt whose check run gave ``attempt_steps``."""
     base = BaseCheckResult(ok=False, failures={f for sr in base_steps for f in sr["failures"]},
                            output="", exit_code=1)
     base._base_complete = base_complete  # type: ignore[attr-defined]
@@ -294,6 +294,8 @@ def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_step
     ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
                           read_text=lambda name: "", budget=None)
     attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    # The attempt's check ran as its marker script: its own run's step records.
+    attempt.step_results = attempt_steps  # type: ignore[attr-defined]
     found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
                             target=str(tmp_path / "target"))
     with contextlib.ExitStack() as stack:
@@ -307,8 +309,6 @@ def _scenario(tmp_path: Path, command: str, base_steps: list[dict], attempt_step
                 return_value=(BaseCheckResult(ok=True, failures=set(), output="", exit_code=0),
                               "test")))
         stack.enter_context(patch.object(base_check, "run_base_check", return_value=base))
-        stack.enter_context(patch.object(base_check, "_run_chain_markers",
-                                         return_value=attempt_steps))
         stack.enter_context(patch.object(base_check.worktree, "recorded", return_value=found))
         stack.enter_context(patch.object(base_check, "_all_changed_files", return_value=[]))
         return filter_check(ctx, attempt, command, 60.0)
@@ -609,8 +609,9 @@ def _run(tmp_path: Path, base: dict[str, str], attempt: dict[str, str]) -> _Run:
 
 
 def _check(run: _Run, command: str) -> Any:
-    """The attempt's own check, then `filter_check`, as design mode runs them."""
-    result = repo_change.run_check(run.ctx, command, 60)
+    """The attempt's own check, step by step from the start, then `filter_check`, as
+    design mode runs them."""
+    result = repo_change.run_check(run.ctx, command, 60, per_step=True)
     assert not result.ok, result.stdout
     return filter_check(run.ctx, result, command, 60, named_text="")
 
@@ -667,7 +668,7 @@ def test_cache_hit_never_reruns_the_base(tmp_path):
     command = "pytest unit && pytest integ"
     first = _check(run, command)
     calls = len(run.base_calls())
-    assert calls == 3  # the check stops at unit; the steps run unit and integ
+    assert calls == 2  # one run of the base: its marker script runs unit, then integ
     second = _check(run, command)
     assert len(run.base_calls()) == calls
     assert first.all_excused and second.all_excused
@@ -852,16 +853,14 @@ def test_per_step_excused_when_all_base_failures(tmp_path):
                           read_text=lambda name: "", budget=None)
     attempt_out = _pytest_out([S])
     attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    # The attempt's check ran as its marker script: its own run's step records.
+    attempt.step_results = _recs(  # type: ignore[attr-defined]
+        ("tok.sh", "", 0, ""), ("pytest tests/", "&&", 1, _pytest_out([S])))
     found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
                             target=str(tmp_path / "target"))
     with patch.object(base_check, "run_base_check", return_value=base), \
-         patch.object(base_check, "_run_chain_markers",
-                      return_value=_recs(("tok.sh", "", 0, ""), ("pytest tests/", "&&", 1, _pytest_out([S])))), \
          patch.object(base_check.worktree, "recorded", return_value=found), \
-         patch.object(base_check, "_all_changed_files", return_value=[]), \
-         patch.object(base_check, "_attempt_marker_run",
-                      return_value=(lambda script: sandbox.run_command(
-                          script, workdir=tmp_path, timeout_s=60), lambda *a: {})):
+         patch.object(base_check, "_all_changed_files", return_value=[]):
         filtered = filter_check(ctx, attempt, "tok.sh && pytest tests/", 60.0)
     assert filtered.all_excused
     assert S in filtered.inherited
@@ -869,8 +868,7 @@ def test_per_step_excused_when_all_base_failures(tmp_path):
 
 def test_single_step_all_excused_skips_per_step(tmp_path):
     """A single-step command (the d16/c3 case) with all failures excused never
-    enters the per-step block (len(chain) <= 1), so the 11–26 min re-run cost
-    identified in the brief is eliminated.  Mocked to assert not called."""
+    enters the per-step block (len(chain) <= 1).  Mocked to assert not called."""
     base = BaseCheckResult(ok=False, failures={S}, output="", exit_code=1)
     base._base_complete = True  # type: ignore[attr-defined]
     ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,

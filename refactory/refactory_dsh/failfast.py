@@ -69,6 +69,21 @@ class PrepassResult:
     outputs: list[str] = field(default_factory=list)  # each failing chunk's output
     left_out: list[str] = field(default_factory=list)  # failures not shown: inherited
     timings: list[dict] = field(default_factory=list)  # each chunk run: its tests, seconds
+    #: Test ids that passed, each reported by pytest itself (`chunk_passes`), and whose
+    #: ``--deselect`` would take out nothing else (`exact_passes`): what the full check on
+    #: the same commit need not run again. A chunk stopped at the limit keeps the ones it
+    #: had reported.
+    passed_ids: list[str] = field(default_factory=list)
+
+
+def sandbox_crashed(result: Any) -> bool:
+    """Whether a signal killed the run (`sandbox.is_signal_crash`): nothing it said is kept."""
+    from refactory_dsh import sandbox
+
+    try:
+        return sandbox.is_signal_crash(result)[0]
+    except Exception:
+        return True
 
 
 def _skip() -> PrepassResult:
@@ -215,6 +230,203 @@ def _chunk_report(result: Any, inherited: set[str]) -> tuple[set[str], str]:
     return found - inherited, ""
 
 
+#: A pytest verbose line: ``tests/test_a.py::test_x PASSED  [ 50%]``, or under xdist
+#: ``[gw0] [ 50%] PASSED tests/test_a.py::test_x``.
+_OUTCOMES = "PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS"
+_VERBOSE_LINE = re.compile(
+    rf"^(?:\[(?P<worker>gw\d+)\]\s+\[\s*\d+%\]\s+(?P<xout>{_OUTCOMES})\s+(?P<xid>\S+::.*?\S)"
+    rf"|(?P<id>\S+::.*?\S)\s+(?P<out>{_OUTCOMES})(?:\s+\[\s*\d+%\])?)\s*$", re.MULTILINE)
+
+
+def _verbosity(command: str) -> int | None:
+    """The verbosity a single pytest invocation runs at; None when its words cannot be read."""
+    import shlex
+
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    level = 0
+    for word in words:
+        if word == "--quiet":
+            level -= 1
+        elif word == "--verbose":
+            level += 1
+        elif word.startswith("--verbosity="):
+            try:
+                level = int(word.split("=", 1)[1])
+            except ValueError:
+                return None
+        elif re.fullmatch(r"-[A-Za-z]+", word):
+            for letter in word[1:]:
+                if letter in "rpkmocn":  # an option whose value is the rest of the word
+                    break
+                level += (letter == "v") - (letter == "q")
+    return level
+
+
+def _at_verbosity(command: str, target: int) -> str:
+    """``command`` with ``-v`` or ``-q`` added so it runs at verbosity ``target``."""
+    level = _verbosity(command)
+    if level is None or level == target:
+        return command
+    return f"{command} -{('v' if target > level else 'q') * abs(target - level)}"
+
+
+def _with_test_lines(command: str) -> str:
+    """``command``, a single pytest invocation, made to print one line per test it runs
+    (verbosity at least 1), so what it reported survives a run stopped part way."""
+    level = _verbosity(command)
+    return command if level is None or level >= 1 else _at_verbosity(command, 1)
+
+
+def _with_chunk_lines(command: str) -> tuple[str, bool]:
+    """``command`` with its one plain pytest step printing a line per test
+    (`_with_test_lines`), and whether it has such a step; unchanged without one."""
+    from refactory_dsh.base_check import plain_pytest_step, with_step
+
+    found = plain_pytest_step(command)
+    if found is None:
+        return command, False
+    steps, index = found
+    return with_step(steps, index, _with_test_lines(steps[index][0])), True
+
+
+def _collected_ids(output: str) -> set[str] | None:
+    """The test ids ``pytest --collect-only -q`` printed, one a line; None when it named none."""
+    from refactory_dsh.base_check import strip_ansi
+
+    ids = {line.strip() for line in strip_ansi(output).splitlines()
+           if re.match(r"^\S+::\S", line.strip())}
+    return ids or None
+
+
+def _outcome_lines(output: str) -> tuple[str, list[tuple[str, str, str | None, int]]]:
+    from refactory_dsh.base_check import strip_ansi
+
+    text = strip_ansi(output)
+    found = []
+    for match in _VERBOSE_LINE.finditer(text):
+        if match.group("xid"):
+            found.append((match.group("xid"), match.group("xout"), match.group("worker"),
+                          match.end()))
+        else:
+            found.append((match.group("id"), match.group("out"), None, match.end()))
+    return text, found
+
+
+def chunk_outcomes(output: str) -> list[tuple[str, str, str | None]]:
+    """Each test a pytest verbose run reported, in order: ``(id, outcome, worker)``."""
+    return [(test_id, outcome, worker) for test_id, outcome, worker, _ in _outcome_lines(output)[1]]
+
+
+#: Where pytest, without xdist, starts the next test's line: its id, outcome still to come.
+_NEXT_TEST = re.compile(r"^\S+::\S", re.MULTILINE)
+
+
+def chunk_passes(output: str, *, finished: bool) -> list[str]:
+    """The tests a chunk's run reports as passed and nothing else of.
+
+    A run stopped part way may have been stopped in a test's teardown after its pass was
+    printed, so then a pass counts only once the run went on past it: the same xdist
+    worker reported a later test, or, without xdist, the next test's line began.
+    """
+    text, reported = _outcome_lines(output)
+    other = {test_id for test_id, outcome, _, _ in reported if outcome != "PASSED"}
+    passed: list[str] = []
+    for index, (test_id, outcome, worker, end) in enumerate(reported):
+        if outcome != "PASSED" or test_id in other or test_id in passed:
+            continue
+        if not finished:
+            if worker is None:
+                went_on = bool(_NEXT_TEST.search(text, end))
+            else:
+                went_on = any(later == worker for _, _, later, _ in reported[index + 1:])
+            if not went_on:
+                continue
+        passed.append(test_id)
+    return passed
+
+
+def exact_passes(passed: list[str], output: str, whole_files: list[str], *,
+                 finished: bool) -> list[str]:
+    """The ids of ``passed`` whose ``--deselect`` takes out that test alone.
+
+    pytest deselects every test whose id starts with the one given, so ``test_x`` would
+    take ``test_x2`` with it. A parametrized id (ending ``]``) starts no other test's id.
+    Any other is exact when its whole file ran in this chunk and finished -- the chunk
+    finished, or, without xdist, a later file's tests started -- so every test of the
+    file is in the output, and none of them starts with it.
+    """
+    from refactory_dsh.test_selection import _file_of
+
+    reported = chunk_outcomes(output)
+    files = {_file_of(name) for name in whole_files}
+
+    def whole(test_file: str) -> bool:
+        return test_file in files or any(test_file.endswith("/" + name) or
+                                         name.endswith("/" + test_file) for name in files)
+
+    done: set[str] = set()
+    if finished:
+        done = {test_id.split("::")[0] for test_id, _, _ in reported}
+    elif all(worker is None for _, _, worker in reported):
+        # Without xdist the files run one after another: a file is done once another's
+        # tests come after its last one.
+        order = [test_id.split("::")[0] for test_id, _, _ in reported]
+        for name in set(order):
+            last = max(i for i, other in enumerate(order) if other == name)
+            if any(other != name for other in order[last + 1:]):
+                done.add(name)
+    exact = []
+    for test_id in passed:
+        test_file = test_id.split("::")[0]
+        if test_id.endswith("]"):
+            exact.append(test_id)
+        elif whole(test_file) and test_file in done and not any(
+                other != test_id and other.startswith(test_id)
+                for other, _, _ in reported):
+            exact.append(test_id)
+    return exact
+
+
+#: The time a collection of the passed tests' files may stay silent (`_exact_by_collection`).
+COLLECT_LIMIT_S = 60
+
+
+def _exact_by_collection(undecided: list[str], check_command: str,
+                         run_check_fn: Callable[[str, float], Any], root: Path | None,
+                         notes: list[str]) -> list[str]:
+    """Which ``undecided`` passes are exact (`exact_passes`) by their files' collection.
+
+    A pass whose file did not run whole and finish is exact only if no other test of its
+    file starts with its id. Collecting those files -- no test runs -- lists them; a
+    collection that fails or names nothing leaves every one undecided, so each runs
+    again in the full check.
+    """
+    from refactory_dsh.check_digest import build_probe_command
+
+    if not undecided:
+        return []
+    from refactory_dsh.base_check import plain_pytest_step
+
+    files = sorted({test_id.split("::")[0] for test_id in undecided})
+    command, refusal = build_probe_command(check_command, [], root=root, test_files=files)
+    found = None if refusal else plain_pytest_step(command)
+    if found is None:
+        return []
+    steps, index = found
+    # The pytest step alone: the chain's other steps have nothing to collect.
+    result = run_check_fn(f"{_at_verbosity(steps[index][0], -1)} --collect-only", COLLECT_LIMIT_S)
+    collected = _collected_ids(_output(result)) if getattr(result, "ok", False) else None
+    if collected is None:
+        notes.append(f"{len(undecided)} passed test(s) are not merged into the full check: "
+                     "their files could not be collected")
+        return []
+    return [test_id for test_id in undecided if test_id in collected and not any(
+        other != test_id and other.startswith(test_id) for other in collected)]
+
+
 def _self_check(
     selection: list[str],
     prev_record: dict[str, Any],
@@ -249,6 +461,8 @@ def _self_check(
     notes: list[str] = []
     failed_outputs: list[str] = []
     timings: list[dict[str, Any]] = []
+    passed: list[str] = []
+    candidates: list[str] = []
     last = None
     queue = _chunks(selection, alone)
     number = 0
@@ -274,10 +488,13 @@ def _self_check(
         # invocation only, written outside the worktree).
         junit_path: str | None = None
         actual_command = command
+        # One line per test, so what passed is known by id -- also from a chunk the limit
+        # stops part way, whose junit file is never written.
+        actual_command, pytest_lines = _with_chunk_lines(command)
         if _is_single_pytest_command(command):
             fd, junit_path = tempfile.mkstemp(suffix=".xml", prefix=f"refactory-chunk-{number}-")
             os.close(fd)
-            actual_command = f"{command} --junitxml={junit_path}"
+            actual_command = f"{actual_command} --junitxml={junit_path}"
         began = time.monotonic()
         result = run_check_fn(actual_command, remaining)
         last = result
@@ -297,13 +514,38 @@ def _self_check(
             if chunk_durations:
                 entry_t["durations"] = chunk_durations
             timings.append(entry_t)
-            for later in (chunk, *queue):
+            kept: set[str] = set()
+            if pytest_lines and not sandbox_crashed(result):
+                # What the chunk reported before it was stopped stands: its passes, and
+                # the failures it printed.
+                out = _output(result)
+                found_passes = chunk_passes(out, finished=False)
+                candidates.extend(found_passes)
+                passed.extend(exact_passes(found_passes, out, files, finished=False))
+                reported = chunk_outcomes(out)
+                kept = {test_id for test_id, _, _ in reported}
+                for test_id, outcome, _ in reported:
+                    if outcome == "FAILED" and test_id not in inherited and test_id not in failing:
+                        failing.append(test_id)
+                if any(outcome == "FAILED" for _, outcome, _ in reported):
+                    failed_outputs.append(out)
+            reported_ids = [name for name in ids if name in kept]
+            ran.extend(reported_ids)
+            cut.extend(name for name in chunk if name not in reported_ids)
+            for later in queue:
                 cut.extend(later)
             notes.append(f"chunk {number} of {of} was stopped at the "
-                         f"{limit_s:.0f} s limit, so it and the rest did not report")
+                         f"{limit_s:.0f} s limit, so the rest of it and the rest did not report"
+                         + (f"; {len(kept)} test(s) it reported before then are kept"
+                            if kept else ""))
             break
         commands.append(command)
         found, why_not = _chunk_report(result, inherited)
+        if pytest_lines and not why_not:
+            out = _output(result)
+            found_passes = chunk_passes(out, finished=True)
+            candidates.extend(found_passes)
+            passed.extend(exact_passes(found_passes, out, files, finished=True))
         entry_f: dict[str, Any] = {"tests": chunk, "s": round(time.monotonic() - began, 1),
                                    "counted": not why_not}
         if chunk_durations:
@@ -409,6 +651,10 @@ def _self_check(
                              "before the chunk's tests")
             continue
         ran.extend(chunk)
+    passed += _exact_by_collection(
+        [test_id for test_id in dict.fromkeys(candidates)
+         if test_id not in passed and test_id not in failing],
+        check_command, run_check_fn, root_path, notes)
     digest_text, runners, raw_tail = failure_digest(failed_outputs, inherited)
     return PrepassResult(
         ran=bool(commands), early_stop=bool(failing),
@@ -420,6 +666,7 @@ def _self_check(
         broken_command=broken_command, broken_output=broken_output,
         elapsed_s=round(time.monotonic() - started, 1),
         outputs=failed_outputs, left_out=sorted(inherited), timings=timings,
+        passed_ids=[test_id for test_id in dict.fromkeys(passed) if test_id not in failing],
     )
 
 

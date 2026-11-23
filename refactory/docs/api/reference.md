@@ -842,7 +842,7 @@ The steps a mode uses to change a repository: where it works, what lands, how it
 | function | `refused` | `(ctx: 'Any') -> 'str'` |
 | function | `remove_check_copy` | `(target: 'Path', run_id: 'str') -> 'None'` |
 | function | `report` | `(ctx: 'Any', name: 'str', payload: 'dict[str, Any]') -> 'dict[str, Any]'` |
-| function | `run_check` | `(ctx: 'Any', command: 'str', timeout: 'float', *, triage_prep: 'bool' = True, prepared: 'bool' = False, beside_reviews: 'bool' = False) -> 'Any'` |
+| function | `run_check` | `(ctx: 'Any', command: 'str', timeout: 'float', *, triage_prep: 'bool' = True, prepared: 'bool' = False, beside_reviews: 'bool' = False, per_step: 'bool' = False) -> 'Any'` |
 | function | `wants_worktree` | `(ctx: 'Any') -> 'bool'` |
 
 - **`apply_emission`** — Parse emit.txt and resolve edits against the run worktree, read-only.
