@@ -1,0 +1,1858 @@
+{
+ "cases": [
+  {
+   "name": "exact",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "tolerance_in",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 1000
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 1009.9
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "tolerance_out",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 1000
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 1011
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "zero_absolute",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null,
+      "B3": 5
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 0,
+      "B3": 0
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 0.009,
+      "B3": 0.011
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "none_equals_zero",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 5
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 0
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "empty_string_none",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 5
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": ""
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "not_meaningful",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "N/A"
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "na_vs_div0",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=NA()",
+       "v": "#N/A"
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "error_formula_same",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A3/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=$A3/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "error_formula_differs",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A3/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#DIV/0!"
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "error_vs_value",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2/0",
+       "v": "#REF!"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 7
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "string_number",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "12.5"
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 12.5
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "datetime_same_day",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "datetime": "2024-03-01T00:00:00"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "datetime": "2024-03-01T09:00:00"
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "datetime_other_day",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "datetime": "2024-03-01T00:00:00"
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "datetime": "2024-03-02T00:00:00"
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "text_case",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "Total Revenue"
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "total revenue"
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "formula_text_value",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "=SUM(A2:A3)"
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "=sum($A$2:A3)"
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "uncached_formula_output",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2+A3",
+       "v": 30
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": "=A2+A3"
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "cached_formula_output",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A2+A3",
+       "v": 30
+      }
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": {
+       "f": "=A3+A2",
+       "v": 30
+      }
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "regression_broken",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 11,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "no_modification",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "output_missing_sheet",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "Other",
+     "cells": {
+      "A1": "x"
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "sheet_name_case_space",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "answer_position": "' s '!A1:B3"
+  },
+  {
+   "name": "no_sheet_in_position",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "answer_position": "A1:B3"
+  },
+  {
+   "name": "missing_output",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": null,
+   "answer_position": "'S'!A1:B3"
+  },
+  {
+   "name": "sheet_with_comma",
+   "input": [
+    {
+     "title": "A,B",
+     "cells": {
+      "A1": 1
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "A,B",
+     "cells": {
+      "A1": 1,
+      "A2": 2
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "A,B",
+     "cells": {
+      "A1": 1,
+      "A2": 2
+     }
+    }
+   ],
+   "answer_position": "'A,B'!A1:A2"
+  },
+  {
+   "name": "two_ranges",
+   "input": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": null
+     }
+    }
+   ],
+   "golden": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 30
+     }
+    }
+   ],
+   "output": [
+    {
+     "title": "S",
+     "cells": {
+      "A1": "Label",
+      "A2": 10,
+      "A3": 20,
+      "B1": "Total",
+      "B2": 31
+     }
+    }
+   ],
+   "answer_position": "'S'!A1:A3,'S'!B1:B3"
+  },
+  {
+   "name": "regression_998_pass",
+   "regression": {
+    "wrong": 4
+   },
+   "answer_position": "'S'!C1:D1000"
+  },
+  {
+   "name": "regression_997_fail",
+   "regression": {
+    "wrong": 5
+   },
+   "answer_position": "'S'!C1:D1000"
+  },
+  {
+   "name": "regression_ok_mod_wrong",
+   "regression": {
+    "wrong": 0,
+    "mod_ok": false
+   },
+   "answer_position": "'S'!C1:D1000"
+  },
+  {
+   "name": "regression_rounding",
+   "regression": {
+    "wrong": 4,
+    "rows": 980
+   },
+   "answer_position": "'S'!C1:D980"
+  }
+ ],
+ "pairs": [
+  [
+   1,
+   1.005
+  ],
+  [
+   1,
+   1.02
+  ],
+  [
+   0,
+   0.01
+  ],
+  [
+   0,
+   0.02
+  ],
+  [
+   null,
+   0
+  ],
+  [
+   0,
+   null
+  ],
+  [
+   null,
+   ""
+  ],
+  [
+   "",
+   null
+  ],
+  [
+   "N/A",
+   "#DIV/0!"
+  ],
+  [
+   "#N/A",
+   "nm"
+  ],
+  [
+   " -- ",
+   "#DIV/0!"
+  ],
+  [
+   "#REF!",
+   "#REF!"
+  ],
+  [
+   "#REF!",
+   "#N/A"
+  ],
+  [
+   "12.5",
+   12.5
+  ],
+  [
+   "12.504",
+   "12.5"
+  ],
+  [
+   "abc",
+   "ABC"
+  ],
+  [
+   "=SUM(A1)",
+   "=sum($A1)"
+  ],
+  [
+   true,
+   1
+  ],
+  [
+   {
+    "datetime": "2024-03-01T00:00:00"
+   },
+   {
+    "datetime": "2024-03-01T11:00:00"
+   }
+  ],
+  [
+   {
+    "datetime": "2024-03-01T00:00:00"
+   },
+   {
+    "datetime": "2024-03-01T13:00:00"
+   }
+  ],
+  [
+   {
+    "time": "09:30:00"
+   },
+   "09:30"
+  ],
+  [
+   -0.105,
+   -0.10500000000000001
+  ],
+  [
+   100,
+   101
+  ],
+  [
+   100,
+   101.1
+  ],
+  [
+   "1,000",
+   1000
+  ],
+  [
+   null,
+   null
+  ],
+  [
+   "",
+   ""
+  ],
+  [
+   0,
+   false
+  ]
+ ],
+ "v2": {
+  "cases": {
+   "exact": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "tolerance_in": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "tolerance_out": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=1000, output=1011",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "zero_absolute": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B3: answer=0, output=0.011",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "none_equals_zero": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "empty_string_none": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "not_meaningful": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=#DIV/0!, output=N/A",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "na_vs_div0": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=#DIV/0!, output=#N/A",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "error_formula_same": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "error_formula_differs": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=#DIV/0!, output=#DIV/0!",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "error_vs_value": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=#REF!, output=7",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "string_number": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "datetime_same_day": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "datetime_other_day": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "text_case": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=Total Revenue, output=total revenue",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "formula_text_value": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 6,
+     "total": 6
+    },
+    "modification": {
+     "correct": 0,
+     "total": 0
+    }
+   },
+   "uncached_formula_output": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=30, output=None",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "cached_formula_output": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "regression_broken": {
+    "accuracy": 0.0,
+    "regression_accuracy": 0.8,
+    "modification_accuracy": 1.0,
+    "error_message": "Regression error at S!A2: answer=10, output=11",
+    "missing": false,
+    "regression": {
+     "correct": 4,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "no_modification": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 6,
+     "total": 6
+    },
+    "modification": {
+     "correct": 0,
+     "total": 0
+    }
+   },
+   "output_missing_sheet": {
+    "accuracy": 0.0,
+    "regression_accuracy": 0.0,
+    "modification_accuracy": 0.0,
+    "error_message": "S worksheet not found",
+    "missing": false,
+    "regression": {
+     "correct": 0,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "sheet_name_case_space": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "no_sheet_in_position": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "missing_output": {
+    "accuracy": 0.0,
+    "regression_accuracy": 0.0,
+    "modification_accuracy": 0.0,
+    "error_message": "output file not exist",
+    "missing": true,
+    "regression": {
+     "correct": 0,
+     "total": 0
+    },
+    "modification": {
+     "correct": 0,
+     "total": 0
+    }
+   },
+   "sheet_with_comma": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "",
+    "missing": false,
+    "regression": {
+     "correct": 1,
+     "total": 1
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "two_ranges": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!B2: answer=30, output=31",
+    "missing": false,
+    "regression": {
+     "correct": 5,
+     "total": 5
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "regression_998_pass": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "Regression error at S!C1: answer=1, output=-1",
+    "missing": false,
+    "regression": {
+     "correct": 1995,
+     "total": 1999
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "regression_997_fail": {
+    "accuracy": 0.0,
+    "regression_accuracy": 0.9975,
+    "modification_accuracy": 1.0,
+    "error_message": "Regression error at S!C1: answer=1, output=-1",
+    "missing": false,
+    "regression": {
+     "correct": 1994,
+     "total": 1999
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   },
+   "regression_ok_mod_wrong": {
+    "accuracy": 0.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 0.0,
+    "error_message": "Modification error at S!D1: answer=5, output=6",
+    "missing": false,
+    "regression": {
+     "correct": 1999,
+     "total": 1999
+    },
+    "modification": {
+     "correct": 0,
+     "total": 1
+    }
+   },
+   "regression_rounding": {
+    "accuracy": 1.0,
+    "regression_accuracy": 1.0,
+    "modification_accuracy": 1.0,
+    "error_message": "Regression error at S!C1: answer=1, output=-1",
+    "missing": false,
+    "regression": {
+     "correct": 1955,
+     "total": 1959
+    },
+    "modification": {
+     "correct": 1,
+     "total": 1
+    }
+   }
+  },
+  "pairs": [
+   {
+    "a": 1,
+    "b": 1.005,
+    "value": true,
+    "transform_a": "1.0"
+   },
+   {
+    "a": 1,
+    "b": 1.02,
+    "value": false,
+    "transform_a": "1.0"
+   },
+   {
+    "a": 0,
+    "b": 0.01,
+    "value": true,
+    "transform_a": "0.0"
+   },
+   {
+    "a": 0,
+    "b": 0.02,
+    "value": false,
+    "transform_a": "0.0"
+   },
+   {
+    "a": null,
+    "b": 0,
+    "value": true,
+    "transform_a": "None"
+   },
+   {
+    "a": 0,
+    "b": null,
+    "value": true,
+    "transform_a": "0.0"
+   },
+   {
+    "a": null,
+    "b": "",
+    "value": true,
+    "transform_a": "None"
+   },
+   {
+    "a": "",
+    "b": null,
+    "value": true,
+    "transform_a": "''"
+   },
+   {
+    "a": "N/A",
+    "b": "#DIV/0!",
+    "value": true,
+    "transform_a": "'N/A'"
+   },
+   {
+    "a": "#N/A",
+    "b": "nm",
+    "value": true,
+    "transform_a": "'#N/A'"
+   },
+   {
+    "a": " -- ",
+    "b": "#DIV/0!",
+    "value": true,
+    "transform_a": "' -- '"
+   },
+   {
+    "a": "#REF!",
+    "b": "#REF!",
+    "value": true,
+    "transform_a": "'#REF!'"
+   },
+   {
+    "a": "#REF!",
+    "b": "#N/A",
+    "value": false,
+    "transform_a": "'#REF!'"
+   },
+   {
+    "a": "12.5",
+    "b": 12.5,
+    "value": true,
+    "transform_a": "12.5"
+   },
+   {
+    "a": "12.504",
+    "b": "12.5",
+    "value": true,
+    "transform_a": "12.5"
+   },
+   {
+    "a": "abc",
+    "b": "ABC",
+    "value": false,
+    "transform_a": "'abc'"
+   },
+   {
+    "a": "=SUM(A1)",
+    "b": "=sum($A1)",
+    "value": true,
+    "transform_a": "'=SUM(A1)'"
+   },
+   {
+    "a": true,
+    "b": 1,
+    "value": true,
+    "transform_a": "1.0"
+   },
+   {
+    "a": {
+     "datetime": "2024-03-01T00:00:00"
+    },
+    "b": {
+     "datetime": "2024-03-01T11:00:00"
+    },
+    "value": true,
+    "transform_a": "45352.0"
+   },
+   {
+    "a": {
+     "datetime": "2024-03-01T00:00:00"
+    },
+    "b": {
+     "datetime": "2024-03-01T13:00:00"
+    },
+    "value": true,
+    "transform_a": "45352.0"
+   },
+   {
+    "a": {
+     "time": "09:30:00"
+    },
+    "b": "09:30",
+    "value": true,
+    "transform_a": "'09:30'"
+   },
+   {
+    "a": -0.105,
+    "b": -0.10500000000000001,
+    "value": true,
+    "transform_a": "-0.1"
+   },
+   {
+    "a": 100,
+    "b": 101,
+    "value": true,
+    "transform_a": "100.0"
+   },
+   {
+    "a": 100,
+    "b": 101.1,
+    "value": false,
+    "transform_a": "100.0"
+   },
+   {
+    "a": "1,000",
+    "b": 1000,
+    "value": false,
+    "transform_a": "'1,000'"
+   },
+   {
+    "a": null,
+    "b": null,
+    "value": true,
+    "transform_a": "None"
+   },
+   {
+    "a": "",
+    "b": "",
+    "value": true,
+    "transform_a": "''"
+   },
+   {
+    "a": 0,
+    "b": false,
+    "value": true,
+    "transform_a": "0.0"
+   }
+  ],
+  "evaluation_py_sha256": "04a2a75b29805ab40efe93e202384c365d1d32b9c924c1a4aed56e41249facb0"
+ }
+}

@@ -79,6 +79,10 @@ class Agent(nn.Mode):
     name = "agent"
     description = ("solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness: one "
                    "sealed Claude Code session with Read and Bash writes solution.py")
+    #: The Task whose items the data pass runs, and the module of its prepare and finalize
+    #: ops: another dataset reuses this harness by naming its own (`spreadsheetbench_v2`).
+    task_ref = TASK
+    ops_module = AGENT_OPS
 
     @classmethod
     def declare(cls) -> dict[str, nn.Knob]:
@@ -102,10 +106,10 @@ class Agent(nn.Mode):
     def build(self) -> nn.Graph:
         g = nn.Graph()
         g.add(nn.Node("data", "data", subgraph_entry="prepare", subgraph_exit="finalize",
-                      task_ref=TASK, writes=("current_item.json", INPUT),
+                      task_ref=self.task_ref, writes=("current_item.json", INPUT),
                       produces=("item_scores",),
                       parallelism_knob="data_parallelism", knobs=("data_parallelism",)))
-        g.add(nn.Node("prepare", "op", call=f"{AGENT_OPS}:prepare",
+        g.add(nn.Node("prepare", "op", call=f"{self.ops_module}:prepare",
                       reads=("current_item.json", INPUT), knobs=("skill",),
                       writes=(*WORKSPACE_READS, "turn.json", "target_system_prompt.txt",
                               "target_user_prompt.txt", "spreadsheet_preview.txt"),
@@ -126,7 +130,7 @@ class Agent(nn.Mode):
                                       ("system_prompt_template", SYSTEM_PROMPT_KNOB),
                                       ("route.max_thinking_tokens", THINKING_KNOB)),
                       notes="one sealed Claude Code session (Read, Bash) writes solution.py"))
-        g.add(nn.Node("finalize", "op", call=f"{AGENT_OPS}:finalize",
+        g.add(nn.Node("finalize", "op", call=f"{self.ops_module}:finalize",
                       reads=("current_item.json", "turn.json", "reply.txt",
                              agent_port.SOLUTION_PATH, INPUT),
                       writes=("final.json", "conversation.json", "pred.xlsx", "code.py",

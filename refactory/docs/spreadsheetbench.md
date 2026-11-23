@@ -1,4 +1,4 @@
-# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`)
+# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`, `spreadsheetbench_v2/agent`, `spreadsheetbench_v2/swe`)
 
 SkillOpt's SpreadsheetBench target agent, ported so the outer loop can be measured
 against SkillOpt on the same items, prompts, code runner and grader. Source:
@@ -8,7 +8,10 @@ function names the lines it copies (`refactory_packages/spreadsheetbench/skillop
 Two modes, both SkillOpt's: `spreadsheetbench/solver` is its default harness (the
 multi-turn codegen loop, below), and `spreadsheetbench/agent` its Claude Code agent
 harness ([below](#the-agent-harness-spreadsheetbenchagent)). They share the data, the
-Task, the code runner and the grader.
+Task, the code runner and the grader. `spreadsheetbench_v2/agent` runs that agent harness
+on a second dataset, SpreadsheetBench 2, with V2's own task text and grader
+([below](#spreadsheetbench-2-spreadsheetbench_v2agent)); `spreadsheetbench_v2/swe` runs V2's
+own agent setup on it ([below](#v2s-own-agent-setup-spreadsheetbench_v2swe)).
 
 ## The data
 
@@ -380,3 +383,221 @@ Two more: `run_solution.py` runs the code at module level after its own two path
 (`executor.py:12-23`), so a triple-quoted string spanning lines gains four spaces per line
 at grading only; and the driver runs whatever `python` the agent's shell finds while the
 grader runs the trainer's own (difference 2 above).
+
+## SpreadsheetBench 2 (`spreadsheetbench_v2/agent`)
+
+A second dataset for comparing the SkillOpt strategy with the default outer loop: both
+arms run the same graph, so the optimizer is the only difference. SpreadsheetBench 2
+(arXiv 2606.29955; Hugging Face `KAKA22/SpreadsheetBench-v2`, archive
+`spreadsheetbench-v2-09-10.zip`, sha256 `52699c97…5b3e`) is business workflows on large
+multi-sheet workbooks: Debugging (repair planted errors), Financial_Model (complete a
+model) and Template (fill a schedule). **SkillOpt never ran it.** What is whose:
+
+| | SkillOpt's (as in `spreadsheetbench/agent`) | SpreadsheetBench 2's |
+|---|---|---|
+| harness | one sealed Claude Code session, `Read` and `Bash`, the skill as `.agents/skills/skillopt-target/SKILL.md`, `run_solution.py`, `solution.py` run on the input in the code sandbox; prompt, settings, retry and starting skill | — (V2 runs SWE-agent with `bash`, `view_xlsx`, `submit` and a 50-call cap; not used) |
+| task text | the "Codex Harness Task" section of `task.md` | the `<instructions>` block of V2's instance template (`SWE-agent/config/spreadsheet.yaml:49-60`): instruction, input file, output path (`input.xlsx`, `output.xlsx`) |
+| data, split | — | the release, prepared and split by workbook (below) |
+| grade | — | `open_spreadsheet.py` on the output, then `evaluation/evaluation.py` (`evaluation_port.py`, line for line) |
+
+V2's tool list, workflow and "Important" notes (`spreadsheet.yaml:4-47`) describe its
+SWE-agent harness and are not sent. As in `spreadsheetbench/agent` there is no wall-clock
+or turn cap (inactivity only, and the harness backstop), and the analysts of both arms see
+the same: the instruction, the input's preview (the default loop's item context; SkillOpt's
+"Spreadsheet Preview"), the final message, and the verification or execution-error block.
+SkillOpt has no V2 environment, so the SkillOpt strategy uses its generic analyst prompts.
+`data_parallelism` is 8 (SB's agent mode: 24), since each item's grade runs LibreOffice and
+loads a large workbook.
+
+**No gold feedback.** One session has no later turn to tell, and SB's agent mode takes none
+either (SkillOpt's single path), so the Task offers no `train_feedback`.
+
+### Where the data is hidden
+
+The agent's sealed workspace holds its own files only; the prepared folder (every golden,
+every sibling input, `tasks.json`) is on both hide-lists: the sealed steps' tool
+environment (`tasks.tool_hidden`; an interpreter running from inside it is refused) and
+model code's sandbox (`agent_ops.finalize`). On Linux both sandboxes are allow-lists, so
+the hide-lists are a second guard there; on macOS (Seatbelt) the hide-list is the
+protection.
+
+### Prepared data
+
+The grader reads cached values, and many shipped files have none or stale ones: 7
+Debugging-05 tasks cannot pass as shipped, and the Financial_Model DigiMark inputs do not
+open in openpyxl until LibreOffice rewrites them. V2's README asks for every input and
+golden to be recalculated with its `open_spreadsheet.py` before any run. So, once:
+
+```
+python -m refactory_packages.spreadsheetbench_v2.prepare prepare <release>/spreadsheetbench-v2 <out>
+python -m refactory_packages.spreadsheetbench_v2.prepare check [--grades] <out>
+```
+
+`prepare` checks every source file against `manifest.json`, recalculates each input and
+each golden (once) as V2's script does — LibreOffice, iterative calculation on (100 steps,
+0.0001), `calculateAll`, stored as "Calc MS Excel 2007 XML" (`open_spreadsheet.py`,
+`lo_open_spreadsheet.py`; LibreOffice found as the recalc grader finds it, `SB_SOFFICE`) —
+one file per LibreOffice, resumably (a file is skipped only while its checksum still
+matches), and writes `tasks.json` and `prepared.json` (the manifest's sha256, LibreOffice's
+version, every file's sha256).
+
+**Opaque names.** A Debugging source id names its planted error (`01` Double Counting, `05`
+Incorrect Average, `10` Unit Mismatch, ...), and an item's id reaches the agent's folder
+and environment and both arms' analysts. So each item's id is a seeded hash of its source
+(`sb2-<12 hex>`), its input is `items/<id>/input.xlsx` and each golden
+`goldens/<hash>.xlsx`; source ids, groups and file names stay in `manifest.json` and the
+prepared `tasks.json`, grader side. The split and the drops are computed from the source
+ids.
+
+`check --grades` then grades, one task at a time, each golden against itself and each input
+with V2's grader, and records the result in `prepared.json`. **The Task requires it** and
+leaves out every task whose golden fails against itself, with the reason (also listed in
+`manifest.json`'s `excluded` once the lab's full check is committed); a grader failure
+stops the check rather than dropping a task. Set `SB2_DATA` to `<out>`: the Task refuses a
+directory that is not prepared or checked, was prepared for another manifest, or has any
+file (or `tasks.json`) whose checksum changed.
+
+### Drops and the split
+
+277 of the release's 321 tasks remain (Debugging 80, Financial_Model 100, Template 97);
+`manifest.json` lists every dropped id with its reason:
+
+- the 24 **Visualization** tasks: V2 grades them by exporting charts through Excel or WPS
+  COM on Windows and asking a VLM checklist judge, not by file comparison;
+- the 10 Debugging **Embedded Hardcode** tasks: V2 grades them by formula text, so only the
+  golden's exact formulas pass (owner's decision: impossible);
+- the 10 Debugging **Inconsistent Color Coding** tasks: V2 grades font colours against a
+  convention the instruction never states (owner's decision: unspecified).
+
+Goldens are shared within a Debugging workbook (10 tasks) and a Financial_Model project
+(5), and each sibling input holds the others' fixes, so the split is by group, never by
+task: seed 20261123, `random.Random(seed).sample` of the sorted groups (Debugging 2 train
+and 1 val, Financial_Model 5 and 3), Template groups as the audit chose them (train
+`16_re_direct_cap`, `14_re_dcf`, `03_consolidation`; val `01_bond_accounting`,
+`02_cash_sweep`); the rest is test.
+
+| part | Debugging | Financial_Model | Template | total |
+|---|---|---|---|---|
+| train | 16 (`08`, `10`) | 25 (`03`, `06`, `13`, `17`, `18`) | 25 | 66 |
+| val | 8 (`03`) | 15 (`01`, `12`, `19`) | 15 | 38 |
+| test | 56 | 60 | 57 | 173 |
+
+### The grade
+
+V2's pipeline as its README runs it: the output is recalculated by `open_spreadsheet.py`,
+then `evaluation.py` compares it with the prepared golden. Its rules, ported line for line:
+a number within 1% (relative; absolute against 0), `None` equal to 0 and to `""`, dates as
+whole Excel days (so within 1% too), formatting ignored, a cell holding an Excel error
+compared by its formula (so a real `#DIV/0!` or `#N/A` cell never equals `"N/A"` text:
+V2's not-meaningful rule applies only between texts such as `"N/A"` and `"-"`, and a formula
+error only matches the same formula), and an item
+correct when every changed cell matches and at least 99.8% of the unchanged ones do, after
+rounding to four places (1,955 of 1,959 passes). A task whose golden changes no answer cell
+fails whatever the output (V2's modification accuracy is 0.0 then). The parity fixture
+(`tests/fixtures/spreadsheetbench_v2_grader_parity.json`) holds V2's own results on 30
+cases and 28 value pairs.
+
+How it runs differs, never what it decides:
+
+1. **One workbook at a time.** V2 holds the input, golden and output open twice each at
+   once; a Debugging-10 workbook then needs more than 3 GB, and V2's `except Exception`
+   scores the `MemoryError` 0 with an empty message. Here each workbook is read and closed
+   in turn, and the formula view only when an answer cell holds an Excel error.
+2. **No silent 0.** A prepared input or golden that cannot be read, or memory running out,
+   is a harness incident (`GraderFailed`) with its message: run again, then left out of the
+   score. An output the model's code wrote that cannot be opened is the model's failure,
+   `output-unreadable: <why>` (V2 also scores it 0). An output LibreOffice, running, cannot
+   open is graded as written when LibreOffice works on a known-good workbook (V2's script
+   leaves such a file in place). When LibreOffice itself fails on it -- crashing, killed
+   (out of memory), failing to calculate or store, or past its process guard -- a fresh
+   check on a known-good workbook runs: LibreOffice unhealthy, it is a harness incident;
+   healthy, the output is recalculated once more (retries in one process run one at a time,
+   but other items' first attempts still run beside it, so a retry can still run out of
+   memory next to other work), and failing again scores 0
+   (`recalc-failed: LibreOffice could not recalculate the output ...`), so an output that
+   hangs LibreOffice every time cannot turn into an incident left out of the score.
+3. **Recalculation.** One file per private LibreOffice profile and pipe, a copy opened
+   under a plain name, the source never changed (V2: one service on port 2002, the file
+   replaced). The helper streams nothing to measure inactivity by, so a 900 s guard on
+   LibreOffice's own process keeps a hung one from holding an item; reaching it is a harness
+   incident, not the model's failure.
+
+### Not verified here
+
+The full prepare of all 277 tasks (554 files) and `check --grades` on them are meant for
+the lab; locally, the recalculation ran through LibreOffice 7.4 on single files (the
+DigiMark input among them, which then opens) and on the tests' circular reference.
+
+## V2's own agent setup (`spreadsheetbench_v2/swe`)
+
+SpreadsheetBench 2's leaderboard runs its own SWE-agent config
+(`SWE-agent/config/spreadsheet.yaml`), not SkillOpt's harness; this mode ports that setup to
+one sealed Claude Code session per item, on the same data, split, Task items and grade as
+`spreadsheetbench_v2/agent`. The session has Claude Code's `Bash` alone in a workspace
+holding `input.xlsx`; it edits the workbook itself and writes `output.xlsx`, which V2's
+grade grades (no `solution.py`, nothing run afterwards). No `output.xlsx` fails the item
+(`output-not-found: the agent left no output.xlsx`).
+
+- **Prompt**: V2's instance template, with only the substitutions this runtime needs
+  (`swe_port.SUBSTITUTIONS`): `Bash` for `bash`, `view_xlsx` named as a command run with
+  `Bash`, "submit" meaning ending the turn (no `submit` tool), and the paths `input.xlsx`
+  and `output.xlsx`. The "Important", "Environment" and "Recommended Workflow" sections are
+  V2's. V2's system template is appended to Claude Code's system prompt. Both are frozen
+  knobs.
+- **Tools on the PATH**: V2's `view_xlsx` (byte for byte, `swe_tools/view_xlsx`), and
+  LibreOffice as `soffice` and `libreoffice` -- the grader's own (`SB_SOFFICE`), its
+  install folder and `/etc/fonts` bound read only. LibreOffice puts its pipe in `/tmp`
+  only, so these sessions get a `/tmp` of their own, writable and kept across their commands
+  and removed with the dispatch (`ToolEnvironment.private_tmp`, Linux only: on macOS the
+  step is refused); its profile is in the workspace, the command's HOME. The launcher caps
+  LibreOffice's thread pool and malloc arenas (`MAX_CONCURRENCY=4`, `MALLOC_ARENA_MAX=2`):
+  on a many-core machine its xlsx export otherwise fails under a sealed command's
+  per-process limits.
+- **V2's limits**, each a frozen knob bound to the solve step's route: the 50-call cap is
+  Claude Code's `--max-turns 50` (`max_turns`); the 60 s command timeout is Claude Code's
+  default and longest Bash timeout (`bash_timeout_ms`, `BASH_DEFAULT_TIMEOUT_MS` and
+  `BASH_MAX_TIMEOUT_MS`); the 10,000-character observation is the most of a command's
+  output shown inline (`bash_output_chars`, Claude Code's `bashOutputMaxChars` setting).
+  The last two were read from Claude Code 2.1.299's code, not run against it.
+- **Turn cap reached**: the session ends with a fixed note as its answer and the
+  `output.xlsx` it left is graded. The adapter records the session's facts beside its workspace,
+  out of the session's reach (Claude Code's turn count, the cap, whether it was reached);
+  a file the session writes in its workspace under the same name is ignored. The item's
+  `final.json` records `n_turns` and `turn_limit`, and its verdict ends with
+  `(the session stopped at its turn cap: 50 turns, cap 50)`, which the analysts and reports
+  see. When the adapter left no facts (a stand-in model), `final.json` says
+  `session_facts: missing` and the verdict says the turn count is unknown.
+- **Tool calls**: each item's folder keeps `tool_calls.json`, the session's tool calls in
+  order (tool, the command as the model wrote it, output cut to 2,000 characters, whether it
+  was an error) with Claude Code's turn count, to compare runs step by step with V2's
+  SWE-agent trajectories. Neither the agent nor either arm's analysts see it (no record
+  field, view or item context reads it), so both arms stay on the same information.
+- **Skill**: the `skill` knob, written to `SKILL.md`, is the text the SkillOpt strategy and
+  the default loop optimize. It is empty by default (V2 has none); empty, the prompt does
+  not mention it (`SKILL.md` is then an empty file in the workspace).
+- **Analysts**: as in `spreadsheetbench_v2/agent` -- the input's preview as the item's
+  context; SkillOpt's view shows the final message, then V2's mismatch block or the fail
+  reason, with V2's system template and the prompt sent as the target's prompts. No gold
+  feedback reaches the agent.
+
+**Deviations from V2**, each with its `spreadsheet.yaml` line in `swe_port.py`'s docstring:
+Claude Code's `Bash` in place of SWE-agent's function calls, and `view_xlsx` a command whose
+argument docs are not sent as a schema (its `--help` prints them); no `submit` tool (the kept
+line "Do NOT combine verify and submit commands" then means: verify before ending the
+turn); the paths, and the input a writable copy (V2 mounts it read only; the grade never
+reads this copy); the system template appended rather than the whole system message; the
+turn cap as `--max-turns` (a Claude Code turn is one model response, which may make several
+tool calls; a SWE-agent call makes one); a timed-out command is reported in Claude Code's
+words, and V2's stop after 3 consecutive timeouts has no equivalent; long output is cut to a
+preview with the whole output saved to a file (V2: head and tail with a warning), and V2's
+no-output warning is not ported; the skill section, only when a skill is set; the
+environment: the pinned Python 3.12 with openpyxl, pandas and numpy (V2's image: Python
+3.11 with matplotlib, xlsxwriter and flake8 too), LibreOffice's `uno` not on `python3`'s
+path, no network; "one tool call per response" is the prompt's instruction only; a crashed
+session is run once more and an empty last turn asked once for its answer (V2 does neither).
+
+**Not verified here.** No live model run. LibreOffice inside the seal ran locally
+(LibreOffice 26.8, `test_libreoffice_runs_inside_the_seal`); CI has no LibreOffice and
+skips that test, so the stand-in checks only that `soffice` is reachable. When a run
+directory is itself under `/tmp`, the step's own `/tmp` shows the empty folders the seal
+mounts the workspace on (they go with the dispatch).

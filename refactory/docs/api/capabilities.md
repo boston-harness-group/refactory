@@ -14629,6 +14629,382 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
 }
 ```
 
+## spreadsheetbench_v2/agent
+
+solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness: one sealed Claude Code session with Read and Bash writes solution.py",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/agent",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "run the solution and record the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and write SkillOpt's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_thinking_tokens"
+      ],
+      "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "max_thinking_tokens": {
+      "default": 16384,
+      "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "the skill, written to the agent's SKILL.md",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
+        "knobs": {
+          "data_parallelism": 8,
+          "max_thinking_tokens": 16384
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/agent; use refactory help topic=spreadsheetbench_v2/agent first",
+      "cli": "refactory ceo spreadsheetbench_v2/agent",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+    "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
+  }
+}
+```
+
+## spreadsheetbench_v2/swe
+
+solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with V2's own agent setup (its SWE-agent prompt and tools): one sealed Claude Code session edits the workbook and writes output.xlsx",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which the prompt tells it to read before it edits the workbook (an empty skill is not mentioned); the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/swe",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.swe_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "take the session's output.xlsx as the item's output",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.swe_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and lay the session's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "one sealed Claude Code session (Bash) writes output.xlsx",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "bash_output_chars": {
+      "default": 10000,
+      "description": "the most of a command's output the model sees (V2's max_observation_length)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 10000,
+      "values": []
+    },
+    "bash_timeout_ms": {
+      "default": 60000,
+      "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 60000,
+      "values": []
+    },
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "max_turns": {
+      "default": 50,
+      "description": "the session's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 50,
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "the skill, written to the agent's SKILL.md; empty, the prompt does not mention it",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the solve call's prompt, V2's instance template (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt: V2's system template (frozen)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks with V2's own agent setup (its SWE-agent prompt and tools): one sealed Claude Code session per item with Claude Code's Bash, view_xlsx and LibreOffice on its PATH, edits the workbook and writes output.xlsx, which is graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE). Linux only (the sessions get a /tmp of their own).",
+        "knobs": {
+          "bash_output_chars": 10000,
+          "bash_timeout_ms": 60000,
+          "data_parallelism": 8,
+          "max_turns": 50
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/swe; use refactory help topic=spreadsheetbench_v2/swe first",
+      "cli": "refactory ceo spreadsheetbench_v2/swe",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+    "reviewed_schema": "91569525525546ec4910f87ad83fda04fe1568aebd9bd4b59ac64a343a72a3e3"
+  }
+}
+```
+
 ## sympy_pack/exact
 
 establish closed forms of sums with sympy and score what checked out. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.

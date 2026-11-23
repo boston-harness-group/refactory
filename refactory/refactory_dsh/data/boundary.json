@@ -6,6 +6,7 @@
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.agent_json",
+    "refactory_dsh.attempt_processes",
     "refactory_dsh.budgets",
     "refactory_dsh.control",
     "refactory_dsh.dsh_profile",
@@ -90,6 +91,7 @@
     "refactory_dsh.steer_probe",
     "refactory_dsh.steering",
     "refactory_dsh.strategies",
+    "refactory_dsh.strategy_trace",
     "refactory_dsh.supervisor",
     "refactory_dsh.target_guard",
     "refactory_dsh.task",
@@ -198,7 +200,9 @@
     "review_pack": "core",
     "livemath": "core",
     "spreadsheetbench": "core",
+    "spreadsheetbench_v2": "core",
     "skillopt": "core",
+    "gepa": "core",
     "sympy_pack": "core"
   },
   "typescript_core_packages": [

@@ -107,15 +107,18 @@ def frame(ctx: Any) -> dict[str, Any]:
     return {"solver_prompt": prompt}
 
 
-def _sandbox_run(ctx: Any, item: dict[str, Any], code: str) -> tuple[bool, str]:
+def _sandbox_run(ctx: Any, item: dict[str, Any], code: str,
+                 data_roots: list[str] | None = None) -> tuple[bool, str]:
     """Run ``code`` as SkillOpt's executor does, in a fresh confined directory holding a
-    copy of the input and of the prediction so far; the prediction comes back after."""
+    copy of the input and of the prediction so far; the prediction comes back after.
+    ``data_roots``: the dataset directories it must not see (SB's, by default)."""
     from . import interpreter, sandbox
 
     python = interpreter.interpreter()
     sandbox.require(python)
     workdir = Path(ctx.workdir)
-    hidden = sandbox.hidden_paths([*_run_roots(workdir), *_data_roots()])
+    roots = _data_roots() if data_roots is None else data_roots
+    hidden = sandbox.hidden_paths([*_run_roots(workdir), *roots])
     pred_name = f"{item.get('case_no') or 1}_pred.xlsx"
     with tempfile.TemporaryDirectory(prefix="sb-item-") as work:
         root = Path(work)

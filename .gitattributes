@@ -16,6 +16,9 @@ patches/*.patch -whitespace
 # The v1 subtree is imported as-is; its whitespace is not ours to fix.
 v1/** -whitespace
 
+# SpreadsheetBench 2's view_xlsx, shipped byte for byte (its sha256 is checked).
+refactory/refactory_packages/spreadsheetbench_v2/swe_tools/view_xlsx -whitespace
+
 # Pairing records are generated from the three confirmed owner-blob pairs.
 # The worktree-local installer registers the fail-closed driver command.
 *.i18n.yaml merge=dsh-translation-pairing

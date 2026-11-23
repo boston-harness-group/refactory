@@ -37,7 +37,7 @@ from refactory_dsh.loop import LoopConfig
 
 from refactory_packages.livemath.manifest import build_parts_manifest
 from refactory_packages.skillopt import prompts
-from refactory_packages.skillopt import trace as skillopt_trace
+from refactory_dsh import strategy_trace as skillopt_trace
 from refactory_packages.skillopt.compare import compare_runs, format_report
 from refactory_packages.skillopt.replay import (
     CallMatcher,

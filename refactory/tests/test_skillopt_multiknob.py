@@ -37,7 +37,7 @@ from refactory_packages.skillopt.proposer import (
     AMBIGUOUS_SECTION, CROSS_SECTION, SECTION_LINE_IN_CONTENT, TARGET_NOT_IN_SECTION,
     UNKNOWN_SECTION, SkillOptProposer, composite,
 )
-from refactory_packages.skillopt.trace import current_call_key
+from refactory_dsh.strategy_trace import current_call_key
 
 from test_livemath_blocks import _patch_task
 from test_skillopt import FakeClient, ProcessKilled
