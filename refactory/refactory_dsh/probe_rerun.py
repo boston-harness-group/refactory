@@ -553,8 +553,8 @@ def render(results: dict[str, Any]) -> str:
              f"Each probe file the verifier wrote, rerun on this attempt's commit in a scratch "
              f"checkout ({int(results.get('per_probe_s', PROBE_TIMEOUT_S))} s per probe, "
              f"{int(results.get('total_s', PROBES_TOTAL_S))} s for all).", "",
-             "| file | requirement | exit code | result | last lines of output |",
-             "| --- | --- | --- | --- | --- |"]
+             "| file | requirement | exit code | result | last lines of output | discriminating |",
+             "| --- | --- | --- | --- | --- | --- |"]
     for entry in results.get("probes", []):
         result = {"pass": "pass", "fail": "FAIL", "timed_out": "FAIL (timed out)",
                   "unrun": "not run (advisory)", "no_check": "no check of its own: UNVERIFIED",
@@ -563,9 +563,15 @@ def render(results: dict[str, Any]) -> str:
             result += " — only invokes existing tests: UNVERIFIED"
         tail = entry.get("tail", "").replace("|", "\\|").replace("\n", "<br>")
         code = "" if entry.get("exit_code") is None else str(entry["exit_code"])
-        lines.append(f"| {entry['file']} | {entry['requirement']} | {code} | {result} | {tail} |")
+        disc = entry.get("discriminating")
+        disc_col = ("✓" if disc is True else "✗" if disc is False
+                    else "non-regression" if disc == "non_regression" else "—")
+        lines.append(f"| {entry['file']} | {entry['requirement']} | {code} | {result} | {tail} | {disc_col} |")
     if not results.get("probes"):
-        lines.append("| (no probe files) | | | | |")
+        lines.append("| (no probe files) | | | | | |")
+    base_wall = results.get("base_rerun_wall_s")
+    if base_wall is not None:
+        lines += ["", f"Base rerun wall-clock: {base_wall} s"]
     if results.get("unverified"):
         lines += ["", "## UNVERIFIED claims", ""]
         lines += [f"- UNVERIFIED {item['id']}: {item['requirement']}"
@@ -606,6 +612,45 @@ def read_results(ctx: Any) -> dict[str, Any]:
     return found if isinstance(found, dict) else {}
 
 
+def _base_revert_discriminate(results: dict[str, Any], base_results: dict[str, Any],
+                              base_wall_s: float) -> None:
+    """Annotate head-side probe results with base-revert discrimination.
+
+    For each probe that passed on the head: if it also passed on the base, it is
+    ``discriminating=False`` (not discriminating — the probe proves nothing); if it
+    failed or timed out on the base, it is ``discriminating=True``.  A probe whose
+    header declares ``non-regression`` or ``preserved behaviour`` (case-insensitive) gets
+    ``discriminating="non_regression"`` instead of ``False``.
+
+    Non-discriminating probes are appended to ``results["unverified"]``.
+    """
+    base_by_file = {entry["file"]: entry for entry in base_results.get("probes", [])}
+    for entry in results.get("probes", []):
+        if entry.get("status") != "pass":
+            continue
+        base_entry = base_by_file.get(entry["file"])
+        if base_entry is None:
+            continue
+        base_code = base_entry.get("exit_code")
+        entry["base_exit_code"] = base_code
+        base_passed = (base_code == 0)
+        if base_passed:
+            hdr = (entry.get("header") or "").lower()
+            if "non-regression" in hdr or "preserved behaviour" in hdr:
+                entry["discriminating"] = "non_regression"
+            else:
+                entry["discriminating"] = False
+                results.setdefault("unverified", []).append({
+                    "id": entry["requirement"],
+                    "requirement": entry.get("header") or entry["requirement"],
+                    "why": "passes on base too (not discriminating)",
+                })
+        else:
+            entry["discriminating"] = True
+    results["base_run"] = base_results
+    results["base_rerun_wall_s"] = base_wall_s
+
+
 def rerun_probes(ctx: Any) -> dict[str, Any]:
     """Op before ``synthesize_qa``: rerun the verifier's probe files on the attempt.
 
@@ -614,6 +659,11 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
     leaves unchanged) and are copied to the run directory, replacing the last round's. They
     run in this op's own clone at the attempt (`clones._prepare`), with that clone's
     prepared environment, reset before each probe.
+
+    After running on the head, the same probes run on the base checkout (the run's
+    already-prepared base checkout, reused across QA passes).  A probe that passes on
+    both is "not discriminating" and does not count as verification.  A probe that times
+    out or crashes on the base counts as failing on the base (discriminating).
     """
     from refactory_dsh import clones, worktree
     from refactory_dsh.workspace import ROOT, _slug
@@ -642,8 +692,25 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
                 env.pop(key, None)
             else:
                 env[key] = str(value)
+        check_str = str(ctx.facts.get("check") or "")
         results = run_probes(probes, Path(prepared["path"]), report, base=found.base, env=env,
-                             reset=reset_checkout, check=str(ctx.facts.get("check") or ""),
+                             reset=reset_checkout, check=check_str,
                              roots=[Path(found.path)])
+        # Base-revert discrimination: run the same probes on the base checkout.
+        base_start = time.monotonic()
+        base_prepared = clones._prepare(workdir, workdir / ROOT / "probe_rerun_base", "base",
+                                        facts=dict(ctx.facts), command_timeout_s=PREPARE_TIMEOUT_S)
+        base_env = dict(os.environ)
+        for key, value in (base_prepared.get("env") or {}).items():
+            if value is None:
+                base_env.pop(key, None)
+            else:
+                base_env[key] = str(value)
+        base_results = run_probes(probes, Path(base_prepared["path"]), "",
+                                  base=found.base, env=base_env,
+                                  reset=reset_checkout, check=check_str,
+                                  roots=[Path(found.path)])
+        base_wall_s = round(time.monotonic() - base_start, 2)
+        _base_revert_discriminate(results, base_results, base_wall_s)
     text = write_results(workdir, results)
     return {"probe_results": text}

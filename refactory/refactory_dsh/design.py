@@ -1173,7 +1173,7 @@ class DesignMode(Mode):
             prompt_template=DESIGN_VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
-            reads=("brief.json", "changes.diff"),
+            reads=("brief.json", "changes.diff", "changed-functions.json"),
             writes=("reviews/verification.md",),
             produces=("verification",),
             role="code_reviewer",

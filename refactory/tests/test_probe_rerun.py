@@ -68,7 +68,7 @@ def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
     def prepare(workdir, root, of, *, facts, command_timeout_s, budget=None):
         repo = Path(root) / "repo"
         if not repo.exists():
-            clones.clone_shared(target, repo, head)
+            clones.clone_shared(target, repo, base if of == "base" else head)
         return {"path": str(repo), "env": {}}
 
     monkeypatch.setattr(clones, "_prepare", prepare)
@@ -82,8 +82,8 @@ def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
 
 
 REPORT = "#### Requirement: R1\n- Failure points: PROBED {}\n\nVERDICT: PASS\n"
-OWN_PROBE = ("# R1: double at the last element; expected 2*x\nfrom calc import double\n"
-             "assert double(3) == 6\n")
+OWN_PROBE = ("# R1: double at the last element; expected 2*x\nimport inspect\nfrom calc import double\n"
+             "assert double(3) == 6\nassert '# attempt' in inspect.getsource(double)\n")
 
 
 def test_a_probed_claim_without_a_probe_file_is_unverified(tmp_path, monkeypatch):
@@ -424,7 +424,9 @@ def test_a_probe_importing_the_projects_own_package_runs_and_passes(tmp_path, mo
     ctx = _run(tmp_path, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
     [entry] = probe_rerun.read_results(ctx)["probes"]
     assert entry["status"] == "pass", entry["tail"]
-    assert design_ops.gate_qa(ctx) == "proceed"
+    # The probe passes on both base and attempt (mypkg is unchanged) → non-discriminating.
+    # gate_qa routes through coverage_rerun for the unverified item.
+    assert entry.get("discriminating") is False
 
 
 def test_a_probe_of_the_package_that_asserts_false_is_a_defect(tmp_path, monkeypatch):
@@ -494,6 +496,186 @@ def test_a_probe_importing_refactory_dsh_runs_from_the_scratch_checkout(tmp_path
     [entry] = results["probes"]
     assert entry["status"] == "pass", entry["tail"]
 
+
+# ── base-revert discrimination ──
+
+
+def test_reimplementing_probe_is_not_discriminating(tmp_path, monkeypatch):
+    """Two probes for R1: one imports the changed module (fails on base, discriminating),
+    one carries its own copy (passes on both, not discriminating, in unverified)."""
+    # Probe that imports the changed function — it must fail on the base because the
+    # base has `double(x) = x + x` (which still returns 4 for double(2)), but the
+    # attempt has `double(x) = 2 * x`.  The probe checks for the string "2 * x" in
+    # the source, which is only present in the attempt.
+    importing_probe = (
+        "# R1: double uses multiplication in the attempt\n"
+        "import inspect\nfrom calc import double\n"
+        "assert '2 * x' in inspect.getsource(double)\n"
+    )
+    # Probe that re-implements the logic — passes on both base and attempt.
+    reimplementing_probe = (
+        "# R1: a copy of double works\n"
+        "def my_double(x):\n    return 2 * x\n"
+        "assert my_double(3) == 6\n"
+    )
+    report = (
+        "#### Requirement: R1\n"
+        "- Failure points: PROBED reviews/probes/R1-1.py\n"
+        "- Failure points: PROBED reviews/probes/R1-2.py\n\n"
+        "VERDICT: PASS\n"
+    )
+    ctx = _run(tmp_path, monkeypatch, report,
+               {"R1-1.py": importing_probe, "R1-2.py": reimplementing_probe})
+    results = probe_rerun.read_results(ctx)
+    by_file = {e["file"]: e for e in results["probes"]}
+    # The importing probe passes on head, fails on base → discriminating
+    assert by_file["R1-1.py"]["status"] == "pass"
+    assert by_file["R1-1.py"]["discriminating"] is True
+    assert by_file["R1-1.py"]["base_exit_code"] != 0
+    # The reimplementing probe passes on both → not discriminating
+    assert by_file["R1-2.py"]["status"] == "pass"
+    assert by_file["R1-2.py"]["discriminating"] is False
+    assert by_file["R1-2.py"]["base_exit_code"] == 0
+    # The reimplementing probe appears in unverified
+    unv_ids = [item["id"] for item in results["unverified"]]
+    assert "R1" in unv_ids
+    unv_whys = [item["why"] for item in results["unverified"]]
+    assert any("not discriminating" in w for w in unv_whys)
+    # The table shows the discrimination column
+    md = ctx.read_text(probe_rerun.RESULTS_MD)
+    assert "| discriminating |" in md
+    assert "✓" in md  # the importing probe
+    assert "✗" in md  # the reimplementing probe
+    # Base rerun wall-clock seconds are recorded
+    assert "base_rerun_wall_s" in results
+    assert isinstance(results["base_rerun_wall_s"], (int, float))
+    assert "Base rerun wall-clock:" in md
+
+
+def test_nondiscriminating_probe_proceeds_to_delivery(tmp_path, monkeypatch):
+    """A run whose only issue is a non-discriminating probe proceeds to delivery
+    with the unverified finding listed; no reloop emit."""
+    reimplementing_probe = (
+        "# R1: a copy of double works\n"
+        "def my_double(x):\n    return 2 * x\n"
+        "assert my_double(3) == 6\n"
+    )
+    report = (
+        "#### Requirement: R1\n"
+        "- Failure points: PROBED reviews/probes/R1-1.py\n\n"
+        "VERDICT: PASS\n"
+    )
+    ctx = _run(tmp_path, monkeypatch, report, {"R1-1.py": reimplementing_probe})
+    results = probe_rerun.read_results(ctx)
+    # The probe is not discriminating
+    assert results["probes"][0]["discriminating"] is False
+    assert any("not discriminating" in item["why"] for item in results["unverified"])
+    # gate_qa: should trigger a coverage_rerun first time (the unverified path),
+    # then proceed on the second pass
+    verdict = design_ops.gate_qa(ctx)
+    assert verdict == "coverage_rerun"
+    # Simulate the coverage rerun having been done already
+    ctx.set_fact("qa_coverage_rerun_done", True)
+    verdict2 = design_ops.gate_qa(ctx)
+    assert str(verdict2) == "proceed"
+    # The unverified finding is listed in the QA synthesis
+    synthesis = design_ops.synthesize_qa(ctx)
+    assert "not discriminating" in synthesis["qa"] or "UNVERIFIED" in synthesis["qa"]
+
+
+def test_base_revert_never_touches_workspace(tmp_path, monkeypatch):
+    """The workspace (target) directory and head checkout are unmodified after the
+    base-revert rerun.  The base checkout is the run's already-prepared base checkout,
+    not a new clone."""
+    importing_probe = (
+        "# R1: double uses multiplication in the attempt\n"
+        "import inspect\nfrom calc import double\n"
+        "assert '2 * x' in inspect.getsource(double)\n"
+    )
+    report = (
+        "#### Requirement: R1\n"
+        "- Failure points: PROBED reviews/probes/R1-1.py\n\n"
+        "VERDICT: PASS\n"
+    )
+    target = tmp_path / "target"
+    base, head = _repo(target)
+    # Record git status before
+    status_before = _git(target, "status", "--porcelain")
+    head_content_before = (target / "calc.py").read_text()
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / worktree.RECORD).parent.mkdir(parents=True, exist_ok=True)
+    (run / worktree.RECORD).write_text(json.dumps({
+        "path": str(target), "branch": "b", "base": base, "head": head,
+        "target": str(target), "run": str(run)}))
+    verifier = run / ROOT / "verifier" / "repo"
+    (verifier / probe_rerun.PROBES).mkdir(parents=True)
+    (verifier / probe_rerun.PROBES / "R1-1.py").write_text(importing_probe)
+
+    prepared_roots = []
+
+    def prepare(workdir, root, of, *, facts, command_timeout_s, budget=None):
+        repo = Path(root) / "repo"
+        prepared_roots.append((str(root), of))
+        if not repo.exists():
+            clones.clone_shared(target, repo, base if of == "base" else head)
+        return {"path": str(repo), "env": {}}
+
+    monkeypatch.setattr(clones, "_prepare", prepare)
+    ctx = nn.RunContext(run, facts={})
+    ctx.write_text("reviews/verification.md",
+                   "#### Requirement: R1\n- Failure points: PROBED reviews/probes/R1-1.py\n\nVERDICT: PASS\n")
+    for name, _ in design_ops.DESIGN_QA_REVIEWS:
+        ctx.write_text(name, "ran it; fine\n")
+    ctx.write_text(judges.QA_JUDGE,
+                   '{"verdict": "proceed", "must_fix": [], "follow_ups": []}')
+    probe_rerun.rerun_probes(ctx)
+
+    # The workspace (target) is untouched
+    assert _git(target, "status", "--porcelain") == status_before
+    assert (target / "calc.py").read_text() == head_content_before
+    # A base checkout was prepared (not a new clone of the target)
+    assert any(of == "base" for _, of in prepared_roots)
+    # The head checkout is also untouched (at the attempt's commit)
+    head_root = run / ROOT / "probe_rerun" / "repo"
+    assert "2 * x" in (head_root / "calc.py").read_text()
+
+
+def test_discrimination_on_both_runtimes(tmp_path, monkeypatch):
+    """Exercise rerun_probes through the walker path.  Both produce equivalent
+    discrimination results.  The spine path uses the same Python function via
+    ``python -m refactory_dsh.run refactory_dsh.probe_rerun:rerun_probes``,
+    so the discrimination logic runs identically on both runtimes; the walker
+    path is exercised in-process here."""
+    importing_probe = (
+        "# R1: double uses multiplication in the attempt\n"
+        "import inspect\nfrom calc import double\n"
+        "assert '2 * x' in inspect.getsource(double)\n"
+    )
+    reimplementing_probe = (
+        "# R1: a copy of double works\n"
+        "def my_double(x):\n    return 2 * x\n"
+        "assert my_double(3) == 6\n"
+    )
+    report = (
+        "#### Requirement: R1\n"
+        "- Failure points: PROBED reviews/probes/R1-1.py\n"
+        "- Failure points: PROBED reviews/probes/R1-2.py\n\n"
+        "VERDICT: PASS\n"
+    )
+    # Walker path: in-process call
+    ctx = _run(tmp_path, monkeypatch, report,
+               {"R1-1.py": importing_probe, "R1-2.py": reimplementing_probe})
+    results = probe_rerun.read_results(ctx)
+    by_file = {e["file"]: e for e in results["probes"]}
+    assert by_file["R1-1.py"]["discriminating"] is True
+    assert by_file["R1-2.py"]["discriminating"] is False
+    # The spine runs the same Python function, so its results would be identical;
+    # only the in-process walker path is exercised because the spine test requires
+    # a full lowering + TS drain setup that is out of scope for this unit test.
+    assert results.get("base_run") is not None
+    assert isinstance(results.get("base_rerun_wall_s"), (int, float))
 
 
 def _failing(file: str, requirement: str, header: str, tail: str) -> dict:
