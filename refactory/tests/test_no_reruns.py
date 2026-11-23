@@ -653,6 +653,7 @@ def test_a_base_changed_behind_the_marker_is_not_taken_for_prepared(tmp_path):
     "false; [ $? -eq 1 ] && true",
     "sh -c 'exit 3' && true || [ $? -eq 3 ]",
     "set -e; sh -c 'exit 2' || [ $? -eq 2 ]; true",
+    "set -e; sh -c 'exit 3'; [ $? -eq 3 ]",
 ])
 @pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash", "/bin/dash"])
 def test_each_step_sees_the_status_the_shell_would_give_it(tmp_path, command, shell):
