@@ -1530,6 +1530,8 @@ def _livemath_smoke(tmp_path, monkeypatch, knobs, *, node="smoke", extra=None, p
     knobs = {name: str(project / "parts.json") if value == "MANIFEST" else value
              for name, value in knobs.items()}
     monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 3, **knobs}))
+    # A node command runs in its run directory, as on DSH: not in the project.
+    monkeypatch.chdir(workdir)
     run_node(f"refactory_dsh.create_ops:{node}", workdir=workdir, node_id="smoke")
     return workdir
 
