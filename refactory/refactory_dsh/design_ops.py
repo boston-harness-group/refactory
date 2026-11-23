@@ -2098,6 +2098,7 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
     # Record exactly what the builder will be given (feedback re-fill reads it).
     _inherited_list = sorted(filtered.inherited) if found is not None else []
     _base_reset_list = getattr(ctx, '_base_reset', [])
+    _judge_reasons = filtered.reasons if (found is not None and filtered is not None) else None
     _cr_fail: dict[str, Any] = {
         "status": "fail",
         "validation": detail[:4000],
@@ -2111,6 +2112,8 @@ def _full_check(ctx: Any, command: str, check_timeout: int, prev_record: dict[st
         "inherited": _inherited_list,
         "commit": str(ctx.facts.get("commit", "")),
     }
+    if _judge_reasons:
+        _cr_fail["reasons"] = _judge_reasons
     if _base_reset_list:
         _cr_fail["base_reset"] = _base_reset_list
     ctx.write_json("check-record.json", _cr_fail)
@@ -2509,9 +2512,14 @@ def _the_changes_failures(ctx: Any, command: str, failing: list[str], check_time
         ctx, command, sorted(on_base), prepare_timeout=check_timeout, timeout=limit_s)
     if result.environment_failure:
         return failing, [], f"unavailable, so nothing is inherited: {result.environment_failure}"
-    inherited = base_check.design_comparison(result.failures, set(on_base), _named_text(ctx)).inherited
-    return ([test_id for test_id in failing if test_id not in inherited], sorted(inherited),
-            f"compared with {source}")
+    jr = base_check.judge_failures(
+        set(on_base), result.failures,
+        named_text=_named_text(ctx),
+        targeted_base_failures_set=result.failures,
+    )
+    inherited = sorted(jr.excused)
+    return ([test_id for test_id in failing if test_id not in jr.excused],
+            inherited, f"compared with {source}")
 
 
 def _self_checks(ctx: Any) -> list[dict[str, Any]]:

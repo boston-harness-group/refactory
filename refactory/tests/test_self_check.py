@@ -1310,9 +1310,8 @@ def test_a_base_run_that_names_no_failure_is_unavailable(tmp_path, monkeypatch):
 
 
 def test_a_parametrized_failure_the_parser_cuts_is_still_compared_with_the_base(tmp_path, monkeypatch):
-    """A parameter with a space is cut from the failure's id (``test_param[a``), which pytest
-    cannot find; passed back as it is, it stops the whole base run and nothing is
-    inherited. Its file runs on the base instead, and its failure there is inherited."""
+    """A parameter with a space is captured in full (``test_param[a b]``), and its failure
+    on the base is inherited — the fix for truncated parametrised IDs."""
     param = ("import pytest\nimport tool\n\n\n@pytest.mark.parametrize('value', ['a b'])\n"
              "def test_param(value):\n    assert False\n")
     repo = _target(tmp_path / "repo", {**PINNED, "tests/test_param.py": param})
@@ -1322,7 +1321,7 @@ def test_a_parametrized_failure_the_parser_cuts_is_still_compared_with_the_base(
     assert code == 0 and "self-check fix-up 1 of 2" in out, err
     [record] = _records(run)
     assert record["failing_ids"] == [PIN]
-    assert record["inherited_filtered"] == ["tests/test_param.py::test_param[a"]
+    assert record["inherited_filtered"] == ["tests/test_param.py::test_param[a b]"]
     assert record["base"] == "compared with a run of 2 test(s) on the base"
 
 

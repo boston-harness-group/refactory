@@ -82,9 +82,10 @@ _PYTEST_SECTION = re.compile(
     r"^={3,}\s*(FAILURES|ERRORS|short test summary info)\s*={3,}$", re.MULTILINE
 )
 _PYTEST_HEADER = re.compile(r"^_{3,}\s*(.+?)\s*_{3,}$", re.MULTILINE)
-_PYTEST_FAILED_LINE = re.compile(r"^FAILED\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)+)", re.MULTILINE)
+_PYTEST_FAILED_LINE = re.compile(r"^FAILED\s+(.+?::.*?)(?:\s+-\s.*)?$", re.MULTILINE)
 _PYTEST_ERROR_LINE = re.compile(
-    r"^(?:ERROR|ERRORS?)\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)*)\s*[-–—]", re.MULTILINE
+    r"^(?:ERROR|ERRORS?)\s+(\S+\.py(?:::\S*(?:\[.*?\])?)*)\s*(?:[-–—]\s.*)?$",
+    re.MULTILINE,
 )
 
 

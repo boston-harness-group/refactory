@@ -1117,7 +1117,8 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
         merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
     if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
-                                                   check_timeout_s)
+                                                   check_timeout_s,
+                                                   target_tip=merge.target_tip)
         if check_failure:
             # R1: a signal crash in the merged-tree check stops as infrastructure.
             if infra_flag:
@@ -1602,7 +1603,7 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
                 infra = "[infrastructure]" in (regen_err or "")
                 return MergeResult(abandoned=regen_err, infrastructure=infra)
         merge_sha = worktree.git(path, "rev-parse", "HEAD").strip()
-        return MergeResult(merge_commit=merge_sha)
+        return MergeResult(merge_commit=merge_sha, target_tip=target_tip)
 
     # Merge failed — identify conflicting files.
     try:
@@ -1738,10 +1739,14 @@ def reusable_check(ctx: Any, path: Path, commit: str) -> str:
 
 
 def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
-                  reviewed_commit: str, check_timeout_s: float) -> tuple[str, bool]:
+                  reviewed_commit: str, check_timeout_s: float,
+                  target_tip: str = "") -> tuple[str, bool]:
     """Run the check on the merged result; return (failure_reason, infrastructure_flag).
 
     Returns ("", False) on success.
+
+    When ``target_tip`` is provided, failures that the base at ``target_tip`` also has
+    are excused via ``judge_failures`` and ``targeted_base_failures``.
 
     The environment is built the same way as ``_check_in_worktree`` in ``repo_change.py``:
     HOME under the run directory, ``check_environment()`` for PATH, and
@@ -1814,6 +1819,44 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
     if result.ok:
         record_full_check(ctx, path, check)
         return "", False
+
+    # Check failed — try excusal via judge_failures before giving up.
+    from refactory_dsh import base_check
+
+    output = "\n".join((result.stdout or "", result.stderr or "")).strip()
+    attempt_failures = base_check.parse_test_failures(output)
+    if attempt_failures and target_tip:
+        # Run the failing tests against target_tip in a separate worktree
+        # via the reference parameter — cache key includes target_tip.
+        t_result, _source = base_check.targeted_base_failures(
+            ctx, check, sorted(attempt_failures),
+            prepare_timeout=check_timeout_s, timeout=check_timeout_s,
+            reference=target_tip,
+        )
+
+        # Reuse in-run base results when target_tip equals the run's base.
+        inrun_base_failures: set[str] = set()
+        if target_tip == found.base:
+            inrun_cached = base_check._read_cache(
+                ctx.workdir,
+                base_check.cache_key(found.base,
+                                     str(ctx.facts.get("setup") or "").strip(),
+                                     str(ctx.facts.get("generate") or "").strip(),
+                                     check),
+            )
+            if inrun_cached and not inrun_cached.environment_failure:
+                inrun_base_failures = inrun_cached.failures
+
+        if not t_result.environment_failure:
+            combined_base = t_result.failures | inrun_base_failures
+            jr = base_check.judge_failures(
+                attempt_failures, combined_base,
+                targeted_base_failures_set=combined_base,
+            )
+            if jr.all_excused:
+                record_full_check(ctx, path, check)
+                worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
+                return "", False
 
     # Check failed — reset to reviewed commit and report.
     worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
