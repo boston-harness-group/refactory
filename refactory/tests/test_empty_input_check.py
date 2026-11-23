@@ -246,6 +246,24 @@ def data_files(name: str, *, refuses: bool) -> dict[str, str]:
             "ops.py": _DATA_OPS.format(empty=empty)}
 
 
+class Ctx:
+    """The parts of a run context the smoke gate's steps use, in a run directory."""
+
+    def __init__(self, workdir: Path, facts: dict):
+        self.workdir, self.facts, self.knobs = workdir, dict(facts), {}
+        self.model = self.budget = None
+
+    def knob(self, name: str, default=None):
+        return self.knobs.get(name, default)
+
+    def read_json(self, name: str, default=None):
+        path = self.workdir / name
+        return json.loads(path.read_text()) if path.exists() else default
+
+    def write_json(self, name: str, payload) -> None:
+        (self.workdir / name).write_text(json.dumps(payload, default=str))
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch) -> Path:
     project = tmp_path / "project"
@@ -585,7 +603,6 @@ def test_the_smoke_gate_runs_the_check_as_the_spine_invokes_it(tmp_path, project
 def test_a_finding_unmarks_a_package_that_had_passed(tmp_path, project, plates):
     """`check_empty_input` on its own: a package recorded as passed is pending again once
     the check finds it fabricating, whoever called it."""
-    from tests.test_create_keep_files import Ctx
 
     _install(project, NAME, plate_files(NAME, FABRICATES))
     package = registry.workspace_root(project) / NAME
@@ -604,7 +621,6 @@ def test_a_finding_unmarks_a_package_that_had_passed(tmp_path, project, plates):
 
 def test_the_report_carries_an_unjudged_check_as_a_warning(tmp_path, project, monkeypatch):
     from refactory_dsh import authoring_evidence
-    from tests.test_create_keep_files import Ctx
 
     _install(project, NAME, plate_files(NAME, FABRICATES))
     package = registry.workspace_root(project) / NAME
