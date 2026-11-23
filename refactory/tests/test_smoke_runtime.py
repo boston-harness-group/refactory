@@ -524,9 +524,11 @@ def test_a_recorded_group_whose_id_now_names_another_group_is_left_alone(tmp_pat
 
 @pytest.mark.no_integration
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
-def test_a_run_whose_dsh_ends_on_its_own_leaves_nothing_running(tmp_path, monkeypatch):
+@pytest.mark.parametrize("watched", [True, False])
+def test_a_run_whose_dsh_ends_on_its_own_leaves_nothing_running(tmp_path, monkeypatch, watched):
     """DSH exits by itself, leaving a process in its own group and a node command in a
-    group of its own that recorded itself: both are ended before `run_on_dsh` returns."""
+    group of its own that recorded itself: both are ended before `run_on_dsh` returns.
+    An unwatched run records nothing, so there only DSH's own group is its to end."""
     import sys
 
     from refactory_dsh import dsh_profile, dsh_runtime, lowering
@@ -551,15 +553,16 @@ def test_a_run_whose_dsh_ends_on_its_own_leaves_nothing_running(tmp_path, monkey
     monkeypatch.setattr(lowering, "write_mode_graph", lambda *a, **kw: None)
     monkeypatch.setattr(lowering, "write_declarations", lambda *a, **kw: None)
     started = time.monotonic()
-    run = dsh_runtime.run_on_dsh({"knobs": {}}, tmp_path / "run", timeout_s=60, inactivity=True)
+    run = dsh_runtime.run_on_dsh({"knobs": {}}, tmp_path / "run", timeout_s=60, inactivity=watched)
     pids = [int(left.read_text()), int(detached.read_text())]
+    ended = pids if watched else pids[:1]
     try:
         assert run.returncode == 0, run.stderr
         assert time.monotonic() - started < 20
         deadline = time.monotonic() + 5
-        while any(_alive(pid) for pid in pids) and time.monotonic() < deadline:
+        while any(_alive(pid) for pid in ended) and time.monotonic() < deadline:
             time.sleep(0.1)
-        assert not any(_alive(pid) for pid in pids)
+        assert not any(_alive(pid) for pid in ended)
     finally:
         for pid in pids:  # only what this test started, should an assertion above fail
             try:
