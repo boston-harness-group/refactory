@@ -130,14 +130,15 @@ def test_create_fast_mode_loops_back_on_malformed_header(tmp_path, monkeypatch):
     assert "has space.txt" in emit_prompts[-1], "retry prompt must quote the bad line"
 
 
-# ── T8: EDIT and DELETE headers refused by parse_files (whole files only) ──
+# ── T8: EDIT headers refused by parse_files (whole files only) ──────────
+# A ===DELETE: block is accepted: it is how an edit removes a file
+# (test_create_keep_files.py).
 @pytest.mark.parametrize("header", [
     "===EDIT: src/main.py===",
-    "===DELETE: src/main.py===",
 ])
 def test_parse_files_refuses_edit_header_with_whole_files_message(header):
-    """EDIT and DELETE headers are refused by parse_files, quoting the line
-    and saying this mode takes whole files only."""
+    """EDIT headers are refused by parse_files, quoting the line and saying this
+    mode takes whole files only."""
     import re as _re
     answer = f"{header}\nsome body\n"
     with pytest.raises(ValueError, match=_re.escape(header)) as exc_info:

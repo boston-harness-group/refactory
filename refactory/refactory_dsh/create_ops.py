@@ -34,9 +34,23 @@ STAGING_DIR = Path(".factory-staging")
 
 STAGING = "staging"
 
-#: The marker the emit agent uses to separate files. JSON would need every
-#: newline escaped, which is where a generated source file usually dies.
-FILE_MARKER = re.compile(rf"^===FILE:\s*({EMISSION_PATH})\s*===\s*$", re.MULTILINE)
+#: The markers the emit agent uses to separate files. JSON would need every newline
+#: escaped, which is where a generated source file usually dies. A block is a whole
+#: file (``FILE``) or the removal of one (``DELETE``, with no body): an edit starts
+#: from the package it revises, so a file the answer leaves out is kept, and a
+#: deletion is how the answer says a file must go.
+BLOCK_MARKER = re.compile(
+    rf"^===(FILE|DELETE):\s*({EMISSION_PATH})\s*===\s*$", re.MULTILINE
+)
+
+#: Where ``prepare_create`` keeps an untouched copy of the package an edit starts
+#: from, under the run's staging directory. Every ``materialise`` builds the staged
+#: package from it, so an attempt starts from the source and not from the attempt
+#: before it. A create has an empty one.
+SOURCE_BASELINE = "source-baseline"
+
+#: The names a package's README goes by, any of which satisfies "has a README".
+README_NAMES = ("README.md", "README.rst", "README.txt", "README")
 
 REQUIRED_FILES = ("__init__.py",)
 
@@ -124,6 +138,14 @@ The context offers `ctx.knob(name, default)`, `ctx.read_json(name, default)`,
 `ctx.read_text`, `ctx.exists`, `ctx.set_fact(name, value)`, `ctx.facts`,
 `ctx.task` (what the run was started with), `ctx.workdir`, `ctx.iteration` and
 `ctx.model`.
+
+Missing input is an error, never a reason to invent one. When the input a run is
+given is missing or empty -- an input folder with no files, an empty file, a Task item
+with no data -- the operation raises an error naming what is missing. It never
+fabricates, simulates or samples stand-in input data and never reports on a
+substitute: a run on invented data that exits 0 reads as a result and is not one.
+Canonical validation runs the mode once more with its input empty and refuses a mode
+that then finishes with results.
 
 An agent's reply is text, and a model wraps more than JSON around its answer: prose, a
 fence, even a tool-call transcript it invented. An operation that reads an agent's JSON
@@ -817,17 +839,28 @@ def _package_relative(relative: str, name: str) -> str:
     return str(PurePosixPath(*parts))
 
 
+def _baseline_root(staging_root: Path) -> Path:
+    """The untouched copy of the source package for a staged package root."""
+    return Path(staging_root).parent.parent.parent / SOURCE_BASELINE
+
+
 def materialise(ctx: Any) -> dict[str, Any]:
-    """Turn the emit agent's answer into a package directory."""
+    """Turn the emit agent's answer into a package directory.
+
+    The package is the one the run started from with the answer applied: every file
+    the answer writes replaces or adds that file, every ``===DELETE:`` removes one, and
+    every other file of the starting package -- its README, its data, anything that is
+    not Python -- is kept. A create starts from nothing, so it holds what was written.
+    """
     answer = ctx.read_text("emit.txt")
     try:
-        files = parse_files(answer)
+        files, deletes = parse_emission(answer)
     except ValueError as exc:
         if isinstance(exc, BuildLoopStop):
             raise  # not a refusal — re-raise the stop
         from refactory_dsh.repo_change import _count_refusal
         return _count_refusal(ctx, exc)
-    if not files:
+    if not files and not deletes:
         raise ValueError(
             "the answer contained no '===FILE: <name>===' blocks, so there is "
             "nothing to write"
@@ -837,6 +870,7 @@ def materialise(ctx: Any) -> dict[str, Any]:
     # placed goes back to emit like a malformed header rather than ending the run.
     try:
         placed = {relative: _package_relative(relative, name) for relative in files}
+        removed = {relative: _package_relative(relative, name) for relative in deletes}
     except ValueError as exc:
         from refactory_dsh.repo_change import _count_refusal
         return _count_refusal(ctx, exc)
@@ -845,11 +879,42 @@ def materialise(ctx: Any) -> dict[str, Any]:
     staging_root = ctx.facts.get("package_root")
     if staging_root:
         root = Path(staging_root)
+        baseline: Path | None = _baseline_root(root)
     else:
         root = registry.workspace_root(project_for_writes(workdir=ctx.workdir)) / name
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+        # Written in place: the directory as it stands is what the answer applies to.
+        baseline = None
+    # The files the answer starts from: the source package for a staged edit (never an
+    # earlier attempt's output), the directory itself when written in place.
+    start = baseline if baseline is not None and baseline.is_dir() else (
+        None if baseline is not None else root
+    )
+    present = {
+        str(path.relative_to(start)) for path in start.rglob("*")
+        if path.is_file() and "__pycache__" not in path.relative_to(start).parts
+    } if start is not None and start.is_dir() else set()
+    try:
+        for relative, inside in removed.items():
+            if inside in placed.values():
+                raise ValueError(
+                    f"the answer both writes and deletes {relative!r}; keep one of them"
+                )
+            if inside not in present:
+                raise ValueError(
+                    f"the answer deletes {relative!r}, which the package does not have; "
+                    f"its files are: {', '.join(sorted(present)) or '(none)'}"
+                )
+    except ValueError as exc:
+        from refactory_dsh.repo_change import _count_refusal
+        return _count_refusal(ctx, exc)
+    if baseline is not None:
+        if root.exists():
+            shutil.rmtree(root)
+        if start is not None:
+            shutil.copytree(start, root, ignore=shutil.ignore_patterns("__pycache__"))
+    root.mkdir(parents=True, exist_ok=True)
+    for inside in removed.values():
+        (root / inside).unlink()
     written: list[str] = []
     for relative, content in files.items():
         inside = placed[relative]
@@ -860,6 +925,7 @@ def materialise(ctx: Any) -> dict[str, Any]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         written.append(inside)
+    kept = sorted(present - set(written) - set(removed.values()) - {registry.ORIGIN})
     # What the writer records about where this came from, which outranks anything a
     # generated manifest claims about itself.
     (root / ".origin.json").write_text(
@@ -882,33 +948,58 @@ def materialise(ctx: Any) -> dict[str, Any]:
         registry.install_workspace(project_for_nodes(), project_override=staging_base)
     else:
         registry.install_workspace(project_for_nodes())
-    ctx.write_json(f"{STAGING}/manifest.json", {"package": name, "files": sorted(written)})
+    ctx.write_json(f"{STAGING}/manifest.json", {
+        "package": name, "files": sorted(written), "kept": kept,
+        "deleted": sorted(removed.values()),
+    })
     cleared = {"emission_refused": ""} if ctx.facts.get("emission_refused") else {}
     reset_refusals = {"consecutive_refusals": 0} if ctx.facts.get("consecutive_refusals") else {}
     return {"package_path": str(root), "files": sorted(written), **cleared, **reset_refusals}
 
 
 def parse_files(answer: str) -> dict[str, str]:
-    """Split an answer into ``path -> source`` blocks."""
+    """Split an answer into ``path -> source`` blocks (its deletions are left out)."""
+    return parse_emission(answer)[0]
+
+
+def parse_emission(answer: str) -> tuple[dict[str, str], list[str]]:
+    """Split an answer into its whole files and the paths it deletes.
+
+    ``===FILE: <path>===`` is followed by the file's full contents. ``===DELETE:
+    <path>===`` stands alone: a deletion takes no text, and a path may not be both
+    written and deleted.
+    """
     for line in answer.splitlines():
-        if line.startswith(("===EDIT:", "===DELETE:")):
+        if line.startswith("===EDIT:"):
             raise ValueError(
-                f"this mode takes whole files only (===FILE: <path>===); "
-                f"got: {line!r}"
+                f"this mode takes whole files only (===FILE: <path>===, or "
+                f"===DELETE: <path>=== to remove one); got: {line!r}"
             )
-        if line.startswith("===FILE:") and FILE_MARKER.fullmatch(line) is None:
+        if line.startswith(("===FILE:", "===DELETE:")) and BLOCK_MARKER.fullmatch(line) is None:
             raise ValueError(
                 f"malformed emission header: {line!r}; "
                 "a path may contain any characters except whitespace, '=', "
                 "backtick, or quotes"
             )
     files: dict[str, str] = {}
-    matches = list(FILE_MARKER.finditer(answer))
+    deletes: list[str] = []
+    matches = list(BLOCK_MARKER.finditer(answer))
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(answer)
         body = answer[match.end() : end].strip("\n")
-        files[match.group(1)] = body + "\n"
-    return files
+        kind, path = match.group(1), match.group(2)
+        if kind == "FILE":
+            files[path] = body + "\n"
+        elif body.strip():
+            raise ValueError(
+                f"the ===DELETE: block for {path} has text after it; a deletion takes "
+                "none, so put the next header on the line after it"
+            )
+        elif path not in deletes:
+            deletes.append(path)
+    if both := sorted(set(files) & set(deletes)):
+        raise ValueError(f"the answer both writes and deletes {', '.join(both)}; keep one")
+    return files, deletes
 
 
 def validate(ctx: Any) -> str:
@@ -1523,9 +1614,18 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
     # reviewers.  For a new create the snapshot is empty; for edit it captures
     # every file in the shared package before the run touches it.
     source_files: dict[str, str | None] = {}
+    # The untouched starting point every `materialise` applies its answer to: the
+    # source package for an edit, nothing for a create. Rebuilt here, so a run that
+    # prepares again starts from the source as it is now.
+    baseline = _baseline_root(pkg_root)
+    if baseline.exists():
+        shutil.rmtree(baseline)
+    baseline.mkdir(parents=True)
     if shared.is_dir():
         # Copy existing package as the starting point for an edit.
         shutil.copytree(shared, pkg_root, dirs_exist_ok=True)
+        shutil.copytree(shared, baseline, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         source_hash = _dir_hash(shared)
         source_existed = True
         for _src_path in sorted(shared.rglob("*")):
@@ -1820,6 +1920,7 @@ def gate_smoke(ctx: Any) -> str:
             (ctx.workdir / name).unlink()
     try:
         produced = smoke(ctx)
+        check_empty_input(ctx)
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         receipt = ctx.read_json("smoke.json", {})
@@ -1838,6 +1939,45 @@ def gate_smoke(ctx: Any) -> str:
     evidence.record(ctx, {"status": "pass", "smoke": ctx.read_json("smoke.json", {}),
                           "revision": ctx.read_json("revision.json", None)})
     return "proceed"
+
+
+def check_empty_input(ctx: Any) -> dict[str, Any]:
+    """Run the new mode once more with its input empty; refuse it if it reports anyway.
+
+    Called by the smoke gate after the canonical smoke passed, on either runtime. The
+    receipt is ``empty-input.json``; a finding is raised like a smoke failure, so it goes
+    back to the builder with the reason and the package is not marked as passed. See
+    `refactory_dsh.empty_input` for what counts as an input and as a result.
+    """
+    from refactory_dsh import empty_input, sandbox
+    import uuid
+
+    identifier = str(ctx.read_json("smoke.json", {}).get("mode") or "")
+    if not identifier:
+        return {}
+    name = str(ctx.facts["name"])
+    brief = ctx.read_json("brief.json", {}) or {}
+    declared = tuple(brief.get("requires_input") or declared_inputs(ctx.knob("requires_input", "")))
+    context = _model_context(ctx)
+    timeout_s = int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S))
+    budget = getattr(ctx, "budget", None)
+    if budget is not None:
+        budget.checkpoint()
+        context["budget_ledger"] = str(budget.path)
+    receipt = empty_input.run(
+        identifier, ctx.workdir / "smoke-empty-input" / uuid.uuid4().hex,
+        project=project_for_nodes(), samples=_sample_knobs(ctx.knob("sample_knobs", "")),
+        declared=declared, model=bool(_agent_nodes(name)), timeout_s=timeout_s,
+        model_context=context,
+    )
+    ctx.write_json(empty_input.RECEIPT, receipt)
+    if receipt["status"] == "finding":
+        package = Path(str(ctx.facts.get("package_path") or ""))
+        if ctx.facts.get("package_path") and (package / registry.ORIGIN).is_file():
+            # The revision comparison may have recorded a pass before this ran.
+            registry.record_smoke(package, registry.SMOKE_PENDING)
+        raise ValueError(f"empty-input check: {receipt['reason']}")
+    return receipt
 
 
 def _changed_defaults(state: dict[str, Any], revised_knobs: Any,
@@ -2063,6 +2203,8 @@ def write_result(ctx: Any) -> dict[str, Any]:
         **metadata,
         "mode_contracts": contracts,
         "validation_evidence": ctx.read_json("authoring-evidence.json", None),
+        "empty_input_check": ctx.read_json("empty-input.json", None),
+        **_readme_report(ctx),
         "intent_audit": ctx.read_json("intent-audit.json", None),
     }
     if ctx.facts.get("revision_of"):
@@ -2075,6 +2217,24 @@ def write_result(ctx: Any) -> dict[str, Any]:
         })
     ctx.write_json("create.json", payload)
     return {"created": json.dumps(payload, default=str)}
+
+
+def _readme_report(ctx: Any) -> dict[str, Any]:
+    """Whether the package the run leaves behind has a README, said in its report.
+
+    Every package is meant to carry one. A run that ends without one says so rather
+    than writing one it was not given.
+    """
+    package = str(ctx.facts.get("package_path") or "")
+    if not package or not Path(package).is_dir():
+        return {}
+    found = next((name for name in README_NAMES if (Path(package) / name).is_file()), None)
+    if found:
+        return {"readme": found}
+    return {"readme": None, "warnings": [
+        f"the package {ctx.facts.get('name')!r} has no README ({' or '.join(README_NAMES)}) "
+        f"at {package}; every package should carry one"
+    ]}
 
 
 # ── the v2 review phases ───────────────────────────────────────────────────

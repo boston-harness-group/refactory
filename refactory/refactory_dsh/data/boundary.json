@@ -121,6 +121,7 @@
     "refactory_dsh.design_ops",
     "refactory_dsh.discovery",
     "refactory_dsh.edit",
+    "refactory_dsh.empty_input",
     "refactory_dsh.fast",
     "refactory_dsh.failfast",
     "refactory_dsh.fast_ops",

@@ -253,7 +253,7 @@ def test_lowered_graph_byte_identical_smoke_modes_at_1800():
 
 
 def test_a_smoke_envelope_never_shrinks_below_its_sandboxed_runs():
-    """A smoke op makes up to three sandboxed runs, each on a wall clock of the smoke budget
+    """A smoke op or gate makes up to three sandboxed runs, each on a wall clock of the smoke budget
     (`sandbox.run_sandboxed`); past a budget of 4800 s that exceeds the backstop envelope,
     and the envelope follows the larger of the two."""
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
@@ -267,6 +267,7 @@ def test_a_smoke_envelope_never_shrinks_below_its_sandboxed_runs():
         gate = Node("smoke", "gate", evaluator="m:g", produces=("smoke_score", "smoke_ok"),
                     knobs=("smoke_timeout_s",))
         assert lowering.command_timeout_s(op, state) == max(3 * budget + 600, backstop)
-        assert lowering.command_timeout_s(gate, state) == max(2 * budget + 600, backstop)
+        # The smoke gate's three: the new mode, its empty-input run, the revision source.
+        assert lowering.command_timeout_s(gate, state) == max(3 * budget + 600, backstop)
     state = {"knobs": {"smoke_timeout_s": {"value": 6000}}}
     assert lowering.command_timeout_s(op, state) == 18600 > backstop

@@ -40,6 +40,22 @@ when measured, stdout/stderr, elapsed time and failure information. Distinct smo
 directories preserve the outputs of earlier attempts. `revision.json` separately
 records comparison/provenance. Design retains its command and actual output.
 
+After the smoke passes, the gate runs the mode once more with its input empty
+(`refactory_dsh.empty_input`): sample knobs that name a path and declared input
+knobs point at an empty folder or file, and a data node reading a `source_path`
+reads an empty source of its format. A mode that then finishes and writes any
+file its graph declares has reported on input nobody gave it, which is a
+repairable finding sent back to the builder. A mode that stops with its own
+error, or finishes without results, passes; a timeout or an unavailable model is
+recorded as inconclusive. `empty-input.json` holds the receipt, and the run's
+`create.json` carries it beside a `readme` entry that warns when the package
+has no README.
+
+An edit starts from the package it revises: the emission's `===FILE:` blocks
+replace or add files, a `===DELETE: <path>===` block removes one, and every
+other file (the README, data, anything not Python) is kept. Each attempt starts
+from the source package, not from the previous attempt.
+
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,
 validation settings, receipt files and canonical runtime output files. Each validation receipt also survives in

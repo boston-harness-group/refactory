@@ -363,7 +363,9 @@ class CreateMode(Mode):
                 "the promised structure and substantive content. Identify unresolved "
                 "fields in their actual template context; punctuation, braces, or "
                 "ordinary words alone are not evidence of a placeholder. Keep guards "
-                "small and specific to a stated contract violation.\n\n"
+                "small and specific to a stated contract violation. When the run's "
+                "input is missing or empty, raise an error naming what is missing; "
+                "never fabricate, simulate or sample stand-in input data.\n\n"
                 "Design: Read the file `design.md` in the run directory. It contains the package design with all operations, nodes, knobs, and score definitions.\n\n"
                 "## What this mode must take as input\n{{requires_input}}\n\n"
                 "## API\n{{api}}\n\n"
@@ -372,7 +374,11 @@ class CreateMode(Mode):
                 "## What the reviews refused\n{{qa_gate}}\n{{overwatch_review}}\n\n"
                 "Write every file into emit.txt as a block introduced by a line of exactly:\n"
                 "===FILE: <relative path>===\n"
-                "followed by the file's full contents. Every path is relative to the "
+                "followed by the file's full contents. A revision starts from the "
+                "package it revises: a file you do not write is kept as it is, its "
+                "README, data and other non-Python files included, and a line of "
+                "exactly ===DELETE: <relative path>=== with nothing after it removes "
+                "one. Every path is relative to the "
                 "**package's own root**: the manifest is exactly `__init__.py`, not "
                 "`{{name}}/__init__.py`, not `refactory/refactory_packages/{{name}}/"
                 "__init__.py`, and not `.factory/packages/{{name}}/__init__.py`. The "
@@ -563,7 +569,8 @@ class CreateMode(Mode):
             "smoke", "gate", evaluator=f"{OPS}:gate_smoke", role="validation",
             resource_role="final_validation", max_iterations=12,
             knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "attempts", "check_attempt_cap"),
-            writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt"),
+            writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt",
+                    "empty-input.json"),
             produces=("smoke_score", "smoke_ok", "smoke_model", "smoke_reason",
                       "before_score", "after_score", "regressed", "revision_note",
                       "runtime_evidence", "validation", "attempts_used",
