@@ -5,6 +5,7 @@
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.agent_json",
+    "refactory_dsh.attempt_processes",
     "refactory_dsh.budgets",
     "refactory_dsh.control",
     "refactory_dsh.dsh_profile",
@@ -197,6 +198,7 @@
     "review_pack": "core",
     "livemath": "core",
     "spreadsheetbench": "core",
+    "spreadsheetbench_v2": "core",
     "skillopt": "core",
     "sympy_pack": "core"
   },

@@ -14577,6 +14577,180 @@ solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (
 }
 ```
 
+## spreadsheetbench_v2/agent
+
+solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness: one sealed Claude Code session with Read and Bash writes solution.py",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/agent",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "run the solution and record the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.agent_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and write SkillOpt's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_thinking_tokens"
+      ],
+      "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "max_thinking_tokens": {
+      "default": 16384,
+      "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "the skill, written to the agent's SKILL.md",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
+        "knobs": {
+          "data_parallelism": 8,
+          "max_thinking_tokens": 16384
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/agent; use refactory help topic=spreadsheetbench_v2/agent first",
+      "cli": "refactory ceo spreadsheetbench_v2/agent",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+    "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
+  }
+}
+```
+
 ## sympy_pack/exact
 
 establish closed forms of sums with sympy and score what checked out. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.

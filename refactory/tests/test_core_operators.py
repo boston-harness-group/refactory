@@ -1201,3 +1201,32 @@ def test_a_new_step_s_system_prompt_runs_alike_on_the_walker_and_the_spine(seed,
     drain with or without 'system' (its walker run is checked above)."""
     applier, out = _ok(seed, edit)
     _sound(applier, out, spine=True)
+
+
+@pytest.mark.parametrize("parsimony,item_mean,selection", [
+    (None, False, ""), (0.0, False, ""), (0.0, True, ""), (0.01, True, ""),
+    (0.01, False, "validation")])
+def test_the_compute_policy_is_repeated_where_the_operators_are_weighed(parsimony, item_mean,
+                                                                        selection):
+    """The run's compute-policy sentence (`compute_policy`) is said again under "Structural
+    operators", word for word, exactly when the request's top says it -- in the proposer's
+    request and in the analysts' list of changes, which share those lines; a parameter-only
+    run, with no operators, gets nothing new."""
+    from refactory_dsh.optim import analysts
+
+    ctx = _context("fuzz_draft_review", parsimony=parsimony, score_is_item_mean=item_mean,
+                   selection=selection)
+    text = ctx.render()
+    policy = base_mod.compute_policy(parsimony, item_mean=item_mean, gated=selection)
+    top = text.split("## The pipeline you may edit", 1)[0]
+    section = text.split("## Structural operators", 1)[1].split("\n## ", 1)[0]
+    changes = analysts._changes_text(ctx).split("## Structural operators", 1)[1]
+    if policy:
+        assert policy in top and policy in section and policy in changes
+        assert text.count(policy) == 2
+    else:
+        assert "Compute policy" not in text and "Compute policy" not in changes
+    import dataclasses
+
+    knob_only = dataclasses.replace(ctx, catalogue=nn_edits.catalogue("knob_only")).render()
+    assert knob_only.count("Compute policy") == (1 if policy else 0)

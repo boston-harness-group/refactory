@@ -1422,12 +1422,21 @@ def test_config_lock_does_not_block_isolate_hooks_when_extension_already_set(rep
 
 
 @pytest.fixture(params=["", "true"], ids=["local", "ci"])
-def guard_ci(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+def guard_ci(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> bool:
     """Each inner session runs as on a person's machine and as in CI (`CI`), so the guard
     is tested in both modes wherever this suite itself runs. Bytecode writing is on, so
-    the inner session's `__pycache__` is there for the guard to leave aside."""
+    the inner session's `__pycache__` is there for the guard to leave aside.
+
+    Its numbered temporary directories are under this test's own root
+    (`PYTEST_DEBUG_TEMPROOT`), not the machine's shared ``pytest-of-<user>``: at exit a
+    session deletes the finished sessions' directories it finds there beyond the newest
+    three, and on a machine running many suites that took minutes, past the 60 s each
+    inner session is given."""
     monkeypatch.setenv("CI", request.param)
     monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    root = tmp_path / "inner-pytest-root"
+    root.mkdir()
+    monkeypatch.setenv("PYTEST_DEBUG_TEMPROOT", str(root))
     return bool(request.param)
 
 

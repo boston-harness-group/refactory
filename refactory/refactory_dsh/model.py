@@ -1588,6 +1588,8 @@ class DshModelClient:
                             f"model completion timed out after {budget_s}s; "
                             f"requested runtime shutdown; the client does not replay a deadline{detail}")
                     error.cleanup_unconfirmed = bool(unconfirmed)  # type: ignore[attr-defined]
+                    if (session := getattr(exc, "session_id", None)) is not None:
+                        error.session_id = session  # type: ignore[attr-defined]
                     raise error from exc
                 else:
                     self._raise_if_cancelled()
@@ -1933,6 +1935,13 @@ class DshModelClient:
                             if time.monotonic() >= deadline:
                                 raise
                 except BaseException as error:
+                    if os.name == "posix":
+                        # The session the CLI leads (start_new_session): a retry that keeps
+                        # the workspace ends what is left of it first (`attempt_processes`).
+                        try:
+                            error.session_id = proc.pid  # type: ignore[attr-defined]
+                        except AttributeError:
+                            pass
                     if isinstance(error, subprocess.TimeoutExpired) and not isinstance(
                             error, InactivityTimeout):
                         # How long the model had streamed nothing when the deadline came,

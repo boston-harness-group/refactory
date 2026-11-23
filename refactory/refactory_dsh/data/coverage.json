@@ -500,6 +500,25 @@
       },
       "purpose": "establish closed forms of sums with sympy and score what checked out. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
       "reviewed_schema": "3fe98d311be0af3d62ac7f88789db0452a6e5a032d15b6eb859d3507a8ab8e79"
+    },
+    "spreadsheetbench_v2/agent": {
+      "doc": "refactory/docs/spreadsheetbench.md",
+      "examples": [
+        {
+          "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
+          "knobs": {
+            "data_parallelism": 8,
+            "max_thinking_tokens": 16384
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=spreadsheetbench_v2/agent; use refactory help topic=spreadsheetbench_v2/agent first",
+        "cli": "refactory ceo spreadsheetbench_v2/agent",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the graph of spreadsheetbench/agent): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt and a task.md holding V2's instruction, input file and output path, writes solution.py, which is run on a copy of the input in the code sandbox; the output is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py (1% tolerance, 99.8% of unchanged cells). Items are the 277 file-graded tasks of the prepared release, split by workbook/project (66 train, 38 val, 173 test). No gold feedback; no wall-clock or turn cap. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory) and LibreOffice. The skill is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.",
+      "reviewed_schema": "5ebf8a40be0067bbf492cf4e297d08d426124e6b498dd016c56912e0bcfb819c"
     }
   },
   "operations": {

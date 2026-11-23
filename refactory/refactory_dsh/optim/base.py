@@ -1528,7 +1528,10 @@ class ProposalContext:
             *operation_lines(self.catalogue, self.node_states, self.edges,
                              protected=self.protected,
                              knob_values={k.get("name"): k.get("value") for k in self.knobs},
-                             step_routes=self.step_routes, tools=self.new_node_tools),
+                             step_routes=self.step_routes, tools=self.new_node_tools,
+                             policy=compute_policy(self.parsimony,
+                                                   item_mean=self.score_is_item_mean,
+                                                   gated=self.selection)),
             "",
             *composition_section(self.catalogue, self.node_states, self.edges,
                                  protected=self.protected, code_nodes=self.code_nodes,
@@ -1633,12 +1636,14 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                     edges: Sequence[dict[str, Any]] = (), *, protected: Sequence[str] = (),
                     knob_values: Mapping[str, Any] | None = None,
                     step_routes: Mapping[str, Sequence[str]] | None = None,
-                    tools: bool = True) -> list[str]:
+                    tools: bool = True, policy: str = "") -> list[str]:
     """The operations a request offers, each said once: the written-out operations in a
     table (fields and description), then the core operators, one line and one example each
     (`operator_lines`, `nn.core_ops.OPERATORS`). The proposer's "The operations you may
     use" and the analysts' "The changes the optimizer can make" are both this, word for
-    word. Without ``tools`` (the run offers no tool step) no operator offers 'tools'."""
+    word. Without ``tools`` (the run offers no tool step) no operator offers 'tools'.
+    ``policy``: the run's compute policy (`compute_policy`), repeated under "Structural
+    operators" as the request's top states it."""
     core = set(CORE_OPERATORS)
     written = [c for c in catalogue if c.get("op") not in core]
     lines = [_table(["op", "kind", "macro", "fields", "description"],
@@ -1647,7 +1652,7 @@ def operation_lines(catalogue: Sequence[Mapping[str, Any]],
                      for c in written])] if written else []
     return lines + operator_lines(catalogue, node_states, edges, protected=protected,
                                   knob_values=knob_values, step_routes=step_routes,
-                                  tools=tools)
+                                  tools=tools, policy=policy)
 
 
 def _settings_lines(knobs: Sequence[dict[str, Any]], text_chars: int | None = None,
@@ -2682,8 +2687,9 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
                    edges: Sequence[dict[str, Any]], *, protected: Sequence[str] = (),
                    knob_values: Mapping[str, Any] | None = None,
                    step_routes: Mapping[str, Sequence[str]] | None = None,
-                   tools: bool = True) -> list[str]:
-    """"Structural operators": what the system wires for every one, then each core operator
+                   tools: bool = True, policy: str = "") -> list[str]:
+    """"Structural operators": what the system wires for every one (and the run's compute
+    policy, ``policy``, word for word as the request's top says it), then each core operator
     the run permits in one line -- its fields and its catalogue description (its
     `nn.core_ops.OPERATORS` line, and a written-out form where it has one) -- with one
     example, its ids taken from this graph where it has them. When the run has routes to
@@ -2703,6 +2709,8 @@ def operator_lines(catalogue: Sequence[dict[str, Any]], node_states: Sequence[di
         "",
         "## Structural operators",
         STRUCTURAL_LEAD,
+        # The top's sentence again where the options are weighed (`compute_policy`).
+        *([policy] if policy else []),
     ]
     state = _example_state(node_states, edges, knob_values)
     for name in chosen:
