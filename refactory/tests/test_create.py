@@ -1462,23 +1462,28 @@ def test_gate_smoke_a_revision_source_that_timed_out_halts(tmp_path, monkeypatch
 
 def test_a_revision_and_its_source_are_smoked_on_the_same_sample(tmp_path, monkeypatch):
     """The before and after scores a revision is judged on come from the same items: the
-    source's smoke is cut to the same `smoke_items` sample as the revision's."""
+    source's smoke is cut to the same `smoke_items` sample of the same split as the
+    revision's."""
     from refactory_dsh import lowering
     from refactory_dsh.run import run_node
     from refactory_dsh.sandbox import SandboxResult
     from test_edit_design import _smoke_run
 
-    seen: dict[str, int] = {}
+    seen: dict[str, tuple] = {}
 
-    def stub(identifier, workdir_, *, smoke_items=0, **kwargs):
-        seen["source" if Path(workdir_).name == "smoke-source" else "revision"] = smoke_items
+    def stub(identifier, workdir_, *, smoke_items=0, holdout=None, parts_manifest=None, **kwargs):
+        seen["source" if Path(workdir_).name == "smoke-source" else "revision"] = (
+            smoke_items, holdout, json.loads(Path(parts_manifest).read_text()))
         return SandboxResult(ok=True, payload={"score": 1.0, "iterations": 2})
 
+    parts = {"train": ["a"], "val": ["b"], "test": ["c"]}
+    (tmp_path / "parts.json").write_text(json.dumps(parts))
     workdir = _smoke_run(tmp_path, monkeypatch, revision="circle_packing/adaptive", scores={})
     monkeypatch.setattr(sandbox, "smoke", stub)
-    monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 2}))
+    monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps(
+        {"smoke_items": 2, "holdout": 0, "parts_manifest": str(tmp_path / "parts.json")}))
     run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
-    assert seen == {"revision": 2, "source": 2}
+    assert seen == {"revision": (2, 0.0, parts), "source": (2, 0.0, parts)}
 
 
 #: The LiveMath ids of the shipped fixture split (`tests/fixtures/livemath/split`):
@@ -1526,6 +1531,25 @@ def test_create_smokes_a_task_bound_mode_on_the_train_part_its_runs_use(
     ran = sorted(json.loads(path.read_text())["id"]
                  for path in Path(receipt["workdir"]).glob("passes/data/*/span.json"))
     assert ran == expected
+
+
+@pytest.mark.parametrize("body", ['{"val": ["202503:1"]}', "not json"])
+def test_create_refuses_a_parts_manifest_it_cannot_sample_before_any_smoke(
+        tmp_path, monkeypatch, body):
+    """A manifest with no train ids, or none at all, is refused before a smoke runs:
+    a fraction split in its place would sample items the mode's runs hold out."""
+    from refactory_dsh import lowering
+    from refactory_dsh.run import run_node
+    from test_edit_design import _smoke_run
+
+    calls: list[str] = []
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", lambda identifier, *a, **kw: calls.append(identifier))
+    (tmp_path / "parts.json").write_text(body)
+    monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"parts_manifest": str(tmp_path / "parts.json")}))
+    with pytest.raises(ValueError, match="parts_manifest"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    assert calls == []
 
 
 def test_a_smoke_that_hit_its_cpu_limit_is_uncertain_and_says_so(tmp_path, monkeypatch):
