@@ -875,3 +875,20 @@ def test_a_grades_check_of_an_older_tasks_json_is_refused(sb2_data):
     prepare.check(sb2_data)  # the checksums match: only the grades check is stale
     with pytest.raises(TaskError, match="check --grades"):
         tasks.SpreadsheetBenchV2Task().instances()
+
+
+def test_the_health_check_after_a_failure_is_fresh(tmp_path, sb2_data, monkeypatch):
+    """A cached "healthy" answer is not trusted after a failure: the real reference check
+    runs again (here it fails: the stand-in soffice converts nothing), so the item is an
+    incident rather than the output's 0."""
+    import time
+
+    task, item, pred = _val_and_pred(tmp_path)
+
+    def hangs(*_a, **_k):
+        raise open_spreadsheet.RecalcError("LibreOffice took more than 900 s (its process guard)")
+
+    monkeypatch.setattr(open_spreadsheet, "recalculate", hangs)
+    monkeypatch.setitem(recalc._reference, recalc.soffice(), (True, time.monotonic()))
+    with pytest.raises(tasks.RecalcFailed):
+        task.grade(item, pred)

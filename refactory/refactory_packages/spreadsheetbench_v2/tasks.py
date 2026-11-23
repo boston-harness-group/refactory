@@ -154,10 +154,13 @@ class SpreadsheetBenchV2Task(Task):
 
         When LibreOffice itself fails on the output (timed out, killed, crashed:
         `RecalcError`), a fresh reference check runs and, if LibreOffice is healthy, the
-        recalculation is tried once more, alone in this process (`_RETRY_LOCK`). Failing
-        again while LibreOffice stays healthy is the output's doing (`OutputUnrecalculable`,
-        scored 0): an output that hangs LibreOffice every time must not become an incident
-        that is left out of the score. Only an unhealthy LibreOffice is an incident."""
+        recalculation is tried once more. `_RETRY_LOCK` only keeps two retries in one
+        process from running together: other items' first attempts (and other processes)
+        still run beside a retry, so a retry can still run out of memory next to other
+        work. Failing again while LibreOffice stays healthy is the output's doing
+        (`OutputUnrecalculable`, scored 0): an output that hangs LibreOffice every time must
+        not become an incident that is left out of the score. Only an unhealthy LibreOffice
+        is an incident."""
         meta = instance.metadata
         note = ""
         with tempfile.TemporaryDirectory(prefix="sb2-grade-") as work:
@@ -218,8 +221,8 @@ class OutputUnrecalculable(Exception):
     the output's doing, scored 0 with the reason."""
 
 
-#: One retry of a failed recalculation at a time in this process: nothing else of ours
-#: runs LibreOffice beside it.
+#: One retry of a failed recalculation at a time in this process. It does not stop other
+#: items' first attempts, or other processes, from running LibreOffice beside a retry.
 _RETRY_LOCK = threading.Lock()
 
 

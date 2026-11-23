@@ -510,7 +510,9 @@ How it runs differs, never what it decides:
    leaves such a file in place). When LibreOffice itself fails on it -- crashing, killed
    (out of memory), failing to calculate or store, or past its process guard -- a fresh
    check on a known-good workbook runs: LibreOffice unhealthy, it is a harness incident;
-   healthy, the output is recalculated once more, alone, and failing again scores 0
+   healthy, the output is recalculated once more (retries in one process run one at a time,
+   but other items' first attempts still run beside it, so a retry can still run out of
+   memory next to other work), and failing again scores 0
    (`recalc-failed: LibreOffice could not recalculate the output ...`), so an output that
    hangs LibreOffice every time cannot turn into an incident left out of the score.
 3. **Recalculation.** One file per private LibreOffice profile and pipe, a copy opened
