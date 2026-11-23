@@ -13,6 +13,9 @@ import json
 
 import pytest
 
+import copy as _copy
+import functools as _functools
+
 import structure_fuzz as sf
 from refactory_dsh.nn import core_ops, validate_state
 from refactory_dsh.nn import edits as nn_edits
@@ -22,9 +25,20 @@ from test_livemath_skill_graph import _StepModel
 from test_pipeline_view import _mode
 
 
+#: Module-level cache: ``_mode().state_dict()`` is expensive (registry resolve +
+#: graph construction).  Each mode's state is built once and deep-copied on reuse.
+@_functools.cache
+def _cached_state(name: str) -> dict[str, Any]:
+    return _mode(name).state_dict()
+
+
+def _fresh_state(name: str) -> dict[str, Any]:
+    return _copy.deepcopy(_cached_state(name))
+
+
 def _solver(*edits: dict) -> tuple[object, dict]:
     mode = _mode("livemath/solver")
-    state = mode.state_dict()
+    state = _fresh_state("livemath/solver")
     for edit in edits:
         state = nn_edits.apply(edit, state)
     assert validate_state(state) == [], validate_state(state)
@@ -139,7 +153,7 @@ def test_a_copy_is_sent_exactly_what_the_step_is_sent_on_the_spine(tmp_path, mon
 
 def test_a_copy_takes_no_sees():
     reason = nn_edits.precheck({"op": "parallelize", "steps": ["solve"], "copies": 1,
-                                "sees": ["task"]}, _mode("livemath/solver").state_dict())
+                                "sees": ["task"]}, _fresh_state("livemath/solver"))
     assert reason and "a copy is sent exactly what the step is sent" in reason
 
 
@@ -154,7 +168,7 @@ def test_a_copy_takes_no_sees():
      "a new step does not take 'role'"),
 ])
 def test_a_field_an_operator_would_ignore_is_refused(edit, said):
-    reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
+    reason = nn_edits.precheck(edit, _fresh_state("livemath/solver"))
     assert reason and said in reason and "would be ignored" in reason, reason
 
 
@@ -163,7 +177,7 @@ def test_system_is_offered_where_insert_takes_it():
     same source the precondition checks."""
     assert "system" in core_ops.OPERATORS["insert"]["fields"]
     assert nn_edits.precheck({"op": "insert", "after": "solve", "kind": "agent", "text": "x",
-                              "system": "S"}, _mode("livemath/solver").state_dict()) is None
+                              "system": "S"}, _fresh_state("livemath/solver")) is None
 
 
 # ── 5. no edit makes a step run without an input it had ────────────────────
@@ -172,7 +186,7 @@ def test_system_is_offered_where_insert_takes_it():
 def test_a_route_skipping_the_steps_a_later_step_reads_is_refused():
     """The audit's route_skip_existing: on the easy path decide_prompt would run with
     neither fork step's notes and fail every item that takes it."""
-    s4 = _mode("livemath/skill_graph").state_dict()
+    s4 = _fresh_state("livemath/skill_graph")
     with pytest.raises(nn_edits.EditError) as refused:
         nn_edits.apply({"op": "route", "after": "compare", "judge": "agent", "text": "x",
                         "to": {"hard": "notes_prompts", "easy": "decide_prompt"}}, s4)
@@ -181,7 +195,7 @@ def test_a_route_skipping_the_steps_a_later_step_reads_is_refused():
 
 
 def test_routes_that_keep_every_input_and_removals_are_still_taken():
-    s4 = _mode("livemath/skill_graph").state_dict()
+    s4 = _fresh_state("livemath/skill_graph")
     assert nn_edits.apply({"op": "route", "after": "compare", "judge": "agent", "text": "x",
                            "to": {"a": "notes_prompts",
                                   "b": {"kind": "agent", "text": "y"}}}, s4)
@@ -284,7 +298,7 @@ def test_an_agent_cannot_take_over_a_step_writing_two_files():
 
 
 def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
-    s4 = _mode("livemath/skill_graph").state_dict()
+    s4 = _fresh_state("livemath/skill_graph")
     nodes = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1},
                            s4)["graph"]["nodes"]
     own = [k.replace("decide__", "") for k in nodes["decide"]["knobs"]]
@@ -296,7 +310,7 @@ def test_a_copy_has_exactly_the_knobs_of_the_step_it_copies():
                                            (["Bash"], True), ("yes", True)])
 def test_tools_is_a_list_from_the_sealed_set_or_false(tools, refused):
     edit = {"op": "insert", "after": "solve", "kind": "agent", "text": "x", "tools": tools}
-    reason = nn_edits.precheck(edit, _mode("livemath/solver").state_dict())
+    reason = nn_edits.precheck(edit, _fresh_state("livemath/solver"))
     assert bool(reason and "lists the tools a new step uses, from bash" in reason) == refused, reason
 
 
@@ -366,7 +380,7 @@ def test_as_built_says_a_new_step_no_step_reads():
     no step, and the candidate's As built says so; with the slot kept, it does not."""
     from refactory_dsh.nn import pipeline_view
 
-    parent = _mode("livemath/skill_graph").state_dict()
+    parent = _fresh_state("livemath/skill_graph")
     state = parent
     for edit in [*S4_BUNDLE, {"op": "set_knob", "name": "decide_task", "value": "Decide now."}]:
         state = nn_edits.apply(edit, state)
@@ -392,7 +406,7 @@ def test_a_new_step_ending_the_pass_leaves_its_output_to_the_task():
     """The choice step taking over solve ends the pass; the Task reads what it writes."""
     from refactory_dsh.nn import pipeline_view
 
-    parent = _mode("livemath/solver").state_dict()
+    parent = _fresh_state("livemath/solver")
     _mode_, chosen = _solver(*CHOICE)
     assert not [line for line in pipeline_view.changed_lines(parent, chosen)
                 if "reaches no step" in line]
@@ -476,7 +490,7 @@ def test_a_fact_a_reader_takes_as_feedback_is_refused():
 
 def test_a_copy_keeps_the_step_s_current_text_not_its_default():
     s4 = nn_edits.apply({"op": "set_knob", "name": "decide__system_prompt",
-                         "value": "TUNED SYSTEM PROMPT"}, _mode("livemath/skill_graph").state_dict())
+                         "value": "TUNED SYSTEM PROMPT"}, _fresh_state("livemath/skill_graph"))
     assert s4["knobs"]["decide__system_prompt"]["spec"].get("default") != "TUNED SYSTEM PROMPT"
     after = nn_edits.apply({"op": "parallelize", "steps": ["decide"], "copies": 1}, s4)
     assert after["knobs"]["decide_copy1__system_prompt"]["value"] == "TUNED SYSTEM PROMPT"
@@ -716,7 +730,7 @@ def test_the_s1_table_does_not_list_insert_at_solve_as_applying():
     from refactory_dsh.optim import base
     from test_operator_fit import _rows, _section
 
-    rows = _rows(_section(_mode("livemath/solver").state_dict()))
+    rows = _rows(_section(_fresh_state("livemath/solver")))
     # Insert alone is refused there; with the take-over its refusal names, it applies.
     assert "insert" not in rows["solve"][1].split("; ")[0].split(", "), rows["solve"]
     assert "+ takes_over solve: insert" in rows["solve"][1], rows["solve"]
@@ -1089,7 +1103,7 @@ def test_a_knob_left_reaching_no_step_is_said_and_never_offered():
     assert "hypotheses_task" not in view, view
     # Before the rewire it reached hypotheses only (notes_prompts declares which prompt
     # carries which knob), not precision.
-    assert core_ops.reader_knobs(_mode("livemath/skill_graph").state_dict(), "prepare") == [
+    assert core_ops.reader_knobs(_fresh_state("livemath/skill_graph"), "prepare") == [
         "precision_task", "hypotheses_task", "decide_task"]
 
 
@@ -1133,7 +1147,7 @@ def _shared_decide_task() -> dict:
     through decide_prompt."""
     import copy
 
-    state = _mode("livemath/skill_graph").state_dict()
+    state = _fresh_state("livemath/skill_graph")
     nodes, edges = state["graph"]["nodes"], state["graph"]["edges"]
     copied = copy.deepcopy(nodes["decide_prompt"])
     copied.update(id="decide_prompt2", produces=["decide_prompt2"])

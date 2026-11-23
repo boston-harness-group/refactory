@@ -1,7 +1,8 @@
 """The per-test time budget hook fails over-budget tests only when --time-budget is given.
 
-Three scenarios, exercised by running pytest as a subprocess on a small inline test
-with a minimal conftest that re-exports only the budget-related hooks:
+Three scenarios, exercised end-to-end through the **real** ``conftest.py`` by placing a
+tiny test file inside ``refactory/tests/`` (via a subprocess, so the outer session's
+checkout guard never sees it) and running pytest on it:
 
 1. ``--time-budget=1``, unmarked test takes 1.5 s → failed by the hook.
 2. ``--time-budget=1``, ``@pytest.mark.slow`` test takes 1.5 s → not failed.
@@ -9,106 +10,83 @@ with a minimal conftest that re-exports only the budget-related hooks:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
-_INLINE_TEST = """\
-import time, pytest
+_INLINE_TEST = textwrap.dedent("""\
+    import time, pytest
 
-def test_over_budget():
-    time.sleep(1.5)
+    def test_over_budget():
+        time.sleep(1.5)
 
-@pytest.mark.slow
-def test_over_budget_but_slow():
-    time.sleep(1.5)
+    @pytest.mark.slow
+    def test_over_budget_but_slow():
+        time.sleep(1.5)
 
-def test_under_budget():
-    pass
-"""
-
-# A minimal conftest that registers the same hooks the real conftest.py has for
-# the time budget, without importing the full conftest (which needs the checkout).
-_INLINE_CONFTEST = """\
-import sys, os
-# Put the real tests directory on the path so we can import conftest's hooks.
-_tests_dir = {tests_dir!r}
-sys.path.insert(0, _tests_dir)
-# Also add the parent so test support modules are importable.
-sys.path.insert(0, os.path.dirname(_tests_dir))
-
-import pytest
-from collections.abc import Iterator
-
-def pytest_addoption(parser):
-    parser.addoption("--run-slow", action="store_true", default=False)
-    parser.addoption("--time-budget", type=int, default=None, metavar="SECONDS")
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: test exceeds the CI time budget")
-
-def pytest_collection_modifyitems(config, items):
-    if not config.getoption("--run-slow", default=False):
-        skip_slow = pytest.mark.skip(reason="pass --run-slow to run slow tests; they run nightly")
-        for item in items:
-            if "slow" in item.keywords:
-                item.add_marker(skip_slow)
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    outcome = yield
-    report = outcome.get_result()
-    if report.when != "call" or not report.passed:
-        return
-    budget = item.config.getoption("--time-budget", default=None)
-    if budget is None:
-        return
-    if item.get_closest_marker("slow") is not None:
-        return
-    if report.duration > budget:
-        report.outcome = "failed"
-        report.longrepr = (
-            f"Test took {{report.duration:.1f}}s, exceeding the {{budget}}s budget. "
-            "Mark it @pytest.mark.slow or speed it up."
-        )
-"""
+    def test_under_budget():
+        pass
+""")
 
 
-@pytest.fixture(scope="module")
-def _test_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("budget")
-    tests_dir = str(Path(__file__).resolve().parent)
-    (root / "conftest.py").write_text(_INLINE_CONFTEST.format(tests_dir=tests_dir))
-    (root / "test_budget.py").write_text(_INLINE_TEST)
-    return root
+def _run_budget_probe(*extra_args: str) -> dict:
+    """Create a probe test in refactory/tests/, run pytest on it through the real
+    conftest.py, clean up, and return the stdout/stderr/returncode.
 
+    Everything happens inside a subprocess so the outer session's checkout guard
+    never sees the file.
+    """
+    script = textwrap.dedent(f"""\
+        import json, os, pathlib, subprocess, sys
 
-def _run_pytest(test_dir: Path, *extra_args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", str(test_dir / "test_budget.py"), "-v",
-         f"--rootdir={test_dir}", "-p", "no:xdist", *extra_args],
-        capture_output=True, text=True, timeout=60,
+        tests_dir = pathlib.Path({_TESTS_DIR!r})
+        probe = tests_dir / "_test_budget_probe_tmp.py"
+        probe.write_text({_INLINE_TEST!r})
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", str(probe), "-v",
+                 "-p", "no:xdist", "--timeout=30"] + {list(extra_args)!r},
+                capture_output=True, text=True, timeout=60,
+                cwd={_REPO_ROOT!r},
+            )
+            print(json.dumps({{"stdout": result.stdout, "stderr": result.stderr,
+                              "returncode": result.returncode}}))
+        finally:
+            probe.unlink(missing_ok=True)
+    """)
+    outer = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=120,
+        cwd=_REPO_ROOT,
     )
+    assert outer.returncode == 0 or outer.stdout.strip(), (
+        f"wrapper failed: {outer.stderr}")
+    return json.loads(outer.stdout.strip().split("\n")[-1])
 
 
-def test_the_hook_fails_an_unmarked_test_over_the_budget(_test_dir):
-    result = _run_pytest(_test_dir, "--time-budget=1", "--run-slow")
-    assert "test_over_budget FAILED" in result.stdout, result.stdout + result.stderr
-    assert "exceeding the 1s budget" in result.stdout, result.stdout
+def test_the_hook_fails_an_unmarked_test_over_the_budget():
+    data = _run_budget_probe("--time-budget=1", "--run-slow")
+    assert "test_over_budget FAILED" in data["stdout"], data["stdout"] + data["stderr"]
+    assert "exceeding the 1s budget" in data["stdout"], data["stdout"]
     # The slow-marked one passes even though it is over budget.
-    assert "test_over_budget_but_slow PASSED" in result.stdout, result.stdout
-    assert "test_under_budget PASSED" in result.stdout, result.stdout
+    assert "test_over_budget_but_slow PASSED" in data["stdout"], data["stdout"]
+    assert "test_under_budget PASSED" in data["stdout"], data["stdout"]
 
 
-def test_slow_tests_are_skipped_without_run_slow(_test_dir):
-    result = _run_pytest(_test_dir, "--time-budget=1")
-    assert "test_over_budget_but_slow SKIPPED" in result.stdout, result.stdout + result.stderr
+def test_slow_tests_are_skipped_without_run_slow():
+    data = _run_budget_probe("--time-budget=1")
+    assert "test_over_budget_but_slow SKIPPED" in data["stdout"], (
+        data["stdout"] + data["stderr"])
 
 
-def test_no_budget_means_no_failure(_test_dir):
-    result = _run_pytest(_test_dir, "--run-slow")
-    assert "test_over_budget PASSED" in result.stdout, result.stdout + result.stderr
-    assert "test_over_budget_but_slow PASSED" in result.stdout, result.stdout
+def test_no_budget_means_no_failure():
+    data = _run_budget_probe("--run-slow")
+    assert "test_over_budget PASSED" in data["stdout"], data["stdout"] + data["stderr"]
+    assert "test_over_budget_but_slow PASSED" in data["stdout"], data["stdout"]

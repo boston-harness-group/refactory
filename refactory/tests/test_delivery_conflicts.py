@@ -1,8 +1,39 @@
-"""Delivery: conflicts with a moved main, merge reloops and redos."""
+"""Delivery: conflicts with a moved main, merge reloops and redos.
+
+Speed optimizations (d16):
+- A module-scoped ``_published_template`` fixture creates a repo + bare GitHub once;
+  tests that start from the standard "git_repo + _published" state clone it via
+  ``_clone_published``, saving ~20 redundant ``git init + push`` cycles.
+- The module-scoped golden fixtures from ``_delivery_support`` (``_new_golden``,
+  ``_opened_golden``) already share the two most common design runs.
+"""
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
+
 from _delivery_support import *  # noqa: F403  (the helpers and fixtures these tests share)
+
+
+@pytest.fixture(scope="module")
+def _published_template(tmp_path_factory) -> tuple:
+    """A module-scoped template: ``(repo, bare, github_root)`` after one ``git_repo`` +
+    ``_published`` cycle.  Tests call ``_clone_published`` to get a writable copy."""
+    base = tmp_path_factory.mktemp("pub-tpl")
+    with pytest.MonkeyPatch.context() as mp:
+        _make_github(base)      # noqa: F405
+        _use_github(mp, base)   # noqa: F405
+        repo = git_repo(base / "repo")  # noqa: F405
+        _published(base / "github", "octo/tool", repo)  # noqa: F405
+    return base
+
+
+def _clone_published(template: tuple, dest: Path) -> tuple:  # noqa: F405
+    """Clone the published template into *dest*; return ``(repo, github)``."""
+    shutil.copytree(template, dest)
+    return dest / "repo", dest / "github"
 
 
 def test_interrupted_merge_recovery_resets_to_reviewed_commit(tmp_path):

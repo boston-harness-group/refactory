@@ -54,8 +54,17 @@ OPTIONS = ("import json\n"
            "                                             for c in item['choices']])}}\n")
 
 
-def _state(name: str) -> dict[str, Any]:
+import copy as _copy
+import functools as _functools
+
+
+@_functools.cache
+def _state_cached(name: str) -> dict[str, Any]:
     return registry.resolve(Path("."), name)[1]().state_dict()
+
+
+def _state(name: str) -> dict[str, Any]:
+    return _copy.deepcopy(_state_cached(name))
 
 
 def _mode(name: str, state: dict[str, Any]):

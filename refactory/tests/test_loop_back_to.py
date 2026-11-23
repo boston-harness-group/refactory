@@ -37,12 +37,26 @@ S4_LOOP = {"op": "loop", "step": "decide", "back_to": "compare", "judge": "agent
            "text": "Is the decision sound?"}
 
 
-def _state(name: str) -> dict[str, Any]:
+import copy as _copy
+import functools as _functools
+
+
+@_functools.cache
+def _state_cached(name: str) -> dict[str, Any]:
     return registry.resolve(Path("."), name)[1]().state_dict()
 
 
+def _state(name: str) -> dict[str, Any]:
+    return _copy.deepcopy(_state_cached(name))
+
+
+@_functools.cache
+def _mode_cached(name: str):
+    return registry.resolve(Path("."), name)[1]
+
+
 def _mode(name: str, state: dict[str, Any]):
-    mode = registry.resolve(Path("."), name)[1]()
+    mode = _mode_cached(name)()
     mode.load_state_dict(state)
     return mode
 
