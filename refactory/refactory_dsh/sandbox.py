@@ -548,7 +548,7 @@ def run_sandboxed(
         return _run_watched(
             [sys.executable, "-c", code], workdir=workdir, env=child_env, timeout_s=timeout_s,
             backstop_s=backstop_s if backstop_s is not None else min(4 * timeout_s, COMMAND_BACKSTOP_S),
-            nested_watch=nested_watch,
+            nested_watch=nested_watch, cpu_s=cpu_s,
             **kwargs,
         )
     started = time.monotonic()
@@ -601,14 +601,24 @@ def _signs_of_work(workdir: Path, env: dict[str, str], *, nested_watch: bool) ->
     """What `_run_watched` compares: the mark a nested watched run leaves in
     ``ACTIVITY_FILE``, or, with none, the run's own signs of work (`activity.signs`);
     never the run's budget ledger."""
+    return _signs_watch(workdir, env, nested_watch=nested_watch)()
+
+
+def _signs_watch(workdir: Path, env: dict[str, str], *, nested_watch: bool) -> Any:
+    """A look at `_signs_of_work`, with what it reads resolved once."""
     from refactory_dsh import activity
 
     if nested_watch:
-        try:
-            return (workdir / ACTIVITY_FILE).stat().st_mtime_ns
-        except OSError:
-            return None
-    return activity.signs(workdir, ignore=(env.get("REFACTORY_BUDGET_LEDGER"),))
+        mark = workdir / ACTIVITY_FILE
+
+        def _mark() -> int | None:
+            try:
+                return mark.stat().st_mtime_ns
+            except OSError:
+                return None
+
+        return _mark
+    return activity.Watch(workdir, ignore=(env.get("REFACTORY_BUDGET_LEDGER"),)).look
 
 
 def mark_activity(path: Path) -> None:
@@ -647,17 +657,43 @@ def _stop_watched(proc: subprocess.Popen, workdir: Path) -> bool:
             pass
     elif forced:
         proc.kill()
-    # Node commands a nested run started in groups of their own, should it not have
-    # ended them itself (`activity.end_recorded`).
-    from refactory_dsh import activity
-
-    activity.end_recorded(activity.watch_dir(workdir))
+    _end_left_behind(proc, workdir, own_group=False)
     if forced:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
     return forced
+
+
+def _end_left_behind(proc: subprocess.Popen, workdir: Path, *, own_group: bool = True) -> None:
+    """End what a watched run left running once its process is gone, however it went:
+    what is left in its own process group, and the groups its nested run recorded --
+    the DSH child and each node command (`activity.end_recorded`), which a process that
+    died (a CPU limit, a kill) could not end itself."""
+    from refactory_dsh import activity
+
+    if own_group and os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    activity.end_recorded(activity.watch_dir(workdir))
+
+
+def _ended_by(returncode: int | None, cpu_s: int | None) -> str:
+    """Why a watched run's process ended, when a signal ended it, for the person."""
+    if returncode is None or returncode >= 0:
+        return ""
+    number = -returncode
+    if number == getattr(signal, "SIGXCPU", None):
+        limit = f" ({cpu_s} s of CPU time per process)" if cpu_s else ""
+        return f"the smoke hit its CPU limit{limit}"
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        name = f"signal {number}"
+    return f"the smoke's process was ended by {name}"
 
 
 def _run_watched(
@@ -668,16 +704,21 @@ def _run_watched(
     timeout_s: int,
     backstop_s: float,
     nested_watch: bool = False,
+    cpu_s: int | None = None,
     **kwargs: Any,
 ) -> SandboxResult:
     """`run_sandboxed` with an inactivity limit and a wall-clock backstop.
 
-    Work is any output, or a change in the run's signs of work (`_signs_of_work`). A run stopped for either limit is asked to stop
-    and given ``STOP_GRACE_S`` before it is killed (`_stop_watched`); a kill says that
-    its cleanup is unconfirmed, as `owned_process.shutdown` does. A run that stopped
-    itself for one of these limits reports it in its payload's ``timeout_kind``, which
-    is returned as the result's.
+    Work is any output, or a change in the run's signs of work (`_signs_of_work`). A run
+    stopped for either limit is asked to stop and given ``STOP_GRACE_S`` before it is
+    killed (`_stop_watched`); a kill says that its cleanup is unconfirmed, as
+    `owned_process.shutdown` does. A run that stopped itself for one of these limits
+    reports it in its payload's ``timeout_kind``, which is returned as the result's. A
+    run whose process ended any other way -- its CPU limit, a signal, a crash -- has
+    what it left running ended the same way (`_end_left_behind`), and a signal says
+    which (`_ended_by`).
     """
+    from refactory_dsh import activity as activity_module
     from refactory_dsh.owned_process import _termination_as_exit
 
     started = time.monotonic()
@@ -694,17 +735,19 @@ def _run_watched(
                    for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
         for reader in readers:
             reader.start()
-        seen = _signs_of_work(workdir, env, nested_watch=nested_watch)
+        look = _signs_watch(workdir, env, nested_watch=nested_watch)
+        interval = activity_module.look_interval(timeout_s, WATCH_INTERVAL_S)
+        seen = look()
         look_at = started + WATCH_INTERVAL_S
         stop: str | None = None
         try:
             while proc.poll() is None:
                 now = time.monotonic()
                 if now >= look_at:
-                    current = _signs_of_work(workdir, env, nested_watch=nested_watch)
+                    current = look()
                     if current != seen:
                         seen, activity[0] = current, now
-                    look_at = now + WATCH_INTERVAL_S
+                    look_at = now + interval
                 if now - activity[0] >= timeout_s:
                     stop = "inactivity"
                 elif now - started >= backstop_s:
@@ -730,10 +773,14 @@ def _run_watched(
                 elapsed_s=round(time.monotonic() - started, 3), progress=_progress_at(workdir),
                 stdout=out.text(), stderr="\n".join(part for part in (err.text().rstrip(), note) if part),
             )
+        _end_left_behind(proc, workdir)
         grace_end = time.monotonic() + EXIT_GRACE_S
         for reader in readers:
             reader.join(timeout=max(0.0, grace_end - time.monotonic()))
     stdout, stderr = out.text(), err.text()
+    ended = _ended_by(proc.returncode, cpu_s)
+    if ended:
+        stderr = "\n".join(part for part in (stderr.rstrip(), ended) if part)
     payload: dict[str, Any] = {}
     for line in reversed(stdout.strip().splitlines()):
         try:
@@ -1025,38 +1072,63 @@ def smoke_wall_s(timeout_s: float) -> float:
     return smoke_backstop_s(timeout_s) + STOP_GRACE_S + 5
 
 
-def smoke_sample(mode: Any, workdir: Path, items: int) -> dict[str, Any]:
+def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None = None,
+                 parts_manifest: Path | str | None = None) -> dict[str, Any]:
     """Cut ``mode`` down to a smoke's sample: ``items`` items of each Task's train part.
 
-    Each data node bound to a Task (``task_ref``) runs only the first ``items`` items of
-    the Task's train part -- the part the run directory names, written here
-    (`task.write_subset`) -- and runs them at once. A train part with fewer items runs
-    them all; no holdout item is ever run (`task.partition` keeps at least one item in
-    train). A node whose parallelism is a knob
-    (``parallelism_knob``, or a ``parallelism`` field binding) gets that knob set, held
-    to the knob's own value as a ceiling, since a node may not carry both; any other
-    node gets ``parallelism``, held to the value it declares when that is above one.
-    Nothing changes for ``items`` 0 or a mode with no Task-bound data node.
+    The train part is the one a real run of the mode uses: under ``parts_manifest``
+    (a ``parts.json`` with train/val/test id lists) its ``train`` ids, otherwise the
+    ``holdout`` fraction's split (`task.partition`; by default the outer loop's own,
+    ``task.DEFAULT_HOLDOUT``). Of that part the sample takes the ``items`` lowest ids --
+    the split holds out the highest ids, so these stay train under any larger holdout
+    too while the part has room -- and names exactly them in the run directory's
+    ``parts.json``, with its part (`task.write_subset`), so no held-out item can be run.
+    A part with fewer items runs them all. Each such node runs its sample at once. A
+    node whose parallelism is a knob (``parallelism_knob``, or a ``parallelism`` field
+    binding) gets that knob set, held to the knob's own value as a ceiling, since a node
+    may not carry both; any other node gets ``parallelism``, held to the value it
+    declares when that is above one. Nothing changes for ``items`` 0 or a mode with no
+    Task-bound data node.
 
     Runs in the smoke's sandboxed process, before the run. What it sets is state and the
     run directory's part, which the walker and DSH read the same way
     (`nn.executor.load_items`, `Node.effective_parallelism`).
-    Returns ``{"item_limit": items, "nodes": [...]}`` for the nodes cut, or ``{}``.
+    Returns ``{"item_limit": items, "nodes": [...], "items": [...]}`` for the nodes cut,
+    or ``{}``.
     """
     from refactory_dsh import task as task_module
     from refactory_dsh.nn.edits import configure
+    from refactory_dsh.nn.executor import full_items
     from refactory_dsh.nn.graph import MAX_PARALLELISM, Node
 
     if items <= 0:
         return {}
+    fraction = task_module.DEFAULT_HOLDOUT if holdout is None else float(holdout)
+    manifest_train: set[str] | None = None
+    if parts_manifest:
+        manifest = json.loads(Path(parts_manifest).read_text())
+        manifest_train = set(task_module.manifest_part_ids(manifest, task_module.TRAIN) or [])
     state = mode.state_dict()
     nodes = (state.get("graph") or {}).get("nodes") or {}
     knob_widths: dict[str, int] = {}
     sampled: list[str] = []
+    chosen: list[str] = []
+    # The part, before any manifest of the sample's own is written, so a Task whose items
+    # depend on it sees it (`full_items`).
+    (Path(workdir) / task_module.MANIFEST).unlink(missing_ok=True)
+    task_module.write_subset(workdir, task_module.TRAIN, fraction)
     for node_id, entry in nodes.items():
         node = Node.from_state({**entry, "id": node_id})
         if node.kind != "data" or not node.task_ref:
             continue
+        every = full_items(node, Path(workdir))
+        keyed = [(str(item.get("id") or index), item) for index, item in enumerate(every)]
+        if manifest_train is not None:
+            train = [key for key, _item in keyed if key in manifest_train]
+        else:
+            held = {id(item) for item in task_module.partition(every, fraction)[task_module.HOLDOUT]}
+            train = [key for key, item in keyed if id(item) not in held]
+        chosen.extend(key for key in sorted(train)[:items] if key not in chosen)
         entry["limit"] = min(items, node.limit) if node.limit else items
         knob = node.parallelism_knob or node.bound_knob("parallelism")
         if knob:
@@ -1074,12 +1146,13 @@ def smoke_sample(mode: Any, workdir: Path, items: int) -> dict[str, Any]:
             entry["parallelism"] = min(items, declared)
         sampled.append(node_id)
     if not sampled:
+        task_module._subset_file(Path(workdir)).unlink(missing_ok=True)  # noqa: SLF001
         return {}
     for knob, width in knob_widths.items():
         state = configure(state, knob, max(1, min(width, MAX_PARALLELISM)))
     mode.load_state_dict(state)
-    task_module.write_subset(workdir, task_module.TRAIN, task_module.DEFAULT_HOLDOUT)
-    return {"item_limit": items, "nodes": sampled}
+    task_module.make_manifest(Path(workdir), train_ids=chosen)
+    return {"item_limit": items, "nodes": sampled, "items": chosen}
 
 
 def smoke(
@@ -1091,6 +1164,8 @@ def smoke(
     knobs: dict[str, Any] | None = None,
     model_context: dict[str, str] | None = None,
     smoke_items: int = 0,
+    holdout: float | None = None,
+    parts_manifest: Path | str | None = None,
     **kwargs: Any,
 ) -> SandboxResult:
     """Run one mode once, in a sandbox, and report what it scored.
@@ -1119,7 +1194,9 @@ def smoke(
 
     ``smoke_items`` cuts each data node bound to a Task down to at most that many items
     of the Task's train part, run at once (`smoke_sample`), with a model or without;
-    never a holdout item. 0 runs every item.
+    never a held-out item. The train part is the one the mode's real runs use: the
+    ``holdout`` fraction's, or the train ids of ``parts_manifest``; by default the outer
+    loop's default split. 0 runs every item.
 
     ``timeout_s`` is an inactivity limit here, not a wall clock: a smoke that is still
     working is not stopped before the backstop (`smoke_backstop_s`). Work is output, or
@@ -1173,7 +1250,8 @@ def smoke(
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
         "from refactory_dsh.sandbox import smoke_sample\n"
-        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items)!r})\n"
+        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items)!r}, "
+        f"holdout={holdout!r}, parts_manifest={str(parts_manifest) if parts_manifest else None!r})\n"
         f"{watch}"
         f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
@@ -1215,6 +1293,12 @@ def smoke(
         timeout = kwargs["timeout_s"]
         code = f"smoke_timeout_s={max(1, int(timeout - min(5, timeout / 2)))!r}\n" + code
     kwargs.setdefault("backstop_s", smoke_backstop_s(kwargs["timeout_s"]))
+    # The CPU limit every process of the smoke inherits -- its own, the DSH child's, each
+    # node command's -- is the backstop on every core, as a command's is (`run_command`,
+    # PIT-001): a run that is still working reaches its backstop before it could use that
+    # much, so the limit no longer ends one early, as `DEFAULT_CPU_S` did once a smoke
+    # could run for hours. What is past it is runaway.
+    kwargs.setdefault("cpu_s", math.ceil(kwargs["backstop_s"]) * (os.cpu_count() or 1))
     return run_sandboxed(
         code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded,
         inactivity=True, nested_watch=model, **kwargs,

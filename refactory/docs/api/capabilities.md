@@ -8170,7 +8170,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
     },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "seconds a smoke pass may go with no sign of work before it is stopped: work is any output, or any file written under the smoke's run directory (node state and output, item passes, worker receipts and events); a wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8237,7 +8237,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "37434eabbf4976e46fbf8042564af35d3cc6b24947f089975656030215894987"
+    "reviewed_schema": "46a4d8287752c3ad1d42ba47ed82761fa8658e7f851cfa8316a49eb6e4beb025"
   }
 }
 ```
@@ -8666,7 +8666,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
     },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "seconds a smoke pass may go with no sign of work before it is stopped: work is any output, or any file written under the smoke's run directory (node state and output, item passes, worker receipts and events); a wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -8721,7 +8721,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "5d4a0263e1b7b11784942961462a854fafe64ab2008f6ba627a87c70fb117b33"
+    "reviewed_schema": "6d2c269a5401386895a50083f633c40d248976d33967b0d1eb0998f2ce1963ce"
   }
 }
 ```
@@ -11461,7 +11461,7 @@ Revise an existing mode package and validate the revision before separate QA and
     },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "seconds a smoke pass may go with no sign of work before it is stopped: work is any output, or any file written under the smoke's run directory (node state and output, item passes, worker receipts and events); a wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11528,7 +11528,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "e61423c1d76e163d59bd306510fa16d6ae8e0385dd7cd4a5d2a981326d8c67cb"
+    "reviewed_schema": "8f568a13ecd0c63588479a5ae8248d13a50d190438ad26596686e30e129c5a9a"
   }
 }
 ```
@@ -11942,7 +11942,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
     },
     "smoke_timeout_s": {
       "default": 3600,
-      "description": "seconds a smoke pass may go with no sign of work before it is stopped: work is any output, or any file written under the smoke's run directory (node state and output, item passes, worker receipts and events); a wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "frozen": false,
       "kind": "int",
       "range": [
@@ -11985,7 +11985,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "c3d7aae3ced1e151031c55612a90cc8d3415a2dab0dac687b1b95d2b123044db"
+    "reviewed_schema": "8cafd12d38626075e13b285a806a63c23f3cee1ca2dd17490d5c429f561a2775"
   }
 }
 ```

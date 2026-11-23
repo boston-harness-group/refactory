@@ -108,17 +108,18 @@ def _run_group(process: subprocess.Popen) -> int | None:
     """The process group a DSH child leads, read as it starts, or ``None``.
 
     The child is started in a session of its own (``start_new_session``), so its group
-    id is its pid. Anything else -- not POSIX, a child already gone, a group that is not
-    the child's own or is this process's -- is ``None``, and `_kill_run_group` then
-    signals nothing.
+    id is its pid. Anything else -- not POSIX, a child already gone or with no pid, a
+    group that is not the child's own or is this process's -- is ``None``, and
+    `_kill_run_group` then signals nothing: cleanup bookkeeping never fails a run.
     """
-    if os.name != "posix":
+    pid = getattr(process, "pid", None)
+    if os.name != "posix" or not isinstance(pid, int) or pid <= 0:
         return None
     try:
-        group = os.getpgid(process.pid)
-    except (ProcessLookupError, PermissionError, OSError):
+        group = os.getpgid(pid)
+    except OSError:
         return None
-    return group if group == process.pid and group != os.getpgrp() else None
+    return group if group == pid and group != os.getpgrp() else None
 
 
 def _kill_run_group(group: int | None) -> None:
@@ -293,150 +294,174 @@ def run_on_dsh(
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=os.name == "posix")
         track_run(process)
-        run_group = _run_group(process)
-        out_lines: list[str] = []
-        err_lines: list[str] = []
-
-        # activity[0]: the last time DSH's output or a write under the run arrived.
-        _activity = [time.monotonic()]
-
-        def _pump(stream: Any, sink: list[str]) -> None:
-            for line in stream:
-                sink.append(line)
-                _activity[0] = time.monotonic()
-                if on_output is not None:
-                    on_output(line)
-
-        readers = [Thread(target=_pump, args=(process.stdout, out_lines), daemon=True),
-                   Thread(target=_pump, args=(process.stderr, err_lines), daemon=True)]
-        for reader in readers:
-            reader.start()
-
-        # The run's watcher: the run's signs of work (`activity.signs`), wherever in the
-        # graph it happens, at a cost that does not grow with what sits in the run
-        # directory. With an activity_file it also marks there each time it sees new
-        # work, for the sandbox this run is nested in. Its own mark and the run's budget
-        # ledger are not the run's work, so they are never looked at.
-        _progress_thread: Thread | None = None
-        _watch_done = threading.Event()
-        if watched:
-            from refactory_dsh import sandbox
-
-            ledger = (context or {}).get("budget_ledger") or env.get("REFACTORY_BUDGET_LEDGER")
-            ignore = (activity_file, ledger)
-
-            def _watch_progress() -> None:
-                prev = activity.signs(workdir, ignore=ignore)
-                marked = 0.0
-                while not _watch_done.wait(sandbox.WATCH_INTERVAL_S) and process.poll() is None:
-                    looking = time.monotonic()
-                    snap = activity.signs(workdir, ignore=ignore)
-                    if snap != prev:
-                        _activity[0] = looking
-                        prev = snap
-                    if activity_file is not None and _activity[0] != marked:
-                        marked = _activity[0]
-                        sandbox.mark_activity(activity_file)
-
-            _progress_thread = Thread(target=_watch_progress, daemon=True, name="dsh-progress-watch")
-            _progress_thread.start()
-
-        def _stop_watching() -> None:
-            # No watcher outlives the run: one still looking would mark the sandbox's
-            # activity file after this run was reported stopped.
-            _watch_done.set()
-            if _progress_thread is not None:
-                _progress_thread.join(timeout=5)
-
-        _timeout_kind: str | None = None
+        # Whatever happens below -- a failure in this bookkeeping included -- the run is
+        # no longer tracked once it is over.
         try:
-            if inactivity:
-                from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+            run_group = _run_group(process)
+            # The DSH child's own group, in the watch directory with its node commands', so
+            # the sandbox around this run ends it should this process die without doing so
+            # (a CPU limit, a kill).
+            child_record = activity.record_process(watch, pid=process.pid) if run_group else None
+            out_lines: list[str] = []
+            err_lines: list[str] = []
 
-                _began = time.monotonic()
-                _backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
-                while True:
-                    if telemetry is not None:
-                        telemetry.checkpoint()
-                    if budget is not None:
-                        budget.checkpoint()
-                    if callable(getattr(model, "_raise_if_cancelled", None)):
-                        model._raise_if_cancelled()
-                    if _stopped():
-                        raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
-                    now = time.monotonic()
-                    if now - _activity[0] >= timeout_s:
-                        _timeout_kind = "inactivity"
-                    elif now - _began >= _backstop_s:
-                        _timeout_kind = "backstop"
-                    if _timeout_kind is not None:
-                        # Stopping is work: the sandbox around this run gives the
-                        # shutdown below its window rather than stopping it midway.
-                        if activity_file is not None:
-                            from refactory_dsh.sandbox import mark_activity
-                            mark_activity(activity_file)
-                        raise subprocess.TimeoutExpired(command, timeout_s)
-                    try:
-                        returncode = process.wait(timeout=0.1)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            else:
-                deadline = time.monotonic() + timeout_s
-                while True:
-                    if telemetry is not None:
-                        telemetry.checkpoint()
-                    if budget is not None:
-                        budget.checkpoint()
-                    if callable(getattr(model, "_raise_if_cancelled", None)):
-                        model._raise_if_cancelled()
-                    if _stopped():
-                        raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(command, timeout_s)
-                    try:
-                        returncode = process.wait(timeout=min(remaining, 0.1))
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-            # Ended by the stop's shutdown (or just as it came): not a result.
-            if _stopped():
-                raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
-        except BaseException as error:
-            try:
-                shutdown(process)
-            finally:
-                _kill_run_group(run_group)
-                activity.end_recorded(watch)
-                untrack_run(process)
+            # activity[0]: the last time DSH's output or a write under the run arrived.
+            _activity = [time.monotonic()]
+
+            _passed_on = [0.0]
+
+            def _pump(stream: Any, sink: list[str]) -> None:
+                for line in stream:
+                    sink.append(line)
+                    now = _activity[0] = time.monotonic()
+                    # DSH's output is passed on to the sandbox around this run as it
+                    # comes (at most once a second), not at the watcher's next look,
+                    # which a long limit makes rare.
+                    if activity_file is not None and now - _passed_on[0] >= 1.0:
+                        _passed_on[0] = now
+                        from refactory_dsh.sandbox import mark_activity
+                        mark_activity(activity_file)
+                    if on_output is not None:
+                        on_output(line)
+
+            readers = [Thread(target=_pump, args=(process.stdout, out_lines), daemon=True),
+                       Thread(target=_pump, args=(process.stderr, err_lines), daemon=True)]
             for reader in readers:
-                reader.join(timeout=5)
+                reader.start()
+
+            # The run's watcher: the run's signs of work (`activity.signs`), wherever in the
+            # graph it happens, at a cost that does not grow with what sits in the run
+            # directory. With an activity_file it also marks there each time it sees new
+            # work, for the sandbox this run is nested in. Its own mark and the run's budget
+            # ledger are not the run's work, so they are never looked at.
+            _progress_thread: Thread | None = None
+            _watch_done = threading.Event()
+            if watched:
+                from refactory_dsh import sandbox
+
+                ledger = (context or {}).get("budget_ledger") or env.get("REFACTORY_BUDGET_LEDGER")
+                watch_run = activity.Watch(workdir, ignore=(activity_file, ledger))
+                interval = activity.look_interval(timeout_s, sandbox.WATCH_INTERVAL_S)
+
+                def _watch_progress() -> None:
+                    prev = watch_run.look()
+                    marked = 0.0
+                    while not _watch_done.wait(interval) and process.poll() is None:
+                        looking = time.monotonic()
+                        snap = watch_run.look()
+                        if snap != prev:
+                            _activity[0] = looking
+                            prev = snap
+                        if activity_file is not None and _activity[0] != marked:
+                            marked = _activity[0]
+                            sandbox.mark_activity(activity_file)
+
+                _progress_thread = Thread(target=_watch_progress, daemon=True, name="dsh-progress-watch")
+                _progress_thread.start()
+
+            def _stop_watching() -> None:
+                # No watcher outlives the run: one still looking would mark the sandbox's
+                # activity file after this run was reported stopped.
+                _watch_done.set()
+                if _progress_thread is not None:
+                    _progress_thread.join(timeout=5)
+
+            _timeout_kind: str | None = None
+            try:
+                if inactivity:
+                    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+
+                    _began = time.monotonic()
+                    _backstop_s = min(4 * timeout_s, COMMAND_BACKSTOP_S)
+                    while True:
+                        if telemetry is not None:
+                            telemetry.checkpoint()
+                        if budget is not None:
+                            budget.checkpoint()
+                        if callable(getattr(model, "_raise_if_cancelled", None)):
+                            model._raise_if_cancelled()
+                        if _stopped():
+                            raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
+                        now = time.monotonic()
+                        if now - _activity[0] >= timeout_s:
+                            _timeout_kind = "inactivity"
+                        elif now - _began >= _backstop_s:
+                            _timeout_kind = "backstop"
+                        if _timeout_kind is not None:
+                            # Stopping is work: the sandbox around this run gives the
+                            # shutdown below its window rather than stopping it midway.
+                            if activity_file is not None:
+                                from refactory_dsh.sandbox import mark_activity
+                                mark_activity(activity_file)
+                            raise subprocess.TimeoutExpired(command, timeout_s)
+                        try:
+                            # Half a second between checks: `Popen.wait` polls within
+                            # its timeout, and a run with an inactivity limit of
+                            # minutes does not need its checks ten times a second.
+                            returncode = process.wait(timeout=0.5)
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                else:
+                    deadline = time.monotonic() + timeout_s
+                    while True:
+                        if telemetry is not None:
+                            telemetry.checkpoint()
+                        if budget is not None:
+                            budget.checkpoint()
+                        if callable(getattr(model, "_raise_if_cancelled", None)):
+                            model._raise_if_cancelled()
+                        if _stopped():
+                            raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, timeout_s)
+                        try:
+                            returncode = process.wait(timeout=min(remaining, 0.1))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                # Ended by the stop's shutdown (or just as it came): not a result.
+                if _stopped():
+                    raise EvaluationStopped("the spine run was shut down: the evaluation was stopped")
+            except BaseException as error:
+                try:
+                    shutdown(process)
+                finally:
+                    _kill_run_group(run_group)
+                    activity.end_recorded(watch)
+                    activity.forget_process(child_record)
+                    untrack_run(process)
+                for reader in readers:
+                    reader.join(timeout=5)
+                _stop_watching()
+                if telemetry is not None:
+                    telemetry.finish("timed_out" if isinstance(error, subprocess.TimeoutExpired) else (
+                        "budget_exhausted" if type(error).__name__ == "BudgetExhausted" else "cancelled"), str(error))
+                if isinstance(error, subprocess.TimeoutExpired):
+                    stopped = f" ({_timeout_kind})" if _timeout_kind else ""
+                    return DshRun(facts={}, workdir=workdir, returncode=-1,
+                                  stderr=f"dsh timed out{stopped} after {timeout_s}s; owned runtime shutdown requested",
+                                  duration_s=time.time() - started,
+                                  timeout_kind=_timeout_kind)
+                raise
+            untrack_run(process)
+            activity.forget_process(child_record)
+            for reader in readers:
+                reader.join()
             _stop_watching()
+            stdout, stderr = "".join(out_lines), "".join(err_lines)
+            try:
+                if telemetry is not None:
+                    telemetry.checkpoint(final=True)
+            except BaseException as error:
+                if telemetry is not None:
+                    telemetry.finish("budget_exhausted", str(error))
+                raise
             if telemetry is not None:
-                telemetry.finish("timed_out" if isinstance(error, subprocess.TimeoutExpired) else (
-                    "budget_exhausted" if type(error).__name__ == "BudgetExhausted" else "cancelled"), str(error))
-            if isinstance(error, subprocess.TimeoutExpired):
-                stopped = f" ({_timeout_kind})" if _timeout_kind else ""
-                return DshRun(facts={}, workdir=workdir, returncode=-1,
-                              stderr=f"dsh timed out{stopped} after {timeout_s}s; owned runtime shutdown requested",
-                              duration_s=time.time() - started,
-                              timeout_kind=_timeout_kind)
-            raise
-        untrack_run(process)
-        for reader in readers:
-            reader.join()
-        _stop_watching()
-        stdout, stderr = "".join(out_lines), "".join(err_lines)
-        try:
-            if telemetry is not None:
-                telemetry.checkpoint(final=True)
-        except BaseException as error:
-            if telemetry is not None:
-                telemetry.finish("budget_exhausted", str(error))
-            raise
-        if telemetry is not None:
-            telemetry.finish("completed" if returncode == 0 else "failed")
+                telemetry.finish("completed" if returncode == 0 else "failed")
+        finally:
+            untrack_run(process)
 
     payload = _last_json_object(stdout)
     facts_path = workdir / FACTS

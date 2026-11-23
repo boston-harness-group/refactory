@@ -1479,3 +1479,20 @@ def test_a_revision_and_its_source_are_smoked_on_the_same_sample(tmp_path, monke
     monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 2}))
     run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
     assert seen == {"revision": 2, "source": 2}
+
+
+def test_a_smoke_that_hit_its_cpu_limit_is_uncertain_and_says_so(tmp_path, monkeypatch):
+    """A smoke ended by its CPU limit reports that, not a bare exit code, and is not a
+    code failure to repair: the gate halts on it with that reason (`gate_smoke`)."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    reason = "the smoke hit its CPU limit (120 s of CPU time per process)"
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    monkeypatch.setattr(sandbox, "smoke", lambda *a, **kw: SandboxResult(
+        ok=False, returncode=-24, stderr=f"some output\n{reason}"))
+    with pytest.raises(ValueError, match="hit its CPU limit"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["status"] == "uncertain" and receipt["error"] == reason

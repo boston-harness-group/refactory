@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from refactory_dsh import activity, sandbox
+from refactory_dsh.dsh_runtime import track_run as _real_track
+from refactory_dsh.dsh_runtime import untrack_run as _real_untrack
 from refactory_dsh.model import DshModelClient
 from test_sandbox import GOOD, NAME, _stage
 
@@ -167,7 +169,7 @@ class TestRunOnDshInactivity:
             return real_monotonic() + call_count[0] * 100
 
         monkeypatch.setattr(time, "monotonic", fast_time)
-        monkeypatch.setattr(activity, "signs", lambda w, **kw: ())
+        monkeypatch.setattr(activity.Watch, "look", lambda self: ())
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -228,11 +230,11 @@ class TestRunOnDshInactivity:
         # The run directory changes on every look, resetting activity.
         progress_call_count = [0]
 
-        def changing_progress(w, **kw):
+        def changing_progress(self):
             progress_call_count[0] += 1
             return (("events", progress_call_count[0], 0),)
 
-        monkeypatch.setattr(activity, "signs", changing_progress)
+        monkeypatch.setattr(activity.Watch, "look", changing_progress)
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -263,11 +265,11 @@ class TestRunOnDshInactivity:
         self._mock_dsh_deps(monkeypatch, tmp_path, proc)
         monkeypatch.setattr(sandbox, "WATCH_INTERVAL_S", 0.001)
 
-        def slow_look(w, **kw):
+        def slow_look(self):
             time.sleep(0.3)
             return ()
 
-        monkeypatch.setattr(activity, "signs", slow_look)
+        monkeypatch.setattr(activity.Watch, "look", slow_look)
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
         result = run_on_dsh({"graph": {"nodes": {}}}, workdir, timeout_s=1, inactivity=True,
@@ -309,6 +311,38 @@ class TestRunOnDshInactivity:
             accountant.join()
         assert result.timeout_kind == "inactivity", result.stderr
 
+    def test_a_run_whose_bookkeeping_fails_is_no_longer_tracked(self, tmp_path, monkeypatch):
+        """Whatever fails once the DSH child has started -- here reading its process
+        group -- the run leaves the tracked set (`shutdown_tracked_runs` would otherwise
+        signal a process that is no longer this run's)."""
+        from refactory_dsh import dsh_runtime
+
+        proc = _FakeProcess(exit_after=1)
+        self._mock_dsh_deps(monkeypatch, tmp_path, proc)
+        monkeypatch.setattr(dsh_runtime, "track_run", _real_track)
+        monkeypatch.setattr(dsh_runtime, "untrack_run", _real_untrack)
+
+        def broken(process):
+            raise RuntimeError("the group could not be read")
+
+        monkeypatch.setattr(dsh_runtime, "_run_group", broken)
+        workdir = tmp_path / "run"
+        workdir.mkdir(parents=True)
+        with pytest.raises(RuntimeError, match="could not be read"):
+            dsh_runtime.run_on_dsh({"graph": {"nodes": {}}}, workdir, timeout_s=10, inactivity=True)
+        assert proc not in dsh_runtime._TRACKED_RUNS
+
+    def test_a_process_with_no_readable_group_is_run_and_cleaned_up_as_any(self):
+        """A child whose group cannot be read -- no pid, or already gone -- has none to
+        end; reading it never fails the run."""
+        from refactory_dsh import dsh_runtime
+
+        class _NoPid:
+            pass
+
+        assert dsh_runtime._run_group(_NoPid()) is None
+        assert dsh_runtime._run_group(_FakeProcess()) is None  # this process's own group
+
 # ── a node command in a watched run: its output, and its process group ─────
 
 def _node(tmp_path: Path, body: str, *, watched: bool, stdout: object = subprocess.PIPE,
@@ -334,7 +368,7 @@ def _node(tmp_path: Path, body: str, *, watched: bool, stdout: object = subproce
         return subprocess.Popen(argv, env=env, cwd=str(tmp_path), stdout=stdout,
                                 stderr=subprocess.DEVNULL)
     return subprocess.run(argv, env=env, cwd=str(tmp_path), stdout=stdout,
-                          stderr=subprocess.PIPE, timeout=60)
+                          stderr=subprocess.PIPE, timeout=60, check=False)
 
 
 @pytest.mark.no_integration
@@ -445,3 +479,20 @@ def test_a_stopped_run_ends_the_groups_its_nodes_recorded_and_no_other(tmp_path)
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+
+@pytest.mark.no_integration
+def test_a_watched_node_whose_tee_dies_still_gets_its_output_and_verdict_out(tmp_path):
+    """Should the tee die mid-run, the node's own output goes back to where it went
+    before: what it prints afterwards, its verdict last, still reaches the spine."""
+    body = ("import os, signal, time\n"
+            "from refactory_dsh import activity\n"
+            "from refactory_dsh.nn import Verdict\n"
+            "def node(ctx):\n"
+            "    os.kill(activity.tee_pid, signal.SIGKILL)\n"
+            "    time.sleep(0.5)\n"
+            "    print('after the tee', flush=True)\n"
+            "    return Verdict('reloop', 'two tests failed')\n")
+    result = _node(tmp_path, body, watched=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().splitlines() == ["after the tee", "two tests failed", "reloop"]

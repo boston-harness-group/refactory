@@ -116,22 +116,42 @@ def _node_dir(directory: str, ignored: set[str], out: list[tuple[str, int, int]]
             _node_dir(item.path, ignored, out, depth - 1)
 
 
+class Watch:
+    """Repeated looks at one run's signs of work, with its paths resolved once.
+
+    Each look reads the fixed set of files `signs` describes: no path resolution, no
+    walk. The cost depends on the number of items and workers, never on the files a
+    node leaves in the run directory (a checkout, a build). ``ignore`` names files that
+    are not the run's work -- the watcher's own mark, the budget ledger. Passes are
+    followed ``nested_depth`` levels of nesting down.
+    """
+
+    def __init__(self, run_dir: Path, *, ignore: tuple[Path | str | None, ...] = (),
+                 nested_depth: int = 4) -> None:
+        self.root = str(Path(run_dir).resolve())
+        self.ignored = {str(Path(path).resolve()) for path in ignore if path}
+        self.nested_depth = nested_depth
+
+    def look(self) -> tuple[tuple[str, int, int], ...]:
+        """The run's signs of work, as (path, change time, size) for each that exists.
+        Two looks that differ mean the run worked in between."""
+        out: list[tuple[str, int, int]] = []
+        _stat(os.path.join(self.root, WATCH_DIR, MARK), self.ignored, out)
+        _node_dir(self.root, self.ignored, out, self.nested_depth)
+        return tuple(out)
+
+
 def signs(run_dir: Path, *, ignore: tuple[Path | str | None, ...] = (),
           nested_depth: int = 4) -> tuple[tuple[str, int, int], ...]:
-    """The run's signs of work, as (path, change time, size) for each file that exists.
+    """One look at a run's signs of work (`Watch.look`)."""
+    return Watch(run_dir, ignore=ignore, nested_depth=nested_depth).look()
 
-    Two looks that differ mean the run worked in between. The cost depends on the
-    number of items and workers, never on the files a node leaves in the run directory
-    (a checkout, a build). ``ignore`` names files that are not the run's work -- the
-    watcher's own mark, the budget ledger. Passes are followed ``nested_depth`` levels
-    of nesting down.
-    """
-    root = str(Path(run_dir).resolve())
-    ignored = {str(Path(path).resolve()) for path in ignore if path}
-    out: list[tuple[str, int, int]] = []
-    _stat(os.path.join(root, WATCH_DIR, MARK), ignored, out)
-    _node_dir(root, ignored, out, nested_depth)
-    return tuple(out)
+
+def look_interval(limit_s: float, floor_s: float) -> float:
+    """How often a watcher looks, for an inactivity limit of ``limit_s``: a twentieth of
+    the limit, at least ``floor_s`` and at most 10 s. A one-hour limit is then checked
+    every 10 s rather than twice a second, and a stop comes at most that late."""
+    return min(max(limit_s / 20.0, floor_s), 10.0)
 
 
 # ── the node commands a run started ─────────────────────────────────────────
@@ -156,13 +176,19 @@ def start_time(pid: int) -> str | None:
     return text or None
 
 
-def record_process(directory: str | os.PathLike[str] | None = None) -> Path | None:
-    """Record this process and its process group in a watch directory (``WATCH_ENV``
-    when not given), for `end_recorded`; None when there is none."""
+def record_process(directory: str | os.PathLike[str] | None = None, *,
+                   pid: int | None = None) -> Path | None:
+    """Record a process -- this one, or ``pid`` -- and its process group in a watch
+    directory (``WATCH_ENV`` when not given), for `end_recorded`; None when there is
+    none or the process cannot be read."""
     target = directory if directory is not None else os.environ.get(WATCH_ENV)
     if not target or os.name != "posix":
         return None
-    pid, group = os.getpid(), os.getpgrp()
+    try:
+        pid = os.getpid() if pid is None else int(pid)
+        group = os.getpgid(pid)
+    except (OSError, TypeError, ValueError):
+        return None
     record = {"pid": pid, "start": start_time(pid), "group": group,
               "group_start": start_time(group) if group != pid else None}
     path = Path(target) / PROCESSES / f"{pid}.json"
@@ -301,13 +327,14 @@ def tee_output(directory: str | os.PathLike[str] | None = None) -> bool:
     target = directory if directory is not None else os.environ.get(WATCH_ENV)
     if not target or os.name != "posix":
         return False
+    global tee_pid
     sys.stdout.flush()
     sys.stderr.flush()
     out_read, out_write = os.pipe()
     err_read, err_write = os.pipe()
     try:
         Path(target).mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
+        tee = subprocess.Popen(
             [sys.executable, "-I", "-S", "-c", _TEE, str(Path(target) / MARK),
              str(out_read), str(err_read)],
             pass_fds=(out_read, err_read), stdin=subprocess.DEVNULL,
@@ -316,10 +343,49 @@ def tee_output(directory: str | os.PathLike[str] | None = None) -> bool:
         for fd in (out_read, out_write, err_read, err_write):
             os.close(fd)
         return False
+    tee_pid = tee.pid
     os.close(out_read)
     os.close(err_read)
+    originals = (os.dup(1), os.dup(2))
     os.dup2(out_write, 1)
     os.dup2(err_write, 2)
     os.close(out_write)
     os.close(err_write)
+    # Should the tee die, the node's own output -- its verdict included -- still reaches
+    # where it went before: the first write that finds the tee gone puts the original
+    # streams back and is made again.
+    sys.stdout = _Fallback(sys.stdout, 1, originals[0])  # type: ignore[assignment]
+    sys.stderr = _Fallback(sys.stderr, 2, originals[1])  # type: ignore[assignment]
     return True
+
+
+#: The pid of this process's tee (`tee_output`), or None.
+tee_pid: int | None = None
+
+
+class _Fallback:
+    """A text stream that goes back to the original descriptor once the tee is gone."""
+
+    def __init__(self, stream: Any, fd: int, original: int) -> None:
+        self._stream, self._fd, self._original = stream, fd, original
+
+    def _restore(self) -> None:
+        os.dup2(self._original, self._fd)
+
+    def write(self, text: str) -> int:
+        try:
+            return self._stream.write(text)
+        except BrokenPipeError:
+            self._restore()
+            self._stream.flush()
+            return self._stream.write(text)
+
+    def flush(self) -> None:
+        try:
+            self._stream.flush()
+        except BrokenPipeError:
+            self._restore()
+            self._stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)

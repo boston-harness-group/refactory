@@ -728,9 +728,9 @@ Running code we did not write.
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
 | function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None, nested_watch: 'bool' = False) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
-| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, **kwargs: 'Any') -> 'SandboxResult'` |
+| function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, holdout: 'float \| None' = None, parts_manifest: 'Path \| str \| None' = None, **kwargs: 'Any') -> 'SandboxResult'` |
 | function | `smoke_backstop_s` | `(timeout_s: 'float') -> 'float'` |
-| function | `smoke_sample` | `(mode: 'Any', workdir: 'Path', items: 'int') -> 'dict[str, Any]'` |
+| function | `smoke_sample` | `(mode: 'Any', workdir: 'Path', items: 'int', *, holdout: 'float \| None' = None, parts_manifest: 'Path \| str \| None' = None) -> 'dict[str, Any]'` |
 | function | `smoke_wall_s` | `(timeout_s: 'float') -> 'float'` |
 | function | `timeout_output` | `(result: 'SandboxResult', n: 'int' = 200) -> 'str'` |
 | function | `usage` | `() -> 'str'` |

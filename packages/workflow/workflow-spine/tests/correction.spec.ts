@@ -1215,10 +1215,34 @@ describe('applyControls integration', () => {
     // The smoke ran once, and the CEO cannot send the run back to it.
     expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/run halted at gate gate_smoke: smoke timed out/)
+      .rejects.toThrow(/gate gate_smoke halted the run: smoke timed out/)
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/refactory graph-control rerun --acknowledge-failure/)
+      .rejects.toThrow(/verdict comes from code, so a redo would reach the same halt/)
     expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
+  })
+
+  it('a halt at an agent gate is still the CEO\'s to redo, as before', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'a',
+      nodes: {
+        a: { _type: 'AgentNode', id: 'a', role: 'builder', prompt_template: 'A', reads: [], writes: [] },
+        review: { _type: 'GateNode', id: 'review', evaluator_type: 'agent', reads: [] },
+        c: { _type: 'AgentNode', id: 'c', role: 'builder', prompt_template: 'C', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'a', target: 'review' },
+        { source: 'review', target: 'c', condition: 'proceed' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir, executeCommands: true })
+    await call(ctx, 'wf_next')
+    await call(ctx, 'wf_done', { node: 'a' })
+    await call(ctx, 'wf_verdict', { gate: 'review', verdict: 'halt', feedback: 'the design misses the brief' })
+    const redone = await call(ctx, 'wf_redo', { node: 'a' }) as { status: string }
+    expect(redone.status).toBe('redone')
+    const next = await call(ctx, 'wf_next') as { nodes?: Array<{ id: string }> }
+    expect(next.nodes?.map(node => node.id)).toEqual(['a'])
   })
 
   it('a cancelled run is still the CEO\'s to redo', async () => {

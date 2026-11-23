@@ -8,9 +8,11 @@ executed in-process too.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -957,9 +959,51 @@ def test_a_smoke_of_a_task_bound_mode_runs_a_parallel_sample_of_its_train_part(
     assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
     assert result.payload["item_limit"] == 3
     spans = [json.loads(path.read_text()) for path in run.glob("passes/data/*/span.json")]
-    # The train part holds the 124 lowest ids; the Task lists the highest first.
-    assert sorted(span["id"] for span in spans) == ["item_121", "item_122", "item_123"]
+    # The lowest ids of the train part, which the default split holds out last.
+    assert sorted(span["id"] for span in spans) == ["item_000", "item_001", "item_002"]
     assert _most_at_once(spans) == at_once
+
+
+def _held_out(ids: list[str], holdout: float) -> set[str]:
+    """Which of the sampled Task's ids a run with ``holdout`` holds out."""
+    from refactory_dsh import task as task_module
+
+    items = [{"id": f"item_{i:03d}"} for i in reversed(range(177))]
+    return {item["id"] for item in task_module.partition(items, holdout)[task_module.HOLDOUT]
+            if item["id"] in ids}
+
+
+@pytest.mark.parametrize("holdout", [0.4, 0.9])
+def test_a_smoke_samples_the_train_part_of_the_split_its_runs_use(tmp_path, holdout):
+    """Under a holdout other than the default the sample is still train: none of it is
+    held out by that split."""
+    _stage(tmp_path, _SAMPLED)
+    run = tmp_path / "run"
+    result = sandbox.smoke(f"{NAME}/plain", run, project=tmp_path, smoke_items=3,
+                           holdout=holdout, timeout_s=120)
+    assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
+    ran = sorted(json.loads(path.read_text())["id"]
+                 for path in run.glob("passes/data/*/span.json"))
+    assert len(ran) == 3 and _held_out(ran, holdout) == set(), ran
+
+
+def test_a_smoke_samples_only_the_train_ids_of_a_parts_manifest(tmp_path):
+    """Under a parts manifest the sample comes from its train ids only, never its val or
+    test ids -- here the lowest ids, which a fraction split would have kept in train."""
+    _stage(tmp_path, _SAMPLED)
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({
+        "train": [f"item_{i:03d}" for i in range(100, 177)],
+        "val": [f"item_{i:03d}" for i in range(0, 50)],
+        "test": [f"item_{i:03d}" for i in range(50, 100)],
+    }))
+    run = tmp_path / "run"
+    result = sandbox.smoke(f"{NAME}/plain", run, project=tmp_path, smoke_items=3,
+                           parts_manifest=manifest, timeout_s=120)
+    assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
+    ran = sorted(json.loads(path.read_text())["id"]
+                 for path in run.glob("passes/data/*/span.json"))
+    assert ran == ["item_100", "item_101", "item_102"]
 
 
 # ── a smoke's inactivity limit, on the spine: what counts as work ──────────
@@ -1211,3 +1255,67 @@ def test_a_run_is_looked_at_in_one_place(tmp_path, monkeypatch, model):
     assert sandbox._signs_of_work(run, {}, nested_watch=True) == before
     (run / sandbox.ACTIVITY_FILE).write_text("seen")
     assert sandbox._signs_of_work(run, {}, nested_watch=True) != before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is POSIX")
+def test_a_smoke_that_hits_its_cpu_limit_says_so_and_leaves_nothing_running(tmp_path):
+    """However a watched smoke's process ends -- here its CPU limit, which ends it with
+    SIGXCPU, so it cannot shut its own DSH run down -- the sandbox ends what it left
+    running (the DSH child, whose group the run recorded) and says why it ended."""
+    child = "import time\ntime.sleep(120)\n"
+    # Once the stand-in DSH child is running, the smoke's own process spins.
+    burn = ("import pathlib, threading, time\n"
+            "def _burn():\n"
+            f"    while not pathlib.Path({str(tmp_path / 'dsh.pid')!r}).exists():\n"
+            "        time.sleep(0.05)\n"
+            "    while True:\n"
+            "        pass\n"
+            "threading.Thread(target=_burn, daemon=True).start()\n")
+    # As a model smoke runs it: the nested run's directory is the sandbox's own.
+    nested = _nested(child, tmp_path / "dsh.pid").replace('Path.cwd() / "inner"', "Path.cwd()")
+    result = sandbox.run_sandboxed(burn + nested, workdir=tmp_path / "run", timeout_s=60,
+                                   inactivity=True, nested_watch=True, cpu_s=3)
+    pid = int((tmp_path / "dsh.pid").read_text())
+    try:
+        assert result.returncode == -signal.SIGXCPU, (result.returncode, result.stderr)
+        assert "the smoke hit its CPU limit (3 s of CPU time per process)" in result.stderr
+        assert result.problem() == "the smoke hit its CPU limit (3 s of CPU time per process)"
+        deadline = time.monotonic() + 5  # an ended process is gone once it is reaped
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        try:  # only the stand-in this test started, should an assertion above fail
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_a_smoke_is_given_a_cpu_limit_it_cannot_reach_before_its_backstop(tmp_path, monkeypatch):
+    """A smoke may work for hours, up to its backstop: its CPU limit is that backstop on
+    every core, as a command's is, so only a runaway reaches it first."""
+    _stage(tmp_path, GOOD)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sandbox, "run_sandboxed",
+                        lambda code, **kw: seen.update(kw) or sandbox.SandboxResult(ok=True))
+    sandbox.smoke(f"{NAME}/counter", tmp_path / "run", project=tmp_path, model=True,
+                  model_context={}, timeout_s=3600)
+    backstop = sandbox.smoke_backstop_s(3600)
+    assert seen["backstop_s"] == backstop
+    assert seen["cpu_s"] == math.ceil(backstop) * (os.cpu_count() or 1)
+    assert seen["cpu_s"] >= backstop > sandbox.DEFAULT_CPU_S
+
+
+def test_a_watchers_look_interval_follows_its_limit():
+    """A one-hour limit is checked every 10 s, not twice a second; a short limit in a
+    twentieth of itself, never more often than the floor."""
+    from refactory_dsh import activity
+
+    assert activity.look_interval(3600, sandbox.WATCH_INTERVAL_S) == 10.0
+    assert activity.look_interval(60, sandbox.WATCH_INTERVAL_S) == 3.0
+    assert activity.look_interval(3, sandbox.WATCH_INTERVAL_S) == sandbox.WATCH_INTERVAL_S

@@ -372,7 +372,7 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "seconds a smoke pass may go with no sign of work before it is stopped: work is any output, or any file written under the smoke's run directory (node state and output, item passes, worker receipts and events); a wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
       "required": false
     },
     "smoke_items": {
