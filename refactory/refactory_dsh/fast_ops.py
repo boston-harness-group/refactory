@@ -660,6 +660,8 @@ def focused_check(ctx: Any) -> dict[str, Any]:
                     "inherited": sorted(filtered.inherited),
                     "commit": str(ctx.facts.get("commit", "")),
                 })
+                if filtered.reasons:
+                    cr_record["reasons"] = filtered.reasons
                 if _base_reset_list:
                     cr_record["base_reset"] = _base_reset_list
                 ctx.write_json("check-record.json", cr_record)

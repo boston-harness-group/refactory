@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import test_self_check as T
-from refactory_dsh import design_ops, failfast, judges, lowering, repo_change, test_selection
+from refactory_dsh import base_check, design_ops, failfast, judges, lowering, repo_change, test_selection
 from refactory_dsh.design import DesignMode, prepare_check_iterations
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT
 from refactory_dsh.sandbox import SandboxResult
@@ -411,6 +411,11 @@ def test_b47a_replayed_round_one_lists_what_its_cut_hid_and_inherits_the_lab_onl
         return selection
 
     monkeypatch.setattr(test_selection, "select", recorded)
+    # The targeted confirmation (correction 1) also runs the test.  The fake
+    # self-check injects failures that the real targeted run would not find,
+    # so mock targeted_attempt_failures to reproduce every requested failure.
+    monkeypatch.setattr(base_check, "targeted_attempt_failures",
+                        lambda ctx, cmd, ids, **kw: set(ids))
     run = T._spine_run(_b47a_repo(tmp_path / "repo"), tmp_path, monkeypatch, "abcdef7b47a1",
                        check_timeout_s=1800)
     (run / "facts.json").write_text(json.dumps({**T._facts(run), "check": B47A_CHECK,
@@ -604,6 +609,10 @@ def test_check_that_always_fails_terminates_at_bound(tmp_path, monkeypatch):
         return real(ctx, command, timeout, **kwargs)
 
     monkeypatch.setattr(repo_change, "run_check", run_check)
+    # The targeted confirmation (correction 1) also runs the test; make it
+    # reproduce the failure so the judge charges it.
+    monkeypatch.setattr(base_check, "targeted_attempt_failures",
+                        lambda *a, **kw: {"tests/test_pin.py::test_pin"})
     # Use a small bound to keep the test fast.
     monkeypatch.setattr(design_ops, "_COMBINED_SENDBACK_BOUND", 3)
     T._Chunks(monkeypatch, fails=set())
@@ -848,6 +857,10 @@ def test_combined_sendback_carries_check_failures_and_review_findings(tmp_path, 
         return real(ctx, command, timeout, **kwargs)
 
     monkeypatch.setattr(repo_change, "run_check", run_check)
+    # The targeted confirmation (correction 1) also runs the test; make it
+    # reproduce the failure so the judge charges it.
+    monkeypatch.setattr(base_check, "targeted_attempt_failures",
+                        lambda *a, **kw: {"tests/test_pin.py::test_pin"})
     T._Chunks(monkeypatch, fails=set())
     run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch, "abcdef700070")
     (run / "facts.json").write_text(json.dumps({**T._facts(run), "brief": TWO_ASKS}))
@@ -1033,6 +1046,10 @@ def test_no_attempt_sendback_through_graph_to_draft(tmp_path, monkeypatch):
         return real(ctx, command, timeout, **kwargs)
 
     monkeypatch.setattr(repo_change, "run_check", run_check)
+    # The targeted confirmation (correction 1) also runs the test; make it
+    # reproduce the failure so the judge charges it.
+    monkeypatch.setattr(base_check, "targeted_attempt_failures",
+                        lambda *a, **kw: {"tests/test_pin.py::test_pin"})
     monkeypatch.setattr(design_ops, "_COMBINED_SENDBACK_BOUND", 3)
     T._Chunks(monkeypatch, fails=set())
     run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch,
@@ -1079,6 +1096,10 @@ def test_sendback_names_failing_test_and_review_finding(tmp_path, monkeypatch):
         return real(ctx, command, timeout, **kwargs)
 
     monkeypatch.setattr(repo_change, "run_check", run_check)
+    # The targeted confirmation (correction 1) also runs the test; make it
+    # reproduce the failure so the judge charges it.
+    monkeypatch.setattr(base_check, "targeted_attempt_failures",
+                        lambda *a, **kw: {"tests/test_pin.py::test_pin"})
     T._Chunks(monkeypatch, fails=set())
     run = T._spine_run(T._target(tmp_path / "repo", PINNED), tmp_path, monkeypatch,
                        "abcdef700092")
