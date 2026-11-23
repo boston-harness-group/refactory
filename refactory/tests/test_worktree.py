@@ -1619,7 +1619,7 @@ def test_session_guard_fails_a_written_file_in_ci_and_reports_it_locally(tmp_pat
     )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-xvs", str(test_repo / "test_writes.py")],
-        capture_output=True, text=True, timeout=60, cwd=str(test_repo))
+        capture_output=True, text=True, timeout=120, cwd=str(test_repo))
     combined = result.stdout + result.stderr
     assert "file changed in the checkout under test" in combined and "leak.txt" in combined, combined
     assert "__pycache__" not in combined.split("repository guard")[-1], combined

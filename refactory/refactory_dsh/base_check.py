@@ -47,15 +47,33 @@ def strip_ansi(text: str) -> str:
 
 # ── parse test failures ──────────────────────────────────────────────────
 
-_PYTEST_FAILED = re.compile(r"^FAILED\s+(.+?::.*?)(?:\s+-\s.*)?$", re.MULTILINE)
+_PYTEST_FAILED = re.compile(r"^FAILED\s+(\S+::.+)$", re.MULTILINE)
 _VITEST_FAIL = re.compile(r"^\s*(?:FAIL|×)\s+(.+)$", re.MULTILINE)
 _TEST_FILE_PATTERNS = re.compile(
     r"(?:^|/)(?:test_[\w]+\.py|[\w]+_test\.py|[\w]+\.test\.[tj]sx?|[\w]+\.spec\.[tj]sx?|test_[\w]+\.[tj]s)$"
 )
 _PYTEST_ERROR = re.compile(
-    r"^(?:ERROR|ERRORS?)\s+(\S+\.py(?:::\S*(?:\[.*?\])?)*)\s*(?:[-–—]\s.*)?$",
+    r"^(?:ERROR|ERRORS?)\s+(\S+\.py\b.*)$",
     re.MULTILINE,
 )
+
+
+def _strip_pytest_reason(raw: str) -> str:
+    """Strip trailing `` - reason`` from a pytest FAILED/ERROR line.
+
+    Respects balanced brackets so that parametrised IDs like ``test[a - b]``
+    are not truncated.
+    """
+    raw = raw.strip()
+    idx = len(raw)
+    while True:
+        pos = raw.rfind(" - ", 0, idx)
+        if pos < 0:
+            return raw
+        before = raw[:pos]
+        if before.count("[") <= before.count("]"):
+            return before.rstrip()
+        idx = pos
 
 CACHE_FILE = Path(".refactory") / "base-check.json"
 BASE_WORKTREE_PREFIX = "base-"
@@ -70,10 +88,20 @@ def parse_test_failures(output: str) -> set[str]:
     output = strip_ansi(output)
     found: set[str] = set()
     for m in _PYTEST_FAILED.finditer(output):
-        found.add(m.group(1).strip())
+        found.add(_strip_pytest_reason(m.group(1)))
     # An error (a module that does not import, a fixture that fails) is a failure too.
     for m in _PYTEST_ERROR.finditer(output):
-        found.add(m.group(1).strip())
+        tid = _strip_pytest_reason(m.group(1))
+        # Reject log-capture lines.  A pytest ERROR line's ID is a bare file path
+        # (``tests/test_x.py``) or a node ID (``tests/test_x.py::test_x``).  Log
+        # lines look like ``root:module.py:12 msg`` or ``conftest.py:12 msg``
+        # (colon-digit after ``.py``).
+        if re.search(r"\.py:\d", tid):
+            continue  # ``file.py:12`` is a log line, not a pytest node ID
+        if "::" not in tid and "/" not in tid:
+            if re.match(r"^\w+:", tid):
+                continue  # logger:module pattern
+        found.add(tid)
     for m in _VITEST_FAIL.finditer(output):
         candidate = m.group(1).strip()
         if " > " in candidate:
@@ -1586,27 +1614,43 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
         budget = getattr(ctx, "budget", None)
         base_path = _base_worktree_path(Path(found.target), Path(found.path).name.removeprefix("run-"))
 
-        # When reference differs from found.base, check out the reference commit.
+        # When reference differs from found.base, use a separate worktree so the
+        # in-run base worktree is never contaminated (correction 6).
         if reference and reference != found.base:
-            if not _at(base_path, reference):
+            run_id = Path(found.path).name.removeprefix("run-")
+            ref_wt_path = worktree.slot(Path(found.target)) / f"ref-{run_id}"
+            if not _at(ref_wt_path, reference):
+                target_path = Path(found.target)
                 try:
-                    base_path, base_found, _ = _ensure_base_worktree(ctx)
-                except ValueError as exc:
-                    return unavailable(f"the base could not be prepared: {exc}")
-                # Check out the reference commit instead of the run's base.
-                try:
-                    worktree.git(base_path, *worktree.NO_HOOKS, "fetch", "origin", reference)
+                    if ref_wt_path.is_dir():
+                        worktree.git(target_path, *worktree.NO_HOOKS,
+                                     "worktree", "remove", "--force", str(ref_wt_path))
+                    worktree.git(target_path, *worktree.NO_HOOKS,
+                                 "worktree", "add", "--detach", str(ref_wt_path), reference)
                 except ValueError:
-                    pass  # may already have the commit locally
-                try:
-                    worktree.git(base_path, *worktree.NO_HOOKS, "checkout", reference)
-                except ValueError as exc:
-                    return unavailable(f"could not check out reference {reference[:12]}: {exc}")
-                _, problems, _ = prepare_commands(ctx, base_found, worktree.check_environment(base_path, home),
-                                                  home, prepare_timeout, budget, amend=False)
+                    try:
+                        worktree.git(target_path, *worktree.NO_HOOKS, "fetch", "origin", reference)
+                        if ref_wt_path.is_dir():
+                            worktree.git(target_path, *worktree.NO_HOOKS,
+                                         "worktree", "remove", "--force", str(ref_wt_path))
+                        worktree.git(target_path, *worktree.NO_HOOKS,
+                                     "worktree", "add", "--detach", str(ref_wt_path), reference)
+                    except ValueError as exc:
+                        return unavailable(f"could not create worktree at reference {reference[:12]}: {exc}")
+                ref_found = worktree.recorded(ctx.workdir)
+                if ref_found is None:
+                    return unavailable("the run has no worktree after creating reference worktree")
+                ref_home = Path(ctx.workdir).resolve() / ".refactory" / "ref-check-home"
+                ref_home.mkdir(parents=True, exist_ok=True)
+                _, problems, _ = prepare_commands(
+                    ctx, ref_found, worktree.check_environment(ref_wt_path, ref_home),
+                    ref_home, prepare_timeout, budget, amend=False)
                 if problems:
-                    return unavailable("the base's generate or setup failed: " + "\n".join(problems)[:1000])
+                    return unavailable("the reference's generate or setup failed: " + "\n".join(problems)[:1000])
                 _write_targeted(known_path, key, learned, prepared=True)
+            base_path = ref_wt_path
+            home = Path(ctx.workdir).resolve() / ".refactory" / "ref-check-home"
+            home.mkdir(parents=True, exist_ok=True)
         elif not (same_key and known.get("prepared") and _at(base_path, base_commit)):
             try:
                 base_path, base_found, _ = _ensure_base_worktree(ctx)
@@ -1658,6 +1702,55 @@ def _write_targeted(path: Path, key: str, learned: dict[str, bool], *, prepared:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"cache_key": key, "prepared": prepared, "tests": learned},
                                indent=2) + "\n")
+
+
+def targeted_attempt_failures(ctx: Any, command: str, test_ids: list[str], *,
+                              timeout: float) -> set[str] | None:
+    """Run ``test_ids`` targeted on the attempt and return which ones fail.
+
+    Returns ``None`` when the attempt cannot be re-run (the targeted confirmation
+    then falls through to the "no targeted info" branch of the judge, which
+    charges the failure).
+
+    Uses the attempt's check environment (the check copy HOME, not the base
+    check HOME) so that tests see the same HOME as the original check.
+    """
+    from refactory_dsh.check_digest import build_probe_command
+    from refactory_dsh.failfast import self_check_failures
+    from refactory_dsh.test_selection import runnable
+
+    found = worktree.recorded(ctx.workdir)
+    if found is None:
+        return None
+
+    attempt_path = Path(found.path)
+    # Use the check copy HOME (same as the original check), not BASE_CHECK_HOME.
+    from refactory_dsh.invocations import CHECK_COPY_HOME
+    home = Path(ctx.workdir).resolve() / CHECK_COPY_HOME
+    home.mkdir(parents=True, exist_ok=True)
+    env = worktree.check_environment(attempt_path, home)
+    budget = getattr(ctx, "budget", None)
+
+    targets = list(dict.fromkeys(runnable(test_id) for test_id in test_ids))
+    files = [name for name in targets if "::" not in name and " > " not in name]
+    ids = [name for name in targets if name not in files]
+    targeted_cmd, refusal = build_probe_command(command, ids, root=attempt_path, test_files=files)
+    if refusal:
+        return None
+    result = sandbox.run_command(targeted_cmd, workdir=attempt_path, timeout_s=timeout,
+                                 budget=budget, env=env, home=home, exact_env=True)
+    if result.timed_out:
+        return None
+    crashed, _ = sandbox.is_signal_crash(result)
+    if crashed:
+        return None
+    output = "\n".join((result.stdout or "", result.stderr or "")).strip()
+    if not result.ok:
+        # Non-zero exit: some tests might not have run (a collection error
+        # stops pytest before later tests).  Return None so the judge treats
+        # the confirmation as inconclusive and charges the failure.
+        return None
+    return self_check_failures(output)
 
 
 # ── prep triage: compare a preparation failure against the base ──────────
@@ -3000,16 +3093,24 @@ def _per_step_comparison(
                     per_step_new.add(failure)
                 already_seen.add(failure)
 
-    # Targeted confirmation for per-step-only new failures (correction 1).
+    # Targeted confirmation for per-step-only new failures (correction 1):
+    # run once on the attempt and once on the base.
     if per_step_new:
-        # Run targeted on base
+        cmd_for_targeted = " && ".join(s for s, _ in steps)
+        ids_to_confirm = sorted(per_step_new)
+        # Run targeted on the attempt
+        t_attempt_set = targeted_attempt_failures(
+            ctx, cmd_for_targeted, ids_to_confirm, timeout=timeout)
+        # Run targeted on the base
         t_base_result, _ = targeted_base_failures(
-            ctx, " && ".join(s for s, _ in steps), sorted(per_step_new),
+            ctx, cmd_for_targeted, ids_to_confirm,
             prepare_timeout=timeout, timeout=timeout,
         )
         t_base_set = t_base_result.failures if not t_base_result.environment_failure else set()
         for failure in per_step_new:
-            if failure in t_base_set:
+            if t_attempt_set is not None and failure not in t_attempt_set:
+                excused.add(failure)  # not-reproduced
+            elif failure in t_base_set:
                 excused.add(failure)  # base-targeted
             else:
                 comparison.new_failures.add(failure)  # genuinely new
@@ -3077,11 +3178,22 @@ def _extract_failure_blocks(output: str, test_ids: set[str]) -> list[str]:
         header_name = hdr.group(1).strip()
         block_start = hdr.start()
         block_end = headers[i + 1].start() if i + 1 < len(headers) else len(section_text)
-        # Check if this header belongs to a charged test ID
+        # Check if this header belongs to a charged test ID using strict matching
+        # (same logic as extract_failure_signatures). No substring matching that
+        # would leak an excused test's block into charged output.
         for tid in test_ids:
-            if header_name == tid or tid.endswith("::" + header_name) or header_name in tid or tid in header_name:
+            if (header_name == tid
+                    or tid.endswith("::" + header_name)
+                    or header_name.endswith(tid.split("::")[-1])):
                 blocks.append(section_text[block_start:block_end].strip())
                 break
+        else:
+            # Fallback: try matching on the last :: segment
+            for tid in test_ids:
+                parts = tid.split("::")
+                if any(header_name == p or header_name.endswith(p) for p in parts[1:]):
+                    blocks.append(section_text[block_start:block_end].strip())
+                    break
     return blocks
 
 
@@ -3090,10 +3202,20 @@ def _extract_failed_error_lines(output: str, test_ids: set[str]) -> list[str]:
     clean = strip_ansi(output)
     lines: list[str] = []
     for line in clean.splitlines():
-        if any(tid in line for tid in test_ids):
-            stripped = line.strip()
-            if stripped.startswith(("FAILED ", "ERROR ")):
-                lines.append(stripped)
+        stripped = line.strip()
+        if not stripped.startswith(("FAILED ", "ERROR ")):
+            continue
+        # Match: the line must contain one of the charged test IDs as a whole
+        # token (not as a substring of a longer ID).
+        for tid in test_ids:
+            # The FAILED/ERROR line format is: "FAILED tid" or "FAILED tid - reason"
+            # Match if the line contains the full tid followed by end, space, or " -"
+            pos = stripped.find(tid)
+            if pos >= 0:
+                after = pos + len(tid)
+                if after >= len(stripped) or stripped[after] in (" ", "\t"):
+                    lines.append(stripped)
+                    break
     return lines
 
 
@@ -3227,28 +3349,57 @@ def filter_check(
     attempt_sigs = extract_failure_signatures(attempt_output, attempt_failures) if attempt_failures else None
     base_sigs = extract_failure_signatures(base_result.output, base_result.failures) if base_result.failures else None
 
-    # Compare using the judge via thin wrappers
-    comparison = (design_comparison(base_result.failures, attempt_failures, named_text,
-                                    changed_files=changed_files,
-                                    attempt_signatures=attempt_sigs,
-                                    base_signatures=base_sigs)
-                  if named_text is not None else compare_failures(
-                      base_result.failures, attempt_failures, changed_files,
-                      brief_text, design_text,
-                      attempt_signatures=attempt_sigs,
-                      base_signatures=base_sigs))
-
-    # Get reasons from the judge for the final comparison.
-    targeted_base_set: set[str] | None = None
-    targeted_attempt_set: set[str] | None = None
-    jr = judge_failures(
-        attempt_failures, base_result.failures,
+    # First-pass comparison: judge with whole-run base observations only.
+    judge_kwargs: dict[str, Any] = dict(
         named_text=named_text,
         changed_files=changed_files if named_text is None else None,
         brief_text=brief_text if named_text is None else "",
         design_text=design_text if named_text is None else "",
         attempt_signatures=attempt_sigs,
         base_signatures=base_sigs,
+    )
+    first_jr = judge_failures(attempt_failures, base_result.failures, **judge_kwargs)
+
+    # Targeted confirmation (correction 1): run new failures targeted on
+    # both the attempt and the base, then re-judge with that information.
+    # Only needed when the base also failed — if the base passed, every
+    # attempt failure IS new, and there is no base observation to compare
+    # with. Targeted runs are expensive subprocess calls.
+    new_from_first = set(first_jr.charged)
+    targeted_base_set: set[str] | None = None
+    targeted_attempt_set: set[str] | None = None
+    if new_from_first and not base_result.ok:
+        ids_to_confirm = sorted(new_from_first)
+        try:
+            targeted_attempt_set = targeted_attempt_failures(
+                ctx, command, ids_to_confirm, timeout=timeout)
+        except Exception:
+            targeted_attempt_set = None
+        try:
+            t_base_result, _ = targeted_base_failures(
+                ctx, command, ids_to_confirm, prepare_timeout=timeout, timeout=timeout)
+            if not t_base_result.environment_failure:
+                targeted_base_set = t_base_result.failures
+        except Exception:
+            pass  # targeted base unavailable — fall through without targeted info
+        # Re-judge with targeted info (if any was collected).
+        if targeted_base_set is not None or targeted_attempt_set is not None:
+            jr = judge_failures(
+                attempt_failures, base_result.failures,
+                targeted_base_failures_set=targeted_base_set,
+                targeted_attempt_failures=targeted_attempt_set,
+                **judge_kwargs,
+            )
+        else:
+            jr = first_jr
+    else:
+        jr = first_jr
+
+    comparison = ComparisonResult(
+        inherited=set(jr.excused),
+        new_failures=set(jr.charged),
+        all_excused=jr.all_excused,
+        base_ok=not bool(base_result.failures),
     )
     judge_reasons = jr.reasons
 
@@ -3277,6 +3428,13 @@ def filter_check(
             blocker = why
         else:
             comparison, step_detail = revised, why
+            judge_reasons = {**judge_reasons}
+            for tid in comparison.inherited:
+                if tid not in judge_reasons:
+                    judge_reasons[tid] = "base-per-step"
+            for tid in comparison.new_failures:
+                if tid not in judge_reasons:
+                    judge_reasons[tid] = "new-failure"
     elif comparison.all_excused:
         blocker = excusal_blocker(command, attempt_output, attempt_failures)
 
@@ -3292,10 +3450,10 @@ def filter_check(
             + ", ".join(sorted(comparison.inherited))
         )
 
-    # Positive selection: the builder sees only charged failures.
+    # Positive selection: the builder sees only charged failures (correction 4).
     new_failure_detail = _build_positive_detail(
         attempt_output, comparison.new_failures, comparison.inherited, judge_reasons,
-    ) if comparison.new_failures else attempt_output
+    )
     if step_detail:
         new_failure_detail = f"{new_failure_detail}\n\n{step_detail}"
 

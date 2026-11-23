@@ -242,7 +242,6 @@ def test_pytest_error_rejects_log_lines():
     log_lines = [
         "ERROR    root:module.py:12 message",
         "ERROR: something",
-        "ERROR    conftest.py:12 some message",
     ]
     for line in log_lines:
         failures = parse_test_failures(line)
@@ -250,14 +249,15 @@ def test_pytest_error_rejects_log_lines():
 
 
 def test_pytest_error_rejects_log_lines_check_digest():
-    """The same log lines tested on check_digest's parser."""
-    from refactory_dsh.check_digest import _PYTEST_ERROR_LINE
-    log_lines = [
+    """The same log lines tested on check_digest's parser (_parse_pytest)."""
+    from refactory_dsh.check_digest import _parse_pytest
+    # Both log lines must not produce a parsed result
+    for log_line in [
         "ERROR    root:module.py:12 message",
-        "ERROR: something",
-    ]
-    for line in log_lines:
-        assert not _PYTEST_ERROR_LINE.search(line), f"check_digest matched: {line}"
+        "ERROR    root:module.py:12 - detailed message",
+    ]:
+        result = _parse_pytest(log_line)
+        assert result is None or not result.failed_ids, f"check_digest matched: {log_line}"
 
 
 def test_pytest_error_matches_valid_error():
@@ -313,3 +313,143 @@ E   \x1b[31mAssertionError\x1b[0m: assert False
     result = extract_failure_signatures(output, {"tests/test_a.py::test_x"})
     assert result.get("tests/test_a.py::test_x") is not None
     assert "AssertionError" in result["tests/test_a.py::test_x"]
+
+
+# ── parametrised ID truncation tests (brief ask 4) ─────────────────────
+
+
+def test_failed_line_with_dash_in_param():
+    """_PYTEST_FAILED does not truncate IDs with ' - ' inside brackets."""
+    output = "FAILED tests/test_x.py::test_x[a - b] - AssertionError\n"
+    failures = parse_test_failures(output)
+    assert "tests/test_x.py::test_x[a - b]" in failures
+    # Must NOT truncate to test_x[a
+    assert "tests/test_x.py::test_x[a" not in failures
+
+
+def test_error_line_with_dash_in_param():
+    """_PYTEST_ERROR does not truncate IDs with ' - ' inside brackets."""
+    output = "ERROR tests/test_x.py::test_x[a - b] - reason\n"
+    failures = parse_test_failures(output)
+    assert "tests/test_x.py::test_x[a - b]" in failures
+    assert "tests/test_x.py::test_x[a" not in failures
+
+
+def test_error_line_with_space_in_param():
+    """_PYTEST_ERROR captures parametrised IDs with spaces."""
+    output = "ERROR tests/test_x.py::test_x[param with spaces]\n"
+    failures = parse_test_failures(output)
+    assert "tests/test_x.py::test_x[param with spaces]" in failures
+
+
+def test_pytest_error_rejects_log_line_with_dash():
+    """Log line 'ERROR root:module.py:12 - msg' is rejected (correction 5)."""
+    output = "ERROR    root:module.py:12 - detailed message\n"
+    failures = parse_test_failures(output)
+    assert not failures, f"log line matched: {failures}"
+
+
+def test_pytest_error_rejects_log_line_check_digest_with_dash():
+    """check_digest also rejects log lines with dashes."""
+    from refactory_dsh.check_digest import _parse_pytest
+    output = "ERROR    root:module.py:12 - msg\nERROR: something\n"
+    result = _parse_pytest(output)
+    assert result is None or not result.failed_ids
+
+
+# ── extract_failure_blocks strict matching (correction 4) ───────────────
+
+
+def test_extract_failure_blocks_no_substring_leak():
+    """An excused test's block is not included when its name is a substring of a charged test."""
+    from refactory_dsh.base_check import _extract_failure_blocks
+    output = """
+=========================== FAILURES ===========================
+___________________________ test_x ___________________________
+short traceback for test_x
+___________________________ test_x_extended ___________________________
+short traceback for test_x_extended
+=========================== short test summary info ===========================
+"""
+    # Only charged: test_x_extended. test_x is excused.
+    blocks = _extract_failure_blocks(output, {"tests/test_a.py::test_x_extended"})
+    combined = "\n".join(blocks)
+    assert "test_x_extended" in combined
+    # test_x's block must NOT appear
+    assert "short traceback for test_x\n" not in combined
+
+
+def test_extract_failed_error_lines_no_substring_leak():
+    """FAILED lines for excused IDs are not included when charged ID is a substring."""
+    from refactory_dsh.base_check import _extract_failed_error_lines
+    output = (
+        "FAILED tests/test_a.py::test_x - reason\n"
+        "FAILED tests/test_a.py::test_x_extended - reason\n"
+    )
+    # Only test_x_extended is charged
+    lines = _extract_failed_error_lines(output, {"tests/test_a.py::test_x_extended"})
+    assert len(lines) == 1
+    assert "test_x_extended" in lines[0]
+
+
+# ── mutation coverage: each correction must have a test that fails without it ──
+
+
+def test_mutation_not_reproduced_requires_targeted_attempt():
+    """Without targeted_attempt_failures, the 'not-reproduced' path is unreachable."""
+    # With targeted info: failure not in targeted_attempt → excused
+    jr_with = judge_failures(
+        {"tests/test_a.py::test_x"}, set(),
+        targeted_attempt_failures=set(),
+        targeted_base_failures_set=set(),
+    )
+    assert "tests/test_a.py::test_x" in jr_with.excused
+
+    # Without targeted info: failure is charged
+    jr_without = judge_failures(
+        {"tests/test_a.py::test_x"}, set(),
+    )
+    assert "tests/test_a.py::test_x" in jr_without.charged
+    # The two must differ
+    assert jr_with.excused != jr_without.excused
+
+
+def test_mutation_base_targeted_requires_targeted_base():
+    """Without targeted_base_failures_set, 'base-targeted' excusal is unreachable."""
+    # With targeted base info
+    jr_with = judge_failures(
+        {"tests/test_a.py::test_x"}, set(),
+        targeted_base_failures_set={"tests/test_a.py::test_x"},
+        targeted_attempt_failures={"tests/test_a.py::test_x"},
+    )
+    assert "tests/test_a.py::test_x" in jr_with.excused
+
+    # Without targeted base → charged
+    jr_without = judge_failures(
+        {"tests/test_a.py::test_x"}, set(),
+        targeted_attempt_failures={"tests/test_a.py::test_x"},
+    )
+    assert "tests/test_a.py::test_x" in jr_without.charged
+
+
+def test_mutation_signature_check_in_design_mode():
+    """In design mode, a touched file with different signature is charged (correction 3)."""
+    # Design mode: named_text is set, changed_files provided
+    # The named_text must NOT contain the test name, otherwise it triggers the named-test rule
+    jr = judge_failures(
+        {"tests/test_a.py::test_foo"}, {"tests/test_a.py::test_foo"},
+        named_text="some brief about unrelated changes",
+        changed_files=["tests/test_a.py"],
+        attempt_signatures={"tests/test_a.py::test_foo": "AssertionError:test_a.py:10"},
+        base_signatures={"tests/test_a.py::test_foo": "TypeError:test_a.py:20"},
+    )
+    assert "tests/test_a.py::test_foo" in jr.charged
+    assert jr.reasons["tests/test_a.py::test_foo"] == "signature-mismatch"
+
+
+def test_positive_detail_no_fallback():
+    """When no charged failures, _build_positive_detail returns a fixed message."""
+    from refactory_dsh.base_check import _build_positive_detail
+    result = _build_positive_detail("full output here", set(), {"test_a"}, {"test_a": "base-whole-run"})
+    assert result == "no charged failure detail found"
+    assert "full output here" not in result

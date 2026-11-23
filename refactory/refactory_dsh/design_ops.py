@@ -2512,10 +2512,21 @@ def _the_changes_failures(ctx: Any, command: str, failing: list[str], check_time
         ctx, command, sorted(on_base), prepare_timeout=check_timeout, timeout=limit_s)
     if result.environment_failure:
         return failing, [], f"unavailable, so nothing is inherited: {result.environment_failure}"
+    # Run targeted on the attempt too (correction 1) — only when the base
+    # also has failures.  When the base passed, every attempt failure IS new,
+    # and the targeted confirmation is expensive without changing the outcome.
+    t_attempt_set: set[str] | None = None
+    if result.failures:
+        try:
+            t_attempt_set = base_check.targeted_attempt_failures(
+                ctx, command, sorted(on_base), timeout=limit_s)
+        except Exception:
+            t_attempt_set = None
     jr = base_check.judge_failures(
         set(on_base), result.failures,
         named_text=_named_text(ctx),
         targeted_base_failures_set=result.failures,
+        targeted_attempt_failures=t_attempt_set,
     )
     inherited = sorted(jr.excused)
     return ([test_id for test_id in failing if test_id not in jr.excused],
@@ -2614,8 +2625,25 @@ def _record_prepared(ctx: Any, attempt: str, targeted_command: str | None) -> No
 def _record_check_verdict(ctx: Any, attempt: str, verdict: Any) -> None:
     # The command it ran: a decision stands for this attempt only while the check is
     # the same command (`graph-control amend-command` changes it).
-    ctx.write_json(CHECK_VERDICT, {"attempt": attempt, "command": str(ctx.facts.get("check") or ""),
-                                   "verdict": str(verdict), "reason": getattr(verdict, "reason", "")})
+    data: dict[str, Any] = {
+        "attempt": attempt,
+        "command": str(ctx.facts.get("check") or ""),
+        "verdict": str(verdict),
+        "reason": getattr(verdict, "reason", ""),
+    }
+    # Correction 4: show charged and excused IDs separately.
+    # Read from the check-record that _full_check just wrote.
+    cr = ctx.read_json("check-record.json", {}) if ctx.exists("check-record.json") else {}
+    if cr.get("inherited") is not None:
+        data["excused"] = cr["inherited"]
+    if cr.get("reasons"):
+        data["reasons"] = cr["reasons"]
+        # Charged: failures with reasons that are not in inherited.
+        excused_set = set(cr.get("inherited") or [])
+        data["charged"] = sorted(
+            tid for tid, reason in cr["reasons"].items() if tid not in excused_set
+        )
+    ctx.write_json(CHECK_VERDICT, data)
 
 
 def _decided(ctx: Any, attempt: str) -> dict[str, Any]:

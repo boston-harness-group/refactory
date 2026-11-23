@@ -1834,6 +1834,10 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
             reference=target_tip,
         )
 
+        # Run targeted on the merge-commit attempt (correction 1).
+        t_attempt_set = base_check.targeted_attempt_failures(
+            ctx, check, sorted(attempt_failures), timeout=check_timeout_s)
+
         # Reuse in-run base results when target_tip equals the run's base.
         inrun_base_failures: set[str] = set()
         if target_tip == found.base:
@@ -1852,10 +1856,10 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
             jr = base_check.judge_failures(
                 attempt_failures, combined_base,
                 targeted_base_failures_set=combined_base,
+                targeted_attempt_failures=t_attempt_set,
             )
             if jr.all_excused:
                 record_full_check(ctx, path, check)
-                worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
                 return "", False
 
     # Check failed — reset to reviewed commit and report.
