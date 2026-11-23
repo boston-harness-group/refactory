@@ -544,6 +544,11 @@ def test_spine_runs_each_composition_as_the_walker_does(name, edits, monkeypatch
     ("1. proceed\n2. reloop", None),
     ("-proceed", ("proceed", "")),
     ("halt: give up", ("halt", "give up")),
+    ("VERDICT: reloop\nRow 4 maps to the wrong column.",
+     ("reloop", "Row 4 maps to the wrong column.")),
+    ("**Verdict**: proceed — fine", ("proceed", "fine")),
+    ("Verdict: do not proceed", None),
+    ("Verdict - proceed", None),
 ])
 def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     assert snippet.parse_verdict(text, ["proceed", "reloop", "halt"]) == expected
@@ -581,7 +586,12 @@ def test_a_verdict_is_the_first_word_when_that_is_an_answer(text, expected):
     ("I checked it.\nreloop if unsure", None),
     ("I checked it.\nproceed, because it holds", None),
     ("I checked it.\nproceed! it holds", None),
-    ("I checked it.\nVerdict: proceed", None),
+    # A "Verdict:" tag before the word is read past (a SpreadsheetBench judge wrote
+    # "VERDICT: reloop"); the word after it must be an answer, as a first word must.
+    ("I checked it.\nVerdict: proceed", ("proceed", "I checked it.")),
+    ("I checked it.\n**VERDICT:** reloop — show B", ("reloop", "I checked it.\nshow B")),
+    ("I checked it.\nVerdict: do not proceed", None),
+    ("I checked it.\nVerdict proceed", None),
     ("I checked it.\nproceeding", None),
     ("", None),
 ])

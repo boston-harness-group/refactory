@@ -176,8 +176,53 @@ def node_declarations(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
             # What a code or verdict node's callable needs beyond the context (its code,
             # inputs, labels): the runner hands it over as the walker's child does.
             entry["snippet"] = snippet_spec(graph, node, knob_values)
+        judged = judge_verdict(graph, node_id)
+        if judged is not None:
+            # The verdict gate that reads this agent's answer: its worker asks again when
+            # the answer names no verdict (`node_retry.settle_verdict`), as the walker does.
+            entry["verdict"] = judged
         declarations[node_id] = entry
     return declarations
+
+
+def judge_verdict(graph: Graph, node_id: str) -> dict[str, Any] | None:
+    """The verdict gate that reads an agent's answer, and what settling the answer needs.
+
+    For an agent whose answer a verdict gate (`snippet.verdict`) reads its verdict from
+    -- the gate's first ``required_reads`` is the agent's first write, or its first
+    ``inputs`` the agent's first fact -- what settling that answer needs
+    (`node_retry.settle_verdict`): ``{"gate", "labels", "unreadable"}``, the labels being
+    the gate's out-edge conditions and ``unreadable`` the label taken when the answer
+    names none even when asked again: the gate's ``proceed`` when it goes on there when
+    its loop cannot settle (`Graph.on_exhausted` ``continue``, a loop's in a data pass
+    unless it declares otherwise), else empty, and the gate fails as it always has
+    (``fail_item``, ``halt``). ``None`` for any other node, and for an agent two verdict
+    gates read: which gate's answers to ask for is not one question.
+
+    Both runtimes read it here: the walker from the graph, the spine's worker from the
+    declarations."""
+    from refactory_dsh import snippet
+    from refactory_dsh.nn.graph import PROCEED
+
+    node = graph.nodes.get(node_id)
+    if node is None or node.kind != "agent":
+        return None
+    sources = {("file", node.writes[0]) if node.writes else None,
+               ("fact", node.produces[0]) if node.produces else None} - {None}
+    found = []
+    for gate in graph.nodes.values():
+        if gate.kind != "gate" or gate.evaluator != snippet.VERDICT:
+            continue
+        source = (("file", gate.required_reads[0]) if gate.required_reads else
+                  ("fact", gate.inputs[0]) if gate.inputs else None)
+        if source not in sources:
+            continue
+        labels = sorted({str(edge.condition) for edge in graph.out_edges(gate.id)
+                         if edge.condition})
+        onward = next((label for label in labels if label.lower() == PROCEED), "")
+        found.append({"gate": gate.id, "labels": labels,
+                      "unreadable": onward if graph.on_exhausted(gate.id) == "continue" else ""})
+    return found[0] if len(found) == 1 else None
 
 
 def needs_snippet_spec(node: Any) -> bool:

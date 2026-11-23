@@ -45,6 +45,8 @@ from typing import Any
 
 #: The event a retry is recorded as, in the run's `.refactory/events.jsonl`.
 RETRY_EVENT = "node_retried"
+#: The event an answer that named no verdict is recorded as (`settle_verdict`).
+VERDICT_REASK_EVENT = "verdict_reasked"
 
 #: The shortest session a retry is worth starting. When the node's envelope or the run's
 #: wall leaves less than this (or than the retry's own limit, when that is shorter), the
@@ -612,6 +614,7 @@ def deliver(
     workspace: Callable[..., AbstractContextManager[Any]] | None = None,
     tool_policy: str = "",
     keeps_tool_markup: bool = False,
+    verdict: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one agent node's model work through the delivery bracket, honouring ``rule``.
 
@@ -633,6 +636,10 @@ def deliver(
     (`node_allowance_s`) -- and of the run's wall, as a rule's retry does; with no time
     left, or a second such reply, the step fails (:class:`InventedToolCalls`). A step with
     tools is never judged so. Both runtimes come here, so both refuse such a reply alike.
+
+    ``verdict`` (`lowering.judge_verdict`) marks a step whose answer a verdict gate reads:
+    an answer that names no verdict is settled before the gate reads it
+    (:func:`settle_verdict`).
     """
     from refactory_dsh import workspace as workspaces
     from refactory_dsh.agent_delivery import begin, finish
@@ -777,4 +784,115 @@ def deliver(
         # A step a gate sent back after it went missing has answered now: it is no
         # longer missing (`items.missing_steps`).
         clear_spent(workdir, node)
+        if verdict and writes:
+            settled = settle_verdict(workdir, node, writes[0], verdict, client=client, ask=ask,
+                                     budget=budget)
+            if settled in ("reasked", "unreadable"):
+                receipt = _resettled(workdir, receipt, writes[0], settled)
         return output, receipt
+
+
+def settle_verdict(workdir: Path, node: str, name: str, verdict: dict[str, Any], *,
+                   client: Any, ask: Callable[[Any, str, Any], str], budget: Any = None) -> str:
+    """Settle the answer ``name`` an agent wrote for a verdict gate (``verdict``:
+    `lowering.judge_verdict`) before the gate reads it; what happened, as a word.
+
+    An answer that names a verdict (`snippet.parse_verdict`) is left as it is
+    (``named``), and so is one that names two (``two``), which the gate refuses as before.
+    One that names none (a judge that wrote "Let me inspect ..." or "I found ..." and
+    never put the word first or alone last) is asked again once, in a fresh call with no
+    tools and its own answer in the prompt (`snippet.reask_prompt`), for the word alone:
+    the word it answers is written first in the file, with a line that says it was asked
+    (`snippet.REASKED_NOTE`), above the answer, which stays the reason (``reasked``).
+    When that names none either (or the call fails), the gate's declared way on is taken
+    when it has one -- its ``proceed``, as when its loop cannot settle -- and the note says
+    so (`snippet.UNREADABLE_NOTE`, ``unreadable``); else the file is left as it is and the
+    gate fails as it did (``failed``). Never silent: each case but ``named`` is recorded as
+    a `VERDICT_REASK_EVENT` event, and the re-ask as one of the item's model calls."""
+    from refactory_dsh import snippet
+    from refactory_dsh.agent_delivery import _path
+    from refactory_dsh.live import emit
+
+    target = _path(workdir, name)
+    try:
+        text = target.read_text()
+    except (OSError, UnicodeDecodeError):
+        return "named"  # nothing to read here; the gate says what is wrong with it
+    labels = list(verdict.get("labels") or ())
+    named = snippet.names_verdict(text, snippet.answers({"labels": labels}))
+    if named is None:
+        emit(workdir, VERDICT_REASK_EVENT, node_id=node, state="two", gate=verdict.get("gate"),
+             summary=f"{node}'s answer names two verdicts; gate {verdict.get('gate')!r} "
+                     "refuses it")
+        return "two"
+    if named or not labels:
+        return "named"
+    prompt = snippet.reask_prompt(text, labels)
+    quiet = (client.with_tool_policy("none")
+             if callable(getattr(client, "with_tool_policy", None)) else client)
+    reply, why = "", ""
+    try:
+        if budget is not None:
+            budget.checkpoint()
+        reply = str(ask(quiet, prompt, None) or "")
+    except Exception as error:  # noqa: BLE001 - a failed re-ask is an unreadable verdict, said
+        from refactory_dsh.budgets import BudgetExhausted
+
+        if isinstance(error, BudgetExhausted):
+            raise
+        why = f"the call failed: {type(error).__name__}: {str(error)[:200]}"
+    _record_reask(workdir, node, prompt, reply)
+    label = None
+    if not why:
+        try:
+            parsed = snippet.parse_verdict(reply, labels)
+        except snippet.SnippetError:
+            parsed = None
+        label = parsed[0] if parsed is not None else None
+        if label is None:
+            why = f"it answered {' '.join(reply.split())[:120]!r}"
+    gate = str(verdict.get("gate") or "")
+    if label is not None:
+        note = snippet.REASKED_NOTE.format(node=node, label=label)
+        outcome = "reasked"
+    elif verdict.get("unreadable"):
+        label = str(verdict["unreadable"])
+        note = snippet.UNREADABLE_NOTE.format(node=node, why=why, gate=gate, label=label)
+        outcome = "unreadable"
+    else:
+        emit(workdir, VERDICT_REASK_EVENT, node_id=node, state="failed", gate=gate,
+             reply=reply[:500], summary=f"{node}'s answer named no verdict, also when asked "
+                                        f"again ({why}); gate {gate!r} has no way on to take")
+        return "failed"
+    target.write_text(f"{label}\n{note}\n\n{text}")
+    emit(workdir, VERDICT_REASK_EVENT, node_id=node, state=outcome, gate=gate, verdict=label,
+         reply=reply[:500], summary=note.strip("[]").removeprefix("refactory: "))
+    return outcome
+
+
+def _resettled(workdir: Path, receipt: dict[str, Any], name: str, settled: str
+               ) -> dict[str, Any]:
+    """The delivery receipt with the settled answer's fingerprint and how it was settled
+    (``verdict_settled``), written back, so a reader that checks a delivery is current
+    (`agent_delivery.receipts_in`) sees the file as the step's delivery."""
+    from refactory_dsh.agent_delivery import ROOT, _fingerprint
+
+    receipt = {**receipt, "artifacts": {**(receipt.get("artifacts") or {}),
+                                        name: _fingerprint(workdir, name)},
+               "verdict_settled": settled}
+    path = Path(workdir) / ROOT / str(receipt.get("id") or "") / "receipt.json"
+    if receipt.get("id") and path.is_file():
+        path.write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def _record_reask(workdir: Path, node: str, prompt: str, reply: str) -> None:
+    """The re-ask as one of the item's model calls, on the spine's per-item sidecar
+    (`items.record_exchange`, read only on the spine; the walker's ``ask`` keeps its
+    exchanges itself), inside a data pass only."""
+    from refactory_dsh.nn.executor import CURRENT_ITEM
+
+    if (Path(workdir) / CURRENT_ITEM).exists():
+        from refactory_dsh.items import record_exchange
+
+        record_exchange(workdir, node, prompt, reply)

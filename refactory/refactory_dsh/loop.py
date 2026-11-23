@@ -974,6 +974,10 @@ class Loop(OuterLoop):
         #: replayed), so no graph is smoked twice, and how many smoke runs each had.
         self._smoke_verdicts: dict[str, dict[str, Any]] = {}
         self._smoke_runs: dict[str, int] = {}
+        #: The wiring review of each candidate whose edit added wiring warnings
+        #: (``wiring_review`` events, live and replayed; `_wiring_check`), by the id of
+        #: the candidate reviewed and of the one it became, so none is asked twice.
+        self._wiring_reviews: dict[str, dict[str, Any]] = {}
         #: The loop-level parts manifest (train/val/test id lists), loaded from
         #: config.parts_manifest or the run root.
         self._parts_manifest: dict[str, list[str]] | None = None
@@ -6414,10 +6418,8 @@ class Loop(OuterLoop):
                 "id": candidate.id, "epoch": record.get("epoch"),
                 # What this edit added: its new or changed steps judged against its
                 # parent, less what the parent already had.
-                "warnings": [w for w in _wiring_warnings(
-                                 candidate.state, parent.state if parent is not None else None)
-                             if parent is None
-                             or w not in _wiring_warnings(parent.state, parent.state)],
+                "warnings": (_new_wiring_warnings(candidate.state, parent.state)
+                             if parent is not None else _wiring_warnings(candidate.state)),
                 "edit": candidate.own_edits(), "rationale": record.get("rationale"),
                 "before": _values_before(parent, candidate.own_edits()),
                 "prediction": record.get("prediction"), "diagnosis": record.get("diagnosis"),
@@ -7252,6 +7254,64 @@ class Loop(OuterLoop):
                        error=found.get("error"))
         return [integrity.refusal(found, policy)] if vetoed else candidate
 
+    # ── the wiring review (``Run.attempt``, every strategy's proposals) ──────────
+    def _wiring_check(self, run: Any, proposal: Proposal, parent: Candidate,
+                      candidate: Candidate) -> Candidate:
+        """Show the proposer the wiring warnings its edit adds (`_new_wiring_warnings`:
+        ``W-unread-output``, ``W-reloop-target``) before the candidate is judged, smoked
+        or evaluated, and let it act on them: one slim call (`Optimizer.review_wiring`)
+        answers with fixed edits, or with none to keep the change as it is, saying why.
+        A warning is information, never a refusal (a Python op may read a file it does
+        not declare): the candidate is kept unless the proposer's fix passes every check
+        a proposal must (``Run.mechanics``), and then the fix is the candidate.
+
+        Said either way: a note on the candidate (shown with it in later requests), the
+        optimizer trace (``wiring_review``) and the journal (``wiring_review``, so a
+        resumed run asks no candidate twice). An optimizer that makes no model call
+        (`Optimizer.review_wiring` returns ``None``) keeps the change, with the note.
+        A text-only edit changes no step's wiring, so it is never asked about."""
+        held = self._wiring_reviews.get(candidate.id)
+        if held is not None:
+            return candidate
+        warnings = _new_wiring_warnings(candidate.state, parent.state)
+        if not warnings:
+            return candidate
+        review = getattr(self.optimizer, "review_wiring", None)
+        fixed, why = None, ""
+        if callable(review):
+            fixed = review(self._repair_context(), proposal, warnings, parent)
+            why = str(getattr(self.optimizer, "last_wiring_answer", "") or "")
+        outcome, refused, result = "kept", [], candidate
+        if fixed is not None:
+            again = run.mechanics(fixed, parent)
+            if isinstance(again, Candidate):
+                outcome, result = "fixed", again
+            else:
+                outcome, refused = "fix_refused", list(again)
+        codes = ", ".join(dict.fromkeys(w.split(" ", 1)[0] for w in warnings))
+        said = {"fixed": "the proposer changed the wiring before it ran",
+                "fix_refused": "the proposer's fix was refused, so the change runs as "
+                               f"proposed ({'; '.join(refused)[:300]})",
+                "kept": "the proposer kept the change as it is"}[outcome]
+        result.notes = [*result.notes, f"wiring warnings shown before it ran ({codes}): {said}"
+                        + (f"; it said: {why[:300]}" if why and outcome != "fix_refused" else "")]
+        remaining = _new_wiring_warnings(result.state, parent.state)
+        record = {"id": candidate.id, "became": result.id if result is not candidate else None,
+                  "parent": parent.id, "epoch": self.epoch, "warnings": warnings,
+                  "outcome": outcome, "why": why, "refused": refused, "remaining": remaining}
+        with self._state_lock:
+            self._wiring_reviews[candidate.id] = record
+            if result is not candidate:
+                self._wiring_reviews[result.id] = record
+            self._journal("wiring_review", **record)
+        self.optimizer.record_call(kind="wiring_outcome", epoch=self.epoch, parent=parent.id,
+                                   candidate=candidate.id, became=record["became"],
+                                   outcome=outcome, warnings=warnings, remaining=remaining,
+                                   refused=refused)
+        self._progress("wiring", candidate=candidate.id, parent=parent.id, outcome=outcome,
+                       warnings=len(warnings), remaining=len(remaining))
+        return result
+
     # ── the smoke check (``Run.attempt``, the default loop's own proposals) ───────
     def _smoke_items(self, parent: Candidate) -> list[str]:
         """The train items a child of ``parent`` is smoked on: the first (by item id) its
@@ -7931,6 +7991,12 @@ class Loop(OuterLoop):
                 rescore_measurements += int((record.get("measurements") or {}).get("count", 0))
                 self._smoke_verdicts[cid] = {k: v for k, v in record.items() if k != "event"}
                 self._smoke_runs[cid] = self._smoke_runs.get(cid, 0) + 1
+            elif event == "wiring_review":
+                # Kept so a resumed run does not ask about the same edit's wiring again.
+                held = {k: v for k, v in record.items() if k != "event"}
+                for key in (record.get("id"), record.get("became")):
+                    if key:
+                        self._wiring_reviews[str(key)] = held
             elif event == "train_minibatch":
                 self._minibatches[int(record["epoch"])] = [str(i) for i in record.get("ids") or ()]
             elif event == "train_records_epoch":
@@ -8105,6 +8171,16 @@ def _wiring_warnings(state: Mapping[str, Any] | None,
         return wiring_warnings(Graph.from_state((state or {}).get("graph") or {}), before)
     except Exception:  # noqa: BLE001 - a broken graph is V0's to report, not this note's
         return []
+
+
+def _new_wiring_warnings(state: Mapping[str, Any] | None,
+                         parent_state: Mapping[str, Any] | None) -> list[str]:
+    """The wiring warnings an edit added: ``state``'s, its new or changed steps judged
+    against ``parent_state``'s, less those the parent already had (`_wiring_warnings`).
+    What the ledger says of an edit, and what the proposer is shown before its candidate
+    runs (`Loop._wiring_check`)."""
+    before = set(_wiring_warnings(parent_state, parent_state))
+    return [w for w in _wiring_warnings(state, parent_state) if w not in before]
 
 
 def _other_value(knob: Knob, current: Any, rng: random.Random) -> Any:
