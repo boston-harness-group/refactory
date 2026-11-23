@@ -905,8 +905,13 @@ def test_a_reused_dispatch_record_is_owned_by_the_process_that_carries_it_on(tmp
 def test_an_open_watch_nothing_can_check_lapses_after_the_backstop(tmp_path, monkeypatch):
     driver = _checkout(tmp_path / "driver")
     run = tmp_path / "run"
-    mine = target_guard._open_watch(driver, run, "here", "2026-11-22T00:00:00+00:00")
-    elsewhere = target_guard._open_watch(driver, run, "there", "2026-11-22T00:00:00+00:00")
+    # Begun now: a fixed date lapses every watch, live or not, once the backstop has passed
+    # since it (this test began failing on 2026-11-23).
+    import datetime
+
+    started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    mine = target_guard._open_watch(driver, run, "here", started)
+    elsewhere = target_guard._open_watch(driver, run, "there", started)
     target_guard._write_watch(driver, {**target_guard._read_watch(driver, elsewhere), "host": "another-host"})
     monkeypatch.setattr(target_guard, "WATCH_OPEN_S", 0)
     left = {watch["id"] for watch in target_guard._read_watches(driver)}
