@@ -373,18 +373,59 @@ def test_a_fabricating_mode_with_a_configuration_sample_is_still_caught(tmp_path
 
 
 def test_an_undeclared_knob_defaulting_to_real_data_is_not_run(tmp_path, project, plates):
-    """A knob the run does not declare as input, whose default names existing data, would
-    still be read with the declared input emptied. The check does not run the mode on it:
-    it is inconclusive and names the knob."""
-    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ',
-                                  f'"reference": nn.Knob({str(plates)!r}, ')
+    """A knob the run does not declare as input, whose default names existing data under
+    the project, would still be read with the declared input emptied. The check does not
+    run the mode on it: it is inconclusive and names the knob."""
+    (project / "data" / "plates").mkdir(parents=True)
+    (project / "data" / "plates" / "p1.csv").write_text("well,value\nA1,0.1\n")
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', '"reference": nn.Knob("data/plates", ')
     _install(project, NAME, plate_files(NAME, FABRICATES, knobs=knobs))
     receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
     assert receipt["status"] == "inconclusive", receipt
-    assert receipt["undeclared"] == [f"reference (default {plates})"]
+    assert receipt["undeclared"] == ["reference (default data/plates)"]
     assert "exit_ok" not in receipt, "the mode must not be run on its real data"
     assert not (tmp_path / "empty-run" / "summary.json").exists()
     assert "inconclusive" in empty_input.warning(receipt)
+
+
+def test_a_scratch_default_does_not_stop_the_check(tmp_path, project, plates):
+    """An undeclared `scratch` knob defaulting to /tmp is a scratch location, not input:
+    the check still runs, and the fabricating mode is a finding."""
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', '"reference": nn.Knob("/tmp", ')
+    ops = FABRICATES.replace('stand_in = ctx.workdir / "work" / "synthetic_plate.csv"',
+                             'stand_in = ctx.workdir / "scratch" / "synthetic_plate.csv"')
+    _install(project, NAME, plate_files(NAME, ops, knobs=knobs))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["undeclared"] == []
+    assert receipt["status"] == "finding", receipt
+
+
+def test_which_undeclared_defaults_look_like_input(tmp_path, monkeypatch):
+    """Scratch locations, the run folder and declared writes never make the check
+    inconclusive; data under the project does. A relative default is the project's,
+    never the current directory's."""
+    import tempfile
+
+    project, run = tmp_path / "proj", tmp_path / "proj" / "runs" / "r1"
+    (project / "data").mkdir(parents=True)
+    (run / "cache").mkdir(parents=True)
+    # A folder that exists only under the current directory, which is inside the
+    # project: read against the cwd it would look like project data.
+    elsewhere = project / "sub"
+    (elsewhere / "only_here").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    values = {"input_dir": "", "system_temp": tempfile.gettempdir(), "tmp": "/tmp",
+              "run_cache": str(run / "cache"), "written": "data", "cwd_only": "only_here",
+              "project_data": "data", "project_root": "."}
+    described = {"knobs": sorted(values), "values": values, "data_nodes": [],
+                 "writes": []}
+    planned = empty_input.plan(described, {}, ("input_dir",), empty_root=run / "e",
+                               project=project, run_root=run)
+    assert planned["undeclared"] == ["project_data (default data)", "written (default data)"]
+    described["writes"] = ["data"]
+    planned = empty_input.plan(described, {}, ("input_dir",), empty_root=run / "e",
+                               project=project, run_root=run)
+    assert planned["undeclared"] == []
 
 
 def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
@@ -397,6 +438,29 @@ def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
 
 
 # ── an honest report of no input passes (M1) ──────────────────────────────
+
+
+#: The two ways a status report was made to carry a fabricated result (the review of
+#: #748): status keys inside the result, and numbers and flags at the top.
+FABRICATED_REPORTS = (
+    {"status": "done", "wells": [{"status": "high", "reason": "above threshold"},
+                                 {"status": "low", "reason": "below threshold"}]},
+    {"status": "summarised plate with mean value 0.42", "passed": True, "control_ok": True},
+)
+
+
+@pytest.mark.parametrize("report", FABRICATED_REPORTS, ids=["nested-status", "numbers-and-flags"])
+def test_a_fabricated_result_dressed_as_a_status_is_a_finding(tmp_path, project, plates, report):
+    ops = REPORTS_NONE.replace(
+        '''ctx.write_json("summary.json", {"status": "no input",
+                                        "reason": "input_dir holds no CSV files",
+                                        "tables": [], "rows": 0})''',
+        f'ctx.write_json("summary.json", {report!r})')
+    assert ops != REPORTS_NONE
+    _install(project, NAME, plate_files(NAME, ops))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["status"] == "finding", receipt
+    assert receipt["results"] == ["summary.json"]
 
 
 def test_a_mode_that_reports_no_input_passes(tmp_path, project, plates):
@@ -418,9 +482,24 @@ def test_a_mode_that_reports_no_input_passes(tmp_path, project, plates):
     ("a.json", '{"rows": 2}', False),
     ("a.json", '{"tables": ["synthetic.csv"]}', False),
     ("a.json", "not json", False),
+    # The status strings are a report only at the top level, short and without numbers;
+    # a list of flags or a second flag is a result.
+    ("a.json", '{"status": "no input", "reason": "input folder empty"}', True),
+    ("a.json", '{"ok": false, "rows": 0}', True),
+    ("a.json", '{"status": "done", "wells": [{"status": "high", "reason": "above"}]}', False),
+    ("a.json", '{"status": "summarised plate with mean value 0.42"}', False),
+    ("a.json", '{"status": "' + "x" * 121 + '"}', False),
+    ("a.json", '{"ok": true, "control_ok": true}', False),
+    ("a.json", '{"wells": [true, false]}', False),
+    ("a.json", '{"summary": {"plate": {"status": "high", "reason": "above"}}}', False),
+    ("a.md", "No input: the folder holds no CSV files.\n", True),
+    ("a.txt", "no input", True),
+    ("a.md", "Plate summary: 3 wells", False),
+    ("a.md", "no input " + "and more " * 20, False),
     ("a.jsonl", '{"id": "x"}\n', False),
     ("a.csv", "well,value\nA1,0.5\n", False),
     ("a.txt", "mean 0.5", False),
+    ("a.log", "the run read nothing and wrote a long account of plates " * 3, False),
 ])
 def test_what_counts_as_an_empty_output(tmp_path, name, content, empty):
     path = tmp_path / name

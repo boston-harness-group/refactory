@@ -50,14 +50,21 @@ a path the graph writes is left alone. The check then judges the run:
 
 - it stopped with its own error: pass;
 - it finished and every declared file it wrote is empty: pass. Empty means no
-  content, a CSV/TSV header with no rows, or JSON (or JSONL lines) holding only
-  `null`, `[]`, `{}`, `""`, `0`, flags, or the status strings `status`, `reason`,
-  `error` and `message`, so `{"status": "no input", "rows": 0}` is an honest report;
+  content; a CSV/TSV header with no rows; a Markdown or text file holding one short
+  message (at most 120 characters, no digit); or JSON (or JSONL lines) holding only
+  `null`, `[]`, `{}`, `""` and `0`. At the top level only, a JSON object may also
+  carry one boolean flag and the status strings `status`, `reason`, `error` and
+  `message`, each a short message. So `{"status": "no input", "reason": "input
+  folder empty"}` is an honest report, while a status that quotes numbers, a status
+  key inside a result, or several flags is a result;
 - it finished and wrote a result: a repairable finding, sent back to the builder.
 
 The check is inconclusive when the run timed out, the model was unavailable, the
 mode could not be described, or an undeclared knob defaults to an existing path
-(then the mode is not run, since it would still read that data). It is not
+that looks like input (then the mode is not run, since it would still read that
+data). A path under the project looks like input; a scratch location (`/tmp`, the
+system temp folder), the run folder and a path the graph writes do not. A relative
+default is resolved against the project on both runtimes. It is not
 applicable when the mode declares no input. Both are run warnings and appear in
 `create.json`'s `warnings`. Describing the mode and the run share one smoke budget.
 `empty-input.json` holds the receipt, and `create.json` carries it beside a
@@ -67,8 +74,8 @@ An edit starts from the package it revises: the emission's `===FILE:` blocks
 replace or add files, a `===DELETE: <path>===` block removes one, and every
 other file (the README, data, anything not Python) is kept. Each attempt starts
 from the source package, not from the previous attempt. A symlink that leaves the
-package is dropped, never copied as the file it points at; one inside the package
-stays a link.
+package is dropped, never copied as the file it points at, and named in a run
+warning and in `create.json`'s `warnings`; one inside the package stays a link.
 
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,

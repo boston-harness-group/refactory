@@ -27,8 +27,9 @@ crash and pass. A path the graph declares as a write is never emptied. A data no
 bound to a Task takes its items from the Task, so it has no empty equivalent.
 
 A mode with no declared input at all is **not applicable**. A mode whose undeclared
-knob defaults to an existing path (data built into the mode, perhaps) is
-**inconclusive** and is not run: emptying the declared input would still leave it
+knob defaults to an existing path that looks like input -- under the project or the
+person's data, not a scratch location, the run folder or a path the graph writes --
+is **inconclusive** and is not run: emptying the declared input would still leave it
 reading real data, and a run on real data says nothing about empty input. Both are
 warnings, never findings.
 
@@ -64,6 +65,12 @@ UNJUDGED = ("inconclusive", "not_applicable")
 #: Keys of a JSON object that state a status, not a result: ``{"status": "no input",
 #: "reason": "input_dir holds no CSV files"}`` is a report that there was nothing to do.
 STATUS_KEYS = frozenset({"status", "reason", "error", "message"})
+
+#: The longest a status string or a text output may be and still be a message.
+SHORT_MESSAGE = 120
+
+#: Text outputs whose whole content may be a short message saying there was no input.
+_TEXT_SUFFIXES = (".md", ".txt", ".markdown", ".rst", ".log")
 
 #: Files read as tables: a header line and no rows is no result.
 _TABLE_SUFFIXES = (".csv", ".tsv")
@@ -126,10 +133,35 @@ def _as_path(value: Any, project: Path) -> Path | None:
     if not text:
         return None
     candidate = Path(text).expanduser()
-    for path in ((candidate,) if candidate.is_absolute() else (project / candidate, candidate)):
-        if path.exists():
-            return path
-    return None
+    # A relative value is the project's, as the mode is run from it on both runtimes;
+    # never the current directory, which differs between them.
+    path = candidate if candidate.is_absolute() else Path(project) / candidate
+    return path if path.exists() else None
+
+
+def _temp_roots() -> tuple[Path, ...]:
+    """Scratch locations: what a knob defaulting there points at is not input."""
+    import tempfile
+
+    roots = {Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"), Path(tempfile.gettempdir())}
+    return tuple(sorted({root.resolve() for root in roots if root.exists()}))
+
+
+def _looks_like_input(path: Path, *, project: Path, run_root: Path) -> bool:
+    """Whether an existing path an undeclared knob defaults to could be real input.
+
+    Never anything under the run folder, nor the project folder or the home folder as
+    a whole. A file or folder under the project could be input, wherever the project
+    lives; elsewhere, a scratch location (`_temp_roots`) is not, and anything else --
+    the person's data -- could be.
+    """
+    resolved, root = Path(path).resolve(), Path(project).resolve()
+    run = Path(run_root).resolve()
+    if resolved in (root, Path.home().resolve()) or resolved.is_relative_to(run):
+        return False
+    if resolved.is_relative_to(root):
+        return True
+    return not any(resolved.is_relative_to(scratch) for scratch in _temp_roots())
 
 
 def _normal(value: Any) -> str:
@@ -138,15 +170,17 @@ def _normal(value: Any) -> str:
 
 def plan(
     described: dict[str, Any], samples: dict[str, str], declared: tuple[str, ...] | list[str],
-    *, empty_root: Path, project: Path,
+    *, empty_root: Path, project: Path, run_root: Path | None = None,
 ) -> dict[str, Any]:
     """What the empty-input run points where, and why, in words.
 
     Makes the empty stand-ins under ``empty_root``. ``knobs`` and ``sources`` are what
     the run overrides; ``inputs`` says what was emptied, ``kept`` what was declared but
     left alone and why, and ``undeclared`` the knobs whose default reads an existing
-    path the run does not declare as input.
+    path that looks like input (`_looks_like_input`) the run does not declare as input.
+    ``run_root`` is the run's folder (default: the folder holding ``empty_root``).
     """
+    run_root = Path(run_root) if run_root is not None else Path(empty_root).parent
     knob_names = set(described.get("knobs") or ())
     values = dict(described.get("values") or {})
     writes = {_normal(write) for write in described.get("writes") or () if _normal(write)}
@@ -199,30 +233,66 @@ def plan(
         sources[node_id] = {"source_path": str(source.resolve()), "source_format": source_format}
         inputs.append(f"data node {node_id} ({source_format} source) -> empty")
     undeclared: list[str] = []
-    root = Path(project).resolve()
     for name in sorted(knob_names - set(input_knobs) - set(samples)):
         value = values.get(name)
         real = _as_path(value, project)
-        if real is None or real.resolve() == root or _normal(value) in writes:
+        if (real is None or _normal(value) in writes
+                or not _looks_like_input(real, project=project, run_root=run_root)):
             continue
         undeclared.append(f"{name} (default {value})")
     return {"knobs": knobs, "sources": sources, "inputs": inputs, "kept": kept,
             "undeclared": undeclared}
 
 
-def _empty_value(value: Any, *, key: str = "") -> bool:
-    """Whether a JSON value carries no result (see `is_empty_output`)."""
-    if value is None or isinstance(value, bool):
+def short_message(text: str) -> bool:
+    """A status message, not a result: at most `SHORT_MESSAGE` characters, no digit.
+
+    "no input: the folder holds no CSV files" is a message; "mean 0.42 over 96 wells"
+    carries numbers, and a paragraph carries more than a status.
+    """
+    stripped = text.strip()
+    return len(stripped) <= SHORT_MESSAGE and not any(ch.isdigit() for ch in stripped)
+
+
+def _empty_value(value: Any) -> bool:
+    """Whether a JSON value below the top level carries no result.
+
+    A flag, a status string and anything else that is not blank, zero or empty is a
+    result here: only the top level may state a status (`_empty_document`).
+    """
+    if value is None:
         return True
+    if isinstance(value, bool):
+        return False
     if isinstance(value, (int, float)):
         return value == 0
     if isinstance(value, str):
-        return key in STATUS_KEYS or not value.strip()
+        return not value.strip()
     if isinstance(value, list):
         return all(_empty_value(item) for item in value)
     if isinstance(value, dict):
-        return all(_empty_value(item, key=str(name)) for name, item in value.items())
+        return all(_empty_value(item) for item in value.values())
     return False
+
+
+def _empty_document(value: Any) -> bool:
+    """Whether a whole JSON document carries no result (see `is_empty_output`)."""
+    if isinstance(value, bool):
+        return True
+    if not isinstance(value, dict):
+        return _empty_value(value)
+    flags = [name for name, item in value.items() if isinstance(item, bool)]
+    if len(flags) > 1:
+        return False
+    for name, item in value.items():
+        if name in flags:
+            continue
+        if name in STATUS_KEYS and isinstance(item, str):
+            if not short_message(item):
+                return False
+        elif not _empty_value(item):
+            return False
+    return True
 
 
 def is_empty_output(path: Path) -> bool:
@@ -232,14 +302,18 @@ def is_empty_output(path: Path) -> bool:
 
     * a file with no content but whitespace, or a folder whose files are all empty;
     * ``.json``: a value with no result in it -- ``null``, ``[]``, ``{}``, ``""``, ``0``,
-      a flag, or a list or object made only of those. The string fields ``status``,
-      ``reason``, ``error`` and ``message`` are a report, not a result, so
-      ``{"status": "no input", "reason": "...", "rows": 0}`` is empty;
-    * ``.jsonl`` / ``.ndjson``: every line such a value;
-    * ``.csv`` / ``.tsv``: a header and no rows.
+      or a list or object made only of those. At the top level only, an object may
+      also carry one boolean flag and the status strings ``status``, ``reason``,
+      ``error`` and ``message``, each a short message (`short_message`: at most 120
+      characters, no digit). So ``{"status": "no input", "reason": "input folder
+      empty", "rows": 0}`` is empty, and a status that quotes numbers, a status key
+      nested in a result, or a list of flags is a result;
+    * ``.jsonl`` / ``.ndjson``: every line such a document;
+    * ``.csv`` / ``.tsv``: a header and no rows;
+    * ``.md`` / ``.txt`` (and ``.markdown``, ``.rst``, ``.log``): a short message.
 
     Anything else with content -- a row, a count above zero, a non-status string, text
-    -- is a result.
+    with numbers or more than a sentence -- is a result.
     """
     path = Path(path)
     if path.is_dir():
@@ -258,11 +332,13 @@ def is_empty_output(path: Path) -> bool:
     lines = [line for line in text.splitlines() if line.strip()]
     if suffix in _TABLE_SUFFIXES:
         return len(lines) <= 1
+    if suffix in _TEXT_SUFFIXES:
+        return short_message(text)
     try:
         if suffix == ".json":
-            return _empty_value(json.loads(text))
+            return _empty_document(json.loads(text))
         if suffix in _LINES_SUFFIXES:
-            return all(_empty_value(json.loads(line)) for line in lines)
+            return all(_empty_document(json.loads(line)) for line in lines)
     except json.JSONDecodeError:
         return False
     return False
@@ -315,9 +391,12 @@ def verdict(*, ok: bool, timed_out: bool, error: str, results: list[str],
 def run(
     identifier: str, workdir: Path, *, project: Path, samples: dict[str, str],
     declared: tuple[str, ...] | list[str], model: bool, timeout_s: int,
-    model_context: dict[str, str] | None = None,
+    model_context: dict[str, str] | None = None, run_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run the mode once with its inputs empty and return the receipt.
+
+    ``run_root`` is the run's folder, a scratch location for `plan` (default: the
+    empty-input run's own ``workdir``).
 
     Describing the mode and the run share ``timeout_s``: the describe gets at most
     `DESCRIBE_TIMEOUT_S` of it and the run what is left.
@@ -337,7 +416,7 @@ def run(
                 "reason": f"the mode could not be described, so the empty-input run did "
                           f"not start: {type(exc).__name__}: {exc}"}
     planned = plan(described, samples, declared, empty_root=workdir / EMPTY_ROOT,
-                   project=project)
+                   project=project, run_root=run_root or workdir)
     receipt.update({key: planned[key] for key in ("inputs", "kept", "undeclared")})
     if not planned["knobs"] and not planned["sources"]:
         return {**receipt, "status": "not_applicable",

@@ -145,7 +145,10 @@ with no data -- the operation raises an error naming what is missing. It never
 fabricates, simulates or samples stand-in input data and never reports on a
 substitute: a run on invented data that exits 0 reads as a result and is not one.
 Canonical validation runs the mode once more with its input empty and refuses a mode
-that then finishes with results.
+that then finishes with results. To report no input instead of raising, write each
+declared output empty -- an empty list, a zero count, a CSV header only -- or as a
+top-level `{"status": "no input", "reason": "<what is missing>"}` with no numbers,
+and nothing else.
 
 An agent's reply is text, and a model wraps more than JSON around its answer: prose, a
 fence, even a tool-call transcript it invented. An operation that reads an agent's JSON
@@ -842,6 +845,11 @@ def _package_relative(relative: str, name: str) -> str:
 def _baseline_root(staging_root: Path) -> Path:
     """The untouched copy of the source package for a staged package root."""
     return Path(staging_root).parent.parent.parent / SOURCE_BASELINE
+
+
+def _dropped_link_warning(package: str, link: str) -> str:
+    return (f"the symlink {link!r} in package {package!r} points outside the package, so "
+            "the edit left it out; restore it if the package needs it")
 
 
 def _copy_package(source: Path, target: Path) -> list[str]:
@@ -1668,7 +1676,16 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
         # Copy existing package as the starting point for an edit. A link out of the
         # package is dropped, never copied as the file it points at (`_copy_package`).
         _copy_package(shared, pkg_root)
-        _copy_package(shared, baseline)
+        dropped = _copy_package(shared, baseline)
+        if dropped:
+            # Said where the person reads it: as a run warning now, and in the report
+            # (`write_result` reads them back from the brief).
+            from refactory_dsh import target_guard
+
+            for link in dropped:
+                target_guard.warn(_dropped_link_warning(source_pkg_name, link))
+            ctx.write_json("brief.json", {**(ctx.read_json("brief.json", {}) or {}),
+                                          "dropped_links": dropped})
         source_hash = _dir_hash(shared)
         source_existed = True
         for _src_path in sorted(shared.rglob("*")):
@@ -2023,6 +2040,7 @@ def check_empty_input(ctx: Any) -> dict[str, Any]:
         context["budget_ledger"] = str(budget.path)
     receipt = empty_input.run(
         identifier, ctx.workdir / "smoke-empty-input" / uuid.uuid4().hex,
+        run_root=ctx.workdir,
         project=project_for_nodes(), samples=_sample_knobs(ctx.knob("sample_knobs", "")),
         declared=declared, model=bool(_agent_nodes(name)), timeout_s=timeout_s,
         model_context=context,
@@ -2267,8 +2285,11 @@ def write_result(ctx: Any) -> dict[str, Any]:
         "intent_audit": ctx.read_json("intent-audit.json", None),
     }
     from refactory_dsh import empty_input
+    dropped = (ctx.read_json("brief.json", {}) or {}).get("dropped_links") or []
     warnings = [*payload.pop("warnings", []),
-                *filter(None, [empty_input.warning(payload["empty_input_check"])])]
+                *filter(None, [empty_input.warning(payload["empty_input_check"])]),
+                *(_dropped_link_warning(str(ctx.facts.get("revision_of") or ctx.facts.get("name")
+                                            or "").split("/")[0], link) for link in dropped)]
     if warnings:
         payload["warnings"] = warnings
     if ctx.facts.get("revision_of"):

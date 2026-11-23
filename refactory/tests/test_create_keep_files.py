@@ -229,7 +229,8 @@ def test_a_second_prepare_starts_from_the_source_as_it_is_now(tmp_path, project)
     assert (staged / "README.md").read_text() == README
 
 
-def test_links_out_of_the_package_are_dropped_and_links_inside_stay_links(tmp_path, project):
+def test_links_out_of_the_package_are_dropped_and_links_inside_stay_links(tmp_path, project,
+                                                                           capsys, monkeypatch):
     """A symlink is never copied as the file it points at. One that leaves the package
     (absolute or escaping) is dropped, as it was when an edit kept only what it wrote;
     one inside the package stays the same link through materialise and register."""
@@ -242,12 +243,26 @@ def test_links_out_of_the_package_are_dropped_and_links_inside_stay_links(tmp_pa
     os.symlink(os.path.relpath(outside, shared / "data"), shared / "data" / "escaping.txt")
     os.symlink("plate.csv", shared / "data" / "latest.csv")
     ctx = _start(tmp_path)
+    warned = capsys.readouterr().err
     _emit(ctx, render({"ops.py": NEW_OPS}))
     staged = Path(ctx.facts["package_root"])
     for root in (staged, create_ops._baseline_root(staged)):
         assert not os.path.lexists(root / "absolute_out.txt")
         assert not os.path.lexists(root / "data" / "escaping.txt")
     register(ctx)
+
+    # Each dropped link is said: a run warning naming it, and the report's warnings.
+    assert ctx.read_json("brief.json")["dropped_links"] == ["absolute_out.txt",
+                                                           "data/escaping.txt"]
+    for link in ("absolute_out.txt", "data/escaping.txt"):
+        assert f"run warning: the symlink {link!r}" in capsys.readouterr().err + warned
+    from refactory_dsh import authoring_evidence
+    monkeypatch.setattr(authoring_evidence, "require_completion", lambda _ctx: None)
+    ctx.facts["package_path"] = str(shared)
+    report = json.loads(create_ops.write_result(ctx)["created"])
+    assert [w for w in report["warnings"] if "symlink" in w] == [
+        create_ops._dropped_link_warning(NAME, "absolute_out.txt"),
+        create_ops._dropped_link_warning(NAME, "data/escaping.txt")]
 
     for root in (staged, shared):
         assert not os.path.lexists(root / "absolute_out.txt"), "a link out was copied"
