@@ -14137,6 +14137,180 @@ draft, check, and let a person approve before publishing. Inspect declared ports
 }
 ```
 
+## spreadsheetbench/agent
+
+solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness: one sealed Claude Code session with Read and Bash writes solution.py",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "solve"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "solve",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "The skill is written to the agent's SKILL.md, which it reads before writing solution.py for every item; the graph can be edited too -- the steps before and around the solve step (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench/agent",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.agent_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "run the solution and record the item's outcome before grading",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the call",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.agent_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and write SkillOpt's workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "solve",
+      "kind": "agent",
+      "knobs": [
+        "solve__prompt_template",
+        "solve__system_prompt",
+        "max_thinking_tokens"
+      ],
+      "notes": "one sealed Claude Code session (Read, Bash) writes solution.py",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "data_parallelism": {
+      "default": 24,
+      "description": "concurrent items (SkillOpt's workers)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 24,
+      "values": []
+    },
+    "max_thinking_tokens": {
+      "default": 16384,
+      "description": "the solve call's thinking budget (SkillOpt's --max-thinking-tokens)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 16384,
+      "values": []
+    },
+    "skill": {
+      "default": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "description": "the skill, written to the agent's SKILL.md",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "# Spreadsheet Manipulation Skill (xlsx)\n\n## Overview\nThis skill guides agents in manipulating Excel (.xlsx) spreadsheets using Python.\n\n**Primary libraries**: `openpyxl` (structure-preserving read/write), `pandas` (data transformation).\nNever use any other third-party libraries.\n\n---\n\n## Common Workflow\n\n1. **Explore** the input file: list sheets, inspect headers, check dimensions.\n2. **Write `solution.py`** with `INPUT_PATH` and `OUTPUT_PATH` defined at the top.\n3. **Execute** `python solution.py` and verify the output file was created.\n4. **Confirm** the target cells/range contain the expected values.\n\n---\n\n## Library Selection\n\n| Use case | Library |\n|----------|---------|\n| Preserve formulas, formatting, named ranges | `openpyxl` |\n| Bulk data transformation, aggregation, sorting | `pandas` \u2192 write back with `openpyxl` |\n| Simple cell read/write | `openpyxl` |\n\n**Warning**: `pandas.to_excel()` silently destroys existing formulas and named ranges.\nWhen writing back to a spreadsheet that contains formulas, always use `openpyxl.save()`.\n\n---\n\n## solution.py Template\n\n```python\nimport openpyxl\nimport pandas as pd\n\nINPUT_PATH  = \"...\"   # set to the actual input path\nOUTPUT_PATH = \"...\"   # set to the actual output path\n\nwb = openpyxl.load_workbook(INPUT_PATH)\nws = wb.active  # or wb[\"SheetName\"]\n\n# --- perform manipulation ---\n\nwb.save(OUTPUT_PATH)\n```\n\n---\n\n## Output Requirements\n\n- Save the result to `OUTPUT_PATH`.\n- Do not hardcode row counts or column letters \u2014 iterate over actual rows in the workbook.\n- Preserve sheets and cells not mentioned in the instruction.\n",
+      "values": []
+    },
+    "solve__prompt_template": {
+      "default": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "description": "the solve call's prompt (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "Use the workspace files to solve the task. Read task.md and the skill at .agents/skills/skillopt-target/SKILL.md before answering. If ATTACHMENTS.md exists, read it and inspect the listed local files. Do not call a Skill tool; the ReflACT guidance is a local markdown file. Do not ask for permission. You may modify files in the workspace when the task asks you to create an artifact. Return only the final answer text, keeping any required <answer>...</answer> tags exactly.\n\nRead `.agents/skills/skillopt-target/SKILL.md` directly; do not call a Skill tool.\nRead `task.md`, inspect `input.xlsx` if useful, and write the final solution to `solution.py`.\nYou may run `python run_solution.py` to validate the script locally.\nIn your final response, briefly confirm whether `solution.py` was written and summarize the approach.",
+      "values": []
+    },
+    "solve__system_prompt": {
+      "default": "",
+      "description": "text appended to Claude Code's system prompt for the solve call: none, as SkillOpt's CLI (frozen; use the skill knob)",
+      "frozen": true,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench Verified 400 items as SkillOpt's Claude Code agent harness does: one Claude Code session per item, with Read and Bash, in a sealed workspace holding input.xlsx, the skill as SKILL.md, task.md and run_solution.py, writes solution.py, which is run and graded. Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Set SB_DATA to the extracted spreadsheetbench_verified_400 directory; build the pinned interpreter once with python -m refactory_packages.spreadsheetbench.interpreter.",
+        "knobs": {
+          "data_parallelism": 24,
+          "max_thinking_tokens": 16384
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench/agent; use refactory help topic=spreadsheetbench/agent first",
+      "cli": "refactory ceo spreadsheetbench/agent",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
+    "reviewed_schema": "bbe8e9a0aef2f04d174b651aeba8e1e5610018929d7734d6879f044e88074217"
+  }
+}
+```
+
 ## spreadsheetbench/solver
 
 solve a SpreadsheetBench item as SkillOpt's SpreadsheetBench target agent does (multi mode): each turn one claude -p call whose prompt is the whole conversation in a History: block, its first fenced block run against a copy of the input by a pinned interpreter in a sandbox that cannot see the answer, an execution error as the next message, up to 30 turns, each call ending on inactivity with no wall (SkillOpt: 600 s per item), an item past the harness backstop (REFACTORY_MODEL_BACKSTOP_S) a harness incident; graded by SkillOpt's cell comparison, with a LibreOffice-recalculated copy when the answer cells hold formulas (SB_GRADER=recalc, default; cached is SkillOpt's alone; a failed recalculation is a harness incident). On a train evaluation that asks for gold feedback (the SkillOpt strategy's train rollout, and the default loop's own train evaluations) a wrong clean run is told which cells are wrong and gets another turn, its train score staying its first attempt's. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.

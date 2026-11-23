@@ -1,9 +1,14 @@
-# SpreadsheetBench (`spreadsheetbench/solver`)
+# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`)
 
 SkillOpt's SpreadsheetBench target agent, ported so the outer loop can be measured
 against SkillOpt on the same items, prompts, code runner and grader. Source:
 microsoft/SkillOpt at `ec9d021` (MIT), `skillopt/envs/spreadsheetbench/`; every ported
 function names the lines it copies (`refactory_packages/spreadsheetbench/skillopt_port.py`).
+
+Two modes, both SkillOpt's: `spreadsheetbench/solver` is its default harness (the
+multi-turn codegen loop, below), and `spreadsheetbench/agent` its Claude Code agent
+harness ([below](#the-agent-harness-spreadsheetbenchagent)). They share the data, the
+Task, the code runner and the grader.
 
 ## The data
 
@@ -46,7 +51,7 @@ data ─▶ prepare ─▶ has_case ─▶ frame ─▶ solve ─▶ run_turn �
   Claude Code's default tools offered and refused by `dontAsk` (`tool_policy="refused"`,
   [architecture](architecture.md)), in a fresh empty directory, with no settings loaded.
   Its route must be the `claude_code` worker with permission mode `dontAsk`, and its
-  Claude Code must report exactly SkillOpt's 2.1.299: `refactory optimize` and
+  Claude Code must report exactly 2.1.299, the lab's install that SkillOpt's runs used (SkillOpt pins none): `refactory optimize` and
   `refactory run` refuse another before they start (the SDK's bundled 2.1.281
   included), so name it with `--claude-executable`.
 - `run_turn` waits 3 s, takes the reply's first fenced block (the whole reply when there
@@ -213,3 +218,165 @@ On so-s42 (2026-11-17): 3,014 of 3,088 target calls equal in system and prompt (
 and preview equal; 279 of 279 test-baseline code files agree with SkillOpt's executor; every
 graded prediction of all 31 passes regrades to SkillOpt's `hard`; 5 of 5 recoverable train
 feedback messages equal.
+
+## The agent harness (`spreadsheetbench/agent`)
+
+SkillOpt's target backend `claude_code_exec` with SpreadsheetBench mode `single`
+(`adapter.py:70-76` refuses any other mode with it): the paper's "Claude Code" harness
+(arXiv 2605.23904, §4, Table 1). Ported from `codegen_agent.py` (`_build_codex_skill`,
+`_build_codex_task`, `_build_codex_driver`, `_prepare_codex_workspace`, `run_single`'s exec
+branch) and `codex_harness.py` (`render_skill_md`, `prepare_workspace`, `_exec_prompt`,
+`run_claude_code_exec` and its CLI path) into `agent_port.py`; the graph is `agent_mode.py`,
+its ops `agent_ops.py`. SkillOpt's public history does not hold `ec9d021`; these files are
+the ones at `4fa8396` (`codegen_agent.py` unchanged since July, `run_target_exec` at
+`codex_harness.py:1977`).
+
+```
+data ─▶ prepare ─▶ has_case ─▶ solve ─▶ finalize
+                     └──────── skip ──────▲
+```
+
+- `prepare` writes SkillOpt's workspace into the pass: `input.xlsx` (the item file),
+  `.agents/skills/skillopt-target/SKILL.md` (the skill under SkillOpt's front matter and
+  preamble), `task.md` (the solver's first user message, then SkillOpt's "Codex Harness
+  Task" section) and `run_solution.py` (SkillOpt's driver); and, for the analysts, what
+  `process_one_codegen` saves before the call.
+- `solve` is one Claude Code session in a sealed copy of those four files
+  (`tools=("Read", "Bash")`, a `scratch` workspace; [outer-loop.md](outer-loop.md), "New
+  agents run without tools, or sealed"). It may read the files, run commands (each one
+  sealed: the workspace only, no network, the pinned interpreter as `python` and
+  `python3`) and writes `solution.py`. Its reply, the final message, is its first output.
+- `finalize` takes `solution.py` when the session left one, else the reply's first fenced
+  block (`codegen_agent.py:491-496`), runs it once on a copy of the input with SkillOpt's
+  runner in the code sandbox, and records the outcome; the Task grades it as the solver's.
+
+What SkillOpt starts, and what this mode sends (`tests/test_spreadsheetbench_agent.py`
+checks each against SkillOpt's own code):
+
+| | SkillOpt (`_run_claude_code_cli_exec`, `codex_harness.py:884-955`) | `spreadsheetbench/agent` |
+|---|---|---|
+| prompt | `_exec_prompt(prompt, allow_file_edits=True)` after `--` | the same bytes (frozen knob `solve__prompt_template`) |
+| system prompt | Claude Code's own, nothing appended | the same (frozen knob `solve__system_prompt`, empty) |
+| tools | `--tools Read,Bash --allowedTools Read,Bash` | `tools`/`allowedTools` `Read`, `Bash` |
+| permission mode | `--permission-mode bypassPermissions` | route `skip` (`bypassPermissions`); another is refused |
+| folder | `cwd` the workspace, `--add-dir` it | the sealed workspace, also its added directory |
+| model, effort | `--model <target>`, `--effort medium` | the route's (`claude-opus-4-6`, `medium`) |
+| thinking | `--max-thinking-tokens 16384` (on 2.1.299 with opus-4-6, adaptive thinking is sent anyway) | frozen knob `max_thinking_tokens`, bound to the solve step's route on both runtimes (the same request) |
+| Claude Code | whatever `claude` is on the machine (SkillOpt pins none; the lab's is 2.1.299) | pinned to 2.1.299, the lab's install, as the solver's |
+
+SkillOpt's base config sets `claude_code_exec_use_sdk: auto`, which tries the Python Agent
+SDK first when `claude-agent-sdk` is installed, and its SDK path differs: it appends a
+system-prompt text and asks for structured output whose `final_response` keeps
+`<answer>` tags (`codex_harness.py:801-881`), and its trace steps reach the analysts. This
+mode ports the CLI path, the paper's "through the claude CLI"; which path a given SkillOpt
+run took depends on that run's environment, not its code.
+
+**No gold feedback.** SkillOpt's single path takes none (`run_single` has no gold
+argument); this graph has no feedback node, so neither arm's agent is told anything
+about its answer, and a train score is the attempt's.
+
+**What the analysts see.** SkillOpt saves, for an exec rollout, `final_message or raw` as
+the whole conversation (`codegen_agent.py:501`: the final message, or the CLI log after an
+empty answer), then the verification block (`rollout.py:846-858`), or for code that failed
+to run `## Execution (case N)` and its first 500 characters of error (`rollout.py:799-812`),
+and as the target's prompts the chat path's system and user prompts and the preview
+(`rollout.py:700-721`). Its CLI path's raw output is the final text, so no trace steps
+reach them (`codex_harness.py:526-600`), nor the agent's `solution.py`. Each arm here gets
+the same:
+
+- the SkillOpt strategy renders this mode's records as SkillOpt does
+  (`skillopt_view.agent_rollout_result`, chosen by the mode: `MODE_VIEWS`): the
+  instruction, the chat prompts with the preview, the reply, and the verification or
+  error block (the record's `prediction`);
+- the default loop shows each item's instruction, the preview as the item's context
+  (`SpreadsheetBenchAgentTask.item_context`, in full after the input), the solve step's
+  prompt and reply, and the same verification or error block as what the item gave. It
+  does not show the chat path's prompts, which this agent never sees, nor the tool calls
+  or `solution.py`, which SkillOpt's analysts do not see either.
+
+### Differences from SkillOpt's harness
+
+1. **Sealed workspace.** SkillOpt's workspace is a folder of its run
+   (`<out>/predictions/<id>/codex_single`) and its tools are not confined: `Bash` under
+   `bypassPermissions` reaches the dataset (golden files included), the other items'
+   outputs and the network. Here the agent sees its four files and the pinned interpreter's
+   folders, never a folder holding what SB hides from model code (`sandbox.hidden_paths`,
+   the dataset included: `SpreadsheetBenchTask.tool_environment`'s `hidden`). Stricter,
+   so it can only lower a score that came from reading outside the workspace.
+2. **Interpreter.** `python` in the workspace is the pinned interpreter model code runs
+   under, so `run_solution.py` validates with the interpreter that grades. SkillOpt's
+   driver runs whatever `python` the agent's shell finds (`sys.executable` of that
+   process), while its grader runs the trainer's own (`executor.py:92-126`).
+3. **No item budget.** SkillOpt gives the call `min(600, remaining)` seconds and its
+   batch runner scores the item a timeout 600 s after it started, grading included
+   (`codegen_agent.py:480-490`, `rollout.py:983-1011`). Here the session ends on inactivity
+   and the harness backstop, as in the solver.
+4. **No settings.** No user or project settings, CLAUDE.md or MCP servers are loaded;
+   SkillOpt's `claude -p` loads the operator's.
+5. **Retry.** A crashed or empty session gets one more, in a fresh workspace, after the
+   adapter has asked an empty last turn once, in the session, for its answer. SkillOpt
+   runs `claude -p` once more in the same folder with a note asking for an `<answer>` tag
+   (`codex_harness.py:718-726`, `EXEC_EMPTY_RESPONSE_RETRIES=1`).
+6. **A failed session's file.** A session that fails leaves no output: its `solution.py`
+   is not graded. SkillOpt grades a `solution.py` that a timed-out or failed call left.
+7. **Bash's folder.** Each command starts in the workspace, so a `cd` does not carry to
+   the next command; Claude Code's shell keeps it in SkillOpt's.
+8. **Read.** On Linux a Read is given a copy of the workspace file, taken after the check
+   (outer-loop.md); the content is the same. A Read outside the workspace is refused,
+   except of this session's own tool-results and temporary folders in Claude Code's
+   folders (where it saves a large tool result for the model to Read back): never another
+   session's (an earlier attempt's, or a workspace whose folder name collides), and the
+   session's own go with it. SkillOpt's agent may read anything.
+9. **Transport.** The Agent SDK's streamed session, not `claude -p --output-format text`.
+   On Claude Code 2.1.299 against a stub API the two requests differ slightly: the SDK
+   session's system prompt has two lines `-p`'s does not and lacks one it has, the Bash
+   tool's text gives a 1800 s (not 600 s) default for background commands, and thinking is
+   displayed as `updates` (not `omitted`). Both send adaptive thinking for
+   `claude-opus-4-6` despite `--max-thinking-tokens 16384`.
+10. **Grader.** `recalc` by default, as in the solver (difference 6 above).
+11. **No prediction beside the workspace.** SkillOpt's workspace sits inside the item's
+    output folder, so an agent can write `../<case>_pred.xlsx`, and grading then skips
+    running its code (`rollout.py:796-799`; workspace at `codegen_agent.py:332-333`). The
+    seal shows the agent nothing outside its workspace.
+
+### Problems in SkillOpt's exec path
+
+What its code does, for reading its numbers (evidence only). The port stays faithful to
+each, except where a difference above says otherwise, until they are measured:
+
+1. **Conflicting output instructions.** `task.md` ends its first section with "Return only
+   a ```python``` code block." (`codegen_agent.py:164`) and its harness section with "Do not
+   return a code fence as the primary artifact; the source of truth is `solution.py`."
+   (`:255`); the CLI lead asks to "Return only the final answer text, keeping any required
+   <answer>...</answer> tags" (`codex_harness.py:713`), and an empty answer's retry asks for
+   an `<answer>` tag (`:725`).
+2. **The analysts see the wrong prompt and only the final message.** Their "Target System
+   Prompt" and "Target User Prompt" are the chat path's (`rollout.py:705-719`), which this
+   agent never sees, and their conversation is `final_message or raw` alone
+   (`codegen_agent.py:501`): no tool calls (the CLI's raw output is its final text, so
+   `format_claude_trace_steps` finds none, `codex_harness.py:526-600`) and no code.
+3. **Grading time is counted against the agent.** The call gets `min(600, remaining)`
+   seconds (`codegen_agent.py:480-490`), and the batch scores the item a timeout 600 s after
+   it started, grading included, whatever `solution.py` holds (`rollout.py:983-1011`).
+4. **A raw-log fallback.** Without `solution.py` the code is
+   `extract_code(final_message or raw)` (`codegen_agent.py:496`): after an empty answer,
+   `raw` is the CLI log (`===== CLAUDE CLI ATTEMPT 1 =====` ...,
+   `codex_harness.py:1007-1028`), which is then run as code.
+5. **An unconfined workspace.** It is a folder of the run, `<out>/predictions/<id>/codex_single`
+   (`codegen_agent.py:332-333`), and `Bash` runs under `bypassPermissions`
+   (`codex_harness.py:904`) with no sandbox: the dataset, its golden files, other items'
+   outputs and the network are reachable.
+6. **Two sessions per attempt.** Under `claude_code_exec_use_sdk: auto` an SDK failure or an
+   empty structured answer falls through to the CLI in the same attempt and the same folder
+   (`codex_harness.py:975-1028`), and the one retry reruns in that folder again.
+
+7. **A prediction the agent can write itself.** The workspace is inside the item's output
+   folder (`codegen_agent.py:332-333`), and grading runs the code only when
+   `<case>_pred.xlsx` does not exist (`rollout.py:796-799`): an agent that writes
+   `../1_pred.xlsx` is graded on that file, its code never run.
+
+Two more: `run_solution.py` runs the code at module level after its own two path lines
+(`codegen_agent.py:305-309`) while the grader runs it indented inside `try:`
+(`executor.py:12-23`), so a triple-quoted string spanning lines gains four spaces per line
+at grading only; and the driver runs whatever `python` the agent's shell finds while the
+grader runs the trainer's own (difference 2 above).

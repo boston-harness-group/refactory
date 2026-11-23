@@ -202,6 +202,49 @@ def _step_route_refusals(parent_state: dict[str, Any], candidate_state: dict[str
     return reasons
 
 
+def _route_binding_refusals(seed_state: dict[str, Any], candidate_state: dict[str, Any]
+                            ) -> list[str]:
+    """``E-route`` for each agent step whose route setting is bound to a knob the mode did
+    not freeze (``route.*`` field bindings, `nn.graph.Node.bound_route`): a step's output
+    cap and thinking budget are the run's settings, which a search never chooses. A
+    binding is kept only to a knob the seed declares frozen, at the seed's value, or to a
+    frozen copy of one the seed binds to the same setting, its spec and value the seed
+    knob's (a ``duplicate`` of the step: its copy of the knob stays frozen, so the copy
+    runs on the same budget)."""
+    seed_knobs = seed_state.get("knobs") or {}
+    knobs = candidate_state.get("knobs") or {}
+    seed_bound = {(str(pair[0]), str(pair[1]))
+                  for node in ((seed_state.get("graph") or {}).get("nodes") or {}).values()
+                  for pair in node.get("field_bindings") or ()
+                  if isinstance(pair, (list, tuple)) and len(pair) == 2
+                  and str(pair[0]).startswith("route.")}
+
+    def frozen_copy(field: str, knob: str) -> bool:
+        held = knobs.get(knob) or {}
+        return bool((held.get("spec") or {}).get("frozen")) and any(
+            bound_field == field and seed_knobs.get(seeded, {}).get("spec") == held.get("spec")
+            and seed_knobs.get(seeded, {}).get("value") == held.get("value")
+            and (seed_knobs.get(seeded, {}).get("spec") or {}).get("frozen")
+            for bound_field, seeded in seed_bound)
+
+    reasons = []
+    for node_id, node in sorted(((candidate_state.get("graph") or {}).get("nodes") or {}).items()):
+        for pair in node.get("field_bindings") or ():
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                    and str(pair[0]).startswith("route.")):
+                continue
+            field, knob = str(pair[0]), str(pair[1])
+            seeded = seed_knobs.get(knob) or {}
+            if knob not in seed_knobs and frozen_copy(field, knob):
+                continue
+            if (not (seeded.get("spec") or {}).get("frozen")
+                    or (knobs.get(knob) or {}).get("value") != seeded.get("value")):
+                reasons.append(f"E-route: step {node_id!r} binds its {field.removeprefix('route.')} "
+                               f"to knob {knob!r}, which the mode did not freeze: a step's route "
+                               "settings are the run's, never the search's")
+    return reasons
+
+
 #: Why a run offers no tool step and refuses one when ``new_step_tools`` is off.
 NEW_STEP_TOOLS_OFF = "this run turns tools on new steps off (new_step_tools: false)"
 
@@ -6298,6 +6341,9 @@ class Optimizer:
         routed = _step_route_refusals(parent.state, state, getattr(self, "step_routes", None))
         if routed:
             return routed
+        bound = _route_binding_refusals(seed_state if seed_state is not None else parent.state, state)
+        if bound:
+            return bound
         coded = _code_node_refusals(seed_state if seed_state is not None else parent.state, state,
                                     bool(getattr(self, "allow_code_nodes", True)),
                                     getattr(self, "sandbox", None))

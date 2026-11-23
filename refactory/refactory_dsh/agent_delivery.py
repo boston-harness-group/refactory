@@ -255,8 +255,15 @@ def _execution_contract(workdir: Path, node: str, prompt: str, reads: list[str],
     suppressed entirely: the node's model has no tools, or has every tool that could
     write refused, so the contract's file-writing instructions would be noise. The raw
     reply is delivered by the runtime.
+
+    A sealed Claude Code step (`workspace.sealed_backend`) gets no contract either: its
+    prompt alone says what to do and which files to leave (a harness's own workspace
+    contract, sent as that harness sends it), its reply is captured as its first output,
+    and the files it leaves are collected under its other outputs' names
+    (`workspace.collect`); a second contract would change the prompt it was given.
     """
-    if no_effect(tool_policy):
+    if no_effect(tool_policy) or ((workspace or {}).get('sealed')
+                                  and (workspace or {}).get('backend') == 'claude_code'):
         return (prompt, {})
     context = model_context or {}
     # Absolute path to refactory's own Python, for nested dispatch (worker_node,
@@ -683,8 +690,11 @@ def begin(workdir: Path, node: str, prompt: str, writes: list[str], *, reuse: bo
     if ledger_text:
         (directory / 'ledger.md').write_text(ledger_text)
     prompt_hash = hashlib.sha256(annotated.encode()).hexdigest()
+    from refactory_dsh.workspace import optional_writes
+    optional = list(optional_writes(workspace, writes))
     record = {'id': identifier, 'node': node,
               'started': previous['started'] if previous is not None else context['at'], 'writes': writes,
+              **({'optional': optional} if optional else {}),
               'before': before, 'prompt': annotated, 'entries': entries, 'contexts': contexts,
               'execution': execution, 'target': target, 'checkouts': checkouts, 'prompt_hash': prompt_hash,
               'receipt': str(ROOT / identifier / 'receipt.json')}
@@ -735,7 +745,11 @@ def finish(workdir: Path, node: str, *, final_response: str | None = None,
         captured = writes[0]
         after[captured] = _fingerprint(workdir, captured)
         fresh.add(captured)
-    missing = [name for name in writes if name not in fresh]
+    # A file a sealed Claude Code step may leave in its workspace and did not is absent,
+    # not missing (`workspace.optional_writes`); its first write, the reply, never is.
+    optional = set(record.get('optional') or ())
+    missing = [name for name in writes if name not in fresh
+               and not (name in optional and after[name] is None)]
     fail_changes, warn_changes = target_guard.strayed(
         workdir, record.get('target'))
     # Refactory's own checkout, where it is not the target, is refused for every agent

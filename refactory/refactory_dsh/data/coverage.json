@@ -443,6 +443,25 @@
       "purpose": "draft, check, and let a person approve before publishing. Inspect declared ports and Task inputs before launch. Optimize only when scored; higher is better.",
       "reviewed_schema": "dffe322d53699f95ce1f401b7a297232487846418c63fc6f5c08ae7f9f204d8d"
     },
+    "spreadsheetbench/agent": {
+      "doc": "refactory/docs/spreadsheetbench.md",
+      "examples": [
+        {
+          "explanation": "Solve SpreadsheetBench Verified 400 items as SkillOpt's Claude Code agent harness does: one Claude Code session per item, with Read and Bash, in a sealed workspace holding input.xlsx, the skill as SKILL.md, task.md and run_solution.py, writes solution.py, which is run and graded. Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Set SB_DATA to the extracted spreadsheetbench_verified_400 directory; build the pinned interpreter once with python -m refactory_packages.spreadsheetbench.interpreter.",
+          "knobs": {
+            "data_parallelism": 24,
+            "max_thinking_tokens": 16384
+          }
+        }
+      ],
+      "interfaces": {
+        "chat": "wf_open mode=spreadsheetbench/agent; use refactory help topic=spreadsheetbench/agent first",
+        "cli": "refactory ceo spreadsheetbench/agent",
+        "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+      },
+      "purpose": "solve a SpreadsheetBench item as SkillOpt's Claude Code agent harness does (claude_code_exec, mode single): one sealed Claude Code session with Read and Bash, given SkillOpt's prompt byte for byte, works in a workspace holding the input, the skill as .agents/skills/skillopt-target/SKILL.md, task.md and run_solution.py, its commands seeing only that workspace and the pinned interpreter as python, and writes solution.py; that code (else the reply's first fenced block) is run against a copy of the input in the code sandbox and graded by SkillOpt's cell comparison (SB_GRADER=recalc by default). No gold feedback reaches the agent, as in SkillOpt's single path. The session ends on inactivity with no wall (SkillOpt: 600 s per item). Needs the claude_code worker in skip (bypassPermissions) mode; the thinking budget (16384) is a frozen knob. The skill is the only unfrozen knob; the graph around it is editable too. Requires SB_DATA. Optimize only when scored; higher is better.",
+      "reviewed_schema": "bbe8e9a0aef2f04d174b651aeba8e1e5610018929d7734d6879f044e88074217"
+    },
     "spreadsheetbench/solver": {
       "doc": "refactory/docs/spreadsheetbench.md",
       "examples": [
