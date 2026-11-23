@@ -1334,7 +1334,8 @@ class DesignMode(Mode):
             produces=("probe_results",),
             resource_role="final_validation",
             notes="rerun each probe file the verifier wrote on the attempt in a scratch clone "
-                  "(120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED "
+                  "(120 s each, 600 s in all); the same probes run on the base in parallel "
+                  "for discrimination; a failing probe is a blocking defect, a PROBED "
                   "claim without a probe file of its own is unverified",
         ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──

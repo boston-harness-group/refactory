@@ -636,7 +636,7 @@ def _base_revert_discriminate(results: dict[str, Any], base_results: dict[str, A
         base_passed = (base_code == 0)
         if base_passed:
             hdr = (entry.get("header") or "").lower()
-            if "non-regression" in hdr or "preserved behaviour" in hdr:
+            if "non-regression" in hdr or "preserved behaviour" in hdr or "preserved behavior" in hdr:
                 entry["discriminating"] = "non_regression"
             else:
                 entry["discriminating"] = False
@@ -660,11 +660,13 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
     run in this op's own clone at the attempt (`clones._prepare`), with that clone's
     prepared environment, reset before each probe.
 
-    After running on the head, the same probes run on the base checkout (the run's
-    already-prepared base checkout, reused across QA passes).  A probe that passes on
-    both is "not discriminating" and does not count as verification.  A probe that times
-    out or crashes on the base counts as failing on the base (discriminating).
+    The head-side and base-side probe reruns run in parallel, sharing the step's
+    existing time budget.  A probe that passes on both is "not discriminating" and
+    does not count as verification.  A probe that times out or crashes on the base
+    counts as failing on the base (discriminating).
     """
+    import concurrent.futures
+
     from refactory_dsh import clones, worktree
     from refactory_dsh.workspace import ROOT, _slug
 
@@ -693,11 +695,8 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
             else:
                 env[key] = str(value)
         check_str = str(ctx.facts.get("check") or "")
-        results = run_probes(probes, Path(prepared["path"]), report, base=found.base, env=env,
-                             reset=reset_checkout, check=check_str,
-                             roots=[Path(found.path)])
-        # Base-revert discrimination: run the same probes on the base checkout.
-        base_start = time.monotonic()
+
+        # Prepare the base checkout (reused across QA passes via _prepare's _reset).
         base_prepared = clones._prepare(workdir, workdir / ROOT / "probe_rerun_base", "base",
                                         facts=dict(ctx.facts), command_timeout_s=PREPARE_TIMEOUT_S)
         base_env = dict(os.environ)
@@ -706,10 +705,20 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
                 base_env.pop(key, None)
             else:
                 base_env[key] = str(value)
-        base_results = run_probes(probes, Path(base_prepared["path"]), "",
-                                  base=found.base, env=base_env,
-                                  reset=reset_checkout, check=check_str,
-                                  roots=[Path(found.path)])
+
+        # Run head-side and base-side probes in parallel, sharing the time budget.
+        base_start = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            head_future = pool.submit(
+                run_probes, probes, Path(prepared["path"]), report,
+                base=found.base, env=env, reset=reset_checkout, check=check_str,
+                roots=[Path(found.path)])
+            base_future = pool.submit(
+                run_probes, probes, Path(base_prepared["path"]), "",
+                base=found.base, env=base_env, reset=reset_checkout, check=check_str,
+                roots=[Path(found.path)])
+            results = head_future.result()
+            base_results = base_future.result()
         base_wall_s = round(time.monotonic() - base_start, 2)
         _base_revert_discriminate(results, base_results, base_wall_s)
     text = write_results(workdir, results)

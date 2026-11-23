@@ -350,8 +350,18 @@ def test_the_rerun_uses_a_scratch_checkout_and_leaves_the_workspaces_untouched(t
 
 
 def test_the_total_cap_leaves_the_remaining_probes_unrun_and_advisory(tmp_path, monkeypatch):
-    clock = iter([0.0, 0.0, 10_000.0])
-    monkeypatch.setattr(probe_rerun.time, "monotonic", lambda: next(clock, 10_000.0))
+    # Thread-local clock: each thread (head-side, base-side, main) gets its own counter
+    # so the parallel base-revert rerun does not consume the head thread's tick budget.
+    import threading
+    _local = threading.local()
+
+    def _clock():
+        if not hasattr(_local, "n"):
+            _local.n = 0
+        _local.n += 1
+        return 10_000.0 if _local.n > 2 else 0.0
+
+    monkeypatch.setattr(probe_rerun.time, "monotonic", _clock)
     failing = "# R2: expected 7\nfrom calc import double\nassert double(3) == 7\n"
     ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"),
                {"R1-1.py": OWN_PROBE, "R2-1.py": failing})
