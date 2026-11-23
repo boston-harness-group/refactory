@@ -33,7 +33,7 @@ from refactory_packages.gepa.reflection import (
     feedback_text, reflection_prompt, reflective_dataset,
 )
 from refactory_packages.gepa.sampler import EpochShuffledBatchSampler
-from refactory_packages.skillopt.trace import current_call_key
+from refactory_dsh.strategy_trace import current_call_key
 
 TASK_REF = gepa_ops.PlantedTask.name
 MODE_ID = "gepa_probe/planted"
@@ -42,7 +42,7 @@ task_module.register_task(TASK_REF, gepa_ops.PlantedTask)
 
 @pytest.fixture(autouse=True)
 def _no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("refactory_packages.skillopt.trace._sleep", lambda _s: None)
+    monkeypatch.setattr("refactory_dsh.strategy_trace._sleep", lambda _s: None)
 
 
 @pytest.fixture(autouse=True)
@@ -316,14 +316,29 @@ def test_components_are_the_per_node_instructions():
 # ── the strategy end to end ────────────────────────────────────────────────
 
 
-def test_val_item_scores_are_opaque_per_item(tmp_path):
+def test_val_item_scores_are_keyed_per_run_in_manifest_order(tmp_path):
     strategy, report, _client, loop = _run(tmp_path, max_rollouts=40)
     seed_id = strategy.pool.candidate_ids[0]
     scores = strategy.pool.subscores[0]
-    assert sorted(scores) == sorted(opaque_item_key(i) for i in gepa_ops.VAL_IDS)
+    secret = loop.item_key_secret
+    # Keyed by an HMAC under the run's secret, in the manifest's order (determinism).
+    assert list(scores) == [opaque_item_key(i, secret) for i in gepa_ops.VAL_IDS]
     assert not set(scores) & set(gepa_ops.VAL_IDS)
+    # A bare digest of a known id list no longer undoes the key.
+    assert not set(scores) & {opaque_item_key(i, "") for i in gepa_ops.VAL_IDS}
     assert all(v == 0.0 for v in scores.values())  # the seed says neither word
     assert seed_id == loop.population[0].id
+    # The secret is journaled, so a resumed run keys items the same way.
+    journal = [json.loads(line) for line in (tmp_path / "run").glob("**/journal.jsonl").__next__()
+               .read_text().splitlines() if line.strip()]
+    assert [e["secret"] for e in journal if e.get("event") == "item_key_secret"] == [secret]
+
+
+def test_part_item_scores_refuses_train():
+    from refactory_dsh.outerloop import OuterLoopError, Run
+
+    with pytest.raises(OuterLoopError):
+        Run(_loop=None).part_item_scores(None, "train")  # type: ignore[arg-type]
 
 
 def test_search_finds_both_specialists_and_keeps_them_on_the_frontier(tmp_path):
@@ -377,10 +392,191 @@ def test_perfect_minibatches_are_skipped(tmp_path):
 def test_budget_stops_the_search(tmp_path):
     strategy, report, _client, loop = _run(tmp_path, max_rollouts=30)
     assert report["bound"] == "budget_exhausted"
-    rollouts = sum(1 for _ in loop.population)  # candidates exist
-    assert rollouts >= 1
+    gepa = report["strategy_report"]
+    # GEPA's metric calls are the run's own rollout count, not a tally of its own.
+    assert gepa["rollouts"] == loop.rollouts
+    assert gepa["stopped_by"] == "max_rollouts"
     # The budget is checked at the top of an iteration: at most one iteration over.
-    assert strategy.metric_calls <= 30 + 2 * 3 + len(gepa_ops.VAL_IDS)
+    assert gepa["rollouts"] <= 30 + 2 * 3 + len(gepa_ops.VAL_IDS)
+
+
+def test_evaluation_budget_warns_and_is_named(tmp_path):
+    _strategy, report, _client, loop = _run(tmp_path, max_rollouts=400, max_evaluations=12)
+    log = (loop.root / "strategy.log").read_text()
+    assert "max_evaluations allows" in log
+    assert report["strategy_report"]["stopped_by"] == "max_evaluations"
+    assert report["strategy_report"]["rollouts"] < 400
+
+
+def test_repeated_minibatch_items_are_each_rolled_out(tmp_path, monkeypatch):
+    from refactory_dsh.outerloop import Run
+
+    calls: list[tuple[str, ...]] = []
+    original = Run.evaluate
+
+    def spy(self, candidate, *, part="train", items=None, seed=None, **kw):  # type: ignore[no-untyped-def]
+        if part == "train":
+            calls.append(tuple(items or ()))
+        return original(self, candidate, part=part, items=items, seed=seed, **kw)
+
+    monkeypatch.setattr(Run, "evaluate", spy)
+    # 8 train ids in minibatches of 3: each epoch's last batch repeats an id.
+    _strategy, report, _client, loop = _run(
+        tmp_path, policy=lambda p, k: f"```\nSolve the item, attempt {k[1]}.\n```", max_rollouts=90)
+    batches = [d["minibatch"] for d in _decisions(tmp_path, "reflect")]
+    repeated = [b for b in batches if len(set(b)) < len(b)]
+    assert repeated
+    for batch in repeated:
+        dup = next(i for i in batch if batch.count(i) > 1)
+        assert (dup,) in calls  # the repeat's own rollout
+    assert all(len(set(c)) == len(c) for c in calls)
+    assert report["strategy_report"]["rollouts"] == loop.rollouts
+
+
+def test_failed_reflection_drops_the_whole_proposal(tmp_path, monkeypatch):
+    from refactory_dsh.outerloop import Run
+
+    trains: list[int] = []
+    original = Run.evaluate
+
+    def spy(self, candidate, *, part="train", items=None, seed=None, **kw):  # type: ignore[no-untyped-def]
+        if part == "train":
+            trains.append(len(items or ()))
+        return original(self, candidate, part=part, items=items, seed=seed, **kw)
+
+    def policy(prompt: str, key: tuple | None) -> str:
+        if key[2] == 1:
+            raise RuntimeError("the endpoint is down")
+        return "```\nALPHA\n```"
+
+    monkeypatch.setattr(Run, "evaluate", spy)
+    strategy, _report, _client, _ = _run(tmp_path, TwoKnobs, policy=policy,
+                                         options={"module_selector": "all"}, max_rollouts=40)
+    # Component 0's text came back, component 1's call failed: GEPA drops both, and no
+    # child is rolled out.
+    assert _decisions(tmp_path, "reflection_failed")
+    assert not _decisions(tmp_path, "reflect")
+    assert len(strategy.pool.candidate_ids) == 1
+    assert strategy.stats.get("reflection_failed", 0) >= 2
+    assert not strategy.run_error()  # one call in two succeeded: not a dead endpoint
+
+
+def test_dead_reflection_endpoint_stops_the_run(tmp_path):
+    def policy(prompt: str, key: tuple | None) -> str:
+        raise RuntimeError("the endpoint is down")
+
+    strategy, report, _client, _ = _run(tmp_path, policy=policy, max_rollouts=400,
+                                        options={"max_failed_iterations": 2})
+    assert "every reflection call failed in 2 iterations" in (strategy.run_error() or "")
+    assert report["strategy_report"]["test_eval"] in ("skipped", "not_run")
+
+
+def test_unchanged_text_is_still_rolled_out(tmp_path, monkeypatch):
+    from refactory_dsh.outerloop import Run
+
+    trains: list[str] = []
+    original = Run.evaluate
+
+    def spy(self, candidate, *, part="train", items=None, seed=None, **kw):  # type: ignore[no-untyped-def]
+        if part == "train":
+            trains.append(candidate.id)
+        return original(self, candidate, part=part, items=items, seed=seed, **kw)
+
+    monkeypatch.setattr(Run, "evaluate", spy)
+    strategy, _report, _client, loop = _run(
+        tmp_path, policy=lambda p, k: f"```\n{OneKnob.seed_text}\n```", max_rollouts=40)
+    decisions = _decisions(tmp_path, "reflect")
+    assert decisions and all(d["unchanged"] and d["existing"] and not d["accepted"]
+                             for d in decisions)
+    # As in GEPA, the (identical) child is rolled out on the minibatch after the parent.
+    seed_id = loop.population[0].id
+    assert trains.count(seed_id) >= 2 * len(decisions)
+    assert len(strategy.pool.candidate_ids) == 1
+
+
+def test_result_is_scored_on_test(tmp_path):
+    parts = {"train": gepa_ops.TRAIN_IDS, "val": gepa_ops.VAL_IDS, "test": gepa_ops.TEST_IDS}
+    strategy, report, _client, loop = _run(tmp_path, parts=parts, max_rollouts=160,
+                                           options={"max_metric_calls": 120})
+    gepa = report["strategy_report"]
+    assert gepa["stopped_by"] == "max_metric_calls"
+    assert gepa["test_eval"] == "done"
+    best = strategy.best_candidate(loop.population)
+    assert best.id != loop.population[0].id
+    # One specialist passes the half of test in its category; the seed passes none.
+    assert gepa["baseline_test"] == 0.0
+    assert gepa["best_test"] == pytest.approx(0.5)
+    assert gepa["best_test_delta"] == pytest.approx(0.5)
+    assert gepa["rollouts"] <= 120 + 2 * 3 + len(gepa_ops.VAL_IDS)
+    steps = [e.get("action") for e in _trace(tmp_path) if e.get("step_type") == "test_eval"]
+    assert steps[:2] == ["baseline_test", "best_test"]
+    assert strategy.gate.best_id == best.id == strategy.gate.current_id
+
+
+def test_spent_rollout_budget_leaves_test_incomplete(tmp_path):
+    parts = {"train": gepa_ops.TRAIN_IDS, "val": gepa_ops.VAL_IDS, "test": gepa_ops.TEST_IDS}
+    _strategy, report, _client, _ = _run(tmp_path, parts=parts, max_rollouts=40)
+    gepa = report["strategy_report"]
+    assert gepa["test_eval"] == "incomplete"
+    assert "rollout budget" in gepa["test_eval_reason"]
+
+
+def test_eval_test_off_skips_the_test_evaluation(tmp_path):
+    parts = {"train": gepa_ops.TRAIN_IDS, "val": gepa_ops.VAL_IDS, "test": gepa_ops.TEST_IDS}
+    _strategy, report, _client, _ = _run(tmp_path, parts=parts, max_rollouts=40,
+                                         options={"eval_test": False})
+    assert report["strategy_report"]["test_eval"] == "skipped"
+
+
+def test_seed_defaults_to_the_runs_and_val_uses_it(tmp_path, monkeypatch):
+    from refactory_dsh.outerloop import Run
+
+    seeds: list[tuple[str, int | None]] = []
+    original = Run.evaluate
+
+    def spy(self, candidate, *, part="train", items=None, seed=None, **kw):  # type: ignore[no-untyped-def]
+        seeds.append((part, seed))
+        return original(self, candidate, part=part, items=items, seed=seed, **kw)
+
+    monkeypatch.setattr(Run, "evaluate", spy)
+    strategy, report, _client, _ = _run(tmp_path, max_rollouts=40, seed=7)
+    assert strategy.base_seed == 7 == report["strategy_report"]["seed"]
+    assert {s for _p, s in seeds} == {7}
+    assert any(p == "val" for p, _s in seeds)
+    other, _report, _client, _ = _run(tmp_path / "opt", max_rollouts=40, seed=7,
+                                      options={"seed": 3})
+    assert other.base_seed == 3
+
+
+class FiveKnobs(OneKnob):
+    @classmethod
+    def declare(cls) -> dict[str, nn.Knob]:
+        return {f"rule_{i}": nn.Knob(default=f"Rule {i}.", kind="str", description="rule")
+                for i in range(5)}
+
+    def build(self) -> nn.Graph:
+        return _graph(tuple(f"rule_{i}" for i in range(5)))
+
+
+@pytest.mark.parametrize("options", [{"module_selector": "all"}, {"use_merge": True}])
+def test_more_components_than_the_edit_cap_is_refused_up_front(tmp_path, options):
+    with pytest.raises(ValueError, match="edits per proposal"):
+        _run(tmp_path, FiveKnobs, options=options, max_rollouts=40)
+    # Round robin sets one component per proposal: fine.
+    _run(tmp_path / "rr", FiveKnobs, max_rollouts=20)
+
+
+def test_a_child_inherits_its_parents_component_pointer():
+    pool = ProgramPool()
+    pool.add("c0", [None], {"a": 0.0}, 0)
+    pool.pointers[0] = 2
+    pool.add("c1", [0], {"a": 1.0}, 3)
+    assert pool.pointers[1] == 2
+    pool.pointers[1] = 1
+    pool.add("c2", [None], {"a": 0.5}, 6)
+    assert pool.pointers[2] == 0
+    pool.add("c3", [1, 0], {"a": 1.0}, 9)  # a merge takes the furthest of its parents'
+    assert pool.pointers[3] == 2
 
 
 def test_pareto_set_train_holds_out_train_ids_and_gates_on_val(tmp_path, monkeypatch):

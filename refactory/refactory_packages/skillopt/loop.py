@@ -67,7 +67,7 @@ from refactory_packages.skillopt.env import SkillOptEnv, check_analyst_prompts
 from refactory_packages.skillopt.proposer import (
     SkillOptProposer, only_noop, hard_score, knob_values,
 )
-from refactory_packages.skillopt.trace import TraceRecorder
+from refactory_dsh.strategy_trace import TraceRecorder
 
 #: The report's figures under A's summary.json names (trainer.py:2480-2515), and
 #: the ``FinalEvaluation`` result each comes from.

@@ -17,7 +17,9 @@ Per iteration:
 5. Roll the child out on the same minibatch; keep it only if its sum beats the
    parent's (strict), then score it on the whole Pareto set and add it to the pool.
 
-The result is the program with the highest mean on the Pareto set.
+The result is the program with the highest mean on the Pareto set. After the search
+it is scored on test with the seed (``eval_test``, on by default; ``FinalEvaluation``,
+as SkillOpt is), which GEPA itself leaves to its caller.
 
 Mapping to refactory:
 
@@ -25,20 +27,36 @@ Mapping to refactory:
   node renders and that are not its system prompt: per-node instructions, as DSPy's
   components are its predictors' instructions. The ``components`` option names them.
 - GEPA's **trainset** is the parts manifest's train ids; its **valset** (the Pareto
-  set) is the val part (``pareto_set="val"``, the default, as ``dspy.GEPA`` is run
-  with a valset). Val is rolled out in full and read as per-item scores keyed by
-  opaque digests (``Run.val_item_scores``); the reflection model never sees a val
-  item. ``pareto_set="train"`` instead holds ``pareto_size`` train ids out as the
-  Pareto set (the leakage-free variant of ``docs/plans/gepa-mipro-outer-loop.md``);
-  the seed and the Pareto-best are then scored on val, and the Pareto-best is the
-  result only if it beats the seed there.
-- A **metric call** is a rollout: GEPA's ``max_metric_calls`` is the run's
-  ``max_rollouts``, checked at the top of each iteration as GEPA checks it
-  (``engine.py:731``). Refactory refuses an evaluation once the budget is spent, so
-  where GEPA would overshoot inside the last iteration the run stops there.
+  set) is the val part (``pareto_set="val"``, the default, as upstream GEPA and
+  ``dspy.GEPA`` are run with a valset). Val is rolled out in full and read as per-item
+  scores keyed by a per-run HMAC of the item id (``Run.part_item_scores``), in the
+  manifest's order; the reflection model never sees a val item.
+- **Information parity.** With ``pareto_set="val"`` GEPA *selects* on val item by item:
+  every accepted program is scored on all of val, and its parent draws and its result
+  come from those per-item scores. The default loop and SkillOpt see val only as one
+  number per candidate, at their val gate. So GEPA reads more of val than the other
+  arms do; a comparison with them should say so, or run ``pareto_set="train"``.
+  ``pareto_set="train"`` holds ``pareto_size`` train ids out as the Pareto set instead
+  (the leakage-free variant of ``docs/plans/gepa-mipro-outer-loop.md``); the seed and
+  the Pareto-best are then scored on val, and the Pareto-best is the result only if it
+  beats the seed there.
+- A **metric call** is an item rollout, counted by the run itself
+  (``Run.rollouts_spent``). GEPA's ``max_metric_calls`` is the ``max_metric_calls``
+  option, else the run's ``max_rollouts``; it is checked at the top of each iteration as
+  GEPA checks it (``engine.py:731``), so the last iteration may overshoot by a few
+  rollouts as GEPA's does. With ``pareto_set="train"``
+  the rollouts that scoring the result on val needs are held back, and a step that
+  would eat into them ends the search instead. ``max_evaluations`` (64 by default)
+  counts ``Run.evaluate`` calls, about two per iteration; the run warns at the start
+  when it would bind first, and the report's ``stopped_by`` says which budget did.
+- Refactory refuses every rollout, test included, once ``max_rollouts`` is spent, so
+  a search that spends it leaves the test phase ``incomplete`` (SkillOpt's too). Set
+  ``max_metric_calls`` below ``max_rollouts`` to keep headroom for test: twice the test
+  part's size (the seed and the result; once when the seed is the result), plus a
+  minibatch or a val rollout for the last iteration's overshoot.
 
 Defaults (``api.py:46-103``):
-  - seed = 0                       (``api.py:94``)
+  - seed = the run's ``--seed``    (GEPA's is 0, ``api.py:94``; the ``seed`` option sets it)
   - reflection_minibatch_size = 3  (``api.py:61``, ``:351``)
   - candidate_selection_strategy = "pareto"  (``api.py:57``; also "current_best")
   - skip_perfect_score = True, perfect_score = 1.0  (``api.py:59``, ``:62``)
@@ -47,30 +65,46 @@ Defaults (``api.py:46-103``):
                                    (``api.py:68-70``)
   - reflection_prompt_template = GEPA's default (``instruction_proposal.py:13-29``)
 
+As GEPA does:
+
+- A reflection call that fails (after the client's retries) drops the iteration's whole
+  proposal, every component's, and the iteration moves on with no child rolled out
+  (``reflective_mutation.py``, ``_propose_texts_batch_safe``: the failed task returns
+  ``None``).
+- A proposal whose texts are all unchanged, or that rebuilds a program the search
+  already holds, is still rolled out on the minibatch (GEPA does not deduplicate).
+- A minibatch that repeats an item (the sampler pads an epoch's last batch) rolls the
+  repeat out again, and the sums and the reflective dataset count each occurrence.
+
 Deviations, each forced by refactory or chosen for robustness:
 
 - A merge is scored on 5 sampled Pareto instances (``merge.py:332-392``). Val can only
   be rolled out whole, so with ``pareto_set="val"`` the merged program is rolled out on
   all of val and judged on the same 5 instances by GEPA's rule; that rollout is then its
   full evaluation when it is accepted. A merge costs ``|val|``, not 5.
-- GEPA aborts the run on any error in an iteration (``raise_on_exception=True``,
-  ``engine.py:866-867``). Here a reflection call that fails every attempt skips its
-  component, and the run stops only after ``max_failed_iterations`` iterations in a row
-  whose every call failed.
+- ``max_failed_iterations`` (3): the run stops after that many iterations in a row whose
+  every reflection call failed. GEPA has no such stop; without it a dead endpoint would
+  spend a minibatch of parent rollouts per iteration until the budget ran out.
 - Minibatch sums are taken over the items both parent and child were scored on: an item
   a harness incident left unscored is no one's win or loss.
-- A child whose state the search already holds (the reflection reproduced a text) is
-  not rolled out again.
+- A candidate is its state, so a program the search already holds is not added to the
+  pool a second time (GEPA adds a copy and scores it on the whole Pareto set); an
+  accepted duplicate is recorded as ``duplicate`` and spends no Pareto rollouts.
+- The seed's two start-up rollouts with ``pareto_set="train"`` (the Pareto ids and val)
+  run concurrently.
 """
 
 from __future__ import annotations
 
 import random
+import re
 from typing import Any
 
-from refactory_dsh.budgets import BudgetExhausted
+from refactory_dsh.budgets import RESERVE_RETAINED, BudgetExhausted
 from refactory_dsh.optim import Candidate, Proposal
-from refactory_dsh.outerloop import BudgetStopped, OuterLoop, OuterLoopError, Run, ValidationGate
+from refactory_dsh.outerloop import (
+    BudgetStopped, EvalRequest, FinalEvaluation, OuterLoop, OuterLoopError, Run, ValidationGate,
+)
 
 from refactory_packages.gepa import merge as merge_mod
 from refactory_packages.gepa.pareto import (
@@ -81,10 +115,13 @@ from refactory_packages.gepa.reflection import (
     reflection_prompt, reflective_dataset,
 )
 from refactory_packages.gepa.sampler import EpochShuffledBatchSampler
-from refactory_packages.skillopt.trace import TraceRecorder, ask
+from refactory_dsh.strategy_trace import TraceRecorder, ask
 
 #: The version of the strategy state this code writes and reads.
-STATE_VERSION = 1
+STATE_VERSION = 2
+
+#: Run.attempt's refusal of a state the search already holds names that candidate.
+_DUPLICATE = re.compile(r"E-duplicate: .*?candidate ([0-9a-f]+)")
 
 
 class _OutOfBudget(Exception):
@@ -100,8 +137,8 @@ class GepaLoop(OuterLoop):
     text_only = ("GEPA rewrites the text of one component (an instruction knob) at a time "
                  "with set_knob, and merges components; it never changes the graph")
     accepted_options = (
-        "candidate_selection_strategy", "components", "feedback", "max_failed_iterations",
-        "max_merge_invocations", "merge_val_overlap_floor", "module_selector",
+        "candidate_selection_strategy", "components", "eval_test", "feedback", "max_failed_iterations",
+        "max_merge_invocations", "max_metric_calls", "merge_val_overlap_floor", "module_selector",
         "pareto_set", "pareto_size", "perfect_score", "reflection_minibatch_size",
         "reflection_prompt_template", "seed", "skip_perfect_score", "use_merge",
     )
@@ -115,7 +152,13 @@ class GepaLoop(OuterLoop):
         self.provider = provider
         self.options = dict(options)
 
-        self.base_seed = int(options.get("seed", 0))
+        seed = options.get("seed")
+        #: The ``seed`` option; ``None`` takes the run's ``--seed`` when the search starts.
+        self.seed_option = None if seed is None else int(seed)
+        self.eval_test = _flag("eval_test", options.get("eval_test", True))
+        calls = options.get("max_metric_calls")
+        #: GEPA's own search budget in rollouts; ``None`` searches to ``max_rollouts``.
+        self.max_metric_calls = None if calls is None else _positive("max_metric_calls", calls)
         self.minibatch_size = _positive("reflection_minibatch_size",
                                         options.get("reflection_minibatch_size", 3))
         self.selection = _choice("candidate_selection_strategy",
@@ -142,10 +185,11 @@ class GepaLoop(OuterLoop):
         self.max_failed_iterations = _positive("max_failed_iterations",
                                                options.get("max_failed_iterations", 3))
 
-        self._fresh()
+        self._fresh(self.seed_option or 0)
 
-    def _fresh(self) -> None:
-        """The search state before the first iteration."""
+    def _fresh(self, seed: int) -> None:
+        """The search state before the first iteration, every draw seeded by ``seed``."""
+        self.base_seed = int(seed)
         # One shared generator for frontier sampling, minibatches and merge (``api.py:304``),
         # and the DSPy adapter's own for picking a call (``dspy_adapter.py:111``).
         self.rng = random.Random(self.base_seed)
@@ -156,7 +200,10 @@ class GepaLoop(OuterLoop):
         self.components: list[str] = []
         self.pareto_ids: list[str] = []
         self.i = -1
-        self.metric_calls = 0
+        self.search_rollouts: int | None = None
+        self.stopped_by = ""
+        self.val_size = 0
+        self.final = FinalEvaluation(label="gepa")
         self.merges_due = 0
         self.total_merges_tested = 0
         self.last_iter_found_new_program = False
@@ -173,8 +220,12 @@ class GepaLoop(OuterLoop):
     # ── the search ────────────────────────────────────────────────────────
 
     def strategy(self, run: Run) -> None:
+        if not self.pool.candidate_ids and not self.finished:
+            # A fresh search: every draw from the seed option, else the run's --seed.
+            self._fresh(self.seed_option if self.seed_option is not None else run.run_seed())
         self._trace = TraceRecorder(run.root / "gepa_trace.jsonl")
         self._trace.listener = run.record_proposal_round
+        self.final.record = self._trace.record_decision
         seed = run.seed()
         component_nodes = discover_components(seed.state, self.components_option)
         names = [name for name, _ in component_nodes]
@@ -183,6 +234,7 @@ class GepaLoop(OuterLoop):
                                  f"not {names}; resume it with the same components option")
         self.components = names
         self.nodes = dict(component_nodes)
+        self._check_edit_limit(run)
         train_ids = run.part_ids("train")
         if not train_ids:
             raise ValueError("gepa: the minibatches need the parts manifest's train ids "
@@ -194,16 +246,52 @@ class GepaLoop(OuterLoop):
         try:
             if not self.finished:
                 if not self.pool.candidate_ids:
+                    self._warn_budgets(run)
                     self._start(run, seed)
                 self._search(run)
             self._finish(run)
         except _OutOfBudget:
+            self.stopped_by = self._which_budget(run)
+            run.log(f"gepa: the search stopped on {self.stopped_by} after "
+                    f"{run.rollouts_spent()} rollouts")
             self._finish(run)
-        except BudgetStopped as exc:
-            run.stop(exc.reason)
-        except BudgetExhausted as exc:
-            run.stop(str(exc))
+        except (BudgetStopped, BudgetExhausted) as exc:
+            # A time or token budget stopped an evaluation or a reflection call.
+            run.stop(getattr(exc, "reason", "") or str(exc))
+            self.stopped_by = self.stopped_by or "time or token budget"
+            self._finish(run)
+        self._final_evaluation(run)
         self._save(run)
+
+    def _check_edit_limit(self, run: Run) -> None:
+        """Refuse up front a configuration whose proposals ``attempt`` would refuse:
+        ``module_selector=all`` and a merge each set every component in one proposal."""
+        limit = run.edit_limit()
+        if limit is None or len(self.components) <= limit:
+            return
+        for on, what in ((self.module_selector == "all", "module_selector=all"),
+                         (self.use_merge, "use_merge")):
+            if on:
+                raise ValueError(
+                    f"gepa: {what} may set all {len(self.components)} components in one "
+                    f"proposal, and the run allows {limit} edits per proposal; name at most "
+                    f"{limit} with the components option, or use module_selector=round_robin "
+                    "without merge")
+
+    def _warn_budgets(self, run: Run) -> None:
+        """Say at the start when ``max_evaluations`` would end the search before
+        ``max_rollouts``: an iteration makes about two evaluations of a minibatch each."""
+        rollouts = run.rollouts_left()
+        if self.max_metric_calls is not None:
+            rollouts = min(rollouts if rollouts is not None else self.max_metric_calls,
+                           self.max_metric_calls - run.rollouts_spent())
+        evaluations = run.evaluations_left()
+        if rollouts is not None and evaluations * self.minibatch_size < rollouts:
+            run.log(f"gepa: warning: max_evaluations allows {evaluations} more evaluations, "
+                    f"about {evaluations * self.minibatch_size} item rollouts at "
+                    f"{self.minibatch_size} per evaluation, under the {rollouts} rollouts "
+                    "GEPA's budget leaves; the evaluation budget will end the search first. Raise "
+                    "--max-evaluations to run GEPA to its rollout budget")
 
     def _split(self, train_ids: list[str]) -> list[str]:
         """The train ids the minibatches come from; with ``pareto_set="train"`` the
@@ -224,12 +312,26 @@ class GepaLoop(OuterLoop):
     def _start(self, run: Run, seed: Candidate) -> None:
         """Score the seed on the Pareto set (``engine.py:593-630``); it counts against the
         budget (``state.py:703-704``)."""
-        scores = self._pareto_scores(run, seed)
         if self.pareto_set == "train":
-            # The seed's val score: the bar the result must beat, and how much of the
-            # budget to keep for scoring the result on val.
+            # The seed on the Pareto ids and, beside it, on val: the bar the result must
+            # beat, and how many rollouts to keep for scoring the result on val.
+            self._spend(run, len(self.pareto_ids))
+            run.evaluate_many([
+                EvalRequest(candidate=seed, part="train", items=list(self.pareto_ids),
+                            seed=self.base_seed),
+                EvalRequest(candidate=seed, part="val", seed=self.base_seed),
+            ])
+            records = run.item_records(seed)
+            scores = _ordered(_scores(records), self.pareto_ids)
+            self.gate.cache[seed.id] = ValidationGate.val_score(run, seed)
             self.gate.start(run, seed)
-            self.val_reserve = max(1, len(run.val_item_scores(seed)))
+            self.val_size = len(run.part_item_scores(seed, "val"))
+            self.val_reserve = max(1, self.val_size)
+        else:
+            scores = self._pareto_scores(run, seed)
+        if not scores:
+            raise OuterLoopError("gepa: the seed has no per-item score on the Pareto set; "
+                                 "its rollout failed, so there is no frontier to start from")
         idx = self.pool.add(seed.id, [None], scores, discovered_at=0)
         self.best_id = self.pool.candidate_ids[self.pool.best()]
         self._decide("seed", program=idx, candidate=seed.id, pareto_mean=self.pool.aggregate(idx),
@@ -274,15 +376,15 @@ class GepaLoop(OuterLoop):
         parent_idx = self._select_parent()
         parent = _held(run, self.pool.candidate_ids[parent_idx])
         minibatch = self.sampler.next_minibatch(self.feedback_ids, self.i)
-        records = self._rollout(run, parent, minibatch)
-        before = _scores(records)
+        slots = self._rollout(run, parent, minibatch)
+        records = [r for r in slots if r is not None]
+        before = _slot_scores(slots)
         self._count("iterations")
         if not records:
             self._decide("skip_no_trajectories", parent=parent_idx, minibatch=minibatch)
             return
         if self.skip_perfect_score and all(
-                before.get(item) is not None and before[item] >= self.perfect_score
-                for item in minibatch):
+                score is not None and score >= self.perfect_score for score in before):
             self._count("skipped_perfect")
             self._decide("skip_perfect", parent=parent_idx, minibatch=minibatch)
             return
@@ -300,29 +402,39 @@ class GepaLoop(OuterLoop):
             raw = ask(self.model, self._trace, "reflect", prompt, system="",
                       call_key=("reflect", self.i, self.components.index(name), 0))
             if raw is None:
-                continue
+                # GEPA drops the whole proposal when a component's call fails
+                # (``_propose_texts_batch_safe``), and no child is rolled out.
+                self._count("reflection_failed")
+                self._decide("reflection_failed", parent=parent_idx, components=chosen,
+                             failed=name)
+                return
             new_texts[name] = extract_instruction(raw.strip())
+        if not new_texts:
+            self._decide("no_proposal", parent=parent_idx, components=chosen)
+            return
         changed = {n: t for n, t in new_texts.items() if t != texts[n]}
-        if not changed:
-            self._decide("no_new_text", parent=parent_idx, components=chosen,
-                         proposed=sorted(new_texts))
-            return
-        child = self._attempt(run, parent, changed, f"gepa iteration {self.i}: reflective "
-                                                    f"update of {', '.join(changed)}")
-        if child is None:
-            return
-        child_records = self._rollout(run, child, minibatch)
-        after = _scores(child_records)
-        shared = [item for item in minibatch if item in before and item in after]
-        old_sum = sum(before[item] for item in shared)
-        new_sum = sum(after[item] for item in shared)
+        if changed:
+            made = self._attempt(run, parent, changed, f"gepa iteration {self.i}: reflective "
+                                                       f"update of {', '.join(changed)}")
+            if made is None:
+                return
+            child, existing = made
+        else:
+            # Every text came back unchanged: GEPA still rolls the (identical) child out.
+            child, existing = parent, True
+        after = _slot_scores(self._rollout(run, child, minibatch))
+        shared = [k for k in range(len(minibatch)) if before[k] is not None and after[k] is not None]
+        old_sum = sum(before[k] for k in shared)  # type: ignore[misc]
+        new_sum = sum(after[k] for k in shared)  # type: ignore[misc]
         accepted = new_sum > old_sum
-        self._decide("reflect", parent=parent_idx, components=sorted(changed), minibatch=minibatch,
-                     parent_sum=old_sum, child_sum=new_sum, accepted=accepted, child=child.id)
+        self._decide("reflect", parent=parent_idx, components=sorted(changed or new_texts),
+                     minibatch=minibatch, parent_sum=old_sum, child_sum=new_sum, accepted=accepted,
+                     child=child.id, unchanged=not changed, existing=existing)
         if not accepted:
             self._count("rejected")
             return
-        self._add(run, child, [parent_idx], "reflective")
+        if not self._add(run, child, [parent_idx], "reflective"):
+            return
         if self.use_merge:
             self.last_iter_found_new_program = True
             if self.total_merges_tested < self.max_merge_invocations:
@@ -370,18 +482,21 @@ class GepaLoop(OuterLoop):
             return False
         ancestor_candidate = _held(run, self.pool.candidate_ids[ancestor])
         changed = {n: t for n, t in merged.items() if t != texts[ancestor][n]}
-        child = self._attempt(run, ancestor_candidate, changed,
-                              f"gepa iteration {self.i}: merge of programs {id1} and {id2} "
-                              f"over their ancestor {ancestor}") if changed else None
-        if child is None:
+        made = self._attempt(run, ancestor_candidate, changed,
+                             f"gepa iteration {self.i}: merge of programs {id1} and {id2} "
+                             f"over their ancestor {ancestor}") if changed else None
+        if made is None:
             return True
+        child, _existing = made
         if self.pareto_set == "val":
             full = self._pareto_scores(run, child)
             new = [full.get(k, 0.0) for k in subsample]
         else:
             full = None
-            new_scores = _scores(self._rollout(run, child, subsample))
-            new = [new_scores.get(k, 0.0) for k in subsample]
+            # The subsample may repeat an id (``select_eval_subsample`` pads with
+            # ``rng.choices``): each occurrence is its own rollout, as in GEPA.
+            new = [0.0 if s is None else s
+                   for s in _slot_scores(self._rollout(run, child, subsample))]
         sums = [sum(self.pool.subscores[p][k] for k in subsample) for p in (id1, id2)]
         accepted = sum(new) >= max(sums)
         self._decide("merge", ids=[id1, id2], ancestor=ancestor, subsample=subsample,
@@ -397,60 +512,121 @@ class GepaLoop(OuterLoop):
     # ── shared steps ──────────────────────────────────────────────────────
 
     def _attempt(self, run: Run, parent: Candidate, texts: dict[str, str],
-                 rationale: str) -> Candidate | None:
-        """The candidate the new texts make from ``parent``; ``None`` when refused."""
+                 rationale: str) -> tuple[Candidate, bool] | None:
+        """The candidate the new texts make from ``parent``, and whether the search
+        already held it (the texts rebuild ``parent`` or another held program, which
+        GEPA would still roll out); ``None`` when refused."""
         edits = [{"op": "set_knob", "name": name, "value": text} for name, text in texts.items()]
         outcome = run.attempt(Proposal(edits=tuple(edits), rationale=rationale, parent=parent.id),
                               parent)
         if isinstance(outcome, list):
+            if any(str(r).startswith("E-noop") for r in outcome):
+                return parent, True
+            for reason in outcome:
+                found = _DUPLICATE.search(str(reason))
+                held = run.candidate(found.group(1)) if found else None
+                if held is not None:
+                    return held, True
             self._count("refused")
             self._decide("refused", reasons=outcome[:5], components=sorted(texts))
             return None
-        return outcome
+        return outcome, False
 
     def _add(self, run: Run, child: Candidate, parents: list[int], how: str,
-             scores: dict[str, float] | None = None) -> None:
+             scores: dict[str, float] | None = None) -> bool:
         """Score an accepted program on the whole Pareto set and add it
-        (``engine.py:517-533``)."""
-        discovered = self.metric_calls
+        (``engine.py:517-533``); ``False`` when the pool already holds it (a candidate is
+        its state, so it is not added twice, and spends no Pareto rollouts)."""
+        if self.pool.index(child.id) is not None:
+            self._count("duplicate")
+            self._decide("duplicate", child=child.id, how=how)
+            return False
+        discovered = run.rollouts_spent()
         if scores is None:
             scores = self._pareto_scores(run, child)
         run.keep(child)
-        if self.pool.index(child.id) is not None:
-            self._decide("duplicate", child=child.id)
-            return
         idx = self.pool.add(child.id, parents, scores, discovered_at=discovered)
         self.best_id = self.pool.candidate_ids[self.pool.best()]
         self._count("accepted_" + how)
         self._decide("added", program=idx, candidate=child.id, parents=parents, how=how,
                      pareto_mean=self.pool.aggregate(idx), best=self.best_id)
+        return True
 
     def _pareto_scores(self, run: Run, candidate: Candidate) -> dict[str, float]:
-        """The candidate's per-instance scores on the Pareto set: val, rolled out whole, or
-        the held-out train ids."""
+        """The candidate's per-instance scores on the Pareto set, in its order: val,
+        rolled out whole, or the held-out train ids. A val rollout that failed outright
+        scores 0 on every instance, as GEPA scores a program that fails."""
         if self.pareto_set == "val":
-            self._spend(run, 1)
+            self._spend(run, max(1, self.val_size))
             self.gate.score(run, candidate)
-            scores = run.val_item_scores(candidate)
-            self.metric_calls += len(scores)
+            scores = run.part_item_scores(candidate, "val")
+            self.val_size = self.val_size or len(scores)
+            if not scores and self.pool.subscores:
+                scores = {key: 0.0 for key in self.pool.subscores[0]}
             return scores
-        return _scores(self._rollout(run, candidate, self.pareto_ids))
+        slots = self._rollout(run, candidate, self.pareto_ids)
+        return _ordered(_scores([r for r in slots if r is not None]), self.pareto_ids)
 
-    def _rollout(self, run: Run, candidate: Candidate, items: list[str]) -> list[dict[str, Any]]:
-        """Roll ``candidate`` out on train ``items`` and return their records."""
-        self._spend(run, len(items))
-        run.evaluate(candidate, part="train", items=list(dict.fromkeys(items)), seed=self.base_seed)
-        self.metric_calls += len(items)
-        wanted = set(items)
-        return [r for r in run.item_records(candidate) if str(r.get("id")) in wanted]
+    def _rollout(self, run: Run, candidate: Candidate,
+                 items: list[str]) -> list[dict[str, Any] | None]:
+        """Roll ``candidate`` out on train ``items`` and return each position's record
+        (``None`` when it has none). An item the list repeats is rolled out once per
+        occurrence, as GEPA evaluates a minibatch, in one evaluation per repeat."""
+        rounds: list[list[str]] = []
+        seen: dict[str, int] = {}
+        for item in items:
+            nth = seen[item] = seen.get(item, -1) + 1
+            if nth == len(rounds):
+                rounds.append([])
+            rounds[nth].append(item)
+        found: list[dict[str, dict[str, Any]]] = []
+        for batch in rounds:
+            self._spend(run, len(batch))
+            run.evaluate(candidate, part="train", items=batch, seed=self.base_seed)
+            wanted = set(batch)
+            found.append({str(r.get("id")): r for r in run.item_records(candidate)
+                          if str(r.get("id")) in wanted})
+        out: list[dict[str, Any] | None] = []
+        seen = {}
+        for item in items:
+            nth = seen[item] = seen.get(item, -1) + 1
+            out.append(found[nth].get(item))
+        return out
 
     def _budget(self, run: Run) -> int:
-        """Rollouts the search may still start, the val reserve kept back."""
-        return run.budget_left() - self.val_reserve
+        """What the search may still spend at the top of an iteration, in rollouts
+        (GEPA's metric calls) less the val reserve; in evaluations when the run has no
+        rollout budget; nothing once any budget (time and tokens too) is spent."""
+        if run.budget_left() <= 0:
+            return 0
+        left = run.rollouts_left()
+        budget = run.budget_left() if left is None else left - self.val_reserve
+        if self.max_metric_calls is not None:
+            budget = min(budget, self.max_metric_calls - run.rollouts_spent())
+        return budget
 
     def _spend(self, run: Run, n: int) -> None:
+        """Before rolling ``n`` items out: stop the search once any budget is spent, and,
+        with a val reserve, when the ``n`` would eat into it. Without a reserve the last
+        rollouts may overshoot ``max_rollouts``, as GEPA's last iteration does."""
         if run.budget_left() <= 0:
             raise _OutOfBudget
+        left = run.rollouts_left()
+        if self.val_reserve and left is not None and left - self.val_reserve < n:
+            raise _OutOfBudget
+
+    def _which_budget(self, run: Run) -> str:
+        """The budget that ended the search, for the report's ``stopped_by``."""
+        if self.max_metric_calls is not None and run.rollouts_spent() >= self.max_metric_calls:
+            return "max_metric_calls"
+        left = run.rollouts_left()
+        if left is not None and left <= self.val_reserve:
+            return "max_rollouts" + (" (val reserve kept)" if self.val_reserve else "")
+        if run.evaluations_left() <= 0:
+            return "max_evaluations"
+        if run.budget_left() <= 0:
+            return "time or token budget"
+        return "max_rollouts (the next rollout would eat into the val reserve)"
 
     # ── the end ───────────────────────────────────────────────────────────
 
@@ -459,6 +635,7 @@ class GepaLoop(OuterLoop):
         result is the program with the highest Pareto mean (``core/result.py:76-78``)."""
         if self.finished or not self.pool.candidate_ids:
             return
+        self.search_rollouts = run.rollouts_spent()
         best = self.pool.candidate_ids[self.pool.best()]
         if self.pareto_set == "train" and best != self.pool.candidate_ids[0]:
             candidate = _held(run, best)
@@ -477,22 +654,71 @@ class GepaLoop(OuterLoop):
             run.stop("budget_exhausted")
         self._commit(run)
 
+    def _final_evaluation(self, run: Run) -> None:
+        """Score the result on test (``FinalEvaluation``, as SkillOpt does): the seed and
+        GEPA's result, each with the run's seed. The result is the gate's current and
+        best, so the val check reuses its score and the final phase the best's."""
+        if not self.finished or self.final.result.get("status") in ("done", "skipped"):
+            return
+        save = lambda: self._commit(run)  # noqa: E731
+        reason = self._final_eval_skip(run)
+        if reason:
+            self.final.skip(run, reason, save)
+            return
+        best = self.pool.index(self.best_id) if self.best_id else None
+        score = self.gate.cache.get(self.best_id or "")
+        if score is None:
+            score = self.pool.aggregate(best) if best is not None else 0.0
+        self.gate.adopt(self.best_id, score)  # type: ignore[arg-type]
+        self.final.run(run, self.gate, seed=self.base_seed, save=save)
+
+    def _final_eval_skip(self, run: Run) -> str:
+        """Why the test evaluation does not run; empty when it does."""
+        if not self.eval_test:
+            return "the eval_test strategy option is false"
+        if not run.has_part("test"):
+            return "the parts manifest has no 'test' part"
+        if self._run_error:
+            return f"the search did not finish: {self._run_error}"
+        if not self.best_id:
+            return "the search holds no result"
+        stopped = str(run.stopped or "")
+        if stopped != "budget_exhausted" and not stopped.endswith(RESERVE_RETAINED):
+            return f"the search did not finish: it ended on {stopped!r}"
+        return ""
+
     def report(self, run: Run) -> dict[str, Any]:
+        """GEPA's figures, then the test evaluation's: ``test_eval`` (``done``,
+        ``skipped``, ``incomplete``, ``not_run``) with ``test_eval_reason``, and the
+        ``baseline_test``, ``best_test`` and ``best_test_delta`` scores. ``rollouts``
+        (GEPA's metric calls) counts the search's, before any test rollout."""
         aggs = self.pool.aggregates()
         best = self.pool.index(self.best_id) if self.best_id else None
-        return {
+        rollouts = self.search_rollouts if self.search_rollouts is not None else run.rollouts_spent()
+        result = self.final.result
+        report: dict[str, Any] = {
             "programs": len(self.pool.candidate_ids),
             "frontier": len(find_dominator_programs(self.pool.front_programs, aggs)) if aggs else 0,
             "iterations": self.i + 1,
-            "metric_calls": self.metric_calls,
+            "rollouts": rollouts,
+            "stopped_by": self.stopped_by or None,
+            "seed": self.base_seed,
             "pareto_set": self.pareto_set,
             "components": list(self.components),
             "best_program": best,
             "best_pareto_mean": aggs[best] if best is not None else None,
             "seed_pareto_mean": aggs[0] if aggs else None,
             "merges_accepted": self.total_merges_tested,
+            "test_eval": result.get("status") or "not_run",
             **{f"count_{k}": v for k, v in sorted(self.stats.items())},
         }
+        if result.get("reason"):
+            report["test_eval_reason"] = result["reason"]
+        for key in ("baseline_test", "best_test", "best_test_delta",
+                    "best_test_delta_raw", "best_test_delta_left_out"):
+            if key in result:
+                report[key] = result[key]
+        return report
 
     def best_candidate(self, population: "list[Candidate]") -> "Candidate | None":
         """GEPA's result (``core/result.py:76-78``), by id; an error when the population
@@ -518,6 +744,7 @@ class GepaLoop(OuterLoop):
         a_version, a_internal, a_gauss = self.adapter_rng.getstate()
         self._checkpoint = {
             "gepa_state_version": STATE_VERSION,
+            "base_seed": self.base_seed,
             "components": list(self.components),
             "pareto_ids": list(self.pareto_ids),
             "pool": self.pool.state_dict(),
@@ -525,7 +752,9 @@ class GepaLoop(OuterLoop):
             "rng": [version, list(internal), gauss],
             "adapter_rng": [a_version, list(a_internal), a_gauss],
             "sampler": self.sampler.state_dict(),
-            "metric_calls": self.metric_calls,
+            "search_rollouts": self.search_rollouts,
+            "stopped_by": self.stopped_by,
+            "val_size": self.val_size,
             "merges_due": self.merges_due,
             "total_merges_tested": self.total_merges_tested,
             "last_iter_found_new_program": self.last_iter_found_new_program,
@@ -538,6 +767,7 @@ class GepaLoop(OuterLoop):
             "finished": self.finished,
             "run_error": self._run_error,
             **self.gate.state_dict(),
+            **self.final.state_dict(),
         }
         # The gate's best is the val-gated result only with a train Pareto set; GEPA's
         # result is the Pareto-best, so say that one.
@@ -556,7 +786,7 @@ class GepaLoop(OuterLoop):
         if data.get("gepa_state_version") != STATE_VERSION:
             raise ValueError(f"gepa: cannot resume strategy state version "
                              f"{data.get('gepa_state_version')!r}; this code reads {STATE_VERSION}")
-        self._fresh()
+        self._fresh(int(data.get("base_seed", 0)))
         self.components = list(data.get("components") or [])
         self.pareto_ids = list(data.get("pareto_ids") or [])
         self.pool = ProgramPool.load(data.get("pool") or {})
@@ -566,7 +796,10 @@ class GepaLoop(OuterLoop):
         version, internal, gauss = data["adapter_rng"]
         self.adapter_rng.setstate((version, tuple(internal), gauss))
         self.sampler.load_state_dict(data.get("sampler") or {})
-        self.metric_calls = int(data.get("metric_calls", 0))
+        rollouts = data.get("search_rollouts")
+        self.search_rollouts = None if rollouts is None else int(rollouts)
+        self.stopped_by = str(data.get("stopped_by") or "")
+        self.val_size = int(data.get("val_size", 0))
         self.merges_due = int(data.get("merges_due", 0))
         self.total_merges_tested = int(data.get("total_merges_tested", 0))
         self.last_iter_found_new_program = bool(data.get("last_iter_found_new_program", False))
@@ -580,6 +813,7 @@ class GepaLoop(OuterLoop):
         self.finished = bool(data.get("finished", False))
         self._run_error = str(data.get("run_error") or "")
         self.gate.load_state_dict(data)
+        self.final.load_state_dict(data)
         self._checkpoint = dict(data)
 
     # ── helpers ───────────────────────────────────────────────────────────
@@ -658,6 +892,22 @@ def _scores(records: list[dict[str, Any]]) -> dict[str, float]:
         if isinstance(score, (int, float)) and not isinstance(score, bool):
             out[str(record.get("id"))] = float(score)
     return out
+
+
+def _slot_scores(slots: list[dict[str, Any] | None]) -> list[float | None]:
+    """Each minibatch position's score; ``None`` where the item went unscored."""
+    out: list[float | None] = []
+    for record in slots:
+        score = record.get("score") if record is not None else None
+        ok = isinstance(score, (int, float)) and not isinstance(score, bool)
+        out.append(float(score) if ok else None)  # type: ignore[arg-type]
+    return out
+
+
+def _ordered(scores: dict[str, float], ids: list[str]) -> dict[str, float]:
+    """``scores`` in the order of ``ids`` (the Pareto set's), so the frontier, built in
+    key order, does not depend on the order records came back in."""
+    return {item: scores[item] for item in ids if item in scores}
 
 
 def _held(run: Run, candidate_id: str) -> Candidate:

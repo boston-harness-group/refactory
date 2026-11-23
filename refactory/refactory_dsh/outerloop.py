@@ -588,13 +588,15 @@ class Run:
         as a warning). Scores only: no records or item ids beyond those left out."""
         return self._loop.shared_scores(candidate_ids, part, latest=latest)  # noqa: SLF001
 
-    def val_item_scores(self, candidate: Candidate) -> dict[str, float]:
-        """Each val item's score in the candidate's first finished val rollout (the one
-        ``ValidationGate`` reads), keyed by an opaque digest of the item id
-        (`Loop.part_item_scores`): enough to keep a per-instance frontier on val, as
-        GEPA does, and no item ids, records or workdirs. Empty before a val rollout."""
-        found = getattr(self._loop, "part_item_scores", None)
-        return dict(found(candidate.id, "val")) if callable(found) else {}
+    def part_item_scores(self, candidate: Candidate, part: str = "val") -> dict[str, float]:
+        """Each item's score in the candidate's first finished ``'val'`` or ``'test'``
+        rollout (the one ``ValidationGate`` reads), keyed by a per-run HMAC of the item
+        id (`Loop.part_item_scores`, `opaque_item_key`) and in the parts manifest's
+        order: enough to keep a per-instance frontier on val, as GEPA does, and no item
+        ids, records or workdirs. Empty before a finished rollout."""
+        if part not in ("val", "test"):
+            raise OuterLoopError(f"part_item_scores covers 'val' and 'test', not {part!r}")
+        return dict(self._loop.part_item_scores(candidate.id, part))  # noqa: SLF001
 
     def part_incidents(self, candidate: Candidate, part: str = "val") -> list[str]:
         """The items a harness incident left out of the candidate's first ``part``
@@ -698,6 +700,32 @@ class Run:
             rollout_left = max(0, self._loop.config.max_rollouts - self._loop.rollouts)
             left = min(left, rollout_left)
         return left
+
+    def rollouts_spent(self) -> int:
+        """Item rollouts the run has spent so far (every part), the count
+        ``LoopConfig.max_rollouts`` caps."""
+        return int(getattr(self._loop, "rollouts", 0) or 0)
+
+    def rollouts_left(self) -> int | None:
+        """Item rollouts left under ``LoopConfig.max_rollouts``; ``None`` when the run
+        has no rollout budget. Unlike ``budget_left`` this is one unit, rollouts, so a
+        strategy that counts items (GEPA's metric calls) reads it."""
+        cap = getattr(self._loop.config, "max_rollouts", None)
+        return None if cap is None else max(0, int(cap) - self.rollouts_spent())
+
+    def evaluations_left(self) -> int:
+        """Evaluations (``Run.evaluate`` calls) left under ``LoopConfig.max_evaluations``."""
+        return max(0, self._loop.config.max_evaluations - self._loop.evaluations)
+
+    def run_seed(self) -> int:
+        """The run's ``LoopConfig.seed`` (``--seed``): the default for a strategy's own seed."""
+        return int(getattr(self._loop.config, "seed", 0) or 0)
+
+    def edit_limit(self) -> int | None:
+        """The most edits one proposal may carry (``attempt`` refuses more,
+        ``E-too-many-edits``); ``None`` when the run sets no cap."""
+        cap = getattr(getattr(self._loop, "optimizer", None), "max_edits", None)
+        return None if cap is None else max(1, int(cap))
 
     def rejections(self) -> list[str]:
         return summarise_reasons(
@@ -1171,6 +1199,17 @@ class ValidationGate:
         self.current_id = candidate.id
         if remember:
             self.cache[candidate.id] = self.current_score
+
+    def adopt(self, candidate_id: str, score: float) -> None:
+        """Make the candidate both current and best at ``score``, without a rollout.
+
+        For a strategy that picks its result by its own rule rather than the gate's
+        strict-improvement one (GEPA's best on the Pareto set), before
+        ``FinalEvaluation`` scores it on test.
+        """
+        self.current_id = self.best_id = candidate_id
+        self.current_score = self.best_score = float(score)
+        self.cache.setdefault(candidate_id, float(score))
 
     def offer_best(self, candidate_id: str, score: float, *, run: Run | None = None) -> bool:
         """Make the candidate the best on val if ``score`` beats the best's: with ``run``,
