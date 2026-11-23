@@ -552,3 +552,47 @@ def test_a_targeted_check_that_collects_no_test_is_recorded_not_a_pass():
     assert result.ran_nothing, "the record says the chunk ran nothing"
     assert not result.broken_command
     assert not result.failing_ids and not result.early_stop, "it is not a pass on a failure"
+
+
+def test_cross_attempt_inherited_propagation():
+    """Attempt 1's judge-computed inherited set written to check-record.json is read by
+    attempt 2's targeted_prepass, which does not early-stop on those inherited tests.
+
+    The inherited field in check-record.json holds the judge's excused set, populated via
+    judge_failures. targeted_prepass at failfast.py:578 reads it as `inherited_set` and
+    filters to `non_inherited` at line 581. When all failing ids are inherited, early_stop
+    is False (the builder is not sent back for base failures).
+    """
+    from refactory_dsh import failfast
+
+    # Simulate attempt 1's check-record.json with judge-computed inherited
+    inherited_test = "tests/test_a.py::test_base_fail"
+    prev_record = {
+        "status": "fail",
+        "inherited": [inherited_test],  # written by the judge
+        "reasons": {inherited_test: "base-whole-run"},
+        "runners": [
+            {"name": "pytest", "passed": False,
+             "failures": [{"test_id": inherited_test, "assertion": "assert False", "traceback": ""}]}
+        ],
+    }
+
+    # Attempt 2: targeted_prepass sees the same test failing
+    class Result:
+        ok = False
+        returncode = 1
+        timed_out = False
+        prep_failure = None
+        stdout = f"FAILED {inherited_test} - assert False\n= 1 failed in 0.1s =\n"
+        stderr = ""
+
+    def runner(_command: str, _timeout: float) -> Result:
+        return Result()
+
+    result = failfast.targeted_prepass(
+        prev_record, "pytest tests/", runner, 180,
+        selection=[inherited_test], self_check_timeout_s=60)
+    # The inherited test should NOT trigger early_stop
+    assert not result.early_stop, (
+        "inherited test from the judge should not cause early_stop"
+    )

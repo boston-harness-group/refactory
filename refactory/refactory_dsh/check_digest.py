@@ -82,19 +82,41 @@ _PYTEST_SECTION = re.compile(
     r"^={3,}\s*(FAILURES|ERRORS|short test summary info)\s*={3,}$", re.MULTILINE
 )
 _PYTEST_HEADER = re.compile(r"^_{3,}\s*(.+?)\s*_{3,}$", re.MULTILINE)
-_PYTEST_FAILED_LINE = re.compile(r"^FAILED\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)+)", re.MULTILINE)
+_PYTEST_FAILED_LINE = re.compile(r"^FAILED\s+(\S+::.+)$", re.MULTILINE)
 _PYTEST_ERROR_LINE = re.compile(
-    r"^(?:ERROR|ERRORS?)\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)*)\s*[-–—]", re.MULTILINE
+    r"^(?:ERROR|ERRORS?)\s+(\S+\.py\b.*)$",
+    re.MULTILINE,
 )
+
+
+def _strip_pytest_reason(raw: str) -> str:
+    """Strip trailing `` - reason`` respecting balanced brackets."""
+    raw = raw.strip()
+    idx = len(raw)
+    while True:
+        pos = raw.rfind(" - ", 0, idx)
+        if pos < 0:
+            return raw
+        before = raw[:pos]
+        if before.count("[") <= before.count("]"):
+            return before.rstrip()
+        idx = pos
 
 
 def _parse_pytest(text: str) -> RunnerDigest | None:
     """Parse pytest output into a RunnerDigest, or None if not pytest."""
     failed_ids: set[str] = set()
     for m in _PYTEST_FAILED_LINE.finditer(text):
-        failed_ids.add(m.group(1).strip())
+        failed_ids.add(_strip_pytest_reason(m.group(1)))
     for m in _PYTEST_ERROR_LINE.finditer(text):
-        failed_ids.add(m.group(1).strip())
+        tid = _strip_pytest_reason(m.group(1))
+        # Reject log-capture lines (same guard as base_check.parse_test_failures).
+        if re.search(r"\.py:\d", tid):
+            continue  # ``file.py:12`` is a log line
+        if "::" not in tid and "/" not in tid:
+            if re.match(r"^\w+:", tid):
+                continue  # logger:module pattern
+        failed_ids.add(tid)
     if not failed_ids:
         return None
 
