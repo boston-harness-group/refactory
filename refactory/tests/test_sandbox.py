@@ -839,7 +839,7 @@ def test_a_smoke_whose_nested_run_keeps_working_outlives_its_inactivity_limit(tm
     it leaves for each line it sees keeps it running to its end."""
     child = "import time\nfor i in range(12):\n    print('tick', i, flush=True)\n    time.sleep(0.5)\n"
     result = sandbox.run_sandboxed(_nested(child, tmp_path / "dsh.pid"), workdir=tmp_path / "run",
-                                   timeout_s=2, inactivity=True)
+                                   timeout_s=2, inactivity=True, nested_watch=True)
     assert not result.timed_out, result.stderr
     assert result.payload == {"returncode": 0, "ticks": 12}, result.stdout + result.stderr
     assert result.elapsed_s is not None and result.elapsed_s > 4
@@ -850,7 +850,7 @@ def test_a_smoke_whose_nested_run_goes_quiet_is_stopped_and_its_run_shut_down(tm
     than killed: it shuts its DSH child down within the sandbox's grace."""
     child = "import time\ntime.sleep(120)\n"
     result = sandbox.run_sandboxed(_nested(child, tmp_path / "dsh.pid"), workdir=tmp_path / "run",
-                                   timeout_s=2, inactivity=True)
+                                   timeout_s=2, inactivity=True, nested_watch=True)
     assert result.timed_out and result.timeout_kind == "inactivity", result.stderr
     assert result.elapsed_s is not None and result.elapsed_s < sandbox.STOP_GRACE_S
     assert "cleanup unconfirmed" not in result.stderr
@@ -943,25 +943,17 @@ def _most_at_once(spans: list[dict]) -> int:
     ("plain", None, 3),                         # no knob: the node's parallelism is set
 ])
 def test_a_smoke_of_a_task_bound_mode_runs_a_parallel_sample_of_its_train_part(
-        tmp_path, graph_profile_home, mode, knobs, at_once):
-    """The smoke create runs (`sandbox.smoke` with a model), on the spine: 3 of the Task's
-    177 items, from its train part, at once.
+        tmp_path, mode, knobs, at_once):
+    """The smoke create runs for this mode: 3 of the Task's 177 items, from its train
+    part, at once. The mode has no agent node, so create smokes it without a model
+    (`create_ops.smoke` passes ``model=bool(agent_nodes)``), on the walker.
 
     A node whose parallelism is a knob cannot also be given ``parallelism`` (the graph
-    refuses both), so the knob is set instead, held to its own value. The spine is the
-    graph profile's (`graph-owner.mjs`); the mode has no agent node, so no model is
-    called."""
-    from refactory_dsh.model import DshModelClient
-    from tests_support import graph_owner_launcher
-
-    launcher = graph_owner_launcher(tmp_path / "dsh")
-    if launcher is None:
-        pytest.skip("the spine owner needs Node and the installed workspace (pnpm install)")
+    refuses both), so the knob is set instead, held to its own value."""
     _stage(tmp_path, _SAMPLED)
     run = tmp_path / "run"
-    context = DshModelClient(attempts=1, dsh_cli=str(launcher)).context()
-    result = sandbox.smoke(f"{NAME}/{mode}", run, project=tmp_path, model=True, knobs=knobs,
-                           model_context=context, smoke_items=3, timeout_s=120)
+    result = sandbox.smoke(f"{NAME}/{mode}", run, project=tmp_path, model=False, knobs=knobs,
+                           smoke_items=3, timeout_s=120)
     assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
     assert result.payload["item_limit"] == 3
     spans = [json.loads(path.read_text()) for path in run.glob("passes/data/*/span.json")]
@@ -978,8 +970,9 @@ def test_a_smoke_of_a_task_bound_mode_runs_a_parallel_sample_of_its_train_part(
 _WORKING = {
     "__init__.py": (
         "from refactory_dsh.nn import Package\n"
-        "from .mode import Printing, Rewriting, Steps, Silent\n\n"
-        "PACKAGE = Package(name='sandboxed_pkg', modes=(Printing, Rewriting, Steps, Silent),"
+        "from .mode import Printing, Rewriting, Steps, Streaming, Silent\n\n"
+        "PACKAGE = Package(name='sandboxed_pkg', modes=(Printing, Rewriting, Steps, Streaming,"
+        " Silent),"
         " ops=('refactory_packages.sandboxed_pkg.ops',))\n"
     ),
     "task.py": (
@@ -1008,6 +1001,15 @@ _WORKING = {
         "    return {'best': 1.0}\n\n"
         "def step(ctx):\n"
         "    time.sleep(1.5)\n"
+        "    return {}\n\n"
+        # What DSH's worker observer does while a model streams (`worker_observer.mjs`):
+        # touch the worker's activity file, in the item's pass, and nothing else.
+        "def streaming(ctx):\n"
+        "    alive = ctx.workdir / '.refactory' / 'workers' / 'worker-test.activity'\n"
+        "    alive.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    for i in range(20):\n"
+        "        alive.touch()\n"
+        "        time.sleep(0.25)\n"
         "    return {}\n\n"
         "def silent(ctx):\n"
         "    (ctx.workdir / 'op.pid').write_text(str(os.getpid()))\n"
@@ -1039,64 +1041,84 @@ _WORKING = {
         "    name = 'silent'\n"
         "    def build(self):\n"
         "        return _one('silent')\n\n"
+        "def _item(*calls):\n"
+        "    g = nn.Graph()\n"
+        "    names = [f'n{i}' for i in range(len(calls))]\n"
+        "    g.add(nn.Node('data', 'data', subgraph_entry=names[0], subgraph_exit=names[-1],"
+        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',)))\n"
+        "    for name, call in zip(names, calls):\n"
+        "        g.add(nn.Node(name, 'op', call=OPS + ':' + call, reads=('current_item.json',)))\n"
+        "    for first, then in zip(names, names[1:]):\n"
+        "        g.connect(first, then)\n"
+        "    g.add(nn.Node('finish', 'op', call=OPS + ':finish', produces=('best',)))\n"
+        "    g.connect('data', 'finish')\n"
+        "    return g\n\n"
         "class Steps(_Scored):\n"
         "    name = 'steps'\n"
         "    def build(self):\n"
-        "        g = nn.Graph()\n"
-        "        g.add(nn.Node('data', 'data', subgraph_entry='a', subgraph_exit='c',"
-        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',)))\n"
-        "        for name in 'abc':\n"
-        "            g.add(nn.Node(name, 'op', call=OPS + ':step', reads=('current_item.json',)))\n"
-        "        g.connect('a', 'b')\n"
-        "        g.connect('b', 'c')\n"
-        "        g.add(nn.Node('finish', 'op', call=OPS + ':finish', produces=('best',)))\n"
-        "        g.connect('data', 'finish')\n"
-        "        return g\n"
+        "        return _item('step', 'step', 'step')\n\n"
+        "class Streaming(_Scored):\n"
+        "    name = 'streaming'\n"
+        "    def build(self):\n"
+        "        return _item('streaming')\n"
     ),
 }
 
-#: The smoke's limit. The run inside it stops itself a little earlier (3 s of no work).
-_LIMIT_S = 6
+#: How long the run may go without work, in each runtime. A model smoke's own limit is
+#: the run's (`run_on_dsh`), a little less than the sandbox's: 6 s gives the run 3 s.
+_LIMITS = {"spine": 6, "walker": 3}
+#: The run's own limit, either way: every working op above runs longer than this.
+_RUN_LIMIT_S = 3
 
 
-def _smoke_on_the_spine(tmp_path: Path, mode: str) -> sandbox.SandboxResult:
-    """A model smoke of ``mode`` (`sandbox.smoke` -> `evaluate_on_dsh` -> `run_on_dsh`), on
-    the graph profile's spine (`graph-owner.mjs`): every node runs as DSH runs it."""
+def _smoke(tmp_path: Path, mode: str, runtime: str) -> sandbox.SandboxResult:
+    """The smoke create runs, of ``mode``: with a model it goes `sandbox.smoke` ->
+    `evaluate_on_dsh` -> `run_on_dsh`, on the graph profile's spine (`graph-owner.mjs`,
+    which spawns each node command in a process group of its own, as DSH does); without
+    one, the walker runs in the sandbox's own process."""
     from refactory_dsh.model import DshModelClient
     from tests_support import graph_owner_launcher
 
+    _stage(tmp_path, _WORKING)
+    if runtime == "walker":
+        return sandbox.smoke(f"{NAME}/{mode}", tmp_path / "run", project=tmp_path, model=False,
+                             smoke_items=3, timeout_s=_LIMITS[runtime])
     launcher = graph_owner_launcher(tmp_path / "dsh")
     if launcher is None:
         pytest.skip("the spine owner needs Node and the installed workspace (pnpm install)")
-    _stage(tmp_path, _WORKING)
     context = DshModelClient(attempts=1, dsh_cli=str(launcher)).context()
     return sandbox.smoke(f"{NAME}/{mode}", tmp_path / "run", project=tmp_path, model=True,
-                         model_context=context, smoke_items=3, timeout_s=_LIMIT_S)
+                         model_context=context, smoke_items=3, timeout_s=_LIMITS[runtime])
 
 
+@pytest.mark.parametrize("runtime", ["spine", "walker"])
 @pytest.mark.parametrize("mode", [
     "printing",   # an op that prints for 5 s and writes nothing
-    "rewriting",  # an op that rewrites a file for 5 s and prints nothing
+    "rewriting",  # an op that rewrites a declared file for 5 s and prints nothing
     "steps",      # one item, three silent 1.5 s nodes in a row
+    "streaming",  # an op in an item whose worker's activity file moves for 5 s
 ])
-def test_a_smoke_that_keeps_working_outlives_its_inactivity_limit(tmp_path, graph_profile_home, mode):
-    """Work the inner run does inside a node or an item counts: none of these is stopped,
-    though each takes longer than the 3 s the run inside the smoke allows without work."""
-    result = _smoke_on_the_spine(tmp_path, mode)
+def test_a_smoke_that_keeps_working_outlives_its_inactivity_limit(
+        tmp_path, graph_profile_home, mode, runtime):
+    """Work inside a node or an item counts: none of these is stopped, though each takes
+    longer than the run allows without work."""
+    result = _smoke(tmp_path, mode, runtime)
     assert not result.timed_out, result.stdout + result.stderr
     assert result.ok and result.payload.get("exit_ok"), result.stdout + result.stderr
-    assert result.elapsed_s is not None and result.elapsed_s > 4
+    assert result.elapsed_s is not None and result.elapsed_s > _RUN_LIMIT_S + 1
 
 
+@pytest.mark.parametrize("runtime", ["spine", "walker"])
 def test_a_smoke_whose_op_goes_quiet_is_stopped_and_leaves_no_op_running(
-        tmp_path, graph_profile_home):
+        tmp_path, graph_profile_home, runtime):
     """An op that does nothing is stopped at the limit, and the stop ends the op's own
-    process too: nothing the run started is left running without a parent."""
-    result = _smoke_on_the_spine(tmp_path, "silent")
+    process too -- on the spine, though the op runs in a process group of its own:
+    nothing the run started is left running without a parent."""
+    result = _smoke(tmp_path, "silent", runtime)
     pid = int((tmp_path / "run" / "op.pid").read_text())
     try:
         assert result.timed_out and result.timeout_kind == "inactivity", result.stdout + result.stderr
-        assert result.elapsed_s is not None and result.elapsed_s < _LIMIT_S + 15
+        assert result.elapsed_s is not None and result.elapsed_s < _LIMITS[runtime] + 15
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:
@@ -1113,17 +1135,79 @@ def test_a_smoke_whose_op_goes_quiet_is_stopped_and_leaves_no_op_running(
             pass
 
 
-def test_a_watched_sandbox_counts_a_silent_write_anywhere_under_its_run(tmp_path):
-    """A smoke without a model (the walker, in the sandbox's own process) is watched the
-    same way: a run that prints nothing but keeps writing a nested file outlives its
-    1 s limit, and one that stops writing is then stopped."""
-    code = (
-        "import time\nfrom pathlib import Path\n"
-        "span = Path('passes/data/item_0/span.json')\nspan.parent.mkdir(parents=True)\n"
-        "for i in range(10):\n    span.write_text(str(i))\n    time.sleep(0.3)\n"
-        "time.sleep(30)\n"
-    )
-    result = sandbox.run_sandboxed(code, workdir=tmp_path / "run", timeout_s=1, inactivity=True,
-                                   backstop_s=20)
-    assert result.timed_out and result.timeout_kind == "inactivity", result.stderr
-    assert result.elapsed_s is not None and 3 < result.elapsed_s < 10
+def test_a_look_at_a_run_costs_the_same_however_many_files_it_holds(tmp_path, monkeypatch):
+    """The signs of work are a fixed set of files per item and worker (`activity.signs`):
+    a checkout of thousands of files in the run directory adds nothing to a look."""
+    from refactory_dsh import activity
+
+    run = tmp_path / "run"
+    (run / ".refactory" / "workers").mkdir(parents=True)
+    (run / ".refactory" / "workers" / "worker-a.activity").write_text("")
+    (run / "passes" / "data" / "item_0" / ".refactory").mkdir(parents=True)
+
+    def calls() -> int:
+        counted = [0]
+        real_stat, real_scandir = os.stat, os.scandir
+
+        def stat(*a, **kw):
+            counted[0] += 1
+            return real_stat(*a, **kw)
+
+        def scandir(*a, **kw):
+            counted[0] += 1
+            return real_scandir(*a, **kw)
+
+        monkeypatch.setattr(os, "stat", stat)
+        monkeypatch.setattr(os, "scandir", scandir)
+        try:
+            activity.signs(run)
+        finally:
+            monkeypatch.setattr(os, "stat", real_stat)
+            monkeypatch.setattr(os, "scandir", real_scandir)
+        return counted[0]
+
+    empty = calls()
+    for folder in range(20):
+        for name in range(100):
+            path = run / "checkout" / f"d{folder}" / f"f{name}.py"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+            (run / "passes" / "data" / "item_0" / f"f{folder}_{name}.txt").write_text("")
+    assert calls() == empty
+
+
+def test_a_watched_sandbox_never_counts_the_runs_budget_ledger(tmp_path):
+    """The sandbox's own look (a smoke without a model) leaves the run's budget ledger
+    out, wherever it lives; the same file under another name is a sign of work."""
+    run = tmp_path / "run"
+    workers = run / ".refactory" / "workers"
+    workers.mkdir(parents=True)
+    ledger, other = workers / "ledger.json", workers / "worker-a.json"
+    env = {"REFACTORY_BUDGET_LEDGER": str(ledger)}
+    before = sandbox._signs_of_work(run, env, nested_watch=False)
+    ledger.write_text("spent")
+    assert sandbox._signs_of_work(run, env, nested_watch=False) == before
+    other.write_text("working")
+    assert sandbox._signs_of_work(run, env, nested_watch=False) != before
+
+
+@pytest.mark.parametrize("model", [True, False])
+def test_a_run_is_looked_at_in_one_place(tmp_path, monkeypatch, model):
+    """A model smoke's own run (`run_on_dsh`) looks at the run's signs of work and marks
+    what it sees; the sandbox around it then reads only that mark. Without a model the
+    sandbox is the only watcher, and looks at the signs itself."""
+    _stage(tmp_path, GOOD)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sandbox, "run_sandboxed",
+                        lambda code, **kw: seen.update(kw) or sandbox.SandboxResult(ok=True))
+    sandbox.smoke(f"{NAME}/counter", tmp_path / "run", project=tmp_path, model=model,
+                  model_context={})
+    assert seen["nested_watch"] is model
+
+    run = tmp_path / "run"
+    (run / ".refactory" / "workers").mkdir(parents=True, exist_ok=True)
+    before = sandbox._signs_of_work(run, {}, nested_watch=True)
+    (run / ".refactory" / "workers" / "worker-a.activity").write_text("")
+    assert sandbox._signs_of_work(run, {}, nested_watch=True) == before
+    (run / sandbox.ACTIVITY_FILE).write_text("seen")
+    assert sandbox._signs_of_work(run, {}, nested_watch=True) != before

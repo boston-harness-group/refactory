@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from refactory_dsh import sandbox
+from refactory_dsh import activity, sandbox
 from refactory_dsh.model import DshModelClient
 from test_sandbox import GOOD, NAME, _stage
 
@@ -117,7 +117,7 @@ class TestRunOnDshInactivity:
 
     def _mock_dsh_deps(self, monkeypatch, tmp_path, process):
         """Patch all external dependencies of run_on_dsh."""
-        from refactory_dsh import dsh_runtime, dsh_profile, lowering, workers
+        from refactory_dsh import dsh_profile, dsh_runtime, lowering, workers
 
         monkeypatch.setattr(dsh_profile, "model_home", lambda x: tmp_path / "home")
         monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
@@ -167,7 +167,7 @@ class TestRunOnDshInactivity:
             return real_monotonic() + call_count[0] * 100
 
         monkeypatch.setattr(time, "monotonic", fast_time)
-        monkeypatch.setattr(sandbox, "run_activity", lambda w, **kw: (0, 0, 0))
+        monkeypatch.setattr(activity, "signs", lambda w, **kw: ())
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -204,7 +204,8 @@ class TestRunOnDshInactivity:
         )
         assert result.returncode == -1
         assert result.timeout_kind is None
-        assert "timeout" in result.stderr
+        # Main's text, which `authoring_evidence.failure_kind` reads as a timeout.
+        assert result.stderr == "dsh timed out after 10s; owned runtime shutdown requested"
 
     def test_run_on_dsh_inactivity_progress_files_count_as_activity(self, tmp_path, monkeypatch):
         """Writes under the inner workdir reset the activity timestamp.
@@ -222,16 +223,16 @@ class TestRunOnDshInactivity:
         self._mock_dsh_deps(monkeypatch, tmp_path, proc)
 
         # The watcher looks every 0.05 s instead of every 0.5 s.
-        monkeypatch.setattr(sandbox, "next_look_s", lambda cost: 0.05)
+        monkeypatch.setattr(sandbox, "WATCH_INTERVAL_S", 0.05)
 
         # The run directory changes on every look, resetting activity.
         progress_call_count = [0]
 
         def changing_progress(w, **kw):
             progress_call_count[0] += 1
-            return (progress_call_count[0], 0, 0)
+            return (("events", progress_call_count[0], 0),)
 
-        monkeypatch.setattr(sandbox, "run_activity", changing_progress)
+        monkeypatch.setattr(activity, "signs", changing_progress)
 
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
@@ -260,13 +261,13 @@ class TestRunOnDshInactivity:
         if finishes:  # it ends on its own, after the watcher's first look
             threading.Timer(0.3, lambda: setattr(proc, "returncode", 0)).start()
         self._mock_dsh_deps(monkeypatch, tmp_path, proc)
-        monkeypatch.setattr(sandbox, "next_look_s", lambda cost: 0.001)
+        monkeypatch.setattr(sandbox, "WATCH_INTERVAL_S", 0.001)
 
         def slow_look(w, **kw):
             time.sleep(0.3)
-            return (0, 0, 0)
+            return ()
 
-        monkeypatch.setattr(sandbox, "run_activity", slow_look)
+        monkeypatch.setattr(activity, "signs", slow_look)
         workdir = tmp_path / "run"
         workdir.mkdir(parents=True)
         result = run_on_dsh({"graph": {"nodes": {}}}, workdir, timeout_s=1, inactivity=True,
@@ -274,3 +275,173 @@ class TestRunOnDshInactivity:
         assert (result.timeout_kind is None) == finishes, result.stderr
         assert [t for t in threading.enumerate()
                 if t.name == "dsh-progress-watch" and t.is_alive()] == []
+
+
+    def test_the_runs_own_budget_ledger_is_never_work(self, tmp_path, monkeypatch):
+        """The run's budget ledger moves with every model call's accounting, not with the
+        run's work: wherever it lives -- here among the workers' files, which are signs
+        of work -- a run whose only change is its ledger is stopped for inactivity."""
+        import threading
+
+        from refactory_dsh.dsh_runtime import run_on_dsh
+
+        proc = _FakeProcess()
+        self._mock_dsh_deps(monkeypatch, tmp_path, proc)
+        monkeypatch.setattr(sandbox, "WATCH_INTERVAL_S", 0.05)
+        workdir = tmp_path / "run"
+        ledger = workdir / ".refactory" / "workers" / "budget-ledger.json"
+        ledger.parent.mkdir(parents=True)
+        monkeypatch.setenv("REFACTORY_BUDGET_LEDGER", str(ledger))
+        done = threading.Event()
+
+        def account() -> None:
+            tick = 0
+            while not done.wait(0.05):
+                tick += 1
+                ledger.write_text(str(tick))
+
+        accountant = threading.Thread(target=account, daemon=True)
+        accountant.start()
+        try:
+            result = run_on_dsh({"graph": {"nodes": {}}}, workdir, timeout_s=1, inactivity=True)
+        finally:
+            done.set()
+            accountant.join()
+        assert result.timeout_kind == "inactivity", result.stderr
+
+# ── a node command in a watched run: its output, and its process group ─────
+
+def _node(tmp_path: Path, body: str, *, watched: bool, stdout: object = subprocess.PIPE,
+          wait: bool = True) -> object:
+    """``python -m refactory_dsh.run probe:node``, as the spine runs a node command, with
+    the run's watch directory named (`activity.WATCH_ENV`) or not."""
+    import sys
+
+    from refactory_dsh import lowering
+    from refactory_dsh.run import NODE_ENV
+
+    (tmp_path / "probe.py").write_text(body)
+    declarations = tmp_path / lowering.DECLARATIONS
+    declarations.parent.mkdir(parents=True, exist_ok=True)
+    declarations.write_text(json.dumps({"node": {"reads": [], "writes": [], "produces": []}}))
+    env = {key: value for key, value in os.environ.items() if key != activity.WATCH_ENV}
+    env.update({lowering.KNOBS_ENV: "{}", "REFACTORY_WORKDIR": str(tmp_path),
+                NODE_ENV: json.dumps({"id": "node", "type": "FnNode", "reads": [], "writes": []})})
+    if watched:
+        env[activity.WATCH_ENV] = str(activity.watch_dir(tmp_path))
+    argv = [sys.executable, "-m", "refactory_dsh.run", "probe:node"]
+    if not wait:
+        return subprocess.Popen(argv, env=env, cwd=str(tmp_path), stdout=stdout,
+                                stderr=subprocess.DEVNULL)
+    return subprocess.run(argv, env=env, cwd=str(tmp_path), stdout=stdout,
+                          stderr=subprocess.PIPE, timeout=60)
+
+
+@pytest.mark.no_integration
+@pytest.mark.parametrize("watched", [True, False])
+def test_a_node_that_ends_abruptly_keeps_all_its_output(tmp_path, watched):
+    """The tee is a process of its own, so a node ending with ``os._exit`` (no flush, no
+    cleanup in the node's process) still has every byte it wrote reach the spine."""
+    lines = [f"line {i:06d} " + "x" * 40 for i in range(4000)] + ["the last line"]
+    body = ("import os, sys\n"
+            "def node(ctx):\n"
+            f"    data = {chr(10).join(lines) + chr(10)!r}.encode()\n"
+            "    view = memoryview(data)\n"
+            "    while view:\n"
+            "        view = view[os.write(1, view):]\n"
+            "    os._exit(0)\n")
+    result = _node(tmp_path, body, watched=watched)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().splitlines() == lines
+    assert (activity.watch_dir(tmp_path) / activity.MARK).exists() == watched
+
+
+@pytest.mark.no_integration
+@pytest.mark.parametrize("watched", [True, False])
+def test_only_a_watched_node_goes_through_the_tee(tmp_path, watched):
+    """A node of a run nobody watches writes straight to its own stdout, as before: no
+    pipe, no mark, no process record. A watched one writes into the tee's pipe."""
+    body = ("import json, os, stat\n"
+            "from pathlib import Path\n"
+            "def node(ctx):\n"
+            "    mode = os.fstat(1).st_mode\n"
+            "    Path('fd1.json').write_text(json.dumps({'fifo': stat.S_ISFIFO(mode),\n"
+            "        'records': len(list(Path('.refactory/watch/processes').glob('*.json')))}))\n"
+            "    print('done', flush=True)\n")
+    with (tmp_path / "out.txt").open("wb") as out:
+        result = _node(tmp_path, body, watched=watched, stdout=out)
+    assert result.returncode == 0, result.stderr
+    seen = json.loads((tmp_path / "fd1.json").read_text())
+    assert seen == {"fifo": watched, "records": 1 if watched else 0}
+    assert (tmp_path / "out.txt").read_text() == "done\n"
+    # The record is gone once the node has finished.
+    assert not list((activity.watch_dir(tmp_path) / activity.PROCESSES).glob("*.json"))
+
+
+@pytest.mark.no_integration
+def test_a_watched_gate_still_ends_on_its_verdict(tmp_path):
+    """Everything a gate prints goes through the same pipe in order, so its verdict is
+    still the last line of its stdout."""
+    body = ("from refactory_dsh.nn import Verdict\n"
+            "def node(ctx):\n"
+            "    for i in range(2000):\n"
+            "        print('log', i)\n"
+            "    return Verdict('reloop', 'two tests failed')\n")
+    result = _node(tmp_path, body, watched=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().splitlines()[-2:] == ["two tests failed", "reloop"]
+
+
+@pytest.mark.no_integration
+def test_a_watched_node_that_leaves_a_child_running_ends_at_once(tmp_path):
+    """Nothing waits for the tee: a node whose child still holds its output ends as soon
+    as it returns, and what the child prints later still arrives."""
+    body = ("import subprocess\n"
+            "def node(ctx):\n"
+            "    subprocess.Popen(['sh', '-c', 'sleep 3; echo late'])\n"
+            "    print('early', flush=True)\n")
+    with (tmp_path / "out.txt").open("wb") as out:
+        started = time.monotonic()
+        node = _node(tmp_path, body, watched=True, stdout=out, wait=False)
+        returncode = node.wait(timeout=30)
+        took = time.monotonic() - started
+    assert returncode == 0
+    assert took < 2.5, took
+    deadline = time.monotonic() + 10
+    while "late" not in (tmp_path / "out.txt").read_text() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert (tmp_path / "out.txt").read_text() == "early\nlate\n"
+
+
+@pytest.mark.no_integration
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_a_stopped_run_ends_the_groups_its_nodes_recorded_and_no_other(tmp_path):
+    """`activity.end_recorded` ends a node command's own process group -- as DSH spawns
+    them, a group the run's own does not reach -- and leaves alone a group whose
+    recorded process is no longer the one that wrote the record (pid reuse)."""
+    import sys
+
+    watch = activity.watch_dir(tmp_path)
+    recorder = ("import os, sys, time\n"
+                "from refactory_dsh import activity\n"
+                "activity.record_process(sys.argv[1])\n"
+                "time.sleep(60)\n")
+    node = subprocess.Popen([sys.executable, "-c", recorder, str(watch)], start_new_session=True)
+    stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (watch / activity.PROCESSES / f"{node.pid}.json").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        # A record whose process started at another time: its pid was reused.
+        (watch / activity.PROCESSES / f"{stranger.pid}.json").write_text(json.dumps(
+            {"pid": stranger.pid, "start": "another time", "group": stranger.pid,
+             "group_start": None}))
+        assert activity.end_recorded(watch) == [node.pid]
+        assert node.wait(timeout=10) is not None
+        assert stranger.poll() is None
+    finally:
+        for process in (node, stranger):  # only what this test started
+            if process.poll() is None:
+                process.kill()
+                process.wait()

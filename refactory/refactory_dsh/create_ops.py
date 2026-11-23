@@ -1956,6 +1956,8 @@ def _revision(
             knobs=samples or None,
             model_context=_model_context(ctx),
             timeout_s=int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S)),
+            # The same sample the revision ran, so the two scores compare like with like.
+            smoke_items=int(ctx.knob("smoke_items", 3)),
         )
         if scored.timed_out:
             # Keep the new mode's completed smoke receipt intact. The source pass

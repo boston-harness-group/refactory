@@ -722,13 +722,11 @@ Running code we did not write.
 | function | `mark_activity` | `(path: 'Path') -> 'None'` |
 | function | `missing_init` | `(root: 'Path') -> 'str'` |
 | function | `model_readiness` | `(workdir: 'Path', *, model_context: 'dict[str, str] \| None' = None, require_ready: 'bool' = True) -> 'dict[str, Any]'` |
-| function | `next_look_s` | `(cost_s: 'float') -> 'float'` |
 | function | `output_tail` | `(stdout: 'str \| None', stderr: 'str \| None', n: 'int') -> 'str'` |
 | function | `promote` | `(project: 'Path', name: 'str', *, note: 'str' = '') -> 'dict[str, Any]'` |
 | function | `refactory_env` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
-| function | `run_activity` | `(workdir: 'Path', *, ignore: 'tuple[Path, ...]' = ()) -> 'tuple[int, int, int]'` |
 | function | `run_command` | `(command: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 0, cpu_s: 'int \| None' = None, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, budget: 'Any' = None, home: 'Path \| None' = None, exact_env: 'bool' = False, stdin: 'Any' = None, worktree_root: 'Path \| None' = None) -> 'SandboxResult'` |
-| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None) -> 'SandboxResult'` |
+| function | `run_sandboxed` | `(code: 'str', *, workdir: 'Path', timeout_s: 'int' = 180, memory_mb: 'int' = 2048, cpu_s: 'int' = 120, file_mb: 'int' = 16384, env: 'dict[str, str] \| None' = None, forwarded: 'dict[str, str] \| None' = None, address_space: 'bool' = True, inactivity: 'bool' = False, backstop_s: 'float \| None' = None, nested_watch: 'bool' = False) -> 'SandboxResult'` |
 | function | `scrub` | `(env: 'dict[str, str] \| None' = None) -> 'dict[str, str]'` |
 | function | `smoke` | `(identifier: 'str', workdir: 'Path', *, project: 'Path \| None' = None, model: 'bool' = False, knobs: 'dict[str, Any] \| None' = None, model_context: 'dict[str, str] \| None' = None, smoke_items: 'int' = 0, **kwargs: 'Any') -> 'SandboxResult'` |
 | function | `smoke_backstop_s` | `(timeout_s: 'float') -> 'float'` |
@@ -748,11 +746,9 @@ Running code we did not write.
 - **`mark_activity`** — Leave the mark `_run_watched` reads as work: the time, in ``path``.
 - **`missing_init`** — Why a package root has no `__init__.py`, and what it holds instead.
 - **`model_readiness`** — Check the model path after the same scrub/HOME rewrite as real smoke.
-- **`next_look_s`** — How long a watcher waits before its next `run_activity` look, given what the last
 - **`output_tail`** — The last *n* non-empty lines of each stream, each line labelled with its stream.
 - **`promote`** — Mark a package trusted, explicitly, and record who did it.
 - **`refactory_env`** — ``scrub(env)`` with refactory's own interpreter first on PATH.
-- **`run_activity`** — What a watcher compares to tell a working run from an idle one: every file under
 - **`run_command`** — Run a shell command in the sandbox, bounded by inactivity rather than memory.
 - **`run_sandboxed`** — Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 - **`scrub`** — The environment a sandboxed run sees: an allowlist, with secrets dropped.

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import io
 import json
 import multiprocessing
 import os
@@ -28,6 +29,8 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence
+
+from refactory_dsh import activity
 
 from .graph import PROCEED, Edge, Graph, Node, op_io
 from .loops import loop_edges
@@ -297,6 +300,8 @@ class RunContext:
         target = self._writable(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+        # A watched run counts a node's writes as work (`activity`); others do nothing.
+        activity.mark()
         return target
 
     def append_text(self, name: str, text: str) -> Path:
@@ -305,6 +310,7 @@ class RunContext:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a") as handle:
             handle.write(text)
+        activity.mark()
         return target
 
     def read_text(self, name: str) -> str:
@@ -812,6 +818,7 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         raise SystemExit(f"terminated by signal {signum}")
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
+    record = None
     try:
         # Apply the parent's environment snapshot: the forkserver child inherits
         # the forkserver's env (created once), but the parent may have set vars
@@ -820,6 +827,9 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
         if env_snapshot:
             os.environ.clear()
             os.environ.update(env_snapshot)
+        # In a watched run (`activity.WATCH_ENV`) this child, which leads a session of
+        # its own, records its group, so a stopped run can end it.
+        record = activity.record_process()
         # The child imports what an op names on its own: the forkserver started with the
         # parent's sys.path. A workspace package installed since then is picked up here.
         for pkg_name, pkg_paths in args_dict.get("_package_paths", {}).items():
@@ -867,11 +877,10 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
             # be emitted by the parent, matching the spine (execute.ts:177-178).
             # SWEEP-4: also capture stdout so the parent can extract fn-gate
             # feedback the same way the spine does (execute.ts:148-157).
-            import io as _io
             _old_stderr = sys.stderr
             _old_stdout = sys.stdout
-            _capture_stderr = _io.StringIO()
-            _capture_stdout = _io.StringIO()
+            _capture_stderr = _MarkedCapture()
+            _capture_stdout = _MarkedCapture()
             sys.stderr = _capture_stderr
             sys.stdout = _capture_stdout
             try:
@@ -913,7 +922,17 @@ def _op_child_target(conn: Any, args_dict: dict[str, Any]) -> None:
                 "_stdout": _err_stdout,
             }))
     finally:
+        activity.forget_process(record)
         conn.close()
+
+
+class _MarkedCapture(io.StringIO):
+    """An op child's captured output, which a watched run counts as work as it is
+    written (`activity.mark`), as the spine's node runner does."""
+
+    def write(self, text: str) -> int:
+        activity.mark()
+        return super().write(text)
 
 
 def _finish_op_child(child: Any) -> None:

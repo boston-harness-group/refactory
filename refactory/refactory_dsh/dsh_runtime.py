@@ -28,10 +28,10 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Callable
 
-from refactory_dsh import lowering
+from refactory_dsh import activity, lowering
 from refactory_dsh.nn import RunResult
 from refactory_dsh.paths import REPO_ROOT, dsh_command, require_build, venv_bin
-from refactory_dsh.run import FACTS, OUTPUT_ACTIVITY_ENV, OUTPUT_ACTIVITY_FILE
+from refactory_dsh.run import FACTS
 
 #: What the CEO is asked to do. A deterministic mode needs the CEO only to advance
 #: the cursor; the bundle mounts the spine with `executeCommands: true`, so the
@@ -104,11 +104,6 @@ def shutdown_tracked_runs() -> int:
     return len(running)
 
 
-#: How long the processes left in a stopped run's group get to exit once asked, before
-#: they are killed (`_kill_run_group`).
-GROUP_STOP_GRACE_S = 2.0
-
-
 def _run_group(process: subprocess.Popen) -> int | None:
     """The process group a DSH child leads, read as it starts, or ``None``.
 
@@ -129,32 +124,14 @@ def _run_group(process: subprocess.Popen) -> int | None:
 def _kill_run_group(group: int | None) -> None:
     """End what is left of a stopped DSH child's process group (`_run_group`).
 
-    The group holds exactly what the child started that did not leave it: its shell and
-    the node commands it ran (``python -m refactory_dsh.run ...``).
-    `owned_process.shutdown` asks only the child to stop; a child that exits without
-    ending its commands -- or is killed -- leaves them running with no parent. Each is
-    asked to stop, given ``GROUP_STOP_GRACE_S``, then killed. A group id is not reused
-    while any member is alive, so nothing outside the run is signalled.
+    The group holds what the child started that did not leave it -- its shell and node
+    commands, with a runtime that keeps them there. `owned_process.shutdown` asks only
+    the child to stop; a child that exits without ending its commands leaves them
+    running with no parent. A group id is not reused while any member is alive, so
+    nothing outside the run is signalled (`activity.end_groups`).
     """
-    if group is None:
-        return
-    import signal
-
-    def _signal(sig: int) -> bool:
-        try:
-            os.killpg(group, sig)
-        except (ProcessLookupError, PermissionError):
-            return False
-        return True
-
-    if not _signal(signal.SIGTERM):
-        return
-    deadline = time.monotonic() + GROUP_STOP_GRACE_S
-    while time.monotonic() < deadline:
-        if not _signal(0):
-            return
-        time.sleep(0.05)
-    _signal(signal.SIGKILL)
+    if group is not None:
+        activity.end_groups([group])
 
 
 def run_on_dsh(
@@ -184,16 +161,17 @@ def run_on_dsh(
     rather than returning a result.
 
     ``inactivity`` makes ``timeout_s`` an inactivity limit -- no output from DSH and no
-    write under ``workdir`` for that long (`sandbox.run_activity`): the spine's state,
-    every item's pass and its nodes' files, every worker's receipt and events, and each
-    node command's output, which the node runner marks there (`run.OUTPUT_ACTIVITY_ENV`)
-    -- with a wall-clock backstop, instead of a wall clock. ``activity_file`` is where
-    this run marks each sign of work it sees (`sandbox.mark_activity`), for a watched
-    sandbox it runs inside (a smoke's), which cannot see DSH's output.
+    sign of work in the run for that long (`activity.signs`): the spine's state, every
+    item's pass, every worker's activity, and each node command's output and declared
+    writes, which the node runner marks in the run's watch directory -- with a
+    wall-clock backstop, instead of a wall clock. ``activity_file`` is where this run
+    marks each sign of work it sees (`sandbox.mark_activity`), for a watched sandbox it
+    runs inside (a smoke's), which then looks at nothing else.
 
     A run that is stopped (a timeout, a stop, an error) has its DSH child shut down and
-    then whatever is left of the child's process group killed (`_kill_run_group`), so no
-    node command outlives it.
+    then whatever is left of the child's process group killed (`_kill_run_group`); a
+    watched run also ends the process group each of its node commands recorded
+    (`activity.end_recorded`), since DSH runs each in a group of its own.
     """
     import time
 
@@ -276,10 +254,12 @@ def run_on_dsh(
     env = {**os.environ, "DSH_HOME": str(selected_home),
            "REFACTORY_MODEL_DSH_HOME": str(selected_home)}
     watched = inactivity or activity_file is not None
-    if watched:
-        # Each node command marks its output here as it is written (`run.main`), so an
-        # op that prints but writes nothing still counts as working.
-        env[OUTPUT_ACTIVITY_ENV] = str(workdir / OUTPUT_ACTIVITY_FILE)
+    watch = activity.watch_dir(workdir) if watched else None
+    if watch is not None:
+        # Each node command marks its output and writes here, and records its process
+        # group (`run.main`), so a node that prints counts as working and a stop can end
+        # it however the runtime spawned it.
+        env[activity.WATCH_ENV] = str(watch)
     if item_slots_dir is not None and item_slots is not None:
         env["REFACTORY_ITEM_SLOTS_DIR"] = str(item_slots_dir)
         env["REFACTORY_ITEM_SLOTS"] = str(item_slots)
@@ -332,35 +312,31 @@ def run_on_dsh(
         for reader in readers:
             reader.start()
 
-        # The run's watcher: any write under the run directory is work (`run_activity`),
-        # wherever in the graph it happens. With an activity_file it also marks there
-        # each time it sees new work, for the sandbox this run is nested in; its own
-        # mark is not the run's work, so it is not looked at.
+        # The run's watcher: the run's signs of work (`activity.signs`), wherever in the
+        # graph it happens, at a cost that does not grow with what sits in the run
+        # directory. With an activity_file it also marks there each time it sees new
+        # work, for the sandbox this run is nested in. Its own mark and the run's budget
+        # ledger are not the run's work, so they are never looked at.
         _progress_thread: Thread | None = None
         _watch_done = threading.Event()
         if watched:
-            from refactory_dsh.sandbox import mark_activity, next_look_s, run_activity
+            from refactory_dsh import sandbox
 
-            # Spelled as the walk spells it: under the resolved run directory.
-            ignore = (Path(activity_file).resolve(),) if activity_file is not None else ()
+            ledger = (context or {}).get("budget_ledger") or env.get("REFACTORY_BUDGET_LEDGER")
+            ignore = (activity_file, ledger)
 
             def _watch_progress() -> None:
-                prev = run_activity(workdir, ignore=ignore)
+                prev = activity.signs(workdir, ignore=ignore)
                 marked = 0.0
-                wait = next_look_s(0.0)
-                while not _watch_done.wait(wait) and process.poll() is None:
+                while not _watch_done.wait(sandbox.WATCH_INTERVAL_S) and process.poll() is None:
                     looking = time.monotonic()
-                    try:
-                        snap = run_activity(workdir, ignore=ignore)
-                    except Exception:
-                        snap = prev
+                    snap = activity.signs(workdir, ignore=ignore)
                     if snap != prev:
                         _activity[0] = looking
                         prev = snap
                     if activity_file is not None and _activity[0] != marked:
                         marked = _activity[0]
-                        mark_activity(activity_file)
-                    wait = next_look_s(time.monotonic() - looking)
+                        sandbox.mark_activity(activity_file)
 
             _progress_thread = Thread(target=_watch_progress, daemon=True, name="dsh-progress-watch")
             _progress_thread.start()
@@ -432,6 +408,7 @@ def run_on_dsh(
                 shutdown(process)
             finally:
                 _kill_run_group(run_group)
+                activity.end_recorded(watch)
                 untrack_run(process)
             for reader in readers:
                 reader.join(timeout=5)
@@ -440,9 +417,9 @@ def run_on_dsh(
                 telemetry.finish("timed_out" if isinstance(error, subprocess.TimeoutExpired) else (
                     "budget_exhausted" if type(error).__name__ == "BudgetExhausted" else "cancelled"), str(error))
             if isinstance(error, subprocess.TimeoutExpired):
-                kind_label = _timeout_kind or "wall-clock"
+                stopped = f" ({_timeout_kind})" if _timeout_kind else ""
                 return DshRun(facts={}, workdir=workdir, returncode=-1,
-                              stderr=f"dsh {kind_label} timeout after {timeout_s}s; owned runtime shutdown requested",
+                              stderr=f"dsh timed out{stopped} after {timeout_s}s; owned runtime shutdown requested",
                               duration_s=time.time() - started,
                               timeout_kind=_timeout_kind)
             raise

@@ -670,8 +670,12 @@ def test_naming_only_a_task_yields_a_data_node_harness_bound_to_it(tmp_path):
         client=model,
     )
     assert result.package == NAME
-    # The Task's own verdicts: CountingTask scores alpha 1.0 and beta 0.5.
-    assert result.smoke_score == 0.75
+    # The Task's own verdicts, on the sample a smoke runs: at most `smoke_items` items of
+    # the train part. CountingTask's two items split into alpha (train) and beta
+    # (holdout), so the smoke runs alpha alone, which the Task scores 1.0.
+    assert result.smoke_score == 1.0
+    passes = sorted(path.name for path in run_dir.glob("smoke/*/passes/*/*") if path.is_dir())
+    assert passes == ["alpha_0"], passes
 
     problems = create_ops.check_package(
         NAME, requires_data_node=True, requires_task_ref=TASK
@@ -1454,3 +1458,24 @@ def test_gate_smoke_a_revision_source_that_timed_out_halts(tmp_path, monkeypatch
     assert str(result) == "halt"
     assert result.reason == ("the revision source's smoke timed out (inactivity, limit 60s); "
                              "code repair was not attempted")
+
+
+def test_a_revision_and_its_source_are_smoked_on_the_same_sample(tmp_path, monkeypatch):
+    """The before and after scores a revision is judged on come from the same items: the
+    source's smoke is cut to the same `smoke_items` sample as the revision's."""
+    from refactory_dsh import lowering
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    seen: dict[str, int] = {}
+
+    def stub(identifier, workdir_, *, smoke_items=0, **kwargs):
+        seen["source" if Path(workdir_).name == "smoke-source" else "revision"] = smoke_items
+        return SandboxResult(ok=True, payload={"score": 1.0, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="circle_packing/adaptive", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 2}))
+    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    assert seen == {"revision": 2, "source": 2}

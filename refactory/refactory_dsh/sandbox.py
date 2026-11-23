@@ -84,8 +84,7 @@ STOP_KINDS = ("inactivity", "backstop", "output_limit")
 #: which the nested run keeps in its own process (`dsh_runtime.run_on_dsh`), and its
 #: own shutdown once it stops for inactivity.
 ACTIVITY_FILE = ".refactory/sandbox-activity"
-#: How often a watched run's directory is looked at (`run_activity`), at least: a look
-#: that took long is repeated less often (`next_look_s`).
+#: How often a watched run's signs of work are looked at (`activity.signs`).
 WATCH_INTERVAL_S = 0.5
 #: How long a watched sandbox waits, once it has asked its run to stop, before killing
 #: it: the run's own shutdown of its DSH child (`owned_process.SHUTDOWN_GRACE_S`) with
@@ -519,6 +518,7 @@ def run_sandboxed(
     address_space: bool = True,
     inactivity: bool = False,
     backstop_s: float | None = None,
+    nested_watch: bool = False,
 ) -> SandboxResult:
     """Run a snippet in a subprocess with limits, from the workspace, scrubbed.
 
@@ -529,9 +529,11 @@ def run_sandboxed(
 
     ``timeout_s`` is a wall clock unless ``inactivity`` is set (a smoke's choice,
     `smoke`): the run is then stopped only after ``timeout_s`` seconds with no sign of
-    work -- its own output, or any write under ``workdir`` (`run_activity`), the mark an
-    inner run leaves in ``ACTIVITY_FILE`` included -- or at ``backstop_s`` of wall time
-    (`_run_watched`).
+    work -- its own output, or the run's signs of work in ``workdir`` (`activity.signs`)
+    -- or at ``backstop_s`` of wall time (`_run_watched`). ``nested_watch`` says the
+    snippet runs a watched run of its own (a model smoke's `run_on_dsh`), which looks at
+    those signs and marks what it sees in ``ACTIVITY_FILE``: the sandbox then reads only
+    that mark, so the run is looked at in one place.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +548,7 @@ def run_sandboxed(
         return _run_watched(
             [sys.executable, "-c", code], workdir=workdir, env=child_env, timeout_s=timeout_s,
             backstop_s=backstop_s if backstop_s is not None else min(4 * timeout_s, COMMAND_BACKSTOP_S),
+            nested_watch=nested_watch,
             **kwargs,
         )
     started = time.monotonic()
@@ -594,56 +597,18 @@ def run_sandboxed(
     )
 
 
-def run_activity(workdir: Path, *, ignore: tuple[Path, ...] = ()) -> tuple[int, int, int]:
-    """What a watcher compares to tell a working run from an idle one: every file under
-    ``workdir``, as (how many, the latest change, their total size).
+def _signs_of_work(workdir: Path, env: dict[str, str], *, nested_watch: bool) -> Any:
+    """What `_run_watched` compares: the mark a nested watched run leaves in
+    ``ACTIVITY_FILE``, or, with none, the run's own signs of work (`activity.signs`);
+    never the run's budget ledger."""
+    from refactory_dsh import activity
 
-    Everything a run does that is work lands as a write under its directory: the spine's
-    status, checkpoint and events, each item's pass directory and what its nodes write
-    (spans, facts, records, nested passes), each worker's receipt, events and session
-    store, and -- in a watched run -- each node command's output, which the node runner
-    marks there as it is written (`run.OUTPUT_ACTIVITY_ENV`). Any write moves the latest
-    change (an append or a same-size rewrite included), and a file added or removed
-    changes the count. A run that writes nothing for the limit is idle. Links are not
-    followed. ``ignore`` names files the watcher writes itself, which are not the run's
-    work.
-    """
-    ignored = {str(path) for path in ignore}
-    count = latest = size = 0
-    pending = [str(workdir)]
-    while pending:
+    if nested_watch:
         try:
-            entries = os.scandir(pending.pop())
+            return (workdir / ACTIVITY_FILE).stat().st_mtime_ns
         except OSError:
-            continue
-        with entries:
-            for entry in entries:
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(entry.path)
-                        continue
-                    if entry.path in ignored:
-                        continue
-                    stat = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                count += 1
-                latest = max(latest, stat.st_mtime_ns)
-                size += stat.st_size
-    return count, latest, size
-
-
-def next_look_s(cost_s: float) -> float:
-    """How long a watcher waits before its next `run_activity` look, given what the last
-    one cost: ``WATCH_INTERVAL_S``, or four times the cost when that is longer, so a run
-    directory holding a large checkout is not walked without pause."""
-    return max(WATCH_INTERVAL_S, 4 * cost_s)
-
-
-def _signs_of_work(workdir: Path) -> tuple[int, int, int]:
-    """What `_run_watched` compares: the whole run directory (`run_activity`), which
-    holds the mark a nested run leaves in ``ACTIVITY_FILE``."""
-    return run_activity(workdir)
+            return None
+    return activity.signs(workdir, ignore=(env.get("REFACTORY_BUDGET_LEDGER"),))
 
 
 def mark_activity(path: Path) -> None:
@@ -659,7 +624,7 @@ def mark_activity(path: Path) -> None:
         pass
 
 
-def _stop_watched(proc: subprocess.Popen) -> bool:
+def _stop_watched(proc: subprocess.Popen, workdir: Path) -> bool:
     """Ask a watched run to stop and give it ``STOP_GRACE_S`` to do so; then kill its group.
 
     Only the direct child is asked, as `owned_process.shutdown` asks: a smoke's process
@@ -682,6 +647,11 @@ def _stop_watched(proc: subprocess.Popen) -> bool:
             pass
     elif forced:
         proc.kill()
+    # Node commands a nested run started in groups of their own, should it not have
+    # ended them itself (`activity.end_recorded`).
+    from refactory_dsh import activity
+
+    activity.end_recorded(activity.watch_dir(workdir))
     if forced:
         try:
             proc.wait(timeout=5)
@@ -697,12 +667,12 @@ def _run_watched(
     env: dict[str, str],
     timeout_s: int,
     backstop_s: float,
+    nested_watch: bool = False,
     **kwargs: Any,
 ) -> SandboxResult:
     """`run_sandboxed` with an inactivity limit and a wall-clock backstop.
 
-    Work is any output, or any write under the run's directory (`run_activity`), the
-    mark a nested run leaves in ``ACTIVITY_FILE`` included. A run stopped for either limit is asked to stop
+    Work is any output, or a change in the run's signs of work (`_signs_of_work`). A run stopped for either limit is asked to stop
     and given ``STOP_GRACE_S`` before it is killed (`_stop_watched`); a kill says that
     its cleanup is unconfirmed, as `owned_process.shutdown` does. A run that stopped
     itself for one of these limits reports it in its payload's ``timeout_kind``, which
@@ -724,18 +694,17 @@ def _run_watched(
                    for pipe, sink in ((proc.stdout, out), (proc.stderr, err))]
         for reader in readers:
             reader.start()
-        seen = _signs_of_work(workdir)
+        seen = _signs_of_work(workdir, env, nested_watch=nested_watch)
         look_at = started + WATCH_INTERVAL_S
         stop: str | None = None
         try:
             while proc.poll() is None:
                 now = time.monotonic()
                 if now >= look_at:
-                    current = _signs_of_work(workdir)
-                    looked = time.monotonic()
+                    current = _signs_of_work(workdir, env, nested_watch=nested_watch)
                     if current != seen:
                         seen, activity[0] = current, now
-                    look_at = looked + next_look_s(looked - now)
+                    look_at = now + WATCH_INTERVAL_S
                 if now - activity[0] >= timeout_s:
                     stop = "inactivity"
                 elif now - started >= backstop_s:
@@ -744,12 +713,12 @@ def _run_watched(
                     break
                 time.sleep(0.05)
         except BaseException:
-            _stop_watched(proc)
+            _stop_watched(proc, workdir)
             for reader in readers:
                 reader.join(timeout=5)
             raise
         if stop is not None:
-            forced = _stop_watched(proc)
+            forced = _stop_watched(proc, workdir)
             for reader in readers:
                 reader.join(timeout=5)
             note = f"timed out ({stop}) after {timeout_s}s"
@@ -1061,7 +1030,9 @@ def smoke_sample(mode: Any, workdir: Path, items: int) -> dict[str, Any]:
 
     Each data node bound to a Task (``task_ref``) runs only the first ``items`` items of
     the Task's train part -- the part the run directory names, written here
-    (`task.write_subset`) -- and runs them at once. A node whose parallelism is a knob
+    (`task.write_subset`) -- and runs them at once. A train part with fewer items runs
+    them all; no holdout item is ever run (`task.partition` keeps at least one item in
+    train). A node whose parallelism is a knob
     (``parallelism_knob``, or a ``parallelism`` field binding) gets that knob set, held
     to the knob's own value as a ceiling, since a node may not carry both; any other
     node gets ``parallelism``, held to the value it declares when that is above one.
@@ -1146,16 +1117,17 @@ def smoke(
     exercises the *default* path only, so a mode whose new input path is broken --
     the one the brief asked for -- scores on the fixture and is accepted.
 
-    ``smoke_items`` cuts each data node bound to a Task down to that many items of the
-    Task's train part, run at once (`smoke_sample`), in a smoke with a model; 0 runs
-    every item, as a smoke without a model always does.
+    ``smoke_items`` cuts each data node bound to a Task down to at most that many items
+    of the Task's train part, run at once (`smoke_sample`), with a model or without;
+    never a holdout item. 0 runs every item.
 
     ``timeout_s`` is an inactivity limit here, not a wall clock: a smoke that is still
     working is not stopped before the backstop (`smoke_backstop_s`). Work is output, or
-    any write under the run directory (`run_activity`): every node's state and output,
-    per item and nested, and every worker's events. A run with a model gets a slightly
-    shorter limit of its own, so it stops itself first and says why, and it marks its
-    DSH child's output in ``ACTIVITY_FILE`` for this sandbox to see.
+    the run's signs of work (`activity.signs`): the run's state, every item's pass,
+    every worker's activity, and each node's output and declared writes. A run with a
+    model gets a slightly shorter limit of its own, so it stops itself first and says
+    why; it is the one that looks at those signs, and it marks what it sees in
+    ``ACTIVITY_FILE`` for this sandbox to see.
     """
     project = Path(project or project_for_nodes())
     client = (
@@ -1178,6 +1150,14 @@ def smoke(
         f"activity_file=Path({str(Path(workdir) / ACTIVITY_FILE)!r}), {call})"
         if model else f"mode.evaluate(Path({str(Path(workdir))!r}))"
     )
+    # The walker's own node writes mark the run as working (`activity.mark`); a run with
+    # a model names its watch directory to its node commands itself.
+    watch = (
+        ""
+        if model else
+        "import os\nfrom refactory_dsh import activity\n"
+        f"os.environ[activity.WATCH_ENV] = str(activity.watch_dir(Path({str(Path(workdir))!r})))\n"
+    )
     code = (
         "import json\n"
         "from pathlib import Path\n"
@@ -1193,7 +1173,8 @@ def smoke(
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
         "from refactory_dsh.sandbox import smoke_sample\n"
-        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items) if model else 0!r})\n"
+        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items)!r})\n"
+        f"{watch}"
         f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
         # Reported after the run, so a mode that cannot report them still passes.
@@ -1236,7 +1217,7 @@ def smoke(
     kwargs.setdefault("backstop_s", smoke_backstop_s(kwargs["timeout_s"]))
     return run_sandboxed(
         code, workdir=Path(workdir), env=dict(os.environ), forwarded=forwarded,
-        inactivity=True, **kwargs,
+        inactivity=True, nested_watch=model, **kwargs,
     )
 
 

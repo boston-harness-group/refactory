@@ -204,9 +204,10 @@ export function apply(ctx: Context): void {
       REFACTORY_WORKDIR: workdir,
       ...(process.env.REFACTORY_WORKER_CONTEXT ? { REFACTORY_WORKER_CONTEXT: process.env.REFACTORY_WORKER_CONTEXT } : {}),
       ...(process.env.REFACTORY_BUDGET_LEDGER ? { REFACTORY_BUDGET_LEDGER: process.env.REFACTORY_BUDGET_LEDGER } : {}),
-      // A watched run's output mark (refactory_dsh/run.py `OUTPUT_ACTIVITY_ENV`): each node
-      // command marks it as it prints, so an inactivity limit counts a printing op as working.
-      ...(process.env.REFACTORY_OUTPUT_ACTIVITY ? { REFACTORY_OUTPUT_ACTIVITY: process.env.REFACTORY_OUTPUT_ACTIVITY } : {}),
+      // A watched run's watch directory (refactory_dsh/activity.py `WATCH_ENV`): each node
+      // command marks it as it prints and writes, and records its process group there, so
+      // an inactivity limit counts a working node and a stop can end it.
+      ...(process.env.REFACTORY_RUN_WATCH ? { REFACTORY_RUN_WATCH: process.env.REFACTORY_RUN_WATCH } : {}),
       // Nonsecret context for nested model calls after command/sandbox scrubbing.
       REFACTORY_MODEL_DSH_HOME: resolve((process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')).replace(/^~(?=[/\\]|$)/, homedir())),
       REFACTORY_MODEL_PROVIDER: String(options.provider ?? ''),
