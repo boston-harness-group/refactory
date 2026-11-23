@@ -21,7 +21,11 @@ on a known-buggy commit showed why the file matters: where the bugs were, it wro
   environment -- the project's own package not importable, a missing interpreter or Node
   package -- is "could not run (environment)", advisory (`environment_failure`);
 - any other probe that fails is a defect finding (kind defect, severity high, breaks its
-  requirement) that `design_ops.gate_qa` sends back.
+  requirement) that `design_ops.gate_qa` sends back;
+- the same probes run on the base at the same time (`rerun_probes`): a requirement none of
+  whose passing probes fails there -- they pass with the change reverted, declare only
+  preserved behaviour, or could not run on the base -- is an advisory finding for the
+  person (`base_revert_findings`), never a re-run or a reloop.
 
 Design mode runs this as the ``rerun_probes`` op before ``synthesize_qa``, which both
 runtimes run through the same callable; ``refactory replay-verifier`` runs `run_probes`
@@ -553,8 +557,8 @@ def render(results: dict[str, Any]) -> str:
              f"Each probe file the verifier wrote, rerun on this attempt's commit in a scratch "
              f"checkout ({int(results.get('per_probe_s', PROBE_TIMEOUT_S))} s per probe, "
              f"{int(results.get('total_s', PROBES_TOTAL_S))} s for all).", "",
-             "| file | requirement | exit code | result | last lines of output |",
-             "| --- | --- | --- | --- | --- |"]
+             "| file | requirement | exit code | result | last lines of output | discriminating |",
+             "| --- | --- | --- | --- | --- | --- |"]
     for entry in results.get("probes", []):
         result = {"pass": "pass", "fail": "FAIL", "timed_out": "FAIL (timed out)",
                   "unrun": "not run (advisory)", "no_check": "no check of its own: UNVERIFIED",
@@ -563,9 +567,23 @@ def render(results: dict[str, Any]) -> str:
             result += " — only invokes existing tests: UNVERIFIED"
         tail = entry.get("tail", "").replace("|", "\\|").replace("\n", "<br>")
         code = "" if entry.get("exit_code") is None else str(entry["exit_code"])
-        lines.append(f"| {entry['file']} | {entry['requirement']} | {code} | {result} | {tail} |")
+        disc = entry.get("discriminating")
+        disc_col = ("✓" if disc is True else "✗" if disc is False
+                    else "non-regression" if disc == "non_regression"
+                    else "base unavailable" if disc == "base_unavailable" else "—")
+        lines.append(f"| {entry['file']} | {entry['requirement']} | {code} | {result} | {tail} | {disc_col} |")
     if not results.get("probes"):
-        lines.append("| (no probe files) | | | | |")
+        lines.append("| (no probe files) | | | | | |")
+    base_wall = results.get("base_rerun_wall_s")
+    if base_wall is not None:
+        lines += ["", f"Base rerun wall-clock: {base_wall} s"]
+    base_revert = base_revert_findings(results)
+    if base_revert:
+        lines += ["", "## Not verified against the base (advisory)", "",
+                  "Each probe also ran with the change reverted. A requirement none of whose "
+                  "probes failed there is not shown to work by them; it is listed for the "
+                  "person, not sent back or re-run.", "",
+                  *(f"- {finding}" for finding in base_revert)]
     if results.get("unverified"):
         lines += ["", "## UNVERIFIED claims", ""]
         lines += [f"- UNVERIFIED {item['id']}: {item['requirement']}"
@@ -606,17 +624,204 @@ def read_results(ctx: Any) -> dict[str, Any]:
     return found if isinstance(found, dict) else {}
 
 
+#: A probe header that declares it checks preserved behaviour: it passes on the base too
+#: by design, so it never shows on its own that the change works (`_base_revert_discriminate`).
+_NON_REGRESSION = re.compile(r"non-regression|preserved behaviou?r", re.I)
+#: Where the base side's own checkout and HOME live under the run's workspaces.
+BASE_ROOT = "probe_rerun_base"
+#: The fallback base checkout, recorded once it is prepared, so later passes reuse it.
+BASE_READY = "ready.json"
+
+
+def _base_unavailable(base_entry: dict[str, Any] | None, note: str) -> str:
+    """Why a probe's base-side result says nothing about discrimination, or ``""``."""
+    if base_entry is None:
+        return note or "the base run has no result for it"
+    if base_entry.get("status") == "environment":
+        return f"could not run on the base (environment): {base_entry.get('environment', '')}".rstrip(": ")
+    if base_entry.get("status") == "unrun":
+        return "not run on the base: the total time for all probes was spent"
+    return ""
+
+
+def _base_revert_discriminate(results: dict[str, Any], base_results: dict[str, Any],
+                              base_wall_s: float) -> None:
+    """Annotate the head-side results with base-revert discrimination, per requirement.
+
+    Each probe that passed on the head is compared with its run on the base: one that
+    fails or times out there is ``discriminating=True``; one that passes there too is
+    ``False``, or ``"non_regression"`` when its header declares ``non-regression`` or
+    ``preserved behaviour``; one the base could not run (an environment failure, not
+    run, or no base at all) is ``"base_unavailable"`` -- it says nothing either way.
+
+    A requirement is verified when at least one of its passing probes discriminates; a
+    helper probe beside it that does not is shown in the table only. A requirement with
+    passing probes and none that discriminates is listed in ``results["base_revert"]``
+    as an advisory finding (`base_revert_findings`): never ``unverified``, which the
+    coverage rule re-runs, and never a defect.
+    """
+    base_by_file = {entry["file"]: entry for entry in base_results.get("probes", [])}
+    note = str(base_results.get("note") or "")
+    by_requirement: dict[str, list[dict[str, Any]]] = {}
+    for entry in results.get("probes", []):
+        if entry.get("status") != "pass":
+            continue
+        base_entry = base_by_file.get(entry["file"])
+        why = _base_unavailable(base_entry, note)
+        if why:
+            entry["discriminating"], entry["base_unavailable"] = "base_unavailable", why
+        else:
+            assert base_entry is not None
+            entry["base_exit_code"] = base_entry.get("exit_code")
+            if entry["base_exit_code"] != 0:
+                # Failed, crashed or timed out (None) on the base: it tells the two apart.
+                entry["discriminating"] = True
+            elif _NON_REGRESSION.search(entry.get("header") or ""):
+                entry["discriminating"] = "non_regression"
+            else:
+                entry["discriminating"] = False
+        by_requirement.setdefault(entry["requirement"], []).append(entry)
+    findings: list[dict[str, Any]] = []
+    for requirement, entries in by_requirement.items():
+        values = [entry["discriminating"] for entry in entries]
+        if any(value is True for value in values):
+            continue
+        files = [entry["file"] for entry in entries]
+        named = ", ".join(files)
+        if "base_unavailable" in values:
+            reasons = "; ".join(dict.fromkeys(entry["base_unavailable"] for entry in entries
+                                              if entry.get("base_unavailable")))
+            kind, text = "base_unavailable", (
+                f"base unavailable: {requirement} could not be checked against the base "
+                f"({named}: {reasons})")
+        elif "non_regression" in values:
+            kind, text = "non_regression_only", (
+                f"verified by non-regression probes only: {requirement} ({named} declare "
+                "preserved behaviour and pass on the base too; no probe shows the change)")
+        else:
+            kind, text = "not_discriminating", (
+                f"unverified: probes pass on the base too: {requirement} ({named} pass with "
+                "the change reverted, so they do not show the change works)")
+        findings.append({"id": requirement, "kind": kind, "probes": files, "finding": text})
+    results["base_revert"] = findings
+    results["base_run"] = base_results
+    results["base_rerun_wall_s"] = base_wall_s
+
+
+def base_revert_findings(results: dict[str, Any]) -> list[str]:
+    """The advisory findings for requirements no probe verified against the base."""
+    return [str(item["finding"]) for item in results.get("base_revert", [])
+            if isinstance(item, dict) and item.get("finding")]
+
+
+def _overlay(changes: dict[str, Any]) -> dict[str, str]:
+    """This process's environment with ``changes`` applied (``None`` unsets a name)."""
+    env = dict(os.environ)
+    for key, value in changes.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = str(value)
+    return env
+
+
+def _shared_base(found: Any) -> Path | None:
+    """The base check's worktree (``base-<run id>``) when it is checked out at the run's
+    base, else ``None``: a worktree at any other commit is not reused."""
+    from refactory_dsh import base_check
+
+    run_id = Path(found.path).name.removeprefix("run-")
+    path = base_check._base_worktree_path(Path(found.target), run_id)
+    return path if base_check._at(path, found.base) else None
+
+
+def _base_clone(workdir: Path, found: Any, facts: dict[str, Any]) -> tuple[Path, dict[str, str]]:
+    """The probes' own base checkout when the base check left none: prepared once per run.
+
+    `clones._prepare` puts a base clone back to the base on every call, so it is called
+    only when no ready checkout is recorded (`BASE_READY`) for this run's target and base,
+    or the recorded one is no longer at the base. A preparation that reported problems is
+    not recorded, so the next pass prepares again. Its environment carries the clone's own
+    HOME (``.refactory/home`` inside it), never this process's.
+    """
+    from refactory_dsh import base_check, clones
+    from refactory_dsh.workspace import OWN, ROOT
+
+    root = Path(workdir) / ROOT / BASE_ROOT
+    ready = root / BASE_READY
+    try:
+        kept = json.loads(ready.read_text())
+    except (OSError, ValueError):
+        kept = {}
+    if (isinstance(kept, dict) and kept.get("base") == found.base and kept.get("target") == found.target
+            and base_check._at(Path(str(kept.get("path"))), found.base)):
+        path, changes = Path(kept["path"]), dict(kept.get("env") or {})
+    else:
+        ready.unlink(missing_ok=True)
+        prepared = clones._prepare(workdir, root, "base", facts=facts, command_timeout_s=PREPARE_TIMEOUT_S)
+        path, changes = Path(prepared["path"]), dict(prepared.get("env") or {})
+        if not prepared.get("problems"):
+            ready.parent.mkdir(parents=True, exist_ok=True)
+            ready.write_text(json.dumps({"base": found.base, "target": found.target,
+                                         "path": str(path), "env": changes}))
+    home = path / OWN / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return path, {**_overlay(changes), "HOME": str(home)}
+
+
+def _run_on_shared_base(probes: Path, base_wt: Path, env: dict[str, str], *, base: str,
+                        check: str, roots: list[Path]) -> dict[str, Any]:
+    """Run the probes in the base check's own worktree without disturbing it.
+
+    No reset and no clean: the worktree holds what the base check built and installed
+    (``lib/``, generated files, a refreshed lockfile), which `base_check.targeted_base_failures`
+    and later base checks reuse. The probe copies are removed afterwards (a file the base
+    already had at a probe's path is put back), and Python writes no bytecode there.
+    """
+    names = sorted(path.name for path in probes.iterdir()
+                   if path.is_file() and PROBE_NAME.match(path.name)) if probes.is_dir() else []
+    # The directories the copies need that the base does not have (``reviews/``, then
+    # ``reviews/probes/``), outermost first: removed afterwards with what is in them.
+    made = [directory for directory in reversed((base_wt / PROBES).parents)
+            if base_wt in directory.parents and not directory.exists()]
+    if not (base_wt / PROBES).exists():
+        made.append(base_wt / PROBES)
+    saved = {name: (base_wt / PROBES / name).read_bytes() for name in names
+             if (base_wt / PROBES / name).is_file()}
+    try:
+        return run_probes(probes, base_wt, "", base=base, env={**env, "PYTHONDONTWRITEBYTECODE": "1"},
+                          reset=None, check=check, roots=roots, total_s=PROBES_TOTAL_S)
+    finally:
+        for name in names:
+            copy = base_wt / PROBES / name
+            if name in saved:
+                copy.write_bytes(saved[name])
+            else:
+                copy.unlink(missing_ok=True)
+        if made:
+            shutil.rmtree(made[0], ignore_errors=True)
+
+
 def rerun_probes(ctx: Any) -> dict[str, Any]:
-    """Op before ``synthesize_qa``: rerun the verifier's probe files on the attempt.
+    """Op before ``synthesize_qa``: rerun the verifier's probe files on the attempt and the base.
 
     The probes come from the verifier's workspace clone (``reviews/probes/`` there; a
     directory is not a declared write, because an agent node fails on a declared output it
     leaves unchanged) and are copied to the run directory, replacing the last round's. They
     run in this op's own clone at the attempt (`clones._prepare`), with that clone's
     prepared environment, reset before each probe.
+
+    The same probes run on the base at the same time, within the same total
+    (``PROBES_TOTAL_S``): in the base check's worktree when it is at the base, left as it
+    is (`_run_on_shared_base`); otherwise in a base clone prepared once per run, beside the
+    attempt's preparation (`_base_clone`). The base side runs with its own HOME. A probe
+    that passes on both does not discriminate; a requirement none of whose probes does is
+    an advisory finding (`_base_revert_discriminate`), never a re-run or a reloop.
     """
+    import concurrent.futures
+
     from refactory_dsh import clones, worktree
-    from refactory_dsh.workspace import ROOT, _slug
+    from refactory_dsh.workspace import OWN, ROOT, _slug
 
     workdir = Path(ctx.workdir)
     probes = workdir / PROBES
@@ -633,17 +838,53 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
         results: dict[str, Any] = {"probes": [], "unverified": [], "per_probe_s": PROBE_TIMEOUT_S,
                                    "total_s": PROBES_TOTAL_S,
                                    "note": "the run has no worktree, so there is no attempt to rerun probes on"}
-    else:
-        prepared = clones._prepare(workdir, workdir / ROOT / "probe_rerun", "attempt",
-                                   facts=dict(ctx.facts), command_timeout_s=PREPARE_TIMEOUT_S)
-        env = dict(os.environ)
-        for key, value in (prepared.get("env") or {}).items():
-            if value is None:
-                env.pop(key, None)
+        text = write_results(workdir, results)
+        return {"probe_results": text}
+    facts = dict(ctx.facts)
+    check = str(ctx.facts.get("check") or "")
+    roots = [Path(found.path)]
+    shared = _shared_base(found)
+    base_wall: list[float] = []
+
+    def timed(run: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
+        began = time.monotonic()
+        try:
+            return run(*args, **kwargs)
+        finally:
+            base_wall.append(time.monotonic() - began)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        head_prepare = pool.submit(clones._prepare, workdir, workdir / ROOT / "probe_rerun", "attempt",
+                                   facts=facts, command_timeout_s=PREPARE_TIMEOUT_S)
+        base_prepare = (None if shared is not None
+                        else pool.submit(_base_clone, workdir, found, facts))
+        base_note = ""
+        base_side = None
+        if shared is not None:
+            # Its own HOME, beside the base side's clone rather than inside the shared
+            # worktree, which the base check would otherwise find untracked files in.
+            home = workdir / ROOT / BASE_ROOT / OWN / "home"
+            home.mkdir(parents=True, exist_ok=True)
+            base_env = {**os.environ, **worktree.check_environment(shared, home)}
+            base_side = pool.submit(timed, _run_on_shared_base, probes, shared, base_env,
+                                    base=found.base, check=check, roots=roots)
+        prepared = head_prepare.result()
+        head = pool.submit(run_probes, probes, Path(prepared["path"]), report, base=found.base,
+                           env=_overlay(prepared.get("env") or {}), reset=reset_checkout,
+                           check=check, roots=roots, total_s=PROBES_TOTAL_S)
+        if shared is None:
+            assert base_prepare is not None
+            try:
+                base_path, base_env = base_prepare.result()
+            except (ValueError, OSError) as exc:
+                base_note = f"the base could not be prepared: {exc}"
             else:
-                env[key] = str(value)
-        results = run_probes(probes, Path(prepared["path"]), report, base=found.base, env=env,
-                             reset=reset_checkout, check=str(ctx.facts.get("check") or ""),
-                             roots=[Path(found.path)])
+                base_side = pool.submit(timed, run_probes, probes, base_path, "", base=found.base,
+                                        env=base_env, reset=clones._clean, check=check,
+                                        roots=roots, total_s=PROBES_TOTAL_S)
+        results = head.result()
+        base_results = base_side.result() if base_side is not None else {"probes": [], "note": base_note}
+    base_results["checkout"] = "the base check's worktree" if shared is not None else "the probes' base clone"
+    _base_revert_discriminate(results, base_results, round(sum(base_wall), 2))
     text = write_results(workdir, results)
     return {"probe_results": text}

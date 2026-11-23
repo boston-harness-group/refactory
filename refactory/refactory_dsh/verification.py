@@ -193,6 +193,17 @@ probe; never substitute a weaker probe. A failing probe is a
 defect finding. Stay within the time budget above; list every class you did not
 probe as **UNCHECKED** with the requirement it belongs to.
 
+### Probe import rule
+
+Every probe must call the changed entry points (the functions listed in
+changed-functions.json and named in the diff) by importing them from the
+workspace — never re-implement or copy their logic into the probe.  Where the
+change affects how a mode runs, at least one probe drives a real mode graph
+(design, design_fast or the pack mode it touches) through the real op or node,
+not a hand-built toy graph.  A non-regression probe (one that checks preserved
+behaviour) must declare `non-regression` or `preserved behaviour` in its
+first-line comment.
+
 ### Output format in reviews/verification.md
 
 For each requirement, write a section:
@@ -246,6 +257,7 @@ def _design_verifier_prompt(methods: str) -> str:
         "Read and run the delivered files at this exact path; do not infer it "
         "from your working directory. {{change}}\n\n"
         "Brief: {{brief}}\n\n"
+        "Changed functions:\n{{changed_functions}}\n\n"
         + _HUNK_REVERT_METHOD
         + _HUNK_REVERT_JUDGING
         + methods +
