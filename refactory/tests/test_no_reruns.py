@@ -762,3 +762,30 @@ def test_the_guardedness_cache_is_kept_per_check_command(tmp_path):
     assert len(fx.sessions("base")) == 1
     base_check.compute_test_guardedness(fx.ctx, check + " -p no:randomly", 120)
     assert len(fx.sessions("base")) == 2
+
+
+@pytest.mark.usefixtures("fake_gh")
+def test_a_check_that_passed_with_deselection_is_run_whole_at_delivery_on_the_walker(tmp_path):
+    """One QA pass whose full check deselects what the self-check passed and passes: that
+    pass is not recorded as a whole run, so delivery runs the whole suite once on the
+    reviewed commit, in the run's worktree (`delivery.whole_suite_owed`)."""
+    import test_self_check as T
+    from tests_support import FakeModel
+
+    from refactory_dsh import delivery
+
+    log = tmp_path / "pytest.log"
+    repo = T._target(tmp_path / "repo", {**T.PINNED, "conftest.py": LOGGER.format(log=str(log)),
+                                         ".gitignore": "__pycache__/\n"})
+    first, _ = _emissions()
+    model = FakeModel(T._answers(first.replace("===FILE: data.txt===\ntwo\n", "")))
+    result = T._design(tmp_path / "run", model, repo)
+    assert result.exit_ok, result.error
+    sessions = [line.split() for line in log.read_text().splitlines() if line.startswith("S ")]
+    whole = [Path(words[1]).name for words in sessions if "tests" in words[2:]]
+    copy_runs = [name for name in whole if name.startswith("check-")]
+    run_runs = [name for name in whole if name.startswith("run-")]
+    assert len(copy_runs) == 1 and len(run_runs) == 1, whole
+    run = tmp_path / "run"
+    owed = json.loads((run / delivery.DESELECTED_CHECKS).read_text())["commits"]
+    assert len(owed) == 1
