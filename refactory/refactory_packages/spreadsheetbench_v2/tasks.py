@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -149,8 +150,14 @@ class SpreadsheetBenchV2Task(Task):
         When LibreOffice, running, cannot open the output but does recalculate a known-good
         workbook (`recalc.soffice_works`), the output is graded as it is, as V2's script
         leaves a file it could not open in place; when it cannot recalculate that either,
-        or LibreOffice itself failed (timed out, killed, crashed: `RecalcError`), the
-        grader is broken: `RecalcFailed`, a harness incident."""
+        the grader is broken: `RecalcFailed`, a harness incident.
+
+        When LibreOffice itself fails on the output (timed out, killed, crashed:
+        `RecalcError`), a fresh reference check runs and, if LibreOffice is healthy, the
+        recalculation is tried once more, alone in this process (`_RETRY_LOCK`). Failing
+        again while LibreOffice stays healthy is the output's doing (`OutputUnrecalculable`,
+        scored 0): an output that hangs LibreOffice every time must not become an incident
+        that is left out of the score. Only an unhealthy LibreOffice is an incident."""
         meta = instance.metadata
         note = ""
         with tempfile.TemporaryDirectory(prefix="sb2-grade-") as work:
@@ -159,10 +166,8 @@ class SpreadsheetBenchV2Task(Task):
                 recalculated = os.path.join(work, "output.xlsx")
                 try:
                     ok, why = open_spreadsheet.recalculate(str(pred), recalculated)
-                except open_spreadsheet.RecalcError as exc:
-                    # Timed out, killed, crashed: LibreOffice's failure, never a silent 0.
-                    raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}recalculating the output: "
-                                       f"{exc}") from exc
+                except open_spreadsheet.RecalcError as first:
+                    ok, why = _retry_recalculation(pred, recalculated, first)
                 if ok:
                     graded = recalculated
                 elif recalc.soffice_works():
@@ -192,6 +197,10 @@ class SpreadsheetBenchV2Task(Task):
                 f"## Execution (case 1)\nERROR: {error}" if error is not None else None))
         try:
             g, note = self.grade(instance, Path(workspace) / PRED)
+        except OutputUnrecalculable as exc:
+            text = f"recalc-failed: {exc}"
+            return VerifyResult(passed=False, score=0.0, details=text[:300],
+                                prediction=f"## Eval Result: FAIL\n{text[:500]}")
         except evaluation_port.OutputUnreadable as exc:
             text = f"output-unreadable: {exc}"
             return VerifyResult(passed=False, score=0.0, details=text[:300],
@@ -202,6 +211,41 @@ class SpreadsheetBenchV2Task(Task):
         return VerifyResult(passed=g.passed, score=g.accuracy,
                             details="" if g.passed else f"eval-mismatch: {g.error_message[:200]}",
                             prediction=report)
+
+
+class OutputUnrecalculable(Exception):
+    """LibreOffice failed on the output twice while it recalculates a known-good workbook:
+    the output's doing, scored 0 with the reason."""
+
+
+#: One retry of a failed recalculation at a time in this process: nothing else of ours
+#: runs LibreOffice beside it.
+_RETRY_LOCK = threading.Lock()
+
+
+def _healthy() -> bool:
+    """A fresh reference check (`recalc.soffice_works`, its cached answer dropped)."""
+    with recalc._lock:  # noqa: SLF001
+        recalc._reference.clear()  # noqa: SLF001
+    return recalc.soffice_works()
+
+
+def _retry_recalculation(pred: Path, dst: str, first: Exception) -> tuple[bool, str]:
+    """After LibreOffice failed on ``pred``: an incident if LibreOffice is unhealthy; else
+    one more try, alone; failing again while healthy, `OutputUnrecalculable`."""
+    with _RETRY_LOCK:
+        if not _healthy():
+            raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}LibreOffice failed recalculating the "
+                               f"output and on a known-good workbook: {first}") from first
+        try:
+            return open_spreadsheet.recalculate(str(pred), dst)
+        except open_spreadsheet.RecalcError as second:
+            if not _healthy():
+                raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}LibreOffice failed recalculating "
+                                   f"the output and on a known-good workbook: {second}") from second
+            raise OutputUnrecalculable(
+                f"LibreOffice could not recalculate the output (twice, while it recalculates a "
+                f"known-good workbook): {second}") from second
 
 
 @functools.lru_cache(maxsize=512)

@@ -507,9 +507,12 @@ How it runs differs, never what it decides:
    score. An output the model's code wrote that cannot be opened is the model's failure,
    `output-unreadable: <why>` (V2 also scores it 0). An output LibreOffice, running, cannot
    open is graded as written when LibreOffice works on a known-good workbook (V2's script
-   leaves such a file in place). LibreOffice itself failing on it -- not starting, crashing
-   or killed (out of memory), failing to calculate or store, or past its process guard -- is
-   a harness incident, never a 0.
+   leaves such a file in place). When LibreOffice itself fails on it -- crashing, killed
+   (out of memory), failing to calculate or store, or past its process guard -- a fresh
+   check on a known-good workbook runs: LibreOffice unhealthy, it is a harness incident;
+   healthy, the output is recalculated once more, alone, and failing again scores 0
+   (`recalc-failed: LibreOffice could not recalculate the output ...`), so an output that
+   hangs LibreOffice every time cannot turn into an incident left out of the score.
 3. **Recalculation.** One file per private LibreOffice profile and pipe, a copy opened
    under a plain name, the source never changed (V2: one service on port 2002, the file
    replaced). The helper streams nothing to measure inactivity by, so a 900 s guard on

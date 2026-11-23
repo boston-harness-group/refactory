@@ -794,17 +794,84 @@ def test_only_a_document_libreoffice_cannot_open_is_its_own_fault(tmp_path, fake
             open_spreadsheet.recalculate(str(src), str(tmp_path / "out.xlsx"), timeout_s=2)
 
 
-def test_libreoffice_failing_on_the_output_is_a_harness_incident(tmp_path, sb2_data, monkeypatch):
-    from refactory_dsh.items import error_kind
-
+def _val_and_pred(tmp_path: Path):
     task = tasks.SpreadsheetBenchV2Task()
     item = next(i for i in task.instances() if i.id == VAL)
     pred = make_workbook(tmp_path / "pred.xlsx", [{"title": "Sheet1", "cells": {"A1": 1, "B1": 7}}])
+    return task, item, pred
 
-    def timed_out(*_a, **_k):
+
+def test_libreoffice_failing_once_on_a_healthy_machine_is_retried(tmp_path, sb2_data, monkeypatch):
+    """LibreOffice healthy: a failed recalculation is tried once more, and its result graded."""
+    task, item, pred = _val_and_pred(tmp_path)
+    calls: list[str] = []
+
+    def flaky(src, dst, **_):
+        calls.append(src)
+        if len(calls) == 1:
+            raise open_spreadsheet.RecalcError("LibreOffice failed (crash): bridge disposed")
+        shutil.copyfile(src, dst)
+        return True, ""
+
+    monkeypatch.setattr(open_spreadsheet, "recalculate", flaky)
+    monkeypatch.setattr(recalc, "soffice_works", lambda: True)
+    g, note = task.grade(item, pred)
+    assert g.passed and note == "" and len(calls) == 2
+
+
+def test_an_output_that_hangs_a_healthy_libreoffice_twice_scores_zero(tmp_path, sb2_data,
+                                                                      monkeypatch):
+    """The output's doing, not an incident: no item may dodge its 0 by hanging LibreOffice."""
+    task, item, pred = _val_and_pred(tmp_path)
+    calls: list[str] = []
+
+    def hangs(src, dst, **_):
+        calls.append(src)
         raise open_spreadsheet.RecalcError("LibreOffice took more than 900 s (its process guard)")
 
-    monkeypatch.setattr(open_spreadsheet, "recalculate", timed_out)
+    monkeypatch.setattr(open_spreadsheet, "recalculate", hangs)
+    monkeypatch.setattr(recalc, "soffice_works", lambda: True)
+    with pytest.raises(tasks.OutputUnrecalculable):
+        task.grade(item, pred)
+    assert len(calls) == 2
+    work = tmp_path / "pass"
+    (work / "item").mkdir(parents=True)
+    shutil.copyfile(pred, work / "pred.xlsx")
+    (work / "final.json").write_text(json.dumps({"fail_reason": "", "n_turns": 1}))
+    verdict = task.verify(item, work)
+    assert (verdict.passed, verdict.score) == (False, 0.0)
+    assert verdict.details.startswith("recalc-failed: LibreOffice could not recalculate the output")
+
+
+def test_libreoffice_failing_while_unhealthy_is_a_harness_incident(tmp_path, sb2_data, monkeypatch):
+    from refactory_dsh.items import error_kind
+
+    task, item, pred = _val_and_pred(tmp_path)
+    health = iter([True, False])
+
+    def hangs(*_a, **_k):
+        raise open_spreadsheet.RecalcError("LibreOffice took more than 900 s (its process guard)")
+
+    monkeypatch.setattr(open_spreadsheet, "recalculate", hangs)
+    # Healthy before the retry, broken after it; and broken from the start.
+    monkeypatch.setattr(recalc, "soffice_works", lambda: next(health))
     with pytest.raises(tasks.RecalcFailed) as caught:
         task.grade(item, pred)
     assert error_kind(caught.value) == "harness_incident"
+    monkeypatch.setattr(recalc, "soffice_works", lambda: False)
+    with pytest.raises(tasks.RecalcFailed):
+        task.grade(item, pred)
+
+
+def test_a_grades_check_of_an_older_tasks_json_is_refused(sb2_data):
+    """A tasks.json changed and re-recorded in prepared.json after `check --grades` leaves
+    that check stale: refused until it runs again."""
+    listed = json.loads((sb2_data / prepare.TASKS_FILE).read_text())
+    listed[0]["answer_position"] = "'Sheet1'!A1"
+    (sb2_data / prepare.TASKS_FILE).write_text(json.dumps(listed))
+    record = json.loads((sb2_data / prepare.PREPARED_FILE).read_text())
+    record["tasks_sha256"] = prepare.sha256(sb2_data / prepare.TASKS_FILE)
+    (sb2_data / prepare.PREPARED_FILE).write_text(json.dumps(record))
+    prepare.check(sb2_data)  # the checksums match: only the grades check is stale
+    with pytest.raises(TaskError, match="check --grades"):
+        tasks.SpreadsheetBenchV2Task().instances()
