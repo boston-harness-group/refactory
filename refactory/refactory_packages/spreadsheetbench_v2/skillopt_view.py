@@ -56,6 +56,36 @@ def agent_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[
     return result
 
 
+def swe_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
+    """One swe item record as SkillOpt's ``claude_code_exec`` result, as the agent mode's:
+    the final message then the verification block (the record's ``prediction``); the
+    target's prompts are V2's system template (appended to Claude Code's) and the prompt
+    the session was sent, with the run's skill."""
+    from . import swe_port
+
+    result = sb_view._base(record)  # noqa: SLF001
+    meta = record.get("metadata") or {}
+    result["task_type"] = meta.get("category", "")
+    exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
+    if record.get("error_text") is not None or not exchanges \
+            or str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        return result
+    conversation = agent_port.conversation(str(exchanges[-1].get("response") or ""))
+    verification = str(record.get("prediction") or record.get("fail_reason") or "")
+    if verification:
+        conversation.append({"role": "system",
+                             "content": f"[POST-EXECUTION VERIFICATION]\n\n{verification}"})
+    result.update({
+        "n_turns": 1,
+        "target_system_prompt": swe_port.SYSTEM_TEMPLATE,
+        "target_user_prompt": swe_port.render(str(meta.get("instruction", "")),
+                                              str(knobs.get("skill", "") or "")),
+        "spreadsheet_preview": _preview(meta),
+        "conversation": conversation,
+    })
+    return result
+
+
 rollout_result = agent_rollout_result
-#: The package's one mode.
-MODE_VIEWS = {"agent": agent_rollout_result}
+#: The package's modes.
+MODE_VIEWS = {"agent": agent_rollout_result, "swe": swe_rollout_result}

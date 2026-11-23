@@ -330,6 +330,12 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                 if place is not None and place.backend == "claude_code":
                     for reads in root.glob("*.reads"):
                         shutil.rmtree(reads, ignore_errors=True)
+                    # And the adapter's session facts beside it, collected or not.
+                    for facts in root.glob(f"*{SESSION_SUFFIX}"):
+                        facts.unlink(missing_ok=True)
+                # And the step's own /tmp (`task.ToolEnvironment.private_tmp`).
+                if place is not None and place.runner:
+                    shutil.rmtree(root / SEAL_TMP, ignore_errors=True)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -554,13 +560,32 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
     # What the runner records beside the workspace belongs to this dispatch alone.
     from refactory_dsh.seal_reaper import incidents_path, notes_path
 
-    for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path))):
+    for record in (incidents_path(str(workspace.path)), notes_path(str(workspace.path)),
+                   session_path(workspace.path)):
         Path(record).unlink(missing_ok=True)
 
 
 #: Beside a sealed step's workspaces: the folder holding its Task's interpreter as
 #: ``python3`` and ``python`` (`seal.tool_path`).
 TOOL_BIN = "tool-bin"
+#: The declared write a sealed Claude Code step's session facts are collected under: the
+#: Claude Code adapter writes them beside the workspace (`session_path`), where no sealed
+#: command can read or write them, never inside it; a file of this name the session left in
+#: its workspace is never collected.
+SEALED_SESSION = ".refactory-session.json"
+#: What follows the workspace's path in the adapter's file beside it.
+SESSION_SUFFIX = ".session.json"
+
+
+def session_path(workspace: str | Path) -> Path:
+    """Where the Claude Code adapter leaves a sealed session's facts: beside its workspace
+    (the adapter's ``recordSealedSession``)."""
+    return Path(os.path.realpath(workspace) + SESSION_SUFFIX)
+
+
+#: Beside it: the step's own folder bound at ``/tmp`` where the Task asks for one
+#: (`task.ToolEnvironment.private_tmp`).
+SEAL_TMP = "seal-tmp"
 
 
 def _tool_path(workspace: Workspace, workdir: Path) -> Any:
@@ -585,8 +610,12 @@ def _tool_path(workspace: Workspace, workdir: Path) -> Any:
     try:
         python = environment.python()
         hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
+        commands = dict(environment.commands()) if environment.commands is not None else {}
+        reads = list(environment.reads()) if environment.reads is not None else []
         tool_path = seal.tool_path(python, workspace.root / TOOL_BIN, workspace=workspace.path,
-                                   runs=run_roots(workdir), hidden=hidden)
+                                   runs=run_roots(workdir), hidden=hidden, commands=commands,
+                                   reads=reads, tmp=(workspace.root / SEAL_TMP
+                                                     if environment.private_tmp else None))
     except Exception as exc:  # noqa: BLE001 - the Task's own check, said with its reason
         raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed with Task "
                              f"{ref!r}'s tool environment, which cannot be given: "
@@ -1257,6 +1286,7 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
     """
     from refactory_dsh.agent_delivery import _path
 
+    session = session_path(workspace.path)
     if workspace.runner:
         from refactory_dsh.seal_reaper import incidents_path, notes_path, reap
 
@@ -1327,6 +1357,11 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for name in (writes[1:] if replies else writes):
+                if replies and name == SEALED_SESSION:
+                    # The adapter's record of the session, from beside the workspace: what
+                    # the session left inside it under this name is never taken.
+                    _collect_session(session, _path(workdir, name))
+                    continue
                 relative = Path(name)
                 if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                     raise WorkspaceError(f"output {name!r} must be relative")
@@ -1364,6 +1399,23 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         summary["copied"] = copied
     _write_json(workspace.root / "collected.json", summary)
     return summary
+
+
+def _collect_session(source: Path, destination: Path) -> None:
+    """Copy the adapter's session facts to ``destination`` (a regular file, never through a
+    link), or leave ``destination`` absent when the adapter wrote none. The source goes with
+    the dispatch (`dispatched`)."""
+    destination.unlink(missing_ok=True)
+    try:
+        fd = os.open(source, os.O_RDONLY | _NOFOLLOW)
+    except FileNotFoundError:
+        return
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _copy_file(fd, destination)
+    finally:
+        os.close(fd)
 
 
 def optional_writes(workspace: Mapping[str, Any] | None, writes: list[str]) -> tuple[str, ...]:
