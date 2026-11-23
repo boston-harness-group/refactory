@@ -93,16 +93,19 @@ def build_codex_task(instruction: str, input_xlsx: str, instruction_type: str = 
                      answer_position: str = "") -> str:
     """task.md: the chat path's first user message, then the harness's own section."""
     prompt = port.build_user(instruction, input_xlsx, instruction_type, answer_position)
-    return (
-        f"{prompt}\n\n"
-        "## Codex Harness Task\n"
-        "- Read `.agents/skills/skillopt-target/SKILL.md` before writing code; do not call a Skill tool.\n"
-        "- Read and optionally inspect `input.xlsx` in this workspace.\n"
-        "- Write the final Python solution to `solution.py`.\n"
-        "- The script should use the provided `INPUT_PATH` and `OUTPUT_PATH` variables.\n"
-        "- If you want to validate locally, run `python run_solution.py`.\n"
-        "- Do not return a code fence as the primary artifact; the source of truth is `solution.py`.\n"
-    )
+    return f"{prompt}\n\n{CODEX_TASK_SECTION}"
+
+
+#: codegen_agent.py:248-256: the harness's own section of task.md, after the task's prompt.
+CODEX_TASK_SECTION = (
+    "## Codex Harness Task\n"
+    "- Read `.agents/skills/skillopt-target/SKILL.md` before writing code; do not call a Skill tool.\n"
+    "- Read and optionally inspect `input.xlsx` in this workspace.\n"
+    "- Write the final Python solution to `solution.py`.\n"
+    "- The script should use the provided `INPUT_PATH` and `OUTPUT_PATH` variables.\n"
+    "- If you want to validate locally, run `python run_solution.py`.\n"
+    "- Do not return a code fence as the primary artifact; the source of truth is `solution.py`.\n"
+)
 
 
 # codegen_agent.py:259-316 ``_build_codex_driver``

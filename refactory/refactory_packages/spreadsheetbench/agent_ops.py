@@ -54,17 +54,23 @@ def prepare(ctx: Any) -> dict[str, Any]:
         preview = port.preview_workbook(str(source))
     except Exception:  # noqa: BLE001 - rollout.py:702-705
         preview = "(preview failed)"
-    ctx._note_write(agent_port.INPUT_PATH)  # noqa: SLF001 - a declared write, copied in place
-    shutil.copyfile(source, ctx._writable(agent_port.INPUT_PATH))  # noqa: SLF001
-    ctx.write_text(agent_port.SKILL_PATH, agent_port.build_codex_skill(skill))
-    ctx.write_text(agent_port.TASK_PATH,
-                   agent_port.build_codex_task(instruction, str(source), itype, position))
-    ctx.write_text(agent_port.DRIVER_PATH, agent_port.RUN_SOLUTION)
+    write_workspace(ctx, source, skill,
+                    agent_port.build_codex_task(instruction, str(source), itype, position))
     ctx.write_text(ops.PREVIEW_FILE, preview)
     ctx.write_text(ops.SYSTEM_FILE, port.build_system(skill))
     ctx.write_text(ops.USER_FILE, port.build_user(instruction, str(source), itype, position))
     ctx.write_json(TURN, {"start": started, "status": ""})
     return {"has_case": True}
+
+
+def write_workspace(ctx: Any, source: Any, skill: Any, task: str) -> None:
+    """SkillOpt's workspace files in the pass (codegen_agent.py:319-358): the input as
+    ``input.xlsx``, SKILL.md for ``skill``, ``task`` as task.md, and run_solution.py."""
+    ctx._note_write(agent_port.INPUT_PATH)  # noqa: SLF001 - a declared write, copied in place
+    shutil.copyfile(source, ctx._writable(agent_port.INPUT_PATH))  # noqa: SLF001
+    ctx.write_text(agent_port.SKILL_PATH, agent_port.build_codex_skill(skill))
+    ctx.write_text(agent_port.TASK_PATH, task)
+    ctx.write_text(agent_port.DRIVER_PATH, agent_port.RUN_SOLUTION)
 
 
 def finalize(ctx: Any) -> dict[str, Any]:
@@ -74,6 +80,11 @@ def finalize(ctx: Any) -> dict[str, Any]:
     error or a missing output fails. Writes `tasks.FINAL` and SkillOpt's
     ``conversation.json`` (the final message alone). A solve step that ended without an
     answer ends the item with no answer (`ops.NoReply`), as in the solver."""
+    return finalize_item(ctx, ops._data_roots())  # noqa: SLF001
+
+
+def finalize_item(ctx: Any, data_roots: list[str]) -> dict[str, Any]:
+    """`finalize`, with model code blind to ``data_roots`` (the Task's dataset)."""
     item = ops._item(ctx)  # noqa: SLF001
     turn = ctx.read_json(TURN, {}) or {}
     fail_reason, n_turns, exec_error = "", 0, None
@@ -94,7 +105,7 @@ def finalize(ctx: Any) -> dict[str, Any]:
         if not code.strip():
             fail_reason = "empty-code-block"  # rollout.py:783-786
         else:
-            ok, err = ops._sandbox_run(ctx, item, code)  # noqa: SLF001
+            ok, err = ops._sandbox_run(ctx, item, code, data_roots)  # noqa: SLF001
             if not ok:
                 fail_reason = f"exec-error: {port.tail_line(err)}"
                 exec_error = err[:500]  # rollout.py:802-812, shown to the analysts

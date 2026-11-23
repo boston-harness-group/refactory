@@ -1,0 +1,4522 @@
+{
+ "benchmark": "SpreadsheetBench 2 (V2)",
+ "source": "https://huggingface.co/datasets/KAKA22/SpreadsheetBench-v2",
+ "archive": "spreadsheetbench-v2-09-10.zip",
+ "archive_sha256": "52699c974c30aced7125f3d12cdaabbbcbba8db804373d7397a5d3bdf68e5b3e",
+ "grader": "evaluation/evaluation.py",
+ "grader_sha256": "04a2a75b29805ab40efe93e202384c365d1d32b9c924c1a4aed56e41249facb0",
+ "dataset_json_sha256": {
+  "Debugging": "fb3441c0255a50f9e5e885c9c8dc952b109ba5673f712c181e5d7da7b1c682cc",
+  "Financial_Model": "4edf2a8dd20384ef9d0fd1719d83ecbdb209b111ddfa9365c4ea0613b80ddf78",
+  "Template": "e3d2942e1fab23ae0c90ad199d0cb43660027965593de810ff50f9ea67397e61",
+  "Visualization": "357db7391d36b2c860e20239834b51325d6b51e33009ada997886f2bb9612e01"
+ },
+ "split": {
+  "seed": 20261123,
+  "unit": "group (Debugging workbook, FM project, Template)",
+  "method": "Debugging and Financial_Model: random.Random(seed).sample of the sorted groups, train then val (2+1 and 5+3 groups); Template: the audit's choice; the rest test",
+  "groups": {
+   "Debugging": {
+    "train": [
+     "08_Debugging",
+     "10_Debugging"
+    ],
+    "val": [
+     "03_Debugging"
+    ],
+    "test": [
+     "01_Debugging",
+     "02_Debugging",
+     "04_Debugging",
+     "05_Debugging",
+     "06_Debugging",
+     "07_Debugging",
+     "09_Debugging"
+    ]
+   },
+   "Financial_Model": {
+    "train": [
+     "03_Project Banking",
+     "06_Project DigiMark",
+     "13_Project Logistic",
+     "17_Project FMCG",
+     "18_Project Road Assets"
+    ],
+    "val": [
+     "01_Project Education",
+     "12_Project Infra",
+     "19_Project Transformer"
+    ],
+    "test": [
+     "02_Project PP",
+     "04_Project Consumer",
+     "05_Project AIF",
+     "07_Project Real Estate Financial Model",
+     "08_Project Seafood Model",
+     "09_Project Pepsi Co",
+     "10_McDonalds",
+     "11_Project Switchgear",
+     "14_Project Refinery",
+     "15_Project KIMS",
+     "16_Project Ramjet",
+     "20_Project Fintech"
+    ]
+   },
+   "Template": {
+    "train": [
+     "16_re_direct_cap",
+     "14_re_dcf",
+     "03_consolidation"
+    ],
+    "val": [
+     "01_bond_accounting",
+     "02_cash_sweep"
+    ],
+    "test": [
+     "04_dcf_valuation",
+     "05_deferred_tax",
+     "06_equity_forecast",
+     "07_equity_method",
+     "08_fin_model_basics",
+     "09_lbo_model",
+     "10_ma_analysis",
+     "11_ma_model",
+     "12_net_op_loss",
+     "13_nonrecurring",
+     "15_re_debt"
+    ]
+   }
+  }
+ },
+ "parts": {
+  "train": [
+   "debugging-08_01",
+   "debugging-08_03",
+   "debugging-08_05",
+   "debugging-08_06",
+   "debugging-08_07",
+   "debugging-08_08",
+   "debugging-08_09",
+   "debugging-08_10",
+   "debugging-10_01",
+   "debugging-10_03",
+   "debugging-10_05",
+   "debugging-10_06",
+   "debugging-10_07",
+   "debugging-10_08",
+   "debugging-10_09",
+   "debugging-10_10",
+   "financial_model-03_01",
+   "financial_model-03_02",
+   "financial_model-03_03",
+   "financial_model-03_04",
+   "financial_model-03_05",
+   "financial_model-06_01",
+   "financial_model-06_02",
+   "financial_model-06_03",
+   "financial_model-06_04",
+   "financial_model-06_05",
+   "financial_model-13_01",
+   "financial_model-13_02",
+   "financial_model-13_03",
+   "financial_model-13_04",
+   "financial_model-13_05",
+   "financial_model-17_01",
+   "financial_model-17_02",
+   "financial_model-17_03",
+   "financial_model-17_04",
+   "financial_model-17_05",
+   "financial_model-18_01",
+   "financial_model-18_02",
+   "financial_model-18_03",
+   "financial_model-18_04",
+   "financial_model-18_05",
+   "template-03_01",
+   "template-03_02",
+   "template-03_03",
+   "template-03_04",
+   "template-14_01",
+   "template-14_02",
+   "template-14_03",
+   "template-14_04",
+   "template-14_05",
+   "template-14_06",
+   "template-14_07",
+   "template-14_08",
+   "template-14_09",
+   "template-16_01",
+   "template-16_02",
+   "template-16_03",
+   "template-16_04",
+   "template-16_05",
+   "template-16_06",
+   "template-16_07",
+   "template-16_08",
+   "template-16_09",
+   "template-16_10",
+   "template-16_11",
+   "template-16_12"
+  ],
+  "val": [
+   "debugging-03_01",
+   "debugging-03_03",
+   "debugging-03_05",
+   "debugging-03_06",
+   "debugging-03_07",
+   "debugging-03_08",
+   "debugging-03_09",
+   "debugging-03_10",
+   "financial_model-01_01",
+   "financial_model-01_02",
+   "financial_model-01_03",
+   "financial_model-01_04",
+   "financial_model-01_05",
+   "financial_model-12_01",
+   "financial_model-12_02",
+   "financial_model-12_03",
+   "financial_model-12_04",
+   "financial_model-12_05",
+   "financial_model-19_01",
+   "financial_model-19_02",
+   "financial_model-19_03",
+   "financial_model-19_04",
+   "financial_model-19_05",
+   "template-01_01",
+   "template-01_02",
+   "template-01_03",
+   "template-01_04",
+   "template-01_05",
+   "template-01_06",
+   "template-01_07",
+   "template-01_08",
+   "template-01_09",
+   "template-02_01",
+   "template-02_02",
+   "template-02_03",
+   "template-02_04",
+   "template-02_05",
+   "template-02_06"
+  ],
+  "test": [
+   "debugging-01_01",
+   "debugging-01_03",
+   "debugging-01_05",
+   "debugging-01_06",
+   "debugging-01_07",
+   "debugging-01_08",
+   "debugging-01_09",
+   "debugging-01_10",
+   "debugging-02_01",
+   "debugging-02_03",
+   "debugging-02_05",
+   "debugging-02_06",
+   "debugging-02_07",
+   "debugging-02_08",
+   "debugging-02_09",
+   "debugging-02_10",
+   "debugging-04_01",
+   "debugging-04_03",
+   "debugging-04_05",
+   "debugging-04_06",
+   "debugging-04_07",
+   "debugging-04_08",
+   "debugging-04_09",
+   "debugging-04_10",
+   "debugging-05_01",
+   "debugging-05_03",
+   "debugging-05_05",
+   "debugging-05_06",
+   "debugging-05_07",
+   "debugging-05_08",
+   "debugging-05_09",
+   "debugging-05_10",
+   "debugging-06_01",
+   "debugging-06_03",
+   "debugging-06_05",
+   "debugging-06_06",
+   "debugging-06_07",
+   "debugging-06_08",
+   "debugging-06_09",
+   "debugging-06_10",
+   "debugging-07_01",
+   "debugging-07_03",
+   "debugging-07_05",
+   "debugging-07_06",
+   "debugging-07_07",
+   "debugging-07_08",
+   "debugging-07_09",
+   "debugging-07_10",
+   "debugging-09_01",
+   "debugging-09_03",
+   "debugging-09_05",
+   "debugging-09_06",
+   "debugging-09_07",
+   "debugging-09_08",
+   "debugging-09_09",
+   "debugging-09_10",
+   "financial_model-02_01",
+   "financial_model-02_02",
+   "financial_model-02_03",
+   "financial_model-02_04",
+   "financial_model-02_05",
+   "financial_model-04_01",
+   "financial_model-04_02",
+   "financial_model-04_03",
+   "financial_model-04_04",
+   "financial_model-04_05",
+   "financial_model-05_01",
+   "financial_model-05_02",
+   "financial_model-05_03",
+   "financial_model-05_04",
+   "financial_model-05_05",
+   "financial_model-07_01",
+   "financial_model-07_02",
+   "financial_model-07_03",
+   "financial_model-07_04",
+   "financial_model-07_05",
+   "financial_model-08_01",
+   "financial_model-08_02",
+   "financial_model-08_03",
+   "financial_model-08_04",
+   "financial_model-08_05",
+   "financial_model-09_01",
+   "financial_model-09_02",
+   "financial_model-09_03",
+   "financial_model-09_04",
+   "financial_model-09_05",
+   "financial_model-10_01",
+   "financial_model-10_02",
+   "financial_model-10_03",
+   "financial_model-10_04",
+   "financial_model-10_05",
+   "financial_model-11_01",
+   "financial_model-11_02",
+   "financial_model-11_03",
+   "financial_model-11_04",
+   "financial_model-11_05",
+   "financial_model-14_01",
+   "financial_model-14_02",
+   "financial_model-14_03",
+   "financial_model-14_04",
+   "financial_model-14_05",
+   "financial_model-15_01",
+   "financial_model-15_02",
+   "financial_model-15_03",
+   "financial_model-15_04",
+   "financial_model-15_05",
+   "financial_model-16_01",
+   "financial_model-16_02",
+   "financial_model-16_03",
+   "financial_model-16_04",
+   "financial_model-16_05",
+   "financial_model-20_01",
+   "financial_model-20_02",
+   "financial_model-20_03",
+   "financial_model-20_04",
+   "financial_model-20_05",
+   "template-04_03",
+   "template-04_04",
+   "template-05_01",
+   "template-05_02",
+   "template-06_01",
+   "template-06_02",
+   "template-06_03",
+   "template-06_04",
+   "template-06_05",
+   "template-06_06",
+   "template-06_07",
+   "template-06_08",
+   "template-06_09",
+   "template-06_11",
+   "template-06_12",
+   "template-06_13",
+   "template-06_14",
+   "template-06_15",
+   "template-06_16",
+   "template-06_17",
+   "template-06_18",
+   "template-06_19",
+   "template-06_20",
+   "template-06_21",
+   "template-06_22",
+   "template-06_23",
+   "template-06_24",
+   "template-06_25",
+   "template-07_01",
+   "template-07_02",
+   "template-07_03",
+   "template-08_01",
+   "template-08_02",
+   "template-08_03",
+   "template-09_01",
+   "template-09_02",
+   "template-09_03",
+   "template-09_04",
+   "template-10_01",
+   "template-10_02",
+   "template-11_01",
+   "template-11_02",
+   "template-11_03",
+   "template-11_04",
+   "template-12_01",
+   "template-13_01",
+   "template-13_02",
+   "template-13_03",
+   "template-13_04",
+   "template-13_05",
+   "template-13_06",
+   "template-13_07",
+   "template-13_08",
+   "template-15_01",
+   "template-15_02",
+   "template-15_03",
+   "template-15_04"
+  ]
+ },
+ "dropped": [
+  {
+   "id": "debugging-01_02",
+   "category": "Debugging",
+   "source_id": "01_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-01_04",
+   "category": "Debugging",
+   "source_id": "01_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-02_02",
+   "category": "Debugging",
+   "source_id": "02_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-02_04",
+   "category": "Debugging",
+   "source_id": "02_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-03_02",
+   "category": "Debugging",
+   "source_id": "03_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-03_04",
+   "category": "Debugging",
+   "source_id": "03_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-04_02",
+   "category": "Debugging",
+   "source_id": "04_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-04_04",
+   "category": "Debugging",
+   "source_id": "04_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-05_02",
+   "category": "Debugging",
+   "source_id": "05_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-05_04",
+   "category": "Debugging",
+   "source_id": "05_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-06_02",
+   "category": "Debugging",
+   "source_id": "06_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-06_04",
+   "category": "Debugging",
+   "source_id": "06_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-07_02",
+   "category": "Debugging",
+   "source_id": "07_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-07_04",
+   "category": "Debugging",
+   "source_id": "07_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-08_02",
+   "category": "Debugging",
+   "source_id": "08_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-08_04",
+   "category": "Debugging",
+   "source_id": "08_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-09_02",
+   "category": "Debugging",
+   "source_id": "09_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-09_04",
+   "category": "Debugging",
+   "source_id": "09_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "debugging-10_02",
+   "category": "Debugging",
+   "source_id": "10_02",
+   "reason": "Debugging 'Embedded Hardcode': V2 grades it by formula text (with_formula), so only the golden's exact formulas pass; dropped by the owner as impossible"
+  },
+  {
+   "id": "debugging-10_04",
+   "category": "Debugging",
+   "source_id": "10_04",
+   "reason": "Debugging 'Inconsistent Color Coding': V2 grades font colours (with_font_color) against a colour convention the instruction never states; dropped by the owner as unspecified"
+  },
+  {
+   "id": "visualization-Task 96",
+   "category": "Visualization",
+   "source_id": "Task 96",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 95",
+   "category": "Visualization",
+   "source_id": "Task 95",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1411527",
+   "category": "Visualization",
+   "source_id": "Task 1411527",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1437004",
+   "category": "Visualization",
+   "source_id": "Task 1437004",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1423401",
+   "category": "Visualization",
+   "source_id": "Task 1423401",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1426290",
+   "category": "Visualization",
+   "source_id": "Task 1426290",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1420776",
+   "category": "Visualization",
+   "source_id": "Task 1420776",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1433875",
+   "category": "Visualization",
+   "source_id": "Task 1433875",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1428419",
+   "category": "Visualization",
+   "source_id": "Task 1428419",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1434951",
+   "category": "Visualization",
+   "source_id": "Task 1434951",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1417365",
+   "category": "Visualization",
+   "source_id": "Task 1417365",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 90",
+   "category": "Visualization",
+   "source_id": "Task 90",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1430721",
+   "category": "Visualization",
+   "source_id": "Task 1430721",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 127",
+   "category": "Visualization",
+   "source_id": "Task 127",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 133",
+   "category": "Visualization",
+   "source_id": "Task 133",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1431124",
+   "category": "Visualization",
+   "source_id": "Task 1431124",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1421372",
+   "category": "Visualization",
+   "source_id": "Task 1421372",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1419935",
+   "category": "Visualization",
+   "source_id": "Task 1419935",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 1422635",
+   "category": "Visualization",
+   "source_id": "Task 1422635",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 131",
+   "category": "Visualization",
+   "source_id": "Task 131",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 134",
+   "category": "Visualization",
+   "source_id": "Task 134",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 126",
+   "category": "Visualization",
+   "source_id": "Task 126",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 132",
+   "category": "Visualization",
+   "source_id": "Task 132",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  },
+  {
+   "id": "visualization-Task 129",
+   "category": "Visualization",
+   "source_id": "Task 129",
+   "reason": "Visualization needs V2's Windows Excel/WPS COM export and a VLM checklist judge (run_visual_vlm_checklist_eval.py); not file-graded"
+  }
+ ],
+ "tasks": [
+  {
+   "id": "debugging-01_01",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_01",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "e6d8eb78c3c91d352c054a5c043493861954ffa1cf75f80076a1b2d062709c10"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_03",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_03",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "db44c7fba3299b49a07572c2be03ea4544fabbdf633d22c978013857198dd9a9"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_05",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_05",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "24b0999de0f20959e97b9372e50a791b0528e7e793b4555a8a477ea783953387"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_06",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_06",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "9af630a02079a57a7542217de50822bd1c5b92e1e08416128be3dc600ad0aeeb"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_07",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_07",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "97f867b9624e3496dc8673842aafb951ccc5f45c285b70cc1284b99f38956789"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_08",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_08",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "ba4cf8036c9558fd947c600c0e53f7154d58e217ca67b2ba75546882a0089793"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_09",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_09",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "b8212812e23364bf75d059513c51fc8e37fbd079ec8d9724e813c8f52c664eec"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-01_10",
+   "category": "Debugging",
+   "group": "01_Debugging",
+   "source_id": "01_10",
+   "input": {
+    "source": "spreadsheet/01_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "8b6e6e0c11a6c421126ea4ccb8dd11989bd156bd14b8634e95d06430cc7a4aa6"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Debugging/01_golden.xlsx",
+    "sha256": "4ea318ac60b4266a0b752d92d8174c7e526c99570d987764e20bcacfde68c151"
+   }
+  },
+  {
+   "id": "debugging-02_01",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_01",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "77b6f563c88d02b6ad558bf026f63cd20ac8cad480f9d5c86020e7fc451ac1d7"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_03",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_03",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "db0ec61dfd9ab2ba12cfaabf651c6b8b1b7d49c0babf04efb8e759eb7acd87d9"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_05",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_05",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "23a52e0fbd9781d8916d38a5354f04c227762c94bc612774a5fa6d806cadd8fb"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_06",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_06",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "8201c6f818b331626002113e51b43d30aafb7ebe27218b3457111042ee3f6d1f"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_07",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_07",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "7bf86619840153905e207cfffa77beb0a9e6ba8ea317900f793f4e32c4ab78e3"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_08",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_08",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Incorrect SIgn Conventions_input.xlsx",
+    "sha256": "7b14d4e28f4c99da7b6084ce10b0e72e68a6b76fb3e38b784a347bcffa2ffddb"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_09",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_09",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Relative vs Absolute DIfference_input.xlsx",
+    "sha256": "04dbc3abefe1f46126f6e17276abaff2ce6590dac18b432e2991e4b1aa3234ee"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-02_10",
+   "category": "Debugging",
+   "group": "02_Debugging",
+   "source_id": "02_10",
+   "input": {
+    "source": "spreadsheet/02_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "c5944f9440a895c42c63ab768cf9903d345968a9906281063213c68610daa916"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Debugging/02_golden.xlsx",
+    "sha256": "5d9e6cbeb73605712e254c2131db67a4fd554cfe69400c0a344ef7227aa2a14a"
+   }
+  },
+  {
+   "id": "debugging-03_01",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_01",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "ecda6fb3f4d03fa240c8e1ddbbdb286f78b81bec040c79440087ebac1817119e"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_03",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_03",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "429746c05f685b8de96b29cd29406ff85425952f60829b23dbdcef85682a1c72"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_05",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_05",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Incorrect AVERAGE Formulas_input.xlsx",
+    "sha256": "b154619a3e9d283c3f3f29388854ceedc07b005962c5709b0343519feb1c3aa7"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_06",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_06",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "04fd2d7d1a21b8aa74ff151cdad8c2e0f9c6904b56e7528454b94d675e1ee3fb"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_07",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_07",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "251afe58a9a530b51a3de789bd937fbd39bf900cbdeef304c0bbb8ee66e898b6"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_08",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_08",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "63caa28b7b77459beaadb3bbfdbf3e49ebe75005a415ea6c1eaa5df66ab482ab"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_09",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_09",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "faeed65afaa0a881d6431d314bb50ba2363374b2d62770d38548401387aac811"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-03_10",
+   "category": "Debugging",
+   "group": "03_Debugging",
+   "source_id": "03_10",
+   "input": {
+    "source": "spreadsheet/03_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "8ec530aa156f1830043b48d701e37797f8ce84fe9a013999770d7fdcfdd1f740"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Debugging/03_golden.xlsx",
+    "sha256": "62b00ecda6f2319b49f1992ef7c0023fbaf85e70ab780e996201f873cc60f5ae"
+   }
+  },
+  {
+   "id": "debugging-04_01",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_01",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "c771ab4039f106e116bd3f0d9e63b60392f3b7fe1715ac2e9cbde789f9867967"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_03",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_03",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "e141b511b8e2da0a2709f44f1133d476846cb34878beab4998e7c7c638be3fb9"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_05",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_05",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "7179c1f90f16846a9d8e7da13c0ac9a44f553ba009f8632745d8a375945ba81a"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_06",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_06",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "5b44c960fb8a29619c1c5305cbf7c7a361f7b3582832a58307710d7e34083f99"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_07",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_07",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "d148f7eefd3b1578aaf1b39dc3f34dbf2628719a68e9f956d7b3ca49c245c886"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_08",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_08",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Index Match_input.xlsx",
+    "sha256": "81282125223aef806f56403642e28a4b537e9ed25fc7e6a12c22e779b5575600"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_09",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_09",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "db2bb797924d3db4b455f891b22f413c1f5819b9d2bd08eb0a41eb6cbb2ced32"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-04_10",
+   "category": "Debugging",
+   "group": "04_Debugging",
+   "source_id": "04_10",
+   "input": {
+    "source": "spreadsheet/04_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "591ba6628753083cf20bb3a1484cdc312a74283f55021dc1a568236886955ee3"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Debugging/04_golden.xlsx",
+    "sha256": "e4678dfcde8801143ba0262a2877c14667c3b12bfc64843f3bf912df0f26adb3"
+   }
+  },
+  {
+   "id": "debugging-05_01",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_01",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "25a31549306c99903875f7dad88c6226943292d6283f5e852c0c79de2a563c71"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_03",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_03",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "5d4e004157f4b32649eec9982139fcb36d396829896f836d9cdb420966b4c96f"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_05",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_05",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "781a9610b0fd86d70dffa8cf6165d527ace3559e5f02527f9992f7462b7e55cf"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_06",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_06",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "84016f905d1c6362c9d1313730e6d0ff0093f0eb9c3c597777c93449d4376550"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_07",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_07",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "e2a09b87fc7086bd68f9b0c942b98f67bef0f505f13662cde7ad1bfcf2204e75"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_08",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_08",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Index Match_input.xlsx",
+    "sha256": "e217338fd5aebf20f3d9ff35bcd531d0342ce7f3a19189da2fab313e9aa4ec14"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_09",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_09",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "ddee256c22f26e63ed1f5ee480f643c07c0293275509abaa23e9ae2671a2bdff"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-05_10",
+   "category": "Debugging",
+   "group": "05_Debugging",
+   "source_id": "05_10",
+   "input": {
+    "source": "spreadsheet/05_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "24deeb892abcdea86ff0ab7849e3015aac77139bb2bf8f684b15a10e990a0a26"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Debugging/05_golden.xlsx",
+    "sha256": "9efa82756754ca6a68665c729bbc1153b303d67f736211fee4851a7a97c1e302"
+   }
+  },
+  {
+   "id": "debugging-06_01",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_01",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "dd266f24eb9f024a73847ba737130a20f2688285aa6e1769840f456ab592afa3"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_03",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_03",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "82ce8834d05954d28be7e028f9d16f51f13653d06bf80645a68dccd50177474b"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_05",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_05",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "2a690378dc1e0d2330661457c9c95a26a65efbba08624a9c59548e64ab202c44"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_06",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_06",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "1e56aaeab4158bfed82d367e7fef8fb20f90dba3cabd78d155455f162f5876fb"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_07",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_07",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "12be93ac09199f8885c252a1c3df24101d6d4e4fffcbc46de6ad9a9dc089461a"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_08",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_08",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "f1e36b190dad0133f66dd66ceae355376f6afc79387d40b91ec39c48a273c48b"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_09",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_09",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "f85e9144271f1f20da5baa06ead43a49db01778b07c0115220bae451d171431a"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-06_10",
+   "category": "Debugging",
+   "group": "06_Debugging",
+   "source_id": "06_10",
+   "input": {
+    "source": "spreadsheet/06_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "56e031f5fa3e13c65bf5e85e6bf92c7852a910eac3c4538053f57bbcae6fdd8d"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Debugging/06_golden.xlsx",
+    "sha256": "c5681ba6e86324c0ab0df02c93b742be4a2381e42d6796ba3235bd3dc82dc78f"
+   }
+  },
+  {
+   "id": "debugging-07_01",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_01",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "0ab0be5d7146ce1fed1c3889bd6a39227d28e072ad1bd628c1a4cfa6be0765fb"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_03",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_03",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "597a37f4e41d6fa8296c613b1d84cf9c411259d26c0aadb284ece327235ac6d8"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_05",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_05",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "acb75164e5ce88cb741ef59d87637707c33ce88b3978ed85076d1517ef3e407c"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_06",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_06",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "e5abcfd2c6aa60cc34dd2223856ffb675cd5055724cd32c83ee8e8ee9d3b7e80"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_07",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_07",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "6549cd388689053591430b6d261652728156c714a6b16e5272ec7331929d62d4"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_08",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_08",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "29654241c1ef12a3b3de4348b8d01b1eee314c23123c3fd6b54201eca04ce2aa"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_09",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_09",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "25b8f573c5634f265ab601bf96ea18c788649536aa94fb2057bdd5c86f7c97e6"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-07_10",
+   "category": "Debugging",
+   "group": "07_Debugging",
+   "source_id": "07_10",
+   "input": {
+    "source": "spreadsheet/07_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "56cd4d321a284c14af5c21217ac12a196ae214ae5d1f08dc995ff5d06f41e8bf"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Debugging/07_golden.xlsx",
+    "sha256": "fb6560812e95d115891c19e58e9944fbc91062203a4ae9859102fd66a3596b5a"
+   }
+  },
+  {
+   "id": "debugging-08_01",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_01",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "623d33a48cd5417b98e9feeb6f5a6d2f794bb3b7f45209f44de58bc6898d2e5f"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_03",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_03",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "91967c0fe1ff863be8496b4f15038554d2119ebc6b2a58a116eb77b8dad2535f"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_05",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_05",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "839f34f72114675e37a0f387eebd1738bd7c46fcc2f10201d55741666a09635f"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_06",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_06",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "379497ec0a3704d37723edb6ea13286e1bb3464c326102f2835451791a19f546"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_07",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_07",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "0f8d6951c67ddde73291b75aaf23cfea6d9597f83e957bea07a757f318910bcb"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_08",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_08",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "58453e76b47008d09bf00bda3baf9bc03012f083bb4ac8d15453188cf544ebe8"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_09",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_09",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "25c2d10b4b5fd177be174a6bbd38aa8da5d1e1a129b402634859d15c6c7902aa"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-08_10",
+   "category": "Debugging",
+   "group": "08_Debugging",
+   "source_id": "08_10",
+   "input": {
+    "source": "spreadsheet/08_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "fbd145ce47cd91b345cf904e6ea398077fcb8275e7e0be88b9da1728803480a0"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Debugging/08_golden.xlsx",
+    "sha256": "c1e64ce307674d7db322b439e0f3d4c8b82586b5856423cc0f7c1ccfd47a6a4f"
+   }
+  },
+  {
+   "id": "debugging-09_01",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_01",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "f8a833086c28d4fd21e1bd11a083e2e8bd022002f5e0f6c2c57ae4ff9df80a44"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_03",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_03",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "f1ca163a1198e742864c9814016b49f397a0f1d0469685a5d7efd618aec7ca5a"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_05",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_05",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "105fc9ddfefaa18fa47c91b4982b031acf14809b6a32a1db066b87c89420e540"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_06",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_06",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "23a1b5efdc61408aa2d55ca6163dc35dc122cf811ed8cd3362cc960c0b6d06ae"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_07",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_07",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "91c1a5b5ea594278e7293c2496decbd55070dc0cc36d6ee1e21a10bcabe90495"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_08",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_08",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "7a43373f3a9bb308f87bb4aceeed3b8622736064d95a8ab09c03b58baba8ba0f"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_09",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_09",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "0ca3f0cf0a4639e2789005f81bf540731cd9f17a7797378883cb242e6a709a57"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-09_10",
+   "category": "Debugging",
+   "group": "09_Debugging",
+   "source_id": "09_10",
+   "input": {
+    "source": "spreadsheet/09_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "8d2621f7c98ed7772b750f20fc2e16e79720e5aa9e2eed8d272d02eda90caeb1"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Debugging/09_golden.xlsx",
+    "sha256": "16d82179dff96d5e35d0617cdc0a784fbe455062f78ed7c91a0421a65f88a83a"
+   }
+  },
+  {
+   "id": "debugging-10_01",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_01",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Double Counting_input.xlsx",
+    "sha256": "d166bbab1a79c99fa58f93214218d39c46deb703bb09b94bc45a830c86e098c8"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_03",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_03",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Errors_input.xlsx",
+    "sha256": "98876c941a68149d80e3d6f3f556f47d7e0e5b4a061734ba52b3dbc267a31ffa"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_05",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_05",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Incorrect Average_input.xlsx",
+    "sha256": "d31657423bc94c41a1476e40d1f298c6788be355f54d371541c576ee7b9e63e2"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_06",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_06",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Incorrect Cross Sheet References_input.xlsx",
+    "sha256": "5dab3eb476bc9ee3f983cb6d79b19b5c52d467e06a2d1bd1f4914ab77ed1bd28"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_07",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_07",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Incorrect Index Match_input.xlsx",
+    "sha256": "0d51c60e2cbef7e4b675815f9873fe69c01cac1e06cd69bf8a5751c1f64ee956"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_08",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_08",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Incorrect Sign Conventions_input.xlsx",
+    "sha256": "47b855a00724978616f3ffbbd672228eaf3f3c8c35096fa9143b05cde1b3cb16"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_09",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_09",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Relative vs Absolute References_input.xlsx",
+    "sha256": "9f3ea329fa1508dbf7f963c1c9aa2c256443608ed17fcad98db3cfd04dae0017"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "debugging-10_10",
+   "category": "Debugging",
+   "group": "10_Debugging",
+   "source_id": "10_10",
+   "input": {
+    "source": "spreadsheet/10_Debugging/input_files/Unit Mismatch_input.xlsx",
+    "sha256": "3d95978b76409416f96be4645daeb2e28f949c171cc159560627506ef1c7eb34"
+   },
+   "golden": {
+    "source": "spreadsheet/10_Debugging/10_golden.xlsx",
+    "sha256": "22a7f1d1ec9cadf51489a3b8871674075d1507f1ffef7066cb6ff6a8f9319609"
+   }
+  },
+  {
+   "id": "financial_model-01_01",
+   "category": "Financial_Model",
+   "group": "01_Project Education",
+   "source_id": "01_01",
+   "input": {
+    "source": "spreadsheet/01_Project Education/01_01_Education_input.xlsx",
+    "sha256": "a01657c0cc7116569be1d649bb259d32073d3fa6261d7d9da22c461875e1080c"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Project Education/01_Education_golden.xlsx",
+    "sha256": "02538233e6cf415ca7b374ef4a2118c88b100cfb351ad9fc5043754b0bf68364"
+   }
+  },
+  {
+   "id": "financial_model-01_02",
+   "category": "Financial_Model",
+   "group": "01_Project Education",
+   "source_id": "01_02",
+   "input": {
+    "source": "spreadsheet/01_Project Education/01_02_Education_input.xlsx",
+    "sha256": "7bef070ef527823c8e0e4dad9b68b05e2ae23348b69120860587121622df84d2"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Project Education/01_Education_golden.xlsx",
+    "sha256": "02538233e6cf415ca7b374ef4a2118c88b100cfb351ad9fc5043754b0bf68364"
+   }
+  },
+  {
+   "id": "financial_model-01_03",
+   "category": "Financial_Model",
+   "group": "01_Project Education",
+   "source_id": "01_03",
+   "input": {
+    "source": "spreadsheet/01_Project Education/01_03_Education_input.xlsx",
+    "sha256": "d39250a953e76f7c7ef0aad7dd591cb59e3b7663ffdef138ccb64140dbe4857d"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Project Education/01_Education_golden.xlsx",
+    "sha256": "02538233e6cf415ca7b374ef4a2118c88b100cfb351ad9fc5043754b0bf68364"
+   }
+  },
+  {
+   "id": "financial_model-01_04",
+   "category": "Financial_Model",
+   "group": "01_Project Education",
+   "source_id": "01_04",
+   "input": {
+    "source": "spreadsheet/01_Project Education/01_04_Education_input.xlsx",
+    "sha256": "39cf8b5324b27be0d4883c00b41ca0fce535e52f042165372fe4c2e4249d8a0d"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Project Education/01_Education_golden.xlsx",
+    "sha256": "02538233e6cf415ca7b374ef4a2118c88b100cfb351ad9fc5043754b0bf68364"
+   }
+  },
+  {
+   "id": "financial_model-01_05",
+   "category": "Financial_Model",
+   "group": "01_Project Education",
+   "source_id": "01_05",
+   "input": {
+    "source": "spreadsheet/01_Project Education/01_05_Education_input.xlsx",
+    "sha256": "5031d351e9ca0c7c8f87417d8f03505f1a5c08ba72a9ac07efb5ff3094726697"
+   },
+   "golden": {
+    "source": "spreadsheet/01_Project Education/01_Education_golden.xlsx",
+    "sha256": "02538233e6cf415ca7b374ef4a2118c88b100cfb351ad9fc5043754b0bf68364"
+   }
+  },
+  {
+   "id": "financial_model-02_01",
+   "category": "Financial_Model",
+   "group": "02_Project PP",
+   "source_id": "02_01",
+   "input": {
+    "source": "spreadsheet/02_Project PP/02_01_PP_input.xlsx",
+    "sha256": "2a7aa7cbeda9ebbd90c52b28090030140e30a5d019af05da4844b21396c673e8"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Project PP/02_PP_golden.xlsx",
+    "sha256": "d2b71c081d3fb124ccf41ebe357f7b92439bab93b3e0cb77279e47289ca3862f"
+   }
+  },
+  {
+   "id": "financial_model-02_02",
+   "category": "Financial_Model",
+   "group": "02_Project PP",
+   "source_id": "02_02",
+   "input": {
+    "source": "spreadsheet/02_Project PP/02_02_PP_input.xlsx",
+    "sha256": "012e8dec15d49b7b39d9a9dd2a103dde5c68547de8ae59a0759b5894b2830d33"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Project PP/02_PP_golden.xlsx",
+    "sha256": "d2b71c081d3fb124ccf41ebe357f7b92439bab93b3e0cb77279e47289ca3862f"
+   }
+  },
+  {
+   "id": "financial_model-02_03",
+   "category": "Financial_Model",
+   "group": "02_Project PP",
+   "source_id": "02_03",
+   "input": {
+    "source": "spreadsheet/02_Project PP/02_03_PP_input.xlsx",
+    "sha256": "b074b65f57ff82918a5ac56b79a39ebfc3ca937ddf674b6834642b1fc2fc2634"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Project PP/02_PP_golden.xlsx",
+    "sha256": "d2b71c081d3fb124ccf41ebe357f7b92439bab93b3e0cb77279e47289ca3862f"
+   }
+  },
+  {
+   "id": "financial_model-02_04",
+   "category": "Financial_Model",
+   "group": "02_Project PP",
+   "source_id": "02_04",
+   "input": {
+    "source": "spreadsheet/02_Project PP/02_04_PP_input.xlsx",
+    "sha256": "1b64bd5ac59b13beceb019da28ee25a8e12d479e14d625ce3ead88ccc344c741"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Project PP/02_PP_golden.xlsx",
+    "sha256": "d2b71c081d3fb124ccf41ebe357f7b92439bab93b3e0cb77279e47289ca3862f"
+   }
+  },
+  {
+   "id": "financial_model-02_05",
+   "category": "Financial_Model",
+   "group": "02_Project PP",
+   "source_id": "02_05",
+   "input": {
+    "source": "spreadsheet/02_Project PP/02_05_PP_input.xlsx",
+    "sha256": "f61402df84ff17d94590f86939a408f786cb4fdeba82eb3e1911d8ebb839febd"
+   },
+   "golden": {
+    "source": "spreadsheet/02_Project PP/02_PP_golden.xlsx",
+    "sha256": "d2b71c081d3fb124ccf41ebe357f7b92439bab93b3e0cb77279e47289ca3862f"
+   }
+  },
+  {
+   "id": "financial_model-03_01",
+   "category": "Financial_Model",
+   "group": "03_Project Banking",
+   "source_id": "03_01",
+   "input": {
+    "source": "spreadsheet/03_Project Banking/03_01_Banking_input.xlsx",
+    "sha256": "e778cda4836182acff0820576be7d819dfd482fa4ad0ba1f8aaae8dbcdf56409"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Project Banking/03_Banking_golden.xlsx",
+    "sha256": "435ff55edf4f3932e01bd1dd5e495717284320233ea94b2eec53787c7b8da6c4"
+   }
+  },
+  {
+   "id": "financial_model-03_02",
+   "category": "Financial_Model",
+   "group": "03_Project Banking",
+   "source_id": "03_02",
+   "input": {
+    "source": "spreadsheet/03_Project Banking/03_02_Banking_input.xlsx",
+    "sha256": "2b97543e8da5ac93c0f4052d010c7663733f943c134a897338f22789400b9a2d"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Project Banking/03_Banking_golden.xlsx",
+    "sha256": "435ff55edf4f3932e01bd1dd5e495717284320233ea94b2eec53787c7b8da6c4"
+   }
+  },
+  {
+   "id": "financial_model-03_03",
+   "category": "Financial_Model",
+   "group": "03_Project Banking",
+   "source_id": "03_03",
+   "input": {
+    "source": "spreadsheet/03_Project Banking/03_03_Banking_input.xlsx",
+    "sha256": "8b54f0bd5074a28523a236925f96ebc6f5393ae23a8cc39d5705baba2915a791"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Project Banking/03_Banking_golden.xlsx",
+    "sha256": "435ff55edf4f3932e01bd1dd5e495717284320233ea94b2eec53787c7b8da6c4"
+   }
+  },
+  {
+   "id": "financial_model-03_04",
+   "category": "Financial_Model",
+   "group": "03_Project Banking",
+   "source_id": "03_04",
+   "input": {
+    "source": "spreadsheet/03_Project Banking/03_04_Banking_input.xlsx",
+    "sha256": "ced328cd42d272bedbd083d6d3d1365ff165c04881b81d8a41c15b9e0a4c5c56"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Project Banking/03_Banking_golden.xlsx",
+    "sha256": "435ff55edf4f3932e01bd1dd5e495717284320233ea94b2eec53787c7b8da6c4"
+   }
+  },
+  {
+   "id": "financial_model-03_05",
+   "category": "Financial_Model",
+   "group": "03_Project Banking",
+   "source_id": "03_05",
+   "input": {
+    "source": "spreadsheet/03_Project Banking/03_05_Banking_input.xlsx",
+    "sha256": "aedacb1a4d333256ffc6111f5d6654b2f95154004221df691bff7750ef8b9971"
+   },
+   "golden": {
+    "source": "spreadsheet/03_Project Banking/03_Banking_golden.xlsx",
+    "sha256": "435ff55edf4f3932e01bd1dd5e495717284320233ea94b2eec53787c7b8da6c4"
+   }
+  },
+  {
+   "id": "financial_model-04_01",
+   "category": "Financial_Model",
+   "group": "04_Project Consumer",
+   "source_id": "04_01",
+   "input": {
+    "source": "spreadsheet/04_Project Consumer/04_01_Consumer_input.xlsx",
+    "sha256": "778697c92c78c44e765535c4d7dd7a1bca016099500dc1cbaa161137fc66ff30"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Project Consumer/04_Consumer_golden.xlsx",
+    "sha256": "782e5a5716df333c1bc399b85303aecd832b3ce1f747ea9beb7b36a4beb27c12"
+   }
+  },
+  {
+   "id": "financial_model-04_02",
+   "category": "Financial_Model",
+   "group": "04_Project Consumer",
+   "source_id": "04_02",
+   "input": {
+    "source": "spreadsheet/04_Project Consumer/04_02_Consumer_input.xlsx",
+    "sha256": "a25008961a947d602fb95d002ce2aae21fd8f3fb26acfee37edefb29c4a2a21d"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Project Consumer/04_Consumer_golden.xlsx",
+    "sha256": "782e5a5716df333c1bc399b85303aecd832b3ce1f747ea9beb7b36a4beb27c12"
+   }
+  },
+  {
+   "id": "financial_model-04_03",
+   "category": "Financial_Model",
+   "group": "04_Project Consumer",
+   "source_id": "04_03",
+   "input": {
+    "source": "spreadsheet/04_Project Consumer/04_03_Consumer_input.xlsx",
+    "sha256": "411a3f589feb3e74ffcf51ae0f3cfdd2472ad0fa1df589e57d2c639d1b9f5450"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Project Consumer/04_Consumer_golden.xlsx",
+    "sha256": "782e5a5716df333c1bc399b85303aecd832b3ce1f747ea9beb7b36a4beb27c12"
+   }
+  },
+  {
+   "id": "financial_model-04_04",
+   "category": "Financial_Model",
+   "group": "04_Project Consumer",
+   "source_id": "04_04",
+   "input": {
+    "source": "spreadsheet/04_Project Consumer/04_04_Consumer_input.xlsx",
+    "sha256": "b1c4002c330256cd3c1313dfe83769d3aa58210c7201b5d587e344d19119cbef"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Project Consumer/04_Consumer_golden.xlsx",
+    "sha256": "782e5a5716df333c1bc399b85303aecd832b3ce1f747ea9beb7b36a4beb27c12"
+   }
+  },
+  {
+   "id": "financial_model-04_05",
+   "category": "Financial_Model",
+   "group": "04_Project Consumer",
+   "source_id": "04_05",
+   "input": {
+    "source": "spreadsheet/04_Project Consumer/04_05_Consumer_input.xlsx",
+    "sha256": "bd8755e24c3523a9441b8b65df3f1de79e92fe71d8fbe5bd3a1beb5d61e0ddea"
+   },
+   "golden": {
+    "source": "spreadsheet/04_Project Consumer/04_Consumer_golden.xlsx",
+    "sha256": "782e5a5716df333c1bc399b85303aecd832b3ce1f747ea9beb7b36a4beb27c12"
+   }
+  },
+  {
+   "id": "financial_model-05_01",
+   "category": "Financial_Model",
+   "group": "05_Project AIF",
+   "source_id": "05_01",
+   "input": {
+    "source": "spreadsheet/05_Project AIF/05_01_AIF_input.xlsx",
+    "sha256": "413ca0c2e6c93f520999bc017c210c414775ff2b1cd2d9571cccae191c5e2a8a"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Project AIF/05_AIF_golden.xlsx",
+    "sha256": "b7f9ae747cf4dd2ee469882525d097e84f28f45d183cc5e27b96d8d22d7dcad2"
+   }
+  },
+  {
+   "id": "financial_model-05_02",
+   "category": "Financial_Model",
+   "group": "05_Project AIF",
+   "source_id": "05_02",
+   "input": {
+    "source": "spreadsheet/05_Project AIF/05_02_AIF_input.xlsx",
+    "sha256": "12651652e92bdd2d99f81d3c520914aed6a0bd7ffb79405822983213831e1c23"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Project AIF/05_AIF_golden.xlsx",
+    "sha256": "b7f9ae747cf4dd2ee469882525d097e84f28f45d183cc5e27b96d8d22d7dcad2"
+   }
+  },
+  {
+   "id": "financial_model-05_03",
+   "category": "Financial_Model",
+   "group": "05_Project AIF",
+   "source_id": "05_03",
+   "input": {
+    "source": "spreadsheet/05_Project AIF/05_03_AIF_input.xlsx",
+    "sha256": "159896d762ca558df423eb8c88c2b59701f2a036bd6f2dd46567e866946f5b59"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Project AIF/05_AIF_golden.xlsx",
+    "sha256": "b7f9ae747cf4dd2ee469882525d097e84f28f45d183cc5e27b96d8d22d7dcad2"
+   }
+  },
+  {
+   "id": "financial_model-05_04",
+   "category": "Financial_Model",
+   "group": "05_Project AIF",
+   "source_id": "05_04",
+   "input": {
+    "source": "spreadsheet/05_Project AIF/05_04_AIF_input.xlsx",
+    "sha256": "f2f3404940042e431e4b45a8bc323a632b36336ec7ec3354ad3ad85a90c1e33c"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Project AIF/05_AIF_golden.xlsx",
+    "sha256": "b7f9ae747cf4dd2ee469882525d097e84f28f45d183cc5e27b96d8d22d7dcad2"
+   }
+  },
+  {
+   "id": "financial_model-05_05",
+   "category": "Financial_Model",
+   "group": "05_Project AIF",
+   "source_id": "05_05",
+   "input": {
+    "source": "spreadsheet/05_Project AIF/05_05_AIF_input.xlsx",
+    "sha256": "49b84a5d474d28bd91e489210ca581de1d26a61703fa869ebc79db4b375e09bf"
+   },
+   "golden": {
+    "source": "spreadsheet/05_Project AIF/05_AIF_golden.xlsx",
+    "sha256": "b7f9ae747cf4dd2ee469882525d097e84f28f45d183cc5e27b96d8d22d7dcad2"
+   }
+  },
+  {
+   "id": "financial_model-06_01",
+   "category": "Financial_Model",
+   "group": "06_Project DigiMark",
+   "source_id": "06_01",
+   "input": {
+    "source": "spreadsheet/06_Project DigiMark/06_01_DigiMark_input.xlsx",
+    "sha256": "71233a0b02e0680361836392ca41c567aae657ce91dd24c4248f273f459fd53c"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Project DigiMark/06_DigiMark_golden.xlsx",
+    "sha256": "d5339b166301954638db51edbac5d77d7692bf4057ff6c22c8ff449d914038c5"
+   }
+  },
+  {
+   "id": "financial_model-06_02",
+   "category": "Financial_Model",
+   "group": "06_Project DigiMark",
+   "source_id": "06_02",
+   "input": {
+    "source": "spreadsheet/06_Project DigiMark/06_02_DigiMark_input.xlsx",
+    "sha256": "df11e2ade3fbb3644f64ab0e5003e4339fcb27ebaabd80939eded019da664172"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Project DigiMark/06_DigiMark_golden.xlsx",
+    "sha256": "d5339b166301954638db51edbac5d77d7692bf4057ff6c22c8ff449d914038c5"
+   }
+  },
+  {
+   "id": "financial_model-06_03",
+   "category": "Financial_Model",
+   "group": "06_Project DigiMark",
+   "source_id": "06_03",
+   "input": {
+    "source": "spreadsheet/06_Project DigiMark/06_03_DigiMark_input.xlsx",
+    "sha256": "feddfcf6f02f9966139593d76c54743643404a678c9379ca1721cd1f85da17d3"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Project DigiMark/06_DigiMark_golden.xlsx",
+    "sha256": "d5339b166301954638db51edbac5d77d7692bf4057ff6c22c8ff449d914038c5"
+   }
+  },
+  {
+   "id": "financial_model-06_04",
+   "category": "Financial_Model",
+   "group": "06_Project DigiMark",
+   "source_id": "06_04",
+   "input": {
+    "source": "spreadsheet/06_Project DigiMark/06_04_DigiMark_input.xlsx",
+    "sha256": "61e871f377d5615b0a82a93f67d34c6e1db95c997d8b0d6f6e20b9d950f4be18"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Project DigiMark/06_DigiMark_golden.xlsx",
+    "sha256": "d5339b166301954638db51edbac5d77d7692bf4057ff6c22c8ff449d914038c5"
+   }
+  },
+  {
+   "id": "financial_model-06_05",
+   "category": "Financial_Model",
+   "group": "06_Project DigiMark",
+   "source_id": "06_05",
+   "input": {
+    "source": "spreadsheet/06_Project DigiMark/06_05_DigiMark_input.xlsx",
+    "sha256": "f5e91b13e9a0710ebaf33f8b33ef24e3ebb7b7927f7841163c12c01b483ce2fb"
+   },
+   "golden": {
+    "source": "spreadsheet/06_Project DigiMark/06_DigiMark_golden.xlsx",
+    "sha256": "d5339b166301954638db51edbac5d77d7692bf4057ff6c22c8ff449d914038c5"
+   }
+  },
+  {
+   "id": "financial_model-07_01",
+   "category": "Financial_Model",
+   "group": "07_Project Real Estate Financial Model",
+   "source_id": "07_01",
+   "input": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_01_RealEstate_input.xlsx",
+    "sha256": "e918281d3d7072ceb87fce285e49e77fa8843a260fc827f9c554dc0b47a6b185"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_RealEstate_golden.xlsx",
+    "sha256": "aa41ee2798277aced3d295113cef1e4e4106bc464e23631a0cb8260d4e07d4cd"
+   }
+  },
+  {
+   "id": "financial_model-07_02",
+   "category": "Financial_Model",
+   "group": "07_Project Real Estate Financial Model",
+   "source_id": "07_02",
+   "input": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_02_RealEstate_input.xlsx",
+    "sha256": "824958e79a4ba3bf7014c70e48d4270094498c5e66c27ea7ffd58b2069e79101"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_RealEstate_golden.xlsx",
+    "sha256": "aa41ee2798277aced3d295113cef1e4e4106bc464e23631a0cb8260d4e07d4cd"
+   }
+  },
+  {
+   "id": "financial_model-07_03",
+   "category": "Financial_Model",
+   "group": "07_Project Real Estate Financial Model",
+   "source_id": "07_03",
+   "input": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_03_RealEstate_input.xlsx",
+    "sha256": "049d4fd664e00bf7e2cc7f78dff59ee4ee5565e3aba192f2b8ace6b19dd88831"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_RealEstate_golden.xlsx",
+    "sha256": "aa41ee2798277aced3d295113cef1e4e4106bc464e23631a0cb8260d4e07d4cd"
+   }
+  },
+  {
+   "id": "financial_model-07_04",
+   "category": "Financial_Model",
+   "group": "07_Project Real Estate Financial Model",
+   "source_id": "07_04",
+   "input": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_04_RealEstate_input.xlsx",
+    "sha256": "2a554bc917fa34892cbeee88dfdf0a0154c3451251095b6d9a1496d032467cf2"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_RealEstate_golden.xlsx",
+    "sha256": "aa41ee2798277aced3d295113cef1e4e4106bc464e23631a0cb8260d4e07d4cd"
+   }
+  },
+  {
+   "id": "financial_model-07_05",
+   "category": "Financial_Model",
+   "group": "07_Project Real Estate Financial Model",
+   "source_id": "07_05",
+   "input": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_05_RealEstate_input.xlsx",
+    "sha256": "53f45db0aca73afd1a03c54b5111a65ed8e447cbc04a3748450a2ea79b288964"
+   },
+   "golden": {
+    "source": "spreadsheet/07_Project Real Estate Financial Model/07_RealEstate_golden.xlsx",
+    "sha256": "aa41ee2798277aced3d295113cef1e4e4106bc464e23631a0cb8260d4e07d4cd"
+   }
+  },
+  {
+   "id": "financial_model-08_01",
+   "category": "Financial_Model",
+   "group": "08_Project Seafood Model",
+   "source_id": "08_01",
+   "input": {
+    "source": "spreadsheet/08_Project Seafood Model/08_01_Seafood_input.xlsx",
+    "sha256": "6d742f67e84fcc3d92d1dec6b285417093b99dec1469686f1c6813aee9ad2a0a"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Project Seafood Model/08_Seafood_golden.xlsx",
+    "sha256": "e23c0780bcfdab82ba92c3435a25880ed60d1aab550a38de7219f241ba6a647c"
+   }
+  },
+  {
+   "id": "financial_model-08_02",
+   "category": "Financial_Model",
+   "group": "08_Project Seafood Model",
+   "source_id": "08_02",
+   "input": {
+    "source": "spreadsheet/08_Project Seafood Model/08_02_Seafood_input.xlsx",
+    "sha256": "9928600b0184036b03a8664c1e2dcd8994e5f90e866d68c140dd6543b3ac0aff"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Project Seafood Model/08_Seafood_golden.xlsx",
+    "sha256": "e23c0780bcfdab82ba92c3435a25880ed60d1aab550a38de7219f241ba6a647c"
+   }
+  },
+  {
+   "id": "financial_model-08_03",
+   "category": "Financial_Model",
+   "group": "08_Project Seafood Model",
+   "source_id": "08_03",
+   "input": {
+    "source": "spreadsheet/08_Project Seafood Model/08_03_Seafood_input.xlsx",
+    "sha256": "2b7a84044765a4664ddb197de168fbd7feb8fff395a027a4923ee2d9ab9e8dc1"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Project Seafood Model/08_Seafood_golden.xlsx",
+    "sha256": "e23c0780bcfdab82ba92c3435a25880ed60d1aab550a38de7219f241ba6a647c"
+   }
+  },
+  {
+   "id": "financial_model-08_04",
+   "category": "Financial_Model",
+   "group": "08_Project Seafood Model",
+   "source_id": "08_04",
+   "input": {
+    "source": "spreadsheet/08_Project Seafood Model/08_04_Seafood_input.xlsx",
+    "sha256": "4201821791e065ce9b7e79a6938da5386c4d0b11f51cd018bec824ad02ee28d6"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Project Seafood Model/08_Seafood_golden.xlsx",
+    "sha256": "e23c0780bcfdab82ba92c3435a25880ed60d1aab550a38de7219f241ba6a647c"
+   }
+  },
+  {
+   "id": "financial_model-08_05",
+   "category": "Financial_Model",
+   "group": "08_Project Seafood Model",
+   "source_id": "08_05",
+   "input": {
+    "source": "spreadsheet/08_Project Seafood Model/08_05_Seafood_input.xlsx",
+    "sha256": "629d5e66d268b458c66bc64864310f8802e749ad8a61515d0d738f50dc06d661"
+   },
+   "golden": {
+    "source": "spreadsheet/08_Project Seafood Model/08_Seafood_golden.xlsx",
+    "sha256": "e23c0780bcfdab82ba92c3435a25880ed60d1aab550a38de7219f241ba6a647c"
+   }
+  },
+  {
+   "id": "financial_model-09_01",
+   "category": "Financial_Model",
+   "group": "09_Project Pepsi Co",
+   "source_id": "09_01",
+   "input": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_01_PepsiCo_input.xlsx",
+    "sha256": "339c7f50273b972adbfd45010d1464e2428f19a577e94d7a777deb149f01dd5d"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_PepsiCo_golden.xlsx",
+    "sha256": "4ea7e68c2caa7f3839d2ef0bc0ad5e4a59a9ead049b0dacd7b01e8ad485fe562"
+   }
+  },
+  {
+   "id": "financial_model-09_02",
+   "category": "Financial_Model",
+   "group": "09_Project Pepsi Co",
+   "source_id": "09_02",
+   "input": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_02_PepsiCo_input.xlsx",
+    "sha256": "a6aad8ddac8bf96574fec50f577cfe1038ae9a566a97ed26aef0019d07e8b7f0"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_PepsiCo_golden.xlsx",
+    "sha256": "4ea7e68c2caa7f3839d2ef0bc0ad5e4a59a9ead049b0dacd7b01e8ad485fe562"
+   }
+  },
+  {
+   "id": "financial_model-09_03",
+   "category": "Financial_Model",
+   "group": "09_Project Pepsi Co",
+   "source_id": "09_03",
+   "input": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_03_PepsiCo_input.xlsx",
+    "sha256": "80a0621898fef8ffc7df0a83d157bf447e24756de5993fa622a0e049ff536b49"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_PepsiCo_golden.xlsx",
+    "sha256": "4ea7e68c2caa7f3839d2ef0bc0ad5e4a59a9ead049b0dacd7b01e8ad485fe562"
+   }
+  },
+  {
+   "id": "financial_model-09_04",
+   "category": "Financial_Model",
+   "group": "09_Project Pepsi Co",
+   "source_id": "09_04",
+   "input": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_04_PepsiCo_input.xlsx",
+    "sha256": "a5651398b99864c48a22b6c1ab35f661da37fc4c1f9d1e56f605c61cfd6c9cdc"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_PepsiCo_golden.xlsx",
+    "sha256": "4ea7e68c2caa7f3839d2ef0bc0ad5e4a59a9ead049b0dacd7b01e8ad485fe562"
+   }
+  },
+  {
+   "id": "financial_model-09_05",
+   "category": "Financial_Model",
+   "group": "09_Project Pepsi Co",
+   "source_id": "09_05",
+   "input": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_05_PepsiCo_input.xlsx",
+    "sha256": "2fb7e86a702f3d3de1c0ab46ed2ff8e085ab249901c39246f3b09f427feac45d"
+   },
+   "golden": {
+    "source": "spreadsheet/09_Project Pepsi Co/09_PepsiCo_golden.xlsx",
+    "sha256": "4ea7e68c2caa7f3839d2ef0bc0ad5e4a59a9ead049b0dacd7b01e8ad485fe562"
+   }
+  },
+  {
+   "id": "financial_model-10_01",
+   "category": "Financial_Model",
+   "group": "10_McDonalds",
+   "source_id": "10_01",
+   "input": {
+    "source": "spreadsheet/10_McDonalds/10_01_McDonalds_input.xlsx",
+    "sha256": "26f8817083ad13636971bc7fa18d75fd4a3d10111d8872fa1ab98e7cbd1aa8a7"
+   },
+   "golden": {
+    "source": "spreadsheet/10_McDonalds/10_McDonalds_golden.xlsx",
+    "sha256": "661638e615a710959124a7beeee723572a4e10fe490ddfb7bc37175100f2e0b2"
+   }
+  },
+  {
+   "id": "financial_model-10_02",
+   "category": "Financial_Model",
+   "group": "10_McDonalds",
+   "source_id": "10_02",
+   "input": {
+    "source": "spreadsheet/10_McDonalds/10_02_McDonalds_input.xlsx",
+    "sha256": "44000447c19c6825d42cc32e3f0e4d555a5e7ac52a4f467b9e7b4e30fb5afd39"
+   },
+   "golden": {
+    "source": "spreadsheet/10_McDonalds/10_McDonalds_golden.xlsx",
+    "sha256": "661638e615a710959124a7beeee723572a4e10fe490ddfb7bc37175100f2e0b2"
+   }
+  },
+  {
+   "id": "financial_model-10_03",
+   "category": "Financial_Model",
+   "group": "10_McDonalds",
+   "source_id": "10_03",
+   "input": {
+    "source": "spreadsheet/10_McDonalds/10_03_McDonalds_input.xlsx",
+    "sha256": "747035b624ba85eb48e527948df2fdba807b9678662ca846eaf7d4e94fadf026"
+   },
+   "golden": {
+    "source": "spreadsheet/10_McDonalds/10_McDonalds_golden.xlsx",
+    "sha256": "661638e615a710959124a7beeee723572a4e10fe490ddfb7bc37175100f2e0b2"
+   }
+  },
+  {
+   "id": "financial_model-10_04",
+   "category": "Financial_Model",
+   "group": "10_McDonalds",
+   "source_id": "10_04",
+   "input": {
+    "source": "spreadsheet/10_McDonalds/10_04_McDonalds_input.xlsx",
+    "sha256": "0eacc5bcdb562911deacde8bb856e29845050c95c1cfa0b156e998d11eb16e90"
+   },
+   "golden": {
+    "source": "spreadsheet/10_McDonalds/10_McDonalds_golden.xlsx",
+    "sha256": "661638e615a710959124a7beeee723572a4e10fe490ddfb7bc37175100f2e0b2"
+   }
+  },
+  {
+   "id": "financial_model-10_05",
+   "category": "Financial_Model",
+   "group": "10_McDonalds",
+   "source_id": "10_05",
+   "input": {
+    "source": "spreadsheet/10_McDonalds/10_05_McDonalds_input.xlsx",
+    "sha256": "4eaad378ee6279ad2674d3306c9b5d38ae79c8b73b960d2e161c3c91a7a02fe3"
+   },
+   "golden": {
+    "source": "spreadsheet/10_McDonalds/10_McDonalds_golden.xlsx",
+    "sha256": "661638e615a710959124a7beeee723572a4e10fe490ddfb7bc37175100f2e0b2"
+   }
+  },
+  {
+   "id": "financial_model-11_01",
+   "category": "Financial_Model",
+   "group": "11_Project Switchgear",
+   "source_id": "11_01",
+   "input": {
+    "source": "spreadsheet/11_Project Switchgear/11_01_Switchgear_input.xlsx",
+    "sha256": "595664997b5628ecb48169d035b8f760bcaf5407af8334570029c987a1a34736"
+   },
+   "golden": {
+    "source": "spreadsheet/11_Project Switchgear/11_Switchgear_golden.xlsx",
+    "sha256": "aa20a0b757a3e992c377c5cbd001567a232aa7b56abeebb9253571d31b315959"
+   }
+  },
+  {
+   "id": "financial_model-11_02",
+   "category": "Financial_Model",
+   "group": "11_Project Switchgear",
+   "source_id": "11_02",
+   "input": {
+    "source": "spreadsheet/11_Project Switchgear/11_02_Switchgear_input.xlsx",
+    "sha256": "2102c51421d746b2a090e83b46e37c927b6a839d82d3df75b39f8c5d058b2105"
+   },
+   "golden": {
+    "source": "spreadsheet/11_Project Switchgear/11_Switchgear_golden.xlsx",
+    "sha256": "aa20a0b757a3e992c377c5cbd001567a232aa7b56abeebb9253571d31b315959"
+   }
+  },
+  {
+   "id": "financial_model-11_03",
+   "category": "Financial_Model",
+   "group": "11_Project Switchgear",
+   "source_id": "11_03",
+   "input": {
+    "source": "spreadsheet/11_Project Switchgear/11_03_Switchgear_input.xlsx",
+    "sha256": "917f751d455f0f26683bb0934e248989a3d1b8b54813dea69c40f528cbbc09a2"
+   },
+   "golden": {
+    "source": "spreadsheet/11_Project Switchgear/11_Switchgear_golden.xlsx",
+    "sha256": "aa20a0b757a3e992c377c5cbd001567a232aa7b56abeebb9253571d31b315959"
+   }
+  },
+  {
+   "id": "financial_model-11_04",
+   "category": "Financial_Model",
+   "group": "11_Project Switchgear",
+   "source_id": "11_04",
+   "input": {
+    "source": "spreadsheet/11_Project Switchgear/11_04_Switchgear_input.xlsx",
+    "sha256": "ebdab1146fed51bd38265117a4b323ba9970142b7b6ba6b3830e2e7641c4c8e8"
+   },
+   "golden": {
+    "source": "spreadsheet/11_Project Switchgear/11_Switchgear_golden.xlsx",
+    "sha256": "aa20a0b757a3e992c377c5cbd001567a232aa7b56abeebb9253571d31b315959"
+   }
+  },
+  {
+   "id": "financial_model-11_05",
+   "category": "Financial_Model",
+   "group": "11_Project Switchgear",
+   "source_id": "11_05",
+   "input": {
+    "source": "spreadsheet/11_Project Switchgear/11_05_Switchgear_input.xlsx",
+    "sha256": "8473c534954feadc15b7ac0e50acb789cde433c183bd7c26badc2241b78b3e94"
+   },
+   "golden": {
+    "source": "spreadsheet/11_Project Switchgear/11_Switchgear_golden.xlsx",
+    "sha256": "aa20a0b757a3e992c377c5cbd001567a232aa7b56abeebb9253571d31b315959"
+   }
+  },
+  {
+   "id": "financial_model-12_01",
+   "category": "Financial_Model",
+   "group": "12_Project Infra",
+   "source_id": "12_01",
+   "input": {
+    "source": "spreadsheet/12_Project Infra/12_01_Infra_input.xlsx",
+    "sha256": "7f258ae78f7b8b7856a56b91a3a30632d1b11f02e4a50dd59be2d80e89fb42fd"
+   },
+   "golden": {
+    "source": "spreadsheet/12_Project Infra/12_Infra_golden.xlsx",
+    "sha256": "5968766d75b1215931931056aba3b03eb6d0b653c8e482539061640e77679924"
+   }
+  },
+  {
+   "id": "financial_model-12_02",
+   "category": "Financial_Model",
+   "group": "12_Project Infra",
+   "source_id": "12_02",
+   "input": {
+    "source": "spreadsheet/12_Project Infra/12_02_Infra_input.xlsx",
+    "sha256": "4c5a2dfabb5bfd6171f2e8cec3d873ff322ac38a1785741f71c6cd4182aaa3d6"
+   },
+   "golden": {
+    "source": "spreadsheet/12_Project Infra/12_Infra_golden.xlsx",
+    "sha256": "5968766d75b1215931931056aba3b03eb6d0b653c8e482539061640e77679924"
+   }
+  },
+  {
+   "id": "financial_model-12_03",
+   "category": "Financial_Model",
+   "group": "12_Project Infra",
+   "source_id": "12_03",
+   "input": {
+    "source": "spreadsheet/12_Project Infra/12_03_Infra_input.xlsx",
+    "sha256": "cf0b04a4e424f819fd63511bff257f248ab78c41f5a64f222901d2237b83ef94"
+   },
+   "golden": {
+    "source": "spreadsheet/12_Project Infra/12_Infra_golden.xlsx",
+    "sha256": "5968766d75b1215931931056aba3b03eb6d0b653c8e482539061640e77679924"
+   }
+  },
+  {
+   "id": "financial_model-12_04",
+   "category": "Financial_Model",
+   "group": "12_Project Infra",
+   "source_id": "12_04",
+   "input": {
+    "source": "spreadsheet/12_Project Infra/12_04_Infra_input.xlsx",
+    "sha256": "084f3223bede87254acee0f1d240e1b66052f532d8b352738168d7ff1b83ecd7"
+   },
+   "golden": {
+    "source": "spreadsheet/12_Project Infra/12_Infra_golden.xlsx",
+    "sha256": "5968766d75b1215931931056aba3b03eb6d0b653c8e482539061640e77679924"
+   }
+  },
+  {
+   "id": "financial_model-12_05",
+   "category": "Financial_Model",
+   "group": "12_Project Infra",
+   "source_id": "12_05",
+   "input": {
+    "source": "spreadsheet/12_Project Infra/12_05_Infra_input.xlsx",
+    "sha256": "b682b99bda3456035b6741f41e7eb60d9d2c232a90e48635d05e26e1f93ead96"
+   },
+   "golden": {
+    "source": "spreadsheet/12_Project Infra/12_Infra_golden.xlsx",
+    "sha256": "5968766d75b1215931931056aba3b03eb6d0b653c8e482539061640e77679924"
+   }
+  },
+  {
+   "id": "financial_model-13_01",
+   "category": "Financial_Model",
+   "group": "13_Project Logistic",
+   "source_id": "13_01",
+   "input": {
+    "source": "spreadsheet/13_Project Logistic/13_01_Logistic_input.xlsx",
+    "sha256": "4f8704a74bfcb0d057ef2de878e9339ee9970194d3dc234d6d8c91283e314465"
+   },
+   "golden": {
+    "source": "spreadsheet/13_Project Logistic/13_Logistic_golden.xlsx",
+    "sha256": "5b4941f48b2131a8a79a02bbe35538a4b370c3add0815258d7777ef0ec55c05d"
+   }
+  },
+  {
+   "id": "financial_model-13_02",
+   "category": "Financial_Model",
+   "group": "13_Project Logistic",
+   "source_id": "13_02",
+   "input": {
+    "source": "spreadsheet/13_Project Logistic/13_02_Logistic_input.xlsx",
+    "sha256": "68e88a2a0232d86c8ba2589e02fa21cc892dd3bc74552f0dc0bb48daaa4819cf"
+   },
+   "golden": {
+    "source": "spreadsheet/13_Project Logistic/13_Logistic_golden.xlsx",
+    "sha256": "5b4941f48b2131a8a79a02bbe35538a4b370c3add0815258d7777ef0ec55c05d"
+   }
+  },
+  {
+   "id": "financial_model-13_03",
+   "category": "Financial_Model",
+   "group": "13_Project Logistic",
+   "source_id": "13_03",
+   "input": {
+    "source": "spreadsheet/13_Project Logistic/13_03_Logistic_input.xlsx",
+    "sha256": "4ec636f59e598069436c834145371e61b1ccdee4ff3f614427ccffc2f579ee40"
+   },
+   "golden": {
+    "source": "spreadsheet/13_Project Logistic/13_Logistic_golden.xlsx",
+    "sha256": "5b4941f48b2131a8a79a02bbe35538a4b370c3add0815258d7777ef0ec55c05d"
+   }
+  },
+  {
+   "id": "financial_model-13_04",
+   "category": "Financial_Model",
+   "group": "13_Project Logistic",
+   "source_id": "13_04",
+   "input": {
+    "source": "spreadsheet/13_Project Logistic/13_04_Logistic_input.xlsx",
+    "sha256": "ffa856d6f188344ee4efc4595d8ccca38cc89a20cf0c213e2589bf26929706a9"
+   },
+   "golden": {
+    "source": "spreadsheet/13_Project Logistic/13_Logistic_golden.xlsx",
+    "sha256": "5b4941f48b2131a8a79a02bbe35538a4b370c3add0815258d7777ef0ec55c05d"
+   }
+  },
+  {
+   "id": "financial_model-13_05",
+   "category": "Financial_Model",
+   "group": "13_Project Logistic",
+   "source_id": "13_05",
+   "input": {
+    "source": "spreadsheet/13_Project Logistic/13_05_Logistic_input.xlsx",
+    "sha256": "7df362ed7cb902b3fd8021a5e10e2cd9d5e48308f3e9002ca3df91a391872e1f"
+   },
+   "golden": {
+    "source": "spreadsheet/13_Project Logistic/13_Logistic_golden.xlsx",
+    "sha256": "5b4941f48b2131a8a79a02bbe35538a4b370c3add0815258d7777ef0ec55c05d"
+   }
+  },
+  {
+   "id": "financial_model-14_01",
+   "category": "Financial_Model",
+   "group": "14_Project Refinery",
+   "source_id": "14_01",
+   "input": {
+    "source": "spreadsheet/14_Project Refinery/14_01_Refinery_input.xlsx",
+    "sha256": "afef638120c0055d963c6d965126be99ec05fe80f78f9e800933a58040b11487"
+   },
+   "golden": {
+    "source": "spreadsheet/14_Project Refinery/14_Refinery_golden.xlsx",
+    "sha256": "c963a7e78a53ad97632dc58cf1cd0ee0250a0ed6950fedada8f37e57e89a690e"
+   }
+  },
+  {
+   "id": "financial_model-14_02",
+   "category": "Financial_Model",
+   "group": "14_Project Refinery",
+   "source_id": "14_02",
+   "input": {
+    "source": "spreadsheet/14_Project Refinery/14_02_Refinery_input.xlsx",
+    "sha256": "46d24816614a9fe4ece43635f2afb0a29ecfc6e9a2e74bde2245ca469975eb83"
+   },
+   "golden": {
+    "source": "spreadsheet/14_Project Refinery/14_Refinery_golden.xlsx",
+    "sha256": "c963a7e78a53ad97632dc58cf1cd0ee0250a0ed6950fedada8f37e57e89a690e"
+   }
+  },
+  {
+   "id": "financial_model-14_03",
+   "category": "Financial_Model",
+   "group": "14_Project Refinery",
+   "source_id": "14_03",
+   "input": {
+    "source": "spreadsheet/14_Project Refinery/14_03_Refinery_input.xlsx",
+    "sha256": "a91a110d869005e563e6aa5a7d0efec4de574a0276ad43ff15e319d5af4fa2d2"
+   },
+   "golden": {
+    "source": "spreadsheet/14_Project Refinery/14_Refinery_golden.xlsx",
+    "sha256": "c963a7e78a53ad97632dc58cf1cd0ee0250a0ed6950fedada8f37e57e89a690e"
+   }
+  },
+  {
+   "id": "financial_model-14_04",
+   "category": "Financial_Model",
+   "group": "14_Project Refinery",
+   "source_id": "14_04",
+   "input": {
+    "source": "spreadsheet/14_Project Refinery/14_04_Refinery_input.xlsx",
+    "sha256": "a0502171b538a5462b9fc4b70893cc8446fa81763761292166e94bfaf2f14b99"
+   },
+   "golden": {
+    "source": "spreadsheet/14_Project Refinery/14_Refinery_golden.xlsx",
+    "sha256": "c963a7e78a53ad97632dc58cf1cd0ee0250a0ed6950fedada8f37e57e89a690e"
+   }
+  },
+  {
+   "id": "financial_model-14_05",
+   "category": "Financial_Model",
+   "group": "14_Project Refinery",
+   "source_id": "14_05",
+   "input": {
+    "source": "spreadsheet/14_Project Refinery/14_05_Refinery_input.xlsx",
+    "sha256": "c2959fd0168b6ba3ee972eedcbed1c166893764fb369c366b83525bb1d3bddf1"
+   },
+   "golden": {
+    "source": "spreadsheet/14_Project Refinery/14_Refinery_golden.xlsx",
+    "sha256": "c963a7e78a53ad97632dc58cf1cd0ee0250a0ed6950fedada8f37e57e89a690e"
+   }
+  },
+  {
+   "id": "financial_model-15_01",
+   "category": "Financial_Model",
+   "group": "15_Project KIMS",
+   "source_id": "15_01",
+   "input": {
+    "source": "spreadsheet/15_Project KIMS/15_01_KIMS_input.xlsx",
+    "sha256": "91cb92510cdb20004992bee1b2e391b124dde74c59ff22f802183c6f4c023fa3"
+   },
+   "golden": {
+    "source": "spreadsheet/15_Project KIMS/15_KIMS_golden.xlsx",
+    "sha256": "c921466a0cb7dd95a6c5e5a4522d5c66db13fcf7a0e4af874aa750aacbb81ebe"
+   }
+  },
+  {
+   "id": "financial_model-15_02",
+   "category": "Financial_Model",
+   "group": "15_Project KIMS",
+   "source_id": "15_02",
+   "input": {
+    "source": "spreadsheet/15_Project KIMS/15_02_KIMS_input.xlsx",
+    "sha256": "aa6ee44e678f3ac80be3617928dcb6284a51bbf70c696e119de651f4fcb666c4"
+   },
+   "golden": {
+    "source": "spreadsheet/15_Project KIMS/15_KIMS_golden.xlsx",
+    "sha256": "c921466a0cb7dd95a6c5e5a4522d5c66db13fcf7a0e4af874aa750aacbb81ebe"
+   }
+  },
+  {
+   "id": "financial_model-15_03",
+   "category": "Financial_Model",
+   "group": "15_Project KIMS",
+   "source_id": "15_03",
+   "input": {
+    "source": "spreadsheet/15_Project KIMS/15_03_KIMS_input.xlsx",
+    "sha256": "318eed515474a4e8c0684d3895e49e4726728d1166c2f83ef71b936d32dbf3d7"
+   },
+   "golden": {
+    "source": "spreadsheet/15_Project KIMS/15_KIMS_golden.xlsx",
+    "sha256": "c921466a0cb7dd95a6c5e5a4522d5c66db13fcf7a0e4af874aa750aacbb81ebe"
+   }
+  },
+  {
+   "id": "financial_model-15_04",
+   "category": "Financial_Model",
+   "group": "15_Project KIMS",
+   "source_id": "15_04",
+   "input": {
+    "source": "spreadsheet/15_Project KIMS/15_04_KIMS_input.xlsx",
+    "sha256": "9ff136a8008051fc400bcade977f9732fef6f3b9c3116ebc46ee366d24406f53"
+   },
+   "golden": {
+    "source": "spreadsheet/15_Project KIMS/15_KIMS_golden.xlsx",
+    "sha256": "c921466a0cb7dd95a6c5e5a4522d5c66db13fcf7a0e4af874aa750aacbb81ebe"
+   }
+  },
+  {
+   "id": "financial_model-15_05",
+   "category": "Financial_Model",
+   "group": "15_Project KIMS",
+   "source_id": "15_05",
+   "input": {
+    "source": "spreadsheet/15_Project KIMS/15_05_KIMS_input.xlsx",
+    "sha256": "87f8a4bc2cde12e55bd32734c94a0a9b78c1a000c70026c0d70a8f2b8d1bb895"
+   },
+   "golden": {
+    "source": "spreadsheet/15_Project KIMS/15_KIMS_golden.xlsx",
+    "sha256": "c921466a0cb7dd95a6c5e5a4522d5c66db13fcf7a0e4af874aa750aacbb81ebe"
+   }
+  },
+  {
+   "id": "financial_model-16_01",
+   "category": "Financial_Model",
+   "group": "16_Project Ramjet",
+   "source_id": "16_01",
+   "input": {
+    "source": "spreadsheet/16_Project Ramjet/16_01_Ramjet_input.xlsx",
+    "sha256": "77e10dd7d5634edf2720f0a09f99da89a01d3693a42eab5b5b2e8a11413dce27"
+   },
+   "golden": {
+    "source": "spreadsheet/16_Project Ramjet/16_Ramjet_golden.xlsx",
+    "sha256": "42cbd23372cc480fd2184e61930f7bfe1eaede4cc6f069ea3de0e0e82f8d20f5"
+   }
+  },
+  {
+   "id": "financial_model-16_02",
+   "category": "Financial_Model",
+   "group": "16_Project Ramjet",
+   "source_id": "16_02",
+   "input": {
+    "source": "spreadsheet/16_Project Ramjet/16_02_Ramjet_input.xlsx",
+    "sha256": "4567a1dab48e5b6876f295fde3a82ff4d12bbe75aa25475c7e5702eb6569a867"
+   },
+   "golden": {
+    "source": "spreadsheet/16_Project Ramjet/16_Ramjet_golden.xlsx",
+    "sha256": "42cbd23372cc480fd2184e61930f7bfe1eaede4cc6f069ea3de0e0e82f8d20f5"
+   }
+  },
+  {
+   "id": "financial_model-16_03",
+   "category": "Financial_Model",
+   "group": "16_Project Ramjet",
+   "source_id": "16_03",
+   "input": {
+    "source": "spreadsheet/16_Project Ramjet/16_03_Ramjet_input.xlsx",
+    "sha256": "91bd8989d867208bbe00dc3c8c74268199a149f8c89978fc96e02ed2a4ccd7b5"
+   },
+   "golden": {
+    "source": "spreadsheet/16_Project Ramjet/16_Ramjet_golden.xlsx",
+    "sha256": "42cbd23372cc480fd2184e61930f7bfe1eaede4cc6f069ea3de0e0e82f8d20f5"
+   }
+  },
+  {
+   "id": "financial_model-16_04",
+   "category": "Financial_Model",
+   "group": "16_Project Ramjet",
+   "source_id": "16_04",
+   "input": {
+    "source": "spreadsheet/16_Project Ramjet/16_04_Ramjet_input.xlsx",
+    "sha256": "7dc97d0fda647a3aa7ac079181683648cfadcd2d014831d2c6c6cd46e6a491cb"
+   },
+   "golden": {
+    "source": "spreadsheet/16_Project Ramjet/16_Ramjet_golden.xlsx",
+    "sha256": "42cbd23372cc480fd2184e61930f7bfe1eaede4cc6f069ea3de0e0e82f8d20f5"
+   }
+  },
+  {
+   "id": "financial_model-16_05",
+   "category": "Financial_Model",
+   "group": "16_Project Ramjet",
+   "source_id": "16_05",
+   "input": {
+    "source": "spreadsheet/16_Project Ramjet/16_05_Ramjet_input.xlsx",
+    "sha256": "d4fc8668b2b225bd3cf3a4ebea3d5dcc42c9865efc98cb7962da433184302d7b"
+   },
+   "golden": {
+    "source": "spreadsheet/16_Project Ramjet/16_Ramjet_golden.xlsx",
+    "sha256": "42cbd23372cc480fd2184e61930f7bfe1eaede4cc6f069ea3de0e0e82f8d20f5"
+   }
+  },
+  {
+   "id": "financial_model-17_01",
+   "category": "Financial_Model",
+   "group": "17_Project FMCG",
+   "source_id": "17_01",
+   "input": {
+    "source": "spreadsheet/17_Project FMCG/17_01_FMCG_input.xlsx",
+    "sha256": "9866d30fe846fa57f6246123010b7799398f955a3d644c9189ef380c9c3e916a"
+   },
+   "golden": {
+    "source": "spreadsheet/17_Project FMCG/17_FMCG_golden.xlsx",
+    "sha256": "2e496b54d24e4fd9bcd934afa9f0bc1336f5701892157f169b6e21e69e77382a"
+   }
+  },
+  {
+   "id": "financial_model-17_02",
+   "category": "Financial_Model",
+   "group": "17_Project FMCG",
+   "source_id": "17_02",
+   "input": {
+    "source": "spreadsheet/17_Project FMCG/17_02_FMCG_input.xlsx",
+    "sha256": "a975c95dcfe6a58808f2faf54b5d74f0c9b84b869df9996a7628c0a889847b9e"
+   },
+   "golden": {
+    "source": "spreadsheet/17_Project FMCG/17_FMCG_golden.xlsx",
+    "sha256": "2e496b54d24e4fd9bcd934afa9f0bc1336f5701892157f169b6e21e69e77382a"
+   }
+  },
+  {
+   "id": "financial_model-17_03",
+   "category": "Financial_Model",
+   "group": "17_Project FMCG",
+   "source_id": "17_03",
+   "input": {
+    "source": "spreadsheet/17_Project FMCG/17_03_FMCG_input.xlsx",
+    "sha256": "42423e4490b408506e123f1954e76ed2bff6989c2621b739fa0d2a24afd02e34"
+   },
+   "golden": {
+    "source": "spreadsheet/17_Project FMCG/17_FMCG_golden.xlsx",
+    "sha256": "2e496b54d24e4fd9bcd934afa9f0bc1336f5701892157f169b6e21e69e77382a"
+   }
+  },
+  {
+   "id": "financial_model-17_04",
+   "category": "Financial_Model",
+   "group": "17_Project FMCG",
+   "source_id": "17_04",
+   "input": {
+    "source": "spreadsheet/17_Project FMCG/17_04_FMCG_input.xlsx",
+    "sha256": "dc7e9067225adfb6fd14a64f5b045bd44225e62aec0b98a2935e27d9a9bea9f7"
+   },
+   "golden": {
+    "source": "spreadsheet/17_Project FMCG/17_FMCG_golden.xlsx",
+    "sha256": "2e496b54d24e4fd9bcd934afa9f0bc1336f5701892157f169b6e21e69e77382a"
+   }
+  },
+  {
+   "id": "financial_model-17_05",
+   "category": "Financial_Model",
+   "group": "17_Project FMCG",
+   "source_id": "17_05",
+   "input": {
+    "source": "spreadsheet/17_Project FMCG/17_05_FMCG_input.xlsx",
+    "sha256": "b45497bce1c2c694d2b2b36966abea2d4e2108b7fcb7d3264d37468e00764ba0"
+   },
+   "golden": {
+    "source": "spreadsheet/17_Project FMCG/17_FMCG_golden.xlsx",
+    "sha256": "2e496b54d24e4fd9bcd934afa9f0bc1336f5701892157f169b6e21e69e77382a"
+   }
+  },
+  {
+   "id": "financial_model-18_01",
+   "category": "Financial_Model",
+   "group": "18_Project Road Assets",
+   "source_id": "18_01",
+   "input": {
+    "source": "spreadsheet/18_Project Road Assets/18_01_RoadAssets_input.xlsx",
+    "sha256": "893bab1f4d3493d94192425c344c24ed286f7a75724ab22518ed6b9f0642af0f"
+   },
+   "golden": {
+    "source": "spreadsheet/18_Project Road Assets/18_RoadAssets_golden.xlsx",
+    "sha256": "2406a01d43efa4fe61c12ec342d40fa12779a01ffd1b706297be7781c6bfd039"
+   }
+  },
+  {
+   "id": "financial_model-18_02",
+   "category": "Financial_Model",
+   "group": "18_Project Road Assets",
+   "source_id": "18_02",
+   "input": {
+    "source": "spreadsheet/18_Project Road Assets/18_02_RoadAssets_input.xlsx",
+    "sha256": "09d6a1ed6de57fd967dbdbaae7e4d482842b4de6ef5aafbea84027711becc3fe"
+   },
+   "golden": {
+    "source": "spreadsheet/18_Project Road Assets/18_RoadAssets_golden.xlsx",
+    "sha256": "2406a01d43efa4fe61c12ec342d40fa12779a01ffd1b706297be7781c6bfd039"
+   }
+  },
+  {
+   "id": "financial_model-18_03",
+   "category": "Financial_Model",
+   "group": "18_Project Road Assets",
+   "source_id": "18_03",
+   "input": {
+    "source": "spreadsheet/18_Project Road Assets/18_03_RoadAssets_input.xlsx",
+    "sha256": "fd095b2c0011d098aac379b6f8f928f79cc5a8ee4dcbdb81c6c5a88628ddf6c4"
+   },
+   "golden": {
+    "source": "spreadsheet/18_Project Road Assets/18_RoadAssets_golden.xlsx",
+    "sha256": "2406a01d43efa4fe61c12ec342d40fa12779a01ffd1b706297be7781c6bfd039"
+   }
+  },
+  {
+   "id": "financial_model-18_04",
+   "category": "Financial_Model",
+   "group": "18_Project Road Assets",
+   "source_id": "18_04",
+   "input": {
+    "source": "spreadsheet/18_Project Road Assets/18_04_RoadAssets_input.xlsx",
+    "sha256": "c484346caf5d910d8a0aa07f12256653a9340c7e62952eaf34c8c9733cfe2890"
+   },
+   "golden": {
+    "source": "spreadsheet/18_Project Road Assets/18_RoadAssets_golden.xlsx",
+    "sha256": "2406a01d43efa4fe61c12ec342d40fa12779a01ffd1b706297be7781c6bfd039"
+   }
+  },
+  {
+   "id": "financial_model-18_05",
+   "category": "Financial_Model",
+   "group": "18_Project Road Assets",
+   "source_id": "18_05",
+   "input": {
+    "source": "spreadsheet/18_Project Road Assets/18_05_RoadAssets_input.xlsx",
+    "sha256": "56adf80d06ec4014d5189805adcafdfe38508c58a5391d7d40147621773aac9e"
+   },
+   "golden": {
+    "source": "spreadsheet/18_Project Road Assets/18_RoadAssets_golden.xlsx",
+    "sha256": "2406a01d43efa4fe61c12ec342d40fa12779a01ffd1b706297be7781c6bfd039"
+   }
+  },
+  {
+   "id": "financial_model-19_01",
+   "category": "Financial_Model",
+   "group": "19_Project Transformer",
+   "source_id": "19_01",
+   "input": {
+    "source": "spreadsheet/19_Project Transformer/19_01_Transformer_input.xlsx",
+    "sha256": "9e0312053e3887bdcc8ea5c2053de96e988e97784af29788caa4f6c62727f153"
+   },
+   "golden": {
+    "source": "spreadsheet/19_Project Transformer/19_Transformer_golden.xlsx",
+    "sha256": "0fa984363be3e493970ec0c828ef605d15a7c98f72d01bf79ae320a82b6781be"
+   }
+  },
+  {
+   "id": "financial_model-19_02",
+   "category": "Financial_Model",
+   "group": "19_Project Transformer",
+   "source_id": "19_02",
+   "input": {
+    "source": "spreadsheet/19_Project Transformer/19_02_Transformer_input.xlsx",
+    "sha256": "e44de6ded3f0d76bdba14e76d466538c6050f4199e484b956df7cae269d2d4f6"
+   },
+   "golden": {
+    "source": "spreadsheet/19_Project Transformer/19_Transformer_golden.xlsx",
+    "sha256": "0fa984363be3e493970ec0c828ef605d15a7c98f72d01bf79ae320a82b6781be"
+   }
+  },
+  {
+   "id": "financial_model-19_03",
+   "category": "Financial_Model",
+   "group": "19_Project Transformer",
+   "source_id": "19_03",
+   "input": {
+    "source": "spreadsheet/19_Project Transformer/19_03_Transformer_input.xlsx",
+    "sha256": "13e6603433920d8171eb877baec26c1504eefd7a40fca0bc1f0adb7614b1a101"
+   },
+   "golden": {
+    "source": "spreadsheet/19_Project Transformer/19_Transformer_golden.xlsx",
+    "sha256": "0fa984363be3e493970ec0c828ef605d15a7c98f72d01bf79ae320a82b6781be"
+   }
+  },
+  {
+   "id": "financial_model-19_04",
+   "category": "Financial_Model",
+   "group": "19_Project Transformer",
+   "source_id": "19_04",
+   "input": {
+    "source": "spreadsheet/19_Project Transformer/19_04_Transformer_input.xlsx",
+    "sha256": "2744ba0a10e63c983dcff49c4043143e4cc7f5560775abae2f14ebf32cf4a8de"
+   },
+   "golden": {
+    "source": "spreadsheet/19_Project Transformer/19_Transformer_golden.xlsx",
+    "sha256": "0fa984363be3e493970ec0c828ef605d15a7c98f72d01bf79ae320a82b6781be"
+   }
+  },
+  {
+   "id": "financial_model-19_05",
+   "category": "Financial_Model",
+   "group": "19_Project Transformer",
+   "source_id": "19_05",
+   "input": {
+    "source": "spreadsheet/19_Project Transformer/19_05_Transformer_input.xlsx",
+    "sha256": "9585257343f755d8eba5fbdfe556e9ce4484b73349286a3ec03620bd041037bc"
+   },
+   "golden": {
+    "source": "spreadsheet/19_Project Transformer/19_Transformer_golden.xlsx",
+    "sha256": "0fa984363be3e493970ec0c828ef605d15a7c98f72d01bf79ae320a82b6781be"
+   }
+  },
+  {
+   "id": "financial_model-20_01",
+   "category": "Financial_Model",
+   "group": "20_Project Fintech",
+   "source_id": "20_01",
+   "input": {
+    "source": "spreadsheet/20_Project Fintech/20_01_Fintech_input.xlsx",
+    "sha256": "9833ae6e1116432c07a2724f1296c013ecc9bfc6757ed7bdfb0af21bca21b8ed"
+   },
+   "golden": {
+    "source": "spreadsheet/20_Project Fintech/20_Fintech_golden.xlsx",
+    "sha256": "c6daa76101dbaa63f90615aadb9e171a8e841da2ec61252472bfaccf152c84d2"
+   }
+  },
+  {
+   "id": "financial_model-20_02",
+   "category": "Financial_Model",
+   "group": "20_Project Fintech",
+   "source_id": "20_02",
+   "input": {
+    "source": "spreadsheet/20_Project Fintech/20_02_Fintech_input.xlsx",
+    "sha256": "af862c8f3167c1b555f8b0e7dfe0d64bb73b501ea8e0b1f4f473e2d5aa8d9148"
+   },
+   "golden": {
+    "source": "spreadsheet/20_Project Fintech/20_Fintech_golden.xlsx",
+    "sha256": "c6daa76101dbaa63f90615aadb9e171a8e841da2ec61252472bfaccf152c84d2"
+   }
+  },
+  {
+   "id": "financial_model-20_03",
+   "category": "Financial_Model",
+   "group": "20_Project Fintech",
+   "source_id": "20_03",
+   "input": {
+    "source": "spreadsheet/20_Project Fintech/20_03_Fintech_input.xlsx",
+    "sha256": "eaf48f79443270b2330075c1489cf47ab51bebe25b22ffcb70392966f422d0d2"
+   },
+   "golden": {
+    "source": "spreadsheet/20_Project Fintech/20_Fintech_golden.xlsx",
+    "sha256": "c6daa76101dbaa63f90615aadb9e171a8e841da2ec61252472bfaccf152c84d2"
+   }
+  },
+  {
+   "id": "financial_model-20_04",
+   "category": "Financial_Model",
+   "group": "20_Project Fintech",
+   "source_id": "20_04",
+   "input": {
+    "source": "spreadsheet/20_Project Fintech/20_04_Fintech_input.xlsx",
+    "sha256": "396102de120a7e798c2a9fa3455269fc875710f8894b4206086623aa5454661b"
+   },
+   "golden": {
+    "source": "spreadsheet/20_Project Fintech/20_Fintech_golden.xlsx",
+    "sha256": "c6daa76101dbaa63f90615aadb9e171a8e841da2ec61252472bfaccf152c84d2"
+   }
+  },
+  {
+   "id": "financial_model-20_05",
+   "category": "Financial_Model",
+   "group": "20_Project Fintech",
+   "source_id": "20_05",
+   "input": {
+    "source": "spreadsheet/20_Project Fintech/20_05_Fintech_input.xlsx",
+    "sha256": "f88cc1bbf56876e1dd84600825db3ba7ee5877369dfd658bd441d17cd48af903"
+   },
+   "golden": {
+    "source": "spreadsheet/20_Project Fintech/20_Fintech_golden.xlsx",
+    "sha256": "c6daa76101dbaa63f90615aadb9e171a8e841da2ec61252472bfaccf152c84d2"
+   }
+  },
+  {
+   "id": "template-01_01",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_01",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_01_input.xlsx",
+    "sha256": "3d64bbbf4c1f9be0c36371c5cae038e65c83f53d50bf2226b041277c671c2c4e"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_01_golden.xlsx",
+    "sha256": "dfd14fdf2c5e9864932c860bf8b0b7c5dca9335aaade1b8a89542817cb736d58"
+   }
+  },
+  {
+   "id": "template-01_02",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_02",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_02_input.xlsx",
+    "sha256": "7290b7b0703c267c128d4f6f3633a33a4cbc6863e04b3fd3e099a5f028ea089f"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_02_golden.xlsx",
+    "sha256": "70e1335ee4f3fd5e60271844d153fa251a933effd9118ed7ecc989b828c72d84"
+   }
+  },
+  {
+   "id": "template-01_03",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_03",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_03_input.xlsx",
+    "sha256": "1d5c146ebff86d59a78274d64e8fd72d63a423dba25e3ca6c192b0e65ff51bcb"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_03_golden.xlsx",
+    "sha256": "2748ae40aa5e29f2ca205affc210658ff05c6e68ef0ca6e7589e8d6f17219509"
+   }
+  },
+  {
+   "id": "template-01_04",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_04",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_04_input.xlsx",
+    "sha256": "2105be92cf268575e09ba5a3a62460c388f32c8682e11bb866ac5351016edfbc"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_04_golden.xlsx",
+    "sha256": "f0ef490472506a0233003b823d8aa0f4d55e563770e98c50c810f657936ee2d3"
+   }
+  },
+  {
+   "id": "template-01_05",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_05",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_05_input.xlsx",
+    "sha256": "5f7440ee995da046723e17d03de8d4cfd0d96e055d0834fa2dfafe7d0affcc28"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_05_golden.xlsx",
+    "sha256": "904133e5d685617df92920553215ad7525d3ad5d10688733c0ad981cc75e1b3d"
+   }
+  },
+  {
+   "id": "template-01_06",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_06",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_06_input.xlsx",
+    "sha256": "5b57294aba2fca619f95dcd411118728e62ecf546e0e261f2111bf2fa82477aa"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_06_golden.xlsx",
+    "sha256": "1f64f44ba474fd489484ea4d5c8dec7d3473d4077e7f6556b5771676cda27f22"
+   }
+  },
+  {
+   "id": "template-01_07",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_07",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_07_input.xlsx",
+    "sha256": "af4aad6ad3b799ab8b57fa96425cf15c2c9fcc0c82656822d986c7ff1fec2020"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_07_golden.xlsx",
+    "sha256": "a650f9f3edca943c089b1476d9a3cf0c2f7e7a12656f0cbea982e1aec658b08d"
+   }
+  },
+  {
+   "id": "template-01_08",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_08",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_08_input.xlsx",
+    "sha256": "4ad2ed2fcb9697605f15e5626152a91f9cf54c7b0d61ff740929710eeb5b7b09"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_08_golden.xlsx",
+    "sha256": "19f9bcdc7dca612e3b4ed4878a07ec8699f9e403f2577d56a99771b62bdf70cc"
+   }
+  },
+  {
+   "id": "template-01_09",
+   "category": "Template",
+   "group": "01_bond_accounting",
+   "source_id": "01_09",
+   "input": {
+    "source": "spreadsheet/01_bond_accounting/01_09_input.xlsx",
+    "sha256": "748861ce79515aac7de43db5d1e2ef99fb2007e551e5a5ad72359dadd0ebaf7c"
+   },
+   "golden": {
+    "source": "spreadsheet/01_bond_accounting/01_09_golden.xlsx",
+    "sha256": "91a2df7a75dc41595a573d1c1ebc22905271f4050f709cc2abe46fa75eb65990"
+   }
+  },
+  {
+   "id": "template-02_01",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_01",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_01_input.xlsx",
+    "sha256": "1768dcc784d3c9bd2319dabeaa3a7c27d4bc0ab048a63c7084450abab3f3a1a2"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_01_golden.xlsx",
+    "sha256": "9381b41c1779e430ebfedfd650a5543fc9e09fa95293274ef8a8d73abffebc2f"
+   }
+  },
+  {
+   "id": "template-02_02",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_02",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_02_input.xlsx",
+    "sha256": "26f210a3886a6f69dfc11cb1b60ec3bbbeee60c8891db1cb56fc50373fc8bd8f"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_02_golden.xlsx",
+    "sha256": "221458590d5a0d3bb95b981af67a2d2098fb95bbf559bcd9a71fdd60ffc59312"
+   }
+  },
+  {
+   "id": "template-02_03",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_03",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_03_input.xlsx",
+    "sha256": "d7dfe94a91255a0efe9860c17661d2fc00aa27ec70f775afde2e070d5f01f178"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_03_golden.xlsx",
+    "sha256": "d9abad005762a1a1e29b2420186815792fdd3b5912c581c7c7fae5f1d1125bd5"
+   }
+  },
+  {
+   "id": "template-02_04",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_04",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_04_input.xlsx",
+    "sha256": "b1b66228bc7dfead077b13ab4c468224d28c53a388c0fe7da3c9e42085c3a080"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_04_golden.xlsx",
+    "sha256": "b0b5d874cb9c64bf031d51b69d264414b4b0a990b85679d8d63dff3c820857f3"
+   }
+  },
+  {
+   "id": "template-02_05",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_05",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_05_input.xlsx",
+    "sha256": "af39f8f902f4d91a0893ecf03e64cc75910834675bd50d6f2870b6ad19e42732"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_05_golden.xlsx",
+    "sha256": "46eed10d826f4cefb975059296256599375912b9f6b263da48d8ac57ee5590b1"
+   }
+  },
+  {
+   "id": "template-02_06",
+   "category": "Template",
+   "group": "02_cash_sweep",
+   "source_id": "02_06",
+   "input": {
+    "source": "spreadsheet/02_cash_sweep/02_06_input.xlsx",
+    "sha256": "5192eb171a627b1753dedfeae544d7d30643b582a99a18b011a12e43fcd383fd"
+   },
+   "golden": {
+    "source": "spreadsheet/02_cash_sweep/02_06_golden.xlsx",
+    "sha256": "b904b26fad9aec6003a72edb684a1215fc4ac35f8a73a67a182fe64ca2bb7c81"
+   }
+  },
+  {
+   "id": "template-03_01",
+   "category": "Template",
+   "group": "03_consolidation",
+   "source_id": "03_01",
+   "input": {
+    "source": "spreadsheet/03_consolidation/03_01_input.xlsx",
+    "sha256": "1dc043f10b319b7de03fd6cab3b259e4de87353898db89561a847cb84ee6acbe"
+   },
+   "golden": {
+    "source": "spreadsheet/03_consolidation/03_01_golden.xlsx",
+    "sha256": "8df8745543c983026c96619bc7d930b912f1082c2ba32881c21fab01c24c18df"
+   }
+  },
+  {
+   "id": "template-03_02",
+   "category": "Template",
+   "group": "03_consolidation",
+   "source_id": "03_02",
+   "input": {
+    "source": "spreadsheet/03_consolidation/03_02_input.xlsx",
+    "sha256": "6eb9ea3e1d37e19c18766544164efd7fca3d1f39e8f0e1d73a78125346a5544f"
+   },
+   "golden": {
+    "source": "spreadsheet/03_consolidation/03_02_golden.xlsx",
+    "sha256": "db55c505687ea379ecebbf879c9adbf7703aef572edbeced384dd072ea29bd5d"
+   }
+  },
+  {
+   "id": "template-03_03",
+   "category": "Template",
+   "group": "03_consolidation",
+   "source_id": "03_03",
+   "input": {
+    "source": "spreadsheet/03_consolidation/03_03_input.xlsx",
+    "sha256": "3dc2f7d65a9f792a86cb3f0183a029e0ceb206ed138a5c1c67d40d9c2428de7b"
+   },
+   "golden": {
+    "source": "spreadsheet/03_consolidation/03_03_golden.xlsx",
+    "sha256": "ed02d61990b79e916e3f577eeeb2a6febdb876d60948deeaaf8db25534b7e141"
+   }
+  },
+  {
+   "id": "template-03_04",
+   "category": "Template",
+   "group": "03_consolidation",
+   "source_id": "03_04",
+   "input": {
+    "source": "spreadsheet/03_consolidation/03_04_input.xlsx",
+    "sha256": "8f47ff392bbd273fe6efda59af81f7f304c719ea5c68160f3e0557ce1ca3f913"
+   },
+   "golden": {
+    "source": "spreadsheet/03_consolidation/03_04_golden.xlsx",
+    "sha256": "a9544be5ce298da999408fbf2c15dea98f5b91bf6460e5f5613cd9ef7914b66c"
+   }
+  },
+  {
+   "id": "template-04_03",
+   "category": "Template",
+   "group": "04_dcf_valuation",
+   "source_id": "04_03",
+   "input": {
+    "source": "spreadsheet/04_dcf_valuation/04_03_input.xlsx",
+    "sha256": "ff64db48a4f9aff183b73250847bf983d4b2578739a4be1e009d4c0a753da217"
+   },
+   "golden": {
+    "source": "spreadsheet/04_dcf_valuation/04_03_golden.xlsx",
+    "sha256": "39a9b5ea3d17087cf7dd78725266bfbcd3b3f4422f579b5ad12b8b918642fe96"
+   }
+  },
+  {
+   "id": "template-04_04",
+   "category": "Template",
+   "group": "04_dcf_valuation",
+   "source_id": "04_04",
+   "input": {
+    "source": "spreadsheet/04_dcf_valuation/04_04_input.xlsx",
+    "sha256": "6fe31393f4e12241ffd547f79a8fe62a718e12f9d9f8f9f2074c411a5a55e134"
+   },
+   "golden": {
+    "source": "spreadsheet/04_dcf_valuation/04_04_golden.xlsx",
+    "sha256": "1ca5791db991189ae388edf98dfe07483a15c49092150131ac1f6962f1bc9da7"
+   }
+  },
+  {
+   "id": "template-05_01",
+   "category": "Template",
+   "group": "05_deferred_tax",
+   "source_id": "05_01",
+   "input": {
+    "source": "spreadsheet/05_deferred_tax/05_01_input.xlsx",
+    "sha256": "75d4b9a3aafe23107d9abd0c1441d4718755f9921079a3d32744cb78f88fd3e9"
+   },
+   "golden": {
+    "source": "spreadsheet/05_deferred_tax/05_01_golden.xlsx",
+    "sha256": "01a47f2bcfea933692398edd22bdceae5adf88250bec949c943c89bcea52fc99"
+   }
+  },
+  {
+   "id": "template-05_02",
+   "category": "Template",
+   "group": "05_deferred_tax",
+   "source_id": "05_02",
+   "input": {
+    "source": "spreadsheet/05_deferred_tax/05_02_input.xlsx",
+    "sha256": "9f5e54d3e3d976121ee9dc895f0d6bf0b435c76676a4b51ff24f31e592390674"
+   },
+   "golden": {
+    "source": "spreadsheet/05_deferred_tax/05_02_golden.xlsx",
+    "sha256": "aca43941e5795537febf24a960c408b764d0f4d4738a8a8c8799c8093c2392aa"
+   }
+  },
+  {
+   "id": "template-06_01",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_01",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_01_input.xlsx",
+    "sha256": "e5023b5d9790783d9b5e5abdff9724eed744008325bf5184b8091c21092bcf69"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_01_golden.xlsx",
+    "sha256": "09d731adc823e2b59ec52431f4afeb169f69e910ad6c0d4940769cc225bc71d8"
+   }
+  },
+  {
+   "id": "template-06_02",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_02",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_02_input.xlsx",
+    "sha256": "76ff3caea33395983113db652c35d5a14b46e7be8588f06f26092990fef1cc19"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_02_golden.xlsx",
+    "sha256": "e4450315ff0d8e7bef438a265f52125ee0a6ede71ea9f95bc9d210cba72e86d6"
+   }
+  },
+  {
+   "id": "template-06_03",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_03",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_03_input.xlsx",
+    "sha256": "2bee36ad061b9cb3200d4db221a026f6e957684ab58d562534273317507a362c"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_03_golden.xlsx",
+    "sha256": "4c0c4f5453d2130d2ec0c71a319aa39f0d553377d40772a898a758ab6ee6a4d0"
+   }
+  },
+  {
+   "id": "template-06_04",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_04",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_04_input.xlsx",
+    "sha256": "d0abee23fd9f0f27e4efb27194dcee5c1258bf63a9800cd64edf96f5b2629cb5"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_04_golden.xlsx",
+    "sha256": "43acb98024b38aba937ca46284fca487434377151b1fd40d94390f097ef308c5"
+   }
+  },
+  {
+   "id": "template-06_05",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_05",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_05_input.xlsx",
+    "sha256": "ef93c159b8ccfd36e2228c7207c698eeb160c7ba61e1cabd4dd06f3a8f94eec5"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_05_golden.xlsx",
+    "sha256": "afd1d2145e522fa884e4fcf8a760c4d0a60da7260ca896030e28e325d2bf88b6"
+   }
+  },
+  {
+   "id": "template-06_06",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_06",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_06_input.xlsx",
+    "sha256": "3210a0816bc4d2fb267b19e689dfc0f609568ca15170b1665f962425d9a2d6b2"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_06_golden.xlsx",
+    "sha256": "5f60f7d597b33bf81cc615766f08893e8be2c58fe444c77f93b66c22d50bda04"
+   }
+  },
+  {
+   "id": "template-06_07",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_07",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_07_input.xlsx",
+    "sha256": "4c12b30f0fffcb1f93c1caedef5ea1fd8d50f9abf8514dc9e5e0aa87be832165"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_07_golden.xlsx",
+    "sha256": "f5572a96c86f767fb5f94392c85c350f826803d255fc3442d8ac10885ff1def6"
+   }
+  },
+  {
+   "id": "template-06_08",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_08",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_08_input.xlsx",
+    "sha256": "df35d4aa5498819bd8cc9792ad7ae3f5a9d04a21cf9120db889073a3049c785d"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_08_golden.xlsx",
+    "sha256": "25c05fe37557a13f72f1961735dc279977b436e5908a87b83dd38da73b0781c3"
+   }
+  },
+  {
+   "id": "template-06_09",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_09",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_09_input.xlsx",
+    "sha256": "711ee00111390178ded38c58c7640abef3d225f4e5757dd952bd34c007380c28"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_09_golden.xlsx",
+    "sha256": "08fa5f1e01fc9024ac6c1d6360851671802e8ca4ee96863ab50c206ab783100f"
+   }
+  },
+  {
+   "id": "template-06_11",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_11",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_11_input.xlsx",
+    "sha256": "8af682aaf360d7fc383fb6c0cfcb2841a437fb7b742681207c42b40583ab74fb"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_11_golden.xlsx",
+    "sha256": "3153b5e2ccacb01119d04c7d8ab71f9766dd0dbc62baf51a72a962c659e83c3b"
+   }
+  },
+  {
+   "id": "template-06_12",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_12",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_12_input.xlsx",
+    "sha256": "d05d2bcd62e971dab1907e3b290cc7e46c161f5d1d3bfac6266d04bd831ddeba"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_12_golden.xlsx",
+    "sha256": "578dee0179c7c1537f0cdb935cfd2dc8bda6e11c406d548b0d0915c6cd2c85df"
+   }
+  },
+  {
+   "id": "template-06_13",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_13",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_13_input.xlsx",
+    "sha256": "8bdb5d1c8534dbe94f769595f6cc00b4b3011f6dab486f210f87aa4489751947"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_13_golden.xlsx",
+    "sha256": "066bd1406bdb62ec982d0992c68e57d0e17838afd1ab3550aa06410880a684b2"
+   }
+  },
+  {
+   "id": "template-06_14",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_14",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_14_input.xlsx",
+    "sha256": "603bf0d67f0a52d53238e219c977d8c334e9ca43f326e354f4d5a0b0ea8ea8e7"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_14_golden.xlsx",
+    "sha256": "526920e813cca9776fc33cb1b22995123416176ae57911513e61bf691142d1ff"
+   }
+  },
+  {
+   "id": "template-06_15",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_15",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_15_input.xlsx",
+    "sha256": "25e84818b685262a5671342b2dc995722407596168091b4f3dee34fc7f56c038"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_15_golden.xlsx",
+    "sha256": "7cf408381691ffe0804ef216fe21e7ab963f0d95b9fda9a6616f46bfd832d0b8"
+   }
+  },
+  {
+   "id": "template-06_16",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_16",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_16_input.xlsx",
+    "sha256": "b02c7f8fcaf81509eeabf151431ea02825d0ca9bbcf4b8e79b8a0f02e80faac1"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_16_golden.xlsx",
+    "sha256": "267ad7d33711f39fa199e2af8af1f8c3f5bc13ac5fc320265d5b75b1110b2493"
+   }
+  },
+  {
+   "id": "template-06_17",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_17",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_17_input.xlsx",
+    "sha256": "aa7f152878029b120ef10e0e0dc453f064aeed1e11d85d0989e236eec6b85534"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_17_golden.xlsx",
+    "sha256": "9e1896e147d6bb4dc3ac72d685fbd478244821e72e487c9d32a4b5e72a91b919"
+   }
+  },
+  {
+   "id": "template-06_18",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_18",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_18_input.xlsx",
+    "sha256": "9098814b86e857a655e3f1acda1fb9ee749a8c64a871acbca2961159ce814dfc"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_18_golden.xlsx",
+    "sha256": "d642bb6c62e7b08ceb94a73703fe9dd5f68a623eb19ce477e29cf7ff83266001"
+   }
+  },
+  {
+   "id": "template-06_19",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_19",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_19_input.xlsx",
+    "sha256": "4326257f887cd57cecf95904e03491fd4410f2ce493b5203735b8c6711467309"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_19_golden.xlsx",
+    "sha256": "5fd81d9c2d605c77dcb986429c7d59f0b1f177337b6ce92afa92544e6b1162fe"
+   }
+  },
+  {
+   "id": "template-06_20",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_20",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_20_input.xlsx",
+    "sha256": "0c5a6be104cce4545cdf1d05c32c7a2810802da092cca6b08b7e30638886609e"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_20_golden.xlsx",
+    "sha256": "f08b142f0777bfc72eca447976d1300188acb8d70b8ddc5fdecb272d991ba6f0"
+   }
+  },
+  {
+   "id": "template-06_21",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_21",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_21_input.xlsx",
+    "sha256": "876ab2c4ad8abd6cdea2483f5efa881aafbefd503a7857460cc847b22a7fca3e"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_21_golden.xlsx",
+    "sha256": "db8f337942e18fdf5790ccbd0798fd44915deacc064860be95ffcf865e424af2"
+   }
+  },
+  {
+   "id": "template-06_22",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_22",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_22_input.xlsx",
+    "sha256": "8e0e498c50ad214c19a3370ffaa3275bf991bcfbb18d1a53f1d41aa0148da944"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_22_golden.xlsx",
+    "sha256": "fc8da404ab9adc5c7696a1ed480df0e3028a1e622bc2515ec45d1d12cd675a38"
+   }
+  },
+  {
+   "id": "template-06_23",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_23",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_23_input.xlsx",
+    "sha256": "f6234224db316c02c88453ffb42a681484cbd7a62f1d2219223f45312e1e4bfb"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_23_golden.xlsx",
+    "sha256": "5669da88a4f313fe05cc0995095302e139cea299c5d8835522a0341509150bc6"
+   }
+  },
+  {
+   "id": "template-06_24",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_24",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_24_input.xlsx",
+    "sha256": "a1f641f671e3ce8675b0f907ba7ac50fec219b2ce9274fb9892de3ad48c83d3e"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_24_golden.xlsx",
+    "sha256": "00efbd9258eea1ac8579fff305c18c87736d2fd901b47ccabd36edcd6fa3e88a"
+   }
+  },
+  {
+   "id": "template-06_25",
+   "category": "Template",
+   "group": "06_equity_forecast",
+   "source_id": "06_25",
+   "input": {
+    "source": "spreadsheet/06_equity_forecast/06_25_input.xlsx",
+    "sha256": "148a97de274e11fa51eb3b7284d9ba2500644ec9e1ad76f08d222b1803b264ed"
+   },
+   "golden": {
+    "source": "spreadsheet/06_equity_forecast/06_25_golden.xlsx",
+    "sha256": "b19230376587775b0971e4a359dd8a42d7e02e714055df37f0eef46b1cb147fb"
+   }
+  },
+  {
+   "id": "template-07_01",
+   "category": "Template",
+   "group": "07_equity_method",
+   "source_id": "07_01",
+   "input": {
+    "source": "spreadsheet/07_equity_method/07_01_input.xlsx",
+    "sha256": "9bb442b8e13338a01d50caa83b86f536e9647ee1287961714dff9f0f17aa8fb2"
+   },
+   "golden": {
+    "source": "spreadsheet/07_equity_method/07_01_golden.xlsx",
+    "sha256": "2ff0fe5154c52f801dfbb137332db5b23625228ead593e4849ac50541bd7f914"
+   }
+  },
+  {
+   "id": "template-07_02",
+   "category": "Template",
+   "group": "07_equity_method",
+   "source_id": "07_02",
+   "input": {
+    "source": "spreadsheet/07_equity_method/07_02_input.xlsx",
+    "sha256": "7d63102f21e2cdb0c8ef7ba630004c3e789540a4b8444c02f3c782d8ff426ea9"
+   },
+   "golden": {
+    "source": "spreadsheet/07_equity_method/07_02_golden.xlsx",
+    "sha256": "3a42cff0997e921ff884c2ab578ca3a7199fb1596a50a1aa0c5ea30e3657b53f"
+   }
+  },
+  {
+   "id": "template-07_03",
+   "category": "Template",
+   "group": "07_equity_method",
+   "source_id": "07_03",
+   "input": {
+    "source": "spreadsheet/07_equity_method/07_03_input.xlsx",
+    "sha256": "ab0f393f2dea5908de9ee815a6584f7707f4da676fcdbfa6245843e13b7d664c"
+   },
+   "golden": {
+    "source": "spreadsheet/07_equity_method/07_03_golden.xlsx",
+    "sha256": "1ba0d9b8d20d37e9507559ccfedbd0762ee1bee04a84be4d719be83fae1374e7"
+   }
+  },
+  {
+   "id": "template-08_01",
+   "category": "Template",
+   "group": "08_fin_model_basics",
+   "source_id": "08_01",
+   "input": {
+    "source": "spreadsheet/08_fin_model_basics/08_01_input.xlsx",
+    "sha256": "d6f67c32c5b6cbc57a8000b13f3e7b04fad293ed6a48fb11b5a6153aafb7e2c7"
+   },
+   "golden": {
+    "source": "spreadsheet/08_fin_model_basics/08_01_golden.xlsx",
+    "sha256": "2b0b8fc1fcc4e53d32421dc702e5d52647491ebf38a8f11e8d0c6c7c510bbd82"
+   }
+  },
+  {
+   "id": "template-08_02",
+   "category": "Template",
+   "group": "08_fin_model_basics",
+   "source_id": "08_02",
+   "input": {
+    "source": "spreadsheet/08_fin_model_basics/08_02_input.xlsx",
+    "sha256": "ce76ebca97ff67c31f7c6034cf4ef6473f9ed6321bc729ba65ef043632568de5"
+   },
+   "golden": {
+    "source": "spreadsheet/08_fin_model_basics/08_02_golden.xlsx",
+    "sha256": "8a95047dcfaf09178e3795fd29d4eae088ae80970ceb2caa1b43c00a38117893"
+   }
+  },
+  {
+   "id": "template-08_03",
+   "category": "Template",
+   "group": "08_fin_model_basics",
+   "source_id": "08_03",
+   "input": {
+    "source": "spreadsheet/08_fin_model_basics/08_03_input.xlsx",
+    "sha256": "159fe5699348490e9675045d789efbfe470e2b84df994ce5e9296b872bf383fe"
+   },
+   "golden": {
+    "source": "spreadsheet/08_fin_model_basics/08_03_golden.xlsx",
+    "sha256": "8c37c8eb684e28aa1db30912821853488ae25324beea18f08c994f20e1c5f589"
+   }
+  },
+  {
+   "id": "template-09_01",
+   "category": "Template",
+   "group": "09_lbo_model",
+   "source_id": "09_01",
+   "input": {
+    "source": "spreadsheet/09_lbo_model/09_01_input.xlsx",
+    "sha256": "901acd61aed25b21bd170b6f5fe6064a23e37875b0f271805497b07ba801a51e"
+   },
+   "golden": {
+    "source": "spreadsheet/09_lbo_model/09_01_golden.xlsx",
+    "sha256": "53ef7696e7c23f20317dfa017a1cf2f575736ef45f7b817f7058a07a26a0c1a9"
+   }
+  },
+  {
+   "id": "template-09_02",
+   "category": "Template",
+   "group": "09_lbo_model",
+   "source_id": "09_02",
+   "input": {
+    "source": "spreadsheet/09_lbo_model/09_02_input.xlsx",
+    "sha256": "744e41e7aa7c3263b6e5a964474bba962a5e1ad0a99dafa5c14bf6dee772d886"
+   },
+   "golden": {
+    "source": "spreadsheet/09_lbo_model/09_02_golden.xlsx",
+    "sha256": "87d7bff6f59d27419a86bf5515cbd7774245f8837484107f97fa18806a708b10"
+   }
+  },
+  {
+   "id": "template-09_03",
+   "category": "Template",
+   "group": "09_lbo_model",
+   "source_id": "09_03",
+   "input": {
+    "source": "spreadsheet/09_lbo_model/09_03_input.xlsx",
+    "sha256": "7db3e88fc6d7269369c723f4591891476812a46bf638c201cee02d53be3ea7c2"
+   },
+   "golden": {
+    "source": "spreadsheet/09_lbo_model/09_03_golden.xlsx",
+    "sha256": "32b3d97412c7f05746326cf7b7217066b7331d91003922fb1912ec05644f509a"
+   }
+  },
+  {
+   "id": "template-09_04",
+   "category": "Template",
+   "group": "09_lbo_model",
+   "source_id": "09_04",
+   "input": {
+    "source": "spreadsheet/09_lbo_model/09_04_input.xlsx",
+    "sha256": "513ec8339e7b0c37ed1da0c98159d93b3f962ac1fd9ad8ae78fb54910e79382a"
+   },
+   "golden": {
+    "source": "spreadsheet/09_lbo_model/09_04_golden.xlsx",
+    "sha256": "ab74d951523cc9b97dfba0cd2ccb3d50497ce0006914edf6ad133dd95141954d"
+   }
+  },
+  {
+   "id": "template-10_01",
+   "category": "Template",
+   "group": "10_ma_analysis",
+   "source_id": "10_01",
+   "input": {
+    "source": "spreadsheet/10_ma_analysis/10_01_input.xlsx",
+    "sha256": "910f1f4d69f60d937ac058235e2fb9d2da0b8a5c7c6cf19d1fd4a3baec407153"
+   },
+   "golden": {
+    "source": "spreadsheet/10_ma_analysis/10_01_golden.xlsx",
+    "sha256": "d890860f59c340b3f4805007e3a8fbc91f6a65c4c6dc128c94df682db547705e"
+   }
+  },
+  {
+   "id": "template-10_02",
+   "category": "Template",
+   "group": "10_ma_analysis",
+   "source_id": "10_02",
+   "input": {
+    "source": "spreadsheet/10_ma_analysis/10_02_input.xlsx",
+    "sha256": "1a5ec8f23da859562962b21065f191d4e319e1e6ede6bae606c35db70f9d185a"
+   },
+   "golden": {
+    "source": "spreadsheet/10_ma_analysis/10_02_golden.xlsx",
+    "sha256": "faec4d9725c5af2ea14240b23752ac6357843798900c7386a9c59b50be13e9a2"
+   }
+  },
+  {
+   "id": "template-11_01",
+   "category": "Template",
+   "group": "11_ma_model",
+   "source_id": "11_01",
+   "input": {
+    "source": "spreadsheet/11_ma_model/11_01_input.xlsx",
+    "sha256": "64a77096d01a42041efa3b6123f4b7d1557cd872c521484dc761f07122fb7035"
+   },
+   "golden": {
+    "source": "spreadsheet/11_ma_model/11_01_golden.xlsx",
+    "sha256": "0bd331a8d4b6298b8e41221487b653da398c061727d3300e9dff5cd6830c3b80"
+   }
+  },
+  {
+   "id": "template-11_02",
+   "category": "Template",
+   "group": "11_ma_model",
+   "source_id": "11_02",
+   "input": {
+    "source": "spreadsheet/11_ma_model/11_02_input.xlsx",
+    "sha256": "8b1e7dddd6df75a3786726d6c857c88ebee8dca52da3f52d1d5486c4001607ff"
+   },
+   "golden": {
+    "source": "spreadsheet/11_ma_model/11_02_golden.xlsx",
+    "sha256": "707fa13205f713e9bb5fe34c1bbce52639ac5a4c3dc74f62f3f0e8c64517f4de"
+   }
+  },
+  {
+   "id": "template-11_03",
+   "category": "Template",
+   "group": "11_ma_model",
+   "source_id": "11_03",
+   "input": {
+    "source": "spreadsheet/11_ma_model/11_03_input.xlsx",
+    "sha256": "5163e89cd9af146e3bf264d770ac6913897dbfd2508e33e9cacf4e93946f2c3b"
+   },
+   "golden": {
+    "source": "spreadsheet/11_ma_model/11_03_golden.xlsx",
+    "sha256": "d0f054368ea9b6fba1181fc9b640daca94337b6fe36d296982eb1f0f01dabc96"
+   }
+  },
+  {
+   "id": "template-11_04",
+   "category": "Template",
+   "group": "11_ma_model",
+   "source_id": "11_04",
+   "input": {
+    "source": "spreadsheet/11_ma_model/11_04_input.xlsx",
+    "sha256": "f455c69079e2c34333f8e218c1d3234412890fc83894402fdff0a64a9981f46d"
+   },
+   "golden": {
+    "source": "spreadsheet/11_ma_model/11_04_golden.xlsx",
+    "sha256": "e8f42d43a06625994bec66596a713af4b7736e5f722b3e65e4e7ad95539cacf5"
+   }
+  },
+  {
+   "id": "template-12_01",
+   "category": "Template",
+   "group": "12_net_op_loss",
+   "source_id": "12_01",
+   "input": {
+    "source": "spreadsheet/12_net_op_loss/12_01_input.xlsx",
+    "sha256": "3990baee7e0072191f6b6c2cc69daf8a8ce514e4e903c25f0f3d5cd327cc2e36"
+   },
+   "golden": {
+    "source": "spreadsheet/12_net_op_loss/12_01_golden.xlsx",
+    "sha256": "42ace169bfee02240ab42869a54215f256801e736069d3fa6c17e9d99c664570"
+   }
+  },
+  {
+   "id": "template-13_01",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_01",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_01_input.xlsx",
+    "sha256": "17f4640207b43b0729a971f8a641b3aed7c0e8dd17e16d11a4a904d6e87dca14"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_01_golden.xlsx",
+    "sha256": "ee842ea08d2f024e712e90e01e75ffd068c6422c87917431206299c73f46e6e9"
+   }
+  },
+  {
+   "id": "template-13_02",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_02",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_02_input.xlsx",
+    "sha256": "f1ecc992de17941dc125ecce881e340762941cb343d2fea648ef54aaf84bd15c"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_02_golden.xlsx",
+    "sha256": "fccb3e4020dd68406ee2ac54a735349b5a684697281ff25c435db5990f1282c9"
+   }
+  },
+  {
+   "id": "template-13_03",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_03",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_03_input.xlsx",
+    "sha256": "ec0d9ec6ad5b7455036ab2d3a6a97123ec04cb6c2182ffaf634b235e336b1749"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_03_golden.xlsx",
+    "sha256": "4becdf12b585d8a9e9059b00853c2a9bc8b5639483b751c6b60e1be884ef0108"
+   }
+  },
+  {
+   "id": "template-13_04",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_04",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_04_input.xlsx",
+    "sha256": "ebde6f11a16410fc9841a656062299688429d577231d1bc3493baa5e91f70d88"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_04_golden.xlsx",
+    "sha256": "f7a1b0e7fe9a51fe71aca56b55e23f42d8b8fabf630d694573099c10a1cd22e8"
+   }
+  },
+  {
+   "id": "template-13_05",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_05",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_05_input.xlsx",
+    "sha256": "1b3af0414e4921e629dc35fafeb5079ce9033ca3afde408c501cde2d5bb39773"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_05_golden.xlsx",
+    "sha256": "d8001cb51791bb48d3eb2c55ac7c493ab2fb9666d4224cc034d0742e37e30d8b"
+   }
+  },
+  {
+   "id": "template-13_06",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_06",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_06_input.xlsx",
+    "sha256": "be345ca089910ca2ba6263439a612eeef02998a0fdec17abbaa7dcfbd407de40"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_06_golden.xlsx",
+    "sha256": "84ff0a5df7529a8d4526072f73fad9d35609f36fa448d5f234da4cc91930402e"
+   }
+  },
+  {
+   "id": "template-13_07",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_07",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_07_input.xlsx",
+    "sha256": "f690732e5e023e7e959fa6347b1f7da18febdbfcb83f4b466c8b4d934a0ff969"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_07_golden.xlsx",
+    "sha256": "296b667bb0dd81974de78d36a65ca69e4af4cd2f3799d74c111ee6b56bc268ef"
+   }
+  },
+  {
+   "id": "template-13_08",
+   "category": "Template",
+   "group": "13_nonrecurring",
+   "source_id": "13_08",
+   "input": {
+    "source": "spreadsheet/13_nonrecurring/13_08_input.xlsx",
+    "sha256": "591b6250a393b2606573631b5a9e66f415d68704d2d95756cd1cb8bca7327343"
+   },
+   "golden": {
+    "source": "spreadsheet/13_nonrecurring/13_08_golden.xlsx",
+    "sha256": "71538094ffedc311a4f596baf40871fc398a3fa8b75cdb973eb19814685e77ea"
+   }
+  },
+  {
+   "id": "template-14_01",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_01",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_01_input.xlsx",
+    "sha256": "918851253d4b3004f86413d8daf8e9c55d7ef940e406d01dfd566a147cfb9b20"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_01_golden.xlsx",
+    "sha256": "7e97188a6b6508a4c32da353097d1fa4dd110801128d4f44f8b14ffa52ec3593"
+   }
+  },
+  {
+   "id": "template-14_02",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_02",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_02_input.xlsx",
+    "sha256": "ae2631a79c39beafc2e7c37f2dd74ce36ba039700ac3a46f17276b09a83386ec"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_02_golden.xlsx",
+    "sha256": "33fac06374d7a7248869daaddef0815e38abd4a94de0b53dc22a632204873eb7"
+   }
+  },
+  {
+   "id": "template-14_03",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_03",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_03_input.xlsx",
+    "sha256": "20c87cc3b1815b848c5559943e92f4a874ec10d0734449787e68284928b62059"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_03_golden.xlsx",
+    "sha256": "22a3b4147c39add485fdb61645210d8d91618de6ba415b94c180cb7cf79da2d4"
+   }
+  },
+  {
+   "id": "template-14_04",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_04",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_04_input.xlsx",
+    "sha256": "e14007f370523da9c7c68b4b8149def67da93cab01dd2999bae9c21149af50bb"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_04_golden.xlsx",
+    "sha256": "1ca2f276f3744c8370439a9ffadd13f33ab8247b4282437e9bd8d335999a7355"
+   }
+  },
+  {
+   "id": "template-14_05",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_05",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_05_input.xlsx",
+    "sha256": "78b44779cf702a7df22477e03d14dc8b76da1b842225db16f85867961301279e"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_05_golden.xlsx",
+    "sha256": "f9a8d94844d301fe53e4714996df7ed00ebec1b4cda83bebaf7232beb6030e31"
+   }
+  },
+  {
+   "id": "template-14_06",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_06",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_06_input.xlsx",
+    "sha256": "b5fa2ea67638c24f22bfba1ff80cd56f988f6029498f14e2338cadf89ec630a7"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_06_golden.xlsx",
+    "sha256": "3f4284060af3f6cb70b2b9cd96fdede42b44033e182d5c48373f1de79440f2f6"
+   }
+  },
+  {
+   "id": "template-14_07",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_07",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_07_input.xlsx",
+    "sha256": "e98907f7263a5f4f3134f09b9827801511427aa3e4ad714f6077bd2364ecab53"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_07_golden.xlsx",
+    "sha256": "9f114f07b86a6a925fba743fa3293ff2640058f7426109af4170f965553c7c1b"
+   }
+  },
+  {
+   "id": "template-14_08",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_08",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_08_input.xlsx",
+    "sha256": "205d9a76852ff816aa95a47e5c3f18d8fead66a17c3f33dc05c7cb826096137b"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_08_golden.xlsx",
+    "sha256": "f7508e53ab01181ac415752a78253333a9c0a9b79073302d254072c1db65c909"
+   }
+  },
+  {
+   "id": "template-14_09",
+   "category": "Template",
+   "group": "14_re_dcf",
+   "source_id": "14_09",
+   "input": {
+    "source": "spreadsheet/14_re_dcf/14_09_input.xlsx",
+    "sha256": "b272c7de3b687ecea8013d95e57cdeeccb071c3e7382d1a70abdff7b4216ec69"
+   },
+   "golden": {
+    "source": "spreadsheet/14_re_dcf/14_09_golden.xlsx",
+    "sha256": "cf39273a26ecf5c08d953de2ce8eb389d4eae15196a2342c69ab1b115adfbe27"
+   }
+  },
+  {
+   "id": "template-15_01",
+   "category": "Template",
+   "group": "15_re_debt",
+   "source_id": "15_01",
+   "input": {
+    "source": "spreadsheet/15_re_debt/15_01_input.xlsx",
+    "sha256": "0cce1cbcae88e9dbcc2d33743c76179443119357d80e8d24d38b3e99a404a0c6"
+   },
+   "golden": {
+    "source": "spreadsheet/15_re_debt/15_01_golden.xlsx",
+    "sha256": "225a92878a03cd192d1ce2accc3928e4f24d0fa633e5cc021ceea2aa019ab439"
+   }
+  },
+  {
+   "id": "template-15_02",
+   "category": "Template",
+   "group": "15_re_debt",
+   "source_id": "15_02",
+   "input": {
+    "source": "spreadsheet/15_re_debt/15_02_input.xlsx",
+    "sha256": "edca4549f7d5f64cdec8e1509f94627fff5d80533870ebf8bea232911cd258d2"
+   },
+   "golden": {
+    "source": "spreadsheet/15_re_debt/15_02_golden.xlsx",
+    "sha256": "a03ce2589af222bdb06547511f122b97dae51e4c1a5fbda66be46cd91287ac6d"
+   }
+  },
+  {
+   "id": "template-15_03",
+   "category": "Template",
+   "group": "15_re_debt",
+   "source_id": "15_03",
+   "input": {
+    "source": "spreadsheet/15_re_debt/15_03_input.xlsx",
+    "sha256": "cdf6c70d7728843d3072e3fcf6b7a1140b792042d4240be5f3002fbdc26a980c"
+   },
+   "golden": {
+    "source": "spreadsheet/15_re_debt/15_03_golden.xlsx",
+    "sha256": "d826ef071f614f21b3913ee9a128a8a7f4232a2a63e2e03cd7fb4b8d9040dea7"
+   }
+  },
+  {
+   "id": "template-15_04",
+   "category": "Template",
+   "group": "15_re_debt",
+   "source_id": "15_04",
+   "input": {
+    "source": "spreadsheet/15_re_debt/15_04_input.xlsx",
+    "sha256": "60f7a638f9d0687628e2ca73378c24209c73cb12894b4d0e1af67d414a200a64"
+   },
+   "golden": {
+    "source": "spreadsheet/15_re_debt/15_04_golden.xlsx",
+    "sha256": "36b4f4f31ca933851e410695bb026119bf5f3b72802399b65468064954a1e7ce"
+   }
+  },
+  {
+   "id": "template-16_01",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_01",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_01_input.xlsx",
+    "sha256": "6b07c6bc4c33d6350397481f52026f34dbd7758f99886f05a85e70a199cfafbf"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_01_golden.xlsx",
+    "sha256": "24729ef8835c9965a54f1157ab75d4a1b392da2fddde67c0f9ae502998814e18"
+   }
+  },
+  {
+   "id": "template-16_02",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_02",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_02_input.xlsx",
+    "sha256": "438cf795452a770155efe3b552f205ec3d2b4e94537874a6ace6caf7f0dac10c"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_02_golden.xlsx",
+    "sha256": "f7e4f5f77436489bf0f45e98b962a9e59582a1fae0c5c5518f527f82ca2a31ef"
+   }
+  },
+  {
+   "id": "template-16_03",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_03",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_03_input.xlsx",
+    "sha256": "568c656dc6a7206202ffdcbc5655dbeee0806b3ea996dcdeea1469bf1a5918d3"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_03_golden.xlsx",
+    "sha256": "41fa21c77b945fd07744dd889ec1053c869d724554911ccae8318c341737ac3b"
+   }
+  },
+  {
+   "id": "template-16_04",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_04",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_04_input.xlsx",
+    "sha256": "34e5883cacf76c26d886a955f10dfcd5bbc459bf99742a34133c577704a05f98"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_04_golden.xlsx",
+    "sha256": "2b953fc125ffa3a755521d5dadce0fea00e1a2629dd588dcaa93d460ac461dbd"
+   }
+  },
+  {
+   "id": "template-16_05",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_05",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_05_input.xlsx",
+    "sha256": "ebfa3b52e8694c1b12968ffd9c715531e945b77a09f4df6a708308ba4afab9fd"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_05_golden.xlsx",
+    "sha256": "b2977af3e3cb4397cf8eab8c3a36902cbc9678d5ee597a28fb3b388fd59076c5"
+   }
+  },
+  {
+   "id": "template-16_06",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_06",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_06_input.xlsx",
+    "sha256": "5eafa273ff0267e65f829ea544717fdc98a460859081614622c80b0a6a867c73"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_06_golden.xlsx",
+    "sha256": "c238affe3d97da3d3cb9875bda54482f13b8cda3787a22c37ce4fdadd79ebe9c"
+   }
+  },
+  {
+   "id": "template-16_07",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_07",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_07_input.xlsx",
+    "sha256": "d3a7de73ce86d28dccf1879795495172a906f0268188217b3e7d99f16da47d1c"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_07_golden.xlsx",
+    "sha256": "fb8fd6acf1b4ce12f3f10006dc798d331c5516bfa38a99604531779d5bb4af43"
+   }
+  },
+  {
+   "id": "template-16_08",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_08",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_08_input.xlsx",
+    "sha256": "e624bbe0a36c50d190ff7ecddf892580f2289b689309b26a463a684e2c3afdeb"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_08_golden.xlsx",
+    "sha256": "715c0cd485dad54a1e15450233a886413a86e56c0515948d0369381680544f41"
+   }
+  },
+  {
+   "id": "template-16_09",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_09",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_09_input.xlsx",
+    "sha256": "b9b749c4b6860a95fda11e429b881a290e813302cbf9ad1bc7f3537baf434eff"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_09_golden.xlsx",
+    "sha256": "2a7509f71fd31d6105003e5c851040beebccf8b7838cf469dd7ac6f87e600ccb"
+   }
+  },
+  {
+   "id": "template-16_10",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_10",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_10_input.xlsx",
+    "sha256": "d491373f4c7de010f25f78c103dcc625a81dca602f8a314fa4bacb0bbe99d318"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_10_golden.xlsx",
+    "sha256": "44197f33ef550ff97d18e4c067f9dcc9b7d2c1cc9d0cac8bf2e6711a28d9754f"
+   }
+  },
+  {
+   "id": "template-16_11",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_11",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_11_input.xlsx",
+    "sha256": "0bec3b522039754769423d612984876c553d08a0d0f627fc5a8840a3fb6f4755"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_11_golden.xlsx",
+    "sha256": "1675da87043a3654f8bcb630b359f6a77e2dd0661c2f95c6b17c5c7a5613dd15"
+   }
+  },
+  {
+   "id": "template-16_12",
+   "category": "Template",
+   "group": "16_re_direct_cap",
+   "source_id": "16_12",
+   "input": {
+    "source": "spreadsheet/16_re_direct_cap/16_12_input.xlsx",
+    "sha256": "3e4a2e05173f12cf684fc3b596003760a0967e31ff5c66e5b428e88bea14b238"
+   },
+   "golden": {
+    "source": "spreadsheet/16_re_direct_cap/16_12_golden.xlsx",
+    "sha256": "87204c42333c9f7b43b179d17c6b12d19eed56b9c4486ab81894a82bcfe0db72"
+   }
+  }
+ ]
+}
