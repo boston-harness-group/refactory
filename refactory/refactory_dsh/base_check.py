@@ -458,19 +458,24 @@ def _build_marker_script(steps: list[tuple[str, str]], marker_id: str) -> str:
     have it. A step after ``||`` runs only when the shell would run it, on the chain's
     status so far, not only on the previous step's exit: with ``a || b || c`` and ``a``
     passing, neither ``b`` nor ``c`` runs, and its marker says so. A ``set`` step runs
-    without errexit (`_without_errexit`), its other options kept, and the script keeps
-    the shell's errexit rule itself: once a list (the steps up to a ``;``) ends on a
+    without errexit (`_without_errexit`), its other options kept; each step sees ``$?`` as
+    the shell would give it (the chain's status so far); and the script keeps the shell's
+    errexit rule itself: once a list (the steps up to a ``;``) ends on a
     failure of its last step while errexit is on, the chain's status is that failure,
     whatever the later steps do. The script exits with the chain's status, the exit the
     command itself would have had.
     """
     status, code, would = "__refactory_status", "__refactory_exit", "__refactory_would"
     last, stop, errexit = "__refactory_last", "__refactory_stop", "__refactory_errexit"
-    lines = ["exec 2>&1", f"{status}=0", f"{last}=-1", f"{stop}=0", f"{errexit}=0"]
+    ret = "__refactory_ret"
+    lines = ["exec 2>&1", f'{ret}() {{ return "$1"; }}', f"{status}=0", f"{last}=-1", f"{stop}=0",
+             f"{errexit}=0"]
     for idx, (step_text, operator) in enumerate(steps):
         change = _errexit_change(step_text)
         # errexit would end the shell at the first failing step, before the later markers.
-        step_text = _without_errexit(step_text) or step_text
+        # The bookkeeping between steps overwrites ``$?``: each step gets back the status
+        # the shell would give it, the chain's so far (``pytest || [ $? -eq 5 ]``).
+        step_text = f'{ret} "${status}"\n' + (_without_errexit(step_text) or step_text)
         mark = f"___REFACTORY_STEP_{marker_id}_{idx}_"
         record = f"{code}=$?; echo '{mark}EXIT_'${code}"
         if operator == "||":
@@ -754,17 +759,17 @@ def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
     deselects: none when it has no single plain pytest step (`plain_pytest_step`).
 
     The full check uses it for the tests the self-check already passed on the same commit
-    (`design_ops._full_check`). The last id is never deselected: a step whose every test
-    was deselected would exit 5 (no tests ran) and fail the check, so one passed test runs
-    again rather than that. Past `DESELECT_LIMIT_BYTES` the rest are left to run.
+    (`design_ops._full_check`). A step whose every test is deselected runs none and exits
+    5; `settle_deselected` reads that as the pass it is. Past `DESELECT_LIMIT_BYTES` the
+    rest are left to run.
     """
-    found = plain_pytest_step(command) if len(test_ids) > 1 else None
+    found = plain_pytest_step(command) if test_ids else None
     if found is None:
         return command, []
     steps, index = found
     used: list[str] = []
     size = 0
-    for test_id in test_ids[:-1]:
+    for test_id in test_ids:
         argument = shlex.quote(f"--deselect={test_id}")
         if size + len(argument) + 1 > DESELECT_LIMIT_BYTES:
             break
@@ -773,6 +778,66 @@ def with_deselected(command: str, test_ids: list[str]) -> tuple[str, list[str]]:
     added = steps[index][0] + " " + " ".join(shlex.quote(f"--deselect={test_id}")
                                              for test_id in used)
     return with_step(steps, index, added), used
+
+
+#: pytest's summary when every test it collected was deselected: ``3 deselected in 0.01s``.
+_ALL_DESELECTED = re.compile(r"^=*\s*\d+ deselected(?:, \d+ warnings?)? in [\d.]+s\b",
+                             re.MULTILINE)
+
+
+def _all_deselected(output: str) -> bool:
+    summaries = _PYTEST_FINAL_LINE.findall(strip_ansi(output))
+    return bool(summaries) and bool(_ALL_DESELECTED.match(summaries[-1].strip()))
+
+
+_PYTEST_FINAL_LINE = re.compile(r"^=*\s*\d+ (?:failed|passed|errors?|skipped|deselected|xfailed|"
+                                r"xpassed|warnings?)\b.* in [\d.]+s\b.*$", re.MULTILINE)
+
+
+def chain_status(steps: list[dict]) -> int:
+    """The status the shell gives a chain whose steps ended as ``steps`` say, by the rule
+    `_build_marker_script` keeps: an ``&&`` step counts only after a success, an ``||``
+    step only after a failure, and errexit ends the chain at a list that ends failing."""
+    status, last, errexit = 0, -1, False
+    for index, sr in enumerate(steps):
+        operator = sr["operator"]
+        live = (operator in ("", ";") or (operator == "&&" and status == 0)
+                or (operator == "||" and status != 0))
+        if live and sr["ran"]:
+            status, last = int(sr["exit_code"]), index
+            change = _errexit_change(sr["step"])
+            if change is not None and status == 0:
+                errexit = change
+        if (index + 1 == len(steps) or steps[index + 1]["operator"] == ";") and errexit \
+                and status != 0 and last == index:
+            return status
+    return status
+
+
+def settle_deselected(result: Any, command: str) -> None:
+    """A check whose pytest step deselected every test it collected (`with_deselected`):
+    that step ran nothing and exited 5, which is no failure -- every test in it passed in
+    the self-check on this commit. Its exit becomes 0 and the command's status is worked
+    out again (`chain_status`). A step that collected nothing at all ("no tests ran") is
+    not this and stays failing."""
+    steps = getattr(result, "step_results", None)
+    if steps is not None:
+        changed = False
+        for sr in steps:
+            if sr["ran"] and sr["exit_code"] == 5 and sr["runner"] == "pytest" \
+                    and _all_deselected(sr["output"]):
+                sr.update(exit_code=0, accounted=True)
+                changed = True
+        if not changed:
+            return
+        status = chain_status(steps)
+    elif result.returncode == 5 and _runner(command) == "pytest" \
+            and _all_deselected("\n".join((result.stdout or "", result.stderr or ""))):
+        status = 0
+    else:
+        return
+    result.returncode = status
+    result.ok = status == 0 and not result.timed_out
 
 
 def chain_incomplete(command: str, steps: list[dict] | None) -> str | None:
@@ -1417,10 +1482,144 @@ def prepared_state(path: Path, commit: str, key: str) -> str | None:
     return str(data.get("state") or "") if data.get("key") == key else None
 
 
-def base_prepared(path: Path, commit: str, key: str) -> bool:
-    """Whether the base worktree at ``path`` is prepared at ``commit`` for ``key``: one
-    shared record, so `run_base_check` and `targeted_base_failures` prepare it once."""
-    return prepared_state(path, commit, key) is not None
+#: What a check copy's state leaves out: caches a run writes and nothing prepares.
+_STATE_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def worktree_state(copy: worktree.Worktree) -> str:
+    """One hash of what a prepared worktree's files are -- the check copy's or the base's --
+    beside what the installs made and caches: its tracked changes, its untracked files'
+    bytes, and each ignored file's size and modification time. Equal before and after a
+    run, the run changed nothing that preparing it makes, so it is still prepared."""
+    path = Path(copy.path)
+    installed = {name.rstrip("/").split("/")[0] for name in
+                 worktree._json(worktree._record_path(copy)).get("installed", [])}
+    digest = hashlib.sha256()
+    try:
+        digest.update(worktree.git(path, "diff", "--binary", "HEAD").encode())
+        untracked = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
+        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
+                               "--exclude-standard", "--directory")
+    except ValueError:
+        return ""
+
+    def skipped(name: str) -> bool:
+        parts = name.rstrip("/").split("/")
+        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
+
+    for name in sorted(filter(None, untracked.split("\0"))):
+        if skipped(name):
+            continue
+        digest.update(b"U" + name.encode() + b"\0")
+        try:
+            digest.update((path / name).read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    for entry in sorted(filter(None, ignored.split("\0"))):
+        if skipped(entry):
+            continue
+        root = path / entry
+        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+        for file in files:
+            relative = file.relative_to(path).as_posix()
+            if skipped(relative):
+                continue
+            try:
+                info = file.stat()
+            except OSError:
+                continue
+            digest.update(f"I{relative}\0{info.st_size}\0{info.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
+
+
+
+#: The most files, and bytes, `residue` reads before it gives up (and nothing is shared).
+RESIDUE_FILES = 20_000
+RESIDUE_BYTES = 256 * 1024 * 1024
+
+
+def residue(place: worktree.Worktree) -> str | None:
+    """One hash of what a worktree holds beside its commit: every untracked and ignored
+    file, by name and bytes -- each worktree's own path read as one placeholder -- beside
+    what its installs made and caches. Two places with the same residue run a test on the
+    same files. None when there is too much to read (`RESIDUE_FILES`, `RESIDUE_BYTES`) or
+    git cannot list it."""
+    path = Path(place.path)
+    installed = {name.rstrip("/").split("/")[0] for name in
+                 _read_json(worktree._record_path(place)).get("installed", [])}
+    try:
+        listed = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
+        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
+                               "--exclude-standard", "--directory")
+    except ValueError:
+        return None
+
+    def skipped(name: str) -> bool:
+        parts = name.rstrip("/").split("/")
+        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
+
+    files: set[str] = {name for name in listed.split("\0") if name and not skipped(name)}
+    for entry in filter(None, ignored.split("\0")):
+        if skipped(entry):
+            continue
+        root = path / entry
+        if root.is_file():
+            files.add(entry)
+        else:
+            files.update(p.relative_to(path).as_posix() for p in root.rglob("*")
+                         if p.is_file() and not skipped(p.relative_to(path).as_posix()))
+    if len(files) > RESIDUE_FILES:
+        return None
+    roots = sorted({str(path).encode(), str(path.resolve()).encode()}, key=len, reverse=True)
+    digest, total = hashlib.sha256(), 0
+    for name in sorted(files):
+        try:
+            data = (path / name).read_bytes()
+        except OSError:
+            data = b"<unreadable>"
+        total += len(data)
+        if total > RESIDUE_BYTES:
+            return None
+        for root in roots:
+            data = data.replace(root, b"<root>")
+        digest.update(name.encode() + b"\0" + hashlib.sha256(data).digest())
+    return digest.hexdigest()
+
+
+def _base_descriptor(found: worktree.Worktree, path: Path) -> worktree.Worktree:
+    """The base worktree at ``path`` as a `worktree.Worktree`, as `_ensure_base_worktree`
+    describes it (its own branch name, so its install record is its own)."""
+    run_id = Path(found.path).name.removeprefix("run-")
+    return worktree.Worktree(path=str(path), branch=f"{worktree.BRANCH_PREFIX}base-{run_id}",
+                             base=found.base, head=found.base, target=found.target, run=found.run)
+
+
+def base_prepared(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> bool:
+    """Whether the base worktree at ``path`` is prepared at ``commit`` and its files are
+    exactly as that preparation left them (`worktree_state`): one shared record, so
+    `run_base_check` and `targeted_base_failures` prepare it once, and a base a run left
+    changed -- a test that rewrote a tracked file, a probe's residue -- is never used as
+    prepared."""
+    state = prepared_state(path, commit, prepared_key(ctx, commit))
+    return bool(state) and state == worktree_state(_base_descriptor(found, path))
+
+
+def mark_base_prepared(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> None:
+    """Record the base at ``path`` as prepared for ``commit``, with its files' state now."""
+    mark_prepared(path, prepared_key(ctx, commit), worktree_state(_base_descriptor(found, path)))
+
+
+def restore_base(ctx: Any, found: worktree.Worktree, path: Path, commit: str) -> None:
+    """After a run in the base worktree: when its files are no longer as prepared, put
+    tracked files back and remove what it left (`_check_base_clean`), and forget the
+    preparation, so the next base run prepares it again rather than run on residue."""
+    if base_prepared(ctx, found, path, commit):
+        return
+    clear_prepared(path)
+    try:
+        _check_base_clean(path, commit, _base_descriptor(found, path))
+    except ValueError as exc:
+        target_guard.warn(f"the base worktree could not be put back after a run: {exc}")
 
 
 def _ensure_base_worktree(ctx: Any) -> tuple[Path, worktree.Worktree, list[str]]:
@@ -1686,9 +1885,8 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
         home = Path(ctx.workdir).resolve() / worktree.BASE_CHECK_HOME
         home.mkdir(parents=True, exist_ok=True)
         budget_inner = getattr(ctx, "budget", None)
-        prep_key = prepared_key(ctx, found.base)
         base_path = _base_worktree_path(Path(found.target), Path(found.path).name.removeprefix("run-"))
-        if base_prepared(base_path, found.base, prep_key):
+        if base_prepared(ctx, found, base_path, found.base):
             # `targeted_base_failures` (or an earlier call) prepared this base already:
             # its installs, generate and setup are not run again.
             env = worktree.check_environment(base_path, home)
@@ -1728,7 +1926,7 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
                 )
                 r._crashed = is_crash  # type: ignore[attr-defined]
                 return r, is_crash
-            mark_prepared(base_path, prep_key)
+            mark_base_prepared(ctx, found, base_path, found.base)
 
         # One run: a chain runs as its marker script (`run_chain`), so each step's result
         # comes from this run and the base's suite never runs a second time.
@@ -1736,6 +1934,8 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
             script, workdir=base_path, timeout_s=timeout,
             budget=budget_inner, env=env, home=home, exact_env=True,
         ), _roots((base_path, "<root>"), (home, "<home>"), (ctx.workdir, "<run>")))
+        # What the suite changed in the base must not reach the next run there.
+        restore_base(ctx, found, base_path, found.base)
         crashed_chk, sig_chk = sandbox.is_signal_crash(check_result)
         if crashed_chk:
             r = BaseCheckResult(
@@ -1913,7 +2113,7 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
                 if why:
                     return unavailable(why)
                 _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
-        elif not base_prepared(base_path, base_commit, prepared_key(ctx, base_commit)):
+        elif not base_prepared(ctx, found, base_path, base_commit):
             # One preparation of the base for the run, shared with `run_base_check`.
             try:
                 base_path, base_found, _ = _ensure_base_worktree(ctx)
@@ -1923,7 +2123,7 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
                                               home, prepare_timeout, budget, amend=False)
             if problems:
                 return unavailable("the base's generate or setup failed: " + "\n".join(problems)[:1000])
-            mark_prepared(base_path, prepared_key(ctx, base_commit))
+            mark_base_prepared(ctx, found, base_path, base_commit)
             _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
         from refactory_dsh.test_selection import runnable
 
@@ -1936,6 +2136,9 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
             return unavailable(f"the tests cannot be targeted on the base: {refusal}")
         result = sandbox.run_command(targeted, workdir=base_path, timeout_s=timeout, budget=budget,
                                      env=env, home=home, exact_env=True)
+        if not (reference and reference != found.base):
+            # What these tests changed in the base must not reach the next run there.
+            restore_base(ctx, found, base_path, base_commit)
         if result.timed_out:
             return unavailable(f"the base run of {len(missing)} test(s) was stopped at its "
                                f"{timeout:.0f} s limit")
@@ -2403,12 +2606,13 @@ def _content_hash(path: Path, names: list[str]) -> str:
     return digest.hexdigest()
 
 
-def _guardedness_key(ctx: Any, base: str, runner: str, test_file: str, file_hash: str,
-                     helpers_hash: str) -> str:
+def _guardedness_key(ctx: Any, base: str, command: str, runner: str, test_file: str,
+                     file_hash: str, helpers_hash: str) -> str:
     """A test file's result on the base depends on the base, the run's generate and setup,
-    the runner, the file's own bytes and those of the helpers copied beside it."""
+    the check command and its runner, the file's own bytes and those of the helpers
+    copied beside it."""
     return hashlib.sha256(json.dumps({
-        "base": base, "setup": str(ctx.facts.get("setup") or "").strip(),
+        "base": base, "command": command, "setup": str(ctx.facts.get("setup") or "").strip(),
         "generate": str(ctx.facts.get("generate") or "").strip(), "runner": runner,
         "file": test_file, "content": file_hash, "helpers": helpers_hash,
     }, sort_keys=True).encode()).hexdigest()
@@ -2424,7 +2628,7 @@ def compute_test_guardedness(
     the base worktree on demand if it does not already exist.
 
     Each file's result is kept by the base, the run's generate and setup, the runner and
-    the bytes of the file and of the helpers copied beside it (`_guardedness_key`), so a
+    the bytes of the file and of the helpers copied beside it, and the check command (`_guardedness_key`), so a
     later round runs only the files whose content changed. A run that timed out, crashed
     or could not start is never kept.
     """
@@ -2451,7 +2655,7 @@ def compute_test_guardedness(
 
     helper_files = _changed_files_in_test_dirs(attempt_path, found.base, new_test_files)
     helpers_hash = _content_hash(attempt_path, helper_files)
-    keys = {tf: _guardedness_key(ctx, found.base, runner, tf,
+    keys = {tf: _guardedness_key(ctx, found.base, command, runner, tf,
                                  _content_hash(attempt_path, [tf]), helpers_hash)
             for tf in new_test_files}
     cache_path = ctx.workdir / GUARDEDNESS_CACHE_FILE

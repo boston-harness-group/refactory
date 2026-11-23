@@ -396,6 +396,12 @@ def exact_passes(passed: list[str], output: str, whole_files: list[str], *,
     return exact
 
 
+#: What the self-check's record says when its pytest printed no line per test (before 8.1,
+#: which has no ``verbosity_test_cases``): no pass is known by id, so none is shared.
+NO_TEST_LINES = ("pytest printed no line per test (verbosity_test_cases needs pytest 8.1), so "
+                 "no pass is shared with the full check")
+
+
 #: The time a collection of the passed tests' files may stay silent (`_exact_by_collection`).
 COLLECT_LIMIT_S = 60
 
@@ -547,6 +553,10 @@ def _self_check(
             break
         commands.append(command)
         found, why_not = _chunk_report(result, inherited)
+        if (pytest_lines and "Unknown config option: verbosity_test_cases" in _output(result)
+                and NO_TEST_LINES not in notes):
+            # A pytest before 8.1 does not know the option: it printed no line per test.
+            notes.append(NO_TEST_LINES)
         if pytest_lines and not why_not:
             out = _output(result)
             found_passes = chunk_passes(out, finished=True)

@@ -11,6 +11,7 @@ each preparation once.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -224,13 +225,25 @@ TWO = ("def test_one():\n    pass\n\n\ndef test_two():\n    pass\n\n\n"
 
 def _self_check(fx: Fixture, selection: list[str], limit: float = 120):
     found = worktree.recorded(fx.ctx.workdir)
+    here = base_check.residue(found)
     result = failfast._self_check(
         selection, {}, fx.check,
         lambda cmd, timeout: repo_change.run_check(fx.ctx, cmd, timeout, triage_prep=False,
                                                    prepared=True),
         limit, found.path)
-    design_ops._record_self_check_passed(fx.ctx, fx.check, result.passed_ids)
+    design_ops._record_self_check_passed(fx.ctx, fx.check, result.passed_ids, here)
     return result
+
+
+def _merged_full_check(fx: Fixture, check: str):
+    """The full check beside the reviews as `design_ops._full_check` runs it: the passes it
+    may merge (`_mergeable_passes`), deselected, then one run in the check copy."""
+    passed = design_ops._mergeable_passes(fx.ctx, check, 120)
+    command, used = base_check.with_deselected(check, passed)
+    result = repo_change.run_check(fx.ctx, command, 120, beside_reviews=True, per_step=True)
+    if used:
+        base_check.settle_deselected(result, command)
+    return passed, used, result
 
 
 def test_a_self_check_pass_is_not_run_again_by_the_full_check(tmp_path):
@@ -244,17 +257,13 @@ def test_a_self_check_pass_is_not_run_again_by_the_full_check(tmp_path):
     prepass = _self_check(fx, ["tests/test_two.py"])
     ids = {f"tests/test_two.py::{name}" for name in ("test_one", "test_two_more", "test_new")}
     assert set(prepass.passed_ids) == ids
-    passed = design_ops.self_check_passed(fx.ctx, check)
-    command, used = base_check.with_deselected(check, passed)
-    # The last always runs, so a step never deselects all it collects (pytest exit 5).
-    assert used == passed[:-1] and passed[-1] == "tests/test_two.py::test_new"
-    result = repo_change.run_check(fx.ctx, command, 120, beside_reviews=True, per_step=True)
+    passed, used, result = _merged_full_check(fx, check)
+    assert set(used) == ids and set(passed) == ids
     assert result.ok
     # The full check ran only what the self-check had not merged.
     assert sorted(fx.tests("copy")) == ["tests/test_three.py::test_more",
-                                        "tests/test_two.py::test_new",
                                         "tests/test_two.py::test_two"]
-    assert "2 deselected" in result.stdout
+    assert "3 deselected" in result.stdout
 
 
 def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
@@ -266,12 +275,10 @@ def test_an_id_whose_deselect_would_take_another_test_is_not_merged(tmp_path):
     repo_change.prepare_attempt(fx.ctx, 120)
     prepass = _self_check(fx, ["tests/test_two.py::test_one", "tests/test_two.py::test_two"])
     assert prepass.passed_ids == ["tests/test_two.py::test_one"]
-    command, used = base_check.with_deselected(check, design_ops.self_check_passed(fx.ctx, check))
-    result = repo_change.run_check(fx.ctx, command, 120, beside_reviews=True, per_step=True)
-    # test_one, the only pass, is the one that always runs (`with_deselected`).
-    assert used == [] and result.ok and sorted(fx.tests("copy")) == [
-        "tests/test_two.py::test_one", "tests/test_two.py::test_two",
-        "tests/test_two.py::test_two_more"]
+    _, used, result = _merged_full_check(fx, check)
+    assert used == ["tests/test_two.py::test_one"] and result.ok
+    assert sorted(fx.tests("copy")) == ["tests/test_two.py::test_two",
+                                        "tests/test_two.py::test_two_more"]
 
 
 def test_self_check_passes_hold_only_for_their_commit(tmp_path):
@@ -279,10 +286,11 @@ def test_self_check_passes_hold_only_for_their_commit(tmp_path):
     fx = Fixture(tmp_path, {"tests/test_two.py": TWO}, {"change.txt": "x\n"}, check=check)
     repo_change.prepare_attempt(fx.ctx, 120)
     _self_check(fx, ["tests/test_two.py"])
-    assert design_ops.self_check_passed(fx.ctx, check)
-    assert design_ops.self_check_passed(fx.ctx, check + " -x") == []
-    worktree.commit_attempt(fx.ctx.workdir, {Path("change.txt"): "y\n"}, "next attempt")
-    assert design_ops.self_check_passed(fx.ctx, check) == []
+    assert design_ops._mergeable_passes(fx.ctx, check, 120)
+    assert design_ops._mergeable_passes(fx.ctx, check + " -x", 120) == []
+    found = worktree.commit_attempt(fx.ctx.workdir, {Path("change.txt"): "y\n"}, "next attempt")
+    fx.ctx.set_fact("commit", found.head)
+    assert design_ops._mergeable_passes(fx.ctx, check, 120) == []
 
 
 def test_a_chunk_stopped_at_its_limit_keeps_what_it_reported(tmp_path):
@@ -298,7 +306,7 @@ def test_a_chunk_stopped_at_its_limit_keeps_what_it_reported(tmp_path):
     assert prepass.passed_ids == ["tests/test_slow.py::test_a", "tests/test_slow.py::test_b"]
     assert prepass.cut_ids == ["tests/test_slow.py"]
     assert any("kept" in note for note in prepass.notes), prepass.notes
-    assert design_ops.self_check_passed(fx.ctx, check) == prepass.passed_ids
+    assert design_ops._mergeable_passes(fx.ctx, check, 120) == prepass.passed_ids
 
 
 def test_a_partial_chunk_keeps_its_passes_for_the_full_check():
@@ -338,12 +346,9 @@ def test_the_chunk_prints_a_line_per_test(command, added):
 
 def test_deselect_reaches_only_a_single_plain_pytest_step():
     ids = ["tests/test_a.py::test_x[a b]"]
-    assert base_check.with_deselected("pnpm test && pytest -q tests", ids) == (
-        "pnpm test && pytest -q tests", [])  # the last id always runs
-    ids = [*ids, "tests/test_a.py::test_y"]
     command, used = base_check.with_deselected("pnpm test && pytest -q tests", ids)
     assert command == "pnpm test && pytest -q tests '--deselect=tests/test_a.py::test_x[a b]'"
-    assert used == ids[:1]
+    assert used == ids
     for refused in ("pytest a && pytest b", "pytest tests | tee log", "pytest tests > out",
                     "pnpm test"):
         assert base_check.with_deselected(refused, ids) == (refused, [])
@@ -353,7 +358,7 @@ def test_deselect_stops_at_its_size_limit(monkeypatch):
     monkeypatch.setattr(base_check, "DESELECT_LIMIT_BYTES", 100)
     ids = [f"tests/test_a.py::test_{n:03}" for n in range(10)]
     _, used = base_check.with_deselected("pytest tests", ids)
-    assert 0 < len(used) < len(ids) - 1 and used == ids[:len(used)]
+    assert 0 < len(used) < len(ids) and used == ids[:len(used)]
 
 
 # ── 4. guardedness runs only test files whose content changed ─────────────────
@@ -493,6 +498,18 @@ def _assert_counts(log: Path) -> None:
     assert pin_runs.count("run") >= 1, lines
 
 
+def _assert_delivery_owed(run: Path) -> None:
+    """Attempt 1's check deselected the self-check's passes, so it is noted for delivery's
+    whole run (`delivery.whole_suite_owed`), and no such check is recorded as a whole
+    passing run (`delivery.record_full_check`)."""
+    from refactory_dsh import delivery
+
+    owed = json.loads((run / delivery.DESELECTED_CHECKS).read_text())["commits"]
+    ledger = run / delivery.PASSED_CHECKS
+    whole = json.loads(ledger.read_text()) if ledger.exists() else {}
+    assert owed and not set(owed) & {entry["commit"] for entry in whole.values()}
+
+
 @pytest.mark.usefixtures("fake_gh")
 def test_suite_runs_across_two_passes_on_the_walker(tmp_path):
     import test_self_check as T
@@ -506,6 +523,7 @@ def test_suite_runs_across_two_passes_on_the_walker(tmp_path):
     assert result.exit_ok, result.error
     assert sum(T.EMIT in prompt for prompt in model.prompts) >= 2
     _assert_counts(log)
+    _assert_delivery_owed(tmp_path / "run")
 
 
 @pytest.mark.usefixtures("fake_gh")
@@ -530,6 +548,7 @@ def test_suite_runs_across_two_passes_on_the_spine(tmp_path, monkeypatch):
     verdict = _check_node(run, monkeypatch)
     assert verdict["verdict"] == "proceed", verdict
     _assert_counts(log)
+    _assert_delivery_owed(run)
 
 
 # ── delivery's merged check: one run, its steps held to the excusal rule ──────
@@ -570,3 +589,175 @@ def test_the_merged_check_excuses_an_inherited_failure_when_every_step_ran(tmp_p
 def test_unreadable_steps_leave_a_chain_incomplete():
     assert base_check.chain_incomplete("pytest a && pytest b", None)
     assert base_check.chain_incomplete("pytest a", None) is None
+
+
+# ── the review's findings: the check stays binding ────────────────────────────
+
+CFG = ("from pathlib import Path\n\n\ndef test_cfg():\n    assert Path('local.cfg').exists()\n\n\n"
+       "def test_other():\n    pass\n")
+
+
+def test_a_file_only_the_run_worktree_has_stops_the_passes_being_shared(tmp_path):
+    """H1: a gitignored ``local.cfg`` the builder left in the run's worktree makes test_cfg
+    pass in the self-check. The clean check copy lacks it, so nothing is shared and the
+    full check runs test_cfg, which fails there."""
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {".gitignore": "__pycache__/\nlocal.cfg\n", "tests/test_cfg.py": CFG},
+                 {"change.txt": "x\n"}, check=check)
+    repo_change.prepare_attempt(fx.ctx, 120)
+    (Path(worktree.recorded(fx.ctx.workdir).path) / "local.cfg").write_text("x")
+    prepass = _self_check(fx, ["tests/test_cfg.py"])
+    assert "tests/test_cfg.py::test_cfg" in prepass.passed_ids
+    passed, used, result = _merged_full_check(fx, check)
+    assert passed == [] and used == []
+    assert not result.ok and "tests/test_cfg.py::test_cfg" in fx.tests("copy")
+
+
+WRITE = "from pathlib import Path\n\n\ndef test_write():\n    Path('data.txt').write_text('bad\\n')\n"
+DATA = ("from pathlib import Path\n\n\ndef test_data():\n"
+        "    assert Path('data.txt').read_text() == 'good\\n'\n")
+
+
+def test_a_targeted_base_run_that_dirties_the_base_does_not_reach_the_base_check(tmp_path):
+    """H2: a targeted base run rewrites the tracked data.txt. The base is put back after it
+    and the whole base check finds it changed from its preparation anyway, so test_data
+    does not fail on the base."""
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {"data.txt": "good\n", "tests/test_d.py": DATA, "tests/test_w.py": WRITE},
+                 {"change.txt": "x\n"}, check=check)
+    base_check.targeted_base_failures(fx.ctx, check, ["tests/test_w.py::test_write"],
+                                      prepare_timeout=120, timeout=120)
+    base_path = base_check._base_worktree_path(Path(fx.found.target), "norerun0")
+    assert (base_path / "data.txt").read_text() == "good\n"
+    whole = base_check.run_base_check(fx.ctx, check, 120)
+    assert whole.ok and whole.failures == set()
+
+
+def test_a_base_changed_behind_the_marker_is_not_taken_for_prepared(tmp_path):
+    """H2: something else rewrites a tracked file in the prepared base; the base check
+    sees its state differ from the preparation's, puts it back and prepares again."""
+    check = f"{PYTEST} -q tests/test_d.py"
+    fx = Fixture(tmp_path, {"data.txt": "good\n", "tests/test_d.py": DATA},
+                 {"change.txt": "x\n"}, check=check, setup=True)
+    base_check.targeted_base_failures(fx.ctx, check, ["tests/test_d.py::test_data"],
+                                      prepare_timeout=120, timeout=120)
+    base_path = base_check._base_worktree_path(Path(fx.found.target), "norerun0")
+    (base_path / "data.txt").write_text("bad\n")
+    whole = base_check.run_base_check(fx.ctx, check, 120)
+    assert whole.ok and fx.setups("base") == 2
+
+
+@pytest.mark.parametrize("command", [
+    "sh -c 'exit 5' || [ $? -eq 5 ]",
+    "sh -c 'exit 5' || test $? -eq 3",
+    "false; [ $? -eq 1 ] && true",
+    "sh -c 'exit 3' && true || [ $? -eq 3 ]",
+    "set -e; sh -c 'exit 2' || [ $? -eq 2 ]; true",
+])
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash", "/bin/dash"])
+def test_each_step_sees_the_status_the_shell_would_give_it(tmp_path, command, shell):
+    """M1: ``$?`` in a step is the chain's status so far, as in the shell itself, under each
+    shell the check may run in (`/bin/sh` is dash on Debian and Ubuntu)."""
+    if not Path(shell).exists():
+        pytest.skip(f"{shell} is not installed")
+    plain = subprocess.run([shell, "-c", command], cwd=tmp_path).returncode
+    plan = base_check.chain_plan(command)
+    script = subprocess.run([shell, "-c", plan.script], cwd=tmp_path, capture_output=True,
+                            text=True)
+    assert script.returncode == plain
+    steps = base_check._parse_step_results(script.stdout, plan.marker_id, plan.steps)
+    records = [{**sr, "step": text} for sr, (text, _) in zip(steps, plan.steps)]
+    assert base_check.chain_status(records) == plain
+
+
+def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_path):
+    """Every test of the check passed in the self-check on this commit: all are deselected,
+    none runs again, and pytest's exit 5 for the empty step is read as the pass it is --
+    for a single step and as a step of a chain."""
+    for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok"):
+        root = tmp_path / str(len(check))
+        root.mkdir()
+        fx = Fixture(root, {"tests/test_three.py": MORE}, {"change.txt": "x\n"}, check=check)
+        repo_change.prepare_attempt(fx.ctx, 120)
+        _self_check(fx, ["tests/test_three.py"])
+        _, used, result = _merged_full_check(fx, check)
+        assert used == ["tests/test_three.py::test_more"]
+        assert result.ok and result.returncode == 0, result.stdout
+        assert fx.tests("copy") == []
+
+
+def test_a_step_that_collected_nothing_still_fails():
+    """No test collected at all is not a deselected step: it stays failing."""
+    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="no tests ran in 0.01s\n")
+    base_check.settle_deselected(result, "pytest -q tests")
+    assert not result.ok and result.returncode == 5
+
+
+ORDER_BASE = ("STATE = []\n\n\ndef test_a_sets():\n    pass\n\n\n"
+              "def test_b_needs_empty():\n    assert STATE == []\n\n\ndef test_c():\n    pass\n")
+ORDER_LEAKS = ORDER_BASE.replace("def test_a_sets():\n    pass", "def test_a_sets():\n    STATE.append(1)")
+
+
+def test_an_order_dependent_failure_hidden_by_deselection_is_caught_at_delivery(tmp_path):
+    """M2: the change makes test_a leave state that breaks test_b only in its file's order.
+    The self-check ran test_b alone and passed it, so the full check deselected it and
+    passed. That pass never stands for delivery: delivery runs the whole suite on the
+    reviewed commit, finds test_b failing where the base passes it, and does not deliver
+    it as passing (a draft, or no push)."""
+    from refactory_dsh import delivery
+
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {"tests/test_o.py": ORDER_BASE},
+                 {"tests/test_o.py": ORDER_LEAKS}, check=check)
+    repo_change.prepare_attempt(fx.ctx, 120)
+    _self_check(fx, ["tests/test_o.py::test_b_needs_empty", "tests/test_o.py::test_c"])
+    _, used, result = _merged_full_check(fx, check)
+    assert "tests/test_o.py::test_b_needs_empty" in used and result.ok
+    found = worktree.recorded(fx.ctx.workdir)
+    path = Path(found.path)
+    # What `_full_check` does with such a pass: noted as deselected, never recorded whole.
+    delivery.record_deselected_check(fx.ctx, found.head)
+    assert delivery.reusable_check(fx.ctx, path, found.head) == ""
+    assert delivery.whole_suite_owed(fx.ctx, path, found.head)
+    reason, infra = delivery._check_merged(fx.ctx, found, found.head, found.head, 120,
+                                           target_tip=found.base)
+    assert not infra and "tests/test_o.py::test_b_needs_empty" in reason.split("\n", 1)[0], reason
+    # A whole run that passes stands for the tree again.
+    delivery.record_full_check(fx.ctx, path, check)
+    assert not delivery.whole_suite_owed(fx.ctx, path, found.head)
+
+
+def test_a_crashed_chunk_keeps_nothing(monkeypatch):
+    """A chunk stopped at the limit keeps what it reported, but not when a signal killed it:
+    nothing a crashed run printed is kept."""
+    out = ("tests/test_a.py::test_x PASSED  [ 50%]\ntests/test_a.py::test_y FAILED  [ 60%]\n"
+           "tests/test_a.py::test_z ")
+    for crashed, kept in ((False, True), (True, False)):
+        monkeypatch.setattr(failfast, "sandbox_crashed", lambda result, crashed=crashed: crashed)
+        result = sandbox.SandboxResult(ok=False, timed_out=True, returncode=124, stdout=out)
+        prepass = failfast._self_check(["tests/test_a.py"], {}, "pytest -q tests",
+                                       lambda cmd, timeout: result, 30, None)
+        assert bool(prepass.failing_ids) is kept, prepass
+        assert (prepass.failing_ids == ["tests/test_a.py::test_y"]) is kept
+
+
+def test_a_pytest_without_test_lines_is_said_in_the_record():
+    """pytest before 8.1 warns of the unknown option and prints no line per test: the
+    record says so, and no pass is shared."""
+    warned = ("PytestConfigWarning: Unknown config option: verbosity_test_cases\n"
+              "1 passed in 0.01s\n")
+    prepass = failfast._self_check(
+        ["tests/test_a.py"], {}, "pytest -q tests",
+        lambda cmd, timeout: sandbox.SandboxResult(ok=True, returncode=0, stdout=warned), 30, None)
+    assert failfast.NO_TEST_LINES in prepass.notes and prepass.passed_ids == []
+
+
+def test_the_guardedness_cache_is_kept_per_check_command(tmp_path):
+    check = f"{PYTEST} -q tests"
+    fx = Fixture(tmp_path, {"tests/test_g.py": "def test_g():\n    pass\n"},
+                 {"tests/test_w.py": "def test_w():\n    pass\n"}, check=check)
+    base_check.compute_test_guardedness(fx.ctx, check, 120)
+    base_check.compute_test_guardedness(fx.ctx, check, 120)
+    assert len(fx.sessions("base")) == 1
+    base_check.compute_test_guardedness(fx.ctx, check + " -p no:randomly", 120)
+    assert len(fx.sessions("base")) == 2

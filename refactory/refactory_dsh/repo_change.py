@@ -1309,7 +1309,7 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
         # Prepared for this commit already, and nothing has changed its files since but
         # caches: reused as it is, without installing, generating or setting up again.
         state = base_check.prepared_state(path, found.head, key)
-        if state and state == _copy_state(copy):
+        if state and state == base_check.worktree_state(copy):
             return copy, worktree.check_environment(path, home), home, [], None
         base_check.clear_prepared(path)
         try:
@@ -1325,60 +1325,8 @@ def _check_copy(ctx: Any, found: worktree.Worktree, timeout: float
         copy, ctx.facts, amend=False, commit_lockfiles=False, run=ctx.workdir, home=home,
         timeout=timeout, budget=getattr(ctx, "budget", None))
     if not problems:
-        base_check.mark_prepared(path, key, _copy_state(copy))
+        base_check.mark_prepared(path, key, base_check.worktree_state(copy))
     return copy, env, home, problems, prep_fail
-
-
-#: What a check copy's state leaves out: caches a run writes and nothing prepares.
-_STATE_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
-
-
-def _copy_state(copy: worktree.Worktree) -> str:
-    """One hash of what the check copy's files are, beside what the installs made and
-    caches: its tracked changes, its untracked files' bytes, and each ignored file's
-    size and modification time. Equal before and after a run, the run changed nothing
-    that preparing the copy makes, so the copy is still prepared."""
-    import hashlib
-
-    path = Path(copy.path)
-    installed = {name.rstrip("/").split("/")[0] for name in
-                 worktree._json(worktree._record_path(copy)).get("installed", [])}
-    digest = hashlib.sha256()
-    try:
-        digest.update(worktree.git(path, "diff", "--binary", "HEAD").encode())
-        untracked = worktree.git(path, "ls-files", "-z", "--others", "--exclude-standard")
-        ignored = worktree.git(path, "ls-files", "-z", "--others", "--ignored",
-                               "--exclude-standard", "--directory")
-    except ValueError:
-        return ""
-
-    def skipped(name: str) -> bool:
-        parts = name.rstrip("/").split("/")
-        return parts[0] in installed or any(part in _STATE_CACHES for part in parts)
-
-    for name in sorted(filter(None, untracked.split("\0"))):
-        if skipped(name):
-            continue
-        digest.update(b"U" + name.encode() + b"\0")
-        try:
-            digest.update((path / name).read_bytes())
-        except OSError:
-            digest.update(b"<unreadable>")
-    for entry in sorted(filter(None, ignored.split("\0"))):
-        if skipped(entry):
-            continue
-        root = path / entry
-        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
-        for file in files:
-            relative = file.relative_to(path).as_posix()
-            if skipped(relative):
-                continue
-            try:
-                info = file.stat()
-            except OSError:
-                continue
-            digest.update(f"I{relative}\0{info.st_size}\0{info.st_mtime_ns}\0".encode())
-    return digest.hexdigest()
 
 
 def remove_check_copy(target: Path, run_id: str) -> None:

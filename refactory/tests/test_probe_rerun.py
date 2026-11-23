@@ -689,7 +689,7 @@ def test_the_base_checks_worktree_is_reused_and_never_reset(tmp_path, monkeypatc
     ctx.facts["check"] = check
     # The base check prepared it: the one record `run_base_check` and
     # `targeted_base_failures` share (`base_check.mark_prepared`).
-    base_check.mark_prepared(base_wt, base_check.prepared_key(ctx, found.base))
+    base_check.mark_base_prepared(ctx, found, base_wt, found.base)
 
     probe_rerun.rerun_probes(ctx)
 

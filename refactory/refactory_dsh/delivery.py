@@ -1115,6 +1115,19 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
 
     if merge.merge_commit:
         merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
+    elif (not merge.conflicts and not merge.abandoned and not merge.infrastructure
+          and whole_suite_owed(ctx, path, reviewed_commit)):
+        # Nothing to merge, but the reviewed commit's check deselected what its self-check
+        # had passed: the whole suite runs once here, so the check stays binding (an
+        # order-dependent failure, a file only the run's worktree had).
+        check_failure, infra_flag = _check_merged(ctx, found, reviewed_commit, reviewed_commit,
+                                                   check_timeout_s, target_tip=found.base)
+        if check_failure:
+            if infra_flag:
+                raise ValueError(
+                    f"delivery stopped: infrastructure failure in the whole check: {check_failure}"
+                )
+            merge = MergeResult(check_failed=check_failure)
     if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
                                                    check_timeout_s,
@@ -1717,6 +1730,29 @@ def record_full_check(ctx: Any, path: Path, command: str) -> None:
     ledger = Path(ctx.workdir) / PASSED_CHECKS
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(json.dumps(passed, indent=2) + "\n")
+
+
+#: The commits whose full check deselected the self-check's passes
+#: (`design_ops._full_check`): none of them stands for delivery's check. In the run
+#: directory, beside `PASSED_CHECKS`.
+DESELECTED_CHECKS = Path(".refactory") / "deselected-checks.json"
+
+
+def record_deselected_check(ctx: Any, commit: str) -> None:
+    """Note that ``commit``'s full check ran without what its self-check had passed."""
+    ledger = Path(ctx.workdir) / DESELECTED_CHECKS
+    known = list(worktree._json(ledger).get("commits") or [])
+    if commit and commit not in known:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({"commits": [*known, commit]}, indent=1) + "\n")
+
+
+def whole_suite_owed(ctx: Any, path: Path, commit: str) -> bool:
+    """Whether delivery must run the whole check on ``commit``: its full check deselected
+    the self-check's passes, and no whole run of the suite on its tree passed since
+    (`reusable_check`)."""
+    known = worktree._json(Path(ctx.workdir) / DESELECTED_CHECKS).get("commits") or []
+    return commit in known and not reusable_check(ctx, path, commit)
 
 
 def reusable_check(ctx: Any, path: Path, commit: str) -> str:

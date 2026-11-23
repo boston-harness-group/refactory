@@ -541,8 +541,12 @@ def test_a_self_check_that_says_nothing_goes_on_with_no_fixup(tmp_path, monkeypa
     [record] = _records(run)
     assert record["outcome"] == "inconclusive" and record["ran"] == []
     assert record["cut"] == ["tests/test_slow.py"]
-    # Stopped at the self-check's limit, not at the check's 10 s.
-    assert record["limit_s"] == 3 and record["duration_s"] < 2 * record["limit_s"]
+    # Stopped at the self-check's limit, not at the check's 10 s: its one chunk was given
+    # the 3 s that were left and stopped there (events, not wall time, which load stretches).
+    [timing] = record["timings"]
+    assert record["limit_s"] == 3 and timing["timed_out"] and timing["tests"] == ["tests/test_slow.py"]
+    assert record["notes"] == ["chunk 1 of 1 was stopped at the 3 s limit, so it and the rest "
+                               "did not report"]
     assert (run / CHECK_PREP).exists()
     facts = _facts(run)
     assert not facts.get("self_check_fixup_count") and not facts.get("attempts_used")
