@@ -484,6 +484,7 @@ The optimizer loop, named like one.
 | function | `item_time_spread` | `(records: 'Sequence[Mapping[str, Any]]') -> 'dict[str, Any]'` |
 | function | `main` | `(argv: 'list[str] \| None' = None, *, _client_factory: 'Any' = None) -> 'int'` |
 | function | `node_count` | `(state: 'dict[str, Any]') -> 'int'` |
+| function | `opaque_item_key` | `(item_id: 'str') -> 'str'` |
 | function | `run` | `(mode_id: 'str', *, config: 'LoopConfig \| None' = None, project: 'Path \| None' = None, model: 'Any' = None) -> 'dict[str, Any]'` |
 | function | `single_parent` | `(strategy: 'str', optimizer: 'str', picker: 'str' = '') -> 'bool'` |
 | function | `uncapped_sealed_steps` | `(runs: 'Path') -> 'dict[str, Any]'` |
@@ -498,6 +499,7 @@ The optimizer loop, named like one.
 - **`item_time_spread`** — How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
 - **`main`** — ``python -m refactory_dsh.loop <package>/<mode> [options]``.
 - **`node_count`** — How many nodes a candidate's graph holds, which is what the size cost counts.
+- **`opaque_item_key`** — The key `Loop.part_item_scores` gives an item: a digest of its id, so a strategy
 - **`run`** — Build a loop and run it to its bound.
 - **`single_parent`** — Whether a run is the default loop with a single-parent optimizer and no
 - **`uncapped_sealed_steps`** — The sealed steps under ``runs`` (a run's candidate runs) whose dispatch record says

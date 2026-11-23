@@ -59,6 +59,45 @@ def tool_hidden(workdir: Path) -> list[str]:
     return sandbox.hidden_paths([*ops._run_roots(Path(workdir)), *data_roots()])  # noqa: SLF001
 
 
+#: What the swe mode's sessions find beside ``python3`` (`swe_port`, deviation 8).
+SWE_SUMMARY = (f"{interpreter.SUMMARY}; view_xlsx (SpreadsheetBench 2's workbook viewer); "
+               "soffice and libreoffice (LibreOffice, headless); a writable /tmp of the step's own")
+#: Folders of the machine's LibreOffice may need besides its install, read only where they
+#: exist: the font configuration, and a distribution's LibreOffice settings.
+SWE_ETC = ("/etc/fonts", "/etc/libreoffice")
+
+
+def _office_program() -> str:
+    """The real ``soffice`` in LibreOffice's program folder (the grader's, `recalc.soffice`)."""
+    folder = open_spreadsheet.program_dir()
+    if folder is None or not os.access(os.path.join(folder, "soffice"), os.X_OK):
+        raise TaskError(f"no LibreOffice for the sessions: install it or set {recalc.SOFFICE_ENV}")
+    return os.path.join(folder, "soffice")
+
+
+def swe_commands() -> dict[str, str]:
+    """The swe sessions' commands: upstream's ``view_xlsx``, and LibreOffice as ``soffice``
+    and ``libreoffice``. LibreOffice starts a thread pool and a malloc arena per core;
+    under a sealed command's per-process limits (128 processes, 8 GiB of address space,
+    `seal.LINUX_LIMITS_UNSCOPED`) that fails its xlsx export on a many-core machine, so
+    its pool and arenas are capped (neither changes what it computes)."""
+    from . import swe_port
+
+    office = _office_program()
+    launcher = ("#!/bin/sh\n"
+                "MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}; MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}\n"
+                "export MAX_CONCURRENCY MALLOC_ARENA_MAX\n"
+                f'exec "{office}" "$@"\n')
+    return {"view_xlsx": swe_port.VIEW_XLSX, "soffice": launcher, "libreoffice": launcher}
+
+
+def swe_reads() -> list[str]:
+    """LibreOffice's install (the folder above its program folder), and `SWE_ETC`."""
+    office = os.path.realpath(_office_program())
+    return [os.path.dirname(os.path.dirname(office)),
+            *(path for path in SWE_ETC if os.path.isdir(path))]
+
+
 class RecalcFailed(recalc.RecalcFailed):
     """LibreOffice failed on a known-good workbook while grading: the grader's failure."""
 
@@ -214,6 +253,47 @@ class SpreadsheetBenchV2Task(Task):
         return VerifyResult(passed=g.passed, score=g.accuracy,
                             details="" if g.passed else f"eval-mismatch: {g.error_message[:200]}",
                             prediction=report)
+
+
+class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
+    """The same items and grade, for the swe mode: its sessions' commands also find
+    ``view_xlsx`` and LibreOffice, and a /tmp of their own (`swe_port`, deviation 8)."""
+
+    tool_environment = ToolEnvironment(summary=SWE_SUMMARY, python=interpreter.interpreter,
+                                       hidden=tool_hidden, commands=swe_commands,
+                                       reads=swe_reads, private_tmp=True)
+
+    def verify(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
+               seed: int | None = None) -> VerifyResult:
+        """V2's verdict; when the session stopped at its turn cap (`tasks.FINAL`'s
+        ``turn_limit``, `swe_ops.finalize`), or the adapter left no facts of it
+        (``session_facts: missing``), it says so after the verdict's text, where the
+        analysts and reports read it."""
+        import dataclasses
+
+        result = super().verify(instance, workspace, part=part, seed=seed)
+        final_path = Path(workspace) / FINAL
+        final = json.loads(final_path.read_text()) if final_path.exists() else {}
+        if final.get("turn_limit"):
+            note = turn_limit_note(final.get("n_turns"), final["turn_limit"])
+        elif final.get("session_facts") == "missing":
+            note = MISSING_SESSION_NOTE
+        else:
+            return result
+        return dataclasses.replace(
+            result, prediction=f"{result.prediction}\n{note}" if result.prediction else note,
+            details=f"{result.details} {note}".strip())
+
+
+#: What a record says when Claude Code's adapter left no facts of the session.
+MISSING_SESSION_NOTE = ("(no session facts from Claude Code's adapter: the turn count and "
+                        "whether the turn cap was reached are unknown)")
+
+
+def turn_limit_note(turns: Any, cap: Any) -> str:
+    """What a record says of a session stopped at its turn cap."""
+    used = f"{turns} turns, " if turns is not None else ""
+    return f"(the session stopped at its turn cap: {used}cap {cap})"
 
 
 class OutputUnrecalculable(Exception):

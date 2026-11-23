@@ -1684,6 +1684,62 @@ the strategy optimizes the single `skill` knob exactly as before.
 - **Trajectories.** LiveMath's trajectory view labels each message with the step that
   wrote it (`[compare] …`) when a record has several steps.
 
+## GEPA (`--strategy gepa`)
+
+`refactory_packages/gepa` ports `gepa.optimize` (gepa-ai/gepa 0.1.4, MIT) with its
+default configuration. Each iteration:
+
+1. Draw a parent from the per-instance Pareto frontier.
+2. Roll it out on a minibatch of 3 train items.
+3. Ask the reflection model (`--model`) to rewrite one component, using GEPA's own
+   prompt with each item's prompt, response and grader feedback.
+4. Keep the child only if its minibatch sum strictly beats the parent's.
+5. Score a kept child on the whole Pareto set.
+
+The result is the program with the highest Pareto-set mean. The module docstring
+(`refactory_packages/gepa/loop.py`) cites GEPA's source for each step.
+
+- **Components.** A component is an open text knob. By default GEPA rewrites the knobs
+  that exactly one agent node renders and that are not its system prompt: the per-node
+  instructions, as DSPy's components are its predictors' instructions. To choose others,
+  set `components=a,b`. Components are rewritten round robin, one per iteration; set
+  `module_selector=all` to rewrite every component each iteration.
+- **The Pareto set.**
+  - `pareto_set=val` is the default, as `dspy.GEPA` is run with a valset. Val is rolled
+    out whole, and the strategy reads per-item scores through `Run.val_item_scores`,
+    which keys each item by an opaque digest. No val item reaches the reflection model.
+  - `pareto_set=train` holds `pareto_size` train ids out instead (half by default). The
+    seed and the Pareto-best are then scored on val, and the Pareto-best is the result
+    only if it beats the seed there.
+- **Budget.** GEPA's `max_metric_calls` is the run's `--max-rollouts`, checked at the
+  top of each iteration.
+- **Options.** The other options are GEPA's own, with GEPA's defaults:
+  - `seed` (0)
+  - `reflection_minibatch_size` (3)
+  - `candidate_selection_strategy` (`pareto` or `current_best`)
+  - `skip_perfect_score`, `perfect_score`
+  - `use_merge` (off), `max_merge_invocations`, `merge_val_overlap_floor`
+  - `reflection_prompt_template`
+
+  Two options are refactory's:
+  - `feedback`: `details` (the default) gives the grader's text; `score` gives only the
+    score sentence.
+  - `max_failed_iterations`: see the reflection-call deviation below.
+- **Deviations.**
+  - **Merge cost.** A merge with `pareto_set=val` is rolled out on all of val, since val
+    cannot be subsampled. It is still judged on GEPA's 5 sampled instances, and costs
+    `|val|` rollouts, not 5.
+  - **Failed reflection calls.** A reflection call that fails all three attempts skips
+    its component, where GEPA aborts the run. The run stops after
+    `max_failed_iterations` (3) iterations in a row in which every call failed.
+  - **Zero-score ancestors.** When every common ancestor of a merge pair scores 0, the
+    ancestor is drawn uniformly; GEPA's weighted draw raises there.
+  - **Unscored items.** Minibatch sums skip items that a harness incident left
+    unscored.
+- **Trace.** `gepa_trace.jsonl` in the run directory holds every reflection call and
+  decision. The strategy state is saved at the top of each iteration, so a resumed run
+  continues GEPA's random draws where they stopped.
+
 ## Structure edits: what an accepted edit guarantees
 
 A structure edit reaches the search only through `Optimizer.attempt` (which `Run.attempt`
@@ -2675,6 +2731,9 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | bindable field: `optional` | `branch` | `set_knob` | - |
 | bindable field: `route.max_completion_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | bindable field: `route.max_thinking_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_turns` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_timeout_ms` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_output_chars` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |
