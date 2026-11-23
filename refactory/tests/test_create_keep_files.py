@@ -214,3 +214,59 @@ def test_parse_emission_reads_files_and_deletions():
 def test_parse_emission_refuses_a_malformed_deletion(answer, said):
     with pytest.raises(ValueError, match=said):
         parse_emission(answer)
+
+
+def test_a_second_prepare_starts_from_the_source_as_it_is_now(tmp_path, project):
+    """A run that prepares again rebuilds its baseline: a file the source lost in between
+    is not brought back from the first prepare's copy."""
+    shared = _install_source(project)
+    ctx = _start(tmp_path)
+    (shared / "notes.txt").unlink()
+    ctx.facts.update(prepare_create(ctx))
+    _emit(ctx, render({"ops.py": NEW_OPS}))
+    staged = Path(ctx.facts["package_root"])
+    assert not (staged / "notes.txt").exists(), "the stale baseline survived a new prepare"
+    assert (staged / "README.md").read_text() == README
+
+
+def test_links_out_of_the_package_are_dropped_and_links_inside_stay_links(tmp_path, project):
+    """A symlink is never copied as the file it points at. One that leaves the package
+    (absolute or escaping) is dropped, as it was when an edit kept only what it wrote;
+    one inside the package stays the same link through materialise and register."""
+    import os
+
+    shared = _install_source(project)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("not part of the package\n")
+    os.symlink(outside, shared / "absolute_out.txt")
+    os.symlink(os.path.relpath(outside, shared / "data"), shared / "data" / "escaping.txt")
+    os.symlink("plate.csv", shared / "data" / "latest.csv")
+    ctx = _start(tmp_path)
+    _emit(ctx, render({"ops.py": NEW_OPS}))
+    staged = Path(ctx.facts["package_root"])
+    for root in (staged, create_ops._baseline_root(staged)):
+        assert not os.path.lexists(root / "absolute_out.txt")
+        assert not os.path.lexists(root / "data" / "escaping.txt")
+    register(ctx)
+
+    for root in (staged, shared):
+        assert not os.path.lexists(root / "absolute_out.txt"), "a link out was copied"
+        assert not os.path.lexists(root / "data" / "escaping.txt"), "a link out was copied"
+        assert (root / "data" / "latest.csv").is_symlink()
+        assert os.readlink(root / "data" / "latest.csv") == "plate.csv"
+        assert (root / "data" / "latest.csv").read_text() == PLATE
+
+
+def test_a_write_in_place_clears_what_an_earlier_answer_left(tmp_path, project):
+    """Without `prepare_create` there is no source package: the directory holds what the
+    answer writes, and a file an earlier answer left there is gone."""
+    root = registry.workspace_root(project) / NAME
+    root.mkdir(parents=True)
+    (root / "stale.py").write_text("LEFT = True\n")
+    ctx = Ctx(tmp_path / "run", {"name": NAME})
+    ctx.workdir.mkdir()
+    produced = _emit(ctx, render(good_files(NAME)))
+    assert Path(produced["package_path"]) == root
+    assert not (root / "stale.py").exists(), "an earlier answer's file survived"
+    assert (root / "ops.py").read_text() == good_files(NAME)["ops.py"]
+    assert ctx.read_json("staging/manifest.json")["kept"] == []

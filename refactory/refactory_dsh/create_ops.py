@@ -844,6 +844,45 @@ def _baseline_root(staging_root: Path) -> Path:
     return Path(staging_root).parent.parent.parent / SOURCE_BASELINE
 
 
+def _copy_package(source: Path, target: Path) -> list[str]:
+    """Copy a package's files from ``source`` into ``target``; return the links dropped.
+
+    A symlink is never copied as the file it points at. One that stays inside the
+    package -- relative, and resolving to a path under ``source`` -- is recreated as the
+    same link; one that leaves the package (absolute, escaping, or dangling) is dropped,
+    as it was when an edit kept only the files it wrote. Bytecode caches are skipped.
+    """
+    source, target = Path(source), Path(target)
+    inside = source.resolve()
+    dropped: list[str] = []
+    target.mkdir(parents=True, exist_ok=True)
+    for directory, dirnames, filenames in os.walk(source):
+        here = Path(directory)
+        dirnames[:] = [name for name in dirnames if name != "__pycache__"]
+        for name in [*dirnames, *filenames]:
+            path = here / name
+            relative = path.relative_to(source)
+            if (target / relative).is_symlink():
+                (target / relative).unlink()  # never write through a link already there
+            if path.is_symlink():
+                link = os.readlink(path)
+                resolved = path.resolve()
+                if (os.path.isabs(link) or not resolved.exists()
+                        or not resolved.is_relative_to(inside)):
+                    dropped.append(str(relative))
+                else:
+                    (target / relative).parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(link, target / relative)
+                if name in dirnames:
+                    dirnames.remove(name)  # a linked folder is the link, not its files
+            elif name in dirnames:
+                (target / relative).mkdir(parents=True, exist_ok=True)
+            elif not name.endswith(".pyc"):
+                (target / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target / relative)
+    return sorted(dropped)
+
+
 def materialise(ctx: Any) -> dict[str, Any]:
     """Turn the emit agent's answer into a package directory.
 
@@ -881,14 +920,14 @@ def materialise(ctx: Any) -> dict[str, Any]:
         root = Path(staging_root)
         baseline: Path | None = _baseline_root(root)
     else:
+        # Written in place, without `prepare_create` (a caller that registers nothing):
+        # there is no source package to start from, so the directory is cleared and holds
+        # what the answer writes, as a create does. Never what an earlier answer left.
         root = registry.workspace_root(project_for_writes(workdir=ctx.workdir)) / name
-        # Written in place: the directory as it stands is what the answer applies to.
         baseline = None
-    # The files the answer starts from: the source package for a staged edit (never an
-    # earlier attempt's output), the directory itself when written in place.
-    start = baseline if baseline is not None and baseline.is_dir() else (
-        None if baseline is not None else root
-    )
+    # The files the answer starts from: the source package for a staged edit, never an
+    # earlier attempt's output; nothing for a create or a write in place.
+    start = baseline if baseline is not None and baseline.is_dir() else None
     present = {
         str(path.relative_to(start)) for path in start.rglob("*")
         if path.is_file() and "__pycache__" not in path.relative_to(start).parts
@@ -907,11 +946,14 @@ def materialise(ctx: Any) -> dict[str, Any]:
     except ValueError as exc:
         from refactory_dsh.repo_change import _count_refusal
         return _count_refusal(ctx, exc)
-    if baseline is not None:
-        if root.exists():
-            shutil.rmtree(root)
-        if start is not None:
-            shutil.copytree(start, root, ignore=shutil.ignore_patterns("__pycache__"))
+    if root.is_symlink() or root.is_file():
+        root.unlink()
+    elif root.exists():
+        shutil.rmtree(root)
+    if start is not None:
+        # The baseline holds only the package's own files and links (`_copy_package`).
+        shutil.copytree(start, root, symlinks=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
     root.mkdir(parents=True, exist_ok=True)
     for inside in removed.values():
         (root / inside).unlink()
@@ -1385,7 +1427,8 @@ def register(ctx: Any) -> dict[str, Any]:
         old_aside: Path | None = None
         try:
             dest = temp / name
-            shutil.copytree(staging_root, dest)
+            # Links stay links: the staged package holds only links inside itself.
+            shutil.copytree(staging_root, dest, symlinks=True)
             if shared.exists():
                 old_aside = shared.with_name(f".{name}-old-{os.getpid()}")
                 shared.rename(old_aside)
@@ -1622,10 +1665,10 @@ def prepare_create(ctx: Any) -> dict[str, Any]:
         shutil.rmtree(baseline)
     baseline.mkdir(parents=True)
     if shared.is_dir():
-        # Copy existing package as the starting point for an edit.
-        shutil.copytree(shared, pkg_root, dirs_exist_ok=True)
-        shutil.copytree(shared, baseline, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Copy existing package as the starting point for an edit. A link out of the
+        # package is dropped, never copied as the file it points at (`_copy_package`).
+        _copy_package(shared, pkg_root)
+        _copy_package(shared, baseline)
         source_hash = _dir_hash(shared)
         source_existed = True
         for _src_path in sorted(shared.rglob("*")):
@@ -1911,16 +1954,28 @@ def gate_smoke(ctx: Any) -> str:
     registered = bool(ctx.facts.get("package_path")) and (package / registry.ORIGIN).is_file()
     if registered and registry.recorded_smoke(package) != registry.SMOKE_PENDING:
         registry.record_smoke(package, registry.SMOKE_PENDING)
-    for name in ("smoke.json", "revision.json"):
+    for name in ("smoke.json", "revision.json", "empty-input.json"):
         if ctx.exists(name):
             path = ctx.workdir / ".refactory" / "validation-history" / "prior"
             path.mkdir(parents=True, exist_ok=True)
             import uuid
             (path / (uuid.uuid4().hex + "-" + name)).write_text(ctx.read_text(name))
             (ctx.workdir / name).unlink()
+    from refactory_dsh import empty_input
+
     try:
         produced = smoke(ctx)
         check_empty_input(ctx)
+    except empty_input.Finding as exc:
+        # A typed, repairable code finding: its reason quotes file names the mode chose,
+        # so it is never classified by its words (`evidence.failure_kind`).
+        detail = str(exc)
+        evidence.record(ctx, {"status": "code_failure", "detail": detail,
+                              "smoke": ctx.read_json("smoke.json", {}),
+                              "empty_input": exc.receipt,
+                              "revision": ctx.read_json("revision.json", None)})
+        from refactory_dsh.fast_ops import _repair
+        return (_repair if "repair_attempts" in ctx.knobs else repair)(ctx, [detail])
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         receipt = ctx.read_json("smoke.json", {})
@@ -1945,11 +2000,13 @@ def check_empty_input(ctx: Any) -> dict[str, Any]:
     """Run the new mode once more with its input empty; refuse it if it reports anyway.
 
     Called by the smoke gate after the canonical smoke passed, on either runtime. The
-    receipt is ``empty-input.json``; a finding is raised like a smoke failure, so it goes
-    back to the builder with the reason and the package is not marked as passed. See
-    `refactory_dsh.empty_input` for what counts as an input and as a result.
+    receipt is ``empty-input.json``. A finding is raised as `empty_input.Finding`, which
+    the gate sends back to the builder with the reason, and the package is not marked as
+    passed. A check that could not judge the mode (inconclusive, not applicable) is a run
+    warning and goes into the run's report. See `refactory_dsh.empty_input` for what
+    counts as an input and as a result.
     """
-    from refactory_dsh import empty_input, sandbox
+    from refactory_dsh import empty_input, sandbox, target_guard
     import uuid
 
     identifier = str(ctx.read_json("smoke.json", {}).get("mode") or "")
@@ -1974,9 +2031,11 @@ def check_empty_input(ctx: Any) -> dict[str, Any]:
     if receipt["status"] == "finding":
         package = Path(str(ctx.facts.get("package_path") or ""))
         if ctx.facts.get("package_path") and (package / registry.ORIGIN).is_file():
-            # The revision comparison may have recorded a pass before this ran.
+            # Whoever called this, a mode that fabricates never stays marked as passed.
             registry.record_smoke(package, registry.SMOKE_PENDING)
-        raise ValueError(f"empty-input check: {receipt['reason']}")
+        raise empty_input.Finding(receipt)
+    if warned := empty_input.warning(receipt):
+        target_guard.warn(warned)
     return receipt
 
 
@@ -2207,6 +2266,11 @@ def write_result(ctx: Any) -> dict[str, Any]:
         **_readme_report(ctx),
         "intent_audit": ctx.read_json("intent-audit.json", None),
     }
+    from refactory_dsh import empty_input
+    warnings = [*payload.pop("warnings", []),
+                *filter(None, [empty_input.warning(payload["empty_input_check"])])]
+    if warnings:
+        payload["warnings"] = warnings
     if ctx.facts.get("revision_of"):
         payload.update({
             "revision_of": ctx.facts.get("revision_of"),

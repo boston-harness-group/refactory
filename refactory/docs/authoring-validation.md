@@ -41,20 +41,34 @@ directories preserve the outputs of earlier attempts. `revision.json` separately
 records comparison/provenance. Design retains its command and actual output.
 
 After the smoke passes, the gate runs the mode once more with its input empty
-(`refactory_dsh.empty_input`): sample knobs that name a path and declared input
-knobs point at an empty folder or file, and a data node reading a `source_path`
-reads an empty source of its format. A mode that then finishes and writes any
-file its graph declares has reported on input nobody gave it, which is a
-repairable finding sent back to the builder. A mode that stops with its own
-error, or finishes without results, passes; a timeout or an unavailable model is
-recorded as inconclusive. `empty-input.json` holds the receipt, and the run's
-`create.json` carries it beside a `readme` entry that warns when the package
-has no README.
+(`refactory_dsh.empty_input`). Only declared input is emptied: a knob named in the
+brief's inputs (`--input`) points at an empty folder or file when its sample or
+default names one, and is the empty string otherwise; a data node reading a
+`source_path` reads an empty source of its format. Other knobs keep their values,
+so an output folder or a settings file given with `--sample` is never emptied, and
+a path the graph writes is left alone. The check then judges the run:
+
+- it stopped with its own error: pass;
+- it finished and every declared file it wrote is empty: pass. Empty means no
+  content, a CSV/TSV header with no rows, or JSON (or JSONL lines) holding only
+  `null`, `[]`, `{}`, `""`, `0`, flags, or the status strings `status`, `reason`,
+  `error` and `message`, so `{"status": "no input", "rows": 0}` is an honest report;
+- it finished and wrote a result: a repairable finding, sent back to the builder.
+
+The check is inconclusive when the run timed out, the model was unavailable, the
+mode could not be described, or an undeclared knob defaults to an existing path
+(then the mode is not run, since it would still read that data). It is not
+applicable when the mode declares no input. Both are run warnings and appear in
+`create.json`'s `warnings`. Describing the mode and the run share one smoke budget.
+`empty-input.json` holds the receipt, and `create.json` carries it beside a
+`readme` entry that warns when the package has no README.
 
 An edit starts from the package it revises: the emission's `===FILE:` blocks
 replace or add files, a `===DELETE: <path>===` block removes one, and every
 other file (the README, data, anything not Python) is kept. Each attempt starts
-from the source package, not from the previous attempt.
+from the source package, not from the previous attempt. A symlink that leaves the
+package is dropped, never copied as the file it points at; one inside the package
+stays a link.
 
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,

@@ -3,30 +3,46 @@
 A created mode that finds no input and generates stand-in data instead -- a synthetic
 table, a sampled set, a simulated file -- exits 0 and reports on something nobody gave
 it. The canonical smoke cannot see that: it runs the mode on real input. So after the
-smoke passes, create mode runs the mode once more with every input it can point
-somewhere empty, and judges the run by what it did:
+smoke passes, create mode runs the mode once more with its declared inputs empty, and
+judges the run by what it did:
 
 * it stopped with an error of its own -- **pass**, the mode refused to run without input;
-* it finished and wrote none of the files its graph declares -- **pass**, nothing was
-  reported;
-* it finished and wrote results -- **finding**: the results came from no input;
-* it was stopped, or could not start (a timeout, a missing model) -- **inconclusive**,
-  recorded and not held against the mode.
+* it finished and every declared file it wrote is empty (`is_empty_output`) -- **pass**,
+  the mode said there was nothing to report;
+* it finished and wrote a result -- **finding**: the result came from no input;
+* it was stopped, could not start, or could not be described (a timeout, a missing
+  model) -- **inconclusive**, recorded and warned about, not held against the mode.
 
-An input is something a run can point elsewhere: a sample knob whose value is a path
-(the person's real input for the smoke), a declared input (``requires_input``) the
-mode takes as a knob, and a data node that reads a ``source_path``. A data node bound
-to a Task takes its items from the Task, so it has no empty equivalent and is left as
-it is; a mode with no input of any of these kinds is not applicable and is recorded so.
+Only what the run declares as input is emptied, never an output or a setting:
 
-The run goes through `sandbox.smoke`, the same contained path and the same time limit
-the canonical smoke uses, so it costs one more short run of the mode and no new way
-of running one.
+* a knob the brief declares as input (``requires_input``, the ``--input`` names) that
+  the mode has. With a sample (``--sample``) or a default that names an existing
+  folder or file, it points at an empty folder or an empty file of the same name;
+  with any other value it is the empty string;
+* a data node that reads a ``source_path``, which reads an empty source of its format.
+
+Every other knob keeps its value: a sample for an output folder, a configuration file
+or a reference database is not input, and emptying it would make a fabricating mode
+crash and pass. A path the graph declares as a write is never emptied. A data node
+bound to a Task takes its items from the Task, so it has no empty equivalent.
+
+A mode with no declared input at all is **not applicable**. A mode whose undeclared
+knob defaults to an existing path (data built into the mode, perhaps) is
+**inconclusive** and is not run: emptying the declared input would still leave it
+reading real data, and a run on real data says nothing about empty input. Both are
+warnings, never findings.
+
+The run goes through `sandbox.smoke`, the same contained path the canonical smoke
+uses. Describing the mode and running it share one smoke budget, so the check never
+takes longer than one smoke.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +55,42 @@ EMPTY_ROOT = ".empty-input"
 #: Empty files a data node of each format reads as no items.
 _EMPTY_SOURCE = {"jsonl": "items.jsonl", "csv": "items.csv"}
 
+#: The longest describing the mode may take, within the smoke budget.
+DESCRIBE_TIMEOUT_S = 180
 
-def describe(identifier: str, project: Path, **kwargs: Any) -> dict[str, Any]:
-    """The mode's knobs, data nodes and declared writes, read where loading it is safe."""
+#: The statuses a person is warned about: the check did not judge the mode.
+UNJUDGED = ("inconclusive", "not_applicable")
+
+#: Keys of a JSON object that state a status, not a result: ``{"status": "no input",
+#: "reason": "input_dir holds no CSV files"}`` is a report that there was nothing to do.
+STATUS_KEYS = frozenset({"status", "reason", "error", "message"})
+
+#: Files read as tables: a header line and no rows is no result.
+_TABLE_SUFFIXES = (".csv", ".tsv")
+
+#: Files read as one JSON value per line.
+_LINES_SUFFIXES = (".jsonl", ".ndjson")
+
+
+class Finding(ValueError):
+    """The mode reported on empty input: a repairable code finding, typed.
+
+    The smoke gate sends it back to the builder as it is. Its reason quotes file names
+    the mode chose, so it is never classified by its words.
+    """
+
+    def __init__(self, receipt: dict[str, Any]):
+        self.receipt = receipt
+        super().__init__(f"empty-input check: {receipt.get('reason')}")
+
+
+def describe(identifier: str, project: Path, *, timeout_s: int = DESCRIBE_TIMEOUT_S,
+             **kwargs: Any) -> dict[str, Any]:
+    """The mode's knobs and their values, data nodes and declared writes.
+
+    Read in the sandbox, where loading the mode is safe. Raises `ValueError` when the
+    mode cannot be described in ``timeout_s``.
+    """
     from refactory_dsh import sandbox
 
     code = (
@@ -51,24 +100,29 @@ def describe(identifier: str, project: Path, **kwargs: Any) -> dict[str, Any]:
         f"package, mode_class = registry.resolve(Path({str(project)!r}), {identifier!r})\n"
         "mode = mode_class()\n"
         "graph = mode.graph()\n"
+        "knobs = mode.state_dict().get('knobs') or {}\n"
         "print(json.dumps({\n"
-        "    'knobs': sorted((mode.state_dict().get('knobs') or {}).keys()),\n"
+        "    'knobs': sorted(knobs.keys()),\n"
+        "    'values': {name: (entry or {}).get('value') for name, entry in knobs.items()},\n"
         "    'data_nodes': [{'node': n.id, 'task_ref': n.task_ref, 'source_path': n.source_path,\n"
         "                    'source_format': n.source_format}\n"
         "                   for n in graph.nodes.values() if n.kind == 'data'],\n"
         "    'writes': sorted({w for n in graph.nodes.values() for w in n.writes}),\n"
-        "}))\n"
+        "}, default=str))\n"
     )
-    result = sandbox.run_sandboxed(code, workdir=Path(project), env=dict(os.environ), **kwargs)
+    result = sandbox.run_sandboxed(code, workdir=Path(project), env=dict(os.environ),
+                                   timeout_s=timeout_s, **kwargs)
     if not result.ok:
         raise ValueError(f"the mode could not be described for the empty-input check: "
                          f"{result.problem()}")
     return dict(result.payload)
 
 
-def _as_path(value: str, project: Path) -> Path | None:
+def _as_path(value: Any, project: Path) -> Path | None:
     """The existing path a knob value names, or ``None`` when it names none."""
-    text = str(value).strip()
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
     if not text:
         return None
     candidate = Path(text).expanduser()
@@ -78,45 +132,63 @@ def _as_path(value: str, project: Path) -> Path | None:
     return None
 
 
+def _normal(value: Any) -> str:
+    return str(value).strip().rstrip("/").removeprefix("./")
+
+
 def plan(
     described: dict[str, Any], samples: dict[str, str], declared: tuple[str, ...] | list[str],
     *, empty_root: Path, project: Path,
 ) -> dict[str, Any]:
-    """What the empty-input run points where, and the inputs it empties, in words.
+    """What the empty-input run points where, and why, in words.
 
-    Makes the empty stand-ins under ``empty_root``: an empty directory for a directory
-    input, an empty file of the same name for a file input, and an empty source of the
-    node's own format for a data node.
+    Makes the empty stand-ins under ``empty_root``. ``knobs`` and ``sources`` are what
+    the run overrides; ``inputs`` says what was emptied, ``kept`` what was declared but
+    left alone and why, and ``undeclared`` the knobs whose default reads an existing
+    path the run does not declare as input.
     """
     knob_names = set(described.get("knobs") or ())
+    values = dict(described.get("values") or {})
+    writes = {_normal(write) for write in described.get("writes") or () if _normal(write)}
     knobs: dict[str, str] = {}
     sources: dict[str, dict[str, str]] = {}
     inputs: list[str] = []
+    kept: list[str] = []
 
     def empty_dir(label: str) -> Path:
         path = empty_root / label
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    for name, value in samples.items():
-        real = _as_path(value, project)
-        if real is None:
+    input_knobs: list[str] = []
+    for name in dict.fromkeys(declared):
+        if name not in knob_names:
+            kept.append(f"declared input {name} is not a knob of the mode")
             continue
-        if real.is_dir():
+        value = samples[name] if name in samples else values.get(name)
+        if name in writes or (isinstance(value, str) and _normal(value) in writes):
+            kept.append(f"declared input {name} names a file the graph writes; left as given")
+            continue
+        input_knobs.append(name)
+        real = _as_path(value, project)
+        if real is not None and real.is_dir():
             knobs[name] = str(empty_dir(f"knob-{name}").resolve())
-        else:
+            inputs.append(f"input knob {name} ({value}) -> empty folder")
+        elif real is not None:
             stand_in = empty_dir(f"knob-{name}") / real.name
             stand_in.write_text("")
             knobs[name] = str(stand_in.resolve())
-        inputs.append(f"knob {name} (sample {value}) -> empty")
-    for name in declared:
-        if name in knob_names and name not in samples:
-            knobs[name] = str(empty_dir(f"knob-{name}").resolve())
-            inputs.append(f"declared input knob {name} -> empty directory")
+            inputs.append(f"input knob {name} ({value}) -> empty file")
+        else:
+            knobs[name] = ""
+            inputs.append(f"input knob {name} ({value!r}) -> empty string")
     for node in described.get("data_nodes") or ():
         if node.get("task_ref") or not node.get("source_path"):
             continue
         node_id = str(node["node"])
+        if _normal(node["source_path"]) in writes:
+            kept.append(f"data node {node_id} reads a file the graph writes; left as given")
+            continue
         source_format = str(node.get("source_format") or "directory")
         folder = empty_dir(f"data-{node_id}")
         if source_format in _EMPTY_SOURCE:
@@ -126,7 +198,74 @@ def plan(
             source = folder
         sources[node_id] = {"source_path": str(source.resolve()), "source_format": source_format}
         inputs.append(f"data node {node_id} ({source_format} source) -> empty")
-    return {"knobs": knobs, "sources": sources, "inputs": inputs}
+    undeclared: list[str] = []
+    root = Path(project).resolve()
+    for name in sorted(knob_names - set(input_knobs) - set(samples)):
+        value = values.get(name)
+        real = _as_path(value, project)
+        if real is None or real.resolve() == root or _normal(value) in writes:
+            continue
+        undeclared.append(f"{name} (default {value})")
+    return {"knobs": knobs, "sources": sources, "inputs": inputs, "kept": kept,
+            "undeclared": undeclared}
+
+
+def _empty_value(value: Any, *, key: str = "") -> bool:
+    """Whether a JSON value carries no result (see `is_empty_output`)."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return key in STATUS_KEYS or not value.strip()
+    if isinstance(value, list):
+        return all(_empty_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(_empty_value(item, key=str(name)) for name, item in value.items())
+    return False
+
+
+def is_empty_output(path: Path) -> bool:
+    """Whether a file the run wrote reports nothing: no derived result in it.
+
+    The rule is mechanical:
+
+    * a file with no content but whitespace, or a folder whose files are all empty;
+    * ``.json``: a value with no result in it -- ``null``, ``[]``, ``{}``, ``""``, ``0``,
+      a flag, or a list or object made only of those. The string fields ``status``,
+      ``reason``, ``error`` and ``message`` are a report, not a result, so
+      ``{"status": "no input", "reason": "...", "rows": 0}`` is empty;
+    * ``.jsonl`` / ``.ndjson``: every line such a value;
+    * ``.csv`` / ``.tsv``: a header and no rows.
+
+    Anything else with content -- a row, a count above zero, a non-status string, text
+    -- is a result.
+    """
+    path = Path(path)
+    if path.is_dir():
+        return all(is_empty_output(child) for child in path.rglob("*") if child.is_file())
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if not data.strip():
+        return True
+    suffix = path.suffix.lower()
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return False
+    lines = [line for line in text.splitlines() if line.strip()]
+    if suffix in _TABLE_SUFFIXES:
+        return len(lines) <= 1
+    try:
+        if suffix == ".json":
+            return _empty_value(json.loads(text))
+        if suffix in _LINES_SUFFIXES:
+            return all(_empty_value(json.loads(line)) for line in lines)
+    except json.JSONDecodeError:
+        return False
+    return False
 
 
 def produced_results(workdir: Path, writes: list[str] | tuple[str, ...]) -> list[str]:
@@ -143,8 +282,13 @@ def produced_results(workdir: Path, writes: list[str] | tuple[str, ...]) -> list
     return sorted(found)
 
 
-def verdict(*, ok: bool, timed_out: bool, error: str, produced: list[str]) -> tuple[str, str]:
-    """``(status, reason)`` for one empty-input run; see the module docstring."""
+def verdict(*, ok: bool, timed_out: bool, error: str, results: list[str],
+            empty: list[str] | tuple[str, ...] = ()) -> tuple[str, str]:
+    """``(status, reason)`` for one empty-input run; see the module docstring.
+
+    ``results`` are the declared files the run wrote with a result in them, ``empty``
+    the ones it wrote with none (`is_empty_output`).
+    """
     from refactory_dsh.authoring_evidence import failure_kind
 
     if timed_out:
@@ -154,13 +298,17 @@ def verdict(*, ok: bool, timed_out: bool, error: str, produced: list[str]) -> tu
         if kind != "code_failure":
             return "inconclusive", f"the empty-input run could not run ({kind}): {error}"
         return "pass", f"the mode stopped on empty input: {error or '(no message)'}"
-    if produced:
+    if results:
         return "finding", (
             "with its input empty the mode finished and wrote results "
-            f"({', '.join(produced)}). A created mode must not fabricate, simulate or "
+            f"({', '.join(results)}). A created mode must not fabricate, simulate or "
             "sample stand-in input data when its real input is missing or empty; it must "
-            "stop with an error that names the missing input"
+            "stop with an error that names the missing input, or write an empty result "
+            "or a status saying there was no input"
         )
+    if empty:
+        return "pass", ("the mode finished on empty input and reported no result "
+                        f"({', '.join(empty)} empty)")
     return "pass", "the mode finished on empty input and wrote none of its declared files"
 
 
@@ -169,33 +317,68 @@ def run(
     declared: tuple[str, ...] | list[str], model: bool, timeout_s: int,
     model_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run the mode once with its inputs empty and return the receipt."""
+    """Run the mode once with its inputs empty and return the receipt.
+
+    Describing the mode and the run share ``timeout_s``: the describe gets at most
+    `DESCRIBE_TIMEOUT_S` of it and the run what is left.
+    """
     from refactory_dsh import sandbox
     from refactory_dsh.items import write_source
 
     workdir = Path(workdir)
-    described = describe(identifier, project)
+    receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
+                               "declared": list(declared), "timeout_s": int(timeout_s)}
+    started = time.monotonic()
+    try:
+        described = describe(identifier, project,
+                             timeout_s=max(1, min(DESCRIBE_TIMEOUT_S, int(timeout_s))))
+    except Exception as exc:  # noqa: BLE001 - any failure to describe leaves it unjudged
+        return {**receipt, "status": "inconclusive",
+                "reason": f"the mode could not be described, so the empty-input run did "
+                          f"not start: {type(exc).__name__}: {exc}"}
     planned = plan(described, samples, declared, empty_root=workdir / EMPTY_ROOT,
                    project=project)
-    receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
-                               "inputs": planned["inputs"]}
+    receipt.update({key: planned[key] for key in ("inputs", "kept", "undeclared")})
     if not planned["knobs"] and not planned["sources"]:
         return {**receipt, "status": "not_applicable",
-                "reason": "the mode has no input a run can point somewhere empty: no sample "
-                          "knob names a path, no declared input is a knob, and no data node "
-                          "reads a source_path"}
+                "reason": "the mode declares no input the check can empty: no declared "
+                          "input (--input) is a knob of the mode, and no data node reads "
+                          "a source_path"}
+    if planned["undeclared"]:
+        return {**receipt, "status": "inconclusive",
+                "reason": "not run: these knobs are not declared inputs but default to an "
+                          f"existing path, so an empty-input run would still read it: "
+                          f"{', '.join(planned['undeclared'])}. Declare each input with "
+                          "--input, or give the knob a --sample"}
+    remaining = int(timeout_s) - math.ceil(time.monotonic() - started)
+    if remaining < 1:
+        return {**receipt, "status": "inconclusive",
+                "reason": "describing the mode used the whole smoke budget, so the "
+                          "empty-input run did not start"}
     for node_id, source in planned["sources"].items():
         write_source(workdir, node_id=node_id, **source)
     result = sandbox.smoke(
         identifier, workdir, project=project, model=model,
         knobs={**samples, **planned["knobs"]}, model_context=model_context,
-        timeout_s=timeout_s,
+        timeout_s=remaining,
     )
     ok = result.ok and result.payload.get("exit_ok") is not False
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     produced = produced_results(workdir, described.get("writes") or ())
-    status, reason = verdict(ok=ok, timed_out=result.timed_out, error=error, produced=produced)
+    empty = [name for name in produced if is_empty_output(workdir / name)]
+    results = [name for name in produced if name not in empty]
+    status, reason = verdict(ok=ok, timed_out=result.timed_out, error=error,
+                             results=results, empty=empty)
     return {**receipt, "status": status, "reason": reason, "exit_ok": ok,
             "timed_out": result.timed_out, "returncode": result.returncode,
-            "elapsed_s": result.elapsed_s, "error": error, "produced": produced,
+            "elapsed_s": result.elapsed_s, "run_timeout_s": remaining, "error": error,
+            "produced": produced, "results": results, "empty_outputs": empty,
             "knobs": planned["knobs"], "sources": planned["sources"]}
+
+
+def warning(receipt: dict[str, Any] | None) -> str:
+    """The line a person reads when the check did not judge the mode; empty otherwise."""
+    if not receipt or receipt.get("status") not in UNJUDGED:
+        return ""
+    status = str(receipt["status"]).replace("_", " ")
+    return f"the empty-input check was {status} for {receipt.get('mode')}: {receipt.get('reason')}"
