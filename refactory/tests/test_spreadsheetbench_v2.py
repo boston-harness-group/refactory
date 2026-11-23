@@ -896,7 +896,10 @@ def test_the_health_check_after_a_failure_is_fresh(tmp_path, sb2_data, monkeypat
         task.grade(item, pred)
 
 
+
 def _fake_office(tmp_path, monkeypatch, *, bundled: bool):
+    """A LibreOffice stand-in whose ``python`` records how it was started (argv, PYTHON*
+    variables) and copies the helper's input to its output."""
     from refactory_packages.spreadsheetbench import recalc
     program = tmp_path / "office" / "program"
     program.mkdir(parents=True)
@@ -904,37 +907,52 @@ def _fake_office(tmp_path, monkeypatch, *, bundled: bool):
     soffice.write_text("#!/bin/sh\nexit 0\n")
     soffice.chmod(0o755)
     if bundled:
+        log = tmp_path / "started.txt"
         launcher = program / "python"
-        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > {log}\n"
+            f"env | grep '^PYTHON' | sort >> {log}\n"
+            "for a; do src=$dst; dst=$a; done\n"
+            "cp \"$src\" \"$dst\" && echo '{\"ok\": true}'\n")
         launcher.chmod(0o755)
+        (program / "python.bin").write_text("")
     monkeypatch.setattr(recalc, "soffice", lambda: str(soffice))
     return program
 
 
 def test_the_bundled_libreoffice_python_is_not_run_isolated(tmp_path, monkeypatch):
-    """[LibreOffice helper] The bundled program/python finds its stdlib through PYTHONHOME,
-    which -I would make it ignore (the lab's LibreOffice 26.8 failed every file so); a
-    system Python keeps -I."""
+    """[LibreOffice helper] The bundled program/python finds its stdlib through the
+    PYTHONHOME it sets, which -I would make it ignore (the lab's LibreOffice 26.8 failed every
+    file so): `recalculate` starts it with -s, PYTHONSAFEPATH=1 and none of the caller's
+    PYTHON* variables."""
     from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
     program = _fake_office(tmp_path, monkeypatch, bundled=True)
-    assert lo.lo_python() == str(program / "python")
-    assert lo.python_flags(lo.lo_python()) == ["-s", "-P"]
-    assert "-I" not in lo.python_flags(lo.lo_python())
-    assert lo.python_flags("/usr/bin/python3") == ["-I"]
+    monkeypatch.setenv("PYTHONPATH", "/some/venv/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/some/venv")
+    monkeypatch.setenv("PYTHONSTARTUP", "/some/startup.py")
+    assert lo.lo_python() == str(program / "python") and lo.bundled(lo.lo_python())
+    src = tmp_path / "in.xlsx"
+    src.write_bytes(b"workbook")
+    assert lo.recalculate(str(src), str(tmp_path / "out.xlsx")) == (True, "")
+    started = (tmp_path / "started.txt").read_text().splitlines()
+    argv = [line for line in started if not line.startswith("PYTHON")]
+    python_vars = [line for line in started if line.startswith("PYTHON")]
+    assert argv[0] == "-s" and "-I" not in argv and "-E" not in argv, argv
+    assert python_vars == ["PYTHONSAFEPATH=1"], python_vars
 
 
 def test_a_system_python_helper_stays_isolated(tmp_path, monkeypatch):
     from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
     _fake_office(tmp_path, monkeypatch, bundled=False)
     assert lo.lo_python() == "/usr/bin/python3"
-    assert lo.python_flags(lo.lo_python()) == ["-I"]
+    assert not lo.bundled(lo.lo_python()) and lo.python_flags(lo.lo_python()) == ["-I"]
 
 
-def test_the_callers_python_variables_never_reach_libreoffice(tmp_path, monkeypatch):
+def test_a_python_beside_a_soffice_wrapper_is_not_the_bundled_one(tmp_path, monkeypatch):
+    """[LibreOffice helper] A ``python`` in the same directory as ``soffice`` but with no
+    ``python.bin`` (a system python beside a wrapper script) keeps -I."""
     from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
     program = _fake_office(tmp_path, monkeypatch, bundled=True)
-    monkeypatch.setenv("PYTHONPATH", "/some/venv/site-packages")
-    monkeypatch.setenv("PYTHONHOME", "/some/venv")
-    env = lo._environment(str(program))
-    assert not any(key.startswith("PYTHON") for key in env), sorted(env)
-    assert env["UNO_PATH"] == str(program)
+    (program / "python.bin").unlink()
+    assert not lo.bundled(lo.lo_python()) and lo.python_flags(lo.lo_python()) == ["-I"]

@@ -21,7 +21,12 @@ What differs from V2's script, none of it in what LibreOffice computes:
   `TIMEOUT_S` -- raises `RecalcError`: the machine's failure, never the document's;
 - `TIMEOUT_S` per file is LibreOffice's own process guard (V2 has none): the helper
   streams nothing to measure inactivity by, and a hung LibreOffice must not hold an item
-  forever. Reaching it is a `RecalcError`, recorded as a harness incident.
+  forever. Reaching it is a `RecalcError`, recorded as a harness incident;
+- the helper's Python is isolated (V2 runs it with no flags and the caller's
+  ``PYTHONPATH``, open_spreadsheet.py:46-53, :96): the caller's ``PYTHON*`` variables are
+  dropped, a system Python runs with ``-I``, and the bundled launcher -- which finds its
+  standard library through the ``PYTHONHOME``/``PYTHONPATH`` it sets, so ``-I``/``-E`` would
+  break it -- runs with ``-s`` and ``PYTHONSAFEPATH=1`` (`python_flags`).
 """
 from __future__ import annotations
 
@@ -67,22 +72,30 @@ def _environment(folder: str) -> dict[str, str]:
     bundled launcher sets its own ``PYTHONHOME``/``PYTHONPATH``, and the caller's (a virtual
     environment's) must not reach LibreOffice's Python."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    env["PYTHONSAFEPATH"] = "1"  # the bundled launcher's -I stand-in (`python_flags`)
     env["UNO_PATH"] = folder
     env["URE_BOOTSTRAP"] = f"vnd.sun.star.pathname:{folder}/fundamentalrc"
     return env
 
 
-def python_flags(python: str) -> list[str]:
-    """Isolation flags for the helper's Python. The bundled ``program/python`` is a shell
-    launcher that finds its standard library through ``PYTHONHOME``/``PYTHONPATH``, which
-    ``-I`` (and ``-E``) would make it ignore ("Failed to import encodings"); it gets ``-s
-    -P`` (no user site, no script directory on the path) instead. A system Python keeps
-    ``-I``."""
+def bundled(python: str) -> bool:
+    """Whether ``python`` is LibreOffice's own launcher: ``program/python`` with its
+    ``python.bin`` beside it (a system ``python`` in the same directory as a ``soffice``
+    wrapper is not)."""
     folder = program_dir()
-    if folder is not None and os.path.realpath(python) == os.path.realpath(
-            os.path.join(folder, "python")):
-        return ["-s", "-P"]
-    return ["-I"]
+    return (folder is not None
+            and os.path.realpath(python) == os.path.realpath(os.path.join(folder, "python"))
+            and os.path.isfile(os.path.join(folder, "python.bin")))
+
+
+def python_flags(python: str) -> list[str]:
+    """Isolation flags for the helper's Python: ``-I`` for a system Python; ``-s`` for the
+    bundled launcher (with ``PYTHONSAFEPATH=1`` in `_environment`), which finds its
+    standard library through the ``PYTHONHOME``/``PYTHONPATH`` it sets itself and which
+    ``-I`` or ``-E`` would make it ignore ("Failed to import encodings"). Both keep the user
+    site and the script's directory off the path (``PYTHONSAFEPATH`` needs Python 3.11 and is
+    ignored before; ``-s`` holds on every version)."""
+    return ["-s"] if bundled(python) else ["-I"]
 
 
 def available() -> bool:
