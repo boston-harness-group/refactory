@@ -508,3 +508,43 @@ def test_suite_runs_across_two_passes_on_the_spine(tmp_path, monkeypatch):
     verdict = _check_node(run, monkeypatch)
     assert verdict["verdict"] == "proceed", verdict
     _assert_counts(log)
+
+
+# ── delivery's merged check: one run, its steps held to the excusal rule ──────
+
+def test_the_merged_check_runs_once_and_blocks_a_failing_non_test_step(tmp_path):
+    """``pytest old && false``: the reference fails test_old too, but the step after it
+    failed without naming a test, so the merged result is not excused; the chain ran once."""
+    from test_judge_paths import _merged
+
+    from refactory_dsh import delivery
+
+    log = tmp_path / "pytest.log"
+    command = f"{PYTEST} tests/test_old.py && false"
+    ctx, found, merge, tip = _merged(
+        tmp_path, {"tests/test_old.py": TEST_OLD, "conftest.py": LOGGER.format(log=str(log))},
+        {"feature.py": "x = 1\n"}, {"other.txt": "main moved\n"}, check=command)
+    reason, infra = delivery._check_merged(ctx, found, merge, found.head, 120, target_tip=tip)
+    assert not infra and "step `false` failed (exit 1)" in reason.split("\n", 1)[0], reason
+    merged_runs = [line for line in log.read_text().splitlines()
+                   if line.startswith("S ") and Path(line.split()[1]).name.startswith("run-")
+                   and "::" not in line]
+    assert len(merged_runs) == 1, merged_runs
+
+
+def test_the_merged_check_excuses_an_inherited_failure_when_every_step_ran(tmp_path):
+    """``pytest old && pytest more``: test_old fails on the reference too and test_more
+    passes in the same run, so the merged result is delivered."""
+    from test_judge_paths import _merged
+
+    from refactory_dsh import delivery
+
+    ctx, found, merge, tip = _merged(
+        tmp_path, {"tests/test_old.py": TEST_OLD, "tests/test_more.py": MORE},
+        {"feature.py": "x = 1\n"}, {"other.txt": "main moved\n"}, check=CHAIN)
+    assert delivery._check_merged(ctx, found, merge, found.head, 120, target_tip=tip) == ("", False)
+
+
+def test_unreadable_steps_leave_a_chain_incomplete():
+    assert base_check.chain_incomplete("pytest a && pytest b", None)
+    assert base_check.chain_incomplete("pytest a", None) is None
