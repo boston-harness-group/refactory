@@ -26,6 +26,7 @@ sandbox (`sandbox`), under the input's own name.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -216,7 +217,12 @@ class SpreadsheetBenchTask(Task):
         if not meta.get("gold_path"):
             reason = "no-test-cases"
         if reason:
-            return VerifyResult(passed=False, score=0.0, details=reason)
+            # rollout.py:799-812: code that failed to run is shown to the analysts as its
+            # first 500 characters of error under ``## Execution (case N)``.
+            error = final.get("exec_error")
+            return VerifyResult(passed=False, score=0.0, details=reason, prediction=(
+                f"## Execution (case {meta.get('case_no') or 1})\nERROR: {error}"
+                if error is not None and meta.get("gold_path") else None))
         pred = Path(workspace) / PRED
         ape = meta.get("answer_position_eval", "")
         try:
@@ -237,3 +243,30 @@ class SpreadsheetBenchTask(Task):
             details="" if ev["ok"] else f"eval-mismatch: {str(ev.get('reason', ''))[:200]}",
             prediction=verification,
         )
+
+
+class SpreadsheetBenchAgentTask(SpreadsheetBenchTask):
+    """The same items and grade, for the agent harness (`agent_mode.Agent`), whose model
+    call carries the item only as the files of its workspace: the optimizer is shown the
+    input's preview as the item's context (`Task.item_context`), as SkillOpt's analysts
+    see it for an exec rollout (rollout.py:697-721: its ``spreadsheet_preview.txt``, also
+    inside its target user prompt). The solver's call already carries it in its prompt."""
+
+    item_context = ("spreadsheet_preview",)
+
+    def item_context_values(self, metadata: Any) -> dict[str, Any]:
+        sp = str(metadata.get("spreadsheet_path") or "")
+        name = str(metadata.get("input_name") or "")
+        if not name:
+            return {}
+        folder = sp if os.path.isabs(sp) else os.path.join(str(self.data_root), sp)
+        return {"spreadsheet_preview": _preview(os.path.join(folder, name))}
+
+
+@functools.lru_cache(maxsize=1024)
+def _preview(path: str) -> str:
+    """rollout.py:701-704: the input's preview, ``(preview failed)`` when it cannot be read."""
+    try:
+        return port.preview_workbook(path)
+    except Exception:  # noqa: BLE001 - as SkillOpt's
+        return "(preview failed)"

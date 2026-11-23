@@ -18,7 +18,9 @@ way SkillOpt finds its env -- from where the code lives, not from a setting:
 - ``refactory_packages/<package>/skillopt_prompts/<name>.md`` overrides the
   generic prompt ``<name>`` (:data:`GENERIC_PROMPTS`).
 - ``refactory_packages/<package>/skillopt_view.py`` may define
-  ``rollout_result(record, knobs) -> dict``: the package's own rendering of one
+  ``rollout_result(record, knobs) -> dict``, and a ``MODE_VIEWS`` mapping of a mode's
+  name to its own such function for a mode whose records read differently: the
+  package's own rendering of one
   F6 item record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's
   rollout result for that environment, with the conversation under
   ``"conversation"`` (``None`` when the env would have written no
@@ -118,15 +120,20 @@ def _package_dir(package: str) -> Path | None:
 class SkillOptEnv:
     """One mode's package, as SkillOpt's environment adapter."""
 
-    def __init__(self, package: str = "", *, analyst_prompts: str = "task") -> None:
+    def __init__(self, package: str = "", *, analyst_prompts: str = "task",
+                 mode: str = "") -> None:
         self.package = package
+        #: The mode's name within its package (``agent`` for ``spreadsheetbench/agent``):
+        #: a view module's ``MODE_VIEWS`` may render that mode's records its own way.
+        self.mode = mode
         self.analyst_prompts = check_analyst_prompts(analyst_prompts)
         self._dir = _package_dir(package)
         self._view: RolloutView | None = self._load_view()
 
     @classmethod
     def for_mode(cls, mode_id: str, *, analyst_prompts: str = "task") -> "SkillOptEnv":
-        return cls(package_of(mode_id), analyst_prompts=analyst_prompts)
+        return cls(package_of(mode_id), analyst_prompts=analyst_prompts,
+                   mode=str(mode_id or "").partition("/")[2])
 
     # -- prompts: skillopt/prompts/__init__.py:32-58 ------------------------
 
@@ -163,7 +170,8 @@ class SkillOptEnv:
         if self._dir is None or not (self._dir / f"{VIEW_MODULE}.py").is_file():
             return None
         module = importlib.import_module(f"{ROOT_PACKAGE}.{self.package}.{VIEW_MODULE}")
-        view = getattr(module, "rollout_result", None)
+        view = (getattr(module, "MODE_VIEWS", None) or {}).get(self.mode) \
+            or getattr(module, "rollout_result", None)
         if not callable(view):
             raise TypeError(
                 f"{ROOT_PACKAGE}.{self.package}.{VIEW_MODULE} must define "

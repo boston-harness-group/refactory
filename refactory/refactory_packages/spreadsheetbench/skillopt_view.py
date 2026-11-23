@@ -14,6 +14,16 @@ holds every message before its reply (`unframe_claude_backend_messages`). A user
 message after the last call -- feedback on a turn that ended the loop by using up its
 turns or its budget -- is not in any call, so it is not shown.
 
+The agent mode's records (`agent_mode.Agent`, SkillOpt's ``claude_code_exec`` harness) are
+rendered as that harness's results: one turn, the conversation ``final_message or raw``
+alone (codegen_agent.py:501; here the step's reply, which is never empty) then the
+verification or execution-error block, and the chat path's system and user
+prompts and preview, which ``process_one_codegen`` saves for the analysts in this harness
+too (rollout.py:700-718) -- never the agent's tool calls or its ``solution.py``, which
+SkillOpt's CLI path shows them nowhere (`agent_port.conversation`). Its user prompt is
+rebuilt from the item's own input in ``SB_DATA`` (its ``spreadsheet_path`` and
+``input_name``, both in the record), as SkillOpt built it from the same file.
+
 ``skillopt_prompts/analyst_error.md`` and ``analyst_success.md`` are SkillOpt's
 SpreadsheetBench analyst prompts, copied verbatim from
 ``skillopt/envs/spreadsheetbench/prompts/`` (MIT License, Copyright (c) 2026 Microsoft
@@ -40,11 +50,52 @@ def preview_of(user: str) -> str:
     return user[start + len(_PREVIEW_HEAD):end] if start != -1 and end > start else ""
 
 
-def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
-    """One item record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's result."""
+def _agent_user(meta: dict[str, Any]) -> str:
+    """The chat path's first user message for the item, as ``process_one_codegen`` builds
+    it from the item's input (rollout.py:697-718), read from ``SB_DATA``."""
+    import os
+
+    from .tasks import DATA_ENV
+
+    root = os.environ.get(DATA_ENV, "").strip()
+    sp = str(meta.get("spreadsheet_path") or "")
+    path = sp if os.path.isabs(sp) else os.path.join(os.path.expanduser(root), sp)
+    return port.build_user(str(meta.get("instruction", "")),
+                           os.path.join(path, str(meta.get("input_name") or "")),
+                           str(meta.get("instruction_type", "")),
+                           str(meta.get("answer_position_eval", "")))
+
+
+def agent_rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
+    """One agent-mode item record as SkillOpt's ``claude_code_exec`` result."""
+    from . import agent_port
+
+    result = _base(record)
+    exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
+    if record.get("error_text") is not None or not exchanges \
+            or str(record.get("fail_reason") or "").startswith(NO_ANSWER):
+        return result
+    conversation = agent_port.conversation(str(exchanges[-1].get("response") or ""))
+    verification = str(record.get("prediction") or "")
+    if verification:
+        conversation.append({"role": "system",
+                             "content": f"[POST-EXECUTION VERIFICATION]\n\n{verification}"})
+    user = _agent_user(record.get("metadata") or {})
+    result.update({
+        "n_turns": 1,
+        "target_system_prompt": port.build_system(knobs.get("skill", "")),
+        "target_user_prompt": user,
+        "spreadsheet_preview": preview_of(user),
+        "conversation": conversation,
+    })
+    return result
+
+
+def _base(record: dict[str, Any]) -> dict[str, Any]:
+    """rollout.py:657-676: the result's fields before the model call."""
     meta = record.get("metadata") or {}
     passed = bool(record.get("passed"))
-    result: dict[str, Any] = {
+    return {
         "id": str(record.get("id", "")),
         "instruction_type": meta.get("instruction_type", ""),
         "task_type": meta.get("task_type", ""),
@@ -56,6 +107,12 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
         "n_turns": 0,
         "conversation": None,
     }
+
+
+def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
+    """One solver item record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's
+    result; the agent mode's records go through `agent_rollout_result` (`MODE_VIEWS`)."""
+    result = _base(record)
     exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
     if record.get("error_text") is not None or not exchanges \
             or str(record.get("fail_reason") or "").startswith(NO_ANSWER):
@@ -78,3 +135,7 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
         "conversation": conversation,
     })
     return result
+
+
+#: The modes whose records read differently from the solver's (`SkillOptEnv`, by mode).
+MODE_VIEWS = {"agent": agent_rollout_result}

@@ -168,7 +168,11 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
         return workspaces.ask(place, attempt, sent, workdir=workdir, system=system)
 
     _capture_final = client.route()["worker_backend"] == "dsh"
-    if tool_policies.no_effect(tool_policy):
+    from refactory_dsh.workspace import is_sealed
+    if tool_policies.no_effect(tool_policy) or is_sealed({
+            'kind': 'agent', 'tools': spec.get('tools') or (), 'tool_policy': spec.get('tool_policy'),
+            'workspace': spec.get('workspace')}):
+        # A sealed step answers in its reply too, as on the walker (`nn.executor`).
         _capture_final = True
     output, receipt = deliver(
         workdir, node, prompt=with_feedback(render(prompt, context), feedback, previous_output(

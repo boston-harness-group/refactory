@@ -1073,7 +1073,7 @@ def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_
     with pytest.warns(UserWarning, match="a saved state was upgraded"):
         upgraded = sb_mode.Solver(state=old)
     assert upgraded.state_dict() == sb_mode.Solver().state_dict()
-    assert len(upgraded.state_upgrades) == 4
+    assert len(upgraded.state_upgrades) == 5  # item files (4), and the route-bound output cap (1)
     assert sb_mode.Solver(state=sb_mode.Solver().state_dict()).state_upgrades == ()
     runs = {}
     with pytest.warns(UserWarning):
@@ -1087,7 +1087,7 @@ def test_a_state_saved_before_item_files_runs_and_scores_as_it_did(tmp_path, sb_
     assert seen["old"] == seen["new"] and seen["new"][0] == [("v1", True, 1.0, None)], seen
     from refactory_dsh.nn.mode import STATE_UPGRADES
 
-    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 4
+    assert len(json.loads((runs["old"][2] / STATE_UPGRADES).read_text())) == 5
     assert not (runs["new"][2] / STATE_UPGRADES).exists()
 
 
@@ -1111,7 +1111,7 @@ def test_the_spine_runs_a_state_saved_before_item_files_upgraded(tmp_path, monke
     with pytest.raises(Lowered):
         dsh_runtime.evaluate_on_dsh(sb_mode.Solver(), old, tmp_path)
     assert lowered["state"] == sb_mode.Solver().state_dict()
-    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 4
+    assert len(json.loads((tmp_path / STATE_UPGRADES).read_text())) == 5
 
 
 def test_a_missing_prediction_gets_one_more_run(tmp_path, sb_env):

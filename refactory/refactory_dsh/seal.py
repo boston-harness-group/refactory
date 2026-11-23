@@ -47,6 +47,15 @@ sealed step may list only tools whose effects run through it: the shell. A runne
 cannot set the seal up prints ``refactory-seal:`` and exits 97, and the command does not
 run (`FAILURE`). There is no fallback: where the seal cannot run (:func:`available`) a
 new step is not offered tools.
+
+A step on the ``claude_code`` worker backend may instead list Claude Code's own tools
+from :data:`CLAUDE_CODE_TOOLS` (``Read`` and ``Bash``), as a harness that runs Claude
+Code with ``--tools Read,Bash`` does. Claude Code runs them in its own process, so the
+adapter confines them with a ``PreToolUse`` hook: each Bash command is rewritten to run
+under the same runner (the runner, ``--``, ``/bin/bash -c`` and the command), and a Read
+of any path whose real path is outside the workspace is refused. Any other tool is
+refused. The workspace and its runner are made here and in `workspace` as for a DSH
+step; only who puts the runner in front of a command differs.
 """
 
 from __future__ import annotations
@@ -66,6 +75,10 @@ from refactory_dsh import seal_cgroup, seal_reaper, snippet
 #: through the seal. DSH's file and web tools run in its own process, outside any
 #: runner, so they are not among them.
 SEALED_TOOLS = ("bash",)
+#: The Claude Code tools a sealed step on the ``claude_code`` backend may list instead:
+#: Bash runs each command through the runner, and Read reads inside the workspace only,
+#: both enforced by the adapter's ``PreToolUse`` hook (the module docstring).
+CLAUDE_CODE_TOOLS = ("Read", "Bash")
 
 #: What the runner prints when it could not seal a command, as DSH's provider matches it.
 FAILURE = "refactory-seal: "

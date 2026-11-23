@@ -259,6 +259,7 @@ def finalize(ctx: Any) -> dict[str, Any]:
     history = ctx.read_json(HISTORY, []) or []
     code = str(turn.get("code") or "")
     fail_reason = ""
+    exec_error = None
     calls = int(turn.get("turn", 0))
     # run_multi's n_turns is its loop index + 1: a loop the budget stopped before a
     # call counts that turn too (codegen_agent.py:768).
@@ -273,11 +274,13 @@ def finalize(ctx: Any) -> dict[str, Any]:
         ok, err = _sandbox_run(ctx, item, code)
         if not ok:
             fail_reason = f"exec-error: {port.tail_line(err)}"
+            exec_error = err[:500]  # rollout.py:802-812
         elif not ctx.exists(PRED):
             fail_reason = "output-not-found"
     elapsed = time.time() - float(turn.get("start") or time.time())
     ctx.write_json(CONVERSATION, history[1:])
     ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns,
+                           **({"exec_error": exec_error} if exec_error is not None else {}),
                            "elapsed_s": round(elapsed, 3),
                            "backstop": elapsed > item_limit_s(), "limit_s": item_limit_s()})
     return {"finished": True}

@@ -32,7 +32,7 @@ CLAUDE_EXECUTABLE_ENV = 'REFACTORY_CLAUDE_EXECUTABLE'
 CLAUDE_AGENT_SDK = '@anthropic-ai/claude-agent-sdk'
 ROUTE_FIELDS = frozenset({'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
                           'openshell_gateway', 'openshell_image', 'max_completion_tokens',
-                          'setting_sources', 'claude_executable'})
+                          'setting_sources', 'claude_executable', 'max_thinking_tokens'})
 
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
@@ -100,6 +100,13 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
         if not os.path.isabs(route['claude_executable']):
             raise ValueError(f'claude_code claude_executable must be an absolute path; '
                              f'got {route["claude_executable"]!r}')
+    if route.get('max_thinking_tokens'):
+        if backend != 'claude_code':
+            raise ValueError(f'{backend} does not support max_thinking_tokens; only claude_code '
+                             'takes a thinking budget')
+        if not route['max_thinking_tokens'].isdigit() or int(route['max_thinking_tokens']) <= 0:
+            raise ValueError('claude_code max_thinking_tokens is a positive whole number of tokens; '
+                             f'got {route["max_thinking_tokens"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -121,7 +128,7 @@ def resolve_route(base: dict[str, Any], *, role: str = 'worker', node: str = '',
             permission = route.get('permission_mode')
             route.update(provider='', model='', effort='',
                          permission_mode=permission if permission in ('default', 'skip') else 'skip')
-            for key in ('setting_sources', 'claude_executable'):
+            for key in ('setting_sources', 'claude_executable', 'max_thinking_tokens'):
                 if key in route:
                     route[key] = ''
         route.update(override)
@@ -180,6 +187,9 @@ class StepRoutes:
         under = self.step_route(node, role)
         allowed = self.values(under)
         for key, value in declared.items():
+            if key not in allowed:
+                return (f"step {node!r} sets route {key} {value!r}, which a step may not "
+                        "choose for itself")
             if value not in allowed[key]:
                 return (f"step {node!r} sets route {key} {value!r}, which no route of this run "
                         f"uses; allowed: {', '.join(allowed[key]) or 'none'}")
@@ -604,6 +614,9 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
     None keeps DSH's shared store.
     ``seal`` (``tools``, ``runner``) seals the agent (`refactory_dsh.seal`): DSH's local
     sandbox provider runs each command under ``runner``, and the agent has ``tools`` only.
+    On the claude_code backend (``seal["backend"]``, Claude Code's own tools) the adapter
+    does: it offers and allows ``tools`` only, in ``workspace_root``, and its hook runs each
+    Bash command under ``runner`` and refuses a Read outside the workspace.
     """
     observer = Path(__file__).with_name('worker_observer.mjs')
     rows: list[dict[str, Any]] = [{'insert': [
@@ -626,7 +639,15 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 {'id': 'tool-bash', 'config': {
                     'enableRunInBackground': False, 'promoteOnTimeout': False}},
             ])
-    if seal is not None:
+    claude_seal = seal is not None and seal.get('backend') == 'claude_code'
+    if claude_seal:
+        from refactory_dsh.seal import CLAUDE_CODE_TOOLS
+        if (workspace_root is None or route.get('worker_backend') != 'claude_code'
+                or not seal.get('tools') or not set(seal['tools']) <= set(CLAUDE_CODE_TOOLS)
+                or not seal.get('runner') or tool_policy):
+            raise ValueError("a step with Claude Code's tools runs sealed on the claude_code "
+                             "worker backend, confined to its workspace, with no tool policy")
+    elif seal is not None:
         from refactory_dsh.seal import FAILURE
         if workspace_root is None or route.get('worker_backend', 'dsh') != 'dsh':
             raise ValueError('a sealed agent runs on the dsh worker backend, confined to its workspace')
@@ -668,6 +689,12 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 # How long a step waits on background tasks that report nothing; the
                 # adapter's default (600 s) unless this process's environment sets it.
                 ('REFACTORY_BACKGROUND_QUIET_S', os.environ.get('REFACTORY_BACKGROUND_QUIET_S', '')),
+                ('REFACTORY_MAX_THINKING_TOKENS', route.get('max_thinking_tokens', '')),
+                # A sealed step (`refactory_dsh.seal`, Claude Code's own tools): the tools it
+                # is offered, its workspace, and the runner its hook puts before each command.
+                ('REFACTORY_SEALED_TOOLS', ','.join(seal['tools']) if claude_seal else ''),
+                ('REFACTORY_SEAL_WORKSPACE', str(workspace_root) if claude_seal else ''),
+                ('REFACTORY_SEAL_RUNNER', json.dumps(list(seal['runner'])) if claude_seal else ''),
             ) if value}
             if env:
                 config['env'] = env
@@ -732,7 +759,7 @@ def lower_workflow(workflow: Any, workdir: Path, model_context: dict[str, Any] |
                       'tool_policy': node.tool_policy,
                       'workspace': getattr(node, 'workspace', None)}
         # A sealed step runs on the dsh backend with the run's model, as on the walker.
-        selected = for_sealed_step(selected, name, is_sealed(node_state))
+        selected = for_sealed_step(selected, name, is_sealed(node_state), node_state['tools'])
         # The node's tool policy is part of its client: a session without tools may
         # retry on any backend (`DshModelClient.retry_attempts`), so its envelope
         # below reserves every attempt.

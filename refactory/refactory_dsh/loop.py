@@ -6644,10 +6644,33 @@ class Loop(OuterLoop):
                                evaluated=0, rolled=0, tried=tried, refused=refused)
 
     def _with_meta(self, held: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-        """Records by item, each with its declared metadata when the mode reads any."""
-        return {item: dict(rec, item_meta=self._item_meta(rec))
-                if self._item_meta_reader() is not None else dict(rec)
-                for item, rec in held.items()}
+        """Records by item, each with its declared metadata and context when the mode
+        reads any (`_declared`)."""
+        return {item: self._declared(rec) for item, rec in held.items()}
+
+    def _declared(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """``record`` with what its Task declares for the optimizer: its metadata
+        (``item_meta``, the item header) and its context (``item_context``, shown in full
+        after its input, `evidence.render_item`), each only when a Task declares it."""
+        out = dict(record)
+        if self._item_meta_reader() is not None:
+            out["item_meta"] = self._item_meta(out)
+        context = self._item_context_reader()
+        if context is not None:
+            out["item_context"] = context(out)
+        return out
+
+    def _item_context_reader(self) -> Any:
+        """How a record's declared context is read (`task.item_metadata_reader` with
+        ``context``), once; ``None`` when no Task declares any."""
+        if getattr(self, "_item_context", None) is None:
+            from refactory_dsh.task import item_metadata_reader
+
+            try:
+                self._item_context = (item_metadata_reader(self.mode.state_dict(), context=True),)
+            except Exception:  # noqa: BLE001 - a mode that cannot say declares nothing
+                self._item_context = (None,)
+        return self._item_context[0]
 
     def _rejected_side(self, incumbent: Candidate, tried: Sequence[Mapping[str, Any]]
                        ) -> tuple[Any, ...] | None:
@@ -6894,9 +6917,9 @@ class Loop(OuterLoop):
     def _with_item_meta(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Train records with their declared metadata (``item_meta``) for the item headers
         the analysts and the proposal's evidence show; unchanged when none is declared."""
-        if self._item_meta_reader() is None:
+        if self._item_meta_reader() is None and self._item_context_reader() is None:
             return records
-        return [{**record, "item_meta": self._item_meta(record)} for record in records]
+        return [self._declared(record) for record in records]
 
     def _with_step_sources(self, records: Iterable[Mapping[str, Any]],
                            candidate: Candidate | str | None) -> list[dict[str, Any]]:

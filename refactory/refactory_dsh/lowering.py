@@ -377,6 +377,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
             _resolved_spt = node.bound("system_prompt_template", knob_values)
             _resolved_pt = node.bound("prompt_template", knob_values)
             _resolved_mi = node.bound("max_iterations", knob_values)
+            _resolved_route = node.bound_route(knob_values)
             nodes[node_id] = AgentNode(
                 **common,
                 role=role,
@@ -405,7 +406,7 @@ def to_workflow(state: dict[str, Any], *, name: str = "", description: str = "")
                 **({"workspace": dict(node.workspace)} if node.workspace is not None else {}),
                 # The step's own route: `workers.lower_workflow` puts it on its worker's
                 # model context, as the walker puts it on the step's client.
-                **({"route": dict(node.route)} if node.route is not None else {}),
+                **({"route": dict(_resolved_route)} if _resolved_route is not None else {}),
                 **({"tool_policy": node.tool_policy} if node.tool_policy is not None else {}),
                 **({"keeps_tool_markup": True} if node.keeps_tool_markup else {}),
             )
