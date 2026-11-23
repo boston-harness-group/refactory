@@ -145,10 +145,13 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
 
-    def dispatch_workspace(retrying: bool):
+    def dispatch_workspace(retrying: bool, keep: bool = False, session: int | None = None):
+        from refactory_dsh.attempt_processes import keeps_workspace
+        kept = keeps_workspace(workdir, node, retrying=retrying, keep=keep, session=session)
         return workspaces.dispatched(
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None,
+            route=client.route(), fresh=retrying and not kept,
+            runtime_root=Path(runtime_root) if runtime_root else None,
             tools=spec.get('tools') or (), reads=spec.get('reads') or ())
 
     system = render(spec.get('system_prompt', ''), context)
