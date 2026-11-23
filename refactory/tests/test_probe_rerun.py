@@ -31,7 +31,10 @@ def _repo(path: Path) -> tuple[str, str]:
     _git(path, "init", "-q")
     _git(path, "config", "user.email", "t@t")
     _git(path, "config", "user.name", "t")
-    (path / "calc.py").write_text("def double(x):\n    return x + x\n")
+    # The base's double is wrong (5 for 2) and the attempt fixes it: a probe that calls it
+    # tells the two apart by behaviour, not by reading the source.
+    (path / ".gitignore").write_text("lib/\n")
+    (path / "calc.py").write_text("def double(x):\n    return x + x + 1\n")
     (path / "tests").mkdir()
     (path / "tests" / "test_calc.py").write_text(
         "from calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n")
@@ -48,10 +51,12 @@ def _repo(path: Path) -> tuple[str, str]:
     return base, _git(path, "rev-parse", "HEAD")
 
 
-def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
-         judgment: str = '{"verdict": "proceed", "must_fix": [], "follow_ups": []}') -> nn.RunContext:
+def _setup(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
+           judgment: str = '{"verdict": "proceed", "must_fix": [], "follow_ups": []}',
+           prepared: list | None = None) -> nn.RunContext:
     """A design run directory after the verifier: its report, its probe files in its
-    workspace clone, the three reviews and the QA judge's verdict; then `rerun_probes`."""
+    workspace clone, the three reviews and the QA judge's verdict. `clones._prepare` makes
+    a plain clone (at the base or the attempt) and records each call in ``prepared``."""
     target = tmp_path / "target"
     base, head = _repo(target)
     run = tmp_path / "run"
@@ -67,8 +72,10 @@ def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
 
     def prepare(workdir, root, of, *, facts, command_timeout_s, budget=None):
         repo = Path(root) / "repo"
+        if prepared is not None:
+            prepared.append(of)
         if not repo.exists():
-            clones.clone_shared(target, repo, head)
+            clones.clone_shared(target, repo, base if of == "base" else head)
         return {"path": str(repo), "env": {}}
 
     monkeypatch.setattr(clones, "_prepare", prepare)
@@ -77,13 +84,21 @@ def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
     for name, _ in design_ops.DESIGN_QA_REVIEWS:
         ctx.write_text(name, "ran it; fine\n")
     ctx.write_text(judges.QA_JUDGE, judgment)
+    return ctx
+
+
+def _run(tmp_path: Path, monkeypatch, report: str, probes: dict[str, str],
+         judgment: str = '{"verdict": "proceed", "must_fix": [], "follow_ups": []}',
+         prepared: list | None = None) -> nn.RunContext:
+    """`_setup`, then `rerun_probes`."""
+    ctx = _setup(tmp_path, monkeypatch, report, probes, judgment, prepared)
     probe_rerun.rerun_probes(ctx)
     return ctx
 
 
 REPORT = "#### Requirement: R1\n- Failure points: PROBED {}\n\nVERDICT: PASS\n"
-OWN_PROBE = ("# R1: double at the last element; expected 2*x\nfrom calc import double\n"
-             "assert double(3) == 6\n")
+OWN_PROBE = ("# R1: double at the last element; expected 2*x\nimport inspect\nfrom calc import double\n"
+             "assert double(3) == 6\nassert '# attempt' in inspect.getsource(double)\n")
 
 
 def test_a_probed_claim_without_a_probe_file_is_unverified(tmp_path, monkeypatch):
@@ -350,8 +365,18 @@ def test_the_rerun_uses_a_scratch_checkout_and_leaves_the_workspaces_untouched(t
 
 
 def test_the_total_cap_leaves_the_remaining_probes_unrun_and_advisory(tmp_path, monkeypatch):
-    clock = iter([0.0, 0.0, 10_000.0])
-    monkeypatch.setattr(probe_rerun.time, "monotonic", lambda: next(clock, 10_000.0))
+    # Thread-local clock: each thread (head-side, base-side, main) gets its own counter
+    # so the parallel base-revert rerun does not consume the head thread's tick budget.
+    import threading
+    _local = threading.local()
+
+    def _clock():
+        if not hasattr(_local, "n"):
+            _local.n = 0
+        _local.n += 1
+        return 10_000.0 if _local.n > 2 else 0.0
+
+    monkeypatch.setattr(probe_rerun.time, "monotonic", _clock)
     failing = "# R2: expected 7\nfrom calc import double\nassert double(3) == 7\n"
     ctx = _run(tmp_path, monkeypatch, REPORT.format("reviews/probes/R1-1.py"),
                {"R1-1.py": OWN_PROBE, "R2-1.py": failing})
@@ -424,6 +449,9 @@ def test_a_probe_importing_the_projects_own_package_runs_and_passes(tmp_path, mo
     ctx = _run(tmp_path, monkeypatch, PACKAGE_REPORT, {"R1-1.py": probe})
     [entry] = probe_rerun.read_results(ctx)["probes"]
     assert entry["status"] == "pass", entry["tail"]
+    # mypkg is unchanged, so the probe passes on the base too: an advisory finding,
+    # never a re-run, so the gate proceeds.
+    assert entry.get("discriminating") is False
     assert design_ops.gate_qa(ctx) == "proceed"
 
 
@@ -494,6 +522,337 @@ def test_a_probe_importing_refactory_dsh_runs_from_the_scratch_checkout(tmp_path
     [entry] = results["probes"]
     assert entry["status"] == "pass", entry["tail"]
 
+
+# ── base-revert discrimination ──
+
+#: Calls the changed function: 6 on the attempt, 7 on the base, so it fails there.
+CALLING_PROBE = "# R1: double(3) is 6\nfrom calc import double\nassert double(3) == 6\n"
+#: Carries its own copy of the logic: passes with or without the change.
+COPYING_PROBE = "# R1: a copy of double works\ndef my_double(x):\n    return 2 * x\n\nassert my_double(3) == 6\n"
+#: Declares preserved behaviour, and checks code the change does not touch.
+PRESERVED_PROBE = "# R1: non-regression: triple is unchanged\nfrom mypkg import triple\nassert triple(2) == 6\n"
+
+
+def _report(*claims: tuple[str, str]) -> str:
+    """A verifier report: one PROBED line per (requirement, probe file)."""
+    out: dict[str, list[str]] = {}
+    for requirement, name in claims:
+        out.setdefault(requirement, []).append(f"- Failure points: PROBED reviews/probes/{name}")
+    return "".join(f"#### Requirement: {req}\n" + "\n".join(lines) + "\n\n" for req, lines in out.items()
+                   ) + "VERDICT: PASS\n"
+
+
+def _findings(ctx: nn.RunContext) -> dict[str, dict]:
+    return {item["id"]: item for item in probe_rerun.read_results(ctx).get("base_revert", [])}
+
+
+def test_a_requirement_is_verified_when_one_of_its_probes_discriminates(tmp_path, monkeypatch):
+    """R1 has a probe that calls the changed function (fails on the base) beside a helper
+    that carries its own copy (passes on both): verified, the helper only shown in the
+    table. R2 has only the copy: advisory "unverified: probes pass on the base too"."""
+    report = _report(("R1", "R1-1.py"), ("R1", "R1-2.py"), ("R2", "R2-1.py"))
+    ctx = _run(tmp_path, monkeypatch, report, {
+        "R1-1.py": CALLING_PROBE, "R1-2.py": COPYING_PROBE,
+        "R2-1.py": COPYING_PROBE.replace("# R1", "# R2")})
+    results = probe_rerun.read_results(ctx)
+    by_file = {entry["file"]: entry for entry in results["probes"]}
+    assert all(entry["status"] == "pass" for entry in by_file.values()), results["probes"]
+    assert (by_file["R1-1.py"]["discriminating"], by_file["R1-1.py"]["base_exit_code"]) == (True, 1)
+    assert (by_file["R1-2.py"]["discriminating"], by_file["R1-2.py"]["base_exit_code"]) == (False, 0)
+    assert by_file["R2-1.py"]["discriminating"] is False
+    # Per requirement, not per probe: R1 is verified, R2 is not.
+    assert list(_findings(ctx)) == ["R2"]
+    assert _findings(ctx)["R2"]["kind"] == "not_discriminating"
+    assert _findings(ctx)["R2"]["finding"].startswith("unverified: probes pass on the base too: R2")
+    # Never the coverage rule's `unverified`, which would re-run the QA director.
+    assert results["unverified"] == []
+    table = ctx.read_text(probe_rerun.RESULTS_MD)
+    assert "| R1-1.py | R1 | 0 | pass |" in table and "| ✓ |" in table and "| ✗ |" in table
+    assert "## Not verified against the base (advisory)" in table
+    assert "R1 (" not in table.split("## Not verified against the base")[1]
+    assert isinstance(results["base_rerun_wall_s"], (int, float))
+    assert "Base rerun wall-clock:" in table
+
+
+def test_a_requirement_verified_by_one_discriminating_probe_has_no_finding(tmp_path, monkeypatch):
+    ctx = _run(tmp_path, monkeypatch, _report(("R1", "R1-1.py"), ("R1", "R1-2.py")),
+               {"R1-1.py": CALLING_PROBE, "R1-2.py": COPYING_PROBE})
+    results = probe_rerun.read_results(ctx)
+    assert results["base_revert"] == [] and results["unverified"] == []
+    assert "Not verified against the base" not in ctx.read_text(probe_rerun.RESULTS_MD)
+    assert design_ops.gate_qa(ctx) == "proceed"
+    assert "probes pass on the base too" not in ctx.read_text("reviews/qa-gate.txt")
+
+
+def test_a_non_discriminating_requirement_goes_to_the_judge_and_the_follow_ups_once(tmp_path,
+                                                                                    monkeypatch):
+    """No re-run: the first gate_qa proceeds, with the finding in the synthesis the judge
+    reads and in the follow-ups; the coverage rule's re-run is never started for it."""
+    ctx = _run(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": COPYING_PROBE})
+    assert "unverified: probes pass on the base too: R1" in design_ops.synthesize_qa(ctx)["qa"]
+    ctx.write_text(judges.QA_JUDGE, '{"verdict": "proceed", "must_fix": [], "follow_ups": []}')
+    assert design_ops.gate_qa(ctx) == "proceed"
+    assert "qa_coverage_rerun_done" not in ctx.facts
+    [line] = [item for item in json.loads(ctx.read_text("reviews/follow-ups.json"))["qa"]
+              if "base too" in item]
+    assert line.startswith("unverified: probes pass on the base too: R1 (R1-1.py pass with")
+    assert "follow-up: unverified: probes pass on the base too: R1" in ctx.read_text("reviews/qa-gate.txt")
+
+
+def test_a_requirement_with_only_non_regression_probes_is_reported_as_such(tmp_path, monkeypatch):
+    """A probe may declare preserved behaviour, which passes on the base by design; a
+    requirement with nothing else is not silently verified."""
+    ctx = _run(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": PRESERVED_PROBE})
+    [entry] = probe_rerun.read_results(ctx)["probes"]
+    assert (entry["status"], entry["discriminating"]) == ("pass", "non_regression")
+    finding = _findings(ctx)["R1"]
+    assert finding["kind"] == "non_regression_only"
+    assert finding["finding"].startswith("verified by non-regression probes only: R1")
+    assert "verified by non-regression probes only: R1" in design_ops.synthesize_qa(ctx)["qa"]
+    ctx.write_text(judges.QA_JUDGE, '{"verdict": "proceed", "must_fix": [], "follow_ups": []}')
+    assert design_ops.gate_qa(ctx) == "proceed"
+    assert any(item.startswith("verified by non-regression probes only: R1")
+               for item in json.loads(ctx.read_text("reviews/follow-ups.json"))["qa"])
+
+
+def test_a_probe_the_base_cannot_run_is_base_unavailable_not_discriminating(tmp_path, monkeypatch):
+    """An environment failure on the base says nothing about the change."""
+    probe = ("# R1: double\nfrom calc import double\nif double(3) == 7:\n"
+             "    raise ModuleNotFoundError(\"No module named 'mypkg'\")\nassert double(3) == 6\n")
+    ctx = _run(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": probe})
+    results = probe_rerun.read_results(ctx)
+    [entry] = results["probes"]
+    assert results["base_run"]["probes"][0]["status"] == "environment"
+    assert entry["discriminating"] == "base_unavailable" and "mypkg" in entry["base_unavailable"]
+    finding = _findings(ctx)["R1"]
+    assert finding["kind"] == "base_unavailable"
+    assert finding["finding"].startswith("base unavailable: R1 could not be checked against the base")
+    assert "| base unavailable |" in ctx.read_text(probe_rerun.RESULTS_MD)
+
+
+def _entry(status: str, code: int | None, header: str = "R1: x") -> dict:
+    return {"file": "R1-1.py", "requirement": "R1", "status": status, "exit_code": code,
+            "header": header, "existing_tests": [], "tail": ""}
+
+
+@pytest.mark.parametrize("base_status, base_code", [("timed_out", None), ("fail", 1), ("fail", -9)])
+def test_a_probe_that_times_out_or_crashes_on_the_base_discriminates(base_status, base_code):
+    results = {"probes": [_entry("pass", 0)], "unverified": []}
+    probe_rerun._base_revert_discriminate(results, {"probes": [_entry(base_status, base_code)]}, 0.5)
+    assert results["probes"][0]["discriminating"] is True
+    assert results["base_revert"] == [] and results["base_rerun_wall_s"] == 0.5
+
+
+def test_a_base_that_could_not_be_prepared_leaves_every_probe_base_unavailable():
+    results = {"probes": [_entry("pass", 0)], "unverified": []}
+    probe_rerun._base_revert_discriminate(
+        results, {"probes": [], "note": "the base could not be prepared: no clone"}, 0.0)
+    assert results["probes"][0]["base_unavailable"] == "the base could not be prepared: no clone"
+    assert [item["kind"] for item in results["base_revert"]] == ["base_unavailable"]
+
+
+def _base_check_worktree(ctx: nn.RunContext) -> Path:
+    """The base check's worktree, as `base_check._ensure_base_worktree` leaves it, with
+    something the base's setup built in an ignored directory."""
+    from refactory_dsh import base_check
+
+    found = worktree.recorded(ctx.workdir)
+    path = base_check._base_worktree_path(Path(found.target), Path(found.path).name.removeprefix("run-"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _git(Path(found.target), "worktree", "add", "-q", "--detach", str(path), found.base)
+    (path / "lib").mkdir()
+    (path / "lib" / "built.js").write_text("built by setup\n")
+    return path
+
+
+def test_the_base_checks_worktree_is_reused_and_never_reset(tmp_path, monkeypatch):
+    """With the base check's ``base-<run id>`` worktree at the base, the probes run there:
+    nothing is prepared for the base, what its setup built survives, the probe copies are
+    gone afterwards, and the base comparison that reuses the worktree still finds it
+    prepared."""
+    import sys
+
+    from refactory_dsh import base_check
+
+    prepared: list[str] = []
+    ctx = _setup(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": CALLING_PROBE},
+                 prepared=prepared)
+    # The run's worktree has its own directory under the slot, as a real run's has.
+    found = worktree.recorded(ctx.workdir)
+    run_wt = worktree.slot(Path(found.target)) / "run-abc"
+    run_wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(Path(found.target), "worktree", "add", "-q", "--detach", str(run_wt), found.head)
+    record = json.loads((ctx.workdir / worktree.RECORD).read_text())
+    (ctx.workdir / worktree.RECORD).write_text(json.dumps({**record, "path": str(run_wt)}))
+    base_wt = _base_check_worktree(ctx)
+    check = f"{sys.executable} -m pytest -q tests/test_calc.py"
+    ctx.facts["check"] = check
+    key = base_check.cache_key(found.base, "", "", check)
+    base_check._write_targeted(ctx.workdir / base_check.TARGETED_CACHE_FILE, key, {}, prepared=True)
+
+    probe_rerun.rerun_probes(ctx)
+
+    results = probe_rerun.read_results(ctx)
+    assert results["base_run"]["checkout"] == "the base check's worktree"
+    assert prepared == ["attempt"]
+    assert results["probes"][0]["discriminating"] is True
+    assert (base_wt / "lib" / "built.js").read_text() == "built by setup\n"
+    assert not (base_wt / "reviews").exists()
+    assert _git(base_wt, "rev-parse", "HEAD") == found.base
+    assert _git(base_wt, "status", "--porcelain", "--ignored") == "!! lib/"
+
+    def not_again(ctx):
+        raise AssertionError("the base was prepared again")
+
+    monkeypatch.setattr(base_check, "_ensure_base_worktree", not_again)
+    result, source = base_check.targeted_base_failures(
+        ctx, check, ["tests/test_calc.py::test_double"], prepare_timeout=60, timeout=120)
+    assert source == "a run of 1 test(s) on the base", result.environment_failure
+    assert result.failures == {"tests/test_calc.py::test_double"}
+
+
+def test_a_base_check_worktree_at_another_commit_is_not_reused(tmp_path, monkeypatch):
+    prepared: list[str] = []
+    ctx = _setup(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": CALLING_PROBE},
+                 prepared=prepared)
+    base_wt = _base_check_worktree(ctx)
+    _git(base_wt, "checkout", "-q", "--detach", worktree.recorded(ctx.workdir).head)
+    probe_rerun.rerun_probes(ctx)
+    assert sorted(prepared) == ["attempt", "base"]
+    assert probe_rerun.read_results(ctx)["base_run"]["checkout"] == "the probes' base clone"
+    assert (base_wt / "lib" / "built.js").exists()
+
+
+def test_the_fallback_base_clone_is_prepared_once_per_run(tmp_path, monkeypatch):
+    """Without the base check's worktree, the probes' own base clone is prepared on the
+    first pass only; what was built in it survives the probes and the next pass."""
+    prepared: list[str] = []
+    ctx = _run(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": CALLING_PROBE},
+               prepared=prepared)
+    clone = ctx.workdir / ROOT / probe_rerun.BASE_ROOT / "repo"
+    (clone / "lib").mkdir()
+    (clone / "lib" / "built.js").write_text("built by setup\n")
+    probe_rerun.rerun_probes(ctx)
+    assert prepared.count("base") == 1 and prepared.count("attempt") == 2
+    assert (clone / "lib" / "built.js").exists()
+    assert probe_rerun.read_results(ctx)["probes"][0]["discriminating"] is True
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_the_base_side_runs_with_its_own_home(tmp_path, monkeypatch, shared):
+    """A base-side probe writes into its own HOME, never this process's."""
+    process_home = tmp_path / "process-home"
+    process_home.mkdir()
+    monkeypatch.setenv("HOME", str(process_home))
+    probe = ("# R1: double\nimport os, pathlib\nfrom calc import double\n"
+             "side = 'base' if double(3) == 7 else 'head'\n"
+             "pathlib.Path(os.environ['HOME'], 'mark-' + side).write_text(os.getcwd())\n"
+             "assert double(3) == 6\n")
+    ctx = _setup(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": probe})
+    if shared:
+        _base_check_worktree(ctx)
+    probe_rerun.rerun_probes(ctx)
+    assert not (process_home / "mark-base").exists()
+    marks = list((ctx.workdir / ROOT / probe_rerun.BASE_ROOT).rglob("mark-base"))
+    assert len(marks) == 1 and marks[0].parent.name == "home"
+
+
+def test_the_head_and_base_sides_run_at_the_same_time(tmp_path, monkeypatch):
+    """Both preparations and both reruns are under way before either finishes: each
+    waits for the other at a barrier, which a serial order never reaches."""
+    import threading
+
+    barrier = {"prepare": threading.Barrier(2, timeout=20), "run": threading.Barrier(2, timeout=20)}
+    events: list[str] = []
+    ctx = _setup(tmp_path, monkeypatch, _report(("R1", "R1-1.py")), {"R1-1.py": CALLING_PROBE})
+    real_prepare, real_run = clones._prepare, probe_rerun.run_probes
+
+    def prepare(workdir, root, of, **kwargs):
+        events.append(f"prepare {of} start")
+        barrier["prepare"].wait()
+        out = real_prepare(workdir, root, of, **kwargs)
+        events.append(f"prepare {of} end")
+        return out
+
+    def run(probes, checkout, report, **kwargs):
+        side = "base" if report == "" else "head"
+        events.append(f"run {side} start")
+        barrier["run"].wait()
+        out = real_run(probes, checkout, report, **kwargs)
+        events.append(f"run {side} end")
+        return out
+
+    monkeypatch.setattr(clones, "_prepare", prepare)
+    monkeypatch.setattr(probe_rerun, "run_probes", run)
+    probe_rerun.rerun_probes(ctx)
+    for stage in ("prepare", "run"):
+        starts = [i for i, e in enumerate(events) if e.startswith(stage) and e.endswith("start")]
+        ends = [i for i, e in enumerate(events) if e.startswith(stage) and e.endswith("end")]
+        assert len(starts) == 2 and max(starts) < min(ends), events
+    assert probe_rerun.read_results(ctx)["probes"][0]["discriminating"] is True
+
+
+def test_the_verifier_is_told_never_to_reimplement_the_changed_functions():
+    assert "never re-implement or copy their logic into the probe" in DESIGN_VERIFIER_PROMPT
+    assert "by importing them from the\nworkspace" in DESIGN_VERIFIER_PROMPT
+
+
+def test_the_rerun_and_discrimination_run_on_the_spine(tmp_path, monkeypatch):
+    """The spine runs the op as its lowered command, `python -m refactory_dsh.run
+    refactory_dsh.probe_rerun:rerun_probes`, in a real run directory with the lowered
+    declarations: once with the probes' own base clone, once in the base check's worktree."""
+    import os
+    import sys
+
+    from refactory_dsh import lowering
+    from refactory_dsh.run import NODE_ENV, WORKDIR_ENV
+
+    target = tmp_path / "target"
+    base, head = _repo(target)
+    run_wt = worktree.slot(target) / "run-spine"
+    run_wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(target, "worktree", "add", "-q", "--detach", str(run_wt), head)
+    run = tmp_path / "run"
+    (run / worktree.RECORD).parent.mkdir(parents=True)
+    (run / worktree.RECORD).write_text(json.dumps({
+        "path": str(run_wt), "branch": "b", "base": base, "head": head,
+        "target": str(target), "run": str(run)}))
+    probes = run / ROOT / "verifier" / "repo" / probe_rerun.PROBES
+    probes.mkdir(parents=True)
+    (probes / "R1-1.py").write_text(CALLING_PROBE)
+    (probes / "R1-2.py").write_text(COPYING_PROBE)
+    (probes / "R2-1.py").write_text(COPYING_PROBE.replace("# R1", "# R2"))
+    (run / "reviews").mkdir()
+    (run / "reviews/verification.md").write_text(
+        _report(("R1", "R1-1.py"), ("R1", "R1-2.py"), ("R2", "R2-1.py")))
+    (run / "facts.json").write_text("{}")
+    state = DesignMode().state_dict()
+    lowering.write_declarations(state, run)
+    command = lowering.to_workflow(state).nodes["rerun_probes"].command
+    assert command == "python -m refactory_dsh.run refactory_dsh.probe_rerun:rerun_probes"
+    env = {**os.environ, WORKDIR_ENV: str(run),
+           NODE_ENV: json.dumps({"id": "rerun_probes", "type": "FnNode"})}
+
+    def spine() -> dict:
+        proc = subprocess.run([sys.executable, *command.split()[1:]], cwd=run, env=env,
+                              capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+        return json.loads((run / probe_rerun.RESULTS_JSON).read_text())
+
+    for checkout in ("the probes' base clone", "the base check's worktree"):
+        if checkout == "the base check's worktree":
+            base_wt = worktree.slot(target) / "base-spine"
+            _git(target, "worktree", "add", "-q", "--detach", str(base_wt), base)
+            (base_wt / "lib").mkdir()
+            (base_wt / "lib" / "built.js").write_text("built by setup\n")
+        results = spine()
+        assert results["base_run"]["checkout"] == checkout
+        by_file = {entry["file"]: entry["discriminating"] for entry in results["probes"]}
+        assert by_file == {"R1-1.py": True, "R1-2.py": False, "R2-1.py": False}
+        assert [(item["id"], item["kind"]) for item in results["base_revert"]] == [
+            ("R2", "not_discriminating")]
+        assert results["unverified"] == []
+    assert (base_wt / "lib" / "built.js").exists() and not (base_wt / "reviews").exists()
 
 
 def _failing(file: str, requirement: str, header: str, tail: str) -> dict:
@@ -663,3 +1022,66 @@ def test_brief_conflict_dismissal_routes_the_same_on_both_runtimes(tmp_path, run
     assert "brief conflict for the person to settle" in honoured.read_text("reviews/qa-gate.txt")
     defect = _qa_round(tmp_path / "b", DEFECT_PROBE, _dismissal(DEFECT_PROBE))
     assert _gate_on(runtime, defect) == "reloop"
+
+
+# ── a whole design run: the finding reaches the pull request with no extra agent call ──
+
+COPY_REPORT = ("#### Requirement: R1\n- Failure points: PROBED reviews/probes/R1-1.py\n\n"
+               "No blocking findings.\n\nVERDICT: PASS\n")
+TOOL_COPY_PROBE = ("# R1: build prints built\ndef build():\n    return 'built'\n\n"
+                   "assert build() == 'built'\n")
+
+
+def _design_run_with_verifier(tmp_path: Path, verifier_answer: str):
+    """A scripted design run (`test_follow_ups`'s) whose verifier, when it answers
+    ``COPY_REPORT``, saves a probe that carries its own copy of the logic."""
+    import sys
+
+    from tests_support import (DESIGN_DOC_ANSWER, PITFALLS_ANSWER, RESEARCH_ANSWER, FakeModel,
+                               git_repo, render)
+
+    class Model(FakeModel):
+        def complete(self, prompt, *, system="", workdir=None, cwd=None, env=None, confine=False):
+            answer = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env,
+                                      confine=confine)
+            if answer.startswith(COPY_REPORT.split("\n\n")[0]) and cwd is not None:
+                probes = Path(cwd) / probe_rerun.PROBES
+                probes.mkdir(parents=True, exist_ok=True)
+                (probes / "R1-1.py").write_text(TOOL_COPY_PROBE)
+            return answer
+
+    repo = git_repo(tmp_path / "repo")
+    model = Model([RESEARCH_ANSWER, PITFALLS_ANSWER, "perspectives", "one plan", DESIGN_DOC_ANSWER,
+                   render({"tool.py": "def build():\n    print('built')\n"}),
+                   "health: ok", "code review: ok", "qa: ok", verifier_answer])
+    mode = DesignMode()
+    state = mode.state_dict()
+    state["knobs"]["pr"]["value"] = False
+    mode.load_state_dict(state)
+    run = mode.run(tmp_path / "run", model=model, verdicts={"gate_strategy": "proceed"},
+                   task={"name": "nd_tool", "brief": "a tool", "check": f"{sys.executable} tool.py",
+                         "target": str(repo)})
+    return run, model
+
+
+def test_a_non_discriminating_requirement_proceeds_to_delivery_with_no_extra_agent_call(tmp_path):
+    """The run's only issue is a requirement whose one probe passes on the base too: it is
+    delivered, the finding is in the pull request's follow-ups, and no agent is asked
+    anything more than in the same run whose verifier saved no probe."""
+    from tests_support import VERIFICATION_ANSWER
+
+    plain, plain_model = _design_run_with_verifier(tmp_path / "plain", VERIFICATION_ANSWER)
+    assert plain.exit_ok, plain.error
+    run, model = _design_run_with_verifier(tmp_path / "copy", COPY_REPORT)
+    assert run.exit_ok, run.error
+    results = json.loads((tmp_path / "copy/run" / probe_rerun.RESULTS_JSON).read_text())
+    assert [(entry["file"], entry["status"], entry["discriminating"])
+            for entry in results["probes"]] == [("R1-1.py", "pass", False)]
+    assert [item["kind"] for item in results["base_revert"]] == ["not_discriminating"]
+    assert len(model.prompts) == len(plain_model.prompts)
+    assert not any("coverage re-run" in prompt.lower() for prompt in model.prompts)
+    assert (tmp_path / "copy/run/reviews/qa-gate.txt").read_text().startswith("proceed:")
+    pull_request = (tmp_path / "copy/run/pull-request.md").read_text()
+    follow_ups = pull_request.split("## Follow-ups\n\n", 1)[1]
+    assert ("- unverified: probes pass on the base too: R1 (R1-1.py pass with the change "
+            "reverted, so they do not show the change works) (qa)") in follow_ups
