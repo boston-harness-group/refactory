@@ -1296,6 +1296,19 @@ def test_a_smoke_that_hits_its_cpu_limit_says_so_and_leaves_nothing_running(tmp_
             pass
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is POSIX")
+def test_a_sandboxed_process_reaches_its_soft_cpu_limit_before_its_hard_one():
+    """The hard CPU limit sits a second above the soft one, so Linux ends a process at
+    its CPU limit with SIGXCPU, which says what happened, rather than with the SIGKILL
+    it sends when the two are equal."""
+    import subprocess
+
+    probe = "import resource; print(*resource.getrlimit(resource.RLIMIT_CPU))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         check=True, preexec_fn=sandbox._limits(0, 7, 10))
+    assert out.stdout.split() == ["7", "8"]
+
+
 def test_a_smoke_is_given_a_cpu_limit_it_cannot_reach_before_its_backstop(tmp_path, monkeypatch):
     """A smoke may work for hours, up to its backstop: its CPU limit is that backstop on
     every core, as a command's is, so only a runaway reaches it first."""

@@ -1481,6 +1481,53 @@ def test_a_revision_and_its_source_are_smoked_on_the_same_sample(tmp_path, monke
     assert seen == {"revision": 2, "source": 2}
 
 
+#: The LiveMath ids of the shipped fixture split (`tests/fixtures/livemath/split`):
+#: train 202501:1-2, val 202503:1, test 202503:2-3.
+_LIVEMATH_IDS = ("202501:1", "202501:2", "202503:1", "202503:2", "202503:3")
+
+
+@pytest.mark.parametrize(("knobs", "expected"), [
+    # LiveMath's own settings (`livemath/mode.py`): its parts manifest, holdout 0. A
+    # fraction split of holdout 0 would sample 202503:1 too, which is val.
+    ({"holdout": 0, "parts_manifest": "MANIFEST"}, ["202501:1", "202501:2"]),
+    # No manifest: the holdout fraction the mode's runs use, not the outer loop's default.
+    ({"holdout": 0.6}, ["202501:1", "202501:2"]),
+    ({"holdout": 0}, ["202501:1", "202501:2", "202503:1"]),
+])
+def test_create_smokes_a_task_bound_mode_on_the_train_part_its_runs_use(
+        tmp_path, monkeypatch, knobs, expected):
+    """Create's smoke node samples the produced mode's train part as that mode's runs
+    define it -- its ``holdout`` and ``parts_manifest`` -- through the real sandboxed
+    smoke, so no val or test item runs."""
+    from refactory_dsh import lowering
+    from refactory_dsh.run import run_node
+    from refactory_packages.livemath.manifest import build_parts_manifest
+    from test_edit_design import _smoke_run
+    from test_sandbox import _SAMPLED, NAME, _stage
+
+    real_smoke = sandbox.smoke
+    files = dict(_SAMPLED)
+    files["task.py"] = files["task.py"].replace(
+        "[TaskInstance(id=f'item_{i:03d}', metadata={}) for i in reversed(range(177))]",
+        f"[TaskInstance(id=i, metadata={{}}) for i in reversed({list(_LIVEMATH_IDS)!r})]")
+    _stage(tmp_path / "project", files)
+    manifest = build_parts_manifest(Path(__file__).parent / "fixtures" / "livemath" / "split",
+                                    tmp_path / "manifest")
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
+    (workdir / "facts.json").write_text(json.dumps({"name": NAME, "revision_of": ""}))
+    monkeypatch.setattr(sandbox, "smoke", real_smoke)
+    monkeypatch.setattr(create_ops, "project_for_nodes", lambda: tmp_path / "project")
+    monkeypatch.setattr(create_ops, "_model_context", lambda ctx: {})
+    knobs = {name: str(manifest) if value == "MANIFEST" else value for name, value in knobs.items()}
+    monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 3, **knobs}))
+    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"], receipt
+    ran = sorted(json.loads(path.read_text())["id"]
+                 for path in Path(receipt["workdir"]).glob("passes/data/*/span.json"))
+    assert ran == expected
+
+
 def test_a_smoke_that_hit_its_cpu_limit_is_uncertain_and_says_so(tmp_path, monkeypatch):
     """A smoke ended by its CPU limit reports that, not a bare exit code, and is not a
     code failure to repair: the gate halts on it with that reason (`gate_smoke`)."""

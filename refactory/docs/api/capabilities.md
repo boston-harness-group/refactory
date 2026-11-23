@@ -7849,6 +7849,8 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "holdout",
+        "parts_manifest",
         "attempts",
         "check_attempt_cap"
       ],
@@ -8024,6 +8026,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": 0.3,
+      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "frozen": false,
+      "kind": "float",
+      "range": [
+        0.0,
+        0.99
+      ],
+      "value": 0.3,
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
@@ -8039,6 +8053,18 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
     "overwatch__system_prompt": {
       "default": "",
       "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8237,7 +8263,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "46a4d8287752c3ad1d42ba47ed82761fa8658e7f851cfa8316a49eb6e4beb025"
+    "reviewed_schema": "255aeb58aa328bf12ffa3bdf0e1aee100acbb8d5382fcca6a99ebe8531794719"
   }
 }
 ```
@@ -8435,6 +8461,8 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "holdout",
+        "parts_manifest",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -8568,9 +8596,33 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": 0.3,
+      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "frozen": false,
+      "kind": "float",
+      "range": [
+        0.0,
+        0.99
+      ],
+      "value": 0.3,
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8721,7 +8773,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "6d2c269a5401386895a50083f633c40d248976d33967b0d1eb0998f2ce1963ce"
+    "reviewed_schema": "dda9d05d648104e525a90cef14858b56e4a63af9cd55c2172a79a02796b7ba30"
   }
 }
 ```
@@ -11140,6 +11192,8 @@ Revise an existing mode package and validate the revision before separate QA and
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "holdout",
+        "parts_manifest",
         "attempts",
         "check_attempt_cap"
       ],
@@ -11315,6 +11369,18 @@ Revise an existing mode package and validate the revision before separate QA and
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": 0.3,
+      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "frozen": false,
+      "kind": "float",
+      "range": [
+        0.0,
+        0.99
+      ],
+      "value": 0.3,
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
@@ -11330,6 +11396,18 @@ Revise an existing mode package and validate the revision before separate QA and
     "overwatch__system_prompt": {
       "default": "",
       "description": "system prompt for overwatch",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11528,7 +11606,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "8f568a13ecd0c63588479a5ae8248d13a50d190438ad26596686e30e129c5a9a"
+    "reviewed_schema": "b0575e71f3bbc4e5a026316b878105bd454b42c5c90478769da22b755824234f"
   }
 }
 ```
@@ -11721,6 +11799,8 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "holdout",
+        "parts_manifest",
         "repair_attempts",
         "check_attempt_cap"
       ],
@@ -11844,9 +11924,33 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "value": "",
       "values": []
     },
+    "holdout": {
+      "default": 0.3,
+      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "frozen": false,
+      "kind": "float",
+      "range": [
+        0.0,
+        0.99
+      ],
+      "value": 0.3,
+      "values": []
+    },
     "name": {
       "default": "",
       "description": "the package to create (empty takes the name from the brief)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "parts_manifest": {
+      "default": "",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11985,7 +12089,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "8cafd12d38626075e13b285a806a63c23f3cee1ca2dd17490d5c429f561a2775"
+    "reviewed_schema": "a68809779026522a7d408e69c3af5584888319de9215e15470c32281d045187d"
   }
 }
 ```

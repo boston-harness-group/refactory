@@ -40,6 +40,12 @@ when measured, stdout/stderr, elapsed time and failure information. Distinct smo
 directories preserve the outputs of earlier attempts. `revision.json` separately
 records comparison/provenance. Design retains its command and actual output.
 
+A Task-bound mode is smoked on `smoke_items` items of its train part, run at once.
+The train part is the one the mode's own runs use: pass the `holdout` and
+`parts_manifest` knobs as `refactory optimize` takes them (LiveMath: its manifest
+and `holdout` 0), and the smoke never runs a val or test item. A revision's source
+is smoked on the same sample.
+
 `authoring-evidence.json` binds the validation result to hashes of the delivered
 source, authoritative brief/strategy/design/plan inputs, applicable ledger entries,
 validation settings, receipt files and canonical runtime output files. Each validation receipt also survives in

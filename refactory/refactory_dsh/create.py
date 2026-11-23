@@ -31,6 +31,7 @@ from refactory_dsh.create_ops import (
 )
 from refactory_dsh.model import DEFAULT_TIMEOUT_S
 from refactory_dsh.sandbox import DEFAULT_MODEL_SMOKE_TIMEOUT_S
+from refactory_dsh.task import DEFAULT_HOLDOUT
 from refactory_dsh.nn import Graph, Knob, Mode, Node, RunResult
 
 OPS = "refactory_dsh.create_ops"
@@ -109,6 +110,21 @@ class CreateMode(Mode):
                 3, "int", lo=1,
                 description="number of items to run from a task-bound data node "
                             "during smoke; the full item set is not exercised",
+            ),
+            # The split the produced mode's real runs use, as `refactory optimize` takes
+            # it (the run settings of the same names): the smoke samples that train part
+            # only, so it never runs an item those runs hold out.
+            "holdout": Knob(
+                DEFAULT_HOLDOUT, "float", lo=0.0, hi=0.99,
+                description="the holdout fraction the produced mode's runs use; the smoke "
+                            "samples only the train part of that split. Ignored for the "
+                            "split when parts_manifest is given",
+            ),
+            "parts_manifest": Knob(
+                "", "str",
+                description="the parts manifest (parts.json with train/val/test id lists) "
+                            "the produced mode's runs use; the smoke samples only its train "
+                            "ids (empty: the holdout fraction's split)",
             ),
             "check_attempt_cap": Knob(
                 8, "int", lo=0,
@@ -574,7 +590,8 @@ class CreateMode(Mode):
         graph.add(Node(
             "smoke", "gate", evaluator=f"{OPS}:gate_smoke", role="validation",
             resource_role="final_validation", max_iterations=12,
-            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items", "attempts", "check_attempt_cap"),
+            knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items", "holdout",
+                   "parts_manifest", "attempts", "check_attempt_cap"),
             writes=("smoke.json", "revision.json", "authoring-evidence.json", "validation.txt"),
             produces=("smoke_score", "smoke_ok", "smoke_model", "smoke_reason",
                       "before_score", "after_score", "regressed", "revision_note",

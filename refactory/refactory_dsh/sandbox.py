@@ -407,21 +407,27 @@ def _limits(memory_mb: int, cpu_s: int, file_mb: int, *,
     ``memory_mb`` caps the heap (RLIMIT_DATA) and, unless ``address_space`` is false,
     the whole address space (RLIMIT_AS). Node reserves address space it never uses, so
     a child that starts Node keeps the heap cap and drops only the address-space one.
+
+    ``cpu_s`` is the soft CPU limit, and the hard limit is one second above it: Linux
+    sends SIGKILL, not SIGXCPU, when a process reaches a hard limit equal to its soft
+    one, and a CPU limit ended by SIGKILL cannot be told from any other kill
+    (`_ended_by`). macOS sends SIGXCPU either way.
     """
     import resource
 
     def apply() -> None:
         # Cap RLIMIT_CPU at the system's hard limit — a non-root process cannot
         # raise its hard limit, so setrlimit would silently fail.
-        effective_cpu = cpu_s
+        soft, ceiling = cpu_s, cpu_s + 1
         try:
             _soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
-            if hard != resource.RLIM_INFINITY and cpu_s > hard:
-                effective_cpu = hard
+            if hard != resource.RLIM_INFINITY and ceiling > hard:
+                ceiling = hard
+                soft = min(cpu_s, max(hard - 1, 1))
         except (ValueError, OSError):
             pass
         caps = (
-            (resource.RLIMIT_CPU, (effective_cpu, effective_cpu)),
+            (resource.RLIMIT_CPU, (soft, ceiling)),
             (resource.RLIMIT_FSIZE, (file_mb * 1024 * 1024,) * 2),
         )
         for which, value in caps:

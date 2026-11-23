@@ -1609,6 +1609,38 @@ def artifact_problems(root: Path) -> list[str]:
     return problems
 
 
+#: Where the smoke keeps its copy of the produced mode's parts manifest, in the run
+#: directory: both smokes (the revision's and its source's) sample the same train ids.
+SMOKE_PARTS = "smoke-parts.json"
+
+
+def _smoke_split(ctx: Any) -> dict[str, Any]:
+    """The split the produced mode's real runs use, for `sandbox.smoke`'s sample.
+
+    ``holdout`` and ``parts_manifest`` are the knobs of those names, as
+    `refactory optimize` takes them. A manifest is read here, outside the smoke's
+    sandbox, and copied into the run directory (`SMOKE_PARTS`); one that cannot be read,
+    or names no train ids, is refused before any smoke runs -- falling back to a
+    fraction split would sample items the mode's runs hold out.
+    """
+    from refactory_dsh import task as task_module
+
+    holdout = float(ctx.knob("holdout", task_module.DEFAULT_HOLDOUT))
+    source = str(ctx.knob("parts_manifest", "") or "").strip()
+    if not source:
+        return {"holdout": holdout, "parts_manifest": None}
+    path = Path(source).expanduser()
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"parts_manifest {source!r} cannot be read as JSON: {exc}") from exc
+    if not isinstance(manifest, dict) or not task_module.manifest_part_ids(manifest, task_module.TRAIN):
+        raise ValueError(f"parts_manifest {source!r} names no train ids for the smoke to sample")
+    copy = ctx.workdir / SMOKE_PARTS
+    copy.write_text(json.dumps(manifest, indent=2))
+    return {"holdout": holdout, "parts_manifest": copy.resolve()}
+
+
 def _sample_knobs(raw: Any) -> dict[str, str]:
     """The knob values a validation run should use, as `NAME=VALUE` pairs.
 
@@ -1671,6 +1703,7 @@ def smoke(ctx: Any) -> dict[str, Any]:
     if not 1 <= timeout_s <= 86400:
         raise ValueError("smoke_timeout_s must be between 1 and 86400 seconds")
     smoke_items = int(ctx.knob("smoke_items", 3))
+    split = _smoke_split(ctx)
     described = sandbox.describe_package(name, project=project_for_nodes())
     if not described.ok:
         raise ValueError(f"the package could not be read: {described.problem()}")
@@ -1685,7 +1718,7 @@ def smoke(ctx: Any) -> dict[str, Any]:
     result = sandbox.smoke(
         identifier, workdir, project=project_for_nodes(), model=bool(agent_nodes),
         knobs=samples or None, model_context=context, timeout_s=timeout_s,
-        smoke_items=smoke_items,
+        smoke_items=smoke_items, **split,
     )
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
     ok = result.ok and result.payload.get("exit_ok") is not False
@@ -1957,7 +1990,7 @@ def _revision(
             model_context=_model_context(ctx),
             timeout_s=int(ctx.knob("smoke_timeout_s", sandbox.DEFAULT_MODEL_SMOKE_TIMEOUT_S)),
             # The same sample the revision ran, so the two scores compare like with like.
-            smoke_items=int(ctx.knob("smoke_items", 3)),
+            smoke_items=int(ctx.knob("smoke_items", 3)), **_smoke_split(ctx),
         )
         if scored.timed_out:
             # Keep the new mode's completed smoke receipt intact. The source pass

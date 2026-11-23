@@ -620,6 +620,8 @@
     "single_shot": 0.0,
     "smoke_timeout_s": 3600.0,
     "smoke_items": 3.0,
+    "holdout": 0.3,
+    "parts_manifest": "",
     "check_attempt_cap": 8.0,
     "sample_knobs": "",
     "requires_input": "",
@@ -736,6 +738,28 @@
       "values": [],
       "frozen": false,
       "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "required": false
+    },
+    "holdout": {
+      "default": 0.3,
+      "kind": "float",
+      "lo": 0.0,
+      "hi": 0.99,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "required": false
+    },
+    "parts_manifest": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
       "required": false
     },
     "check_attempt_cap": {
