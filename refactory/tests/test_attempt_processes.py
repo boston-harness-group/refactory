@@ -103,3 +103,21 @@ def test_a_zombie_counts_as_ended_and_the_wait_does_not_run_out(tmp_path):
     finally:
         _kill([parent.pid])
         parent.wait(timeout=10)
+
+
+def test_a_process_in_a_sibling_workspace_with_a_lookalike_name_is_left_alone(tmp_path):
+    """``emit2`` beside ``emit`` is another node's workspace: its process is not ``emit``'s."""
+    root = tmp_path / "workspaces" / "emit"
+    sibling = tmp_path / "workspaces" / "emit2"
+    root.mkdir(parents=True)
+    sibling.mkdir()
+    other = subprocess.Popen([sys.executable, "-c", SLEEP], cwd=sibling, start_new_session=True)
+    try:
+        time.sleep(0.3)
+        assert other.pid in attempt_processes.find(sibling)
+        assert attempt_processes.find(root) == []
+        assert attempt_processes.end(root) == []
+        assert other.poll() is None
+    finally:
+        _kill([other.pid])
+        other.wait(timeout=10)

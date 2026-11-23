@@ -67,7 +67,9 @@ wrap it in `timeout`. It records each failing test as it fails (a pytest plugin 
 the run, plus the output's own `FAILED`/`ERROR` lines), in the workspace's own `.refactory/`,
 so a killed run still leaves a record: `--failed` reruns what failed so far and says the last
 run did not finish, and runs the full selection only when nothing was recorded. Before it runs
-it prints the size of the selection and how long the last finished run took. Materialise,
+it prints the size of the selection and how long the last finished run took. A builder's
+timeout retry keeps its workspace (`keep_workspace`); before it does, any process running inside
+the node's workspace is ended (`attempt_processes`). Materialise,
 the check, the reviews and the target guard read the derived `emit.txt` as they read
 an emitted one. create, edit and fast-create keep the emission-only builder.
 

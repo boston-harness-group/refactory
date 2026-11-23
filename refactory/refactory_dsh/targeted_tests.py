@@ -71,20 +71,35 @@ PLUGIN = "refactory_failure_log"
 FAILURE_LOG_ENV = "REFACTORY_FAILURE_LOG"
 
 #: The pytest plugin: it appends each failing test's id to the file named by
-#: ``REFACTORY_FAILURE_LOG`` as the test fails. The process that owns the log takes the
-#: variable out of the environment, so a pytest run by a test, or an xdist worker, never
-#: writes to it. xdist reports every worker's result to the controller, which is the one
-#: that writes.
+#: ``REFACTORY_FAILURE_LOG`` as the test fails. The pytest it loads into takes the variable,
+#: its own ``-p`` from ``PYTEST_ADDOPTS`` and its folder from ``PYTHONPATH`` out of the
+#: environment when it starts, before xdist starts its workers: a worker, or a pytest a
+#: test runs, neither loads nor writes it, and so cannot fail to import it. xdist reports
+#: every worker's result to the controller, which is the one that writes.
 _PLUGIN_SOURCE = '''"""Written by refactory (targeted_tests.py): record each failing test as it fails."""
 import os
 
 _log = None
+_OPTION = "-p refactory_failure_log"
 
 
 def pytest_configure(config):
     global _log
-    if not os.environ.get("PYTEST_XDIST_WORKER"):
-        _log = os.environ.pop("REFACTORY_FAILURE_LOG", None)
+    _log = os.environ.pop("REFACTORY_FAILURE_LOG", None)
+    addopts = os.environ.get("PYTEST_ADDOPTS", "")
+    if addopts.startswith(_OPTION):
+        rest = addopts[len(_OPTION):].strip()
+        if rest:
+            os.environ["PYTEST_ADDOPTS"] = rest
+        else:
+            os.environ.pop("PYTEST_ADDOPTS")
+    here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+    parts = os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    kept = [part for part in parts if part and os.path.realpath(part) != here]
+    if kept:
+        os.environ["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        os.environ.pop("PYTHONPATH", None)
 
 
 def _record(report):

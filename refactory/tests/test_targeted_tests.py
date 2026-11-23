@@ -293,6 +293,40 @@ def test_a_real_pytest_run_cut_off_leaves_the_failures_it_saw(tmp_path, check):
     assert listed["rerun_failed"] is False and "tests/test_cut.py" in listed["selection"]
 
 
+NESTED = {
+    "tool.py": "VERSION = 1\n",
+    # A repo test that runs pytest itself, with a PYTHONPATH of its own: it passes in the
+    # check, so it must pass under the command too.
+    "tests/test_nested.py": (
+        "import os, subprocess, sys\nimport tool\n\n\n"
+        "def test_nested(tmp_path):\n"
+        "    # What the repo's own tests see of the environment carries none of the plugin.\n"
+        "    assert 'refactory_failure_log' not in os.environ.get('PYTEST_ADDOPTS', '')\n"
+        "    assert not [part for part in os.environ.get('PYTHONPATH', '').split(os.pathsep)\n"
+        "                if part.endswith(os.path.join('.refactory', 'plugins'))]\n"
+        "    inner = tmp_path / 'test_inner.py'\n"
+        "    inner.write_text('def test_inner():\\n    pass\\n')\n"
+        "    done = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',\n"
+        "                           str(inner)], cwd=tmp_path, capture_output=True, text=True,\n"
+        "                          env={**os.environ, 'PYTHONPATH': str(tmp_path)})\n"
+        "    assert done.returncode == 0, done.stdout + done.stderr\n"
+        "    assert tool.VERSION == 2\n"),
+}
+
+
+@pytest.mark.parametrize("check", [CHECK, "python -m pytest -q -n 2 -p no:cacheprovider tests"],
+                         ids=["serial", "xdist"])
+def test_a_repo_test_that_runs_pytest_itself_does_not_see_the_plugin(tmp_path, check):
+    """The plugin is the command's alone: a pytest the repo's own test starts, with its own
+    PYTHONPATH, neither loads it nor fails importing it."""
+    run, _, _ = _run_with_worktree(tmp_path, NESTED)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": check})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    said = _command(place)
+    assert said.returncode == 0 and "PASSED" in said.stdout, said.stdout + said.stderr
+    assert "refactory_failure_log" not in said.stdout
+
+
 def test_the_command_prints_the_selection_size_and_the_last_time_before_it_runs(tmp_path):
     run, _, _ = _run_with_worktree(tmp_path, PINNED)
     place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
