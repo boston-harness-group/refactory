@@ -293,3 +293,39 @@ def test_the_reask_quotes_a_long_answer_by_its_start_and_end():
     assert "MIDDLE" not in prompt and "characters left out" in prompt
     assert prompt.count("A") >= snippet.REASK_HEAD_CHARS
     assert "Z" * snippet.REASK_TAIL_CHARS in prompt
+
+
+def test_a_client_that_cannot_drop_its_tools_is_never_asked(tmp_path):
+    """The re-ask runs in the run directory, outside any sealed workspace: a client that
+    cannot run a call without tools is not asked at all (never the unrestricted client);
+    the gate's way on is taken, and the note says why."""
+    from refactory_dsh.node_retry import settle_verdict
+
+    (tmp_path / "judge.txt").write_text(PROSE)
+    asked: list[str] = []
+
+    class Bare:  # no with_tool_policy
+        pass
+
+    outcome = settle_verdict(tmp_path, "judge", "judge.txt",
+                             {"gate": "check", "labels": ["proceed", "reloop"],
+                              "unreadable": "proceed"},
+                             client=Bare(), ask=lambda c, p, w: asked.append(p) or "reloop")
+    assert outcome == "unreadable" and asked == []
+    text = (tmp_path / "judge.txt").read_text()
+    assert text.startswith("proceed\n") and "cannot run a call without tools" in text
+
+
+def test_a_gate_fed_the_agent_s_fact_is_not_settled():
+    """Only the file the agent answers in is settled; a gate reading its fact is left as
+    it always was (the fact is not the file rewritten)."""
+    graph = Graph()
+    graph.add(Node("judge", "agent", prompt_template=JUDGE, writes=("judge.txt",),
+                   produces=("judge",), tool_policy="none"))
+    graph.add(Node("check", "gate", evaluator=snippet.VERDICT, inputs=("judge",),
+                   max_iterations=1, on_exhausted="continue"))
+    graph.add(Node("done", "op", call=LOOP_END_CALL, score_effect="none"))
+    graph.connect("judge", "check")
+    graph.connect("check", "done", condition="proceed")
+    graph.connect("check", "judge", condition="reloop")
+    assert lowering.judge_verdict(graph, "judge") is None

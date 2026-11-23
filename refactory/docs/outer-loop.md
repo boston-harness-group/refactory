@@ -1976,9 +1976,9 @@ generic callables in `refactory_dsh.snippet` and one macro close that gap:
   or its review and then the word on the last line.
 - **An agent's answer that names no verdict is asked again** (`node_retry.settle_verdict`,
   both runtimes: the walker's agent visit and the spine's worker both deliver through
-  `node_retry.deliver`). When the agent whose first write (or first fact) is a verdict
-  gate's source answers with no verdict ("Let me inspect ...", "I found ..."), it gets one
-  fresh call with no tools, quoting its answer, for the word alone. The word it answers is
+  `node_retry.deliver`). When the agent whose first write is a verdict gate's first
+  required read answers with no verdict ("Let me inspect ...", "I found ..."), it gets one
+  fresh call with no tools (a client that cannot drop its tools is not asked), quoting its answer, for the word alone. The word it answers is
   written first in the file, with a line saying it was asked, above the answer, which stays
   the reason a reloop hands back. When that names none either, the gate takes its
   declared way on when its loop cannot settle -- its `proceed`, when `on_exhausted`

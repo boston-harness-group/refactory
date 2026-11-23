@@ -231,3 +231,21 @@ def test_in_a_loop_round_the_fixed_candidate_is_the_one_evaluated(tmp_path):
     events = [json.loads(line)["event"] for line in (loop.root / JOURNAL).read_text().splitlines()]
     review_at = events.index("wiring_review")
     assert "score" in events[review_at:], "the fix was evaluated after its review"
+
+
+def test_a_resumed_run_keeps_a_fix_the_journal_holds(tmp_path):
+    """The journaled outcome decides: a candidate the proposer fixed is the fix again on
+    resume (rebuilt from the journaled edits), with no new call."""
+    client = _Answers({"edits": [KNOB], "why": "fixed"})
+    loop = _loop(tmp_path, AutoresearchOptimizer(client))
+    parent = loop.population[0]
+    first = Run(loop).attempt(Proposal(edit=ORPHAN, parent=parent.id), parent)
+    assert "scribe" not in first.state["graph"]["nodes"]
+    again = Loop(MODE, LoopConfig(optimizer="random", runs_root=tmp_path, resume=True),
+                 project=Path("."))
+    again.init()
+    other = _Answers()
+    again.optimizer = AutoresearchOptimizer(other)
+    out = Run(again).attempt(Proposal(edit=ORPHAN, parent=parent.id), again.population[0])
+    assert isinstance(out, Candidate) and out.id == first.id, out
+    assert other.prompts == []

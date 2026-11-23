@@ -333,7 +333,11 @@ def _seen(graph: Graph, state: Mapping[str, Any], there: set[tuple[str, str]],
     """What a new (or rewired) step will see: ``default``, or what ``sees`` names, kept
     to what is there before it on every path, facts before files, each sorted."""
     if sees is None:
-        chosen = set(default) & there
+        # A sealed step's session log (`workspace.SEALED_SESSION`) goes with its dispatch
+        # and nothing reads it, so a default never hands it on; 'sees' may still name it.
+        from refactory_dsh.workspace import SEALED_SESSION
+
+        chosen = {key for key in set(default) & there if key != ("file", SEALED_SESSION)}
     else:
         if isinstance(sees, str):
             sees = [sees]

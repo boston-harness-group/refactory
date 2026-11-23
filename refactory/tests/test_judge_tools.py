@@ -170,3 +170,18 @@ def test_a_sealed_loop_judge_reads_the_item_and_the_answer_and_its_verdict_route
         assert "input=INPUT-" in text and "answer=my answer" in text, text
         # Proceeded once: the judge was not sent back, nor asked again.
         assert "[refactory:" not in text
+
+
+def test_a_default_view_never_hands_on_a_sealed_session_log():
+    """SpreadsheetBench V2's solve writes `.refactory-session.json` (its tool-call log,
+    which nothing reads): a judge or step seeing solve by default does not get it."""
+    from refactory_packages.spreadsheetbench_v2.swe_mode import Swe
+
+    from refactory_dsh.workspace import SEALED_SESSION
+
+    for edit in ({"op": "loop", "step": "solve", "judge": "agent"},
+                 {"op": "loop", "step": "solve", "judge": "agent", "tools": ["bash"]}):
+        nodes = _nodes(_attempt([edit], mode=Swe()))
+        seed = Swe().state_dict()["graph"]["nodes"]
+        reads = [r for k, n in nodes.items() if k not in seed for r in (n.get("reads") or ())]
+        assert "output.xlsx" in reads and SEALED_SESSION not in reads, (edit, reads)

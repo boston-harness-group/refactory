@@ -7272,6 +7272,18 @@ class Loop(OuterLoop):
         A text-only edit changes no step's wiring, so it is never asked about."""
         held = self._wiring_reviews.get(candidate.id)
         if held is not None:
+            # Reviewed before (a resumed run): the outcome the journal holds, with no new
+            # call -- a fix is rebuilt from its journaled edits, as it was accepted.
+            if (held.get("outcome") == "fixed" and held.get("id") == candidate.id
+                    and held.get("fixed_edits")):
+                again = run.mechanics(Proposal(edits=tuple(held["fixed_edits"]),
+                                               rationale=proposal.rationale,
+                                               prediction=proposal.prediction,
+                                               parent=proposal.parent), parent)
+                if isinstance(again, Candidate):
+                    again.notes = [*again.notes, "wiring warnings shown before it ran: the "
+                                   "proposer changed the wiring before it ran (journaled)"]
+                    return again
             return candidate
         warnings = _new_wiring_warnings(candidate.state, parent.state)
         if not warnings:
@@ -7282,7 +7294,9 @@ class Loop(OuterLoop):
             fixed = review(self._repair_context(), proposal, warnings, parent)
             why = str(getattr(self.optimizer, "last_wiring_answer", "") or "")
         outcome, refused, result = "kept", [], candidate
+        fixed_edits: list[Any] = []
         if fixed is not None:
+            fixed_edits = list(fixed.steps)
             again = run.mechanics(fixed, parent)
             if isinstance(again, Candidate):
                 outcome, result = "fixed", again
@@ -7298,7 +7312,8 @@ class Loop(OuterLoop):
         remaining = _new_wiring_warnings(result.state, parent.state)
         record = {"id": candidate.id, "became": result.id if result is not candidate else None,
                   "parent": parent.id, "epoch": self.epoch, "warnings": warnings,
-                  "outcome": outcome, "why": why, "refused": refused, "remaining": remaining}
+                  "outcome": outcome, "why": why, "refused": refused, "remaining": remaining,
+                  **({"fixed_edits": fixed_edits} if outcome == "fixed" else {})}
         with self._state_lock:
             self._wiring_reviews[candidate.id] = record
             if result is not candidate:

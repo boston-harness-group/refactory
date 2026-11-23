@@ -189,8 +189,8 @@ def judge_verdict(graph: Graph, node_id: str) -> dict[str, Any] | None:
     """The verdict gate that reads an agent's answer, and what settling the answer needs.
 
     For an agent whose answer a verdict gate (`snippet.verdict`) reads its verdict from
-    -- the gate's first ``required_reads`` is the agent's first write, or its first
-    ``inputs`` the agent's first fact -- what settling that answer needs
+    -- the gate's first ``required_reads`` is the agent's first write -- what settling
+    that answer needs
     (`node_retry.settle_verdict`): ``{"gate", "labels", "unreadable"}``, the labels being
     the gate's out-edge conditions and ``unreadable`` the label taken when the answer
     names none even when asked again: the gate's ``proceed`` when it goes on there when
@@ -207,15 +207,15 @@ def judge_verdict(graph: Graph, node_id: str) -> dict[str, Any] | None:
     node = graph.nodes.get(node_id)
     if node is None or node.kind != "agent":
         return None
-    sources = {("file", node.writes[0]) if node.writes else None,
-               ("fact", node.produces[0]) if node.produces else None} - {None}
+    if not node.writes:
+        return None
     found = []
     for gate in graph.nodes.values():
         if gate.kind != "gate" or gate.evaluator != snippet.VERDICT:
             continue
-        source = (("file", gate.required_reads[0]) if gate.required_reads else
-                  ("fact", gate.inputs[0]) if gate.inputs else None)
-        if source not in sources:
+        # The file the agent answers in, which `settle_verdict` settles: a gate fed the
+        # agent's fact instead is not matched (its verdict is read as it always was).
+        if not gate.required_reads or gate.required_reads[0] != node.writes[0]:
             continue
         labels = sorted({str(edge.condition) for edge in graph.out_edges(gate.id)
                          if edge.condition})

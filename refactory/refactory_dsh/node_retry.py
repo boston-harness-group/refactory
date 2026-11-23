@@ -828,10 +828,14 @@ def settle_verdict(workdir: Path, node: str, name: str, verdict: dict[str, Any],
     if named or not labels:
         return "named"
     prompt = snippet.reask_prompt(text, labels)
-    quiet = (client.with_tool_policy("none")
-             if callable(getattr(client, "with_tool_policy", None)) else client)
     reply, why = "", ""
+    # The re-ask runs in the run directory, outside any sealed workspace, so it must run
+    # without tools; a client that cannot promise that is not asked at all.
+    quiet = (client.with_tool_policy("none")
+             if callable(getattr(client, "with_tool_policy", None)) else None)
     try:
+        if quiet is None:
+            raise RuntimeError("its model client cannot run a call without tools")
         if budget is not None:
             budget.checkpoint()
         reply = str(ask(quiet, prompt, None) or "")
@@ -841,7 +845,8 @@ def settle_verdict(workdir: Path, node: str, name: str, verdict: dict[str, Any],
         if isinstance(error, BudgetExhausted):
             raise
         why = f"the call failed: {type(error).__name__}: {str(error)[:200]}"
-    _record_reask(workdir, node, prompt, reply)
+    if quiet is not None:
+        _record_reask(workdir, node, prompt, reply)
     label = None
     if not why:
         try:
