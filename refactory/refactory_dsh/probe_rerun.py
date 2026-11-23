@@ -661,9 +661,12 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
     prepared environment, reset before each probe.
 
     The head-side and base-side probe reruns run in parallel, sharing the step's
-    existing time budget.  A probe that passes on both is "not discriminating" and
-    does not count as verification.  A probe that times out or crashes on the base
-    counts as failing on the base (discriminating).
+    existing time budget (``PROBES_TOTAL_S``).  The base side uses the run's
+    already-prepared base checkout (the one the base check uses) when it exists;
+    otherwise one is prepared once per run and reused on later passes.  A probe
+    that passes on both is "not discriminating" and does not count as
+    verification.  A probe that times out or crashes on the base counts as
+    failing on the base (discriminating).
     """
     import concurrent.futures
 
@@ -696,15 +699,24 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
                 env[key] = str(value)
         check_str = str(ctx.facts.get("check") or "")
 
-        # Prepare the base checkout (reused across QA passes via _prepare's _reset).
-        base_prepared = clones._prepare(workdir, workdir / ROOT / "probe_rerun_base", "base",
-                                        facts=dict(ctx.facts), command_timeout_s=PREPARE_TIMEOUT_S)
-        base_env = dict(os.environ)
-        for key, value in (base_prepared.get("env") or {}).items():
-            if value is None:
-                base_env.pop(key, None)
-            else:
-                base_env[key] = str(value)
+        # Use the base check's already-prepared worktree when it exists;
+        # otherwise prepare once per run and reuse on later passes.
+        run_id = Path(found.path).name.removeprefix("run-")
+        base_wt = worktree.slot(Path(found.target)) / f"base-{run_id}"
+        if base_wt.is_dir():
+            base_checkout: Path = base_wt
+            base_env = dict(os.environ)
+        else:
+            base_prepared = clones._prepare(
+                workdir, workdir / ROOT / "probe_rerun_base", "base",
+                facts=dict(ctx.facts), command_timeout_s=PREPARE_TIMEOUT_S)
+            base_checkout = Path(base_prepared["path"])
+            base_env = dict(os.environ)
+            for key, value in (base_prepared.get("env") or {}).items():
+                if value is None:
+                    base_env.pop(key, None)
+                else:
+                    base_env[key] = str(value)
 
         # Run head-side and base-side probes in parallel, sharing the time budget.
         base_start = time.monotonic()
@@ -712,11 +724,11 @@ def rerun_probes(ctx: Any) -> dict[str, Any]:
             head_future = pool.submit(
                 run_probes, probes, Path(prepared["path"]), report,
                 base=found.base, env=env, reset=reset_checkout, check=check_str,
-                roots=[Path(found.path)])
+                roots=[Path(found.path)], total_s=PROBES_TOTAL_S)
             base_future = pool.submit(
-                run_probes, probes, Path(base_prepared["path"]), "",
+                run_probes, probes, base_checkout, "",
                 base=found.base, env=base_env, reset=reset_checkout, check=check_str,
-                roots=[Path(found.path)])
+                roots=[Path(found.path)], total_s=PROBES_TOTAL_S)
             results = head_future.result()
             base_results = base_future.result()
         base_wall_s = round(time.monotonic() - base_start, 2)
