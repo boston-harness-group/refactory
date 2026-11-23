@@ -200,6 +200,7 @@
     "spreadsheetbench": "core",
     "spreadsheetbench_v2": "core",
     "skillopt": "core",
+    "gepa": "core",
     "sympy_pack": "core"
   },
   "typescript_core_packages": [
