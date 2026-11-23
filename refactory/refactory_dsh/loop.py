@@ -117,6 +117,13 @@ HOLDOUT_FILE = "holdout.json"
 OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
+def opaque_item_key(item_id: str) -> str:
+    """The key `Loop.part_item_scores` gives an item: a digest of its id, so a strategy
+    can line two candidates' per-item val scores up without learning a held-out id."""
+    import hashlib
+
+    return hashlib.sha256(f"refactory-item:{item_id}".encode()).hexdigest()[:16]
+
 
 def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
@@ -2948,6 +2955,22 @@ class Loop(OuterLoop):
         return ({cid: statistics.mean(statistics.mean(r[i] for i in common)
                                       for r in repeats.values())
                  for cid, repeats in by_repeat.items()}, left_out)
+
+    def part_item_scores(self, candidate_id: str, part: str = "val") -> dict[str, float]:
+        """Each item's score in the candidate's first finished ``part`` rollout (the one
+        the val gate reads), averaged over repeats, keyed by an opaque digest of the
+        item id (`opaque_item_key`): a per-instance view for a strategy that keeps a
+        per-item frontier on val (GEPA), which names no held-out item. Items a harness
+        incident left out have no score and are absent; empty before a finished
+        rollout."""
+        done = [o for o in self._part_results.get(candidate_id, {}).get(part, [])
+                if not o.get("budget_stopped") and o.get("score") is not None]
+        if not done:
+            return {}
+        values: dict[str, list[float]] = {}
+        for entry in done[0].get("item_scores") or ():
+            values.setdefault(str(entry[0]), []).append(float(entry[1]))
+        return {opaque_item_key(item): statistics.mean(scores) for item, scores in values.items()}
 
     def part_incidents(self, candidate_id: str, part: str = "val") -> list[str]:
         """The items a harness incident left out of the candidate's first finished

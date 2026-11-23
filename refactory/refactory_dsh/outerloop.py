@@ -588,6 +588,14 @@ class Run:
         as a warning). Scores only: no records or item ids beyond those left out."""
         return self._loop.shared_scores(candidate_ids, part, latest=latest)  # noqa: SLF001
 
+    def val_item_scores(self, candidate: Candidate) -> dict[str, float]:
+        """Each val item's score in the candidate's first finished val rollout (the one
+        ``ValidationGate`` reads), keyed by an opaque digest of the item id
+        (`Loop.part_item_scores`): enough to keep a per-instance frontier on val, as
+        GEPA does, and no item ids, records or workdirs. Empty before a val rollout."""
+        found = getattr(self._loop, "part_item_scores", None)
+        return dict(found(candidate.id, "val")) if callable(found) else {}
+
     def part_incidents(self, candidate: Candidate, part: str = "val") -> list[str]:
         """The items a harness incident left out of the candidate's first ``part``
         rollout's score (`Loop.part_incidents`); empty when none."""
