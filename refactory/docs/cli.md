@@ -77,46 +77,56 @@ takes its brief as its intent; it used to be dropped.
 ### Finishing a pull request
 
 A design run gets one fix round and always delivers a pull request; what it leaves is a
-draft whose description has an `## Open items` section, one task-list line per item:
+draft whose description has an Open items block, outside the sections delivery writes:
 
 ```markdown
+<!-- refactory:open-items -->
 ## Open items
 
 - [ ] **qa-1** (qa_finding): the empty-input case prints a traceback
-  - tests/test_cli.py::test_empty_input
-  - cli.py:42
+  - evidence: tests/test_cli.py::test_empty_input
+  - evidence: cli.py:42
 - [ ] **env-1** (environment): the lab runner timed out
-  - log: `Timeout after 600 s`
+  - evidence: log `Timeout after 600 s`
+<!-- /refactory:open-items -->
 ```
 
 An item's kind is `change_failure`, `unfinished_ask`, `qa_finding`, `judgment_call` or
-`environment`; its indented lines are its evidence, and `[x]` marks it resolved. You may
-tick a box or write a comment between items; both are read as you meant them.
+`environment`; a kind it does not know is kept as written and treated as a
+`judgment_call`. Only an indented `- evidence:` line is evidence; any other line under an
+item is a note. `[x]` marks an item resolved. You may tick a box or write anything in the
+block or around it: a finish changes nothing it did not decide.
 
 `refactory ceo "<brief>" --check "<command>" --refine <PR> --finish` finishes it, the way a
 person would after review. It is a light refine (no research or strategy), and design_doc
 is given a short fix plan for exactly the selected items: every open item that is not a
 `judgment_call`, or those `--items qa-1,cf-2` names. `--review-comments` adds the pull
-request's reviews as usual.
+request's reviews as usual; `--no-pr` is refused.
 
 - **The approval gate is skipped** when every item the builder gets is concrete (a
-  `change_failure`, `unfinished_ask` or `qa_finding` with evidence): the run answers
-  `gate_strategy` with `proceed` up front, as `--approve` does, and says why in its
-  `finish_gate` fact and in the pull request's `## Finish run` section. A `judgment_call`
-  among them leaves the gate to you.
+  `change_failure`, `unfinished_ask` or `qa_finding` with an evidence line) and the design
+  review passed: the run answers `gate_strategy` `proceed` for that one visit, scoped to
+  the design it is about to show, with the reason in the ledger entry, the `finish_gate`
+  fact and the pull request's `## Finish run` section. A `judgment_call` among them, or a
+  design review out of rewrites, leaves the gate to you.
 - **`environment` items are never given to the builder.** The run's own check re-evaluates
-  them: when the failure does not recur (the check passes, or fails on none of the tests
-  the item names) the item is resolved with that evidence; otherwise it stays open.
+  them: the item is resolved when the check passes, or fails on none of the tests the item
+  names with its output whole; otherwise it stays open.
+- **Each item is resolved only on evidence.** A `change_failure` when the check passed and
+  every test it names passed in it (none excused as a failure the base has too); a
+  `qa_finding` or `unfinished_ask` when the run delivers ready for review and its QA judge
+  confirms the item met, with evidence. Anything else is "attempted, not confirmed" and
+  stays open.
 - **One fix round.** A finish sets `check_attempts=2`, `check_attempt_cap=0` and
   `self_check_fixups=0` (it refuses `--attempts` and larger values), and every gate that
   sends the change back to the builder (`prepare_check`'s self-check, `gate_check`,
   `gate_qa`, `gate_overwatch`, `delivery_gate`) does so only while that one round is
   unspent (the `finish_rounds` fact counts it); after it, the run delivers a draft. A
   refused emission's retry is not a round.
-- **Same pull request out.** The run pushes onto the pull request's branch and rewrites
-  its Open items, each resolved or still open with the evidence. It opens no new pull
-  request; if the branch cannot be pushed, it says so and keeps the work local, as any
-  delivery does.
+- **Same pull request out.** The run pushes onto the pull request's branch. In the Open
+  items it ticks what it resolved and adds a `- result:` line under each item it worked on
+  or re-checked; every other line stays as it was. It opens no new pull request; if the
+  branch cannot be pushed, it says so and keeps the work local, as any delivery does.
 
 Fast Create and Design use one strategist, coder and QA agent sequentially. Fast
 Design works where Design works, but has no approval gate, so it opens no pull

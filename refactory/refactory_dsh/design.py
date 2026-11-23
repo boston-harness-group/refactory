@@ -235,6 +235,7 @@ QA_JUDGE_PROMPT = (
     "The evidence map below is the overwatch's starting point once you proceed: when your "
     "verdict is `redo`, the builder goes again and the map is made next round, so an "
     "empty one (`{\"requirements\": []}`) will do.\n"
+    "{% if finish_items_check %}{{finish_items_check}}{% endif %}"
     "{{qa_judge_reread}}"
 )
 
@@ -618,7 +619,8 @@ class DesignMode(Mode):
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
                       "claims_check_feedback", "design_review_status", "refine_context",
-                      "gate_strategy_feedback", "gate_revision_instruction", "finish"),
+                      "gate_strategy_feedback", "gate_revision_instruction", "finish",
+                      "finish_items_check"),
             notes="read the brief and the command that decides whether it is done",
         ))
 
@@ -990,7 +992,7 @@ class DesignMode(Mode):
                       "finding_coverage", "design_review_status", "design_card",
                       "design_review_advisory", "design_review_blocking",
                       "gate_strategy_feedback", "reloop_scope", "reloop_scope_reason",
-                      "gate_revision_instruction"),
+                      "gate_revision_instruction", "finish_gate"),
             knobs=("design_review_attempts",),
             max_iterations=6,
             notes="reloop to design_doc only for a missing or empty ## Changes; list "

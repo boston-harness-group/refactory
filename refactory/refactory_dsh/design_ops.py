@@ -540,8 +540,8 @@ def route_refine_design(ctx: Any) -> Any:
         f"### Changed files\n```\n{changed_files}\n```\n\n"
         + (finish.context_block(finishing) if finishing is not None else "")
     )
-    # A finish skips the approval gate when every item it fixes is concrete, by the gate's
-    # own up-front answer; the reason is a fact, and a line of the pull request.
+    # Whether a finish may skip the approval gate: every item it fixes concrete. The skip
+    # itself waits for the design review (`finish.after_design_review`).
     ctx.set_fact("finish_gate", finish.decide_gate(ctx, finishing) if finishing is not None else "")
 
     # Write sentinel facts.  The pull request goes to design_doc as `refine_context`,
@@ -887,6 +887,7 @@ def gate_design_review(ctx: Any) -> str:
         ctx.set_fact("design_review_findings", "(none: nothing blocks the build)" + coverage_block)
         ctx.set_fact("design_review_status", design_review_status(ctx.facts))
         ctx.set_fact("design_card", design_card(ctx.facts, design_text))
+        finish.after_design_review(ctx, passed=True)
         return "proceed"
 
     report = "\n".join(f"- {p}" for p in problems)
@@ -907,6 +908,7 @@ def gate_design_review(ctx: Any) -> str:
     ctx.set_fact("design_review_findings", report + coverage_block)
     ctx.set_fact("design_review_status", design_review_status(ctx.facts))
     ctx.set_fact("design_card", design_card(ctx.facts, design_text))
+    finish.after_design_review(ctx, passed=False)
     return "proceed"
 
 

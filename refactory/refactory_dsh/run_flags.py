@@ -235,6 +235,8 @@ def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, labe
         return "refactory: --finish goes with --refine: it finishes that pull request's Open items"
     if getattr(args, "items", "") and not getattr(args, "finish", False):
         return "refactory: --items goes with --finish: they are the Open items it works on"
+    if getattr(args, "finish", False) and args.no_pr:
+        return "refactory: --finish updates the pull request it finishes, so it takes no --no-pr"
     if getattr(args, "finish", False) and args.attempts is not None:
         return ("refactory: a --finish run gets one fix round, so it takes no --attempts: it sets "
                 "check_attempts itself")

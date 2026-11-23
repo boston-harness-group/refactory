@@ -784,7 +784,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "name": "report_format",
         "refine": "https://github.com/owner/repository/pull/12"
       },
-      "explanation": "Finish a pull request a run left as a draft with an Open items section: a truncated refine that works on its open items (every one that is not a judgment_call, or those items names), in one fix round, pushes onto the same branch and marks each item resolved or still open, with its evidence, in the description. Environment items are re-checked by the run's check, never given to the builder; the approval gate is skipped when every item worked on is concrete."
+      "explanation": "Finish a pull request a run left as a draft with an Open items section: a truncated refine that works on its open items (every one that is not a judgment_call, or those items names), in one fix round, pushes onto the same branch and marks each item resolved or still open, with its evidence, in the description. Environment items are re-checked by the run's check, never given to the builder; the approval gate is skipped when every item worked on is concrete and the design review passed; an item is resolved only on evidence, and every other line of the description is left as written."
     }
   ],
   "interfaces": {
@@ -5340,7 +5340,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "refine": "https://github.com/owner/repository/pull/12",
         "what": "finish the pull request's open items"
       },
-      "explanation": "Finish a pull request's Open items: a truncated refine (no research or strategy) that works on every open item that is not a judgment_call (--items id1,id2 to choose), gets one fix round, pushes onto the same branch and updates each item in the description as resolved or still open, with its evidence. It skips the approval gate when every item worked on is concrete, and re-checks environment items with the run's check instead of giving them to the builder."
+      "explanation": "Finish a pull request's Open items: a truncated refine (no research or strategy) that works on every open item that is not a judgment_call (--items id1,id2 to choose), gets one fix round, pushes onto the same branch and updates each item in the description as resolved or still open, with its evidence. It skips the approval gate when every item worked on is concrete and the design review passed, resolves an item only on evidence (its tests passed, or the QA judge confirmed it), and re-checks environment items with the run's check instead of giving them to the builder."
     },
     {
       "arguments": {
@@ -10321,7 +10321,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         }
       },
       {
-        "explanation": "Finish a pull request's Open items in one fix round, on its own branch, and update them in its description; the approval gate is answered up front when every item worked on is concrete.",
+        "explanation": "Finish a pull request's Open items in one fix round, on its own branch, and update them in its description; its approval gate is answered for one visit when every item worked on is concrete and the design review passed.",
         "knobs": {
           "brief": "Finish the pull request's open items",
           "check": "python -m pytest -q",

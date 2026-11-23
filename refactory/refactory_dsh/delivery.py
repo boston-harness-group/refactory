@@ -1335,9 +1335,16 @@ def _describe(ctx: Any, url: str, draft_delivery: dict[str, Any] | None) -> str:
         # item it worked on or re-checked is resolved or still open, with the evidence.
         body = finish.update_body(body, finishing, finish.results(ctx, finishing, draft=draft_delivery))
     if legacy:
-        notes.append(f"the description of {url} was not updated: it has no delivery markers, so "
-                     + ("its text is kept as written, with the draft's section put above it"
-                        if draft_delivery else "all of it is kept as written"))
+        kept = ("its text is kept as written, with the draft's section put above it"
+                if draft_delivery else "all of it is kept as written")
+        if finishing is not None:
+            # A finish's results go into the Open items with or without delivery's markers.
+            kept = ("its text is kept as written" + (", with the draft's section put above it"
+                                                     if draft_delivery else "")
+                    + ", but for the results this finish added to its Open items")
+        what = (f"the sections delivery writes in the description of {url} were" if finishing is not None
+                else f"the description of {url} was")
+        notes.append(f"{what} not updated: it has no delivery markers, so {kept}")
     if body != old_body:
         sent = Path(ctx.workdir) / BODY
         sent.write_text(body)

@@ -202,13 +202,15 @@ class Ledger:
 
     def verdict(
         self, gate: str, value: str, *, approval: bool = False,
-        review: str | None = None, answered: bool = False,
+        review: str | None = None, answered: bool = False, reason: str = "",
     ) -> dict[str, Any]:
         """Record a one-use answer for the current review, or explicit upfront approval.
 
         Interactive answers are already used. A public steer answer is pending for
         the exact declared input files, then consumed once. Only ``approval=True``
         is standing authorization, as explicitly supplied by ``ceo --approve``.
+        ``reason``, on one line, says why the answer was given, when the run gave it itself
+        (a finish's skip of its approval gate, `finish.after_design_review`).
         """
         gate, value = (gate or "").strip(), (value or "").strip()
         if not gate or not value or len(gate.splitlines()) != 1 or len(value.splitlines()) != 1:
@@ -230,6 +232,7 @@ class Ledger:
             "scope": "run" if approval else review,
             "source": "upfront" if approval else "interactive",
             "consumed": "used" if answered else "no",
+            **({"reason": " ".join(reason.split())} if reason.strip() else {}),
         }
         self._decision_entry(entry)
         return entry

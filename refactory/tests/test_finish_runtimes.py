@@ -63,6 +63,10 @@ QA = OpenItem("qa-1", "qa_finding", "tool.py still sets VERSION to 1; the pull r
               ("tool.py:1", "tests/test_pin.py::test_pin"))
 ENV = OpenItem("env-1", "environment", "ENV-ONLY-SUMMARY: the CI runner ran out of disk",
                ("log: No space left on device in tests/test_disk.py::test_disk",))
+#: A change failure the builder is not told how to fix: its test fails on the pull request
+#: already, so the run's check excuses it as the base's, and it must stay open.
+CHANGE = OpenItem("cf-2", "change_failure", "tests/test_two.py::test_two fails",
+                  ("tests/test_two.py::test_two",))
 JUDGMENT = OpenItem("jc-1", "judgment_call", "whether NOTES.md belongs in this pull request",
                     ("the excuse rule used: out of the brief's scope",))
 
@@ -72,7 +76,10 @@ def _body(*items: OpenItem) -> str:
             + open_items.render(list(items)))
 
 
-QA_PROCEED = json.dumps({"verdict": "proceed", "must_fix": [], "follow_ups": [], "dismissed": []})
+QA_PROCEED = json.dumps({"verdict": "proceed", "must_fix": [], "follow_ups": [], "dismissed": [],
+                         "finish_items": [{"id": "qa-1", "met": True, "evidence": "tests/test_pin.py::test_pin"}]})
+#: A design with no ## Changes: the design review sends it back once, then is out of rewrites.
+NO_CHANGES = DESIGN_DOC_ANSWER.replace("## Changes", "## Plan")
 
 
 def _files(files: dict[str, str]) -> str:
@@ -144,6 +151,7 @@ class World:
         # The pull request: a branch with the first run's work on it, open as a draft.
         git(repo, "checkout", "-q", "-b", "version-two")
         (repo / "NOTES.md").write_text("Version two is coming.\n")
+        (repo / "tests/test_two.py").write_text("def test_two():\n    assert False\n")
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "version two: notes")
         git(repo, "push", "-q", str(bare), "version-two:refs/heads/version-two")
@@ -219,13 +227,16 @@ NOT_BUILT = json.dumps({"items": [{"id": "ask-1", "kind": "ask", "text": "the br
 
 #: One sealed world per runtime and case: what its pull request lists, what its agents
 #: answer beyond `SCRIPT`, and how the finish is driven.
-#: - ``fixed``: a QA finding and an environment item; both resolved.
+#: - ``fixed``: a QA finding the QA judge confirms (resolved), a change failure whose test
+#:   still fails (open) and an environment item (resolved).
+#: - ``review``: the design review is out of rewrites, so the gate is left to a person.
 #: - ``judgment``: --items names a judgment call too, so the gate is left to a person.
 #: - ``rounds``: the early asks judge finds the first build lacking (gate_check sends it
 #:   back: the round), and the second build breaks a test the self-check runs, which would
 #:   send it back again: no second round, a draft.
 CASES: dict[str, tuple[str, dict[str, list[Any]], Any, tuple[str, ...]]] = {
-    "fixed": (_body(QA, ENV), {}, _finished, ()),
+    "fixed": (_body(QA, CHANGE, ENV), {}, _finished, ()),
+    "review": (_body(QA, ENV), {"design_doc": [NO_CHANGES]}, _asked, ()),
     "judgment": (_body(QA, JUDGMENT, ENV), {}, _asked, ("--items", "qa-1,jc-1")),
     "rounds": (_body(QA, ENV), {
         "emit": [SCRIPT["emit"][0],
@@ -276,7 +287,7 @@ def test_a_finish_updates_the_same_pull_request_on_each_runtime(worlds, runtime)
     world = worlds[f"fixed-{runtime}"]
     facts = _facts(world, runtime)
     assert facts["finish_gate"]["skipped"] is True, facts.get("finish_gate")
-    assert facts["finish"]["builder"] == ["qa-1"] and facts["finish"]["environment"] == ["env-1"]
+    assert facts["finish"]["builder"] == ["qa-1", "cf-2"] and facts["finish"]["environment"] == ["env-1"]
     # A light refine: one design, one build, no research, pitfalls or strategy agent.
     nodes = world.nodes()
     assert nodes.count("design_doc") == 1 and nodes.count("emit") == 1, nodes
@@ -292,8 +303,16 @@ def test_a_finish_updates_the_same_pull_request_on_each_runtime(worlds, runtime)
     pull = _pull(world)
     items = {item.id: item for item in open_items.parse(pull["body"])}
     assert items["qa-1"].status == "resolved"
-    assert items["qa-1"].evidence[-1].startswith(f"finish run at `{head[:12]}`: fixed")
-    assert items["env-1"].status == "resolved" and "passed, so the failure did not recur" in items["env-1"].evidence[-1]
+    assert items["qa-1"].results == (f"finish run at `{head[:12]}`: the QA judge confirmed it met "
+                                     "(tests/test_pin.py::test_pin)",)
+    assert items["cf-2"].status == "open" and "attempted, not confirmed" in items["cf-2"].results[-1]
+    assert items["env-1"].status == "resolved" and "passed, so the failure did not recur" in items["env-1"].results[-1]
+    # Only the boxes of what was resolved, and one result line per selected item, changed.
+    before = _body(QA, CHANGE, ENV)
+    assert pull["body"].replace("- [x] **qa-1**", "- [ ] **qa-1**").replace("- [x] **env-1**", "- [ ] **env-1**") \
+        .split(open_items.START, 1)[1].replace("\n  - result: " + items["qa-1"].results[-1], "") \
+        .replace("\n  - result: " + items["cf-2"].results[-1], "") \
+        .replace("\n  - result: " + items["env-1"].results[-1], "") == before.split(open_items.START, 1)[1]
     assert pull["body"].count("## Open items") == 1
     assert "- The approval gate was skipped: every item this finish run fixes is concrete" in pull["body"]
     assert json.loads((world.run / delivery.RECORD).read_text())["status"] == "updated"
@@ -325,7 +344,20 @@ def test_a_finish_gets_one_fix_round_on_each_runtime(worlds, runtime):
     head = worktree.recorded(world.run).head
     assert git(world.github / f"{SLUG}.git", "rev-parse", "refs/heads/version-two") == head
     items = {item.id: item for item in open_items.parse(pull["body"])}
-    assert items["qa-1"].status == "open" and "the run delivered a draft" in items["qa-1"].evidence[-1]
+    assert items["qa-1"].status == "open" and "the run delivered a draft" in items["qa-1"].results[-1]
     # The check failed on tests/test_pin.py, not on the test the environment item names.
     assert items["env-1"].status == "resolved" and "but not on tests/test_disk.py::test_disk" in \
-        items["env-1"].evidence[-1]
+        items["env-1"].results[-1]
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_design_review_out_of_rewrites_leaves_the_gate_to_a_person_on_each_runtime(worlds, runtime):
+    """Every item is concrete, but the design review found no ## Changes twice: the gate is
+    not answered, and nobody is there to answer it."""
+    world = worlds[f"review-{runtime}"]
+    facts = _facts(world, runtime)
+    assert facts["finish_gate"]["skipped"] is False and "design review" in facts["finish_gate"]["reason"]
+    assert world.nodes().count("design_doc") == 2 and "emit" not in world.nodes()
+    from refactory_dsh.steering import Ledger
+
+    assert not [entry for entry in Ledger(world.run).entries() if entry["kind"] == "verdict"]
