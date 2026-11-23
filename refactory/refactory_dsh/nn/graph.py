@@ -80,9 +80,9 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         raise ValueError(f"a retry is a mapping of on, times and timeout_factor, not {value!r}")
-    unknown = sorted(set(value) - {"on", "times", "timeout_factor"})
+    unknown = sorted(set(value) - {"on", "times", "timeout_factor", "keep_workspace"})
     if unknown:
-        raise ValueError(f"a retry takes on, times and timeout_factor; unknown: {unknown}")
+        raise ValueError(f"a retry takes on, times, timeout_factor and keep_workspace; unknown: {unknown}")
     on = value.get("on", ["timeout"])
     if isinstance(on, str) or not isinstance(on, (list, tuple)) or not on:
         raise ValueError(f"a retry's 'on' is a non-empty list of failures, not {on!r}")
@@ -100,7 +100,9 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
                          f"not {factor!r}")
     if float(factor).is_integer():
         factor = int(factor)
-    return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor}
+    keep_workspace = bool(value.get("keep_workspace", False))
+    return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor,
+            "keep_workspace": keep_workspace}
 
 def retry_safe(node: "Node") -> bool:
     """Whether running ``node`` again in a fresh session cannot start from what a failed
@@ -725,13 +727,15 @@ class Node:
             if retries and not retry_safe(self):
                 # A node that may change the run's worktree or the target cannot simply
                 # run again: the second session would start from what the first left.
-                # A node with a workspace is safe: each attempt gets a fresh workspace
-                # via workspace.dispatched(fresh=True), which discards the previous one.
-                # A clone and a scratch folder both keep an attempt's writes inside the
-                # workspace until collect, and collect runs only after the session
-                # returns, so a timed-out attempt contributes nothing. The declaration is
-                # canonical by here, so one that means "no workspace" is None and counts
-                # as none.
+                # A node with a workspace is safe: each attempt either gets a fresh
+                # workspace via workspace.dispatched(fresh=True), which discards the
+                # previous one, or keeps it when the retry rule sets keep_workspace
+                # (the builder's timeout retry continues from the previous attempt's
+                # edits). A clone and a scratch folder both keep an attempt's writes
+                # inside the workspace until collect, and collect runs only after the
+                # session returns, so a timed-out attempt contributes nothing outside
+                # the workspace. The declaration is canonical by here, so one that means
+                # "no workspace" is None and counts as none.
                 raise GraphError(
                     f"node {self.id!r} declares a retry but may change shared state (the "
                     "run's worktree or the target), so a second session would start from "
@@ -1123,7 +1127,8 @@ class Graph:
             return node.retry if node.retry["times"] > 0 else None
         if not self.in_data_pass(node_id) or not retry_safe(node):
             return None
-        return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
+        return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1,
+                "keep_workspace": False}
 
     def missing_on_crash(self, node_id: str) -> bool:
         """Whether ``node_id``, when its retries are spent or it runs out of output without

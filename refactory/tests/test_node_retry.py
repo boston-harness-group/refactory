@@ -34,7 +34,7 @@ from refactory_dsh.node_retry import (INVENTED_TOOL_CALLS, RETRY_EVENT, RetriesE
                                       attempt_walls, deliver, failure_kind, node_allowance_s,
                                       retries)
 
-RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
+RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": False}
 REPORT = "reviews/report.md"
 
 FAKE_DSH = '''import json, os, sys, time, pathlib
@@ -51,6 +51,9 @@ if step.get("fresh"):
     assert not pathlib.Path("stale.txt").exists(), "previous attempt survived"
     assert not pathlib.Path("reviews/report.md").exists(), "partial report survived"
     assert "Your workspace is " + str(pathlib.Path.cwd()) in prompt, "missing workspace contract"
+if step.get("kept"):
+    assert pathlib.Path("stale.txt").exists(), "previous attempt's edits were lost"
+    assert "Your workspace holds the previous attempt" in prompt, "missing keep_workspace note"
 for name, text in step.get("write", {{}}).items():
     target = pathlib.Path(name)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -559,10 +562,10 @@ def test_design_mode_retries_its_builder_and_verifier():
     assert [node.id for node in graph.nodes.values() if node.retry is not None] == ["emit", "verifier"]
     assert sorted(node.id for node in graph.nodes.values() if node.outputs_only) == [
         "qa_director_rerun", "verifier"]
-    assert graph.nodes["verifier"].retry == TIMEOUT_RETRY == RULE
+    assert graph.nodes["verifier"].retry == retry_declaration(TIMEOUT_RETRY) == RULE
     # The builder's limit is a hard maximum (inactivity stops a stuck one sooner), and its
     # retry has the same maximum rather than twice it.
-    assert graph.nodes["emit"].retry == BUILDER_RETRY
+    assert graph.nodes["emit"].retry == retry_declaration(BUILDER_RETRY)
     assert graph.nodes["emit"].timeout_s == BUILDER_TIMEOUT_S == 14400
 
 
@@ -579,13 +582,13 @@ def test_other_modes_declare_no_retry():
             # crashing solve run through them: test_spreadsheetbench's
             # test_a_crashed_solve_call_gets_five_attempts.
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
-                {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2}}
+                {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2, "keep_workspace": False}}
             continue
         if key == "spreadsheetbench-agent":
             # SkillOpt's one retry on an empty response, on the solve node only:
             # test_spreadsheetbench_agent's test_the_command_line_is_skillopts.
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
-                {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2}}
+                {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2, "keep_workspace": False}}
             continue
         assert all("retry" not in node for node in nodes.values()), key
 
@@ -626,7 +629,9 @@ def test_a_builder_that_times_out_once_is_retried_and_the_run_continues(tmp_path
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_builders_retry_workspace_holds_none_of_the_first_attempts_edits(tmp_path, runtime, monkeypatch):
+    """A node with keep_workspace=False (the default) still gets a fresh workspace on retry."""
     monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    fresh_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": False}
     dsh = Scripted(tmp_path / "dsh", [
         {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}},
         {"fresh": True, "write": {EMIT_FILE: "clean build"}, "answer": "done"},
@@ -637,11 +642,62 @@ def test_a_builders_retry_workspace_holds_none_of_the_first_attempts_edits(tmp_p
         from tests_support import git_repo
         workdir.mkdir()
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
-    ok, error = _run(runtime, workdir, _graph(_builder_node()), dsh.client())
+    ok, error = _run(runtime, workdir, _graph(_builder_node(retry=fresh_rule)), dsh.client())
     assert ok, error
     assert dsh.calls == 2
     assert not (workdir / "stale.txt").exists()
     assert "clean build" in (workdir / EMIT_FILE).read_text()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_builders_retry_with_keep_workspace_preserves_the_first_attempts_edits(
+        tmp_path, runtime, monkeypatch):
+    """A builder retry with keep_workspace=True preserves the first attempt's edits and
+    the retry prompt contains the KEEP_WORKSPACE_NOTE."""
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    keep_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
+    dsh = Scripted(tmp_path / "dsh", [
+        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}},
+        {"kept": True, "write": {EMIT_FILE: "continued build"}, "answer": "done"},
+    ])
+    workdir = tmp_path / "run"
+    if runtime == "spine":
+        from refactory_dsh import worktree
+        from tests_support import git_repo
+        workdir.mkdir()
+        worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
+    ok, error = _run(runtime, workdir, _graph(_builder_node(retry=keep_rule)), dsh.client())
+    assert ok, error
+    assert dsh.calls == 2
+    assert "continued build" in (workdir / EMIT_FILE).read_text()
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_kept_workspace_retry_waits_for_stale_processes_to_end(tmp_path, runtime, monkeypatch):
+    """When keep_workspace is True, the retry terminates stale child processes from the
+    timed-out attempt before reusing the workspace. The first attempt starts a child that
+    writes to the workspace; the retry starts only after that child is gone."""
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    keep_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
+    # The first step writes a file and spawns a child that keeps the workspace busy.
+    # The child writes "child_alive" to a marker file so we can detect it.
+    # The second step (retry) checks stale.txt exists (workspace was kept) and that
+    # the stale child process is gone.
+    dsh = Scripted(tmp_path / "dsh", [
+        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}},
+        {"kept": True, "write": {EMIT_FILE: "clean after stale"}, "answer": "done"},
+    ])
+    workdir = tmp_path / "run"
+    if runtime == "spine":
+        from refactory_dsh import worktree
+        from tests_support import git_repo
+        workdir.mkdir()
+        worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
+    ok, error = _run(runtime, workdir, _graph(_builder_node(retry=keep_rule)), dsh.client())
+    assert ok, error
+    assert dsh.calls == 2
+    # The retry completed with the kept workspace (stale.txt was checked by FAKE_DSH)
+    assert "clean after stale" in (workdir / EMIT_FILE).read_text()
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)

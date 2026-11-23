@@ -14,6 +14,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,14 @@ def test_failed_reruns_only_the_last_failures_and_falls_back_without_a_record(tm
     said = _command(place, "--failed")
     assert "no failures are recorded" in said.stdout and "tests/test_second.py" in said.stdout
     assert said.returncode != 0
+    # The record is inside the workspace's own .refactory/ (inside the sandbox).
+    record_path = place.path / ".refactory" / targeted_tests.LAST_RUN
+    assert record_path.exists(), f"record not at {record_path}"
+    assert record_path.relative_to(place.path)  # inside the sandbox
+    # The log file exists and contains FAILED lines.
+    log_path = place.path / ".refactory" / targeted_tests.LOG_FILE
+    assert log_path.exists(), f"log not at {log_path}"
+    assert "FAILED" in log_path.read_text()
     # The run that just failed recorded its failures; --failed reruns only those.
     listed = json.loads(_command(place, "--failed", "--list").stdout)
     assert listed["selection"] == [f"{PIN}::test_pin"] and listed["rerun_failed"] is True
@@ -194,3 +203,110 @@ def test_failed_reruns_only_the_last_failures_and_falls_back_without_a_record(tm
     assert _command(place, "--failed").returncode == 0
     after = json.loads(_command(place, "--failed", "--list").stdout)
     assert after["rerun_failed"] is False and "tests/test_second.py" in after["selection"]
+
+
+def test_cutoff_run_records_failures_seen_so_far(tmp_path):
+    """A run cut off by a timeout (SIGTERM) still leaves exactly the failures seen so far
+    in the record, and --failed afterwards runs only those. No mocks: the real command
+    runs a fixture that prints FAILED lines then sleeps, and is killed."""
+    run, _, _ = _run_with_worktree(tmp_path, PINNED)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    # Write a Python test script that prints two FAILED lines then blocks.
+    # Using Python + sys.stdout.flush to ensure the lines reach the pipe before the hang.
+    fake_test = place.path / "_fake_pytest.py"
+    fake_test.write_text(
+        "import sys, time\n"
+        "print('FAILED tests/test_a.py::test_one - assert 1 == 2')\n"
+        "sys.stdout.flush()\n"
+        "print('FAILED tests/test_b.py::test_two - assert 3 == 4')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(300)\n"
+    )
+    record_dir = place.path / ".refactory"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record_path = record_dir / targeted_tests.LAST_RUN
+    log_path = record_dir / targeted_tests.LOG_FILE
+    # Launch _run_and_collect in a child process group so we can kill it.
+    import signal
+    import threading
+    import time
+
+    exc_holder: list[BaseException | None] = [None]
+
+    def run_it():
+        try:
+            targeted_tests._run_and_collect(
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_test))}",
+                place.path, record_path=record_path, log_path=log_path)
+        except BaseException as e:
+            exc_holder[0] = e
+
+    thread = threading.Thread(target=run_it, daemon=True)
+    thread.start()
+    # Wait for the record to be written with the two failures.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if record_path.exists():
+            try:
+                rec = json.loads(record_path.read_text())
+                if len(rec.get("failed", [])) >= 2:
+                    break
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(0.1)
+    # The record holds exactly the failures printed so far.
+    assert record_path.exists(), "record not written before cutoff"
+    rec = json.loads(record_path.read_text())
+    assert rec["failed"] == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+    # Kill the hanging child process (the Python script's sleep).
+    # Find it by its command line containing _fake_pytest.py.
+    import signal as _sig
+    for pid_dir in Path("/proc").iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            cmdline = (pid_dir / "cmdline").read_bytes().decode(errors="replace")
+            if "_fake_pytest.py" in cmdline and str(pid_dir.name) != str(os.getpid()):
+                os.kill(int(pid_dir.name), _sig.SIGKILL)
+        except (OSError, PermissionError):
+            continue
+    thread.join(timeout=10)
+    # Confirm --failed reads back exactly those two.
+    failures = targeted_tests._last_failures(record_path)
+    assert failures == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+
+
+def test_remember_warns_on_write_failure(tmp_path, capsys):
+    """When the record cannot be written, a warning naming the path is printed to stderr.
+    Uses a directory in place of the file (works even as root, unlike chmod)."""
+    record_path = tmp_path / "record" / targeted_tests.LAST_RUN
+    # Create a directory where the JSON file should go, so writing the file fails.
+    record_path.mkdir(parents=True)
+    targeted_tests._remember(record_path, ["tests/test_x.py::test_y"])
+    captured = capsys.readouterr()
+    assert "warning" in captured.err
+    assert str(record_path) in captured.err
+
+
+def test_record_and_log_never_reach_the_change(tmp_path):
+    """The record and log files are inside .refactory/, which is excluded from delivery.
+    After a targeted run they must not appear in git status or the emitted diff."""
+    run, _, _ = _run_with_worktree(tmp_path, PINNED)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    result = _command(place)
+    assert result.returncode != 0  # pin fails
+    # The record and log exist in the workspace.
+    assert (place.path / ".refactory" / targeted_tests.LAST_RUN).exists()
+    assert (place.path / ".refactory" / targeted_tests.LOG_FILE).exists()
+    # They do not appear in git status (the workspace's .gitignore or exclusion hides them).
+    status = subprocess.run(
+        ["git", "-C", str(place.path), "status", "--porcelain", "-uall"],
+        capture_output=True, text=True, check=True).stdout
+    assert targeted_tests.LAST_RUN not in status
+    assert targeted_tests.LOG_FILE not in status
+    # They do not appear in the emitted diff.
+    emission = _emission(place)
+    assert targeted_tests.LAST_RUN not in emission
+    assert targeted_tests.LOG_FILE not in emission

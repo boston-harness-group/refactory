@@ -73,6 +73,12 @@ NO_TOOLS_NOTE = ("Note: your previous reply to this step was refused because it 
                  "those results were invented. Answer directly from the prompt and your own "
                  "reasoning, without writing tool calls or their results.")
 
+#: What a retry after a timeout with ``keep_workspace`` adds to the node's prompt: the
+#: workspace holds the previous attempt's unfinished edits; the builder is told how to see them.
+KEEP_WORKSPACE_NOTE = ("Your workspace holds the previous attempt's unfinished edits. "
+                       "Start with `git status` and `git diff --stat` against the base "
+                       "to see them, then continue from there.")
+
 #: The ``reason`` of the `RETRY_EVENT` for that retry.
 INVENTED_TOOL_CALLS = "invented_tool_calls"
 
@@ -489,7 +495,7 @@ def deliver(
     rule: dict[str, Any] | None,
     timeout_s: int | None,
     budget: Any = None,
-    workspace: Callable[[bool], AbstractContextManager[Any]] | None = None,
+    workspace: Callable[..., AbstractContextManager[Any]] | None = None,
     tool_policy: str = "",
     keeps_tool_markup: bool = False,
 ) -> tuple[str, dict[str, Any]]:
@@ -539,6 +545,7 @@ def deliver(
     spent_s: list[int] = []
     #: Every session the node may run, for the retry events' "attempt N of M".
     most = tries + markup
+    keep = bool(rule and rule.get("keep_workspace"))
     attempt_client = client
     attempt_prompt = prompt
     told = False
@@ -548,7 +555,7 @@ def deliver(
         started = None
         invented: list[str] = []
         try:
-            with workspace(index > 0 or told) if workspace is not None else nullcontext(None) as place:
+            with workspace(index > 0 or told, keep=keep and index > 0) if workspace is not None else nullcontext(None) as place:
                 delivery = begin(workdir, node, attempt_prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}),
@@ -602,6 +609,8 @@ def deliver(
             # told it has no tools stays told.
             attempt_prompt = (f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt) \
                 + (f"\n\n{NO_TOOLS_NOTE}" if told else "")
+            if keep and workspace is not None:
+                attempt_prompt += f"\n\n{KEEP_WORKSPACE_NOTE}"
             index += 1
             continue
         if invented:

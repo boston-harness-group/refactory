@@ -129,7 +129,8 @@
           "crash"
         ],
         "times": 1,
-        "timeout_factor": 2
+        "timeout_factor": 2,
+        "keep_workspace": false
       },
       "missing_on_crash": true,
       "workspace": {

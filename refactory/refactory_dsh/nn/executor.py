@@ -2271,10 +2271,13 @@ class Executor:
         from refactory_dsh import workspace as workspaces
         from refactory_dsh.node_retry import deliver
 
-        def dispatch_workspace(retrying: bool):
+        def dispatch_workspace(retrying: bool, keep: bool = False):
+            if keep and retrying:
+                from refactory_dsh.worker_node import _end_stale_processes
+                _end_stale_processes(self.ctx.workdir, node.id)
             return workspaces.dispatched(
                 self.ctx.workdir, node.id, node.workspace, knobs=self.ctx.knobs, facts=self.ctx.facts,
-                route=route, budget=self.ctx.budget, fresh=retrying,
+                route=route, budget=self.ctx.budget, fresh=retrying and not keep,
                 tools=node.tools if is_sealed(node) else (), reads=node.reads,
                 runtime_root=Path(model_context["runtime_root"]) if (model_context or {}).get("runtime_root")
                 else None)

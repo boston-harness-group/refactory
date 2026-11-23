@@ -401,6 +401,9 @@ def test_the_workspace_builder_runs_the_tests_its_change_touches_not_the_full_su
                      ("If you wrap a command in `timeout`, give it about twice the time stated "
                       "above")):
             assert line in emit, (key, line)
+        assert "targeted edits" in emit, (key, "targeted edits")
+        assert "subagents only for short" in emit, (key, "subagents only for short")
+        assert "read that file instead of rerunning" in emit, (key, "read that file instead of rerunning")
         # The only mention of the whole suite is the one telling the builder not to run it,
         # and no fixed timeout is suggested: the time stated above is the guide.
         assert emit.count("whole test suite") == 1, key

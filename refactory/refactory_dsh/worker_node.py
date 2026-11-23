@@ -59,6 +59,57 @@ def _check_driver_mid_run(workdir: Path) -> str | None:
     return None
 
 
+def _end_stale_processes(workdir: Path, node: str) -> None:
+    """Terminate child processes from a timed-out attempt still running in the workspace.
+
+    Walks ``/proc`` to find processes whose cwd is inside the workspace path, sends
+    SIGTERM, waits briefly, then SIGKILL any survivors. Called before a keep-workspace
+    retry reuses the workspace, so it never races a still-running pytest or a half-written
+    file from the killed session.
+    """
+    import signal
+    from refactory_dsh.workspace import ROOT, _slug
+
+    ws_path = (Path(workdir).resolve() / ROOT / _slug(node)).resolve()
+    if not ws_path.is_dir():
+        return
+    ws_str = str(ws_path)
+    my_pid = os.getpid()
+    stale: list[int] = []
+    proc_path = Path("/proc")
+    if not proc_path.is_dir():
+        return
+    for entry in proc_path.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == my_pid:
+            continue
+        try:
+            cwd = (entry / "cwd").resolve()
+            if str(cwd).startswith(ws_str):
+                stale.append(pid)
+        except (OSError, PermissionError):
+            continue
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+    if stale:
+        import time as _time
+        _time.sleep(0.5)
+        for pid in stale:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
 def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     # When pinned, override model_context so workers use the pin's paths
     # for nested dispatch and DSH CLI resolution.
@@ -145,10 +196,13 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     from refactory_dsh.node_retry import deliver
     runtime_root = (client.context() or {}).get('runtime_root') if spec.get('workspace') else None
 
-    def dispatch_workspace(retrying: bool):
+    def dispatch_workspace(retrying: bool, keep: bool = False):
+        if keep and retrying:
+            _end_stale_processes(workdir, node)
         return workspaces.dispatched(
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
-            route=client.route(), fresh=retrying, runtime_root=Path(runtime_root) if runtime_root else None,
+            route=client.route(), fresh=retrying and not keep,
+            runtime_root=Path(runtime_root) if runtime_root else None,
             tools=spec.get('tools') or (), reads=spec.get('reads') or ())
 
     system = render(spec.get('system_prompt', ''), context)

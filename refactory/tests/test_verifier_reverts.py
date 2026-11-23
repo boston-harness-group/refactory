@@ -11,6 +11,7 @@ from refactory_dsh import design_ops, judges
 from refactory_dsh.design import (
     DesignMode, TIMEOUT_RETRY, prepare_check_iterations,
 )
+from refactory_dsh.nn.graph import retry_declaration
 from refactory_dsh.fast import DesignFastMode
 from refactory_dsh.verification import DESIGN_VERIFIER_TIMEOUT_S
 
@@ -107,7 +108,7 @@ def test_revert_uses_scratch_copy():
         "verifier must get a clone workspace"
     assert v.outputs_only is True, \
         "outputs_only must remain True (retry safety)"
-    assert v.retry == TIMEOUT_RETRY, \
+    assert v.retry == retry_declaration(TIMEOUT_RETRY), \
         "verifier must use the standard timeout retry"
 
 

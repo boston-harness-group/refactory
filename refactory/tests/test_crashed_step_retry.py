@@ -506,12 +506,12 @@ def _unpassed() -> nn.Graph:
 def test_the_rule_resolves_from_the_graph_and_lowers_to_the_spine():
     assert _unpassed().retry_rule("solve") is None and not _unpassed().missing_on_crash("solve")
     graph = _straight()
-    assert graph.retry_rule("solve") == {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
+    assert graph.retry_rule("solve") == {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1, "keep_workspace": False}
     # A timeout is not retried by default: the node's bound stays its author's.
     assert _straight(timeout_s=30).retry_rule("solve")["on"] == ["crash"]
     # A declared rule wins; times 0 is none.
     declared = _straight(retry={"on": ["crash"], "times": 1})
-    assert declared.retry_rule("solve") == {"on": ["crash"], "times": 1, "timeout_factor": 2}
+    assert declared.retry_rule("solve") == {"on": ["crash"], "times": 1, "timeout_factor": 2, "keep_workspace": False}
     assert _straight(retry={"times": 0}).retry_rule("solve") is None
     assert not _straight(retry={"times": 0}).missing_on_crash("solve")
     # A tool-using step that may change shared state gets no default.
@@ -521,7 +521,7 @@ def test_the_rule_resolves_from_the_graph_and_lowers_to_the_spine():
     assert shared.retry_rule("solve") is None and not shared.missing_on_crash("solve")
 
     lowered = lowering.to_workflow({"graph": graph.to_state()}).to_dict()["nodes"]["solve"]
-    assert lowered["retry"] == {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
+    assert lowered["retry"] == {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1, "keep_workspace": False}
     assert lowered["missing_on_crash"] is True
     declarations = lowering.node_declarations({"graph": graph.to_state()})["solve"]
     assert declarations["missing_on_crash"] is True and declarations["retry"]["on"] == ["crash"]

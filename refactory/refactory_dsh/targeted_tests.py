@@ -45,8 +45,12 @@ COMMAND = "refactory-targeted-tests"
 BIN = "bin"
 CONTEXT = "targeted-tests.json"
 
-#: What the last run in this workspace failed on, next to `CONTEXT`.
+#: What the last run in this workspace failed on, inside the workspace's own `.refactory/`.
 LAST_RUN = "targeted-tests-last.json"
+
+#: The full output of each run, beside the record, so the builder can read it instead of
+#: rerunning to review results.
+LOG_FILE = "targeted-tests-output.log"
 
 #: A failing test as pytest's short summary names it: ``FAILED tests/x.py::test_y - why``.
 _FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.MULTILINE)
@@ -133,7 +137,10 @@ def main(argv: list[str] | None = None) -> int:
 
     touched, chosen = selection(context)
     root = Path(context["path"])
-    record = Path(args.context).with_name(LAST_RUN)
+    record_dir = root / ".refactory"
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record = record_dir / LAST_RUN
+    log_path = record_dir / LOG_FILE
     tests = list(chosen.tests)
     rerun = _last_failures(record) if args.failed else []
     if rerun:
@@ -161,8 +168,9 @@ def main(argv: list[str] | None = None) -> int:
               "runs after you finish.")
         return 2
     print(f"{COMMAND}: running: {line}", flush=True)
-    code, failed = _run_and_collect(line, root)
+    code, failed = _run_and_collect(line, root, record_path=record, log_path=log_path)
     _remember(record, failed)
+    print(f"{COMMAND}: full output saved to {log_path}")
     if code:
         print(f"{COMMAND}: FAILED (exit {code}): these are what the self-check would send you "
               "back for. Fix them and run this again.", flush=True)
@@ -172,16 +180,37 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
-def _run_and_collect(line: str, root: Path) -> tuple[int, list[str]]:
+def _run_and_collect(line: str, root: Path, *, record_path: Path | None = None,
+                     log_path: Path | None = None) -> tuple[int, list[str]]:
     """Run ``line`` with its output passed through as it arrives; the exit code, and the
-    tests it reported failing."""
+    tests it reported failing.
+
+    When ``record_path`` is set, failures are recorded incrementally as they appear, so a
+    run cut off by a timeout still leaves whatever it found. When ``log_path`` is set, the
+    full output is written there line by line so the builder can read it afterwards.
+    """
     proc = subprocess.Popen(line, shell=True, cwd=root, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, errors="replace")
     seen: list[str] = []
-    assert proc.stdout is not None
-    for text in proc.stdout:
-        print(text, end="", flush=True)
-        seen.append(text)
+    accumulated: list[str] = []
+    log_fh = open(log_path, "w") if log_path is not None else None  # noqa: SIM115
+    try:
+        assert proc.stdout is not None
+        for text in proc.stdout:
+            print(text, end="", flush=True)
+            seen.append(text)
+            if log_fh is not None:
+                log_fh.write(text)
+                log_fh.flush()
+            new_failures = _FAILED.findall(text)
+            if new_failures and record_path is not None:
+                for name in new_failures:
+                    if name not in accumulated:
+                        accumulated.append(name)
+                _remember(record_path, accumulated)
+    finally:
+        if log_fh is not None:
+            log_fh.close()
     code = proc.wait()
     return code, list(dict.fromkeys(_FAILED.findall("".join(seen))))
 
@@ -190,8 +219,9 @@ def _remember(path: Path, failed: list[str]) -> None:
     """Record what the last run failed on (empty when it passed)."""
     try:
         path.write_text(json.dumps({"failed": failed}))
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"{COMMAND}: warning: could not write the last-run record to {path}: {exc}",
+              file=sys.stderr)
 
 
 def _last_failures(path: Path) -> list[str]:
