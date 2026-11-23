@@ -5,6 +5,7 @@
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.agent_json",
+    "refactory_dsh.attempt_processes",
     "refactory_dsh.budgets",
     "refactory_dsh.control",
     "refactory_dsh.dsh_profile",
