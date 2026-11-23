@@ -341,7 +341,7 @@ class Normaliser:
             (r"\b[0-9a-f]{64}\b", "<HASH>"), (r"\b[0-9a-f]{40}\b", "<SHA>"), (r"\b[0-9a-f]{32}\b", "<UUID>"),
             (r"\b[0-9a-f]{7,12}\b", "<SHORT>"),
             (r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:?\d\d)?", "<TIME>"),
-            (r"\b\d+(\.\d+)? ?s\b", "<S>s"), (r'("(?:s|elapsed_s|duration_s|seconds)": )[\d.]+', r"\1<S>"),
+            (r"\b\d+(\.\d+)? ?s\b", "<S>s"), (r'("(?:s|elapsed_s|duration_s|seconds|base_rerun_wall_s)": )[\d.]+', r"\1<S>"),
         ):
             text = re.sub(pattern, name, text)
         return text

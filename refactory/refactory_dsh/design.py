@@ -1179,7 +1179,7 @@ class DesignMode(Mode):
             prompt_template=DESIGN_VERIFIER_PROMPT + BESIDE_CHECK_VERIFIER_NOTE,
             timeout_s=DESIGN_VERIFIER_TIMEOUT_S,
             # Not test-guardedness.json: the check beside it writes that file.
-            reads=("brief.json", "changes.diff"),
+            reads=("brief.json", "changes.diff", "changed-functions.json"),
             writes=("reviews/verification.md",),
             produces=("verification",),
             role="code_reviewer",
@@ -1340,8 +1340,11 @@ class DesignMode(Mode):
             produces=("probe_results",),
             resource_role="final_validation",
             notes="rerun each probe file the verifier wrote on the attempt in a scratch clone "
-                  "(120 s each, 600 s in all); a failing probe is a blocking defect, a PROBED "
-                  "claim without a probe file of its own is unverified",
+                  "(120 s each, 600 s total, shared with the base rerun); the same probes "
+                  "run on the base in parallel for discrimination (wall-clock seconds in "
+                  "probe-results.json); a failing probe is a blocking defect, a PROBED "
+                  "claim without a probe file of its own is unverified, a requirement "
+                  "no probe tells apart from the base is advisory",
         ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(
