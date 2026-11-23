@@ -63,11 +63,26 @@ def lo_python() -> str | None:
 
 
 def _environment(folder: str) -> dict[str, str]:
-    """open_spreadsheet.py:44-51."""
-    env = dict(os.environ)
+    """open_spreadsheet.py:44-51, without this process's own ``PYTHON*`` variables: the
+    bundled launcher sets its own ``PYTHONHOME``/``PYTHONPATH``, and the caller's (a virtual
+    environment's) must not reach LibreOffice's Python."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
     env["UNO_PATH"] = folder
     env["URE_BOOTSTRAP"] = f"vnd.sun.star.pathname:{folder}/fundamentalrc"
     return env
+
+
+def python_flags(python: str) -> list[str]:
+    """Isolation flags for the helper's Python. The bundled ``program/python`` is a shell
+    launcher that finds its standard library through ``PYTHONHOME``/``PYTHONPATH``, which
+    ``-I`` (and ``-E``) would make it ignore ("Failed to import encodings"); it gets ``-s
+    -P`` (no user site, no script directory on the path) instead. A system Python keeps
+    ``-I``."""
+    folder = program_dir()
+    if folder is not None and os.path.realpath(python) == os.path.realpath(
+            os.path.join(folder, "python")):
+        return ["-s", "-P"]
+    return ["-I"]
 
 
 def available() -> bool:
@@ -104,7 +119,7 @@ def recalculate(src: str, dst: str, *, timeout_s: float = TIMEOUT_S) -> tuple[bo
         copy, stored = os.path.join(work, "in.xlsx"), os.path.join(work, "out.xlsx")
         shutil.copyfile(src, copy)
         try:
-            out = subprocess.run([python, "-I", str(HELPER), folder, binary, profile, pipe,
+            out = subprocess.run([python, *python_flags(python), str(HELPER), folder, binary, profile, pipe,
                                   copy, stored],
                                  capture_output=True, text=True, timeout=timeout_s,
                                  env=_environment(folder))

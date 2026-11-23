@@ -262,7 +262,9 @@ def fake_lo(tmp_path, monkeypatch):
     folder = tmp_path / "fake-lo"
     folder.mkdir()
     (folder / "soffice").write_text("#!/bin/sh\necho 'LibreOffice stand-in'\n")
-    (folder / "python").write_text('#!/bin/sh\ncp "$7" "$8" && echo \'{"ok": true}\'\n')
+    # The helper's last two arguments are the copy and where to store it (its flags vary).
+    (folder / "python").write_text('#!/bin/sh\nfor a; do src=$dst; dst=$a; done\n'
+                                   'cp "$src" "$dst" && echo \'{"ok": true}\'\n')
     for name in ("soffice", "python"):
         (folder / name).chmod(0o755)
     monkeypatch.setenv(recalc.SOFFICE_ENV, str(folder / "soffice"))
@@ -892,3 +894,47 @@ def test_the_health_check_after_a_failure_is_fresh(tmp_path, sb2_data, monkeypat
     monkeypatch.setitem(recalc._reference, recalc.soffice(), (True, time.monotonic()))
     with pytest.raises(tasks.RecalcFailed):
         task.grade(item, pred)
+
+
+def _fake_office(tmp_path, monkeypatch, *, bundled: bool):
+    from refactory_packages.spreadsheetbench import recalc
+    program = tmp_path / "office" / "program"
+    program.mkdir(parents=True)
+    soffice = program / "soffice"
+    soffice.write_text("#!/bin/sh\nexit 0\n")
+    soffice.chmod(0o755)
+    if bundled:
+        launcher = program / "python"
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o755)
+    monkeypatch.setattr(recalc, "soffice", lambda: str(soffice))
+    return program
+
+
+def test_the_bundled_libreoffice_python_is_not_run_isolated(tmp_path, monkeypatch):
+    """[LibreOffice helper] The bundled program/python finds its stdlib through PYTHONHOME,
+    which -I would make it ignore (the lab's LibreOffice 26.8 failed every file so); a
+    system Python keeps -I."""
+    from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
+    program = _fake_office(tmp_path, monkeypatch, bundled=True)
+    assert lo.lo_python() == str(program / "python")
+    assert lo.python_flags(lo.lo_python()) == ["-s", "-P"]
+    assert "-I" not in lo.python_flags(lo.lo_python())
+    assert lo.python_flags("/usr/bin/python3") == ["-I"]
+
+
+def test_a_system_python_helper_stays_isolated(tmp_path, monkeypatch):
+    from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
+    _fake_office(tmp_path, monkeypatch, bundled=False)
+    assert lo.lo_python() == "/usr/bin/python3"
+    assert lo.python_flags(lo.lo_python()) == ["-I"]
+
+
+def test_the_callers_python_variables_never_reach_libreoffice(tmp_path, monkeypatch):
+    from refactory_packages.spreadsheetbench_v2 import open_spreadsheet as lo
+    program = _fake_office(tmp_path, monkeypatch, bundled=True)
+    monkeypatch.setenv("PYTHONPATH", "/some/venv/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/some/venv")
+    env = lo._environment(str(program))
+    assert not any(key.startswith("PYTHON") for key in env), sorted(env)
+    assert env["UNO_PATH"] == str(program)
