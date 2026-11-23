@@ -10,13 +10,20 @@
 # /usr/local to keep (colon-separated, glob patterns), the command's PATH and locale,
 # pivot_root's path (resolved by refactory: a service's PATH may lack /usr/sbin), and the
 # folders of the Task's tool environment to bind read only (colon-separated, maybe none:
-# `seal.tool_path`); then whatever DSH appends, its command after "--".
+# `seal.tool_path`), and the step's own folder to bind writable at /tmp (maybe none:
+# `seal.ToolPath.tmp`); then whatever DSH appends, its command after "--".
 [ "$1" = refactory-seal ] || { echo "refactory-seal: bad arguments" >&2; exit 97; }
 ws="$2"; uid="$3"; gid="$4"; limits="$5"; closer="$6"; reads="$7"; kept="$8"
-cmd_path="$9"; locale="${10}"; pivot="${11}"; tools="${12}"
-shift 12
+cmd_path="$9"; locale="${10}"; pivot="${11}"; tools="${12}"; tmp="${13}"
+shift 13
 fail() { echo "refactory-seal: $1" >&2; exit 97; }
 exec 3<"$ws" || fail "cannot open the workspace"
+# The step's /tmp folder, opened now too: it may be under the /tmp covered below.
+tmp_fd=
+if [ -n "$tmp" ]; then
+    [ -d "$tmp" ] || fail "no folder $tmp"
+    exec {tmp_fd}<"$tmp" || fail "cannot open $tmp"
+fi
 # The tool environment's folders, opened now (as the workspace is): /tmp is covered below,
 # and one of them may be under it. Each must be there.
 IFS=: read -r -a tool_dirs <<< "$tools"
@@ -38,6 +45,13 @@ mount -n -t tmpfs -o mode=0755,size=1m seal /tmp || fail "cannot mount /tmp"
 r=/tmp/root
 { mkdir "$r" && mount -n -t tmpfs -o mode=0755,size=16m seal "$r"; } || fail "cannot make the new root"
 mkdir -p "$r/etc" || fail "cannot make /etc"
+# The step's /tmp first: anything bound below under /tmp (the workspace, a tool folder)
+# is then mounted over it, as it would be over the read-only one.
+if [ -n "$tmp_fd" ]; then
+    { mkdir -p "$r/tmp" && mount -n --bind "/proc/self/fd/$tmp_fd" "$r/tmp"; } \
+        || fail "cannot bind the step's /tmp"
+    exec {tmp_fd}<&- || fail "cannot close $tmp"
+fi
 # Each bound alone (--bind, not --rbind), so nothing mounted inside it comes along with
 # flags of its own, then made read only.
 IFS=: read -r -a binds <<< "$reads"
@@ -88,7 +102,8 @@ exec 3<&-
 { cd "$r" && mkdir .old && "$pivot" . .old; } || fail "cannot pivot to the new root"
 { cd / && umount -n -l /.old && rmdir /.old; } || fail "cannot detach the old root"
 # The new root itself (/, /tmp, the folders above the workspace) is read only, as
-# macOS's is: the workspace is the one place a sealed command writes.
+# macOS's is: the workspace is the one place a sealed command writes, and the step's own
+# /tmp where its Task asks for one.
 mount -n -o remount,bind,ro / || fail "cannot make the new root read only"
 # shellcheck disable=SC2086  # $limits is several options
 ulimit $limits || fail "cannot set limits"
