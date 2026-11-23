@@ -121,14 +121,17 @@ def retry_safe(node: "Node") -> bool:
 STEP_ROUTE_FIELDS = ("model", "effort", "max_completion_tokens")
 #: Route settings a mode may bind to a frozen knob of its own instead (``field_bindings``
 #: ``("route.<field>", knob)``, `Node.bound_route`), so the value reaches the step's route
-#: on both runtimes: its output cap, and Claude Code's thinking budget (a claude_code
-#: route's ``max_thinking_tokens``). An int knob; 0 sets nothing. A search never chooses
-#: a thinking budget (`workers.StepRoutes` offers none).
-BOUND_ROUTE_FIELDS = ("max_completion_tokens", "max_thinking_tokens")
+#: on both runtimes: its output cap, Claude Code's thinking budget (a claude_code
+#: route's ``max_thinking_tokens``), and Claude Code's turn cap and Bash limits (its
+#: ``max_turns``, ``bash_timeout_ms``, ``bash_output_chars``). An int knob; 0 sets nothing.
+#: A search never chooses one of Claude Code's settings (`workers.StepRoutes` offers none).
+CLAUDE_CODE_ROUTE_FIELDS = ("max_thinking_tokens", "max_turns", "bash_timeout_ms",
+                            "bash_output_chars")
+BOUND_ROUTE_FIELDS = ("max_completion_tokens", *CLAUDE_CODE_ROUTE_FIELDS)
 #: Every field a step's route may hold.
-ROUTE_DECLARATION_FIELDS = (*STEP_ROUTE_FIELDS, "max_thinking_tokens")
+ROUTE_DECLARATION_FIELDS = (*STEP_ROUTE_FIELDS, *CLAUDE_CODE_ROUTE_FIELDS)
 #: Whole-number fields of a step's route.
-_WHOLE_ROUTE_FIELDS = ("max_completion_tokens", "max_thinking_tokens")
+_WHOLE_ROUTE_FIELDS = ("max_completion_tokens", *CLAUDE_CODE_ROUTE_FIELDS)
 
 
 def route_declaration(value: Any) -> dict[str, str] | None:

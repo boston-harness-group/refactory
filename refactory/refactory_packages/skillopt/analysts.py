@@ -16,7 +16,7 @@ from typing import Any
 from refactory_packages.skillopt import prompts
 from refactory_packages.skillopt.env import SkillOptEnv
 from refactory_packages.skillopt.json_utils import extract_json
-from refactory_packages.skillopt.trace import TraceRecorder, ask
+from refactory_dsh.strategy_trace import TraceRecorder, ask
 
 
 def reflect(

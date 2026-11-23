@@ -1684,6 +1684,98 @@ the strategy optimizes the single `skill` knob exactly as before.
 - **Trajectories.** LiveMath's trajectory view labels each message with the step that
   wrote it (`[compare] …`) when a record has several steps.
 
+## GEPA (`--strategy gepa`)
+
+`refactory_packages/gepa` ports `gepa.optimize` (gepa-ai/gepa 0.1.4, MIT) with its
+default configuration. Each iteration:
+
+1. Draw a parent from the per-instance Pareto frontier.
+2. Roll it out on a minibatch of 3 train items.
+3. Ask the reflection model (`--model`) to rewrite one component, using GEPA's own
+   prompt with each item's prompt, response and grader feedback.
+4. Keep the child only if its minibatch sum strictly beats the parent's.
+5. Score a kept child on the whole Pareto set.
+
+The result is the program with the highest Pareto-set mean. When the parts manifest has
+a test part, the seed and the result are then scored on test with the run's seed,
+through `FinalEvaluation` as SkillOpt is (`eval_test`, on by default). The report gives
+`test_eval`, `baseline_test`, `best_test` and `best_test_delta`. The module docstring
+(`refactory_packages/gepa/loop.py`) cites GEPA's source for each step.
+
+- **Components.** A component is an open text knob. By default GEPA rewrites the knobs
+  that exactly one agent node renders and that are not its system prompt: the per-node
+  instructions, as DSPy's components are its predictors' instructions. To choose others,
+  set `components=a,b`. Components are rewritten round robin, one per iteration; set
+  `module_selector=all` to rewrite every component each iteration. `module_selector=all`
+  and `use_merge` set every component in one proposal, so a mode with more components
+  than a proposal may edit (4) is refused before the run spends anything.
+- **The Pareto set.**
+  - `pareto_set=val` is the default, as upstream GEPA and `dspy.GEPA` are run with a
+    valset. Val is rolled out whole, and the strategy reads per-item scores through
+    `Run.part_item_scores`. That keys each item by an HMAC under a per-run secret,
+    journaled so a resumed run keys items the same way, in the manifest's order. No val
+    item reaches the reflection model.
+  - `pareto_set=train` holds `pareto_size` train ids out instead (half by default). The
+    seed and the Pareto-best are then scored on val, and the Pareto-best is the result
+    only if it beats the seed there.
+- **GEPA reads more of val than the other strategies.** With `pareto_set=val`, every
+  accepted program is scored on all of val, and GEPA picks parents and its result from
+  those per-item scores. The default loop and SkillOpt see val only as one score per
+  candidate, at their val gate. A comparison of GEPA with them should state this
+  difference, or run GEPA with `pareto_set=train`.
+- **Budget.**
+  - A metric call is an item rollout, counted by the run (`Run.rollouts_spent`).
+  - GEPA's `max_metric_calls` is the `max_metric_calls` option, or else
+    `--max-rollouts`. It is checked at the top of each iteration, so the last iteration
+    may overshoot by a few rollouts, as GEPA's does.
+  - A minibatch that repeats an item rolls it out once per occurrence. The sampler
+    repeats items to pad an epoch's last batch.
+  - With `pareto_set=train`, the rollouts needed to score the result on val are held
+    back.
+  - `--max-evaluations` (64 by default) counts evaluations, about two per iteration.
+    The run warns at the start when that limit would end the search first.
+  - The report's `stopped_by` names the budget that ended the search.
+  - Refactory refuses every rollout, test included, once `--max-rollouts` is spent. To
+    keep headroom for the test rollouts, set `max_metric_calls` below it: twice the test
+    part's size, plus a val rollout for the overshoot. Without that headroom the test
+    phase ends `incomplete`, as SkillOpt's does.
+- **Options.** The other options are GEPA's own, with GEPA's defaults:
+  - `seed` (the run's `--seed`; GEPA's default is 0)
+  - `reflection_minibatch_size` (3)
+  - `candidate_selection_strategy` (`pareto` or `current_best`)
+  - `skip_perfect_score`, `perfect_score`
+  - `use_merge` (off), `max_merge_invocations`, `merge_val_overlap_floor`
+  - `reflection_prompt_template`
+
+  These options are refactory's:
+  - `feedback`: `details` (the default) gives the grader's text; `score` gives only the
+    score sentence.
+  - `max_failed_iterations`: see the deviations below.
+  - `eval_test` (on): score the seed and the result on test after the search.
+- **As in GEPA.**
+  - A reflection call that fails all three attempts drops the iteration's whole
+    proposal, and no child is rolled out.
+  - A proposal whose texts all come back unchanged is still rolled out on the minibatch.
+    So is one that rebuilds a program the search already holds.
+- **Deviations.**
+  - **Merge cost.** A merge with `pareto_set=val` is rolled out on all of val, since val
+    cannot be subsampled. It is still judged on GEPA's 5 sampled instances, and costs
+    `|val|` rollouts, not 5.
+  - **A dead endpoint stops the run.** The run stops after `max_failed_iterations` (3)
+    iterations in a row in which every reflection call failed. GEPA has no such stop.
+    Without it, a dead endpoint would spend a minibatch of parent rollouts every
+    iteration until the budget ran out.
+  - **No duplicate programs.** A candidate is its state, so an accepted program the pool
+    already holds is recorded as `duplicate` and not added again. GEPA adds a copy and
+    scores it on the whole Pareto set.
+  - **Zero-score ancestors.** When every common ancestor of a merge pair scores 0, the
+    ancestor is drawn uniformly; GEPA's weighted draw raises there.
+  - **Unscored items.** Minibatch sums skip items that a harness incident left
+    unscored.
+- **Trace.** `gepa_trace.jsonl` in the run directory holds every reflection call and
+  decision. The strategy state is saved at the top of each iteration, so a resumed run
+  continues GEPA's random draws where they stopped.
+
 ## Structure edits: what an accepted edit guarantees
 
 A structure edit reaches the search only through `Optimizer.attempt` (which `Run.attempt`
@@ -2675,6 +2767,9 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | bindable field: `optional` | `branch` | `set_knob` | - |
 | bindable field: `route.max_completion_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | bindable field: `route.max_thinking_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_turns` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_timeout_ms` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.bash_output_chars` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |

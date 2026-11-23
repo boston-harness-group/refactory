@@ -622,9 +622,10 @@ def test_other_modes_declare_no_retry():
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
                 {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2}}
             continue
-        if key in ("spreadsheetbench-agent", "spreadsheetbench_v2-agent"):
+        if key in ("spreadsheetbench-agent", "spreadsheetbench_v2-agent", "spreadsheetbench_v2-swe"):
             # SkillOpt's one retry on an empty response, on the solve node only:
-            # test_spreadsheetbench_agent's test_the_command_line_is_skillopts.
+            # test_spreadsheetbench_agent's test_the_command_line_is_skillopts (the swe
+            # mode keeps the agent mode's).
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
                 {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2}}
             continue

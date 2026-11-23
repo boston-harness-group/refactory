@@ -22,7 +22,7 @@ from typing import Any
 
 from refactory_dsh.model import CompletionTimeout
 
-from refactory_packages.skillopt.trace import current_call_key
+from refactory_dsh.strategy_trace import current_call_key
 
 
 # ── normaliser ─────────────────────────────────────────────────────────────

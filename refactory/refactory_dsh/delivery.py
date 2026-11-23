@@ -1125,7 +1125,8 @@ def _deliver(ctx: Any, found: worktree.Worktree, planned: dict[str, Any], *,
         merge.check_reused = reusable_check(ctx, path, merge.merge_commit)
     if merge.merge_commit and not merge.check_reused:
         check_failure, infra_flag = _check_merged(ctx, found, merge.merge_commit, reviewed_commit,
-                                                   check_timeout_s)
+                                                   check_timeout_s,
+                                                   target_tip=merge.target_tip)
         if check_failure:
             # R1: a signal crash in the merged-tree check stops as infrastructure.
             if infra_flag:
@@ -1617,7 +1618,7 @@ def _merge_target(ctx: Any, path: Path, slug: str, into: str, generate: str,
                 infra = "[infrastructure]" in (regen_err or "")
                 return MergeResult(abandoned=regen_err, infrastructure=infra)
         merge_sha = worktree.git(path, "rev-parse", "HEAD").strip()
-        return MergeResult(merge_commit=merge_sha)
+        return MergeResult(merge_commit=merge_sha, target_tip=target_tip)
 
     # Merge failed — identify conflicting files.
     try:
@@ -1753,10 +1754,14 @@ def reusable_check(ctx: Any, path: Path, commit: str) -> str:
 
 
 def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
-                  reviewed_commit: str, check_timeout_s: float) -> tuple[str, bool]:
+                  reviewed_commit: str, check_timeout_s: float,
+                  target_tip: str = "") -> tuple[str, bool]:
     """Run the check on the merged result; return (failure_reason, infrastructure_flag).
 
     Returns ("", False) on success.
+
+    When ``target_tip`` is provided, failures that the base at ``target_tip`` also has
+    are excused via ``judge_failures`` and ``targeted_base_failures``.
 
     The environment is built the same way as ``_check_in_worktree`` in ``repo_change.py``:
     HOME under the run directory, ``check_environment()`` for PATH, and
@@ -1830,9 +1835,86 @@ def _check_merged(ctx: Any, found: worktree.Worktree, merge_commit: str,
         record_full_check(ctx, path, check)
         return "", False
 
+    # Check failed — try excusal via judge_failures before giving up.
+    not_excused = ""
+    if target_tip:
+        output = "\n".join((result.stdout or "", result.stderr or "")).strip()
+        not_excused = _merged_excusal(ctx, found, path, env, home, check, output,
+                                      merge_commit, target_tip, check_timeout_s)
+        if not not_excused:
+            record_full_check(ctx, path, check)
+            return "", False
+
     # Check failed — reset to reviewed commit and report.
     worktree.git(path, *worktree.NO_HOOKS, "reset", "--hard", reviewed_commit)
-    return _merge_check_failure(result), False
+    return _merge_check_failure(result, not_excused=not_excused), False
+
+
+def _merged_excusal(ctx: Any, found: worktree.Worktree, path: Path, env: dict[str, str],
+                    home: Path, check: str, output: str, merge_commit: str, target_tip: str,
+                    timeout: float) -> str:
+    """Why the merged result's failed check is not excused; empty when it is.
+
+    The merged result passes only when every failure its output counts is named and
+    excused by `base_check.judge_failures` against the base at ``target_tip`` -- which
+    fails the test too (run there in its own prepared worktree), or the merged result
+    does not fail it again -- and nothing went unrun: `base_check.excusal_blocker` finds
+    nothing (the runner's summary counts exactly the named failures, the last step is
+    a test runner that did not stop at its first failure), and the chain ran every step
+    (`base_check.chain_incomplete`). Anything else is the check failing, so delivery
+    stays binding: a draft, or no push.
+    """
+    from refactory_dsh import base_check, sandbox
+
+    failures = base_check.parse_test_failures(output)
+    if not failures:
+        return "no failing test could be read, so nothing is excused"
+    blocker = base_check.excusal_blocker(check, output, failures)
+    if blocker:
+        return f"not excused: {blocker}"
+    t_result, _source = base_check.targeted_base_failures(
+        ctx, check, sorted(failures), prepare_timeout=timeout, timeout=timeout,
+        reference=target_tip)
+    if t_result.environment_failure:
+        return f"not excused: the base at {target_tip[:12]} is unavailable: " \
+               f"{t_result.environment_failure[:300]}"
+    base_failures = set(t_result.failures)
+    base_output = ""
+    # Reuse the in-run base's whole result when target_tip is the run's base.
+    if target_tip == found.base:
+        inrun = base_check._read_cache(ctx.workdir, base_check.cache_key(
+            found.base, str(ctx.facts.get("setup") or "").strip(),
+            str(ctx.facts.get("generate") or "").strip(), check))
+        if inrun is not None and not inrun.environment_failure:
+            base_failures |= inrun.failures
+            base_output = inrun.output
+    unconfirmed = sorted(failures - base_failures)
+    t_attempt = (base_check.targeted_attempt_failures(
+        ctx, check, unconfirmed, timeout=timeout, place=(path, env, home))
+        if unconfirmed else None)
+    try:
+        changed = [line.strip() for line in worktree.git(
+            path, "diff", "--name-only", target_tip, merge_commit).splitlines() if line.strip()]
+    except ValueError:
+        changed = []
+    jr = base_check.judge_failures(
+        failures, set(), changed_files=changed,
+        targeted_base_failures_set=base_failures, targeted_attempt_failures=t_attempt,
+        attempt_signatures=base_check.extract_failure_signatures(output, failures),
+        base_signatures={**(t_result.signatures or {}),
+                         **(base_check.extract_failure_signatures(base_output, base_failures)
+                            if base_output else {})})
+    if not jr.all_excused:
+        return "charged: " + ", ".join(
+            f"{tid} ({jr.reasons.get(tid, 'new-failure')})" for tid in sorted(jr.charged))
+    incomplete = base_check.chain_incomplete(
+        check, lambda script: sandbox.run_command(
+            script, workdir=path, timeout_s=timeout, budget=getattr(ctx, "budget", None),
+            env=env, home=home, exact_env=True),
+        base_check._roots((path, "<root>"), (home, "<home>")))
+    if incomplete:
+        return f"not excused: {incomplete}"
+    return ""
 
 
 #: How much of each stream of a check that failed on the merged result the delivery record
@@ -1870,7 +1952,7 @@ def _merge_check_status(result: Any) -> str:
     return ""
 
 
-def _merge_check_failure(result: Any) -> str:
+def _merge_check_failure(result: Any, *, not_excused: str = "") -> str:
     """The record of a check that failed on the merged result (D17).
 
     First line: how the check ended when it was stopped or killed, then the failing tests
@@ -1889,7 +1971,8 @@ def _merge_check_failure(result: Any) -> str:
         found = f"{_FAILING_TESTS}{len(failing)}): " + "; ".join(failing)
     else:
         found = _NONE_READ + ("" if status else f" (exit {result.returncode})")
-    parts = [_shorten("; ".join(filter(None, (status, found))), _FAILING_LINE_LIMIT)]
+    parts = [_shorten("; ".join(filter(None, (status, found, not_excused))),
+                      _FAILING_LINE_LIMIT)]
     for label, text in streams.items():
         if text:
             kept = sandbox._Output(MERGE_CHECK_KEEP, MERGE_CHECK_TAIL)

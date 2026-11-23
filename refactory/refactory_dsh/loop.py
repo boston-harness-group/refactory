@@ -117,6 +117,18 @@ HOLDOUT_FILE = "holdout.json"
 OPTIMIZER_TRACE = "optimizer_trace.jsonl"
 
 
+def opaque_item_key(item_id: str, secret: str) -> str:
+    """The key `Loop.part_item_scores` gives an item: an HMAC of its id under the run's
+    secret (`Loop.item_key_secret`), so a strategy can line two candidates' per-item
+    val scores up without learning a held-out id. Keyed rather than a bare hash, so a
+    known list of dataset ids cannot be hashed to undo it; the journal, which holds
+    the raw ids, is not a boundary this draws."""
+    import hashlib
+    import hmac
+
+    return hmac.new(secret.encode(), f"refactory-item:{item_id}".encode(),
+                    hashlib.sha256).hexdigest()[:16]
+
 
 def item_time_spread(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """How long train items took each, from their records' ``duration_s``: ``per_item_median_s``,
@@ -979,6 +991,9 @@ class Loop(OuterLoop):
         #: ``train_minibatch``: each epoch's sampled train ids, and the epoch whose
         #: minibatch each candidate's train records come from.
         self._minibatches: dict[int, list[str]] = {}
+        #: The per-run secret behind `opaque_item_key`, made on first use and
+        #: journaled (``item_key_secret``) so a resumed run keys items the same way.
+        self._item_key_secret: str | None = None
         self._records_epoch: dict[str, int] = {}
         #: Each candidate's train records by the epoch (and so the seed) they come from,
         #: so a child is compared with its parent scored in the same epoch.
@@ -2948,6 +2963,37 @@ class Loop(OuterLoop):
         return ({cid: statistics.mean(statistics.mean(r[i] for i in common)
                                       for r in repeats.values())
                  for cid, repeats in by_repeat.items()}, left_out)
+
+    @property
+    def item_key_secret(self) -> str:
+        """The run's secret for `opaque_item_key`: made on first use, journaled, and
+        restored on resume, so a key names the same item for the whole run."""
+        if self._item_key_secret is None:
+            import secrets
+
+            self._item_key_secret = secrets.token_hex(16)
+            self._journal("item_key_secret", secret=self._item_key_secret)
+        return self._item_key_secret
+
+    def part_item_scores(self, candidate_id: str, part: str = "val") -> dict[str, float]:
+        """Each item's score in the candidate's first finished ``part`` rollout (the one
+        the val gate reads), averaged over repeats, keyed by `opaque_item_key`: a
+        per-instance view for a strategy that keeps a per-item frontier on val (GEPA),
+        which names no held-out item. In the parts manifest's order, so a strategy that
+        walks it is deterministic. Items a harness incident left out have no score and
+        are absent; empty before a finished rollout."""
+        done = [o for o in self._part_results.get(candidate_id, {}).get(part, [])
+                if not o.get("budget_stopped") and o.get("score") is not None]
+        if not done:
+            return {}
+        values: dict[str, list[float]] = {}
+        for entry in done[0].get("item_scores") or ():
+            values.setdefault(str(entry[0]), []).append(float(entry[1]))
+        manifest = [str(i) for i in ((self._parts_manifest or {}).get(part) or ())]
+        rank = {item: n for n, item in enumerate(manifest)}
+        ordered = sorted(values, key=lambda item: (rank.get(item, len(rank)), item))
+        secret = self.item_key_secret
+        return {opaque_item_key(item, secret): statistics.mean(values[item]) for item in ordered}
 
     def part_incidents(self, candidate_id: str, part: str = "val") -> list[str]:
         """The items a harness incident left out of the candidate's first finished
@@ -7915,6 +7961,8 @@ class Loop(OuterLoop):
                     self._occasion_counters.setdefault(cid, {})[part_name] = int(counter_val)
             elif event == "rollouts":
                 self.rollouts = int(record.get("rollouts") or 0)
+            elif event == "item_key_secret":
+                self._item_key_secret = str(record.get("secret") or "") or None
             elif event == "evaluation_interrupted":
                 if record.get("outcome") in ("stopped", "recorded_failed") and record.get("key"):
                     self._interrupted_stops[str(record["key"])] = int(record.get("stops") or 0)
