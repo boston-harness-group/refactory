@@ -10,6 +10,8 @@ entry points.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from refactory_dsh import delivery, design_ops, finish, open_items, worktree
@@ -85,6 +87,9 @@ def test_parse_takes_a_persons_edits():
     commented = text.replace(
         "  - tests/test_tool.py::test_prints_two\n", "  - tests/test_tool.py::test_prints_two\nnot evidence\n")
     assert open_items.parse(commented)[0].evidence == QA.evidence
+    # An indented line after that comment belongs to no item.
+    stray = commented.replace("not evidence\n", "not evidence\n  - stray line under the comment\n")
+    assert open_items.parse(stray)[0].evidence == QA.evidence
 
 
 def test_replace_keeps_everything_else_and_one_section():
@@ -163,6 +168,23 @@ def test_gate_check_sends_back_once_on_a_finish(tmp_path):
         design_ops._gate_check_combined_sendback(after, "the check failed")
     plain = RunContext(tmp_path / "c", knobs={"check_attempts": 2}, facts={"review_attempts_used": 1})
     assert str(design_ops._gate_check_combined_sendback(plain, "the check failed")) == "reloop"
+
+
+def test_the_early_asks_send_back_once_on_a_finish(tmp_path):
+    """gate_check's send-back for an ask the early asks judge found not built, on a finish."""
+    not_built = json.dumps({"items": [{"id": "ask-1", "kind": "ask", "text": "the brief", "built": False,
+                                       "missing": "the --two flag"}]})
+
+    def ctx(name, facts):
+        made = RunContext(tmp_path / name, knobs={"check_attempts": 2}, facts=facts)
+        made.write_text(design_ops.EARLY_ASKS_VERDICT, not_built)
+        return made
+
+    first = ctx("a", {"finish": _fact(QA)})
+    assert str(design_ops._gate_check_early_asks(first)) == "reloop" and first.facts["finish_rounds"] == 1
+    with pytest.raises(BuildLoopStop, match=finish.ROUND_SPENT):
+        design_ops._gate_check_early_asks(ctx("b", {"finish": _fact(QA), "finish_rounds": 1}))
+    assert str(design_ops._gate_check_early_asks(ctx("c", {"finish_rounds": 1}))) == "reloop"
 
 
 def test_the_review_gates_send_back_once_on_a_finish(tmp_path):
@@ -370,3 +392,12 @@ def test_the_console_design_verb_forwards_a_finish(monkeypatch):
                          "--finish", "--items", "qa-1"]) == 0
     assert "--finish" in seen[-1] and seen[-1][seen[-1].index("--items") + 1] == "qa-1"
     assert "--attempts" not in seen[-1]
+
+
+def test_the_console_create_verb_still_forwards_its_attempts(monkeypatch):
+    from refactory_dsh import console
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(console, "_forward", lambda module, argv: seen.append(argv) or {})
+    console.main(["create", "--name", "t", "--brief", "b", "--attempts", "2"])
+    assert seen and seen[-1][seen[-1].index("--attempts") + 1] == "2"

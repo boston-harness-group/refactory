@@ -2112,10 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
                 resource_limits={key: getattr(args, key) for key in ("max_elapsed_s", "max_tokens", "validation_reserve_s", "validation_reserve_tokens") if getattr(args, key) is not None},
             )
         elif args.verb == "create":
-            forwarded = ["--name", args.name, "--brief", args.brief]
-            if not args.finish:
-                # A finish sets its own round knobs (`finish.ROUND_KNOBS`), and refuses --attempts.
-                forwarded += ["--attempts", str(args.attempts)]
+            forwarded = ["--name", args.name, "--brief", args.brief, "--attempts", str(args.attempts)]
             if args.workdir:
                 forwarded += ["--workdir", args.workdir]
             if args.resume:
