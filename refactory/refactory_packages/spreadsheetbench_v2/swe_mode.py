@@ -1,7 +1,7 @@
 """SpreadsheetBench 2 swe mode: V2's own agent setup (its SWE-agent config) as a sealed Claude Code step.
 
 Per item, one sealed Claude Code session (`refactory_dsh.seal`, `workspace.is_sealed`) with
-``Read`` and ``Bash`` in a ``scratch`` workspace holding ``input.xlsx`` (and ``SKILL.md``),
+``Bash`` in a ``scratch`` workspace holding ``input.xlsx`` (and ``SKILL.md``),
 on the same route plumbing as the agent mode (`spreadsheetbench.agent_mode`): each Bash
 command runs under the seal (the workspace only, no network), with the pinned interpreter
 as ``python3``, upstream's ``view_xlsx`` and LibreOffice on its PATH and a /tmp of its own
@@ -14,9 +14,12 @@ with its spreadsheet.yaml line). The agent edits the workbook itself and writes
 Run settings: the route's, as in the agent mode (the ``claude_code`` worker, permission mode
 ``skip``, Claude Code 2.1.299); the turn cap is upstream's call cap, 50, the frozen knob
 ``max_turns`` bound to the solve step's route (`nn.Node.bound_route`, ``--max-turns``) on
-both runtimes. A session stopped there ends with the adapter's note as its answer, and the
-``output.xlsx`` it left is graded. A crashed or empty session gets one more, in a fresh
-workspace, as in the agent mode. No gold feedback reaches the agent (``Task.train_feedback``
+both runtimes. A session stopped there ends with the adapter's note as its answer, the
+``output.xlsx`` it left is graded, and the item's record says so (`swe_ops.finalize`,
+`tasks.SpreadsheetBenchV2SweTask.verify`). Each Bash command's timeout is upstream's 60 s and
+a command's output past upstream's 10,000 characters is cut (the frozen knobs
+``bash_timeout_ms`` and ``bash_output_chars``, bound alike). A crashed or empty session gets
+one more, in a fresh workspace, as in the agent mode. No gold feedback reaches the agent (``Task.train_feedback``
 is not offered).
 
 The one open knob is ``skill``, written to ``SKILL.md``; empty by default (upstream has
@@ -40,6 +43,9 @@ PROMPT_KNOB = "solve__prompt_template"
 SYSTEM_PROMPT_KNOB = "solve__system_prompt"
 #: The solve step's turn cap, upstream's call cap (frozen).
 TURNS_KNOB = "max_turns"
+#: Each Bash command's timeout and the most of its output the model sees, upstream's (frozen).
+TIMEOUT_KNOB = "bash_timeout_ms"
+OUTPUT_KNOB = "bash_output_chars"
 #: Concurrent items, as the agent mode's (each grade runs LibreOffice on a large workbook).
 DATA_PARALLELISM = 8
 #: What the solve step's workspace holds (copies of these pass files, by their names).
@@ -67,6 +73,12 @@ class Swe(nn.Mode):
             TURNS_KNOB: nn.Knob(swe_port.MAX_TURNS, "int", lo=1, frozen=True,
                                 description="the session's turn cap (V2's per_instance_call_limit"
                                             ", Claude Code's --max-turns)"),
+            TIMEOUT_KNOB: nn.Knob(swe_port.BASH_TIMEOUT_MS, "int", lo=1, frozen=True,
+                                  description="each Bash command's timeout in ms (V2's "
+                                              "execution_timeout)"),
+            OUTPUT_KNOB: nn.Knob(swe_port.BASH_OUTPUT_CHARS, "int", lo=1, frozen=True,
+                                 description="the most of a command's output the model sees "
+                                             "(V2's max_observation_length)"),
             PROMPT_KNOB: nn.Knob(swe_port.INSTANCE_TEMPLATE, "str", frozen=True,
                                  description="the solve call's prompt, V2's instance template "
                                              "(frozen; use the skill knob)"),
@@ -97,15 +109,21 @@ class Swe(nn.Mode):
         g.add(nn.Node("solve", "agent", prompt_template=swe_port.INSTANCE_TEMPLATE,
                       system_prompt_template=swe_port.SYSTEM_TEMPLATE,
                       tools=swe_port.TOOLS, workspace="scratch", reads=WORKSPACE_READS,
-                      writes=("reply.txt", swe_port.OUTPUT_PATH), role="solver",
-                      retry=SOLVE_RETRY, knobs=(PROMPT_KNOB, SYSTEM_PROMPT_KNOB, TURNS_KNOB),
+                      writes=("reply.txt", swe_port.OUTPUT_PATH, swe_port.SESSION_PATH),
+                      role="solver", retry=SOLVE_RETRY,
+                      knobs=(PROMPT_KNOB, SYSTEM_PROMPT_KNOB, TURNS_KNOB, TIMEOUT_KNOB,
+                             OUTPUT_KNOB),
                       field_bindings=(("prompt_template", PROMPT_KNOB),
                                       ("system_prompt_template", SYSTEM_PROMPT_KNOB),
-                                      ("route.max_turns", TURNS_KNOB)),
-                      notes="one sealed Claude Code session (Read, Bash) writes output.xlsx"))
+                                      ("route.max_turns", TURNS_KNOB),
+                                      ("route.bash_timeout_ms", TIMEOUT_KNOB),
+                                      ("route.bash_output_chars", OUTPUT_KNOB)),
+                      notes="one sealed Claude Code session (Bash) writes output.xlsx"))
         g.add(nn.Node("finalize", "op", call=f"{SWE_OPS}:finalize",
-                      reads=("turn.json", "reply.txt", swe_port.OUTPUT_PATH),
-                      writes=("final.json", "conversation.json", "pred.xlsx", "raw.txt"),
+                      reads=("turn.json", "reply.txt", swe_port.OUTPUT_PATH,
+                             swe_port.SESSION_PATH),
+                      writes=("final.json", "conversation.json", "pred.xlsx", "raw.txt",
+                              "tool_calls.json"),
                       produces=("finished",),
                       notes="take the session's output.xlsx as the item's output"))
         g.connect("prepare", "has_case")

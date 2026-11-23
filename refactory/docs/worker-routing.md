@@ -57,6 +57,18 @@ workspace is still collected; without the field, a session Claude Code stops at 
 fails the step. A mode binds it as it binds the thinking budget (`("route.max_turns",
 knob)`); `spreadsheetbench_v2/swe` does (50). `actual_route` records it.
 
+`claude_code` alone also accepts `bash_timeout_ms` and `bash_output_chars`, positive whole
+numbers: each Bash command's default and longest timeout (Claude Code's
+`BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`), and the most characters of a
+command's output the model sees inline (the `bashOutputMaxChars` flag setting, which Claude
+Code clamps to 4,000-128,000, and `BASH_MAX_OUTPUT_LENGTH`; the rest is saved to a file
+Claude Code names). Bound like `max_turns`; `spreadsheetbench_v2/swe` binds 60000 and 10000.
+A sealed session also leaves its result's facts in its workspace,
+`.refactory-session.json` (`subtype`, `num_turns`, `max_turns`, `turn_limit_reached`, and
+`tool_calls`: each call's tool, its input as the model wrote it and its output, each cut to
+2,000 characters, and whether it was an error), which a step collects by declaring it as a
+write; nothing else reads it.
+
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code
 2.1.281). Each model needs a recent enough one: the Claude 5 family (`claude-opus-5-*`,

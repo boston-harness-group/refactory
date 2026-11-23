@@ -67,12 +67,18 @@ def test_the_prompt_is_v2s_instance_template_with_the_listed_substitutions():
     assert values[swe_mode.PROMPT_KNOB] == swe_port.INSTANCE_TEMPLATE
     assert values[swe_mode.SYSTEM_PROMPT_KNOB] == UPSTREAM["system_template"]
     assert values[swe_mode.TURNS_KNOB] == UPSTREAM["per_instance_call_limit"] == 50
+    assert values[swe_mode.TIMEOUT_KNOB] == UPSTREAM["execution_timeout"] * 1000 == 60_000
+    assert values[swe_mode.OUTPUT_KNOB] == UPSTREAM["max_observation_length"] == 10_000
     solve = swe_mode.Swe().build().nodes["solve"]
-    assert solve.tools == ("Read", "Bash") and solve.workspace["kind"] == "scratch"
+    assert solve.tools == ("Bash",) and solve.workspace["kind"] == "scratch"
     assert dict(solve.field_bindings)["route.max_turns"] == swe_mode.TURNS_KNOB
+    assert dict(solve.field_bindings)["route.bash_timeout_ms"] == swe_mode.TIMEOUT_KNOB
+    assert dict(solve.field_bindings)["route.bash_output_chars"] == swe_mode.OUTPUT_KNOB
     frozen = {name for name, knob in swe_mode.Swe.declare().items() if knob.frozen}
-    assert frozen == {"data_parallelism", swe_mode.TURNS_KNOB, swe_mode.PROMPT_KNOB,
-                      swe_mode.SYSTEM_PROMPT_KNOB}
+    assert frozen == {"data_parallelism", swe_mode.TURNS_KNOB, swe_mode.TIMEOUT_KNOB,
+                      swe_mode.OUTPUT_KNOB, swe_mode.PROMPT_KNOB, swe_mode.SYSTEM_PROMPT_KNOB}
+    # One tool: Claude Code's Bash for upstream's bash; no Read.
+    assert "`Read`" not in swe_port.INSTANCE_TEMPLATE
     # Upstream's Important, Environment and Recommended Workflow sections, unchanged.
     for section in ("## Important\n", "## Environment\n", "## Recommended Workflow\n"):
         head = UPSTREAM["instance_template"].split(section, 1)[1].split("\n\n", 1)[0]
@@ -199,6 +205,11 @@ def _state(**knobs: Any) -> dict[str, Any]:
     return state
 
 
+#: The route settings the solve step's frozen knobs put on its route: V2's call cap,
+#: command timeout and longest observation.
+ROUTE = {"max_turns": "50", "bash_timeout_ms": "60000", "bash_output_chars": "10000"}
+
+
 def _walk(tmp_path: Path, model: Any, *, expect_ok: bool = True, **knobs: Any) -> Any:
     state = _state(**knobs)
     work = tmp_path / "walk"
@@ -223,16 +234,22 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb2_env, office):
     (call,) = model.calls
     assert call["prompt"] == swe_port.render("Put 7 in B1.", "")
     assert call["system"] == swe_port.SYSTEM_TEMPLATE
-    assert model.routes == [{"max_turns": "50"}]
+    assert model.routes == [ROUTE]
     assert sorted(call["files"]) == sorted(swe_mode.WORKSPACE_READS)
     assert call["files"][swe_port.SKILL_PATH] == b""
-    assert call["seal"]["tools"] == ["Read", "Bash"] and call["seal"]["backend"] == "claude_code"
+    assert call["seal"]["tools"] == ["Bash"] and call["seal"]["backend"] == "claude_code"
     listed, _write, wrote, office_seen, gold = call["seen"]
     assert "Sheets: ['Sheet1']" in listed, listed
     assert "WROTE" in wrote, wrote
     assert "LibreOffice stand-in 4" in office_seen and "HAS-LIBREOFFICE" in office_seen, office_seen
     assert "GOLD-HIDDEN" in gold and "GOLD-READ" not in gold, gold
     assert [e["response"] for e in record["exchanges"]] == ["Done."]
+    # The step's own /tmp goes with its dispatch.
+    assert not list((tmp_path / "walk").rglob("seal-tmp"))
+    # No session facts from a stand-in model: no turn count, no cap.
+    (final,) = [json.loads(p.read_text()) for p in (tmp_path / "walk").rglob("final.json")]
+    assert final["n_turns"] is None and "turn_limit" not in final
+    assert not list((tmp_path / "walk").rglob("tool_calls.json"))
 
 
 @needs_linux
@@ -377,8 +394,10 @@ def test_one_item_end_to_end_on_the_spine(tmp_path, sb2_env, office):
     assert call["prompt"].strip() == swe_port.render("Put 7 in B1.", "").strip()
     worker_env = call["config"]["env"]
     assert worker_env["REFACTORY_MAX_TURNS"] == "50"
+    assert worker_env["REFACTORY_BASH_TIMEOUT_MS"] == "60000"
+    assert worker_env["REFACTORY_BASH_OUTPUT_CHARS"] == "10000"
     assert worker_env["REFACTORY_SYSTEM_PROMPT"] == swe_port.SYSTEM_TEMPLATE
-    assert worker_env["REFACTORY_SEALED_TOOLS"] == "Read,Bash"
+    assert worker_env["REFACTORY_SEALED_TOOLS"] == "Bash"
     assert call["files"] == sorted(swe_mode.WORKSPACE_READS)
     assert "Sheets: ['Sheet1']" in call["seen"][0] and "WROTE" in call["seen"][2], call["seen"]
 
@@ -397,9 +416,12 @@ export function query({ prompt, options }) {
     command: process.execPath, args: ['-e', 'setTimeout(() => {}, 60000)'],
     cwd: options.cwd, env: options.env, signal: options.abortController.signal })
   const record = { maxTurns: options.maxTurns ?? null, systemPrompt: options.systemPrompt,
-    tools: options.tools ?? null, bash: [],
+    tools: options.tools ?? null, bash: [], settings: options.settings ?? null,
+    bashEnv: Object.fromEntries(['BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS', 'BASH_MAX_OUTPUT_LENGTH']
+      .map(key => [key, options.env[key] ?? null])),
     controlsInChildEnv: Object.keys(options.env).filter(key => key === 'REFACTORY_MAX_TURNS'
-      || key === 'REFACTORY_SYSTEM_PROMPT' || key.startsWith('REFACTORY_SEAL')) }
+      || key === 'REFACTORY_SYSTEM_PROMPT' || key.startsWith('REFACTORY_SEAL')
+      || key.startsWith('REFACTORY_BASH')) }
   const hook = options.hooks?.PreToolUse?.[0]?.hooks?.[0]
   return {
     close() { child.kill?.() },
@@ -409,23 +431,49 @@ export function query({ prompt, options }) {
       yield { type: 'system', subtype: 'init', model: 'fake-claude', session_id: 'fake-session',
               tools: options.tools ?? [] }
       for (const [i, command] of JSON.parse(process.env.FAKE_SWE_COMMANDS || '[]').entries()) {
+        // As Claude Code streams it: the model's call, the hook's decision, the call's result.
+        yield { type: 'assistant', message: { role: 'assistant', content: [
+          { type: 'tool_use', id: `toolu_${i}`, name: 'Bash', input: { command, description: `step ${i}` } }] } }
         const out = (await hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash',
                                   tool_input: { command } }, `toolu_${i}`, {}))?.hookSpecificOutput
-        record.bash.push(out?.updatedInput?.command
+        const text = out?.updatedInput?.command
           ? execSync(out.updatedInput.command, { cwd: options.cwd, shell: '/bin/bash', encoding: 'utf8' })
-          : null)
+          : null
+        record.bash.push(text)
+        yield { type: 'user', message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: `toolu_${i}`, is_error: false, content: [{ type: 'text', text: text ?? '' }] }] } }
       }
       writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify(record))
       const usage = { 'fake-claude': { inputTokens: 3, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
       if (process.env.FAKE_SWE_END === 'max_turns') {
         yield { type: 'result', subtype: 'error_max_turns', is_error: true, errors: [], num_turns: 50, modelUsage: usage }
       } else {
-        yield { type: 'result', subtype: 'success', is_error: false, result: 'Done.', modelUsage: usage }
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'Done.', num_turns: 3, modelUsage: usage }
       }
     },
   }
 }
 """
+
+
+#: What the faked session runs: write the answer to output.xlsx, then print a long line.
+SDK_COMMANDS = [WRITE.format(n=7), "python3 /tmp/script.py && echo WROTE",
+                "python3 -c \"print('x' * 5000)\""]
+
+
+def _tool_calls(work: Path, turns: int, capped: bool) -> None:
+    """The item's folder keeps the session's tool calls as the model made them (the
+    commands before the seal wrapped them), with their outputs, each cut to 2,000
+    characters, and Claude Code's turn count."""
+    (path,) = work.rglob("tool_calls.json")
+    kept = json.loads(path.read_text())
+    assert (kept["n_turns"], kept["turn_limit_reached"]) == (turns, capped)
+    assert [c["tool"] for c in kept["calls"]] == ["Bash"] * 3
+    assert [c["input"] for c in kept["calls"]] == SDK_COMMANDS
+    assert [c["is_error"] for c in kept["calls"]] == [False] * 3
+    assert "WROTE" in kept["calls"][1]["output"]
+    long = kept["calls"][2]["output"]
+    assert long.startswith("x" * 2000) and long.endswith("... [3001 more characters]"), long[-60:]
 
 
 @pytest.fixture
@@ -442,28 +490,43 @@ def swe_sdk(tmp_path, monkeypatch, sb2_env, office):
     record = tmp_path / "sdk-query.json"
     monkeypatch.setenv("NODE_OPTIONS", f"--import {(hooks / 'register.mjs').as_uri()}")
     monkeypatch.setenv("FAKE_SDK_RECORD", str(record))
-    monkeypatch.setenv("FAKE_SWE_COMMANDS", json.dumps(
-        [WRITE.format(n=7), "python3 /tmp/script.py && echo WROTE"]))
+    monkeypatch.setenv("FAKE_SWE_COMMANDS", json.dumps(SDK_COMMANDS))
     monkeypatch.setenv("FAKE_SWE_END", "max_turns")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.delenv("REFACTORY_WORKER_CONTEXT", raising=False)
     return record
 
 
-def _capped(record: dict[str, Any], sent_path: Path) -> None:
-    """The session was started with the turn cap and V2's system template appended,
-    stopped at the cap, and the output.xlsx it left was graded; the item's answer is the
-    adapter's note."""
+def _sent(sent_path: Path) -> dict[str, Any]:
+    """Claude Code was started with the turn cap, upstream's command timeout and output size,
+    Bash alone, V2's system template appended and V2's prompt; the adapter's controls stayed
+    out of its environment."""
+    sent = json.loads(sent_path.read_text())
+    assert sent["maxTurns"] == 50 and sent["controlsInChildEnv"] == []
+    assert sent["bashEnv"] == {"BASH_DEFAULT_TIMEOUT_MS": "60000", "BASH_MAX_TIMEOUT_MS": "60000",
+                               "BASH_MAX_OUTPUT_LENGTH": "10000"}
+    assert sent["settings"]["bashOutputMaxChars"] == 10000
+    assert sent["systemPrompt"] == {"type": "preset", "preset": "claude_code",
+                                    "append": swe_port.SYSTEM_TEMPLATE}
+    assert sent["tools"] == ["Bash"]
+    assert sent["prompt"] == swe_port.render("Put 7 in B1.", "")
+    assert "WROTE" in sent["bash"][1], sent["bash"]
+    return sent
+
+
+def _capped(record: dict[str, Any], sent_path: Path, work: Path) -> None:
+    """The session stopped at the cap: its output.xlsx was graded, the item's answer is the
+    adapter's note, and the record and the item's final.json say the cap was reached, with
+    Claude Code's own turn count."""
+    _sent(sent_path)
     assert record["passed"], record
     assert record["exchanges"][-1]["response"].strip() == \
         "(Claude Code stopped the session at its turn limit of 50 turns.)"
-    sent = json.loads(sent_path.read_text())
-    assert sent["maxTurns"] == 50 and sent["controlsInChildEnv"] == []
-    assert sent["systemPrompt"] == {"type": "preset", "preset": "claude_code",
-                                    "append": swe_port.SYSTEM_TEMPLATE}
-    assert sent["tools"] == ["Read", "Bash"]
-    assert sent["prompt"] == swe_port.render("Put 7 in B1.", "")
-    assert "WROTE" in sent["bash"][1], sent["bash"]
+    assert record["prediction"].startswith("## Eval Result: PASS")
+    assert record["prediction"].endswith("\n(the session stopped at its turn cap: 50 turns, cap 50)")
+    (final,) = [json.loads(p.read_text()) for p in work.rglob("final.json")]
+    assert (final["n_turns"], final["turn_limit"]) == (50, 50), final
+    _tool_calls(work, 50, True)
 
 
 @needs_adapter
@@ -480,7 +543,30 @@ def test_the_turn_cap_ends_the_session_and_its_output_is_graded_on_the_walker(tm
         .evaluate(swe_mode.Swe(state=state), state, work)
     assert result.exit_ok, result.error
     (record,) = result.item_records
-    _capped(record, swe_sdk)
+    _capped(record, swe_sdk, work)
+
+
+@needs_adapter
+@needs_linux
+def test_a_session_that_ends_itself_records_its_turns_and_no_cap(tmp_path, swe_sdk, monkeypatch):
+    """Walker, real adapter: a session that ends with a reply records Claude Code's turn
+    count and no cap; its verdict carries no note."""
+    monkeypatch.setenv("FAKE_SWE_END", "success")
+    state = _state()
+    work = tmp_path / "walk"
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()})
+    task_module.write_subset(work, "val", 0.0)
+    result = WalkerEvaluator(model=_claude(tmp_path), project=Path("."), max_steps=400) \
+        .evaluate(swe_mode.Swe(state=state), state, work)
+    assert result.exit_ok, result.error
+    (record,) = result.item_records
+    _sent(swe_sdk)
+    assert record["passed"] and "turn cap" not in record["prediction"], record
+    (final,) = [json.loads(p.read_text()) for p in work.rglob("final.json")]
+    assert final["n_turns"] == 3 and "turn_limit" not in final, final
+    _tool_calls(work, 3, False)
+    # Neither the analysts nor the record see the tool calls.
+    assert "x" * 100 not in json.dumps(record)
 
 
 @needs_linux
@@ -491,7 +577,7 @@ def test_the_turn_cap_ends_the_session_and_its_output_is_graded_on_the_spine(tmp
 
     client = DshModelClient(**AGENT_ROUTE, runtime_root=REPO_ROOT, dsh_home=tmp_path / "dsh-home",
                             routes_resolved=True, timeout_s=120)
-    _capped(_drain(tmp_path, client), swe_sdk)
+    _capped(_drain(tmp_path, client), swe_sdk, tmp_path / "spine")
 
 
 # ── the seal's /tmp, and a real LibreOffice inside it ─────────────────────────
@@ -516,6 +602,12 @@ def test_a_private_tmp_is_the_steps_own_and_otherwise_read_only(tmp_path):
                             capture_output=True, text=True, timeout=120)
     assert second.stdout.strip() == "kept", second.stdout + second.stderr
     assert (tmp_path / "own-tmp" / "note").read_text().strip() == "kept"
+    # A later dispatch on the same root (a retry) starts with an empty /tmp.
+    again = seal.tool_path(sys.executable, tmp_path / "bin-b", workspace=ws, tmp=tmp_path / "own-tmp")
+    third = subprocess.run([*seal.runner_command(ws, None, again), "--", "/bin/bash", "-c",
+                            "test -e /tmp/note && echo STALE || echo FRESH"], cwd=ws,
+                           capture_output=True, text=True, timeout=120)
+    assert third.stdout.strip() == "FRESH", third.stdout + third.stderr
 
 
 def test_a_tool_environment_may_not_show_the_run_or_shadow_python(tmp_path):

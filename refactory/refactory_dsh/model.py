@@ -832,6 +832,8 @@ class DshModelClient:
         claude_executable: str = "",
         max_thinking_tokens: str = "",
         max_turns: str = "",
+        bash_timeout_ms: str = "",
+        bash_output_chars: str = "",
     ) -> None:
         from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -903,6 +905,11 @@ class DshModelClient:
         #: Claude Code's turn cap (``--max-turns``), a claude_code route's ``max_turns``; empty
         #: leaves none. Inherited only within the same product, as the thinking budget is.
         self._max_turns = max_turns or inherited_route.get("max_turns", "")
+        #: Claude Code's Bash timeout (default and most, ``BASH_DEFAULT_TIMEOUT_MS`` and
+        #: ``BASH_MAX_TIMEOUT_MS``) and the most of a command's output it sees inline (the
+        #: ``bashOutputMaxChars`` setting); empty keeps Claude Code's own. Inherited likewise.
+        self._bash_timeout_ms = bash_timeout_ms or inherited_route.get("bash_timeout_ms", "")
+        self._bash_output_chars = bash_output_chars or inherited_route.get("bash_output_chars", "")
         #: The Claude Code executable a claude_code worker runs; empty keeps the one
         #: bundled with the Agent SDK. Inherited only within the same product, as the
         #: settings sources are, then `workers.CLAUDE_EXECUTABLE_ENV` on claude_code.
@@ -996,8 +1003,9 @@ class DshModelClient:
             result["claude_executable"] = self._claude_executable
         if getattr(self, "_max_thinking_tokens", ""):
             result["max_thinking_tokens"] = self._max_thinking_tokens
-        if getattr(self, "_max_turns", ""):
-            result["max_turns"] = self._max_turns
+        for key in ("max_turns", "bash_timeout_ms", "bash_output_chars"):
+            if getattr(self, "_" + key, ""):
+                result[key] = getattr(self, "_" + key)
         return result
 
     def output_limit(self) -> int | None:
@@ -1112,6 +1120,8 @@ class DshModelClient:
         client._claude_executable = ""
         client._max_thinking_tokens = ""
         client._max_turns = ""
+        client._bash_timeout_ms = ""
+        client._bash_output_chars = ""
         validate_route(client.route())
         return client
 
@@ -1232,7 +1242,9 @@ class DshModelClient:
             **({"claude_executable": ce} if (ce := getattr(self, "_claude_executable", "")) else {}),
             **({"max_thinking_tokens": mtt} if (mtt := getattr(self, "_max_thinking_tokens", ""))
                else {}),
-            **({"max_turns": mt} if (mt := getattr(self, "_max_turns", "")) else {}),
+            **{key: getattr(self, "_" + key) for key in ("max_turns", "bash_timeout_ms",
+                                                          "bash_output_chars")
+               if getattr(self, "_" + key, "")},
             # Only the non-default choice, so a default context is the bytes it was.
             **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }

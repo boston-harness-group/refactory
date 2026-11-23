@@ -15,46 +15,63 @@ model calls (:111), each command cut at 60 s (:99), in a Docker image with Pytho
 pandas, openpyxl, numpy, matplotlib, xlsxwriter and LibreOffice (spreadsheet.Dockerfile).
 The task's output file is graded.
 
-Here, one sealed Claude Code session (`swe_mode.Swe`) with ``Read`` and ``Bash`` in a
+Here, one sealed Claude Code session (`swe_mode.Swe`) with ``Bash`` in a
 workspace holding ``input.xlsx``; ``view_xlsx``, ``soffice`` and ``libreoffice`` are on its
 PATH (`tasks.SpreadsheetBenchV2SweTask`); it edits the workbook and writes ``output.xlsx``,
 which V2's grade grades.
 
-**Deviations from upstream**, each needed by this runtime (the prompt's are
-`SUBSTITUTIONS`, applied to upstream's instance template in this order):
+**Deviations from upstream**, each needed by this runtime or not possible in it (the
+prompt's are `SUBSTITUTIONS`, applied to upstream's instance template in this order):
 
-1. *Tools* (spreadsheet.yaml:16-20, :97-105): Claude Code's ``Bash`` (upstream ``bash``) and
-   ``Read`` (upstream has none: the agent mode's tool pair, which this runtime's sealed
-   Claude Code step offers) are its tools; ``view_xlsx`` is a command on the PATH run
-   through ``Bash`` (upstream: a function the model calls; same script, same arguments);
-   there is no ``submit``: the session ends when the agent ends its turn, so "submit"
-   means that (:20, :45). The tool list's count stays "four" (upstream lists three under
-   "four"; here ``Bash``, ``Read``, ``view_xlsx`` and ``submit``).
+1. *Tools* (spreadsheet.yaml:16-20, :97-105): Claude Code's ``Bash`` (upstream ``bash``) is
+   the one tool; ``view_xlsx`` is a command on the PATH run through ``Bash`` (upstream: a
+   function the model calls; the same script and arguments, but its argument docs,
+   tools/view_xlsx/config.yaml, are not given to the model as a function schema: the
+   prompt's examples and ``view_xlsx --help`` are what it has). There is no ``submit``: the
+   session ends when the agent ends its turn, so "submit" means that (:20, :45). The
+   workflow's "Do NOT combine verify and submit commands (e.g., ``python3 script.py &&
+   submit``)" (:42) is kept verbatim; with submit meaning the end of the turn it still
+   says to verify first.
 2. *Paths* (:30-32, :57-58): ``{{spreadsheet_path}}`` is ``input.xlsx`` and
    ``{{output_path}}`` is ``output.xlsx``, in the session's working directory (upstream:
-   the task's paths in its container).
+   the task's paths in its container). Upstream mounts the input read only; here
+   ``input.xlsx`` is the session's own copy, writable (grading reads the prepared input,
+   never this copy).
 3. *System prompt* (:4-6): upstream's system template, appended to Claude Code's own
    system prompt (the step's ``system_prompt_template``, as a route's appended system
    prompt); upstream it is the whole system message.
 4. *Call cap* (:111 ``per_instance_call_limit: 50``): Claude Code's turn cap of 50
-   (``--max-turns``, the route's ``max_turns``). Reaching it ends the session; whatever
-   ``output.xlsx`` it left is graded (upstream: SWE-agent's autosubmission on exit).
-5. *No per-command 60 s timeout* (:99-100): the sealed step's own limits apply (each
-   command's CPU time, the inactivity limit), as in the agent mode.
-6. *Skill* (none upstream): the ``skill`` knob, written to ``SKILL.md``; when it is
+   (``--max-turns``, the route's ``max_turns``). A Claude Code turn is one model response,
+   which may make several tool calls. Reaching it ends the session; whatever
+   ``output.xlsx`` it left is graded, and the record says the cap was reached
+   (upstream: SWE-agent's autosubmission on exit).
+5. *Command timeout* (:99 ``execution_timeout: 60``): each Bash command's timeout is 60 s,
+   Claude Code's default and longest (``BASH_DEFAULT_TIMEOUT_MS``/``BASH_MAX_TIMEOUT_MS``,
+   the route's ``bash_timeout_ms``); a command past it is stopped and the model told so
+   in Claude Code's words, not upstream's warning template (:92-95), and upstream's stop
+   after 3 consecutive timeouts (:100) has no equivalent. The seal's own limits apply too.
+6. *Long output* (:72-90 ``max_observation_length: 10_000``): a command's output past
+   10,000 characters is cut (Claude Code's ``bashOutputMaxChars``, the route's
+   ``bash_output_chars``); Claude Code shows a short preview and saves the whole output to
+   a file it names, where upstream shows the head and tail with a warning. Upstream's
+   no-output warning (:67-70) is not ported: Claude Code reports an empty result its own way.
+7. *Skill* (none upstream): the ``skill`` knob, written to ``SKILL.md``; when it is
    non-empty a "## Skill" section before ``</task_context>`` tells the agent to read it
    (`skill_section`). Empty (the default), the prompt is upstream's with the
    substitutions above and nothing else, and ``SKILL.md`` is an empty file (the sealed
    step reads every file it declares).
-7. *Environment* (spreadsheet.Dockerfile): ``python3`` is the pinned interpreter
+8. *Environment* (spreadsheet.Dockerfile): ``python3`` is the pinned interpreter
    (Python 3.12 with openpyxl, pandas and numpy; no matplotlib, xlsxwriter or flake8;
    upstream: Python 3.11.10 with those too), LibreOffice is the grader's own (`recalc.soffice`)
    as ``soffice`` and ``libreoffice``, with the session's own writable ``/tmp`` (its pipe
    lives there) and its profile in the session's HOME, the workspace; ``import uno`` is not
    on ``python3``'s path (upstream adds LibreOffice's program folder to ``PYTHONPATH``).
    No network.
-8. *One tool call per response* (:17) is the prompt's instruction only: Claude Code may
+9. *One tool call per response* (:17) is the prompt's instruction only: Claude Code may
    still make several calls in one response.
+10. *Retries* (none upstream): a crashed session gets one more in a fresh workspace (the
+    agent mode's ``SOLVE_RETRY``), and a session whose last turn ends without a reply is
+    asked once, in the session, for its answer (the Claude Code adapter).
 """
 from __future__ import annotations
 
@@ -65,11 +82,18 @@ INPUT_PATH = "input.xlsx"
 OUTPUT_PATH = "output.xlsx"
 #: The skill file in the workspace (`skill_section`).
 SKILL_PATH = "SKILL.md"
+#: What the Claude Code adapter leaves in a sealed session's workspace after its result:
+#: the result's subtype, Claude Code's turn count, the turn cap and whether it was reached.
+SESSION_PATH = ".refactory-session.json"
 #: Upstream's call cap (spreadsheet.yaml:111 ``per_instance_call_limit``), Claude Code's
 #: turn cap here.
 MAX_TURNS = 50
 #: The tools the session is offered (deviation 1).
-TOOLS = ("Read", "Bash")
+TOOLS = ("Bash",)
+#: Upstream's command timeout (spreadsheet.yaml:99 ``execution_timeout``), in ms.
+BASH_TIMEOUT_MS = 60_000
+#: Upstream's longest observation (spreadsheet.yaml:72 ``max_observation_length``).
+BASH_OUTPUT_CHARS = 10_000
 
 #: spreadsheet.yaml:4-6, the system template, verbatim.
 SYSTEM_TEMPLATE = (
@@ -150,18 +174,17 @@ UPSTREAM_INSTANCE_TEMPLATE = (
 
 #: The prompt's substitutions, ``(upstream text, this runtime's, why)``, each found once in
 #: upstream's instance template and applied in order (the module docstring's deviations 1
-#: and 6; deviation 2 is the placeholders' values, `prompt_facts`).
+#: and 7; deviation 2 is the placeholders' values, `prompt_facts`).
 SUBSTITUTIONS: tuple[tuple[str, str, str], ...] = (
     ("You are provided with four tools: `bash`, `view_xlsx` and `submit`.",
-     "You are provided with four tools: `Bash`, `Read`, `view_xlsx` and `submit`.",
-     "Claude Code's Bash and Read; submit is ending the turn (spreadsheet.yaml:16)"),
+     "You are provided with four tools: `Bash`, `view_xlsx` and `submit`.",
+     "Claude Code's Bash (spreadsheet.yaml:16)"),
     ("- `bash`: run shell commands",
      "- `Bash`: run shell commands",
      "Claude Code's Bash (spreadsheet.yaml:18)"),
     ("formulas and values)\n",
-     "formulas and values); a command on your PATH: run it with `Bash`\n"
-     "- `Read`: read a file in the working directory\n",
-     "view_xlsx is a command, not a function; Read is offered (spreadsheet.yaml:19)"),
+     "formulas and values); a command on your PATH: run it with `Bash`\n",
+     "view_xlsx is a command, not a function (spreadsheet.yaml:19)"),
     ("- `submit`: finalize and submit your solution after verification\n",
      "- `submit`: finalize and submit your solution after verification; to submit, end your "
      "turn with a short final reply (there is no `submit` command)\n",

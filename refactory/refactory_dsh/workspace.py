@@ -330,6 +330,9 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                 if place is not None and place.backend == "claude_code":
                     for reads in root.glob("*.reads"):
                         shutil.rmtree(reads, ignore_errors=True)
+                # And the step's own /tmp (`task.ToolEnvironment.private_tmp`).
+                if place is not None and place.runner:
+                    shutil.rmtree(root / SEAL_TMP, ignore_errors=True)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 

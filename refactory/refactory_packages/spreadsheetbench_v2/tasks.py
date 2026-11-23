@@ -59,7 +59,7 @@ def tool_hidden(workdir: Path) -> list[str]:
     return sandbox.hidden_paths([*ops._run_roots(Path(workdir)), *data_roots()])  # noqa: SLF001
 
 
-#: What the swe mode's sessions find beside ``python3`` (`swe_port`, deviation 7).
+#: What the swe mode's sessions find beside ``python3`` (`swe_port`, deviation 8).
 SWE_SUMMARY = (f"{interpreter.SUMMARY}; view_xlsx (SpreadsheetBench 2's workbook viewer); "
                "soffice and libreoffice (LibreOffice, headless); a writable /tmp of the step's own")
 #: Folders of the machine's LibreOffice may need besides its install, read only where they
@@ -257,11 +257,34 @@ class SpreadsheetBenchV2Task(Task):
 
 class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
     """The same items and grade, for the swe mode: its sessions' commands also find
-    ``view_xlsx`` and LibreOffice, and a /tmp of their own (`swe_port`, deviation 7)."""
+    ``view_xlsx`` and LibreOffice, and a /tmp of their own (`swe_port`, deviation 8)."""
 
     tool_environment = ToolEnvironment(summary=SWE_SUMMARY, python=interpreter.interpreter,
                                        hidden=tool_hidden, commands=swe_commands,
                                        reads=swe_reads, private_tmp=True)
+
+    def verify(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
+               seed: int | None = None) -> VerifyResult:
+        """V2's verdict; when the session stopped at its turn cap (`tasks.FINAL`'s
+        ``turn_limit``, `swe_ops.finalize`), it says so after the verdict's text, where the
+        analysts and reports read it."""
+        import dataclasses
+
+        result = super().verify(instance, workspace, part=part, seed=seed)
+        final_path = Path(workspace) / FINAL
+        final = json.loads(final_path.read_text()) if final_path.exists() else {}
+        if not final.get("turn_limit"):
+            return result
+        note = turn_limit_note(final.get("n_turns"), final["turn_limit"])
+        return dataclasses.replace(
+            result, prediction=f"{result.prediction}\n{note}" if result.prediction else note,
+            details=f"{result.details} {note}".strip())
+
+
+def turn_limit_note(turns: Any, cap: Any) -> str:
+    """What a record says of a session stopped at its turn cap."""
+    used = f"{turns} turns, " if turns is not None else ""
+    return f"(the session stopped at its turn cap: {used}cap {cap})"
 
 
 class OutputUnrecalculable(Exception):
