@@ -15,9 +15,13 @@ What differs from V2's script, none of it in what LibreOffice computes:
 - one file per ``soffice``, started on a private profile and pipe and stopped after, so
   concurrent items never share one (V2 runs one service on port 2002 for a whole batch);
 - the result goes to a separate path; the source is never changed (V2 replaces it);
-- a file LibreOffice cannot open or store is reported (`recalculate` returns why); V2
-  prints the error and leaves the file as it was;
-- a wall of `TIMEOUT_S` per file (V2 has none), so a hung LibreOffice cannot hold an item.
+- a document LibreOffice, running, cannot open is reported (`recalculate` returns why);
+  V2 prints the error and leaves the file as it was. Anything else -- LibreOffice not
+  starting, crashing or killed (out of memory), failing to calculate or store, or past
+  `TIMEOUT_S` -- raises `RecalcError`: the machine's failure, never the document's;
+- `TIMEOUT_S` per file is LibreOffice's own process guard (V2 has none): the helper
+  streams nothing to measure inactivity by, and a hung LibreOffice must not hold an item
+  forever. Reaching it is a `RecalcError`, recorded as a harness incident.
 """
 from __future__ import annotations
 
@@ -34,6 +38,11 @@ from refactory_packages.spreadsheetbench import recalc
 HELPER = Path(__file__).resolve().with_name("lo_open_spreadsheet.py")
 #: The most one file's recalculation may take, LibreOffice's start included.
 TIMEOUT_S = 900
+
+
+class RecalcError(RuntimeError):
+    """LibreOffice failed, not the document: it did not start, crashed or was killed, could
+    not calculate or store, or ran past `TIMEOUT_S`."""
 
 
 def program_dir() -> str | None:
@@ -79,11 +88,12 @@ def version() -> str:
 
 def recalculate(src: str, dst: str, *, timeout_s: float = TIMEOUT_S) -> tuple[bool, str]:
     """Recalculate ``src`` into ``dst`` as V2's ``process_file`` does: ``(True, "")``, or
-    ``(False, why)`` when LibreOffice could not (``dst`` is then absent)."""
+    ``(False, why)`` when LibreOffice, running, could not open the document (``dst`` is
+    then absent). Raises `RecalcError` for any failure of LibreOffice's own."""
     folder, python = program_dir(), lo_python()
     binary = recalc.soffice()
     if folder is None or python is None or binary is None:
-        return False, "LibreOffice not found"
+        raise RecalcError("LibreOffice not found")
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     Path(dst).unlink(missing_ok=True)
     profile = f"file://{recalc._profile()}"  # noqa: SLF001 - one profile per thread, shared
@@ -98,10 +108,11 @@ def recalculate(src: str, dst: str, *, timeout_s: float = TIMEOUT_S) -> tuple[bo
                                   copy, stored],
                                  capture_output=True, text=True, timeout=timeout_s,
                                  env=_environment(folder))
-        except subprocess.TimeoutExpired:
-            return False, f"LibreOffice took more than {timeout_s:.0f} s"
+        except subprocess.TimeoutExpired as exc:
+            raise RecalcError(f"LibreOffice took more than {timeout_s:.0f} s (its process "
+                              "guard)") from exc
         except OSError as exc:
-            return False, f"LibreOffice's Python could not start: {exc}"
+            raise RecalcError(f"LibreOffice's Python could not start: {exc}") from exc
         lines = [line for line in out.stdout.splitlines() if line.startswith("{")]
         try:
             result = json.loads(lines[-1]) if lines else {}
@@ -110,5 +121,8 @@ def recalculate(src: str, dst: str, *, timeout_s: float = TIMEOUT_S) -> tuple[bo
         if result.get("ok") and os.path.exists(stored):
             shutil.move(stored, dst)
             return True, ""
-    why = result.get("error") or (out.stderr.strip().splitlines() or ["no result"])[-1]
-    return False, str(why)[:500]
+    why = str(result.get("error") or (out.stderr.strip().splitlines() or
+                                      [f"no result (exit {out.returncode})"])[-1])[:500]
+    if result.get("stage") == "open":
+        return False, why
+    raise RecalcError(f"LibreOffice failed ({result.get('stage') or 'killed'}): {why}")

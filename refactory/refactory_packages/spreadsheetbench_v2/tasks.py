@@ -79,6 +79,7 @@ class SpreadsheetBenchV2Task(Task):
     def __init__(self, data_root: str | None = None) -> None:
         self.data_root = Path(data_root or os.environ.get(DATA_ENV, "")).expanduser()
         self._items: list[TaskInstance] | None = None
+        self.excluded: dict[str, str] = {}
 
     def _load(self) -> list[TaskInstance]:
         if self._items is not None:
@@ -87,19 +88,23 @@ class SpreadsheetBenchV2Task(Task):
             raise TaskError(f"SpreadsheetBench 2 data not prepared: set {DATA_ENV} to a directory "
                             "written by `python -m refactory_packages.spreadsheetbench_v2.prepare "
                             "prepare SOURCE OUT`")
+        manifest = prepare.load_manifest()
         try:
-            prepare.check(self.data_root)
+            record = prepare.check(self.data_root)
+            #: Tasks left out, with why (a golden that fails against itself).
+            self.excluded = prepare.excluded_ids(record, manifest)
         except prepare.PrepareError as exc:
             raise TaskError(f"{DATA_ENV}: {exc}") from exc
         if not open_spreadsheet.available():
             raise TaskError(f"grading recalculates the output with LibreOffice: install it or set "
                             f"{recalc.SOFFICE_ENV}")
-        manifest = prepare.load_manifest()
         rows = {row["id"]: row for row in
                 json.loads((self.data_root / prepare.TASKS_FILE).read_text(encoding="utf-8"))}
         items = []
         for part in ("train", "val", "test"):
             for item_id in manifest["parts"][part]:
+                if item_id in self.excluded:
+                    continue
                 if item_id not in rows:
                     raise TaskError(f"{part} id {item_id!r} is not in {prepare.TASKS_FILE}")
                 items.append(self._record(rows[item_id]))
@@ -110,7 +115,6 @@ class SpreadsheetBenchV2Task(Task):
         return TaskInstance(id=row["id"], metadata={
             "instruction": row["instruction"],
             "category": row["category"],
-            "group": row["group"],
             "answer_position": row["answer_position"],
             "input_name": INPUT_NAME,
             # Where the preview is read from (`item_context_values`); the prepared input's
@@ -142,17 +146,23 @@ class SpreadsheetBenchV2Task(Task):
         """V2's grade of ``pred`` (evaluation/README: recalculate the outputs with
         ``open_spreadsheet.py``, then ``evaluation.py``) and a note on how it was graded.
 
-        When LibreOffice cannot recalculate the output but does recalculate a known-good
+        When LibreOffice, running, cannot open the output but does recalculate a known-good
         workbook (`recalc.soffice_works`), the output is graded as it is, as V2's script
         leaves a file it could not open in place; when it cannot recalculate that either,
-        the grader is broken: `RecalcFailed`, a harness incident."""
+        or LibreOffice itself failed (timed out, killed, crashed: `RecalcError`), the
+        grader is broken: `RecalcFailed`, a harness incident."""
         meta = instance.metadata
         note = ""
         with tempfile.TemporaryDirectory(prefix="sb2-grade-") as work:
             graded = str(pred)
             if pred.exists():
                 recalculated = os.path.join(work, "output.xlsx")
-                ok, why = open_spreadsheet.recalculate(str(pred), recalculated)
+                try:
+                    ok, why = open_spreadsheet.recalculate(str(pred), recalculated)
+                except open_spreadsheet.RecalcError as exc:
+                    # Timed out, killed, crashed: LibreOffice's failure, never a silent 0.
+                    raise RecalcFailed(f"{HARNESS_INCIDENT_TEXT}recalculating the output: "
+                                       f"{exc}") from exc
                 if ok:
                     graded = recalculated
                 elif recalc.soffice_works():

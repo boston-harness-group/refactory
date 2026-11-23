@@ -93,8 +93,21 @@ def group_of(row: dict[str, Any]) -> str:
     return str(row["spreadsheet_path"]).split("/")[1]
 
 
+def _opaque(*parts: str) -> str:
+    return hashlib.sha256(":".join((str(SPLIT_SEED), *parts)).encode()).hexdigest()[:12]
+
+
 def item_id(category: str, source_id: str) -> str:
-    return f"{category.lower()}-{source_id}"
+    """The item's id: opaque. A Debugging source id names its planted error (``01`` Double
+    Counting, ``05`` Incorrect Average, ...), and the id reaches the agent's paths and both
+    arms' analysts, so it is a seeded hash of the source; the source id stays in the
+    manifest and the prepared ``tasks.json`` (grader side)."""
+    return f"sb2-{_opaque(category, source_id)}"
+
+
+def source_key(category: str, source_id: str) -> str:
+    """The task's name in the release (manifest and grader side only)."""
+    return f"{category}/{source_id}"
 
 
 def drop_reason(category: str, row: dict[str, Any]) -> str:
@@ -146,8 +159,8 @@ def build_manifest(source: Path, *, archive_sha256: str = "", grader: Path | Non
         for row in json.loads(path.read_text(encoding="utf-8")):
             reason = drop_reason(category, row)
             if reason:
-                dropped.append({"id": item_id(category, str(row["id"])), "category": category,
-                                "source_id": str(row["id"]), "reason": reason})
+                dropped.append({"category": category, "source_id": str(row["id"]),
+                                "reason": reason})
                 continue
             group = group_of(row)
             groups.setdefault(category, set()).add(group)
@@ -181,6 +194,9 @@ def build_manifest(source: Path, *, archive_sha256: str = "", grader: Path | Non
                   "groups": split},
         "parts": parts,
         "dropped": dropped,
+        # Tasks whose prepared golden fails against itself on the lab's full `check
+        # --grades`: {"id", "reason"} each (`excluded_ids`).
+        "excluded": [],
         "tasks": tasks,
     }
 
@@ -192,10 +208,10 @@ class PrepareError(RuntimeError):
 
 
 def prepared_paths(task: dict[str, Any]) -> tuple[str, str]:
-    """Where the task's input and golden go in the prepared directory."""
-    folder = f"{task['category']}/{task['group']}"
-    return (f"{folder}/{task['source_id']}/input.xlsx",
-            f"{folder}/{os.path.basename(task['golden']['source'])}")
+    """Where the task's input and golden go in the prepared directory: named by the opaque
+    id and a seeded hash of the golden's source, never by a source id or file name."""
+    return (f"items/{task['id']}/input.xlsx",
+            f"goldens/{_opaque(task['category'], task['golden']['source'])}.xlsx")
 
 
 def _source_rows(source: Path, manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -207,7 +223,7 @@ def _source_rows(source: Path, manifest: dict[str, Any]) -> dict[str, dict[str, 
         if sha256(path) != manifest["dataset_json_sha256"][category]:
             raise PrepareError(f"{path} is not the release's (sha256 differs from manifest.json)")
         for row in json.loads(path.read_text(encoding="utf-8")):
-            rows[item_id(category, str(row["id"]))] = row
+            rows[source_key(category, str(row["id"]))] = row
     return rows
 
 
@@ -239,9 +255,10 @@ def prepare(source: Path, out: Path, *, recalculate=None) -> dict[str, Any]:
     entries = []
     jobs: dict[str, tuple[Path, str]] = {}
     for task in manifest["tasks"]:
-        row = rows.get(task["id"])
+        row = rows.get(source_key(task["category"], task["source_id"]))
         if row is None:
-            raise PrepareError(f"{task['id']} is not in the release's dataset.json")
+            raise PrepareError(f"{source_key(task['category'], task['source_id'])} is not in "
+                               "the release's dataset.json")
         input_rel, golden_rel = prepared_paths(task)
         folder = Path(source) / task["category"]
         for rel, ref in ((input_rel, task["input"]), (golden_rel, task["golden"])):
@@ -259,7 +276,10 @@ def prepare(source: Path, out: Path, *, recalculate=None) -> dict[str, Any]:
             raise PrepareError(f"{src} is not the release's file (sha256 differs from manifest.json)")
         _log(f"[{n}/{len(jobs)}] recalculating {rel}")
         dst.parent.mkdir(parents=True, exist_ok=True)
-        ok, why = recalculate(str(src), str(dst))
+        try:
+            ok, why = recalculate(str(src), str(dst))
+        except open_spreadsheet.RecalcError as exc:
+            ok, why = False, str(exc)
         if not ok:
             raise PrepareError(f"LibreOffice could not recalculate {src}: {why}")
         files[rel] = sha256(dst)
@@ -296,25 +316,61 @@ def check(out: Path) -> dict[str, Any]:
     return record
 
 
-def sanity_grades(out: Path) -> dict[str, Any]:
-    """V2's grade of each task's golden against itself and of its input, one at a time:
-    the tasks whose golden fails, or whose input already passes."""
+def _gold_fail_reason(g: Any) -> str:
+    if g.modification["total"] == 0:
+        return "the golden changes no answer cell, so V2's modification accuracy is 0.0"
+    return (f"the golden fails against itself ({g.regression['correct']}/{g.regression['total']} "
+            f"unchanged, {g.modification['correct']}/{g.modification['total']} changed): "
+            f"{g.error_message[:200]}")
+
+
+def sanity_grades(out: Path, *, grade=None) -> dict[str, Any]:
+    """V2's grade of each task's golden against itself and of its input, one task at a
+    time: the tasks whose golden fails (excluded by the Task, `excluded_ids`) and those
+    whose input already passes (kept, listed). A grader failure (an unreadable file, memory
+    running out) stops the check: it is the machine's, never a reason to drop a task."""
     from . import evaluation_port
 
+    grade = grade or evaluation_port.grade
     out = Path(out)
     gold_fails, input_passes = [], []
     tasks = json.loads((out / TASKS_FILE).read_text(encoding="utf-8"))
     for n, task in enumerate(tasks, 1):
         _log(f"[{n}/{len(tasks)}] grading {task['id']}")
         inp, gold = str(out / task["input"]), str(out / task["golden"])
-        g = evaluation_port.grade(inp, gold, gold, task["answer_position"])
-        if not g.passed:
-            gold_fails.append({"id": task["id"], "error": g.error_message[:200],
-                               "regression": g.regression, "modification": g.modification})
-        g = evaluation_port.grade(inp, gold, inp, task["answer_position"])
-        if g.passed:
-            input_passes.append(task["id"])
-    return {"graded": len(tasks), "gold_fails": gold_fails, "input_passes": input_passes}
+        try:
+            g = grade(inp, gold, gold, task["answer_position"])
+            if not g.passed:
+                gold_fails.append({"id": task["id"], "reason": _gold_fail_reason(g)})
+            if grade(inp, gold, inp, task["answer_position"]).passed:
+                input_passes.append(task["id"])
+        except evaluation_port.GraderFailed as exc:
+            raise PrepareError(f"the grader failed on {task['id']}: {exc}") from exc
+    return {"tasks_sha256": sha256(out / TASKS_FILE), "graded": len(tasks),
+            "gold_fails": gold_fails, "input_passes": input_passes}
+
+
+def check_grades(out: Path, *, grade=None) -> dict[str, Any]:
+    """`check`, then `sanity_grades`, recorded in ``prepared.json`` (``sanity``): what the
+    Task requires before it runs (`excluded_ids`)."""
+    record = check(out)
+    record["sanity"] = sanity_grades(out, grade=grade)
+    (Path(out) / PREPARED_FILE).write_text(json.dumps(record, indent=1) + "\n")
+    return record
+
+
+def excluded_ids(record: dict[str, Any], manifest: dict[str, Any]) -> dict[str, str]:
+    """The tasks the Task leaves out, by id, with why: the manifest's ``excluded`` (the
+    lab's check, committed) and this directory's own ``check --grades`` (``sanity``), whose
+    goldens fail against themselves. Refuses a directory with no current check."""
+    sanity = record.get("sanity")
+    if not isinstance(sanity, dict) or sanity.get("tasks_sha256") != record.get("tasks_sha256"):
+        raise PrepareError("the prepared directory has no current `check --grades` (run "
+                           "`python -m refactory_packages.spreadsheetbench_v2.prepare check "
+                           "--grades OUT`): each golden must be graded against itself first")
+    out = {row["id"]: row["reason"] for row in manifest.get("excluded", [])}
+    out.update({row["id"]: row["reason"] for row in sanity.get("gold_fails", [])})
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -337,10 +393,10 @@ def main(argv: list[str] | None = None) -> int:
             record = prepare(args.source, args.out)
             _log(f"prepared {len(record['files'])} files in {args.out}")
         elif args.command == "check":
-            record = check(args.out)
+            record = check_grades(args.out) if args.grades else check(args.out)
             if args.grades:
-                record["sanity"] = sanity_grades(args.out)
-                (args.out / PREPARED_FILE).write_text(json.dumps(record, indent=1) + "\n")
+                for row in record["sanity"]["gold_fails"]:
+                    _log(f"excluded {row['id']}: {row['reason']}")
                 _log(json.dumps(record["sanity"], indent=1))
             _log(f"{args.out}: {len(record['files'])} files match")
         else:

@@ -14733,7 +14733,7 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
     "doc": "refactory/docs/spreadsheetbench.md",
     "examples": [
       {
-        "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
+        "explanation": "Solve SpreadsheetBench 2 tasks (277 file-graded Debugging, Financial_Model and Template tasks, split by workbook) with SkillOpt's Claude Code agent harness: one sealed Claude Code session per item with Read and Bash writes solution.py, which is run and graded by V2's pipeline (LibreOffice recalculation, then V2's evaluation.py). Route it to the claude_code worker in skip (bypassPermissions) mode, claude-opus-4-6 at effort medium. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE).",
         "knobs": {
           "data_parallelism": 8,
           "max_thinking_tokens": 16384

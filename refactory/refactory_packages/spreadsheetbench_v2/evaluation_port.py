@@ -3,11 +3,17 @@
 Copied from the SpreadsheetBench 2 repository's ``evaluation/evaluation.py`` (the file the
 release ships, sha256 in ``manifest.json``: ``grader_sha256``); each piece names the lines
 it copies. The comparison is V2's exactly: numbers within 1% (relative; absolute against
-0), ``None`` equal to 0 and to ``""``, ``#DIV/0!``/``#N/A`` equal to finance "not
-meaningful" text (``N/A``, ``NM``, ``-``, ...), dates as whole Excel day numbers,
-formatting ignored, a cell holding an Excel error compared by its formula, and an item
+0), ``None`` equal to 0 and to ``""``, dates as whole Excel day numbers, formatting
+ignored, a cell holding an Excel error compared by its formula, and an item
 correct when every changed cell matches and at least 99.8% of the unchanged ones do
 (``process_single_item``, :452-458).
+
+``compare_cell_value`` treats ``#DIV/0!``/``#N/A`` as equal to finance "not meaningful"
+text (``N/A``, ``NM``, ``-``, ..., :44-61), but on the workbook path that rule does not
+reach a real error cell: when either cell's cached value is an Excel error, V2 compares
+the two cells' formulas instead (:298, :324), so a golden ``#DIV/0!`` (from ``=A2/0``)
+never equals an output's ``"N/A"`` text (parity case ``not_meaningful``). The rule only
+applies between texts such as ``"N/A"`` and ``"-"``, or inside that formula comparison.
 
 Two things differ in how it runs, never in what it decides (the parity fixture
 ``tests/fixtures/spreadsheetbench_v2_grader_parity.json`` was recorded by calling V2's own

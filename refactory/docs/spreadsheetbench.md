@@ -411,6 +411,15 @@ loads a large workbook.
 **No gold feedback.** One session has no later turn to tell, and SB's agent mode takes none
 either (SkillOpt's single path), so the Task offers no `train_feedback`.
 
+### Where the data is hidden
+
+The agent's sealed workspace holds its own files only; the prepared folder (every golden,
+every sibling input, `tasks.json`) is on both hide-lists: the sealed steps' tool
+environment (`tasks.tool_hidden`; an interpreter running from inside it is refused) and
+model code's sandbox (`agent_ops.finalize`). On Linux both sandboxes are allow-lists, so
+the hide-lists are a second guard there; on macOS (Seatbelt) the hide-list is the
+protection.
+
 ### Prepared data
 
 The grader reads cached values, and many shipped files have none or stale ones: 7
@@ -427,13 +436,25 @@ python -m refactory_packages.spreadsheetbench_v2.prepare check [--grades] <out>
 each golden (once) as V2's script does — LibreOffice, iterative calculation on (100 steps,
 0.0001), `calculateAll`, stored as "Calc MS Excel 2007 XML" (`open_spreadsheet.py`,
 `lo_open_spreadsheet.py`; LibreOffice found as the recalc grader finds it, `SB_SOFFICE`) —
-one file per LibreOffice, resumably, and writes `tasks.json` and `prepared.json` (the
-manifest's sha256, LibreOffice's version, every file's sha256). Each input becomes
-`<Category>/<group>/<id>/input.xlsx`, so no Debugging input's name says which error was
-planted in it. `check --grades` grades each golden against itself and each input with V2's
-grader and records the ones that misbehave. Set `SB2_DATA` to `<out>`: the Task refuses a
-directory that is not prepared, was prepared for another manifest, or has any file whose
-checksum changed.
+one file per LibreOffice, resumably (a file is skipped only while its checksum still
+matches), and writes `tasks.json` and `prepared.json` (the manifest's sha256, LibreOffice's
+version, every file's sha256).
+
+**Opaque names.** A Debugging source id names its planted error (`01` Double Counting, `05`
+Incorrect Average, `10` Unit Mismatch, ...), and an item's id reaches the agent's folder
+and environment and both arms' analysts. So each item's id is a seeded hash of its source
+(`sb2-<12 hex>`), its input is `items/<id>/input.xlsx` and each golden
+`goldens/<hash>.xlsx`; source ids, groups and file names stay in `manifest.json` and the
+prepared `tasks.json`, grader side. The split and the drops are computed from the source
+ids.
+
+`check --grades` then grades, one task at a time, each golden against itself and each input
+with V2's grader, and records the result in `prepared.json`. **The Task requires it** and
+leaves out every task whose golden fails against itself, with the reason (also listed in
+`manifest.json`'s `excluded` once the lab's full check is committed); a grader failure
+stops the check rather than dropping a task. Set `SB2_DATA` to `<out>`: the Task refuses a
+directory that is not prepared or checked, was prepared for another manifest, or has any
+file (or `tasks.json`) whose checksum changed.
 
 ### Drops and the split
 
@@ -466,8 +487,9 @@ V2's pipeline as its README runs it: the output is recalculated by `open_spreads
 then `evaluation.py` compares it with the prepared golden. Its rules, ported line for line:
 a number within 1% (relative; absolute against 0), `None` equal to 0 and to `""`, dates as
 whole Excel days (so within 1% too), formatting ignored, a cell holding an Excel error
-compared by its formula (so the `N/A`-equals-`#DIV/0!` rule only matters when no cell of the
-pair holds an error, and a formula error only matches the same formula), and an item
+compared by its formula (so a real `#DIV/0!` or `#N/A` cell never equals `"N/A"` text:
+V2's not-meaningful rule applies only between texts such as `"N/A"` and `"-"`, and a formula
+error only matches the same formula), and an item
 correct when every changed cell matches and at least 99.8% of the unchanged ones do, after
 rounding to four places (1,955 of 1,959 passes). A task whose golden changes no answer cell
 fails whatever the output (V2's modification accuracy is 0.0 then). The parity fixture
@@ -483,12 +505,16 @@ How it runs differs, never what it decides:
 2. **No silent 0.** A prepared input or golden that cannot be read, or memory running out,
    is a harness incident (`GraderFailed`) with its message: run again, then left out of the
    score. An output the model's code wrote that cannot be opened is the model's failure,
-   `output-unreadable: <why>` (V2 also scores it 0). LibreOffice failing on the output is
-   graded as written when LibreOffice works on a known-good workbook (V2's script leaves
-   such a file in place), else a harness incident.
+   `output-unreadable: <why>` (V2 also scores it 0). An output LibreOffice, running, cannot
+   open is graded as written when LibreOffice works on a known-good workbook (V2's script
+   leaves such a file in place). LibreOffice itself failing on it -- not starting, crashing
+   or killed (out of memory), failing to calculate or store, or past its process guard -- is
+   a harness incident, never a 0.
 3. **Recalculation.** One file per private LibreOffice profile and pipe, a copy opened
-   under a plain name, the source never changed, and a 900 s wall per file (V2: one service
-   on port 2002, the file replaced, no wall).
+   under a plain name, the source never changed (V2: one service on port 2002, the file
+   replaced). The helper streams nothing to measure inactivity by, so a 900 s guard on
+   LibreOffice's own process keeps a hung one from holding an item; reaching it is a harness
+   incident, not the model's failure.
 
 ### Not verified here
 

@@ -211,8 +211,16 @@ RELEASE = [
     ("Template", "02_cash_sweep", "02_01", "spreadsheet/02_cash_sweep/02_01_input.xlsx",
      "spreadsheet/02_cash_sweep/02_01_golden.xlsx", "Put 9 in B1.", 9),
 ]
-PARTS = {"train": ["debugging-01_01", "debugging-01_02"], "val": ["template-01_01"],
-         "test": ["template-02_01"]}
+IDS = [prepare.item_id(category, sid) for category, _g, sid, *_ in RELEASE]
+PARTS = {"train": IDS[:2], "val": [IDS[2]], "test": [IDS[3]]}
+VAL = IDS[2]
+
+
+def _rel(index: int) -> tuple[str, str]:
+    """The prepared input and golden of ``RELEASE[index]``, relative to the data folder."""
+    category, _group, _sid, _inp, gold, *_ = RELEASE[index]
+    return prepare.prepared_paths({"id": IDS[index], "category": category,
+                                   "golden": {"source": gold}})
 
 
 def make_release(root: Path) -> tuple[Path, Path]:
@@ -223,7 +231,8 @@ def make_release(root: Path) -> tuple[Path, Path]:
     for category, group, sid, inp, gold, instruction, n in RELEASE:
         folder = source / category
         make_workbook(folder / inp, ONE)
-        make_workbook(folder / gold, [{"title": "Sheet1", "cells": {"A1": 1, "B1": n}}])
+        if not (folder / gold).exists():  # a shared golden is written once (its checksum)
+            make_workbook(folder / gold, [{"title": "Sheet1", "cells": {"A1": 1, "B1": n}}])
         rows[category].append({"id": sid, "instruction": instruction, "spreadsheet_path": inp,
                                "golden_response_path": gold, "answer_position": "'Sheet1'!A1:B2"})
         entries.append({"id": prepare.item_id(category, sid), "category": category, "group": group,
@@ -266,6 +275,7 @@ def sb2_data(tmp_path, monkeypatch, fake_lo):
     monkeypatch.setenv(prepare.MANIFEST_ENV, str(manifest))
     out = tmp_path / "prepared"
     prepare.prepare(source, out)
+    prepare.check_grades(out)
     monkeypatch.setenv(tasks.DATA_ENV, str(out))
     return out
 
@@ -283,11 +293,8 @@ def test_prepare_renames_freezes_and_records(tmp_path, monkeypatch, fake_lo):
         return _copy(src, dst)
 
     record = prepare.prepare(source, tmp_path / "out", recalculate=recording)
-    assert sorted(record["files"]) == [
-        "Debugging/01_Debugging/01_01/input.xlsx", "Debugging/01_Debugging/01_02/input.xlsx",
-        "Debugging/01_Debugging/01_golden.xlsx",
-        "Template/01_bond_accounting/01_01/input.xlsx", "Template/01_bond_accounting/01_01_golden.xlsx",
-        "Template/02_cash_sweep/02_01/input.xlsx", "Template/02_cash_sweep/02_01_golden.xlsx"]
+    assert sorted(record["files"]) == sorted({rel for i in range(len(RELEASE)) for rel in _rel(i)})
+    assert len(record["files"]) == 7 and _rel(0)[1] == _rel(1)[1]  # the shared golden
     assert len(seen) == 7  # the shared golden once
     assert record["manifest_sha256"] == prepare.sha256(manifest)
     listed = json.loads((tmp_path / "out" / prepare.TASKS_FILE).read_text())
@@ -319,7 +326,7 @@ def test_the_task_refuses_unprepared_or_changed_data(tmp_path, monkeypatch, sb2_
         [*PARTS["train"], *PARTS["val"], *PARTS["test"]]
     with pytest.raises(TaskError, match="not prepared"):
         tasks.SpreadsheetBenchV2Task(str(tmp_path / "nothing")).instances()
-    golden = sb2_data / "Template/01_bond_accounting/01_01_golden.xlsx"
+    golden = sb2_data / _rel(2)[1]
     make_workbook(golden, [{"title": "Sheet1", "cells": {"A1": 1, "B1": 8}}])
     with pytest.raises(TaskError, match="changed since prepare"):
         tasks.SpreadsheetBenchV2Task().instances()
@@ -340,7 +347,7 @@ def test_the_output_is_recalculated_before_grading(tmp_path, sb2_data, monkeypat
     """V2's pipeline: open_spreadsheet.py on the output, then evaluation.py. The grade reads
     the recalculated copy; the output itself is never changed."""
     task = tasks.SpreadsheetBenchV2Task()
-    item = next(i for i in task.instances() if i.id == "template-01_01")
+    item = next(i for i in task.instances() if i.id == VAL)
     pred = tmp_path / "pred.xlsx"
     make_workbook(pred, [{"title": "Sheet1", "cells": {"A1": 1, "B1": "=3+4"}}])
     before = pred.read_bytes()
@@ -363,7 +370,7 @@ def test_an_output_libreoffice_cannot_open_is_graded_as_written(tmp_path, sb2_da
     """V2's script leaves a file it cannot open as it was; here so too, when LibreOffice
     works on a known-good workbook. When it does not, the grader is broken: an incident."""
     task = tasks.SpreadsheetBenchV2Task()
-    item = next(i for i in task.instances() if i.id == "template-01_01")
+    item = next(i for i in task.instances() if i.id == VAL)
     pred = tmp_path / "pred.xlsx"
     make_workbook(pred, [{"title": "Sheet1", "cells": {"A1": 1, "B1": 7}}])
     monkeypatch.setattr(open_spreadsheet, "recalculate", lambda s, d, **_: (False, "cannot open"))
@@ -424,8 +431,8 @@ def _walk(tmp_path: Path, part: str, model: Any, *, expect_ok: bool = True) -> A
     return result
 
 
-def _gold(data: Path, rel: str = "Template/01_bond_accounting/01_01_golden.xlsx") -> str:
-    return str(data / rel)
+def _gold(data: Path, index: int = 2) -> str:
+    return str(data / _rel(index)[1])
 
 
 def test_one_item_end_to_end_on_the_walker(tmp_path, sb2_env):
@@ -434,7 +441,7 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb2_env):
     solution.py, and the item is run and graded by V2's grade."""
     model = AgentStub(_gold(sb2_env))
     (record,) = _walk(tmp_path, "val", model).item_records
-    assert (record["id"], record["passed"], record["score"]) == ("template-01_01", True, 1.0), record
+    assert (record["id"], record["passed"], record["score"]) == (VAL, True, 1.0), record
     (call,) = model.calls
     assert call["prompt"] == agent_port.SOLVE_PROMPT and call["system"] == ""
     assert sorted(call["files"]) == sorted(agent_mode.sb_agent_mode.WORKSPACE_READS)
@@ -467,7 +474,7 @@ def test_a_wrong_answer_shows_v2s_mismatch_to_both_arms(tmp_path, sb2_env):
     assert not record["passed"]
     assert record["fail_reason"].startswith("eval-mismatch: Modification error at Sheet1!B1")
     assert "Modification error at Sheet1!B1: answer=7, output=8" in record["prediction"]
-    preview = port.preview_workbook(str(sb2_env / "Template/01_bond_accounting/01_01/input.xlsx"))
+    preview = port.preview_workbook(str(sb2_env / _rel(2)[0]))
     view = SkillOptEnv.for_mode("spreadsheetbench_v2/agent").rollout_result(
         record, agent_mode.Agent().values())
     assert view["conversation"][-1]["content"] == f"[POST-EXECUTION VERIFICATION]\n\n{record['prediction']}"
@@ -534,7 +541,7 @@ def test_one_item_end_to_end_on_the_spine(tmp_path, sb2_env):
     cli, log = _agent_dsh(tmp_path, _gold(sb2_env))
     client = DshModelClient(**AGENT_ROUTE, dsh_cli=str(cli), attempts=1, timeout_s=120)
     (record,) = _drain(tmp_path, client)
-    assert (record["id"], record["passed"]) == ("template-01_01", True), record
+    assert (record["id"], record["passed"]) == (VAL, True), record
     (call,) = [json.loads(line) for line in log.read_text().splitlines()]
     assert call["prompt"] == agent_port.SOLVE_PROMPT
     assert call["config"]["env"]["REFACTORY_SEALED_TOOLS"] == "Read,Bash"
@@ -564,9 +571,7 @@ def sealed_sdk_v2(tmp_path, monkeypatch, sb2_env):
     monkeypatch.setenv("FAKE_AGENT_PROBE", PROBE.format(gold=gold))
     monkeypatch.setenv("FAKE_AGENT_OUTSIDE", gold)
     monkeypatch.setenv("FAKE_AGENT_FORBIDDEN", json.dumps([
-        gold, str(sb2_env / "Template/02_cash_sweep/02_01/input.xlsx"),
-        str(sb2_env / "Debugging/01_Debugging/01_golden.xlsx"),
-        str(sb2_env / "Debugging/01_Debugging/01_02/input.xlsx"),
+        gold, str(sb2_env / _rel(3)[0]), str(sb2_env / _rel(0)[1]), str(sb2_env / _rel(1)[0]),
         str(sb2_env / prepare.TASKS_FILE), str(sb2_env)]))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.delenv("REFACTORY_WORKER_CONTEXT", raising=False)
@@ -602,3 +607,204 @@ def test_model_code_is_blind_to_the_prepared_data(tmp_path, sb2_env):
     (record,) = _walk(tmp_path, "val", AgentStub(_gold(sb2_env), solution=hostile),
                       expect_ok=False).item_records
     assert "HIDDEN" in record["prediction"] and "SEEN" not in record["prediction"], record
+
+
+# ── review fixes: names, hidden lists, tampering, LibreOffice failures, exclusions ──
+
+#: What the release calls these tasks: their source ids, groups and file names (a
+#: Debugging source id names its planted error). None may reach the agent or the analysts.
+RELEASE_NAMES = ("01_01", "01_02", "02_01", "01_Debugging", "bond_accounting", "cash_sweep",
+                 "Double Counting", "Unit Mismatch", "_golden", "_input.xlsx")
+
+
+class _LookingStub(AgentStub):
+    """The agent of `AgentStub`, which also records its working folder, environment and
+    what ``pwd``, ``env`` and ``ls`` say through its seal."""
+
+    def complete(self, prompt: str, *, system: str = "", workdir: object = None,
+                 cwd: object = None, env: object = None, confine: bool = False,
+                 seal: dict[str, Any] | None = None) -> str:
+        import subprocess
+
+        reply = super().complete(prompt, system=system, workdir=workdir, cwd=cwd, env=env,
+                                 confine=confine, seal=seal)
+        looked = subprocess.run([*seal["runner"], "--", "/bin/bash", "-c", "pwd; env; ls -laR"],
+                                cwd=str(cwd), capture_output=True, text=True, timeout=120)
+        self.calls[-1].update(cwd=str(cwd), env=json.dumps(env or {}), shell=looked.stdout + looked.stderr)
+        return reply
+
+
+def test_the_agent_and_analysts_see_no_release_name(tmp_path, sb2_env):
+    """Ids and prepared folders are opaque: no source id, group or original file name in
+    the agent's task text, files, folder, environment or shell, nor in the record, either
+    arm's analyst view or the item's context."""
+    from refactory_dsh.optim import analysts
+    from refactory_dsh.task import item_metadata_reader
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    model = _LookingStub(_gold(sb2_env, 0))
+    records = _walk(tmp_path, "train", model, expect_ok=False).item_records
+    assert len(records) == 2 and len(model.calls) == 2
+    read = item_metadata_reader(agent_mode.Agent().state_dict(), context=True)
+    seen = []
+    for call in model.calls:
+        seen += [call["prompt"], call["cwd"], call["env"], call["shell"], call["seen"],
+                 *call["files"], *(v.decode(errors="replace") for v in call["files"].values())]
+    for record in records:
+        context = read(record)
+        seen += [json.dumps(record), json.dumps(context),
+                 json.dumps(SkillOptEnv.for_mode("spreadsheetbench_v2/agent").rollout_result(
+                     record, agent_mode.Agent().values())),
+                 analysts.item_text({**record, "item_context": context})]
+    text = "\n".join(seen)
+    leaked = [name for name in RELEASE_NAMES if name in text]
+    assert leaked == [], leaked
+    assert IDS[0] in text  # the opaque id is what is shown
+
+
+def _covered(path: Path, hidden: list[str]) -> bool:
+    target = Path(path).resolve()
+    return any(target == Path(h).resolve() or Path(h).resolve() in target.parents for h in hidden)
+
+
+def test_the_hidden_lists_hold_the_dataset_goldens_and_siblings(tmp_path, sb2_data, monkeypatch):
+    """[any OS] Model code's hide-list (`agent_ops.finalize`; macOS's only protection,
+    `spreadsheetbench.sandbox`) and the sealed steps' (`tasks.tool_hidden`) both cover the
+    prepared folder: every golden, every sibling input, tasks.json."""
+    from refactory_packages.spreadsheetbench import agent_ops as sb_agent_ops
+    from refactory_packages.spreadsheetbench import sandbox
+
+    private = [sb2_data / _rel(2)[1], sb2_data / _rel(0)[1], sb2_data / _rel(1)[0],
+               sb2_data / _rel(3)[0], sb2_data / prepare.TASKS_FILE, sb2_data]
+    work = tmp_path / "pass"
+    work.mkdir()
+    sealed = tasks.tool_hidden(work)
+    assert all(_covered(p, sealed) for p in private), sealed
+    handed: dict[str, Any] = {}
+    monkeypatch.setattr(sb_agent_ops, "finalize_item",
+                        lambda ctx, roots: handed.setdefault("roots", roots))
+    agent_ops.finalize(object())
+    model_code = sandbox.hidden_paths(handed["roots"])
+    assert all(_covered(p, model_code) for p in private), model_code
+
+
+def test_an_interpreter_under_the_prepared_data_is_refused(tmp_path, sb2_env, monkeypatch):
+    """[both runtimes' `workspace.prepare`] A sealed step's interpreter that runs from inside
+    SB2_DATA is refused (`tasks.tool_hidden` reaches the seal); outside, it is given."""
+    from test_sealed_tools import _sealable
+    from test_tool_steps_item_inputs import _bound, _layout
+
+    from refactory_dsh import workspace as workspaces
+
+    _sealable()
+    _run, pass_dir, _workspace = _layout(tmp_path)
+    (pass_dir / ".refactory" / "pass.json").write_text(json.dumps({"task": agent_mode.TASK}))
+    _bound(monkeypatch, sb2_env / "venv")
+    with pytest.raises(workspaces.WorkspaceError, match="may not read"):
+        workspaces.prepare(pass_dir, "look", "scratch", route={"worker_backend": "dsh"},
+                           tools=("bash",))
+    _bound(monkeypatch, tmp_path / "elsewhere" / "venv")
+    assert workspaces.prepare(pass_dir, "look", "scratch", route={"worker_backend": "dsh"},
+                              tools=("bash",)) is not None
+
+
+def test_a_changed_tasks_json_is_refused(sb2_data):
+    listed = json.loads((sb2_data / prepare.TASKS_FILE).read_text())
+    listed[0]["answer_position"] = "'Sheet1'!A1"
+    (sb2_data / prepare.TASKS_FILE).write_text(json.dumps(listed))
+    with pytest.raises(prepare.PrepareError, match="does not match"):
+        prepare.check(sb2_data)
+    with pytest.raises(TaskError, match="does not match"):
+        tasks.SpreadsheetBenchV2Task().instances()
+
+
+def test_a_resumed_prepare_redoes_a_file_changed_since(tmp_path, monkeypatch, fake_lo):
+    """Resuming skips only files whose checksum still matches the record."""
+    source, manifest = make_release(tmp_path / "release")
+    monkeypatch.setenv(prepare.MANIFEST_ENV, str(manifest))
+    out = tmp_path / "out"
+    prepare.prepare(source, out, recalculate=_copy)
+    make_workbook(out / _rel(2)[0], [{"title": "Sheet1", "cells": {"A1": "tampered"}}])
+    seen: list[str] = []
+
+    def recording(src, dst):
+        seen.append(src)
+        return _copy(src, dst)
+
+    prepare.prepare(source, out, recalculate=recording)
+    assert seen == [str(source / "Template" / RELEASE[2][3])]
+    prepare.check(out)
+
+
+def test_the_task_requires_the_grades_check_and_leaves_failing_goldens_out(tmp_path, monkeypatch,
+                                                                         fake_lo):
+    source, manifest = make_release(tmp_path / "release")
+    monkeypatch.setenv(prepare.MANIFEST_ENV, str(manifest))
+    out = tmp_path / "out"
+    prepare.prepare(source, out)
+    monkeypatch.setenv(tasks.DATA_ENV, str(out))
+    with pytest.raises(TaskError, match="check --grades"):
+        tasks.SpreadsheetBenchV2Task().instances()
+    real = ev.grade
+
+    def no_change_for_val(inp, gold, out_file, position):
+        if VAL in inp and out_file == gold:
+            return ev.Grade(exact=True, error_message="", regression={"correct": 2, "total": 2},
+                            modification={"correct": 0, "total": 0}, regression_accuracy=1.0,
+                            modification_accuracy=0.0, accuracy=0.0)
+        return real(inp, gold, out_file, position)
+
+    record = prepare.check_grades(out, grade=no_change_for_val)
+    assert [row["id"] for row in record["sanity"]["gold_fails"]] == [VAL]
+    task = tasks.SpreadsheetBenchV2Task()
+    assert [i.id for i in task.instances()] == [*PARTS["train"], *PARTS["test"]]
+    assert "changes no answer cell" in task.excluded[VAL]
+
+    def broken(*_):
+        raise ev.GraderFailed("out of memory")
+
+    with pytest.raises(prepare.PrepareError, match="grader failed"):
+        prepare.check_grades(out, grade=broken)
+
+
+def _fake_python(folder: Path, body: str) -> None:
+    (folder / "python").write_text(f"#!/bin/sh\n{body}\n")
+    (folder / "python").chmod(0o755)
+
+
+@pytest.mark.parametrize("body,document_fault", [
+    ("echo '{\"ok\": false, \"stage\": \"open\", \"error\": \"Failed to open document\"}'", True),
+    ("echo '{\"ok\": false, \"stage\": \"crash\", \"error\": \"bridge disposed\"}'", False),
+    ("echo '{\"ok\": false, \"stage\": \"calc\", \"error\": \"store failed\"}'", False),
+    ("kill -9 $$", False),
+    ("sleep 30", False),
+])
+def test_only_a_document_libreoffice_cannot_open_is_its_own_fault(tmp_path, fake_lo, body,
+                                                                   document_fault):
+    """A document LibreOffice, running, cannot open is graded as written (V2's script
+    leaves it); LibreOffice crashing, killed (out of memory), failing to store or past its
+    process guard raises `RecalcError`."""
+    _fake_python(fake_lo, body)
+    src = make_workbook(tmp_path / "in.xlsx", ONE)
+    if document_fault:
+        assert open_spreadsheet.recalculate(str(src), str(tmp_path / "out.xlsx"), timeout_s=5) == \
+            (False, "Failed to open document")
+    else:
+        with pytest.raises(open_spreadsheet.RecalcError):
+            open_spreadsheet.recalculate(str(src), str(tmp_path / "out.xlsx"), timeout_s=2)
+
+
+def test_libreoffice_failing_on_the_output_is_a_harness_incident(tmp_path, sb2_data, monkeypatch):
+    from refactory_dsh.items import error_kind
+
+    task = tasks.SpreadsheetBenchV2Task()
+    item = next(i for i in task.instances() if i.id == VAL)
+    pred = make_workbook(tmp_path / "pred.xlsx", [{"title": "Sheet1", "cells": {"A1": 1, "B1": 7}}])
+
+    def timed_out(*_a, **_k):
+        raise open_spreadsheet.RecalcError("LibreOffice took more than 900 s (its process guard)")
+
+    monkeypatch.setattr(open_spreadsheet, "recalculate", timed_out)
+    with pytest.raises(tasks.RecalcFailed) as caught:
+        task.grade(item, pred)
+    assert error_kind(caught.value) == "harness_incident"

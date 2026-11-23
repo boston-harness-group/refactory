@@ -7,7 +7,9 @@ profile and pipe (so concurrent runs never share one, unlike V2's fixed port 200
 ``src``, turns on iterative calculation (100 steps, 0.0001), recalculates everything and
 stores the result to ``dst`` as "Calc MS Excel 2007 XML" (V2's ``process_file``, inside
 ``batch_open_files``' script), then stops ``soffice``. Prints one JSON line:
-``{"ok": true}`` or ``{"ok": false, "error": ...}``.
+``{"ok": true}`` or ``{"ok": false, "stage": ..., "error": ...}``, where ``stage`` is
+``open`` when LibreOffice, running, could not open the document (the document's fault),
+and ``start``, ``crash`` or ``calc`` otherwise (LibreOffice's).
 """
 import json
 import subprocess
@@ -29,6 +31,7 @@ def main(argv):
          "--norestore", "--nologo", "--nodefault", "--nofirststartwizard",
          f"--accept=pipe,name={pipe};urp;"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    stage = "start"
     try:
         local = uno.getComponentContext()
         resolver = local.ServiceManager.createInstanceWithContext(
@@ -43,14 +46,16 @@ def main(argv):
                     f"uno:pipe,name={pipe};urp;StarOffice.ComponentContext")
             except NoConnectException:
                 if proc.poll() is not None or time.monotonic() > deadline:
-                    return {"ok": False, "error": "LibreOffice did not start"}
+                    return {"ok": False, "stage": "start", "error": "LibreOffice did not start"}
                 time.sleep(0.5)
         desktop = context.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", context)
         # open_spreadsheet.py process_file (inside batch_open_files' script, :202-222)
+        stage = "open"
         doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(src), "_blank", 0, ())
         if not doc:
-            return {"ok": False, "error": "Failed to open document"}
+            return {"ok": False, "stage": "open", "error": "Failed to open document"}
+        stage = "calc"
         try:
             doc.IsIterationEnabled = True
             doc.IterationCount = 100
@@ -66,7 +71,11 @@ def main(argv):
             pass
         return {"ok": True}
     except Exception as e:  # noqa: BLE001 - reported, as process_file reports it
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # LibreOffice gone (killed, crashed, out of memory) is its failure, not the file's.
+        crashed = proc.poll() is not None or "Disposed" in type(e).__name__ \
+            or "bridge" in str(e).lower()
+        where = "crash" if crashed else stage
+        return {"ok": False, "stage": where, "error": f"{type(e).__name__}: {e}"}
     finally:
         try:
             proc.wait(timeout=15)
