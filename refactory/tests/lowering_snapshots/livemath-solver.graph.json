@@ -81,8 +81,7 @@
           "crash"
         ],
         "times": 2,
-        "timeout_factor": 1,
-        "keep_workspace": false
+        "timeout_factor": 1
       },
       "missing_on_crash": true,
       "tool_policy": "none",

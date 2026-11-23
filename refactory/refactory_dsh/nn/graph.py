@@ -100,9 +100,12 @@ def retry_declaration(value: Any) -> dict[str, Any] | None:
                          f"not {factor!r}")
     if float(factor).is_integer():
         factor = int(factor)
-    keep_workspace = bool(value.get("keep_workspace", False))
+    keep_workspace = value.get("keep_workspace", False)
+    if not isinstance(keep_workspace, bool):
+        raise ValueError(f"a retry's 'keep_workspace' is true or false, not {keep_workspace!r}")
+    # Written only when set, so a rule that does not keep its workspace reads as before.
     return {"on": sorted({str(item) for item in on}), "times": times, "timeout_factor": factor,
-            "keep_workspace": keep_workspace}
+            **({"keep_workspace": True} if keep_workspace else {})}
 
 def retry_safe(node: "Node") -> bool:
     """Whether running ``node`` again in a fresh session cannot start from what a failed
@@ -1127,8 +1130,7 @@ class Graph:
             return node.retry if node.retry["times"] > 0 else None
         if not self.in_data_pass(node_id) or not retry_safe(node):
             return None
-        return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1,
-                "keep_workspace": False}
+        return {"on": ["crash"], "times": PASS_RETRY_TIMES, "timeout_factor": 1}
 
     def missing_on_crash(self, node_id: str) -> bool:
         """Whether ``node_id``, when its retries are spent or it runs out of output without

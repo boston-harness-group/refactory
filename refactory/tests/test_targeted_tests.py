@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -205,76 +205,127 @@ def test_failed_reruns_only_the_last_failures_and_falls_back_without_a_record(tm
     assert after["rerun_failed"] is False and "tests/test_second.py" in after["selection"]
 
 
-def test_cutoff_run_records_failures_seen_so_far(tmp_path):
-    """A run cut off by a timeout (SIGTERM) still leaves exactly the failures seen so far
-    in the record, and --failed afterwards runs only those. No mocks: the real command
-    runs a fixture that prints FAILED lines then sleeps, and is killed."""
+CUT = {
+    "tool.py": "VERSION = 1\n",
+    # Collected first: sleeps before any test fails when CUT_FIRST names a marker.
+    "tests/test_a_first.py": ("import os, pathlib, time\nimport tool\n\n\ndef test_first():\n"
+                              "    if os.environ.get('CUT_FIRST'):\n"
+                              "        pathlib.Path(os.environ['CUT_FIRST']).write_text('started')\n"
+                              "        time.sleep(300)\n"),
+    # Two tests the change breaks, then one that sleeps when CUT_MARKER names a marker.
+    "tests/test_cut.py": ("import os, pathlib, time\nimport tool\n\n\n"
+                          "def test_one():\n    assert tool.VERSION == 1\n\n\n"
+                          "def test_two():\n    assert tool.VERSION == 1\n\n\n"
+                          "def test_wait():\n    if os.environ.get('CUT_MARKER'):\n"
+                          "        pathlib.Path(os.environ['CUT_MARKER']).write_text('started')\n"
+                          "        time.sleep(300)\n"),
+}
+CUT_FAILED = ["tests/test_cut.py::test_one", "tests/test_cut.py::test_two"]
+
+
+def _cut_off(place: workspace.Workspace, out: Path, until, **env: str) -> None:
+    """Start the real command as the builder does, wait until ``until()`` holds, then cut
+    it off as a session timeout does: SIGTERM to the process group this test started (and
+    SIGKILL if it lingers). Only that group is signalled."""
+    import signal
+    import time
+
+    with out.open("w") as stream:
+        proc = subprocess.Popen(["refactory-targeted-tests"], cwd=place.path,
+                                env={**_agent_env(place), **env}, stdout=stream,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 120
+        while not until():
+            assert proc.poll() is None, out.read_text()
+            assert time.monotonic() < deadline, out.read_text()
+            time.sleep(0.1)
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("check", [CHECK, "python -m pytest -q -n 2 -p no:cacheprovider tests"],
+                         ids=["serial", "xdist"])
+def test_a_real_pytest_run_cut_off_leaves_the_failures_it_saw(tmp_path, check):
+    """The real command runs real pytest (``-q``, so no FAILED line is printed before the
+    summary) and is cut off while a later test still runs: the record holds the failures
+    seen so far, and ``--failed`` reruns exactly those. With xdist, the controller records
+    what its workers report. A new run that is cut off before any failure leaves an empty
+    record, not the last run's failures."""
+    run, _, _ = _run_with_worktree(tmp_path, CUT)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": check})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    record = place.path / ".refactory" / targeted_tests.LAST_RUN
+    marker = tmp_path / "waiting"
+
+    def seen_both() -> bool:
+        return marker.exists() and sorted(targeted_tests._last_failures(record)) == CUT_FAILED
+
+    _cut_off(place, tmp_path / "first.out", seen_both, CUT_MARKER=str(marker))
+    assert "PASSED" not in (tmp_path / "first.out").read_text()
+    assert sorted(targeted_tests._last_failures(record)) == CUT_FAILED
+    listed = json.loads(_command(place, "--failed", "--list").stdout)
+    assert listed["rerun_failed"] is True and sorted(listed["selection"]) == CUT_FAILED
+    if "-n" in check:
+        return
+    # The next --failed says why it reruns so few, and runs only those (not the waiting test).
+    again = _command(place, "--failed")
+    assert "the last run here did not finish" in again.stdout, again.stdout
+    assert "2 test(s) had failed by then, and only those are rerun" in again.stdout
+    assert "test_wait" not in again.stdout.split("running:")[1]
+    assert again.returncode != 0 and "FAILED (exit" in again.stdout
+    # The next run is cut off before anything fails: none of the last run's failures stay,
+    # and --failed runs the full selection.
+    first = tmp_path / "first-test"
+    _cut_off(place, tmp_path / "second.out", first.exists, CUT_FIRST=str(first))
+    assert targeted_tests._last_run(record) == {
+        "finished": False, "failed": [], "seconds": targeted_tests._last_run(record)["seconds"]}
+    listed = json.loads(_command(place, "--failed", "--list").stdout)
+    assert listed["rerun_failed"] is False and "tests/test_cut.py" in listed["selection"]
+
+
+def test_the_command_prints_the_selection_size_and_the_last_time_before_it_runs(tmp_path):
     run, _, _ = _run_with_worktree(tmp_path, PINNED)
     place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
     (place.path / "tool.py").write_text("VERSION = 2\n")
-    # Write a Python test script that prints two FAILED lines then blocks.
-    # Using Python + sys.stdout.flush to ensure the lines reach the pipe before the hang.
-    fake_test = place.path / "_fake_pytest.py"
-    fake_test.write_text(
-        "import sys, time\n"
-        "print('FAILED tests/test_a.py::test_one - assert 1 == 2')\n"
-        "sys.stdout.flush()\n"
-        "print('FAILED tests/test_b.py::test_two - assert 3 == 4')\n"
-        "sys.stdout.flush()\n"
-        "time.sleep(300)\n"
-    )
-    record_dir = place.path / ".refactory"
-    record_dir.mkdir(parents=True, exist_ok=True)
-    record_path = record_dir / targeted_tests.LAST_RUN
-    log_path = record_dir / targeted_tests.LOG_FILE
-    # Launch _run_and_collect in a child process group so we can kill it.
-    import signal
-    import threading
-    import time
+    first = _command(place).stdout
+    plan = "this run: 1 test file(s), 0 test id(s) named; no earlier run here has been timed."
+    assert plan in first and first.index(plan) < first.index("running:")
+    (place.path / PIN).write_text("import tool\n\n\ndef test_pin():\n    assert tool.VERSION == 2\n")
+    second = _command(place).stdout
+    assert re.search(r"this run: 1 test file\(s\), 0 test id\(s\) named; the last finished run "
+                     r"here took about \d+ s\.", second), second
+    assert second.index("the last finished run") < second.index("running:")
+    # A longer run is told in minutes, and an id counts as an id in its file.
+    assert targeted_tests._took(330) == "the last finished run here took about 6 min"
+    assert targeted_tests._size([f"{PIN}::test_pin", "tests/test_other.py"]) == (
+        "2 test file(s), 1 test id(s) named")
 
-    exc_holder: list[BaseException | None] = [None]
 
-    def run_it():
-        try:
-            targeted_tests._run_and_collect(
-                f"{shlex.quote(sys.executable)} {shlex.quote(str(fake_test))}",
-                place.path, record_path=record_path, log_path=log_path)
-        except BaseException as e:
-            exc_holder[0] = e
-
-    thread = threading.Thread(target=run_it, daemon=True)
-    thread.start()
-    # Wait for the record to be written with the two failures.
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if record_path.exists():
-            try:
-                rec = json.loads(record_path.read_text())
-                if len(rec.get("failed", [])) >= 2:
-                    break
-            except (json.JSONDecodeError, OSError):
-                pass
-        time.sleep(0.1)
-    # The record holds exactly the failures printed so far.
-    assert record_path.exists(), "record not written before cutoff"
-    rec = json.loads(record_path.read_text())
-    assert rec["failed"] == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
-    # Kill the hanging child process (the Python script's sleep).
-    # Find it by its command line containing _fake_pytest.py.
-    import signal as _sig
-    for pid_dir in Path("/proc").iterdir():
-        if not pid_dir.name.isdigit():
-            continue
-        try:
-            cmdline = (pid_dir / "cmdline").read_bytes().decode(errors="replace")
-            if "_fake_pytest.py" in cmdline and str(pid_dir.name) != str(os.getpid()):
-                os.kill(int(pid_dir.name), _sig.SIGKILL)
-        except (OSError, PermissionError):
-            continue
-    thread.join(timeout=10)
-    # Confirm --failed reads back exactly those two.
-    failures = targeted_tests._last_failures(record_path)
-    assert failures == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+def test_a_record_or_log_that_cannot_be_written_is_warned_about_and_the_run_goes_on(tmp_path):
+    """The record's folder and the log cannot be made (a file stands where the folder goes):
+    each is warned about by path, and the tests still run and report."""
+    run, _, _ = _run_with_worktree(tmp_path, PINNED)
+    place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
+    (place.path / "tool.py").write_text("VERSION = 2\n")
+    own = place.path / ".refactory"
+    import shutil
+    shutil.rmtree(own, ignore_errors=True)
+    own.write_text("not a folder\n")
+    said = _command(place)
+    assert said.returncode != 0 and f"FAILED {PIN}::test_pin" in said.stdout, said.stdout
+    assert f"warning: could not make {own}" in said.stderr, said.stderr
+    assert f"could not open the output log {own / targeted_tests.LOG_FILE}" in said.stderr, \
+        said.stderr
 
 
 def test_remember_warns_on_write_failure(tmp_path, capsys):
@@ -283,15 +334,16 @@ def test_remember_warns_on_write_failure(tmp_path, capsys):
     record_path = tmp_path / "record" / targeted_tests.LAST_RUN
     # Create a directory where the JSON file should go, so writing the file fails.
     record_path.mkdir(parents=True)
-    targeted_tests._remember(record_path, ["tests/test_x.py::test_y"])
+    targeted_tests._remember(record_path, ["tests/test_x.py::test_y"], 1.0)
     captured = capsys.readouterr()
     assert "warning" in captured.err
     assert str(record_path) in captured.err
 
 
 def test_record_and_log_never_reach_the_change(tmp_path):
-    """The record and log files are inside .refactory/, which is excluded from delivery.
-    After a targeted run they must not appear in git status or the emitted diff."""
+    """The record, the failure stream, the pytest plugin and the log are inside .refactory/,
+    which is excluded from delivery. After a targeted run they must not appear in git status
+    or the emitted diff."""
     run, _, _ = _run_with_worktree(tmp_path, PINNED)
     place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": CHECK})
     (place.path / "tool.py").write_text("VERSION = 2\n")
@@ -300,13 +352,19 @@ def test_record_and_log_never_reach_the_change(tmp_path):
     # The record and log exist in the workspace.
     assert (place.path / ".refactory" / targeted_tests.LAST_RUN).exists()
     assert (place.path / ".refactory" / targeted_tests.LOG_FILE).exists()
+    assert (place.path / ".refactory" / targeted_tests.FAILURES).read_text() == f"{PIN}::test_pin\n"
+    plugin = place.path / ".refactory" / targeted_tests.PLUGINS / f"{targeted_tests.PLUGIN}.py"
+    assert plugin.exists()
     # They do not appear in git status (the workspace's .gitignore or exclusion hides them).
     status = subprocess.run(
         ["git", "-C", str(place.path), "status", "--porcelain", "-uall"],
         capture_output=True, text=True, check=True).stdout
     assert targeted_tests.LAST_RUN not in status
     assert targeted_tests.LOG_FILE not in status
+    assert targeted_tests.FAILURES not in status and targeted_tests.PLUGIN not in status
+    assert status == " M tool.py\n", status
     # They do not appear in the emitted diff.
     emission = _emission(place)
     assert targeted_tests.LAST_RUN not in emission
     assert targeted_tests.LOG_FILE not in emission
+    assert targeted_tests.FAILURES not in emission and targeted_tests.PLUGIN not in emission

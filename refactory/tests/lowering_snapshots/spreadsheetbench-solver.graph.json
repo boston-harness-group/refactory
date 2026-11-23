@@ -175,8 +175,7 @@
           "crash"
         ],
         "times": 4,
-        "timeout_factor": 2,
-        "keep_workspace": false
+        "timeout_factor": 2
       },
       "missing_on_crash": true,
       "tool_policy": "refused",

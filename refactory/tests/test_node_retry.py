@@ -34,7 +34,7 @@ from refactory_dsh.node_retry import (INVENTED_TOOL_CALLS, RETRY_EVENT, RetriesE
                                       attempt_walls, deliver, failure_kind, node_allowance_s,
                                       retries)
 
-RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": False}
+RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
 REPORT = "reviews/report.md"
 
 FAKE_DSH = '''import json, os, sys, time, pathlib
@@ -54,6 +54,8 @@ if step.get("fresh"):
 if step.get("kept"):
     assert pathlib.Path("stale.txt").exists(), "previous attempt's edits were lost"
     assert "Your workspace holds the previous attempt" in prompt, "missing keep_workspace note"
+if step.get("fresh") or step.get("not_kept"):
+    assert "Your workspace holds the previous attempt" not in prompt, "note on a fresh workspace"
 if step.get("check_child_gone"):
     pid_file = pathlib.Path(step["check_child_gone"])
     if pid_file.exists():
@@ -75,11 +77,13 @@ if step.get("spawn_child"):
     # can find and kill it. Write its PID to a file for the retry step to verify.
     # Redirect all stdio to DEVNULL so the child does not hold the parent's pipes open
     # (which would cause "child cleanup unconfirmed" and block the retry).
+    # With "child_cwd", it stays in this session instead and works outside the workspace,
+    # so only the attempt's session identifies it.
     child_script = "import time, os; time.sleep(300)"
     child = subprocess.Popen(
         [sys.executable, "-c", child_script],
-        start_new_session=True,
-        cwd=os.getcwd(),
+        start_new_session=not step.get("child_cwd"),
+        cwd=step.get("child_cwd") or os.getcwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -521,9 +525,13 @@ def test_the_declaration_has_one_canonical_form():
     assert retry_declaration(None) is None
     # times 0 declares no retry, turning off a data pass's default.
     assert retry_declaration({"times": 0})["times"] == 0
+    # keep_workspace is written only when set, so a rule without it reads as before.
+    assert retry_declaration({"keep_workspace": False}) == RULE
+    assert retry_declaration({"keep_workspace": True}) == {**RULE, "keep_workspace": True}
     for bad, says in [({"on": ["error"]}, "unknown"), ({"on": "timeout"}, "non-empty list"),
                       ({"times": -1}, "times"), ({"times": 5}, "times"), ({"times": True}, "times"),
                       ({"timeout_factor": 0.5}, "timeout_factor"), ({"wait": 1}, "unknown"),
+                      ({"keep_workspace": 1}, "keep_workspace"),
                       ("timeout", "mapping")]:
         with pytest.raises(ValueError, match=says):
             retry_declaration(bad)
@@ -589,10 +597,13 @@ def test_design_mode_retries_its_builder_and_verifier():
     assert [node.id for node in graph.nodes.values() if node.retry is not None] == ["emit", "verifier"]
     assert sorted(node.id for node in graph.nodes.values() if node.outputs_only) == [
         "qa_director_rerun", "verifier"]
-    assert graph.nodes["verifier"].retry == retry_declaration(TIMEOUT_RETRY) == RULE
+    assert graph.nodes["verifier"].retry == TIMEOUT_RETRY == RULE
     # The builder's limit is a hard maximum (inactivity stops a stuck one sooner), and its
-    # retry has the same maximum rather than twice it.
-    assert graph.nodes["emit"].retry == retry_declaration(BUILDER_RETRY)
+    # retry has the same maximum rather than twice it. Its timeout retry keeps the
+    # workspace, so the second session continues from the first one's edits.
+    assert graph.nodes["emit"].retry["keep_workspace"] is True
+    assert graph.nodes["emit"].retry == {"on": ["timeout"], "times": 1, "timeout_factor": 1,
+                                         "keep_workspace": True} == BUILDER_RETRY
     assert graph.nodes["emit"].timeout_s == BUILDER_TIMEOUT_S == 14400
 
 
@@ -609,13 +620,13 @@ def test_other_modes_declare_no_retry():
             # crashing solve run through them: test_spreadsheetbench's
             # test_a_crashed_solve_call_gets_five_attempts.
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
-                {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2, "keep_workspace": False}}
+                {"solve": {"on": ["crash"], "times": 4, "timeout_factor": 2}}
             continue
         if key in ("spreadsheetbench-agent", "spreadsheetbench_v2-agent"):
             # SkillOpt's one retry on an empty response, on the solve node only:
             # test_spreadsheetbench_agent's test_the_command_line_is_skillopts.
             assert {k: n["retry"] for k, n in nodes.items() if "retry" in n} == \
-                {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2, "keep_workspace": False}}
+                {"solve": {"on": ["crash"], "times": 1, "timeout_factor": 2}}
             continue
         assert all("retry" not in node for node in nodes.values()), key
 
@@ -656,9 +667,9 @@ def test_a_builder_that_times_out_once_is_retried_and_the_run_continues(tmp_path
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_a_builders_retry_workspace_holds_none_of_the_first_attempts_edits(tmp_path, runtime, monkeypatch):
-    """A node with keep_workspace=False (the default) still gets a fresh workspace on retry."""
+    """A node whose retry does not keep its workspace gets a fresh one on retry."""
     monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
-    fresh_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": False}
+    fresh_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2}
     dsh = Scripted(tmp_path / "dsh", [
         {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}},
         {"fresh": True, "write": {EMIT_FILE: "clean build"}, "answer": "done"},
@@ -699,42 +710,121 @@ def test_a_builders_retry_with_keep_workspace_preserves_the_first_attempts_edits
     assert "continued build" in (workdir / EMIT_FILE).read_text()
 
 
-@pytest.mark.parametrize("runtime", RUNTIMES)
-def test_kept_workspace_retry_waits_for_stale_processes_to_end(tmp_path, runtime, monkeypatch):
-    """When keep_workspace is True, the retry terminates stale child processes from the
-    timed-out attempt before reusing the workspace. The first attempt spawns a background
-    child process (in a new session so it survives SIGTERM), then goes silent so the
-    inactivity timeout fires. The retry step verifies the child is gone before it starts."""
-    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
-    keep_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
-    # spawn_child writes the child's PID to this path; check_child_gone reads it back.
-    pid_file = str(tmp_path / "child.pid")
-    dsh = Scripted(tmp_path / "dsh", [
-        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"},
-         "spawn_child": pid_file},
-        {"kept": True, "check_child_gone": pid_file,
-         "write": {EMIT_FILE: "clean after stale"}, "answer": "done"},
-    ])
+def _end_own_child(pid_file: Path) -> None:
+    """End the child this test's scripted session started, if it is still there: only that
+    PID, which the session wrote down."""
+    import signal
+
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
+
+
+def _ended(pid_file: Path) -> bool:
+    """Whether the child named in ``pid_file`` has ended (gone, or a zombie)."""
+    from refactory_dsh import attempt_processes
+
+    return attempt_processes._gone(int(pid_file.read_text().strip()))
+
+
+def _workdir(tmp_path: Path, runtime: str) -> Path:
     workdir = tmp_path / "run"
     if runtime == "spine":
         from refactory_dsh import worktree
         from tests_support import git_repo
         workdir.mkdir()
         worktree.create(git_repo(tmp_path / "repo"), "HEAD", "0123456789ab", workdir)
-    ok, error = _run(runtime, workdir, _graph(_builder_node(retry=keep_rule)), dsh.client())
+    return workdir
+
+
+KEEP_RULE = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+@pytest.mark.parametrize("found_by", ["workspace", "session"])
+def test_kept_workspace_retry_ends_the_timed_out_attempts_processes_first(
+        tmp_path, runtime, found_by, monkeypatch):
+    """Before a retry keeps the workspace, what the timed-out attempt left running is ended
+    and waited for, on Linux and macOS. ``workspace``: a child that left the session
+    (``setsid``) but works in the workspace. ``session``: a child still in the attempt's
+    session that works outside the workspace. The retry checks the child is gone before it
+    starts, and still finds the first attempt's edits."""
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    pid_file = tmp_path / "child.pid"
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    first = {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"},
+             "spawn_child": str(pid_file)}
+    if found_by == "session":
+        first["child_cwd"] = str(outside)
+    dsh = Scripted(tmp_path / "dsh", [
+        first, {"kept": True, "check_child_gone": str(pid_file),
+                "write": {EMIT_FILE: "clean after stale"}, "answer": "done"}])
+    workdir = _workdir(tmp_path, runtime)
+    try:
+        ok, error = _run(runtime, workdir, _graph(_builder_node(retry=KEEP_RULE)), dsh.client())
+        assert ok, error
+        assert dsh.calls == 2
+        assert "clean after stale" in (workdir / EMIT_FILE).read_text()
+        assert _ended(pid_file)
+    finally:
+        _end_own_child(pid_file)
+
+
+@pytest.mark.parametrize("runtime", RUNTIMES)
+def test_a_retry_after_a_crash_does_not_keep_the_workspace(tmp_path, runtime, monkeypatch):
+    """``keep_workspace`` is for a timeout: a rule that also answers a crash retries the
+    crashed attempt from a fresh workspace, with no note about kept edits."""
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    rule = {"on": ["crash", "timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
+    dsh = Scripted(tmp_path / "dsh", [
+        {"write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}, "exit": 1,
+         "stderr": "worker: the session failed"},
+        {"fresh": True, "write": {EMIT_FILE: "clean build"}, "answer": "done"},
+    ])
+    workdir = _workdir(tmp_path, runtime)
+    ok, error = _run(runtime, workdir, _graph(_builder_node(retry=rule)), dsh.client())
     assert ok, error
     assert dsh.calls == 2
-    # The retry completed with the kept workspace (stale.txt was checked by FAKE_DSH)
-    assert "clean after stale" in (workdir / EMIT_FILE).read_text()
-    # Double-check: the stale child process is truly gone
-    pid_path = Path(pid_file)
-    if pid_path.exists():
-        pid = int(pid_path.read_text().strip())
-        try:
-            os.kill(pid, 0)
-            pytest.fail(f"stale child process {pid} is still running after test")
-        except ProcessLookupError:
-            pass  # expected
+    assert "clean build" in (workdir / EMIT_FILE).read_text()
+
+
+def test_a_process_that_outlives_the_wait_makes_the_retry_start_fresh(tmp_path, monkeypatch,
+                                                                       capfd):
+    """When a process the timed-out attempt left does not end within the bounded wait, the
+    workspace is not kept: the retry starts fresh, with a warning naming the process. (The
+    walker runs in this process, so the surviving process is simulated by making the
+    wait see the child as never ending; SIGKILL always ends a real one of ours.)"""
+    from refactory_dsh import attempt_processes
+
+    monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
+    monkeypatch.setattr(attempt_processes, "TERM_GRACE_S", 0.2)
+    monkeypatch.setattr(attempt_processes, "KILL_WAIT_S", 0.2)
+    pid_file = tmp_path / "child.pid"
+    real_gone = attempt_processes._gone
+
+    def never_gone(pid: int) -> bool:
+        return False if pid_file.exists() and pid == int(pid_file.read_text()) else real_gone(pid)
+
+    monkeypatch.setattr(attempt_processes, "_gone", never_gone)
+    dsh = Scripted(tmp_path / "dsh", [
+        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"},
+         "spawn_child": str(pid_file)},
+        {"fresh": True, "write": {EMIT_FILE: "clean build"}, "answer": "done"},
+    ])
+    workdir = tmp_path / "run"
+    try:
+        ok, error = _run("walker", workdir, _graph(_builder_node(retry=KEEP_RULE)), dsh.client())
+        assert ok, error
+        assert dsh.calls == 2
+        assert "clean build" in (workdir / EMIT_FILE).read_text()
+        pid = int(pid_file.read_text())
+        err = capfd.readouterr().err
+        assert f"process(es) [{pid}]" in err and "starts from a fresh workspace" in err, err
+    finally:
+        _end_own_child(pid_file)
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)

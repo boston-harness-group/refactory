@@ -73,11 +73,16 @@ NO_TOOLS_NOTE = ("Note: your previous reply to this step was refused because it 
                  "those results were invented. Answer directly from the prompt and your own "
                  "reasoning, without writing tool calls or their results.")
 
-#: What a retry after a timeout with ``keep_workspace`` adds to the node's prompt: the
-#: workspace holds the previous attempt's unfinished edits; the builder is told how to see them.
+#: What a retry after a timeout with ``keep_workspace`` adds to the node's prompt when its
+#: workspace was kept (`KEPT_SYNCS`): it holds the previous attempt's unfinished edits; the
+#: builder is told how to see them.
 KEEP_WORKSPACE_NOTE = ("Your workspace holds the previous attempt's unfinished edits. "
                        "Start with `git status` and `git diff --stat` against the base "
                        "to see them, then continue from there.")
+
+#: How a workspace was synced (`workspace.Workspace.synced`) when it still holds the last
+#: attempt's work: a clone reset, re-cloned or made afresh does not.
+KEPT_SYNCS = frozenset({"kept", "verified"})
 
 #: The ``reason`` of the `RETRY_EVENT` for that retry.
 INVENTED_TOOL_CALLS = "invented_tool_calls"
@@ -308,6 +313,20 @@ def clear_spent(workdir: Path, node: str) -> None:
     `nn.executor.Executor._visit`, `run.run_node`)."""
     (Path(workdir) / "reviews" / f"{node}-missing.txt").unlink(missing_ok=True)
     (Path(workdir) / MISSING_DIR / f"{node}.json").unlink(missing_ok=True)
+
+
+def _session_of(error: BaseException) -> int | None:
+    """The session the failed attempt's CLI ran in (``session_id``, set by
+    `model.ModelClient._run_completion`), from ``error`` or what it was raised from."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        session = getattr(current, "session_id", None)
+        if isinstance(session, int):
+            return session
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def failure_kind(error: BaseException) -> str | None:
@@ -645,12 +664,21 @@ def deliver(
     attempt_prompt = prompt
     told = False
     index = 0
+    #: Whether this attempt keeps the workspace: only a retry after a timeout, under a rule
+    #: that keeps it; and the timed-out attempt's session, whose processes end first.
+    keep_now = False
+    stale_session: int | None = None
     while True:
         worktree = _worktree_state(workdir) if rule else None
         started = None
         invented: list[str] = []
         try:
-            with workspace(index > 0 or told, keep=keep and index > 0) if workspace is not None else nullcontext(None) as place:
+            opened = (workspace(index > 0 or told, keep=keep_now, session=stale_session)
+                      if workspace is not None else nullcontext(None))
+            with opened as place:
+                if keep_now and place is not None and place.synced in KEPT_SYNCS:
+                    attempt_prompt = f"{attempt_prompt}\n\n{KEEP_WORKSPACE_NOTE}"
+                keep_now, stale_session = False, None
                 delivery = begin(workdir, node, attempt_prompt, list(writes), reads=list(reads),
                                  model_context=_context(attempt_client),
                                  **({"workspace": place.describe()} if place is not None else {}),
@@ -704,8 +732,8 @@ def deliver(
             # told it has no tools stays told.
             attempt_prompt = (f"{prompt}\n\n{OUTPUT_LIMIT_NOTE}" if _output_limit(error) else prompt) \
                 + (f"\n\n{NO_TOOLS_NOTE}" if told else "")
-            if keep and workspace is not None:
-                attempt_prompt += f"\n\n{KEEP_WORKSPACE_NOTE}"
+            keep_now = keep and kind == "timeout" and workspace is not None
+            stale_session = _session_of(error) if keep_now else None
             index += 1
             continue
         if invented:
