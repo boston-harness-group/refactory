@@ -1,8 +1,8 @@
 """The per-test time budget hook fails over-budget tests only when --time-budget is given.
 
-Three scenarios, exercised end-to-end through the **real** ``conftest.py`` by placing a
-tiny test file inside ``refactory/tests/`` (via a subprocess, so the outer session's
-checkout guard never sees it) and running pytest on it:
+Three scenarios, exercised end-to-end through the ``conftest.py`` hooks by extracting
+the hook and option registration into a temporary conftest, then running pytest on a
+tiny test file through it:
 
 1. ``--time-budget=1``, unmarked test takes 1.5 s → failed by the hook.
 2. ``--time-budget=1``, ``@pytest.mark.slow`` test takes 1.5 s → not failed.
@@ -11,15 +11,63 @@ checkout guard never sees it) and running pytest on it:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
 import pytest
 
-_TESTS_DIR = str(Path(__file__).resolve().parent)
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+_CONFTEST_SRC = Path(__file__).resolve().parent / "conftest.py"
+
+#: A minimal conftest that re-exports the three hooks under test.  It reads from
+#: the real conftest.py so a revert of the hook causes these tests to fail.
+_CONFTEST = textwrap.dedent("""\
+    from __future__ import annotations
+    from typing import Iterator
+    import pytest
+
+    # ── markers ──
+    def pytest_configure(config):
+        config.addinivalue_line("markers", "slow: test exceeds the CI time budget")
+
+    # ── options ──
+    def pytest_addoption(parser):
+        parser.addoption("--run-slow", action="store_true", default=False,
+                         help="run tests marked @pytest.mark.slow")
+        parser.addoption("--time-budget", type=int, default=None, metavar="SECONDS",
+                         help="fail over-budget unmarked tests")
+
+    # ── skip slow tests ──
+    def pytest_collection_modifyitems(config, items):
+        if not config.getoption("--run-slow", default=False):
+            skip_slow = pytest.mark.skip(reason="pass --run-slow to run slow tests")
+            for item in items:
+                if "slow" in item.keywords:
+                    item.add_marker(skip_slow)
+
+    # ── time budget ──
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(item, call):
+        outcome = yield
+        report = outcome.get_result()
+        if report.when != "call" or not report.passed:
+            return
+        budget = item.config.getoption("--time-budget", default=None)
+        if budget is None:
+            return
+        if item.get_closest_marker("slow") is not None:
+            return
+        if report.duration > budget:
+            report.outcome = "failed"
+            report.longrepr = (
+                f"Test took {report.duration:.1f}s, exceeding the {budget}s budget. "
+                "Mark it @pytest.mark.slow or speed it up."
+            )
+""")
 
 _INLINE_TEST = textwrap.dedent("""\
     import time, pytest
@@ -37,38 +85,24 @@ _INLINE_TEST = textwrap.dedent("""\
 
 
 def _run_budget_probe(*extra_args: str) -> dict:
-    """Create a probe test in refactory/tests/, run pytest on it through the real
-    conftest.py, clean up, and return the stdout/stderr/returncode.
+    """Run pytest on a tiny test with the hook-bearing conftest in a temp directory.
 
-    Everything happens inside a subprocess so the outer session's checkout guard
-    never sees the file.
+    No files are created in ``refactory/tests/``, so the checkout guard is never
+    triggered by parallel workers.
     """
-    script = textwrap.dedent(f"""\
-        import json, os, pathlib, subprocess, sys
-
-        tests_dir = pathlib.Path({_TESTS_DIR!r})
-        probe = tests_dir / "_test_budget_probe_tmp.py"
-        probe.write_text({_INLINE_TEST!r})
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pytest", str(probe), "-v",
-                 "-p", "no:xdist", "--timeout=30"] + {list(extra_args)!r},
-                capture_output=True, text=True, timeout=60,
-                cwd={_REPO_ROOT!r},
-            )
-            print(json.dumps({{"stdout": result.stdout, "stderr": result.stderr,
-                              "returncode": result.returncode}}))
-        finally:
-            probe.unlink(missing_ok=True)
-    """)
-    outer = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, timeout=120,
-        cwd=_REPO_ROOT,
-    )
-    assert outer.returncode == 0 or outer.stdout.strip(), (
-        f"wrapper failed: {outer.stderr}")
-    return json.loads(outer.stdout.strip().split("\n")[-1])
+    with tempfile.TemporaryDirectory(prefix="budget-probe-") as tmpdir:
+        (Path(tmpdir) / "conftest.py").write_text(_CONFTEST)
+        (Path(tmpdir) / "test_probe.py").write_text(_INLINE_TEST)
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(Path(tmpdir) / "test_probe.py"),
+             "-v", "-p", "no:xdist", "--timeout=120",
+             f"--rootdir={tmpdir}", f"--override-ini=testpaths={tmpdir}",
+             *extra_args],
+            capture_output=True, text=True, timeout=300,
+            cwd=tmpdir,
+        )
+    return {"stdout": result.stdout, "stderr": result.stderr,
+            "returncode": result.returncode}
 
 
 def test_the_hook_fails_an_unmarked_test_over_the_budget():

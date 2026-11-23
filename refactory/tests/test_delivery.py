@@ -8,39 +8,16 @@ GitHub is `fake_gh.py` over bare repositories on disk, which git reaches through
 pushes and the registry are real.
 
 Speed optimizations (d16):
-- A module-scoped ``_git_pair_template`` fixture creates the common two-commit repo
-  once; the ~15 inline ``git init + add + commit + rev-parse`` blocks clone it via
-  ``shutil.copytree``.
 - The module-scoped golden fixtures from ``_delivery_support`` (``_new_golden``,
-  ``_opened_golden``) already share the two most common design runs.
+  ``_opened_golden``) share the two most common design runs; each test gets a cheap
+  ``shutil.copytree`` clone instead of a fresh walker run.
 """
 
 from __future__ import annotations
 
-import shutil
-
 import pytest
 
 from _delivery_support import *  # noqa: F403  (the helpers and fixtures these tests share)
-
-
-@pytest.fixture(scope="module")
-def _git_pair_template(tmp_path_factory) -> tuple:
-    """Two-commit repo (base, head) built once per module.
-
-    Many body/title tests create an identical two-commit repo to get a ``(base, head)``
-    pair.  This builds it once; tests that need a writable copy clone from it.
-    """
-    root = tmp_path_factory.mktemp("git-pair-tpl")
-    base, head = _git_pair(root / "repo")  # noqa: F405
-    return root / "repo", base, head
-
-
-def _cloned_pair(template: tuple, dest) -> tuple:
-    """Clone the two-commit template into *dest*; return ``(base, head)``."""
-    repo, base, head = template
-    shutil.copytree(repo, dest)
-    return base, head
 
 
 def test_pr_body_lists_the_gate_corrections_one_bullet_each(tmp_path):

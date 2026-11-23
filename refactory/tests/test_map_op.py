@@ -258,11 +258,12 @@ class _Model:
         return "<answer>B</answer>"
 
 
-def _walk(name: str, state: dict, tmp_path: Path, monkeypatch) -> tuple[Any, list]:
+def _walk(name: str, state: dict, tmp_path: Path, monkeypatch,
+          *, walker_id: str = "walker") -> tuple[Any, list]:
     _patch_task(monkeypatch)
     log: list = []
-    run = tmp_path / "walker"
-    run.mkdir()
+    run = tmp_path / walker_id
+    run.mkdir(parents=True, exist_ok=True)
     return _mode(name, state).run(run, model=_Model(log)), log
 
 
@@ -385,8 +386,8 @@ def test_spine_records_every_visit_and_call_of_a_map(tmp_path):
         _every_visit_and_call_recorded(records, 8)
 
 
-def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True
-                ) -> tuple[list, Scripted]:
+def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool = True,
+                spine_id: str = "spine") -> tuple[list, Scripted]:
     """The mode state on the spine drain, its agents dispatched to workers (`worker_node`,
     which refuses a run whose element was not written) against a scripted dsh."""
     import os
@@ -395,17 +396,18 @@ def _dispatched(name: str, state: dict, plan: dict, tmp_path: Path, *, ok: bool 
     from refactory_dsh import workers
     from test_livemath_blocks import DRAIN_AGENT, FIXTURE_DIR, NODE, PYTHON_BIN, REPO_ROOT
 
-    dsh = Scripted(tmp_path / "dsh", plan)
-    run = tmp_path / "spine"
+    dsh = Scripted(tmp_path / f"dsh-{spine_id}", plan)
+    run = tmp_path / spine_id
 
     def dispatched(workflow: Any) -> Any:
-        return workers.lower_workflow(workflow, tmp_path / "specs", dsh.client().context(),
+        return workers.lower_workflow(workflow, tmp_path / f"specs-{spine_id}",
+                                      dsh.client().context(),
                                       lowering.node_declarations(state))
 
-    run.mkdir()
+    run.mkdir(parents=True, exist_ok=True)
     lowering.write_declarations(state, run)
-    graph_path, _ = lowering.write_mode_graph(state, tmp_path / "graphs", name="map",
-                                              transform=dispatched)
+    graph_path, _ = lowering.write_mode_graph(state, tmp_path / f"graphs-{spine_id}",
+                                              name="map", transform=dispatched)
     env = {key: value for key, value in os.environ.items() if key != "REFACTORY_WORKER_CONTEXT"}
     env.update(REFACTORY_WORKDIR=str(run), PYTHONPATH=str(Path(__file__).resolve().parent),
                LIVEMATH_DATA_PATH=str(FIXTURE_DIR), PATH=f"{PYTHON_BIN}:{env.get('PATH', '')}")

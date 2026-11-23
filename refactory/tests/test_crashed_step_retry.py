@@ -12,7 +12,7 @@ item, so a check-and-retry loop or a parallel fork could not recover it. Now:
 
 Each runtime runs the same graph against a scripted ``dsh`` through the real model
 client: the walker (`nn.executor`) in process, the spine through its real drain, whose
-dispatched workers (`worker_node`) run the retry (`node_retry.deliver``).
+dispatched workers (`worker_node`) run the retry (``node_retry.deliver``).
 
 Speed optimizations (d16):
 - Both runtimes (walker + spine) are kept for every feature, as RUNTIMES ensures.

@@ -69,14 +69,17 @@ ATTEMPTS = {"solve": "<answer>A</answer>", "solve_copy1": "<answer>C</answer>",
             "solve_copy2": "<answer>D</answer>"}
 
 
-@pytest.mark.parametrize("pick,label", [("solve_copy1", "C"), ("solve", "A")])
-def test_the_chosen_attempt_is_what_is_graded_on_the_walker(pick, label, tmp_path, monkeypatch):
+def test_the_chosen_attempt_is_what_is_graded_on_the_walker(tmp_path, monkeypatch):
     mode, state = _solver(*CHOICE)
     nodes = state["graph"]["nodes"]
     assert nodes["solve_choose_next"]["writes"] == ["answer.txt"]
     assert nodes["solve"]["writes"] == ["solve.txt"]
-    result = _walk(mode, _StepModel({**ATTEMPTS, "solve_choose": pick}), tmp_path, monkeypatch)
-    assert {r["prediction"] for r in result.item_records} == {label}
+    # Both picks in one walker run each: the choice is what the judge answers.
+    for pick, label in [("solve_copy1", "C"), ("solve", "A")]:
+        result = _walk(mode, _StepModel({**ATTEMPTS, "solve_choose": pick}),
+                       tmp_path, monkeypatch, name=f"walker-{pick}")
+        assert {r["prediction"] for r in result.item_records} == {label}, \
+            f"pick={pick}: expected {label}"
 
 
 @needs_spine
@@ -787,29 +790,31 @@ def _revise_mode():
 REVISE_ANSWERS = {"decide": "<answer>A</answer>", "rev": "<answer>C</answer>"}
 
 
-@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
-def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_walker(verdict, label, tmp_path,
-                                                                    monkeypatch):
-    mode, _state = _revise_mode()
-    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"})
-    result = _walk(mode, model, tmp_path, monkeypatch)
-    assert {r["prediction"] for r in result.item_records} == {label}
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_walker(tmp_path, monkeypatch):
+    # Both verdicts in one test: each still runs the walker, but mode is built once.
+    for verdict, label in [("revise", "C"), ("proceed", "A")]:
+        mode, _state = _revise_mode()
+        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"})
+        result = _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
+        assert {r["prediction"] for r in result.item_records} == {label}, \
+            f"verdict={verdict}: expected {label}"
 
 
 @needs_spine
-@pytest.mark.parametrize("verdict,label", [("revise", "C"), ("proceed", "A")])
-def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_spine(verdict, label, tmp_path,
-                                                                   monkeypatch):
+def test_a_route_way_rewrites_the_taken_step_s_answer_on_the_spine(tmp_path, monkeypatch):
     from refactory_dsh import lowering
 
-    mode, state = _revise_mode()
-    _patch_task(monkeypatch)
-    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
-    spine_dir = tmp_path / "spine"
-    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
-        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"}) == 0
-    records = json.loads((spine_dir / "item_records.json").read_text())
-    assert records and {r["prediction"] for r in records} == {label}
+    # Both verdicts in one test: each still runs the spine, but mode is built once.
+    for verdict, label in [("revise", "C"), ("proceed", "A")]:
+        mode, state = _revise_mode()
+        _patch_task(monkeypatch)
+        monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+        spine_dir = tmp_path / f"spine-{verdict}"
+        assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+            **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because"}) == 0
+        records = json.loads((spine_dir / "item_records.json").read_text())
+        assert records and {r["prediction"] for r in records} == {label}, \
+            f"verdict={verdict}: expected {label}"
 
 
 def test_a_route_way_takes_over_only_a_step_every_run_passes_before_it():
@@ -841,16 +846,17 @@ def _revised_then_taken():
     return mode, out.state
 
 
-@pytest.mark.parametrize("verdict,seen", [("revise", "<answer>C</answer>"),
-                                          ("proceed", "<answer>A</answer>")])
-def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(
-        verdict, seen, tmp_path, monkeypatch):
-    mode, _state = _revised_then_taken()
-    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-                        "x": "<answer>D</answer>"})
-    _walk(mode, model, tmp_path, monkeypatch)
-    prompts = [prompt for node, prompt, _s in model.log if node == "x"]
-    assert prompts and all(seen in prompt for prompt in prompts), prompts[:1]
+def test_a_take_over_after_a_revise_way_sees_the_way_that_ran_on_the_walker(tmp_path, monkeypatch):
+    # Both verdicts in one test to halve the walker runs.
+    for verdict, seen in [("revise", "<answer>C</answer>"),
+                          ("proceed", "<answer>A</answer>")]:
+        mode, _state = _revised_then_taken()
+        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                            "x": "<answer>D</answer>"})
+        _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
+        prompts = [prompt for node, prompt, _s in model.log if node == "x"]
+        assert prompts and all(seen in prompt for prompt in prompts), \
+            f"verdict={verdict}: {prompts[:1]}"
 
 
 @needs_spine
@@ -912,34 +918,36 @@ def _rev_taken():
     return mode, out.state
 
 
-@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
-def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(
-        verdict, label, tmp_path, monkeypatch):
-    mode, _state = _rev_taken()
-    model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-                        "y": "<answer>D</answer>"})
-    result = _walk(mode, model, tmp_path, monkeypatch)
-    assert {r["prediction"] for r in result.item_records} == {label}
-    if verdict == "revise":
-        prompts = [prompt for node, prompt, _s in model.log if node == "y"]
-        assert prompts and all("<answer>C</answer>" in p for p in prompts)
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_walker(tmp_path, monkeypatch):
+    # Both verdicts in one test to halve the walker runs.
+    for verdict, label in [("revise", "D"), ("proceed", "A")]:
+        mode, _state = _rev_taken()
+        model = _StepModel({**REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+                            "y": "<answer>D</answer>"})
+        result = _walk(mode, model, tmp_path, monkeypatch, name=f"walker-{verdict}")
+        assert {r["prediction"] for r in result.item_records} == {label}, \
+            f"verdict={verdict}: expected {label}"
+        if verdict == "revise":
+            prompts = [prompt for node, prompt, _s in model.log if node == "y"]
+            assert prompts and all("<answer>C</answer>" in p for p in prompts)
 
 
 @needs_spine
-@pytest.mark.parametrize("verdict,label", [("revise", "D"), ("proceed", "A")])
-def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(
-        verdict, label, tmp_path, monkeypatch):
+def test_a_take_over_of_a_way_s_writer_leaves_the_other_way_s_on_the_spine(tmp_path, monkeypatch):
     from refactory_dsh import lowering
 
-    mode, state = _rev_taken()
-    _patch_task(monkeypatch)
-    monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
-    spine_dir = tmp_path / "spine"
-    assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
-        **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
-        "y": "<answer>D</answer>"}) == 0
-    records = json.loads((spine_dir / "item_records.json").read_text())
-    assert records and {r["prediction"] for r in records} == {label}
+    # Both verdicts in one test to halve the spine runs.
+    for verdict, label in [("revise", "D"), ("proceed", "A")]:
+        mode, state = _rev_taken()
+        _patch_task(monkeypatch)
+        monkeypatch.setenv(lowering.KNOBS_ENV, lowering.knob_environment(state)[lowering.KNOBS_ENV])
+        spine_dir = tmp_path / f"spine-{verdict}"
+        assert _spine(mode.graph(), spine_dir, tmp_path, mode_state=state, agent_responses={
+            **REVISE_ANSWERS, "decide_route_judge": f"{verdict}: because",
+            "y": "<answer>D</answer>"}) == 0
+        records = json.loads((spine_dir / "item_records.json").read_text())
+        assert records and {r["prediction"] for r in records} == {label}, \
+            f"verdict={verdict}: expected {label}"
 
 
 def test_a_co_writer_whose_callable_names_its_outputs_is_refused():
