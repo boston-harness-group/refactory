@@ -34,7 +34,7 @@ DESIGN_MODES = ("default_pack/design", "default_pack/design_fast")
 GRAPH_MODE = "default_pack/design"
 #: The flags that say how a design run is delivered (#350). design_fast, which has no
 #: approval gate, takes none of them.
-DELIVERY_FLAGS: tuple[str, ...] = ("--no-pr", "--refine", "--review-comments")
+DELIVERY_FLAGS: tuple[str, ...] = ("--no-pr", "--refine", "--review-comments", "--finish", "--items")
 #: The knob ``--attempts N`` sets on each authoring mode.
 ATTEMPTS = {
     "default_pack/design": "check_attempts", "default_pack/create": "attempts", "default_pack/edit": "attempts",
@@ -107,6 +107,13 @@ def add_authoring_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--review-comments", action="store_true",
                         help="design only, with --refine: add the pull request's reviews and comments to the "
                              "run's steering")
+    parser.add_argument("--finish", action="store_true",
+                        help="design only, with --refine: finish the pull request's Open items in one fix "
+                             "round and update them in its description; the approval gate is skipped when "
+                             "every item worked on is concrete")
+    parser.add_argument("--items", default="", metavar="ID[,ID...]",
+                        help="with --finish: the Open items to work on (default: every open item that is not "
+                             "a judgment_call)")
 
 
 def add_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -202,7 +209,9 @@ def _located(args: argparse.Namespace) -> list[str]:
                                      ("--no-worktree", args.no_worktree), ("--setup", args.setup),
                                      ("--generate", args.generate),
                                      ("--no-pr", args.no_pr), ("--refine", args.refine),
-                                     ("--review-comments", args.review_comments)) if given]
+                                     ("--review-comments", args.review_comments),
+                                     ("--finish", getattr(args, "finish", False)),
+                                     ("--items", getattr(args, "items", ""))) if given]
 
 
 def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, label: str = "") -> str | None:
@@ -222,6 +231,13 @@ def refusal(args: argparse.Namespace, mode_id: str | None, *, runtime: str, labe
         return "refactory: --refine starts from the pull request's head, so it takes no --base"
     if args.review_comments and not args.refine:
         return "refactory: --review-comments goes with --refine: they are the pull request's comments"
+    if getattr(args, "finish", False) and not args.refine:
+        return "refactory: --finish goes with --refine: it finishes that pull request's Open items"
+    if getattr(args, "items", "") and not getattr(args, "finish", False):
+        return "refactory: --items goes with --finish: they are the Open items it works on"
+    if getattr(args, "finish", False) and args.attempts is not None:
+        return ("refactory: a --finish run gets one fix round, so it takes no --attempts: it sets "
+                "check_attempts itself")
     timeout = args.model_timeout_s
     if timeout is not None and not (1 <= timeout <= 7200):
         return f"refactory: --model-timeout must be between 1 and 7200 seconds, got {timeout}"
@@ -347,6 +363,13 @@ def worktree_knobs(args: argparse.Namespace, *, deliver: bool = True) -> list[st
         found.append(f"refine={args.refine}")
     if args.review_comments:
         found.append("review_comments=1")
+    if getattr(args, "finish", False):
+        from refactory_dsh.finish import ROUND_KNOBS
+
+        found.append("finish=1")
+        found.extend(f"{name}={value}" for name, value in ROUND_KNOBS.items())
+    if getattr(args, "items", ""):
+        found.append(f"finish_items={args.items}")
     return found
 
 

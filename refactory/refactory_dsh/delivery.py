@@ -235,6 +235,14 @@ def knobs() -> dict[str, Knob]:
         "review_comments": Knob(False, "bool", frozen=True,
                                 description="with refine: add the pull request's reviews and comments to "
                                             "the run's steering"),
+        "finish": Knob(False, "bool", frozen=True,
+                       description="with refine: a truncated refine that fixes the pull request's Open "
+                                   "items, in one fix round, and updates them in its description "
+                                   "(`refactory_dsh.finish`)"),
+        "finish_items": Knob("", "str", frozen=True,
+                             description="with finish: the ids of the Open items to work on, comma "
+                                         "separated (default: every open item that is not a "
+                                         "judgment_call)"),
     }
 
 
@@ -1318,6 +1326,13 @@ def _describe(ctx: Any, url: str, draft_delivery: dict[str, Any] | None) -> str:
                          "draft")
     body = (_with_draft_section(body, draft_delivery, state) if draft_delivery
             else _without_draft_section(body))
+    from refactory_dsh import finish
+
+    finishing = finish.fact(ctx)
+    if finishing is not None:
+        # A finish brings the description's Open items up to this run, markers or not: each
+        # item it worked on or re-checked is resolved or still open, with the evidence.
+        body = finish.update_body(body, finishing, finish.results(ctx, finishing, draft=draft_delivery))
     if legacy:
         notes.append(f"the description of {url} was not updated: it has no delivery markers, so "
                      + ("its text is kept as written, with the draft's section put above it"
@@ -2347,6 +2362,11 @@ def _body(ctx: Any, found: worktree.Worktree, *, merge: MergeResult | None = Non
     if corrections:
         sections.append("## Corrections given at approval\n\n"
                         + "\n".join(f"- {item}" for item in corrections))
+    from refactory_dsh import finish
+
+    finishing = finish.fact(ctx)
+    if finishing is not None:
+        sections.append(_public(finish.pr_section(ctx, finishing, draft=draft_fact(ctx))))
     return f"{BODY_START}\n" + _unmarked("\n\n".join(sections)) + f"\n{BODY_END}\n"
 
 
@@ -2421,8 +2441,8 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     if not target_tip:
         raise ValueError("delivery_gate: delivery_conflict_files set but delivery_target_tip missing")
 
-    # ── Bound the loop by check_attempts ──
-    allowed = int(ctx.knob("check_attempts", 3))
+    # ── Bound the loop by check_attempts, and a finish run by its one fix round ──
+    allowed = _conflict_reloops_allowed(ctx)
     used = int(ctx.facts.get("delivery_conflict_reloops", 0)) + 1
     ctx.set_fact("delivery_conflict_reloops", used)
     if used > allowed:
@@ -2442,7 +2462,22 @@ def evaluate_delivery_conflicts(ctx: Any) -> "Verdict | str":
     # excerpt of the hunks, never the files.
     description = _conflict_description(target_tip, conflict_files, detail)
     ctx.set_fact("validation", description)
-    return Verdict("reloop", description)
+    from refactory_dsh import finish
+
+    return finish.sent_back(ctx, Verdict("reloop", description))
+
+
+def _conflict_reloops_allowed(ctx: Any) -> int:
+    """How many times a conflict with the base goes back to the builder: ``check_attempts``,
+    and on a finish run one more than it has gone back only while the run's one fix round
+    is unspent (`finish.allows_round`)."""
+    from refactory_dsh import finish
+
+    allowed = int(ctx.knob("check_attempts", 3))
+    if finish.fact(ctx) is None:
+        return allowed
+    used = int(ctx.facts.get("delivery_conflict_reloops", 0) or 0)
+    return min(allowed, used + (1 if finish.allows_round(ctx) else 0))
 
 
 def _abort_pending_merge(ctx: Any) -> None:
@@ -2499,7 +2534,7 @@ def _conflict_budget_spent(ctx: Any, refused: NotDelivered,
     if draft_delivery is not None or merge is None or not merge.conflicts:
         return None
     used = int(ctx.facts.get("delivery_conflict_reloops", 0))
-    if used < int(ctx.knob("check_attempts", 3)):
+    if used < _conflict_reloops_allowed(ctx):
         return None
     files = ", ".join(merge.conflicts)
     return {"reason": f"delivered as draft: unresolved conflict with the base in {files}, after "

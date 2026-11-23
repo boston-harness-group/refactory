@@ -618,7 +618,7 @@ class DesignMode(Mode):
                       *repo_change.produces(), "delivery", "delivery_plan",
                       "has_pitfalls_step", "pitfalls", "pitfalls_review", "builder_tests",
                       "claims_check_feedback", "design_review_status", "refine_context",
-                      "gate_strategy_feedback", "gate_revision_instruction"),
+                      "gate_strategy_feedback", "gate_revision_instruction", "finish"),
             notes="read the brief and the command that decides whether it is done",
         ))
 
@@ -634,9 +634,10 @@ class DesignMode(Mode):
                       "research_attempts_used", "research_advisory",
                       "pitfalls", "pitfalls_review", "pitfalls_attempts_used",
                       "pitfalls_advisory", "strategy_plan", "strategy", "refine_context",
-                      "graph_context"),
+                      "graph_context", "finish_gate"),
             max_iterations=2,
-            notes="on a refine, skip research and strategy and go straight to design_doc",
+            notes="on a refine, skip research and strategy and go straight to design_doc; on a "
+                  "finish whose items are all concrete, answer gate_strategy proceed up front",
         ))
 
         graph.add(Node(
@@ -1113,7 +1114,7 @@ class DesignMode(Mode):
                                "review_feedback", "review_baseline",
                                "self_check_fixup_count", "total_self_check_fixups_used",
                                "builder_tests", "draft_delivery", "early_asks_rereads",
-                               "early_asks_reread")
+                               "early_asks_reread", "finish_rounds")
         graph.add(Node(
             "prepare_check", "gate", evaluator=f"{OPS}:prepare_check", role="validation",
             resource_role="final_validation",
@@ -1159,7 +1160,7 @@ class DesignMode(Mode):
             writes=(*check_writes, *repo_change.CHECK_WRITES),
             produces=(*check_produces, *repo_change.CHECK_PRODUCES, "draft_delivery",
                       "combined_sendback_count", "early_asks_sendback_count",
-                      "qa_coverage_rerun_done"),
+                      "qa_coverage_rerun_done", "finish_rounds"),
             knobs=check_knobs, max_iterations=8,
             notes="compose one send-back from check failures and review findings without "
                   "spending an attempt; the combined send-back names every failing test "
@@ -1376,7 +1377,7 @@ class DesignMode(Mode):
             writes=("reviews/qa-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("qa_gate", "qa_judge_rereads", "qa_judge_reread", "qa_draft",
                       "qa_unresolved", "qa_coverage_rerun_done",
-                      "qa_coverage_rerun_ids"),
+                      "qa_coverage_rerun_ids", "finish_rounds"),
             knobs=("judge_rereads",),
             max_iterations=6,
             notes="route on the QA judge's verdict: a redo for what holds the change back goes "
@@ -1413,7 +1414,7 @@ class DesignMode(Mode):
             reads=(judges.OVERWATCH_VERDICT, "correction-audit.json"),
             writes=("reviews/overwatch-gate.txt", "reviews/follow-ups.json", "reviews/follow-ups.md"),
             produces=("overwatch_review", "overwatch_rereads", "overwatch_reread", "draft_delivery",
-                      "overwatch_unresolved"),
+                      "overwatch_unresolved", "finish_rounds"),
             knobs=("judge_rereads",),
             max_iterations=4,
             notes="route on the overwatch's verdict: an unmet correction or a redo for what "
@@ -1478,7 +1479,7 @@ class DesignMode(Mode):
             evaluator="refactory_dsh.delivery:evaluate_delivery_conflicts",
             max_iterations=8,
             knobs=("check_attempts",),
-            produces=("validation", "delivery_conflict_reloops"),
+            produces=("validation", "delivery_conflict_reloops", "finish_rounds"),
             notes="on authored-file conflict reloop to the builder; otherwise proceed to done",
         ))
         graph.add(Node(

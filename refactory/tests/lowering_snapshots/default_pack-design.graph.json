@@ -848,7 +848,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.design_ops:route_refine_design",
-      "gate_prompt": "on a refine, skip research and strategy and go straight to design_doc",
+      "gate_prompt": "on a refine, skip research and strategy and go straight to design_doc; on a finish whose items are all concrete, answer gate_strategy proceed up front",
       "max_iterations": 2,
       "_type": "GateNode"
     },
@@ -1379,6 +1379,8 @@
     "repo_visibility": "private",
     "refine": "",
     "review_comments": 0.0,
+    "finish": 0.0,
+    "finish_items": "",
     "apply_corrections__system_prompt": "",
     "classify_reloop__system_prompt": "",
     "code_reviewer__system_prompt": "",
@@ -1709,6 +1711,28 @@
       "values": [],
       "frozen": true,
       "description": "with refine: add the pull request's reviews and comments to the run's steering",
+      "required": false
+    },
+    "finish": {
+      "default": false,
+      "kind": "bool",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "with refine: a truncated refine that fixes the pull request's Open items, in one fix round, and updates them in its description (`refactory_dsh.finish`)",
+      "required": false
+    },
+    "finish_items": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": true,
+      "description": "with finish: the ids of the Open items to work on, comma separated (default: every open item that is not a judgment_call)",
       "required": false
     },
     "apply_corrections__system_prompt": {
