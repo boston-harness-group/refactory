@@ -478,7 +478,8 @@ def retries(workdir: Path) -> dict[str, int]:
     they cover, and only the journal after those bytes is read. A journal that is not the
     one they were counted from (a new invocation moved it away: another file, or another
     first record) is counted again from its start, as is a journal shorter than the
-    bytes they cover.
+    bytes they cover, and one whose last covered record is no longer where the counts
+    left it (the file cut short in place and grown again past those bytes).
     """
     from refactory_dsh import live
 
@@ -492,10 +493,12 @@ def retries(workdir: Path) -> dict[str, int]:
     kept = _kept_counts(root)
     trusted = (kept is not None and kept["link"] == (list(link) if link else None)
                and kept["size"] <= size
-               and live._anchor(journal, kept["first_end"]) == kept["first"])
+               and live._anchor(journal, kept["first_end"]) == kept["first"]
+               and _digest(journal, kept["last_start"], kept["size"]) == kept["last"])
     counts: dict[str, int] = dict(kept["counts"]) if trusted and kept else {}
     covered = kept["size"] if trusted and kept else 0
     first, first_end = (kept["first"], kept["first_end"]) if trusted and kept else (None, 0)
+    last, last_start = (kept["last"], kept["last_start"]) if trusted and kept else ("", 0)
     if covered == size and trusted:
         return counts
     import hashlib
@@ -506,7 +509,8 @@ def retries(workdir: Path) -> dict[str, int]:
         while line := handle.readline():
             if not line.endswith(b"\n"):
                 break  # a write still in flight: counted once it is complete
-            end = handle.tell()
+            last_start, end = end, handle.tell()
+            last = hashlib.sha256(line).hexdigest()
             if not line.strip():
                 continue
             if first is None:
@@ -518,7 +522,8 @@ def retries(workdir: Path) -> dict[str, int]:
                 counts[str(event["node_id"])] = counts.get(str(event["node_id"]), 0) + 1
     if first is not None and end != covered:
         _keep_counts(root, {"link": list(link) if link else None, "size": end, "first": first,
-                            "first_end": first_end, "counts": counts})
+                            "first_end": first_end, "last": last, "last_start": last_start,
+                            "counts": counts})
     return counts
 
 
@@ -529,10 +534,25 @@ def _kept_counts(root: Path) -> dict[str, Any] | None:
         return None
     if (not isinstance(kept, dict) or not isinstance(kept.get("size"), int)
             or not isinstance(kept.get("first_end"), int) or not isinstance(kept.get("first"), str)
+            or not isinstance(kept.get("last_start"), int) or not isinstance(kept.get("last"), str)
             or not isinstance(kept.get("counts"), dict)
             or not all(isinstance(n, int) for n in kept["counts"].values())):
         return None
     return kept
+
+
+def _digest(journal: Path, start: int, end: int) -> str | None:
+    """The digest of the journal's bytes from ``start`` to ``end``: the last line the
+    counts cover, read in one bounded go."""
+    import hashlib
+
+    try:
+        with journal.open("rb") as handle:
+            handle.seek(start)
+            data = handle.read(end - start)
+    except (OSError, ValueError):
+        return None
+    return hashlib.sha256(data).hexdigest() if len(data) == end - start else None
 
 
 def _keep_counts(root: Path, kept: dict[str, Any]) -> None:

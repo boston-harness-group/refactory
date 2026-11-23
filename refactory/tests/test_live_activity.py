@@ -1054,7 +1054,6 @@ def test_page_cost_separates_journal_size_from_worker_count(tmp_path, monkeypatc
     # And the journal bound is independent of it: both trees pay the same receipts cost.
     large_many = read(status_page(trees['large', 500]))
     assert large_many <= many + allowance, (many, large_many)
-    print('BYTES', small_page, large_page, one, many, large_many)
 
 
 def test_every_page_carries_the_summary_members(tmp_path):

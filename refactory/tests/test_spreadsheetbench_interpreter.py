@@ -85,3 +85,49 @@ def test_builds_started_at_once_each_use_a_directory_of_their_own(stub_env):
     assert {out.strip() for out, _err, _code in results} == {str(stub_env / "bin" / "python")}
     assert sorted(path.name for path in stub_env.parent.iterdir() if not path.name.startswith(".")) \
         == [stub_env.name]
+
+
+def _tree(home: Path, python_script: str) -> None:
+    (home / "bin").mkdir(parents=True)
+    (home / "bin" / "python").write_text(python_script)
+    (home / "bin" / "python").chmod(0o755)
+    (home / "lib" / "pandas").mkdir(parents=True)
+    (home / "lib" / "pandas" / "__init__.py").write_text("")
+
+
+@pytest.mark.parametrize("why", ["times out", "cannot start"])
+def test_a_probe_that_says_nothing_replaces_nothing(stub_env, monkeypatch, why):
+    """On a loaded machine the probe of a sound tree can time out, and another process
+    may be running code from that tree: the error is raised, and nothing is moved,
+    built or removed."""
+    home = stub_env
+    _tree(home, "#!/bin/sh\nsleep 5\n")
+    if why == "cannot start":
+        (home / "bin" / "python").chmod(0o644)
+    monkeypatch.setattr(interpreter, "PROBE_TIMEOUT_S", 0.5)
+    with pytest.raises(interpreter.InterpreterError) as raised:
+        interpreter.provision()
+    assert not isinstance(raised.value, interpreter.InterpreterMismatch)
+    assert (home / "lib" / "pandas" / "__init__.py").is_file()
+    assert sorted(path.name for path in home.parent.iterdir() if not path.name.startswith(".")) \
+        == [home.name], "no build was started and nothing was set aside"
+
+
+def test_a_killed_build_s_directory_is_removed_by_the_next_build(stub_env):
+    """A build killed before its cleanup (SIGKILL, out of memory, a CI timeout) leaves its
+    directory: the next build on the host removes it when its pid is gone, and leaves
+    one whose pid runs, or that another host made."""
+    home = stub_env
+    home.parent.mkdir(parents=True)
+    gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    host = interpreter._host()
+    dead = [home.with_name(f"{home.name}.partial-{host}-{gone}-aaaa1111"),
+            home.with_name(f"{home.name}.stale-{host}-{gone}-bbbb2222")]
+    alive = [home.with_name(f"{home.name}.partial-{host}-{os.getpid()}-cccc3333"),
+             home.with_name(f"{home.name}.partial-otherhost-{gone}-dddd4444")]
+    for path in dead + alive:
+        (path / "lib").mkdir(parents=True)
+    assert interpreter.provision() == home / "bin" / "python"
+    assert [path.exists() for path in dead] == [False, False]
+    assert [path.exists() for path in alive] == [True, True]

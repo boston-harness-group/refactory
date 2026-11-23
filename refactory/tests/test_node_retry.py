@@ -858,6 +858,15 @@ def test_the_retry_count_reads_only_what_was_appended_and_follows_a_new_journal(
                         .replace(b'"node_id": "reviewer"', b'"node_id": "other"') + text[:2000].split(b"\n")[0] + b"\n")
     assert retries(tmp_path) == full_count() == {"other": 1}
 
+    # Cut short in place to its first record and grown again past the counted bytes,
+    # with the same first record: the last counted line is no longer where it was.
+    first_line = journal.read_bytes().split(b"\n", 1)[0] + b"\n"
+    journal.write_bytes(first_line)
+    for i in range(2300):
+        emit(tmp_path, "node_started", node_id=f"k{i}", summary="w" * 200)
+    emit(tmp_path, RETRY_EVENT, node_id="last", attempt=2)
+    assert retries(tmp_path) == full_count() == {"last": 1}
+
 
 def test_a_session_that_ignores_its_shutdown_is_not_retried(tmp_path, monkeypatch):
     """A session that does not stop within the grace is a forced exit with cleanup
