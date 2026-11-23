@@ -75,7 +75,7 @@ from refactory_dsh.outerloop import train_batch_seed
 from refactory_packages.skillopt import analysts, merge, prompts, schedule
 from refactory_packages.skillopt.env import SkillOptEnv
 from refactory_packages.skillopt.json_utils import extract_json
-from refactory_packages.skillopt.trace import TraceRecorder, ask
+from refactory_dsh.strategy_trace import TraceRecorder, ask
 
 #: The line that opens each knob's section in the composite document.
 SECTION_LINE = "<!-- SECTION {knob}: {use} -->"

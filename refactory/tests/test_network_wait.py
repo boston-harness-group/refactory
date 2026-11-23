@@ -390,7 +390,7 @@ def test_skillopt_ask_sees_one_attempt_per_real_failure(answers, tmp_path):
     """SkillOpt's ``ask`` makes three attempts. Outages inside an attempt are the
     client's to wait out: here two outages and a rate limit make one failed attempt, and
     an outage then an answer the second; each attempt's trace line lists its outages."""
-    from refactory_packages.skillopt.trace import TraceRecorder, ask, no_retry_waits
+    from refactory_dsh.strategy_trace import TraceRecorder, ask, no_retry_waits
 
     queue, waits = answers
     queue.extend([_Failed(OAUTH_DNS), _Failed(OAUTH_DNS), _Failed(RATE_LIMITED),
@@ -409,7 +409,7 @@ def test_skillopt_ask_sees_one_attempt_per_real_failure(answers, tmp_path):
 
 
 def test_skillopt_ask_without_an_outage_writes_no_network_waits(answers, tmp_path):
-    from refactory_packages.skillopt.trace import TraceRecorder, ask
+    from refactory_dsh.strategy_trace import TraceRecorder, ask
 
     queue, waits = answers
     queue.append(_Done())
@@ -520,7 +520,7 @@ def test_a_failure_that_is_not_an_outage_also_shows_the_network_is_up(answers):
 def test_skillopt_ask_waits_the_bound_once_not_per_attempt(answers, monkeypatch, tmp_path):
     """The worst case of one optimizer call: its first attempt waits the bound, and its
     other two fail at once (`NETWORK_GIVEN_UP`) rather than waiting it again."""
-    from refactory_packages.skillopt.trace import TraceRecorder, ask, no_retry_waits
+    from refactory_dsh.strategy_trace import TraceRecorder, ask, no_retry_waits
 
     queue, waits = answers
     monkeypatch.setattr(model, "NETWORK_WAIT_S", 30.0)

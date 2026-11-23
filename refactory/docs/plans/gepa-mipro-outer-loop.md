@@ -62,6 +62,7 @@ minibatch gate. It stays as the SRF port.
 | Parity task | HotpotQA, distractor setting | Both papers report on it. It is multi-module, needs no retrieval server, and is far from the ceiling. |
 | Models | Task: GLM on the `dsh` worker. Optimizer: Sonnet, fixed for every strategy. Confirmation: Opus. | The comparison grid is large. A varying proposer would confound it. |
 | Fidelity evidence | Cite the reference implementation file:line for every default, as SkillOpt does, plus record/replay and DSPy parity | Two independent kinds of evidence that the port is faithful |
+| GEPA's Pareto set | Val by default (`pareto_set=val`), as upstream GEPA and `dspy.GEPA` are run; a held-out slice of train (`pareto_set=train`) as an option | Parity with the reference needs its valset. GEPA then selects on val item by item, while the default loop and SkillOpt see one val score per candidate, so every comparison states that difference (`docs/outer-loop.md`). Decided in the #734 review; this replaces the earlier plan of a train split with val as the gate. |
 
 ## Phase 0: Remaining groundwork
 
@@ -87,10 +88,15 @@ Exit: tests for 1–3 pass, and existing strategy and SkillOpt tests are unchang
 
 Tracked in #565.
 
-- Split train ids (`Run.part_ids`) into a feedback set and a Pareto set. The val
-  part remains the acceptance gate.
-- **Frontier**: candidates that are best on at least one Pareto item, using
-  `item_records` scores. Dominated candidates are pruned.
+- **Pareto set**: val by default, read per item through `Run.part_item_scores`
+  (opaque per-run keys; no val item reaches the proposer), as upstream GEPA and
+  `dspy.GEPA` use a valset. `pareto_set=train` instead splits train ids
+  (`Run.part_ids`) into a feedback set and a Pareto set, and val is the final gate.
+  With val as the Pareto set GEPA reads more of val than the default loop and
+  SkillOpt (per-item scores against one score per candidate), so a comparison
+  states it (see the Decisions table).
+- **Frontier**: candidates that are best on at least one Pareto item. Dominated
+  candidates are pruned.
 - **Parent sampling**: weighted by the number of Pareto items a candidate wins.
 - **Reflective mutation**: choose one agent node's prompt slot round-robin. Give
   the proposer that node's exchanges plus scores and feedback from a minibatch
@@ -153,7 +159,9 @@ Tracked in #568.
   modes scored on their regression tests.
 - **Grid**: `gepa`, `mipro`, `skillopt`, `reflective`, `evolutionary`,
   `hill_climb` and `random`, at an equal rollout budget, with three seeds, on GLM.
-  Then the top two on Opus.
+  Then the top two on Opus. The table states that `gepa` with `pareto_set=val`
+  selects on per-item val scores and the others see one val score per candidate,
+  and adds a `gepa` `pareto_set=train` row for an equal-information comparison.
 - **Ablations**, with the expected direction:
   - GEPA with greedy selection instead of the frontier: no better;
   - GEPA with score-only feedback (exchanges withheld): clearly worse;
