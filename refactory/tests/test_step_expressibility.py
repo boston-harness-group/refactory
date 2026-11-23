@@ -266,3 +266,32 @@ def test_the_loop_line_says_what_a_judge_without_tools_is_handed():
     assert "as text (a binary or very long file only named)" in line
     stripped, fields = core_ops.without_tools(line, core_ops.OPERATORS["loop"]["fields"])
     assert "'tools'" not in stripped and "tools" not in fields
+
+
+def test_the_default_route_after_a_multi_file_sealed_step_is_built():
+    """SpreadsheetBench V2's solve is sealed and writes three files. The default route
+    after it (a copy that takes it over) and a route with a tool judge are built: the copy
+    carries solve's tools into every check, and no default view hands on solve's session
+    log."""
+    from refactory_packages.spreadsheetbench_v2.swe_mode import Swe
+
+    from refactory_dsh.workspace import SEALED_SESSION
+
+    swe = Swe()
+    seed = swe.state_dict()["graph"]["nodes"]
+    for edit in ({"op": "route", "after": "solve", "judge": "agent"},
+                 {"op": "route", "after": "solve", "judge": "agent", "tools": T}):
+        nodes = _nodes(_attempt(swe, [edit]))
+        revise = nodes["solve_revise"]
+        assert is_sealed(revise) and revise["tools"] == seed["solve"]["tools"]
+        assert revise["writes"] == seed["solve"]["writes"]
+        reads = [r for k, n in nodes.items() if k not in seed for r in (n.get("reads") or ())]
+        assert SEALED_SESSION not in reads, reads
+    assert is_sealed(nodes["solve_route_judge"])
+
+
+def test_the_merge_line_says_the_tools_rule_once():
+    line = core_ops.OPERATORS["merge"]["line"]
+    assert line.count("tools") == 1, line
+    stripped, _fields = core_ops.without_tools(line, core_ops.OPERATORS["merge"]["fields"])
+    assert "tools" not in stripped

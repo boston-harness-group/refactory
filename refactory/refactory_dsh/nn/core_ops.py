@@ -483,6 +483,10 @@ def _copy_spec(node: Node, state: Mapping[str, Any]) -> dict:
     spec = {"kind": kind, "text": _text_of(node, state), "_like": node.id}
     if kind == "code":
         spec["_copied"] = spec["text"]
+    if kind == "agent" and _sealed(node):
+        # Its sealed tools, in the spec itself, so every check that reads a spec's tools
+        # (a take-over of several files, a fallback's) sees the copy as the tool step it is.
+        spec["tools"] = list(node.tools)
     return spec
 
 
@@ -2792,8 +2796,11 @@ def _expand_route(edit: dict, state: dict) -> list[dict]:
         way_seen = _seen(graph, state, there, view, spec.get("sees"))
         if over is not None and spec.get("sees") is None:
             # By default it sees what it rewrites, wherever before the route that was made.
-            way_seen = sorted(set(way_seen) | (_readable(graph, state, _outputs(over)) & there),
-                              key=lambda key: (key[0] != "fact", key[1]))
+            from refactory_dsh.workspace import SEALED_SESSION
+
+            # What the step it redoes left, but never its session log (nothing reads it).
+            redone = (_readable(graph, state, _outputs(over)) & there) - {("file", SEALED_SESSION)}
+            way_seen = sorted(set(way_seen) | redone, key=lambda key: (key[0] != "fact", key[1]))
         nodes = _step_nodes(graph, state, spec, node_id, way_seen,
                             settings_from=anchor if anchor.kind == "agent" else None,
                             **({"writes": list(over.writes), "produces": list(over.produces)}
@@ -3571,6 +3578,8 @@ INSERT_TOOLS = ("; 'tools' (an agent): e.g. " + json.dumps(list(SEALED_TOOLS))
 MAP_TOOLS = "; 'tools' as insert's: each run sealed"
 #: What the branch and merge lines say of 'tools'.
 STEP_TOOLS = "; 'tools' as insert's (sealed)"
+#: What the merge line says of 'tools'.
+MERGE_TOOLS = "; 'tools' as insert's (sealed), else a sealed step's own come along"
 #: What the route line says of 'tools', not said twice in one request.
 ROUTE_JUDGE_TOOLS = "; 'tools' as loop's judge"
 #: What the loop line says of 'tools': the agent judge's, as insert's.
@@ -3594,8 +3603,8 @@ def refusal_without_tools(reason: str) -> str:
 def without_tools(description: str, fields: Sequence[str]) -> tuple[str, list[str]]:
     """An operator's request line and fields with no offer of tools: for a run where a new
     step has none (no seal, or ``new_step_tools`` off)."""
-    for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, STEP_TOOLS,
-                   "; a sealed tool step's tools come along"):
+    for clause in (INSERT_TOOLS, MAP_TOOLS, JUDGE_TOOLS, ROUTE_JUDGE_TOOLS, MERGE_TOOLS,
+                   STEP_TOOLS):
         description = description.replace(clause, "")
     return description, [f for f in fields if f != "tools"]
 
@@ -3709,8 +3718,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "reads_as": ('step',),
         "fields": ("steps", "kind", "text", "system", "id", "route", "tools"),
         "line": "two consecutive steps as one, with the first's inputs and the second's "
-                "outputs; 'system' as insert's; a sealed tool step's tools come along"
-                + STEP_TOOLS,
+                "outputs; 'system' as insert's" + MERGE_TOOLS,
         "example": {"op": "merge", "steps": ["<step>", "<next step>"],
                     "text": "<what the merged step does>"},
     },
