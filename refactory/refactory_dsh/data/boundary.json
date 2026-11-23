@@ -2,6 +2,7 @@
   "core": [
     "refactory_dsh",
     "refactory_dsh._v1_compat",
+    "refactory_dsh.activity",
     "refactory_dsh.adopt",
     "refactory_dsh.agent_delivery",
     "refactory_dsh.agent_json",
