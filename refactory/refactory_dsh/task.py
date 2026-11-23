@@ -138,11 +138,23 @@ class Task:
     #: the item, never its answer. A name also in ``grader_fields`` is never shown.
     #: Default: none.
     item_metadata: tuple[str, ...] = ()
+    #: What the optimizer's analysts and proposer are shown in full under each item's
+    #: header, after its input, as text the item's solver was given that the record's
+    #: model calls do not carry (SpreadsheetBench's agent harness: the workbook preview,
+    #: which SkillOpt's analysts see): the names `item_context_values` returns. A name
+    #: also in ``grader_fields`` is never shown. Default: none.
+    item_context: tuple[str, ...] = ()
 
     def item_meta(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
         """The values ``item_metadata`` names for one item, from its metadata: by default
         the item's own fields of those names (a Task may derive them instead)."""
         return {name: metadata[name] for name in self.item_metadata
+                if metadata.get(name) not in (None, "", [], {})}
+
+    def item_context_values(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """The values ``item_context`` names for one item, from its metadata: by default
+        the item's own fields of those names (a Task may derive them instead)."""
+        return {name: metadata[name] for name in self.item_context
                 if metadata.get(name) not in (None, "", [], {})}
 
     def instances(
@@ -502,11 +514,14 @@ def integrity_declaration(state: dict[str, Any]) -> dict[str, dict[str, str]]:
     return {"policy": policy, "allowances": allowances}
 
 
-def item_metadata_reader(state: dict[str, Any]) -> Any:
+def item_metadata_reader(state: dict[str, Any], *, context: bool = False) -> Any:
     """How a train record's declared metadata is read (``Task.item_metadata``,
-    ``Task.item_meta``) for the graph's Tasks: a function of a record returning
+    ``Task.item_meta``; with ``context``, ``Task.item_context`` and
+    ``Task.item_context_values``) for the graph's Tasks: a function of a record returning
     ``{name: value}``, never a name any Task lists in ``grader_fields``; ``None`` when no
     Task declares any. A Task that cannot be loaded declares nothing."""
+    declared_names, values_of = (("item_context", "item_context_values") if context
+                                 else ("item_metadata", "item_meta"))
     from refactory_dsh.nn.graph import Graph
 
     try:
@@ -522,7 +537,7 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         except Exception:  # noqa: BLE001 - an unloadable Task is another check's to report
             continue
         hidden |= {str(name) for name in getattr(task, "grader_fields", ()) or ()}
-        if getattr(task, "item_metadata", ()):
+        if getattr(task, declared_names, ()):
             tasks.append(task)
     if not tasks:
         return None
@@ -532,11 +547,11 @@ def item_metadata_reader(state: dict[str, Any]) -> Any:
         out: dict[str, Any] = {}
         for task in tasks:
             try:
-                found = task.item_meta(meta)
+                found = getattr(task, values_of)(meta)
             except Exception:  # noqa: BLE001 - a header is a nicety, never a failure
                 continue
             for name, value in (found or {}).items():
-                if (str(name) not in hidden and str(name) in task.item_metadata
+                if (str(name) not in hidden and str(name) in getattr(task, declared_names)
                         and value not in (None, "", [], {})):
                     out.setdefault(str(name), value)
         return out

@@ -325,6 +325,11 @@ def dispatched(workdir: Path, node: str, declaration: Any, *, knobs: dict[str, A
                 # cgroup goes with it, once what it left running is ended.
                 if place is not None and place.cgroup:
                     release_cgroup(place.path, place.cgroup)
+                # The copies a sealed Claude Code step's Reads were given (the adapter's
+                # hook, `<workspace>.reads`) go with the dispatch too.
+                if place is not None and place.backend == "claude_code":
+                    for reads in root.glob("*.reads"):
+                        shutil.rmtree(reads, ignore_errors=True)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -791,7 +796,17 @@ def ask(workspace: Workspace, client: Any, prompt: str, *, workdir: Path, system
         kwargs["seal"] = {"tools": list(workspace.tools), "runner": list(workspace.runner),
                           **({"backend": workspace.backend}
                              if workspace.backend == "claude_code" else {})}
-    return str(client.complete(prompt, **kwargs))
+    try:
+        return str(client.complete(prompt, **kwargs))
+    except Exception:
+        if workspace.runner:
+            # A seal that failed while the session ran (a Claude Code step whose tool call
+            # passed no hook, the adapter's `sealGuard`) is the harness's failure, not the
+            # model's: said as one (`SealFailed`) wherever the session's own error came from.
+            from refactory_dsh.seal_reaper import incidents_path
+
+            _raise_seal_incidents(workspace.node, Path(incidents_path(str(workspace.path))))
+        raise
 
 
 def agent_env(workspace: Workspace, route: dict[str, Any]) -> dict[str, str | None]:

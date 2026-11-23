@@ -1285,7 +1285,10 @@ these are generic by design (no dataset hints); SkillOpt's batches always hold 8
 (here a batch holds fewer when 8 whole items would not fit one call; no trace is cut,
 except one longer than the room on its own, counted); SkillOpt shows
 each item's task type (here the fields the item's Task declares, `Task.item_metadata`,
-with its input and its choices when it has them); and SkillOpt's analysts never
+with its input and its choices when it has them, and in full after the input what the
+Task declares its solver was given that no model call of the record carries,
+`Task.item_context`: SpreadsheetBench's agent harness shows the workbook preview, as
+SkillOpt's analysts see it); and SkillOpt's analysts never
 see an errored item (it has no conversation to show), while here it is a failure shown
 with its error. A failure finding here may also say how the steps took part (`steps`),
 which SkillOpt's single-skill analysts have no use for; the SkillOpt strategy's own
@@ -1807,7 +1810,12 @@ state is promised, on any graph shape:
   for_claude_sealed`). Its workspace is made and sealed as above; the patched adapter offers
   and allows those tools only, loads no settings or MCP servers, and a `PreToolUse` hook
   runs each Bash command under the same runner (the runner, `--`, `/bin/bash -c` and the
-  command) and refuses a Read whose real path is outside the workspace and any other tool.
+  command) and refuses a Read whose real path is outside the workspace (or Claude Code's own
+  folders for the session, where it saves a large tool result and background output for the
+  model to read back), a Read of a path starting with `~`, and any other tool. It fails
+  closed: a tool result for a call the hook never decided (a Claude Code that ignored it)
+  is recorded as a seal incident and the step fails as a harness incident (`SealFailed`),
+  never graded.
   Its prompt is sent alone (no execution contract: the harness's prompt names its files),
   its reply is its first output, and each later output is a file it may leave in its
   workspace, collected when it does and absent when it does not
@@ -1818,7 +1826,10 @@ state is promised, on any graph shape:
   link, checks the opened descriptor's own path is still inside the workspace, and gives
   the Read a copy taken from it, beside the workspace (`<workspace>.reads/`): a link a
   sealed command swaps in after the check is never followed. On macOS the Read opens the
-  path it was judged by, so such a swap in between could be followed.
+  resolved path it was judged by, so a link swapped in between could be followed. The
+  copies go with the dispatch. Since `workspace.is_sealed` takes these tools, a step the
+  search adds with them in a fresh workspace is judged as a sealed step on its route
+  (`E-new-node-tools` when the run cannot run one, or when `new_step_tools` is off).
 - **Protected nodes are untouched.** A mode names them in `Mode.protected_nodes()`
   (default none). An edit that removes one, changes its declaration or out-edges, moves a
   knob it reads, or lets a run finish without one that every run used to visit is refused
@@ -2658,6 +2669,8 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | bindable field: `max_iterations` | `add_node`, `wrap`, `loop`, `route` | `set_knob` | - |
 | bindable field: `parallelism` | *grader-side* | `set_knob` | - |
 | bindable field: `optional` | `branch` | `set_knob` | - |
+| bindable field: `route.max_completion_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_thinking_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |

@@ -1,12 +1,12 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb00026c788 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19bc6730055 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
  import { brandString } from "@deepseek-ai/dsh-brand";
  import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
  import { EventEmitter } from "node:events";
-+import { closeSync, constants as fsConstants, copyFileSync, fstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync } from "node:fs";
++import { appendFileSync, closeSync, constants as fsConstants, copyFileSync, fstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 +import { homedir, tmpdir } from "node:os";
 +import { basename, dirname, isAbsolute, join, resolve } from "node:path";
  //#region lib/types/process.js
@@ -80,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +276,214 @@ function successfulResult(message) {
+@@ -231,20 +276,216 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -185,6 +185,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +	};
 +	try {
 +		for await (const message of untilGivenUp(query, gaveUp)) {
++			// A sealed step's every tool call must have passed its hook (fail closed).
++			if (sent?.sealed) sealGuard(sent.sealed, message);
 +			// Every message is a sign of life, a partial one (a thinking or text delta)
 +			// included: the delegating side's inactivity limit reads it (refactory).
 +			onActivity?.();
@@ -272,10 +274,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +				stopQuiet();
 +				releaseInput?.();
 +			}
- 		}
--		if (message.type !== "result") continue;
--		onResult?.();
--		answer = successfulResult(message);
++		}
 +	} finally {
 +		// Whatever ended the stream -- a failure, an abort, the CLI exiting -- must not
 +		// leave the prompt input waiting.
@@ -292,7 +291,10 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +			const asked = reasked ? ", also when asked once more for it" : "";
 +			const interim = answer === void 0 ? "" : `; its last text, written while background tasks still ran, was: ${answer.length > 300 ? `${answer.slice(0, 300)}...` : answer}`;
 +			throw new ClaudeCodeFailure({ ...emptyFacts, detail: `${emptyFacts.detail}${asked}${interim}` });
-+		}
+ 		}
+-		if (message.type !== "result") continue;
+-		onResult?.();
+-		answer = successfulResult(message);
 +		answer = settled;
 +		onRefactoryMetadata?.({ answer_from_earlier_turn: true });
  	}
@@ -304,7 +306,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  	});
  	return {
  		output: [{
-@@ -295,15 +534,40 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +536,40 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -350,7 +352,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +591,195 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +593,233 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -423,6 +425,16 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +		if (!Array.isArray(runner) || runner.length === 0 || !runner.every((part) => typeof part === "string")) throw new Error("subagent-claude-code: a sealed step needs its seal runner");
 +		if (!_rfSealWorkspace || !isAbsolute(_rfSealWorkspace)) throw new Error("subagent-claude-code: a sealed step needs its workspace");
 +		const root = realpathSync(_rfSealWorkspace);
++		// Claude Code's own folders for this session, named after its working directory: its
++		// project folder (where it saves a large tool result for the model to Read back) and
++		// its temporary one (background task output). Only the session's own commands' output
++		// is there; a Read of it is the agent reading its own output, as an unsealed
++		// session may.
++		const configDir = _rfEnv.CLAUDE_CONFIG_DIR || join(_rfEnv.HOME || homedir(), ".claude");
++		const slug = root.replace(/[^a-zA-Z0-9]/g, "-");
++		const tmpRoot = _rfEnv.CLAUDE_CODE_TMPDIR || _rfEnv.TMPDIR || tmpdir();
++		const own = [join(configDir, "projects", slug), join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug)];
++		const seal = { tools, runner, root, own, decided: new Set(), workspace: _rfSealWorkspace };
 +		options.cwd = _rfSealWorkspace;
 +		options.additionalDirectories = [_rfSealWorkspace];
 +		options.tools = tools;
@@ -430,8 +442,13 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +		options.settingSources = [];
 +		options.mcpServers = {};
 +		options.strictMcpConfig = true;
-+		options.hooks = { PreToolUse: [{ hooks: [async (input) => sealedToolUse(input, tools, runner, root)] }] };
-+		options[SEALED] = { tools, workspace: _rfSealWorkspace };
++		options.hooks = { PreToolUse: [{ hooks: [async (input, toolUseID) => {
++			const out = sealedToolUse(input, seal);
++			if (typeof toolUseID === "string") seal.decided.add(toolUseID);
++			if (typeof input?.tool_use_id === "string") seal.decided.add(input.tool_use_id);
++			return out;
++		}] }] };
++		options[SEALED] = seal;
 +	}
 +	// A route's thinking budget (`--max-thinking-tokens`): fixed thinking of that many tokens
 +	// in place of Claude Code's adaptive thinking, as a harness passing the flag gets.
@@ -446,6 +463,24 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +	}
 +	options[COMPACT_ENV_DROPPED] = _rfCompactEnvDropped;
 +	return options;
++}
++/**
++* Fail closed if the hook did not run: a tool result for a call the PreToolUse hook never
++* decided means Claude Code ran a tool unconfined (a version that ignores the hook, say).
++* The seal records it as an incident beside the workspace, which refactory reads as a
++* harness incident (`workspace.ask`), and the session fails here.
++*/
++function sealGuard(seal, message) {
++	const content = message?.type === "user" ? message.message?.content : void 0;
++	if (!Array.isArray(content)) return;
++	for (const block of content) {
++		if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string" || seal.decided.has(block.tool_use_id)) continue;
++		const reason = `the seal's hook did not decide tool call ${block.tool_use_id} before it ran`;
++		try {
++			appendFileSync(`${seal.root}.seal-incidents.jsonl`, `${JSON.stringify({ time: Date.now() / 1000, reason })}\n`);
++		} catch {}
++		throw new ClaudeCodeFailure({ stage: "query-run", category: "invalid-result", detail: reason });
++	}
 +}
 +/** The Claude Code tools a sealed step may list (refactory_dsh.seal.CLAUDE_CODE_TOOLS). */
 +const SEALED_CLAUDE_TOOLS = ["Read", "Bash"];
@@ -466,7 +501,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +* to the Read itself, which then fails as it would.
 +* @returns the path the Read is to open, or a reason to refuse it.
 +*/
-+function sealedRead(real, root) {
++function sealedRead(real, root, roots) {
 +	let fd;
 +	try {
 +		fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -476,7 +511,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +	}
 +	try {
 +		const opened = process.platform === "linux" ? readlinkSync(`/proc/self/fd/${fd}`) : real;
-+		if (opened !== root && !opened.startsWith(`${root}/`)) return { refuse: `${real} is outside this step's workspace (${root}); only its files can be read` };
++		if (!roots.some((place) => opened === place || opened.startsWith(`${place}/`))) return { refuse: `${real} is outside this step's workspace (${root}); only its files can be read` };
 +		if (!fstatSync(fd).isFile()) return { path: real };
 +		const folder = join(`${root}.reads`, String(++sealedReads));
 +		mkdirSync(folder, { recursive: true });
@@ -499,7 +534,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +* @param root - the workspace's real path.
 +* @returns the hook's output.
 +*/
-+function sealedToolUse(input, tools, runner, root) {
++function sealedToolUse(input, seal) {
++	const { tools, runner, root } = seal;
 +	const deny = (reason) => ({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
 +	const name = input?.tool_name;
 +	const given = input?.tool_input && typeof input.tool_input === "object" ? input.tool_input : {};
@@ -511,6 +547,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +	}
 +	if (name === "Read") {
 +		if (typeof given.file_path !== "string" || given.file_path.length === 0) return deny("a Read call needs a file_path");
++		// Claude Code expands a leading ~ to the home folder itself: never the workspace.
++		if (given.file_path.startsWith("~")) return deny(`${given.file_path} is outside this step's workspace (${root}); give a path in it`);
 +		const wanted = isAbsolute(given.file_path) ? given.file_path : resolve(root, given.file_path);
 +		let real;
 +		try {
@@ -518,9 +556,11 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
 +		} catch {
 +			try { real = join(realpathSync(dirname(wanted)), basename(wanted)); } catch { real = resolve(wanted); }
 +		}
-+		if (real !== root && !real.startsWith(`${root}/`)) return deny(`${given.file_path} is outside this step's workspace (${root}); only its files can be read`);
-+		if (process.platform !== "linux") return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
-+		const read = sealedRead(real, root);
++		const roots = [root, ...seal.own.map((place) => { try { return realpathSync(place); } catch { return place; } })];
++		if (!roots.some((place) => real === place || real.startsWith(`${place}/`))) return deny(`${given.file_path} is outside this step's workspace (${root}); only its files can be read`);
++		// The Read opens the path judged here, never one it would resolve another way.
++		if (process.platform !== "linux") return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...given, file_path: real } } };
++		const read = sealedRead(real, root, roots);
 +		if (read.refuse) return deny(read.refuse);
 +		return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...given, file_path: read.path } } };
 +	}
@@ -547,7 +587,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +789,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +829,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -593,7 +633,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +848,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +888,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -602,7 +642,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +867,38 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +907,38 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -643,7 +683,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +951,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +991,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -655,7 +695,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +978,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +1018,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -664,7 +704,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +990,15 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +1030,15 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -680,7 +720,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..60f740950acf7389e28002732c735eb0
  			}
  		}
  	});
-@@ -529,6 +1052,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1092,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

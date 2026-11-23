@@ -109,12 +109,8 @@ def _base(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, Any]:
-    """One item record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's result:
-    the agent mode's (its frozen prompt knob is among the knobs) as its harness's."""
-    from .agent_mode import PROMPT_KNOB
-
-    if PROMPT_KNOB in knobs:
-        return agent_rollout_result(record, knobs)
+    """One solver item record (``refactory_dsh/items.py:make_item_record``) as SkillOpt's
+    result; the agent mode's records go through `agent_rollout_result` (`MODE_VIEWS`)."""
     result = _base(record)
     exchanges = [e for e in (record.get("exchanges") or []) if isinstance(e, dict)]
     if record.get("error_text") is not None or not exchanges \
@@ -138,3 +134,7 @@ def rollout_result(record: dict[str, Any], knobs: dict[str, Any]) -> dict[str, A
         "conversation": conversation,
     })
     return result
+
+
+#: The modes whose records read differently from the solver's (`SkillOptEnv`, by mode).
+MODE_VIEWS = {"agent": agent_rollout_result}

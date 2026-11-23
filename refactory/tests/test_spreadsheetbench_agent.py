@@ -122,7 +122,8 @@ PROBE = ("python run_solution.py && test -f output.xlsx && echo VALIDATED; "
          "ls -a; cat {gold} >/dev/null 2>&1 && echo GOLD-READ || echo GOLD-HIDDEN")
 
 
-def _act(cwd: Path, runner: list[str], prompt: str, gold: str, write: bool) -> tuple[str, str]:
+def _act(cwd: Path, runner: list[str], prompt: str, gold: str, write: bool,
+         solution: str | None = None) -> tuple[str, str]:
     """What the stub agent does in its workspace: write solution.py (unless ``write`` is
     off), then run the probe through the seal runner, as the adapter's hook does."""
     import re
@@ -131,7 +132,7 @@ def _act(cwd: Path, runner: list[str], prompt: str, gold: str, write: bool) -> t
     found = re.findall(r"Put (\d+) in B1\.", task)
     n = int(found[0]) if found else 0
     if write:
-        (cwd / agent_port.SOLUTION_PATH).write_text(SOLUTION.format(n=n))
+        (cwd / agent_port.SOLUTION_PATH).write_text(solution or SOLUTION.format(n=n))
     proc = subprocess.run([*runner, "--", "/bin/bash", "-c", PROBE.format(gold=gold)],
                           cwd=cwd, capture_output=True, text=True, timeout=120)
     reply = ("solution.py was written." if write else
@@ -145,9 +146,15 @@ class AgentStub:
 
     thread_safe = True
 
-    def __init__(self, gold: str, write: bool = True) -> None:
-        self.gold, self.write = gold, write
+    def __init__(self, gold: str, write: bool = True, solution: str | None = None) -> None:
+        self.gold, self.write, self.solution = gold, write, solution
         self.calls: list[dict[str, Any]] = []
+        self.routes: list[Any] = []
+
+    def with_step_route(self, route: Any) -> "AgentStub":
+        """The step's own route (`Node.bound_route`), recorded."""
+        self.routes.append(dict(route))
+        return self
 
     def complete(self, prompt: str, *, system: str = "", workdir: object = None,
                  cwd: object = None, env: object = None, confine: bool = False,
@@ -156,7 +163,7 @@ class AgentStub:
         cwd = Path(str(cwd))
         listing = sorted(str(p.relative_to(cwd)) for p in cwd.rglob("*") if p.is_file())
         files = {name: (cwd / name).read_bytes() for name in listing}
-        reply, seen = _act(cwd, list(seal["runner"]), prompt, self.gold, self.write)
+        reply, seen = _act(cwd, list(seal["runner"]), prompt, self.gold, self.write, self.solution)
         self.calls.append({"prompt": prompt, "system": system, "seal": seal, "files": files,
                            "seen": seen})
         return reply
@@ -205,6 +212,8 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb_env):
     assert (record["id"], record["passed"], record["score"]) == ("v1", True, 1.0), record
     (call,) = model.calls
     assert call["prompt"] == agent_port.SOLVE_PROMPT and call["system"] == ""
+    # The thinking budget reaches the step's route from its frozen knob (`Node.bound_route`).
+    assert model.routes == [{"max_thinking_tokens": str(agent_port.MAX_THINKING_TOKENS)}]
     assert sorted(call["files"]) == sorted(agent_mode.WORKSPACE_READS)
     assert call["files"][agent_port.SKILL_PATH].decode() == \
         agent_port.build_codex_skill(port.INITIAL_SKILL)
@@ -214,7 +223,10 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb_env):
     _sealed_and_pinned(call["seen"])
     # One exchange, the reply; SkillOpt's analysts see that and the verification.
     assert [e["response"] for e in record["exchanges"]] == ["solution.py was written."]
-    view = skillopt_view.rollout_result(record, agent_mode.Agent().values())
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    view = SkillOptEnv.for_mode("spreadsheetbench/agent").rollout_result(
+        record, agent_mode.Agent().values())
     assert view["n_turns"] == 1 and view["hard"] == 1
     assert [m["role"] for m in view["conversation"]] == ["assistant", "system"]
     assert view["conversation"][0]["content"] == "solution.py was written."
@@ -331,11 +343,6 @@ def _drain(tmp_path: Path, client: Any) -> dict[str, Any]:
     return record
 
 
-#: The thinking budget `Agent.run` puts on the solve step's route; a lowered graph is
-#: given the client's routes as the run resolved them.
-THINKING_ROUTE = {"solve": {"max_thinking_tokens": str(agent_port.MAX_THINKING_TOKENS)}}
-
-
 @needs_spine
 def test_one_item_end_to_end_on_the_spine(tmp_path, sb_env):
     """Spine: the same item, lowered and drained, its solve step dispatched to the real
@@ -345,8 +352,7 @@ def test_one_item_end_to_end_on_the_spine(tmp_path, sb_env):
     from refactory_dsh.model import DshModelClient
 
     cli, log = _agent_dsh(tmp_path, _gold(sb_env, "v1"))
-    client = DshModelClient(**AGENT_ROUTE, dsh_cli=str(cli), attempts=1, timeout_s=120,
-                            node_routes=THINKING_ROUTE)
+    client = DshModelClient(**AGENT_ROUTE, dsh_cli=str(cli), attempts=1, timeout_s=120)
     record = _drain(tmp_path, client)
     assert (record["id"], record["passed"]) == ("v1", True), record
     (call,) = [json.loads(line) for line in log.read_text().splitlines()]
@@ -377,8 +383,8 @@ needs_adapter = pytest.mark.skipif(not ADAPTER.exists() or NODE is None,
 #: out, and a tool the step does not list.
 _SEALED_SDK = r"""
 import { execSync } from 'node:child_process'
-import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 export function query({ prompt, options }) {
   const child = options.spawnClaudeCodeProcess({
     command: process.execPath, args: ['-e', 'setTimeout(() => {}, 60000)'],
@@ -433,6 +439,19 @@ export function query({ prompt, options }) {
         record.forbidden[path] = { read, cat: execSync(cat.updatedInput.command, { cwd: options.cwd, shell: '/bin/bash', encoding: 'utf8' }).trim() }
       }
       record.decisions.write_tool = (await ask('Write', { file_path: join(options.cwd, 'x.py'), content: '' }))?.permissionDecision
+      // Claude Code's own project folder for this session (a large tool result's file).
+      if (process.env.CLAUDE_CONFIG_DIR) {
+        const slug = realpathSync(options.cwd).replace(/[^a-zA-Z0-9]/g, '-')
+        const saved = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'session', 'tool-results', 'big.txt')
+        mkdirSync(dirname(saved), { recursive: true })
+        writeFileSync(saved, 'BIG OUTPUT')
+        record.decisions.read_own_output = (await ask('Read', { file_path: saved }))?.permissionDecision
+      }
+      // A tool result for a call no hook decided: the seal fails closed.
+      if (process.env.FAKE_AGENT_UNHOOKED) {
+        yield { type: 'user', message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_unhooked', content: 'ran unconfined' }] } }
+      }
       writeFileSync(process.env.FAKE_SDK_RECORD, JSON.stringify(record))
       const usage = { 'fake-claude': { inputTokens: 3, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
       yield { type: 'result', subtype: 'success', is_error: false, result: 'solution.py was written.', modelUsage: usage }
@@ -465,7 +484,8 @@ def sealed_sdk(tmp_path, monkeypatch, sb_env):
     data = sb_env / "sb400"
     monkeypatch.setenv("FAKE_AGENT_FORBIDDEN", json.dumps([
         gold, str(data / "dataset.json"), str(data / "spreadsheet" / "t1" / "1_t1_init.xlsx"),
-        str(data / "spreadsheet" / "v1")]))
+        str(data / "spreadsheet" / "v1"), "~/.bashrc"]))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.delenv("REFACTORY_WORKER_CONTEXT", raising=False)
     return record
 
@@ -495,10 +515,11 @@ def _adapter_sent(record: Path) -> dict[str, Any]:
     assert sent["controlsInChildEnv"] == []
     assert sent["decisions"] == {"write": "allow", "probe": "allow", "read_inside": "allow",
                                  "read_relative": "allow", "read_outside": "deny",
-                                 "read_link": "deny", "write_tool": "deny"}
+                                 "read_link": "deny", "write_tool": "deny",
+                                 "read_own_output": "allow"}
     _sealed_and_pinned(sent["bash"]["probe"])
     # The golden file, the dataset and other items: neither Bash nor Read reaches them.
-    assert len(sent["forbidden"]) == 4
+    assert len(sent["forbidden"]) == 5
     assert all(v == {"read": "deny", "cat": "BLOCKED"} for v in sent["forbidden"].values()), \
         sent["forbidden"]
     # A Read inside is given a copy of the file it checked, beside the workspace (Linux).
@@ -534,7 +555,7 @@ def test_the_adapter_runs_the_spines_solve_step_sealed(tmp_path, sealed_sdk):
     from refactory_dsh.model import DshModelClient
 
     client = DshModelClient(**AGENT_ROUTE, runtime_root=REPO_ROOT, dsh_home=tmp_path / "dsh-home",
-                            routes_resolved=True, timeout_s=120, node_routes=THINKING_ROUTE)
+                            routes_resolved=True, timeout_s=120)
     record = _drain(tmp_path, client)
     assert record["passed"], record
     _adapter_sent(sealed_sdk)
@@ -640,3 +661,146 @@ def test_the_agent_cannot_read_the_gold_the_dataset_or_another_item(tmp_path, se
     dispatch = json.loads(next((work / "passes").rglob("workspaces/solve/dispatch.json")).read_text())
     assert dispatch["sealed"] and dispatch["backend"] == "claude_code"
     assert dispatch["tool_environment"]["python"] == os.environ[interpreter.ENV]
+
+
+@needs_adapter
+def test_a_tool_call_no_hook_decided_fails_closed_as_a_harness_incident(tmp_path, sealed_sdk,
+                                                                        monkeypatch):
+    """If Claude Code ever ran a tool without the PreToolUse hook (a version that ignores
+    it), the adapter's guard sees a tool result for a call the hook never decided: the
+    seal records an incident and the step fails as the harness's failure, never graded."""
+    monkeypatch.setenv("FAKE_AGENT_UNHOOKED", "1")
+    mode, state = _agent_state()
+    work = tmp_path / "walk"
+    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                       if p != "train"}, train_ids=["t1"])
+    task_module.write_subset(work, "val", 0.0)
+    result = WalkerEvaluator(model=_claude(tmp_path), project=Path("."), max_steps=400) \
+        .evaluate(mode, state, work)
+    (record,) = result.item_records
+    assert not record["passed"] and record["error_kind"] == "harness_incident", record
+    assert "hook did not decide tool call toolu_unhooked" in record["error_text"], record
+
+
+# ── route settings from frozen knobs, on the shipped runtime ─────────────────
+
+def _dsh_specs(tmp_path: Path, monkeypatch: Any, mode: Any, client: Any) -> list[dict[str, Any]]:
+    """What `DshEvaluator` lowers for ``mode`` with ``client`` (no route injected): the
+    dispatched workers' specs. The DSH process itself is not started."""
+    from refactory_dsh import dsh_profile, dsh_runtime
+    from refactory_dsh.evaluators import DshEvaluator
+
+    class _Exited:
+        returncode, stdout, stderr = 1, iter(()), iter(())
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            self.pid = os.getpid()
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: Any = None) -> int:
+            return 1
+
+    monkeypatch.setattr(dsh_profile, "requirement", lambda **k: None)
+    monkeypatch.setattr(dsh_runtime, "require_build", lambda **k: None)
+    monkeypatch.setattr(dsh_runtime.subprocess, "Popen", _Exited)
+    monkeypatch.setattr(dsh_runtime, "track_run", lambda process: None, raising=False)
+    work = tmp_path / f"dsh-{mode.name}"
+    DshEvaluator(model=client, timeout_s=5).evaluate(mode, mode.state_dict(), work)
+    return [json.loads(p.read_text()) for p in (work / ".refactory" / "worker-specs").glob("*.json")]
+
+
+def test_dsh_evaluator_carries_each_modes_bound_route_settings(tmp_path, monkeypatch, sb_data):
+    """`DshEvaluator` (the spine) with no route injected: the agent's thinking budget and a
+    solver given a nonzero output cap each reach the solve worker's route from their frozen
+    knobs (`Node.bound_route`); a solver at its default (0, no cap) carries none."""
+    from refactory_dsh.model import DshModelClient
+    from refactory_dsh.nn.edits import configure
+    from refactory_packages.spreadsheetbench import mode as sb_mode
+
+    client = DshModelClient(**AGENT_ROUTE, runtime_root=REPO_ROOT, dsh_home=tmp_path / "home",
+                            routes_resolved=True)
+    (spec,) = [s for s in _dsh_specs(tmp_path, monkeypatch, agent_mode.Agent(), client)
+               if s["node_id"] == "solve"]
+    assert spec["model_context"]["max_thinking_tokens"] == str(agent_port.MAX_THINKING_TOKENS)
+    solver_client = DshModelClient(worker_backend="claude_code", model="claude-opus-4-6",
+                                   permission_mode="dontAsk", runtime_root=REPO_ROOT,
+                                   dsh_home=tmp_path / "home", routes_resolved=True)
+    (plain,) = [s for s in _dsh_specs(tmp_path, monkeypatch, sb_mode.Solver(), solver_client)
+                if s["node_id"] == "solve"]
+    assert "max_completion_tokens" not in plain["model_context"]
+    capped = sb_mode.Solver(state=configure(sb_mode.Solver().state_dict(), "max_completion_tokens", 4096))
+    capped.name = "solver-capped"
+    (spec,) = [s for s in _dsh_specs(tmp_path, monkeypatch, capped, solver_client)
+               if s["node_id"] == "solve"]
+    assert spec["model_context"]["max_completion_tokens"] == "4096"
+
+
+# ── what each arm's analysts see ──────────────────────────────────────────────
+
+#: Code that fails to run: its error, cut at 500 characters, is what SkillOpt's analysts see.
+FAILING = "raise RuntimeError('x' * 700)\n"
+
+
+def test_an_exec_error_reaches_both_arms_as_skillopts_block(tmp_path, sb_env):
+    """rollout.py:799-812: code that fails to run is shown as ``## Execution (case N)``
+    and its first 500 characters of error -- the record's prediction, which SkillOpt's view
+    puts after the final message and the default loop shows as what the item gave."""
+    from refactory_dsh.optim import analysts
+    from refactory_packages.skillopt.env import SkillOptEnv
+
+    model = AgentStub(_gold(sb_env, "v1"), solution=FAILING)
+    (record,) = _walk(tmp_path, "val", model, expect_ok=False).item_records
+    assert record["fail_reason"].startswith("exec-error: RuntimeError"), record
+    head = "## Execution (case 1)\nERROR: "
+    assert record["prediction"].startswith(head), record
+    error = record["prediction"][len(head):]
+    assert len(error) == 500 and "Traceback" in error
+    view = SkillOptEnv.for_mode("spreadsheetbench/agent").rollout_result(
+        record, agent_mode.Agent().values())
+    assert view["conversation"][-1]["content"] == f"[POST-EXECUTION VERIFICATION]\n\n{record['prediction']}"
+    assert record["prediction"] in analysts.item_text(record)
+
+
+def test_the_default_loop_is_shown_what_skillopts_analysts_are(tmp_path, sb_env):
+    """Information parity for an exec rollout: SkillOpt's analysts see the item's
+    instruction, the workbook preview, the final message and the verification (or error)
+    block. The default loop's item now carries the preview as its context
+    (`SpreadsheetBenchAgentTask.item_context`), shown in full after the input; the solver,
+    whose call carries the preview in its prompt, declares none."""
+    from refactory_dsh.optim import analysts
+    from refactory_dsh.task import item_metadata_reader
+    from refactory_packages.spreadsheetbench import mode as sb_mode
+
+    model = AgentStub(_gold(sb_env, "v1"))
+    (record,) = _walk(tmp_path, "val", model).item_records
+    read = item_metadata_reader(agent_mode.Agent().state_dict(), context=True)
+    context = read(record)
+    preview = port.preview_workbook(str(sb_env / "sb400" / "spreadsheet" / "v1" / "1_v1_init.xlsx"))
+    assert context == {"spreadsheet_preview": preview}
+    text = analysts.item_text({**record, "item_context": context})
+    assert "Given to the solver (spreadsheet_preview):" in text and preview.strip() in text
+    assert "Put 7 in B1." in text and "solution.py was written." in text
+    assert record["prediction"] in text
+    assert item_metadata_reader(sb_mode.Solver().state_dict(), context=True) is None
+
+
+# ── the outer loop's new steps ────────────────────────────────────────────────
+
+def test_a_new_read_bash_step_is_refused_when_new_step_tools_is_off():
+    """`is_sealed` now takes Claude Code's Read and Bash: a step the search adds with them
+    in a fresh workspace is judged as a sealed step (on its route), and with
+    ``new_step_tools`` off it is refused like any new step with tools."""
+    from refactory_dsh.optim.base import _new_node_tools
+
+    seed = agent_mode.Agent().state_dict()
+    candidate = json.loads(json.dumps(seed))
+    candidate["graph"]["nodes"]["extra"] = {
+        "id": "extra", "kind": "agent", "tools": ["Read", "Bash"], "workspace": "scratch",
+        "writes": ["extra.txt"], "prompt_template": "Look."}
+    refused = _new_node_tools(seed, candidate, sealed=(True, ""), allowed=False)
+    assert refused and "new_step_tools: false" in refused[0]
+    assert _new_node_tools(seed, candidate, sealed=(True, ""), check=lambda *a: (True, "")) == []
+    assert "cannot run a sealed step" in _new_node_tools(
+        seed, candidate, sealed=(True, ""), check=lambda *a: (False, "not claude_code"))[0]

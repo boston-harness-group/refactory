@@ -799,6 +799,13 @@ def render_item(record: Mapping[str, Any], *, input_keys: Sequence[str],
     elif exchanges and not prompts and settled is None:
         lines += ["Input (the first step's prompt):",
                   *fenced(cut(exchanges[0].get("prompt"), "input", prompt_chars))]
+    # What the Task declares the item's solver was given beyond its input, which no model
+    # call of the record carries (``item_context``, `Task.item_context`), each in full.
+    context = record.get("item_context") if isinstance(record.get("item_context"), Mapping) else {}
+    for name, value in context.items():
+        if show_input and value not in (None, ""):
+            lines += [f"Given to the solver ({name}):", *fenced(cut(value, "input", reply_chars))]
+            seen.add(value, f"the item's {name}")
     completed = harness_line(record)
     if completed:
         lines.append(completed)

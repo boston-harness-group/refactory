@@ -9,7 +9,7 @@
         "item/input.xlsx"
       ],
       "blocking": true,
-      "task_ref": "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchTask",
+      "task_ref": "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchAgentTask",
       "source_path": null,
       "source_format": null,
       "inline_items": [],
@@ -135,6 +135,9 @@
       "workspace": {
         "kind": "scratch",
         "collect": "files"
+      },
+      "route": {
+        "max_thinking_tokens": "16384"
       },
       "_type": "AgentNode"
     }

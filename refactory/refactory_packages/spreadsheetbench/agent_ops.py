@@ -76,7 +76,7 @@ def finalize(ctx: Any) -> dict[str, Any]:
     answer ends the item with no answer (`ops.NoReply`), as in the solver."""
     item = ops._item(ctx)  # noqa: SLF001
     turn = ctx.read_json(TURN, {}) or {}
-    fail_reason, n_turns = "", 0
+    fail_reason, n_turns, exec_error = "", 0, None
     if turn.get("status") == "no_case":
         fail_reason = "no-test-cases"
     else:
@@ -97,11 +97,13 @@ def finalize(ctx: Any) -> dict[str, Any]:
             ok, err = ops._sandbox_run(ctx, item, code)  # noqa: SLF001
             if not ok:
                 fail_reason = f"exec-error: {port.tail_line(err)}"
+                exec_error = err[:500]  # rollout.py:802-812, shown to the analysts
             elif not ctx.exists(PRED):
                 fail_reason = "output-not-found"
     elapsed = time.time() - float(turn.get("start") or time.time())
     limit = ops.item_limit_s()
     ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns,
+                           **({"exec_error": exec_error} if exec_error is not None else {}),
                            "elapsed_s": round(elapsed, 3), "backstop": elapsed > limit,
                            "limit_s": limit})
     return {"finished": True}

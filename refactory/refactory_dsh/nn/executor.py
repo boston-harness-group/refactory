@@ -2210,13 +2210,15 @@ class Executor:
         client = self.ctx.model
         if callable(getattr(client, "for_node", None)):
             client = client.for_node(node.id, role=node.role)
-        if node.route is not None:
-            # The step's own model, effort and output cap, as the spine's worker gets them
-            # (`workers.lower_workflow`); a client that cannot take them is refused.
+        step_route = node.bound_route(self.ctx.knobs)
+        if step_route is not None:
+            # The step's own model, effort and output cap (and settings its knobs bind,
+            # `Node.bound_route`), as the spine's worker gets them (`workers.lower_workflow`);
+            # a client that cannot take them is refused.
             if not callable(getattr(client, "with_step_route", None)):
                 raise ValueError(f"agent node {node.id!r} declares a route, which the model "
                                  "client cannot take")
-            client = client.with_step_route(node.route)
+            client = client.with_step_route(step_route)
         # A sealed step runs on the dsh backend with the run's model, as on the spine
         # (`workspace.for_sealed_step`).
         from refactory_dsh.workspace import for_sealed_step

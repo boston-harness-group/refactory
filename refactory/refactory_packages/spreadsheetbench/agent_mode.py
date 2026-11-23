@@ -23,8 +23,9 @@ Run settings, as SkillOpt's harness passes them, are the route's, as in the solv
 ``claude_code`` worker, ``claude-opus-4-6`` at effort ``medium``, permission mode ``skip``
 (Claude Code's ``bypassPermissions``, SkillOpt's) -- a sealed Claude Code step is refused
 under any other. The thinking budget (``--max-thinking-tokens 16384``) is the frozen knob
-``max_thinking_tokens``, which `Agent.run` puts on the solve step's route. Claude Code is
-pinned to SkillOpt's 2.1.299 (`Agent.claude_code_versions`).
+``max_thinking_tokens``, bound to the solve step's route (`nn.Node.bound_route`), so it
+reaches the route on both runtimes. Claude Code is pinned to 2.1.299, the lab's install
+that SkillOpt's runs used (SkillOpt pins none; `Agent.claude_code_versions`).
 
 **Deviations from SkillOpt as shipped** (docs/spreadsheetbench.md lists each with its reason):
 
@@ -44,15 +45,17 @@ pinned to SkillOpt's 2.1.299 (`Agent.claude_code_versions`).
 """
 from __future__ import annotations
 
-import copy
-from pathlib import Path
 from typing import Any
 
 from refactory_dsh import nn
 
 from . import agent_port
 from . import skillopt_port as port
-from .mode import OPS, SKILLOPT_CLAUDE_CODE, TASK
+from .mode import OPS, SKILLOPT_CLAUDE_CODE
+
+#: The same items and grade, with the input's preview as each item's context for the
+#: optimizer (`tasks.SpreadsheetBenchAgentTask`).
+TASK = "refactory_packages.spreadsheetbench.tasks:SpreadsheetBenchAgentTask"
 from .tasks import INPUT
 
 AGENT_OPS = "refactory_packages.spreadsheetbench.agent_ops"
@@ -120,7 +123,8 @@ class Agent(nn.Mode):
                       writes=("reply.txt", agent_port.SOLUTION_PATH), role="solver",
                       retry=SOLVE_RETRY, knobs=(PROMPT_KNOB, SYSTEM_PROMPT_KNOB, THINKING_KNOB),
                       field_bindings=(("prompt_template", PROMPT_KNOB),
-                                      ("system_prompt_template", SYSTEM_PROMPT_KNOB)),
+                                      ("system_prompt_template", SYSTEM_PROMPT_KNOB),
+                                      ("route.max_thinking_tokens", THINKING_KNOB)),
                       notes="one sealed Claude Code session (Read, Bash) writes solution.py"))
         g.add(nn.Node("finalize", "op", call=f"{AGENT_OPS}:finalize",
                       reads=("current_item.json", "turn.json", "reply.txt",
@@ -142,18 +146,6 @@ class Agent(nn.Mode):
     def protected_nodes(self) -> tuple[str, ...]:
         """The data pass and the item's outcome."""
         return ("data", "finalize")
-
-    def run(self, workdir: Path, *, model: Any = None, task: Any = None,
-            memory: Any = None, **kwargs: Any) -> nn.RunResult:
-        """Put the thinking budget on the solve step's route (SkillOpt's
-        ``--max-thinking-tokens``), as the solver puts its output cap there."""
-        budget = int(self.values().get(THINKING_KNOB) or 0)
-        if budget > 0 and model is not None and callable(getattr(model, "for_node", None)):
-            routes = dict(getattr(model, "_node_routes", None) or {})
-            routes["solve"] = {**routes.get("solve", {}), "max_thinking_tokens": str(budget)}
-            model = copy.copy(model)
-            model._node_routes = routes
-        return super().run(workdir, model=model, task=task, memory=memory, **kwargs)
 
     def score(self, run: nn.RunResult) -> float:
         scores = [entry["score"] for entry in run.facts.get("item_scores", [])]

@@ -187,6 +187,9 @@ class StepRoutes:
         under = self.step_route(node, role)
         allowed = self.values(under)
         for key, value in declared.items():
+            if key not in allowed:
+                return (f"step {node!r} sets route {key} {value!r}, which a step may not "
+                        "choose for itself")
             if value not in allowed[key]:
                 return (f"step {node!r} sets route {key} {value!r}, which no route of this run "
                         f"uses; allowed: {', '.join(allowed[key]) or 'none'}")

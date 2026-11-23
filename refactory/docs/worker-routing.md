@@ -42,8 +42,9 @@ is set only once the runtime has applied the policy.
 `claude_code` alone also accepts `max_thinking_tokens`, a positive whole number: Claude
 Code's thinking budget (`--max-thinking-tokens`), fixed thinking of that many tokens in
 place of its adaptive thinking, as a harness passing the flag gets. Unset, Claude Code
-chooses. A mode may put it on one step's route (`spreadsheetbench/agent` does, from its
-frozen `max_thinking_tokens` knob); `actual_route` records it.
+chooses. A mode may bind it to a frozen knob of its own on one step's route
+(`field_bindings` `("route.max_thinking_tokens", knob)`, `Node.bound_route`), which both
+runtimes then carry; `spreadsheetbench/agent` does. `actual_route` records it.
 
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code

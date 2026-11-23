@@ -449,6 +449,8 @@ def validate(
         "parallelism": "int",
         "code": "str",
         "optional": "bool",
+        "route.max_completion_tokens": "int",
+        "route.max_thinking_tokens": "int",
     }
     branch_heads = {t for n in graph.nodes.values() if n.kind == "fork" for t in n.targets}
 
@@ -470,6 +472,9 @@ def validate(
             elif field_name == "optional" and node_id not in branch_heads:
                 issues.append(Issue("V14", "optional binding is only for a fork branch's first "
                                            "step", node=node_id))
+            elif field_name.startswith("route.") and node.kind != "agent":
+                issues.append(Issue("V14", f"{field_name} binding is only for agent nodes",
+                                    node=node_id))
             elif field_name == "parallelism" and node.kind != "data":
                 issues.append(
                     Issue(
