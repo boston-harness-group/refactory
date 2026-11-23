@@ -254,8 +254,9 @@ def _make_route_client():
 #: with its knobs and facts; its prompts are unchanged. Then the solve node lost its
 #: 1800 s wall (``timeout`` null): its session ends on inactivity only. Then the solve
 #: node keeps a reply that writes out tool calls as it is (``keeps_tool_markup``), as
-#: SkillOpt's harness does.
-BASELINE_SNAPSHOT_SHA256 = "61f99cd1893147e186676273f173599891426c9c5a7957024b0997fcb192c259"
+#: SkillOpt's harness does. Then ``retry_declaration`` started including
+#: ``keep_workspace`` in every canonical retry dict, adding the key to the snapshot.
+BASELINE_SNAPSHOT_SHA256 = "e4194e5f3a356358bd4d1e1c0b84dbe881096f30e0d916375077d468b5dfb0d0"
 
 
 @pytest.mark.parametrize("explicit", [False, True])

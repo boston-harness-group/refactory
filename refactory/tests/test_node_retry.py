@@ -40,7 +40,7 @@ REPORT = "reviews/report.md"
 FAKE_DSH = '''import json, os, sys, time, pathlib
 plans = json.loads(pathlib.Path({plan!r}).read_text())
 prompt = sys.stdin.read()
-import signal
+import signal, subprocess
 key = next((key for key in plans if key and key in prompt), "")
 counter = pathlib.Path({counter!r} + ("." + "".join(c for c in key if c.isalnum()) if key else ""))
 calls = json.loads(counter.read_text()) if counter.exists() else 0
@@ -54,10 +54,37 @@ if step.get("fresh"):
 if step.get("kept"):
     assert pathlib.Path("stale.txt").exists(), "previous attempt's edits were lost"
     assert "Your workspace holds the previous attempt" in prompt, "missing keep_workspace note"
+if step.get("check_child_gone"):
+    pid_file = pathlib.Path(step["check_child_gone"])
+    if pid_file.exists():
+        pid = int(pid_file.read_text().strip())
+        try:
+            os.kill(pid, 0)
+            assert False, f"stale child process {{pid}} is still running"
+        except ProcessLookupError:
+            pass  # expected: the child was cleaned up
+        except PermissionError:
+            assert False, f"stale child process {{pid}} exists but is not ours"
 for name, text in step.get("write", {{}}).items():
     target = pathlib.Path(name)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
+if step.get("spawn_child"):
+    # Spawn a background child process in a new session so it survives this process
+    # being killed. The child sleeps with its cwd in the workspace so _end_stale_processes
+    # can find and kill it. Write its PID to a file for the retry step to verify.
+    # Redirect all stdio to DEVNULL so the child does not hold the parent's pipes open
+    # (which would cause "child cleanup unconfirmed" and block the retry).
+    child_script = "import time, os; time.sleep(300)"
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        start_new_session=True,
+        cwd=os.getcwd(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pathlib.Path(step["spawn_child"]).write_text(str(child.pid))
 if step.get("ignore_term"):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 activity = pathlib.Path(os.environ["REFACTORY_WORKER_RECEIPT"]).with_suffix(".activity")
@@ -675,17 +702,18 @@ def test_a_builders_retry_with_keep_workspace_preserves_the_first_attempts_edits
 @pytest.mark.parametrize("runtime", RUNTIMES)
 def test_kept_workspace_retry_waits_for_stale_processes_to_end(tmp_path, runtime, monkeypatch):
     """When keep_workspace is True, the retry terminates stale child processes from the
-    timed-out attempt before reusing the workspace. The first attempt starts a child that
-    writes to the workspace; the retry starts only after that child is gone."""
+    timed-out attempt before reusing the workspace. The first attempt spawns a background
+    child process (in a new session so it survives SIGTERM), then goes silent so the
+    inactivity timeout fires. The retry step verifies the child is gone before it starts."""
     monkeypatch.setenv("REFACTORY_WORKSPACE_SANDBOX", "unconfined")
     keep_rule = {"on": ["timeout"], "times": 1, "timeout_factor": 2, "keep_workspace": True}
-    # The first step writes a file and spawns a child that keeps the workspace busy.
-    # The child writes "child_alive" to a marker file so we can detect it.
-    # The second step (retry) checks stale.txt exists (workspace was kept) and that
-    # the stale child process is gone.
+    # spawn_child writes the child's PID to this path; check_child_gone reads it back.
+    pid_file = str(tmp_path / "child.pid")
     dsh = Scripted(tmp_path / "dsh", [
-        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"}},
-        {"kept": True, "write": {EMIT_FILE: "clean after stale"}, "answer": "done"},
+        {"sleep": 30, "write": {EMIT_FILE: "partial", "stale.txt": "first attempt"},
+         "spawn_child": pid_file},
+        {"kept": True, "check_child_gone": pid_file,
+         "write": {EMIT_FILE: "clean after stale"}, "answer": "done"},
     ])
     workdir = tmp_path / "run"
     if runtime == "spine":
@@ -698,6 +726,15 @@ def test_kept_workspace_retry_waits_for_stale_processes_to_end(tmp_path, runtime
     assert dsh.calls == 2
     # The retry completed with the kept workspace (stale.txt was checked by FAKE_DSH)
     assert "clean after stale" in (workdir / EMIT_FILE).read_text()
+    # Double-check: the stale child process is truly gone
+    pid_path = Path(pid_file)
+    if pid_path.exists():
+        pid = int(pid_path.read_text().strip())
+        try:
+            os.kill(pid, 0)
+            pytest.fail(f"stale child process {pid} is still running after test")
+        except ProcessLookupError:
+            pass  # expected
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
