@@ -144,7 +144,7 @@ def _bindable() -> list[Entry]:
         Entry("bindable field", "parallelism", _GRADER, ("set_knob",)),
         Entry("bindable field", "optional", ("branch",), ("set_knob",)),
         *(Entry("bindable field", f"route.{name}", _NEW, ("set_knob",))
-          for name in ("max_completion_tokens", "max_thinking_tokens")),
+          for name in ("max_completion_tokens", "max_thinking_tokens", "max_turns")),
     ]
 
 

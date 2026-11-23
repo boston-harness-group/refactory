@@ -1,4 +1,4 @@
-# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`, `spreadsheetbench_v2/agent`)
+# SpreadsheetBench (`spreadsheetbench/solver`, `spreadsheetbench/agent`, `spreadsheetbench_v2/agent`, `spreadsheetbench_v2/swe`)
 
 SkillOpt's SpreadsheetBench target agent, ported so the outer loop can be measured
 against SkillOpt on the same items, prompts, code runner and grader. Source:
@@ -10,7 +10,8 @@ multi-turn codegen loop, below), and `spreadsheetbench/agent` its Claude Code ag
 harness ([below](#the-agent-harness-spreadsheetbenchagent)). They share the data, the
 Task, the code runner and the grader. `spreadsheetbench_v2/agent` runs that agent harness
 on a second dataset, SpreadsheetBench 2, with V2's own task text and grader
-([below](#spreadsheetbench-2-spreadsheetbench_v2agent)).
+([below](#spreadsheetbench-2-spreadsheetbench_v2agent)); `spreadsheetbench_v2/swe` runs V2's
+own agent setup on it ([below](#v2s-own-agent-setup-spreadsheetbench_v2swe)).
 
 ## The data
 
@@ -526,3 +527,53 @@ How it runs differs, never what it decides:
 The full prepare of all 277 tasks (554 files) and `check --grades` on them are meant for
 the lab; locally, the recalculation ran through LibreOffice 7.4 on single files (the
 DigiMark input among them, which then opens) and on the tests' circular reference.
+
+## V2's own agent setup (`spreadsheetbench_v2/swe`)
+
+SpreadsheetBench 2's leaderboard runs its own SWE-agent config
+(`SWE-agent/config/spreadsheet.yaml`), not SkillOpt's harness; this mode ports that setup to
+one sealed Claude Code session per item, on the same data, split, Task items and grade as
+`spreadsheetbench_v2/agent`. The session has `Read` and `Bash` in a workspace holding
+`input.xlsx`; it edits the workbook itself and writes `output.xlsx`, which V2's grade grades
+(no `solution.py`, nothing run afterwards). No `output.xlsx` fails the item
+(`output-not-found: the agent left no output.xlsx`).
+
+- **Prompt**: V2's instance template, with only the substitutions this runtime needs
+  (`swe_port.SUBSTITUTIONS`): `Bash` for `bash`, a `Read` line, `view_xlsx` named as a
+  command run with `Bash`, "submit" meaning ending the turn (no `submit` tool), and the
+  paths `input.xlsx` and `output.xlsx`. The "Important", "Environment" and "Recommended
+  Workflow" sections are V2's. V2's system template is appended to Claude Code's system
+  prompt. Both are frozen knobs.
+- **Tools on the PATH**: V2's `view_xlsx` (byte for byte, `swe_tools/view_xlsx`), and
+  LibreOffice as `soffice` and `libreoffice` -- the grader's own (`SB_SOFFICE`), its
+  install folder and `/etc/fonts` bound read only. LibreOffice puts its pipe in `/tmp`
+  only, so these sessions get a `/tmp` of their own, writable and kept across their commands
+  (`ToolEnvironment.private_tmp`, Linux only: on macOS the step is refused); its profile is
+  in the workspace, the command's HOME. The launcher caps LibreOffice's thread pool and
+  malloc arenas (`MAX_CONCURRENCY=4`, `MALLOC_ARENA_MAX=2`): on a many-core machine its
+  xlsx export otherwise fails under a sealed command's per-process limits.
+- **Turn cap**: V2's 50-call cap is Claude Code's `--max-turns 50` (the frozen knob
+  `max_turns`, bound to the solve step's route). Reaching it ends the session with a fixed
+  note as its answer, and the `output.xlsx` it left is graded.
+- **Skill**: the `skill` knob, written to `SKILL.md`, is the text the SkillOpt strategy and
+  the default loop optimize. It is empty by default (V2 has none); empty, the prompt does
+  not mention it (`SKILL.md` is then an empty file in the workspace).
+- **Analysts**: as in `spreadsheetbench_v2/agent` -- the input's preview as the item's
+  context; SkillOpt's view shows the final message, then V2's mismatch block or the fail
+  reason, with V2's system template and the prompt sent as the target's prompts. No gold
+  feedback reaches the agent.
+
+**Deviations from V2** (each with its `spreadsheet.yaml` line in `swe_port.py`'s
+docstring): Claude Code's tools in place of SWE-agent's function calls (and `Read`, which V2
+lacks); no `submit` tool; the paths; the system template appended rather than the whole
+system message; the turn cap as `--max-turns` (a Claude Code turn is one model response, which may make
+several tool calls; a SWE-agent call makes one);
+no 60 s per-command timeout (the seal's limits and the inactivity limit apply); the skill
+section, only when a skill is set; the environment: the pinned Python 3.12 with openpyxl,
+pandas and numpy (V2's image: Python 3.11 with matplotlib, xlsxwriter and flake8 too),
+LibreOffice's `uno` not on `python3`'s path, no network; "one tool call per response" is the
+prompt's instruction only.
+
+**Not verified here.** No live model run. LibreOffice inside the seal ran locally
+(LibreOffice 26.8, `test_libreoffice_runs_inside_the_seal`); CI has no LibreOffice and
+skips that test, so the stand-in checks only that `soffice` is reachable.

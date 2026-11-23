@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa13363988cfe7b17 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..c4dd12faacc0466143976721d843864532be83bc 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -80,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +276,217 @@ function successfulResult(message) {
+@@ -231,20 +276,226 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -112,6 +112,10 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +	} finally {
 +		if (!finished) await iterator.return?.();
 +	}
++}
++/** The step's answer when Claude Code stopped at the route's turn cap (`max_turns`). */
++function turnLimitAnswer(turns) {
++	return `(Claude Code stopped the session at its turn limit of ${turns} turns.)`;
 +}
 +/** What the step asks, once, when Claude Code's last turn ended without a reply. */
 +const EMPTY_ANSWER_PROMPT = "Your last turn ended without a reply. If the task is not finished, finish it. Then reply with your complete final answer, restated in full even if you gave it before.";
@@ -227,7 +231,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +					model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
 +					...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources },
 +					...sent?.claudeExecutable === void 0 ? {} : { claude_executable: sent.claudeExecutable },
-+					...sent?.maxThinkingTokens === void 0 ? {} : { max_thinking_tokens: sent.maxThinkingTokens }, source: "native-sdk-init" },
++					...sent?.maxThinkingTokens === void 0 ? {} : { max_thinking_tokens: sent.maxThinkingTokens },
++					...sent?.maxTurns === void 0 ? {} : { max_turns: sent.maxTurns }, source: "native-sdk-init" },
 +					product_session_id: typeof message.session_id === "string" ? message.session_id : null, resumable: false, ...toolFacts,
 +					auto_compact: { enabled: sent?.autoCompact === true, source: "claude-agent-sdk-flag-settings",
 +						env_dropped: sent?.compactEnvDropped ?? [] } });
@@ -253,9 +258,13 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +						includes_nested_workers: true, excludes: "permission classifier, token-count probes and other helpers outside the SDK query pipeline" } });
 +				}
 +			}
-+			if (emptySuccess(message)) emptyFacts = resultFailureFacts(message);
++			// The route's turn cap reached: the step's answer says so, and what the session
++			// left in its workspace is what it did.
++			const turnLimit = sent?.maxTurns !== void 0 && message.subtype === "error_max_turns";
++			if (turnLimit) onRefactoryMetadata?.({ turn_limit_reached: sent.maxTurns });
++			if (!turnLimit && emptySuccess(message)) emptyFacts = resultFailureFacts(message);
 +			else {
-+				const text = successfulResult(message);
++				const text = turnLimit ? turnLimitAnswer(sent.maxTurns) : successfulResult(message);
 +				emptyFacts = void 0;
 +				// A reply to the re-ask never replaces a settled answer ("my answer is above").
 +				if (!(reasked && settled !== void 0)) {
@@ -307,7 +316,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  	});
  	return {
  		output: [{
-@@ -295,15 +537,40 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +546,41 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -318,6 +327,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +	const _rfSettingSources = (spec.env && spec.env.REFACTORY_SETTING_SOURCES) || "";
 +	const _rfClaudeExecutable = (spec.env && spec.env.REFACTORY_CLAUDE_EXECUTABLE) || "";
 +	const _rfMaxThinking = (spec.env && spec.env.REFACTORY_MAX_THINKING_TOKENS) || "";
++	const _rfMaxTurns = (spec.env && spec.env.REFACTORY_MAX_TURNS) || "";
 +	const _rfSealedTools = (spec.env && spec.env.REFACTORY_SEALED_TOOLS) || "";
 +	const _rfSealRunner = (spec.env && spec.env.REFACTORY_SEAL_RUNNER) || "";
 +	const _rfSealWorkspace = (spec.env && spec.env.REFACTORY_SEAL_WORKSPACE) || "";
@@ -326,7 +336,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +		...spec.env
 +	};
 +	// Adapter controls, not Claude Code's environment.
-+	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES", "REFACTORY_CLAUDE_EXECUTABLE", "REFACTORY_BACKGROUND_QUIET_S", "REFACTORY_MAX_THINKING_TOKENS", "REFACTORY_SEALED_TOOLS", "REFACTORY_SEAL_RUNNER", "REFACTORY_SEAL_WORKSPACE"]) delete _rfEnv[key];
++	for (const key of ["REFACTORY_SYSTEM_PROMPT", "REFACTORY_MODEL_EFFORT", "REFACTORY_TOOL_POLICY", "REFACTORY_SETTING_SOURCES", "REFACTORY_CLAUDE_EXECUTABLE", "REFACTORY_BACKGROUND_QUIET_S", "REFACTORY_MAX_THINKING_TOKENS", "REFACTORY_MAX_TURNS", "REFACTORY_SEALED_TOOLS", "REFACTORY_SEAL_RUNNER", "REFACTORY_SEAL_WORKSPACE"]) delete _rfEnv[key];
 +	// An unattended worker that cannot compact ends with "Prompt is too long" once its
 +	// conversation outgrows the window, losing the step. These switches, inherited from
 +	// the shell that started the run (a Claude Code session sets one), turn compaction off
@@ -353,7 +363,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +594,269 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +604,277 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -459,6 +469,14 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +		const budget = Number(_rfMaxThinking);
 +		if (!Number.isSafeInteger(budget) || budget <= 0) throw new Error(`subagent-claude-code: max_thinking_tokens is a positive whole number, not ${_rfMaxThinking}`);
 +		options.maxThinkingTokens = budget;
++	}
++	// A route's turn cap (`--max-turns`): Claude Code stops the session after that many
++	// turns, and the step ends there with a fixed answer saying so (`turnLimitAnswer`), so
++	// what the session left in its workspace is still collected.
++	if (_rfMaxTurns) {
++		const turns = Number(_rfMaxTurns);
++		if (!Number.isSafeInteger(turns) || turns <= 0) throw new Error(`subagent-claude-code: max_turns is a positive whole number, not ${_rfMaxTurns}`);
++		options.maxTurns = turns;
 +	}
 +	// A route's chosen Claude Code replaces the one bundled with the SDK.
 +	if (_rfClaudeExecutable) {
@@ -624,7 +642,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +866,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +884,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -670,7 +688,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +925,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +943,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -679,7 +697,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +944,38 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +962,39 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -699,6 +717,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
 +			claudeExecutable: options.pathToClaudeCodeExecutable,
 +			sealed: options[SEALED],
 +			maxThinkingTokens: options.maxThinkingTokens,
++			maxTurns: options.maxTurns,
 +			autoCompact: options.settings?.autoCompactEnabled === true,
 +			compactEnvDropped: options[COMPACT_ENV_DROPPED] ?? [],
 +			// How long consumeClaudeQuery waits on silent background tasks (default 600 s).
@@ -720,7 +739,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +1028,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +1047,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -732,7 +751,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +1055,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +1074,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -741,7 +760,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +1067,16 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +1086,16 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -758,7 +777,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..b366fafafcdc0eda59d486baa1336398
  			}
  		}
  	});
-@@ -529,6 +1130,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1149,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

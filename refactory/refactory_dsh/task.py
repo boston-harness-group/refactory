@@ -59,7 +59,8 @@ class TaskInstance:
 @dataclass(frozen=True)
 class ToolEnvironment:
     """What the commands of a Task's sealed tool steps run with (`Task.tool_environment`):
-    an interpreter put first on their PATH as ``python3`` and ``python``."""
+    an interpreter put first on their PATH as ``python3`` and ``python``, and any further
+    commands the Task names, with the folders they run from."""
 
     #: The facts the optimizer's request states about it, in plain words: what
     #: ``python3`` is and what it holds (``"python3 (and python) = Python 3.12 with
@@ -76,6 +77,18 @@ class ToolEnvironment:
     #: inside the dataset (``<x>/dataset/python``) would show the dataset unless it is
     #: named here. None: nothing more.
     hidden: Callable[[Path], Sequence[str]] | None = None
+    #: Further commands on the same PATH, by name: each the text of a script written beside
+    #: ``python3`` (``#!/usr/bin/env python3`` there runs the interpreter). Raises when one
+    #: cannot be given. None: none.
+    commands: Callable[[], Mapping[str, str]] | None = None
+    #: Further folders those commands run from, each bound read only and refused as the
+    #: interpreter's folders are (`seal.tool_path`). Raises when one cannot be given.
+    #: None: none.
+    reads: Callable[[], Sequence[str]] | None = None
+    #: Whether the commands get a ``/tmp`` of the step's own, writable and kept across its
+    #: commands (a folder beside its workspace), as LibreOffice needs: it puts its pipe in
+    #: ``/tmp`` or ``/var/tmp`` only. Linux only (`seal.tool_path`). Default: a read-only one.
+    private_tmp: bool = False
 
 
 @dataclass(frozen=True)

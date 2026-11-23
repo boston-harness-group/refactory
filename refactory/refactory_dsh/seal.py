@@ -19,9 +19,11 @@ front of the command (its ``runnerCommand``). What the command can then see:
   no inherited descriptor: nothing of the DSH process's, so no credential or run
   variable; no other process's arguments or environment either;
 - where the item's Task declares one (`task.Task.tool_environment`), its interpreter
-  first on that PATH as ``python3`` and ``python``, and the interpreter's own directories
-  read only (:func:`tool_path`): never one that holds the run, the home directory or
-  refactory's own.
+  first on that PATH as ``python3`` and ``python``, any further commands it names beside
+  them, and the interpreter's and those commands' directories read only (:func:`tool_path`):
+  never one that holds the run, the home directory or refactory's own; and, where it asks
+  for one (Linux only), a ``/tmp`` of the step's own, writable and kept across its commands
+  (a folder beside the workspace; LibreOffice puts its pipe there).
 
 It is the code step's sandbox (`snippet`) with a writable workspace and a shell:
 
@@ -164,16 +166,17 @@ def system_tool(name: str) -> str:
 
 
 def linux_arguments(ws: str, reads: tuple[str, ...], limits: str,
-                    path: str = PATH, tools: tuple[str, ...] = ()) -> list[str]:
+                    path: str = PATH, tools: tuple[str, ...] = (), tmp: str = "") -> list[str]:
     """What follows ``bash`` in the Linux runner: the script and its arguments, none of
     which holds a ``$`` (`seal_linux.sh` says what each is); ``path`` the command's PATH,
-    ``tools`` the tool environment's folders (:func:`tool_path`) not already in ``reads``."""
+    ``tools`` the tool environment's folders (:func:`tool_path`) not already in ``reads``,
+    ``tmp`` the folder bound writable at ``/tmp`` (`ToolPath.tmp`), or none."""
     tools = tuple(d for d in tools if not any(_inside(d, root) for root in reads))
     arguments = [str(LINUX_SCRIPT), "refactory-seal", ws, str(os.getuid()), str(os.getgid()),
                  f"{LIMITS} {limits}", str(CLOSE_SCRIPT), ":".join(reads), ":".join(LOCAL_KEPT),
-                 path, snippet.LOCALE, system_tool("pivot_root"), ":".join(tools)]
+                 path, snippet.LOCALE, system_tool("pivot_root"), ":".join(tools), tmp]
     expanded = [argument for argument in arguments if "$" in argument or "\n" in argument]
-    if expanded or any(":" in path for path in (*reads, *tools)):
+    if expanded or any(":" in path for path in (*reads, *tools, tmp)):
         raise SealError(f"a sealed runner's arguments hold no '$', newline or ':' in a path: {expanded}")
     return arguments
 
@@ -263,12 +266,15 @@ class StepCap:
 @dataclass(frozen=True)
 class ToolPath:
     """A Task's tool environment as a sealed command gets it (:func:`tool_path`): ``bin``,
-    first on its PATH, holds ``python3`` and ``python``; ``reads`` are the interpreter's
-    directories (and ``bin``), each bound read only."""
+    first on its PATH, holds ``python3``, ``python`` and the Task's further commands;
+    ``reads`` are the interpreter's directories, the commands' folders and ``bin``, each
+    bound read only; ``tmp``, when set, is the step's own folder bound writable at
+    ``/tmp`` (Linux only)."""
 
     bin: str
     reads: tuple[str, ...]
     python: str
+    tmp: str = ""
 
 
 #: The names a Task's interpreter answers to on a sealed command's PATH.
@@ -329,7 +335,8 @@ def refused_binding(bound, *, held=(), within=()) -> str | None:
     return None
 
 
-def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()) -> ToolPath:
+def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=(),
+              commands=None, reads=(), tmp: Path | None = None) -> ToolPath:
     """The Task interpreter ``python`` for a sealed command: ``bin_dir`` (made afresh, beside
     the workspace and never inside it) holds ``python3`` and ``python``, each a two-line
     script that runs ``python`` by its own path (a link would lose a virtual environment),
@@ -340,7 +347,13 @@ def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()
     it), refactory's own directory, or a Task's ``hidden`` paths (its dataset, the secrets
     `ToolEnvironment.hidden` names); or when one holds the home directory. The workspace is
     inside the run, so it is covered. So the seal shows no item's pass, grader file or
-    dataset through it."""
+    dataset through it.
+
+    ``commands`` (name -> script text, `task.ToolEnvironment.commands`) are written into
+    ``bin_dir`` beside them, and ``reads`` (the folders they run from) are bound read only,
+    held to the same refusals. ``tmp`` (`task.ToolEnvironment.private_tmp`), made afresh
+    beside the workspace, is bound writable at ``/tmp``: the step's own, kept across its
+    commands; refused on macOS, whose seal cannot give a command a /tmp of its own."""
     from refactory_dsh.paths import refactory_home
 
     python = os.path.abspath(python)
@@ -355,10 +368,30 @@ def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()
     if why:
         raise SealError(f"the Task's interpreter {python} runs from a folder a sealed step may "
                         f"not read ({why})")
+    reads = tuple(str(r) for r in reads)
+    for folder in reads:
+        if not os.path.isabs(folder) or not os.path.isdir(folder):
+            raise SealError(f"the Task's tool environment reads {folder!r}, which is not a folder")
+    extra = tuple(distinct_paths(reads))
+    why = refused_binding(extra, held=[*secret, str(Path.home())], within=secret)
+    if why:
+        raise SealError(f"the Task's tool environment reads a folder a sealed step may not "
+                        f"read ({why})")
+    commands = dict(commands or {})
+    for name in commands:
+        if not name or name in PYTHON_NAMES or "/" in name or name.startswith("."):
+            raise SealError(f"the Task's tool environment cannot name a command {name!r}")
+    if tmp is not None:
+        if sys.platform == "darwin":
+            raise SealError("a sealed command gets a /tmp of its own on Linux only")
+        if _inside(str(tmp), str(workspace)) or _inside(str(workspace), str(tmp)) \
+                or _inside(str(tmp), str(bin_dir)) or _inside(str(bin_dir), str(tmp)):
+            raise SealError(f"the step's /tmp folder {tmp} is not beside the workspace")
     bin_dir = Path(bin_dir)
     if _inside(str(bin_dir), str(workspace)) or _inside(str(workspace), str(bin_dir)):
         raise SealError(f"the interpreter's folder {bin_dir} is not beside the workspace")
-    for path in (python, os.path.realpath(python), str(bin_dir), *dirs):
+    for path in (python, os.path.realpath(python), str(bin_dir), *dirs, *extra,
+                 *((str(tmp),) if tmp is not None else ())):
         if any(ch in path for ch in ":$\n\"'\\"):
             raise SealError(f"a sealed command's PATH cannot name {path!r}")
     # Run by the name it was given where that name is inside its own folders (a virtual
@@ -372,7 +405,15 @@ def tool_path(python: str, bin_dir: Path, *, workspace: Path, runs=(), hidden=()
         script = bin_dir / name
         script.write_text(f'#!/bin/sh\nexec "{run_as}" "$@"\n')
         script.chmod(0o555)
-    return ToolPath(str(bin_dir), tuple(distinct_paths([str(bin_dir), *dirs])), run_as)
+    for name, text in commands.items():
+        script = bin_dir / name
+        script.write_text(text)
+        script.chmod(0o555)
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
+        Path(tmp).mkdir(mode=0o700, parents=True)  # raises when an earlier one is still there
+    return ToolPath(str(bin_dir), tuple(distinct_paths([str(bin_dir), *dirs, *extra])), run_as,
+                    tmp=str(tmp) if tmp is not None else "")
 
 
 def runner_command(workspace: Path, cap: StepCap | None = None,
@@ -384,7 +425,10 @@ def runner_command(workspace: Path, cap: StepCap | None = None,
     interpreter first on the command's PATH, its directories read only."""
     extra = tools.reads if tools is not None else ()
     path = f"{tools.bin}:{PATH}" if tools is not None else PATH
+    tmp = tools.tmp if tools is not None else ""
     if sys.platform == "darwin":
+        if tmp:
+            raise SealError("a sealed command gets a /tmp of its own on Linux only")
         ws = _check(workspace, (*MAC_READS, *extra))
         # The reaper runs sandbox-exec, then ends whatever the command left behind.
         reaper = str(Path(__file__).with_name("seal_reaper.py"))
@@ -410,7 +454,7 @@ def runner_command(workspace: Path, cap: StepCap | None = None,
             "--mount-proc", "--", snippet.BASH,
             *linux_arguments(ws, LINUX_READS + LINUX_ETC,
                              LINUX_LIMITS if scope or cgroup else LINUX_LIMITS_UNSCOPED, path,
-                             extra)]
+                             extra, tmp)]
 
 
 def user_manager_kept(groups: str | None = None,

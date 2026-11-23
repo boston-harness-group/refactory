@@ -451,6 +451,7 @@ def validate(
         "optional": "bool",
         "route.max_completion_tokens": "int",
         "route.max_thinking_tokens": "int",
+        "route.max_turns": "int",
     }
     branch_heads = {t for n in graph.nodes.values() if n.kind == "fork" for t in n.targets}
 

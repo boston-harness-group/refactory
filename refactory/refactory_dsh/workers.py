@@ -32,7 +32,8 @@ CLAUDE_EXECUTABLE_ENV = 'REFACTORY_CLAUDE_EXECUTABLE'
 CLAUDE_AGENT_SDK = '@anthropic-ai/claude-agent-sdk'
 ROUTE_FIELDS = frozenset({'worker_backend', 'provider', 'model', 'effort', 'permission_mode',
                           'openshell_gateway', 'openshell_image', 'max_completion_tokens',
-                          'setting_sources', 'claude_executable', 'max_thinking_tokens'})
+                          'setting_sources', 'claude_executable', 'max_thinking_tokens',
+                          'max_turns'})
 
 PERMISSIONS = {
     'dsh': ('skip', 'default'),
@@ -107,6 +108,13 @@ def validate_route(route: dict[str, Any]) -> dict[str, Any]:
         if not route['max_thinking_tokens'].isdigit() or int(route['max_thinking_tokens']) <= 0:
             raise ValueError('claude_code max_thinking_tokens is a positive whole number of tokens; '
                              f'got {route["max_thinking_tokens"]!r}')
+    if route.get('max_turns'):
+        if backend != 'claude_code':
+            raise ValueError(f'{backend} does not support max_turns; only claude_code '
+                             'takes a turn cap')
+        if not route['max_turns'].isdigit() or int(route['max_turns']) <= 0:
+            raise ValueError('claude_code max_turns is a positive whole number of turns; '
+                             f'got {route["max_turns"]!r}')
     if route.get('permission_mode', 'skip') not in PERMISSIONS[backend]:
         raise ValueError(f'unsupported permission mode for {backend}: {route.get("permission_mode")}')
     return route
@@ -128,7 +136,7 @@ def resolve_route(base: dict[str, Any], *, role: str = 'worker', node: str = '',
             permission = route.get('permission_mode')
             route.update(provider='', model='', effort='',
                          permission_mode=permission if permission in ('default', 'skip') else 'skip')
-            for key in ('setting_sources', 'claude_executable', 'max_thinking_tokens'):
+            for key in ('setting_sources', 'claude_executable', 'max_thinking_tokens', 'max_turns'):
                 if key in route:
                     route[key] = ''
         route.update(override)
@@ -690,6 +698,7 @@ def write_patch(path: Path, runtime_root: Path, route: dict[str, Any],
                 # adapter's default (600 s) unless this process's environment sets it.
                 ('REFACTORY_BACKGROUND_QUIET_S', os.environ.get('REFACTORY_BACKGROUND_QUIET_S', '')),
                 ('REFACTORY_MAX_THINKING_TOKENS', route.get('max_thinking_tokens', '')),
+                ('REFACTORY_MAX_TURNS', route.get('max_turns', '')),
                 # A sealed step (`refactory_dsh.seal`, Claude Code's own tools): the tools it
                 # is offered, its workspace, and the runner its hook puts before each command.
                 ('REFACTORY_SEALED_TOOLS', ','.join(seal['tools']) if claude_seal else ''),

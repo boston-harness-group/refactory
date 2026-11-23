@@ -831,6 +831,7 @@ class DshModelClient:
         dsh_sessions: str = "",
         claude_executable: str = "",
         max_thinking_tokens: str = "",
+        max_turns: str = "",
     ) -> None:
         from refactory_dsh.workers import session_store_choice, validate_route
         inherited = json.loads(os.environ.get("REFACTORY_WORKER_CONTEXT") or "{}")
@@ -899,6 +900,9 @@ class DshModelClient:
         #: ``max_thinking_tokens``; empty leaves Claude Code's own (adaptive) thinking.
         #: Inherited only within the same product, as the settings sources are.
         self._max_thinking_tokens = max_thinking_tokens or inherited_route.get("max_thinking_tokens", "")
+        #: Claude Code's turn cap (``--max-turns``), a claude_code route's ``max_turns``; empty
+        #: leaves none. Inherited only within the same product, as the thinking budget is.
+        self._max_turns = max_turns or inherited_route.get("max_turns", "")
         #: The Claude Code executable a claude_code worker runs; empty keeps the one
         #: bundled with the Agent SDK. Inherited only within the same product, as the
         #: settings sources are, then `workers.CLAUDE_EXECUTABLE_ENV` on claude_code.
@@ -992,6 +996,8 @@ class DshModelClient:
             result["claude_executable"] = self._claude_executable
         if getattr(self, "_max_thinking_tokens", ""):
             result["max_thinking_tokens"] = self._max_thinking_tokens
+        if getattr(self, "_max_turns", ""):
+            result["max_turns"] = self._max_turns
         return result
 
     def output_limit(self) -> int | None:
@@ -1105,6 +1111,7 @@ class DshModelClient:
         client._setting_sources = ""
         client._claude_executable = ""
         client._max_thinking_tokens = ""
+        client._max_turns = ""
         validate_route(client.route())
         return client
 
@@ -1225,6 +1232,7 @@ class DshModelClient:
             **({"claude_executable": ce} if (ce := getattr(self, "_claude_executable", "")) else {}),
             **({"max_thinking_tokens": mtt} if (mtt := getattr(self, "_max_thinking_tokens", ""))
                else {}),
+            **({"max_turns": mt} if (mt := getattr(self, "_max_turns", "")) else {}),
             # Only the non-default choice, so a default context is the bytes it was.
             **({"dsh_sessions": ds} if (ds := getattr(self, "_dsh_sessions", "run")) != "run" else {}),
         }

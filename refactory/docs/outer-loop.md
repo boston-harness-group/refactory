@@ -2675,6 +2675,7 @@ deferred, with why in `coverage.DECISIONS["deferred"]`.
 | bindable field: `optional` | `branch` | `set_knob` | - |
 | bindable field: `route.max_completion_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | bindable field: `route.max_thinking_tokens` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
+| bindable field: `route.max_turns` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `set_knob` | - |
 | node field: `id` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `kind` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | *identity* | - |
 | node field: `call` | `add_node`, `insert_after`, `insert_before`, `wrap`, `split`, `parallel`, `loop`, `insert`, `parallelize`, `branch`, `route`, `merge` | `split` | - |

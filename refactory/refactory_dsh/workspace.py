@@ -561,6 +561,9 @@ def _seal(workspace: Workspace, workdir: Path, tools: tuple[str, ...], reads: An
 #: Beside a sealed step's workspaces: the folder holding its Task's interpreter as
 #: ``python3`` and ``python`` (`seal.tool_path`).
 TOOL_BIN = "tool-bin"
+#: Beside it: the step's own folder bound at ``/tmp`` where the Task asks for one
+#: (`task.ToolEnvironment.private_tmp`).
+SEAL_TMP = "seal-tmp"
 
 
 def _tool_path(workspace: Workspace, workdir: Path) -> Any:
@@ -585,8 +588,12 @@ def _tool_path(workspace: Workspace, workdir: Path) -> Any:
     try:
         python = environment.python()
         hidden = list(environment.hidden(workdir)) if environment.hidden is not None else []
+        commands = dict(environment.commands()) if environment.commands is not None else {}
+        reads = list(environment.reads()) if environment.reads is not None else []
         tool_path = seal.tool_path(python, workspace.root / TOOL_BIN, workspace=workspace.path,
-                                   runs=run_roots(workdir), hidden=hidden)
+                                   runs=run_roots(workdir), hidden=hidden, commands=commands,
+                                   reads=reads, tmp=(workspace.root / SEAL_TMP
+                                                     if environment.private_tmp else None))
     except Exception as exc:  # noqa: BLE001 - the Task's own check, said with its reason
         raise WorkspaceError(f"agent node {workspace.node!r} runs its tools sealed with Task "
                              f"{ref!r}'s tool environment, which cannot be given: "

@@ -49,6 +49,14 @@ chooses. A mode may bind it to a frozen knob of its own on one step's route
 (`field_bindings` `("route.max_thinking_tokens", knob)`, `Node.bound_route`), which both
 runtimes then carry; `spreadsheetbench/agent` does. `actual_route` records it.
 
+`claude_code` alone also accepts `max_turns`, a positive whole number, passed to Claude
+Code as its turn cap (`--max-turns`). A session that reaches it ends there, and the step's
+answer is a fixed note saying so (`(Claude Code stopped the session at its turn limit of N
+turns.)`, worker metadata `turn_limit_reached`), so whatever the session left in its
+workspace is still collected; without the field, a session Claude Code stops at a limit
+fails the step. A mode binds it as it binds the thinking budget (`("route.max_turns",
+knob)`); `spreadsheetbench_v2/swe` does (50). `actual_route` records it.
+
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code
 2.1.281). Each model needs a recent enough one: the Claude 5 family (`claude-opus-5-*`,
