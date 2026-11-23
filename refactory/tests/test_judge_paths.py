@@ -247,8 +247,20 @@ def test_vitest_send_back_has_its_summary_and_no_excused_detail():
                                     {"tests/b.spec.ts > suite > excused"},
                                     {"tests/b.spec.ts > suite > excused": "base-whole-run"})
     assert "charged boom" in detail
+    assert detail.count("FAIL  tests/a.spec.ts > suite > charged") == 1, detail
     assert "Tests  2 failed | 9 passed (11)" in detail and "Test Files  2 failed (2)" in detail
     assert "EXCUSED-DETAIL" not in detail and "RUN  v1.6.0" not in detail, detail
+
+
+def test_send_back_without_a_summary_line_keeps_only_the_charged_lines():
+    """No runner summary to find: the detail is the charged failure's own line, not the
+    output it was looked for in."""
+    out = ("collecting NOISE-LINE\nFAILED tests/test_a.py::test_x - boom\n"
+           "FAILED tests/test_b.py::test_y - EXCUSED-DETAIL\n")
+    detail = _build_positive_detail(out, {"tests/test_a.py::test_x"},
+                                    {"tests/test_b.py::test_y"}, {})
+    assert detail.splitlines()[0] == "FAILED tests/test_a.py::test_x - boom"
+    assert "NOISE-LINE" not in detail and "EXCUSED-DETAIL" not in detail, detail
 
 
 # ── a log line naming conftest.py is not a failure ─────────────────────────────

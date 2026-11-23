@@ -3389,10 +3389,17 @@ def _extract_summary_lines(output: str) -> list[str]:
 def _charged_lines(output: str, charged_ids: set[str]) -> str:
     """What ``output`` says of ``charged_ids`` alone: their FAILED/ERROR lines, their
     FAILURES-section blocks, and the runner's summary lines."""
-    parts = (_extract_failed_error_lines(output, charged_ids)
-             + _extract_failure_blocks(output, charged_ids)
-             + _extract_summary_lines(output))
+    parts = _charged_parts(output, charged_ids) + _extract_summary_lines(output)
     return "\n".join(parts) if parts else "no charged failure detail found"
+
+
+def _charged_parts(output: str, charged_ids: set[str]) -> list[str]:
+    """The charged ids' FAILED/ERROR lines and blocks, each line once: a vitest block
+    starts with the ``FAIL`` line the short summary also has."""
+    blocks = _extract_failure_blocks(output, charged_ids)
+    starts = {block.split("\n", 1)[0] for block in blocks}
+    return [line for line in _extract_failed_error_lines(output, charged_ids)
+            if line not in starts] + blocks
 
 
 def _format_excused_line(excused: set[str], reasons: dict[str, str]) -> str:
@@ -3412,12 +3419,10 @@ def _build_positive_detail(attempt_output: str, charged_ids: set[str],
     if not charged_ids:
         return "no charged failure detail found"
 
-    blocks = _extract_failure_blocks(attempt_output, charged_ids)
-    failed_error_lines = _extract_failed_error_lines(attempt_output, charged_ids)
     summary_lines = _extract_summary_lines(attempt_output)
     excused_line = _format_excused_line(excused_ids, judge_reasons)
 
-    parts = failed_error_lines + blocks + summary_lines
+    parts = _charged_parts(attempt_output, charged_ids) + summary_lines
     if excused_line:
         parts.append(excused_line)
     return "\n".join(parts) if parts else "no charged failure detail found"
