@@ -28,6 +28,7 @@ from refactory_dsh import task as task_module
 from refactory_dsh.evaluators import WalkerEvaluator
 from refactory_packages.spreadsheetbench import (
     agent_mode, agent_port, interpreter, skillopt_port as port, skillopt_view)
+from refactory_packages.spreadsheetbench import mode as sb_mode
 from sb_support import make_workbook
 from test_spreadsheetbench import PARTS, sb_data, sb_env, sb_python  # noqa: F401 - fixtures
 
@@ -310,17 +311,19 @@ needs_spine = pytest.mark.skipif(
     reason="the spine drain needs Node and the installed workspace")
 
 
-def _drain(tmp_path: Path, client: Any) -> dict[str, Any]:
-    """The val item, lowered with dispatched workers on ``client``'s route and drained by the
-    real spine; its record."""
+def _drain(tmp_path: Path, client: Any, expect_ok: bool = True, *, part: str = "val",
+           train: tuple[str, ...] = ("t1",)) -> Any:
+    """The part's items (the val item by default), lowered with dispatched workers on
+    ``client``'s route and drained by the real spine; its record (all records, for a part
+    of more than one item)."""
     from refactory_dsh import lowering, workers
 
     _, state = _agent_state()
     work = tmp_path / "spine"
     work.mkdir()
     task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
-                                       if p != "train"}, train_ids=["t1"])
-    task_module.write_subset(work, "val", 0.0)
+                                       if p != "train"}, train_ids=list(train))
+    task_module.write_subset(work, part, 0.0)
     lowering.write_declarations(state, work)
 
     def dispatched(workflow: Any) -> Any:
@@ -338,8 +341,11 @@ def _drain(tmp_path: Path, client: Any) -> dict[str, Any]:
         [str(NODE), "--import", "tsx/esm", str(drain), str(graph_path), str(work),
          str(REPO_ROOT / ".venv/bin/python"), "120000", str(tmp_path / "responses.json")],
         capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, env=env)
-    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-3000:]
-    (record,) = json.loads((work / "facts.json").read_text())["item_scores"]
+    assert proc.returncode == 0 or not expect_ok, proc.stdout[-2000:] + proc.stderr[-3000:]
+    records = json.loads((work / "facts.json").read_text())["item_scores"]
+    if part != "val":
+        return records
+    (record,) = records
     return record
 
 
@@ -442,13 +448,30 @@ export function query({ prompt, options }) {
       // Claude Code's own project folder for this session (a large tool result's file).
       if (process.env.CLAUDE_CONFIG_DIR) {
         const slug = realpathSync(options.cwd).replace(/[^a-zA-Z0-9]/g, '-')
-        const saved = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'session', 'tool-results', 'big.txt')
+        const saved = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'fake-session', 'tool-results', 'big.txt')
         mkdirSync(dirname(saved), { recursive: true })
         writeFileSync(saved, 'BIG OUTPUT')
         record.decisions.read_own_output = (await ask('Read', { file_path: saved }))?.permissionDecision
+        // Another session's folder of the same name (an earlier attempt's, or a workspace
+        // whose name differs only in punctuation): its transcript and its tool results.
+        const other = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'other-session', 'tool-results', 'theirs.txt')
+        mkdirSync(dirname(other), { recursive: true })
+        writeFileSync(other, 'NOT YOURS')
+        writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'other-session.jsonl'), '{}')
+        record.decisions.read_other_session = (await ask('Read', { file_path: other }))?.permissionDecision
+        record.decisions.read_other_transcript = (await ask('Read', { file_path: join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug, 'other-session.jsonl') }))?.permissionDecision
+        record.ownProject = join(process.env.CLAUDE_CONFIG_DIR, 'projects', slug)
       }
+      // Claude Code's own refusals of a call (an unoffered tool, input that does not validate)
+      // never reach the hook; their results are the model's errors, not a breach.
+      yield { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_unoffered', is_error: true,
+          content: '<tool_use_error>Error: No such tool available: Write. Write is disabled for this session, in subagents as well as here.</tool_use_error>' },
+        { type: 'tool_result', tool_use_id: 'toolu_badinput', is_error: true,
+          content: [{ type: 'text', text: '<tool_use_error>InputValidationError: Read failed due to the following issues:\nThe required parameter `file_path` is missing</tool_use_error>' }] }] } }
       // A tool result for a call no hook decided: the seal fails closed.
-      if (process.env.FAKE_AGENT_UNHOOKED) {
+      if (process.env.FAKE_AGENT_UNHOOKED
+          && readFileSync(join(options.cwd, 'task.md'), 'utf8').includes(process.env.FAKE_AGENT_UNHOOKED)) {
         yield { type: 'user', message: { role: 'user', content: [
           { type: 'tool_result', tool_use_id: 'toolu_unhooked', content: 'ran unconfined' }] } }
       }
@@ -516,7 +539,11 @@ def _adapter_sent(record: Path) -> dict[str, Any]:
     assert sent["decisions"] == {"write": "allow", "probe": "allow", "read_inside": "allow",
                                  "read_relative": "allow", "read_outside": "deny",
                                  "read_link": "deny", "write_tool": "deny",
-                                 "read_own_output": "allow"}
+                                 "read_own_output": "allow", "read_other_session": "deny",
+                                 "read_other_transcript": "deny"}
+    # The session's own folders go with it; another session's of the same name stay.
+    own = Path(sent["ownProject"])
+    assert not (own / "fake-session").exists() and (own / "other-session").exists()
     _sealed_and_pinned(sent["bash"]["probe"])
     # The golden file, the dataset and other items: neither Bash nor Read reaches them.
     assert len(sent["forbidden"]) == 5
@@ -663,23 +690,54 @@ def test_the_agent_cannot_read_the_gold_the_dataset_or_another_item(tmp_path, se
     assert dispatch["tool_environment"]["python"] == os.environ[interpreter.ENV]
 
 
+GUARD_RUNTIMES = ["walker", pytest.param("spine", marks=needs_spine)]
+
+
+def _guarded_records(runtime: str, tmp_path: Path) -> dict[str, dict[str, Any]]:
+    """Items t1 and v1 through the real adapter on ``runtime``, by id (two items, so a run
+    whose one item is a harness incident still ends as runs do)."""
+    from refactory_dsh.model import DshModelClient
+
+    if runtime == "spine":
+        records = _drain(tmp_path, DshModelClient(
+            **AGENT_ROUTE, runtime_root=REPO_ROOT, dsh_home=tmp_path / "dsh-home",
+            routes_resolved=True, timeout_s=120), part="train", train=("t1", "v1"))
+    else:
+        mode, state = _agent_state()
+        work = tmp_path / "walk"
+        task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
+                                           if p != "train"}, train_ids=["t1", "v1"])
+        task_module.write_subset(work, "train", 0.0)
+        records = WalkerEvaluator(model=_claude(tmp_path), project=Path("."), max_steps=400) \
+            .evaluate(mode, state, work).item_records
+    return {r["id"]: r for r in records}
+
+
 @needs_adapter
+@pytest.mark.parametrize("runtime", GUARD_RUNTIMES)
+def test_claude_codes_own_refusals_are_not_seal_breaches(tmp_path, sealed_sdk, runtime):
+    """A call to a tool the step is not offered, and one whose input does not validate, come
+    back as Claude Code's ``<tool_use_error>`` without reaching the hook: the model's
+    mistakes, which it sees and goes on from. The item is graded as usual."""
+    record = _guarded_records(runtime, tmp_path)["v1"]
+    assert record["passed"] and record.get("error_kind") is None, record
+
+
+@needs_adapter
+@pytest.mark.parametrize("runtime", GUARD_RUNTIMES)
 def test_a_tool_call_no_hook_decided_fails_closed_as_a_harness_incident(tmp_path, sealed_sdk,
-                                                                        monkeypatch):
+                                                                        monkeypatch, runtime):
     """If Claude Code ever ran a tool without the PreToolUse hook (a version that ignores
     it), the adapter's guard sees a tool result for a call the hook never decided: the
     seal records an incident and the step fails as the harness's failure, never graded."""
-    monkeypatch.setenv("FAKE_AGENT_UNHOOKED", "1")
-    mode, state = _agent_state()
-    work = tmp_path / "walk"
-    task_module.make_manifest(work, **{f"{p}_ids": ids for p, ids in PARTS.items()
-                                       if p != "train"}, train_ids=["t1"])
-    task_module.write_subset(work, "val", 0.0)
-    result = WalkerEvaluator(model=_claude(tmp_path), project=Path("."), max_steps=400) \
-        .evaluate(mode, state, work)
-    (record,) = result.item_records
-    assert not record["passed"] and record["error_kind"] == "harness_incident", record
+    monkeypatch.setenv("FAKE_AGENT_UNHOOKED", "Put 7 in B1.")  # item v1 only
+    records = _guarded_records(runtime, tmp_path)
+    record = records["v1"]
+    assert not record["passed"] and record["error_kind"] == "harness_incident", json.dumps(record)[:3000]
     assert "hook did not decide tool call toolu_unhooked" in record["error_text"], record
+    # The other item ran and was graded as usual (its answer, 7, is not t1's 42).
+    assert records["t1"].get("error_kind") is None and records["t1"]["fail_reason"].startswith(
+        "eval-mismatch"), records["t1"]
 
 
 # ── route settings from frozen knobs, on the shipped runtime ─────────────────
@@ -804,3 +862,34 @@ def test_a_new_read_bash_step_is_refused_when_new_step_tools_is_off():
     assert _new_node_tools(seed, candidate, sealed=(True, ""), check=lambda *a: (True, "")) == []
     assert "cannot run a sealed step" in _new_node_tools(
         seed, candidate, sealed=(True, ""), check=lambda *a: (False, "not claude_code"))[0]
+
+
+@pytest.mark.parametrize("mode_cls", [agent_mode.Agent, sb_mode.Solver], ids=["agent", "solver"])
+def test_the_search_never_binds_a_route_setting_to_a_knob_of_its_own(mode_cls):
+    """A proposal that adds an unfrozen knob and binds a step's thinking budget or output
+    cap to it is refused (``E-route``); a copy of the solve step, whose binding is to the
+    mode's frozen knob, is not refused for it."""
+    import structure_fuzz as sf
+    from refactory_dsh.optim import Candidate
+
+    applier = sf.Applier(sf.Seed("sb-" + mode_cls.name, mode_cls))
+    parent = Candidate.from_state(applier.seed_state)
+    out = applier.attempt(parent, {"edits": [
+        {"op": "add_knob", "name": "tk", "spec": {"kind": "int", "default": 100000, "lo": 1,
+                                                 "hi": 10 ** 7}},
+        {"op": "add_node", "node": {
+            "id": "extra", "kind": "agent", "prompt_template": "x", "writes": ["e.txt"],
+            "knobs": ["tk"], "field_bindings": [["route.max_thinking_tokens", "tk"],
+                                                ["route.max_completion_tokens", "tk"]]},
+         "position": {"before": "finalize"}}]}, {parent.id})
+    assert isinstance(out, list) and any(
+        r.startswith("E-route: step 'extra' binds its max_thinking_tokens to knob 'tk'")
+        for r in out), out
+    from refactory_dsh.optim.base import _route_binding_refusals
+
+    copied = json.loads(json.dumps(applier.seed_state))
+    copied["graph"]["nodes"]["solve2"] = dict(copied["graph"]["nodes"]["solve"], id="solve2")
+    assert _route_binding_refusals(applier.seed_state, copied) == []
+    knob = "max_thinking_tokens" if mode_cls is agent_mode.Agent else "max_completion_tokens"
+    copied["knobs"][knob] = dict(copied["knobs"][knob], value=99999)
+    assert _route_binding_refusals(applier.seed_state, copied)

@@ -1,12 +1,12 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19bc6730055 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..6e267b39d95dafdfc9725f7231000f88e8a27c91 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
  import { brandString } from "@deepseek-ai/dsh-brand";
  import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
  import { EventEmitter } from "node:events";
-+import { appendFileSync, closeSync, constants as fsConstants, copyFileSync, fstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync } from "node:fs";
++import { appendFileSync, rmdirSync, closeSync, constants as fsConstants, copyFileSync, fstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 +import { homedir, tmpdir } from "node:os";
 +import { basename, dirname, isAbsolute, join, resolve } from "node:path";
  //#region lib/types/process.js
@@ -80,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +276,216 @@ function successfulResult(message) {
+@@ -231,20 +276,217 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -222,6 +222,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
 +					working_directory: sent.sealed.workspace
 +				} : {};
 +				if (sent && typeof message.session_id === "string") sent.sessionId = message.session_id;
++				if (sent?.sealed && typeof message.session_id === "string") sent.sealed.sessionId = message.session_id;
 +				onRefactoryMetadata?.({ actual_route: { worker_backend: "claude_code", provider: null,
 +					model: typeof message.model === "string" ? message.model : null, effort: sent?.effort ?? null,
 +					...sent?.settingSources === void 0 ? {} : { setting_sources: sent.settingSources },
@@ -306,7 +307,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  	});
  	return {
  		output: [{
-@@ -295,15 +536,40 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +537,40 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -352,7 +353,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +593,233 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +594,267 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -425,16 +426,18 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
 +		if (!Array.isArray(runner) || runner.length === 0 || !runner.every((part) => typeof part === "string")) throw new Error("subagent-claude-code: a sealed step needs its seal runner");
 +		if (!_rfSealWorkspace || !isAbsolute(_rfSealWorkspace)) throw new Error("subagent-claude-code: a sealed step needs its workspace");
 +		const root = realpathSync(_rfSealWorkspace);
-+		// Claude Code's own folders for this session, named after its working directory: its
-+		// project folder (where it saves a large tool result for the model to Read back) and
-+		// its temporary one (background task output). Only the session's own commands' output
-+		// is there; a Read of it is the agent reading its own output, as an unsealed
-+		// session may.
++		// Claude Code's own folders, named after the working directory (a name other workspaces
++		// may share: the name drops punctuation): its project folder, which holds each
++		// session's transcript and the large tool results it saves for the model to Read back
++		// (`<session>/tool-results`), and its temporary one. Only this session's are the
++		// agent's to read (`sealedOwn`, once the session's id is known), and they go with it
++		// (`removeSealedSession`).
 +		const configDir = _rfEnv.CLAUDE_CONFIG_DIR || join(_rfEnv.HOME || homedir(), ".claude");
 +		const slug = root.replace(/[^a-zA-Z0-9]/g, "-");
 +		const tmpRoot = _rfEnv.CLAUDE_CODE_TMPDIR || _rfEnv.TMPDIR || tmpdir();
-+		const own = [join(configDir, "projects", slug), join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug)];
-+		const seal = { tools, runner, root, own, decided: new Set(), workspace: _rfSealWorkspace };
++		const seal = { tools, runner, root, decided: new Set(), workspace: _rfSealWorkspace,
++			configDir, project: join(configDir, "projects", slug),
++			temporary: join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug), sessionId: void 0 };
 +		options.cwd = _rfSealWorkspace;
 +		options.additionalDirectories = [_rfSealWorkspace];
 +		options.tools = tools;
@@ -475,11 +478,43 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
 +	if (!Array.isArray(content)) return;
 +	for (const block of content) {
 +		if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string" || seal.decided.has(block.tool_use_id)) continue;
++		// A call Claude Code refused before any tool ran (a tool it does not offer, input that
++		// does not validate) never reaches the hook: its result is Claude Code's own error,
++		// the model's mistake, which it sees and goes on from.
++		if (toolUseError(block)) continue;
 +		const reason = `the seal's hook did not decide tool call ${block.tool_use_id} before it ran`;
 +		try {
 +			appendFileSync(`${seal.root}.seal-incidents.jsonl`, `${JSON.stringify({ time: Date.now() / 1000, reason })}\n`);
 +		} catch {}
 +		throw new ClaudeCodeFailure({ stage: "query-run", category: "invalid-result", detail: reason });
++	}
++}
++/** Whether a tool result is Claude Code's own refusal of the call, made before any tool ran. */
++function toolUseError(block) {
++	const text = typeof block.content === "string" ? block.content
++		: Array.isArray(block.content) ? block.content.map((part) => typeof part?.text === "string" ? part.text : "").join("") : "";
++	return block.is_error === true && text.trimStart().startsWith("<tool_use_error>");
++}
++/**
++* The folders of Claude Code's own a sealed step may read: this session's tool results and
++* temporary folder, never another session's (an earlier attempt's, or a workspace whose
++* folder name collides); none until the session's id is known.
++*/
++function sealedOwn(seal) {
++	if (typeof seal.sessionId !== "string" || !/^[0-9a-zA-Z-]{1,80}$/.test(seal.sessionId)) return [];
++	return [join(seal.project, seal.sessionId, "tool-results"), join(seal.temporary, seal.sessionId)];
++}
++/**
++* Remove what Claude Code kept of a sealed session: its transcript and tool results in the
++* project folder, its temporary and session-env folders; the project and temporary folders
++* themselves only once empty, since another session may share their name.
++*/
++function removeSealedSession(seal) {
++	if (seal === void 0 || typeof seal.sessionId !== "string" || !/^[0-9a-zA-Z-]{1,80}$/.test(seal.sessionId)) return;
++	for (const place of [join(seal.project, seal.sessionId), join(seal.project, `${seal.sessionId}.jsonl`),
++		join(seal.temporary, seal.sessionId), join(seal.configDir, "session-env", seal.sessionId)]) rmSync(place, { recursive: true, force: true });
++	for (const place of [seal.project, seal.temporary]) {
++		try { rmdirSync(place); } catch {}
 +	}
 +}
 +/** The Claude Code tools a sealed step may list (refactory_dsh.seal.CLAUDE_CODE_TOOLS). */
@@ -556,7 +591,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
 +		} catch {
 +			try { real = join(realpathSync(dirname(wanted)), basename(wanted)); } catch { real = resolve(wanted); }
 +		}
-+		const roots = [root, ...seal.own.map((place) => { try { return realpathSync(place); } catch { return place; } })];
++		const roots = [root, ...sealedOwn(seal).map((place) => { try { return realpathSync(place); } catch { return place; } })];
 +		if (!roots.some((place) => real === place || real.startsWith(`${place}/`))) return deny(`${given.file_path} is outside this step's workspace (${root}); only its files can be read`);
 +		// The Read opens the path judged here, never one it would resolve another way.
 +		if (process.platform !== "linux") return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { ...given, file_path: real } } };
@@ -587,7 +622,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +829,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +864,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -633,7 +668,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +888,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +923,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -642,7 +677,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +907,38 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +942,38 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -683,7 +718,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +991,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +1026,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -695,7 +730,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +1018,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +1053,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -704,7 +739,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +1030,15 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +1065,16 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -717,10 +752,11 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..7ce4c8c27fe605d0c471fdb26502a19b
  				throw failure;
 +			} finally {
 +				removeScratch(scratch, sent?.sessionId);
++				removeSealedSession(sent?.sealed);
  			}
  		}
  	});
-@@ -529,6 +1092,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1128,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

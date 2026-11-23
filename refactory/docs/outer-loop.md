@@ -1811,11 +1811,15 @@ state is promised, on any graph shape:
   and allows those tools only, loads no settings or MCP servers, and a `PreToolUse` hook
   runs each Bash command under the same runner (the runner, `--`, `/bin/bash -c` and the
   command) and refuses a Read whose real path is outside the workspace (or Claude Code's own
-  folders for the session, where it saves a large tool result and background output for the
-  model to read back), a Read of a path starting with `~`, and any other tool. It fails
+  folders for this session only, where it saves a large tool result for the model to read
+  back; another session's of the same folder name is refused, and the session's own are
+  removed with it), a Read of a path starting with `~`, and any other tool. It fails
   closed: a tool result for a call the hook never decided (a Claude Code that ignored it)
   is recorded as a seal incident and the step fails as a harness incident (`SealFailed`),
-  never graded.
+  never graded; Claude Code's own refusal of a call before any tool ran (an unoffered
+  tool, input that does not validate, `<tool_use_error>`) is the model's error, which it
+  sees and goes on from. A search never binds a step's route setting to a knob of its own
+  (`E-route`): only to a knob the seed froze, at its value.
   Its prompt is sent alone (no execution contract: the harness's prompt names its files),
   its reply is its first output, and each later output is a file it may leave in its
   workspace, collected when it does and absent when it does not

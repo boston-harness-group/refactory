@@ -261,7 +261,7 @@ checks each against SkillOpt's own code):
 | permission mode | `--permission-mode bypassPermissions` | route `skip` (`bypassPermissions`); another is refused |
 | folder | `cwd` the workspace, `--add-dir` it | the sealed workspace, also its added directory |
 | model, effort | `--model <target>`, `--effort medium` | the route's (`claude-opus-4-6`, `medium`) |
-| thinking | `--max-thinking-tokens 16384` | frozen knob `max_thinking_tokens`, bound to the solve step's route on both runtimes |
+| thinking | `--max-thinking-tokens 16384` (on 2.1.299 with opus-4-6, adaptive thinking is sent anyway) | frozen knob `max_thinking_tokens`, bound to the solve step's route on both runtimes (the same request) |
 | Claude Code | whatever `claude` is on the machine (SkillOpt pins none; the lab's is 2.1.299) | pinned to 2.1.299, the lab's install, as the solver's |
 
 SkillOpt's base config sets `claude_code_exec_use_sdk: auto`, which tries the Python Agent
@@ -323,9 +323,10 @@ the same:
    the next command; Claude Code's shell keeps it in SkillOpt's.
 8. **Read.** On Linux a Read is given a copy of the workspace file, taken after the check
    (outer-loop.md); the content is the same. A Read outside the workspace is refused,
-   except of Claude Code's own folders for the session (where it saves a large tool
-   result and background output for the model to Read back); SkillOpt's agent may read
-   anything.
+   except of this session's own tool-results and temporary folders in Claude Code's
+   folders (where it saves a large tool result for the model to Read back): never another
+   session's (an earlier attempt's, or a workspace whose folder name collides), and the
+   session's own go with it. SkillOpt's agent may read anything.
 9. **Transport.** The Agent SDK's streamed session, not `claude -p --output-format text`.
    On Claude Code 2.1.299 against a stub API the two requests differ slightly: the SDK
    session's system prompt has two lines `-p`'s does not and lacks one it has, the Bash

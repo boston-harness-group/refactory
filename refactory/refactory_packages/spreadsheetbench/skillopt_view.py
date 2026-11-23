@@ -15,8 +15,9 @@ message after the last call -- feedback on a turn that ended the loop by using u
 turns or its budget -- is not in any call, so it is not shown.
 
 The agent mode's records (`agent_mode.Agent`, SkillOpt's ``claude_code_exec`` harness) are
-rendered as that harness's results: one turn, the conversation its final message alone
-(codegen_agent.py:501) then the verification block, and the chat path's system and user
+rendered as that harness's results: one turn, the conversation ``final_message or raw``
+alone (codegen_agent.py:501; here the step's reply, which is never empty) then the
+verification or execution-error block, and the chat path's system and user
 prompts and preview, which ``process_one_codegen`` saves for the analysts in this harness
 too (rollout.py:700-718) -- never the agent's tool calls or its ``solution.py``, which
 SkillOpt's CLI path shows them nowhere (`agent_port.conversation`). Its user prompt is

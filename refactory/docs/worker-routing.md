@@ -39,9 +39,12 @@ the route says). The worker record's `actual_route` shows the
 effort and settings sources Claude Code was started with, and `enforced_tool_policy`
 is set only once the runtime has applied the policy.
 
-`claude_code` alone also accepts `max_thinking_tokens`, a positive whole number: Claude
-Code's thinking budget (`--max-thinking-tokens`), fixed thinking of that many tokens in
-place of its adaptive thinking, as a harness passing the flag gets. Unset, Claude Code
+`claude_code` alone also accepts `max_thinking_tokens`, a positive whole number, passed
+to Claude Code as its thinking budget (`--max-thinking-tokens`, as a harness passing the
+flag does). What Claude Code does with it depends on its version and the model: on 2.1.299
+with `claude-opus-4-6`, a `claude -p --max-thinking-tokens 16384 --effort medium` and a
+worker session with this field both send adaptive thinking with effort `medium` (seen
+against a stub API), so the flag has no effect on that model in either. Unset, Claude Code
 chooses. A mode may bind it to a frozen knob of its own on one step's route
 (`field_bindings` `("route.max_thinking_tokens", knob)`, `Node.bound_route`), which both
 runtimes then carry; `spreadsheetbench/agent` does. `actual_route` records it.
