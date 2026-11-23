@@ -1491,19 +1491,12 @@ def test_a_revision_and_its_source_are_smoked_on_the_same_sample(tmp_path, monke
 _LIVEMATH_IDS = ("202501:1", "202501:2", "202503:1", "202503:2", "202503:3")
 
 
-@pytest.mark.parametrize(("knobs", "expected"), [
-    # LiveMath's own settings (`livemath/mode.py`): its parts manifest, holdout 0. A
-    # fraction split of holdout 0 would sample 202503:1 too, which is val.
-    ({"holdout": 0, "parts_manifest": "MANIFEST"}, ["202501:1", "202501:2"]),
-    # No manifest: the holdout fraction the mode's runs use, not the outer loop's default.
-    ({"holdout": 0.6}, ["202501:1", "202501:2"]),
-    ({"holdout": 0}, ["202501:1", "202501:2", "202503:1"]),
-])
-def test_create_smokes_a_task_bound_mode_on_the_train_part_its_runs_use(
-        tmp_path, monkeypatch, knobs, expected):
-    """Create's smoke node samples the produced mode's train part as that mode's runs
-    define it -- its ``holdout`` and ``parts_manifest`` -- through the real sandboxed
-    smoke, so no val or test item runs."""
+def _livemath_smoke(tmp_path, monkeypatch, knobs, *, node="smoke", extra=None, profile=None):
+    """A create run whose package is a Task-bound mode over the LiveMath fixture ids,
+    smoked through the real sandbox with ``knobs``. "MANIFEST" in a knob is LiveMath's
+    fixture parts manifest (`build_parts_manifest`), in the project as ``parts.json``.
+    ``extra`` files are written into the project, and ``profile`` (name, settings) is
+    saved there as an optimize profile. Returns the run directory."""
     from refactory_dsh import lowering
     from refactory_dsh.run import run_node
     from refactory_packages.livemath.manifest import build_parts_manifest
@@ -1515,22 +1508,149 @@ def test_create_smokes_a_task_bound_mode_on_the_train_part_its_runs_use(
     files["task.py"] = files["task.py"].replace(
         "[TaskInstance(id=f'item_{i:03d}', metadata={}) for i in reversed(range(177))]",
         f"[TaskInstance(id=i, metadata={{}}) for i in reversed({list(_LIVEMATH_IDS)!r})]")
-    _stage(tmp_path / "project", files)
-    manifest = build_parts_manifest(Path(__file__).parent / "fixtures" / "livemath" / "split",
-                                    tmp_path / "manifest")
+    project = tmp_path / "project"
+    package = _stage(project, files)
+    built = build_parts_manifest(Path(__file__).parent / "fixtures" / "livemath" / "split",
+                                 tmp_path / "built")
+    (project / "parts.json").write_text(built.read_text())
+    for name, body in (extra or {}).items():
+        (project / name).write_text(body)
+    if profile is not None:
+        from refactory_dsh import profiles
+
+        profiles.save(project, profile[0], {"settings": profile[1]})
     workdir = _smoke_run(tmp_path, monkeypatch, revision="", scores={})
-    (workdir / "facts.json").write_text(json.dumps({"name": NAME, "revision_of": ""}))
+    (workdir / "facts.json").write_text(json.dumps(
+        {"name": NAME, "revision_of": "", "package_path": str(package)}))
+    # The nodes' own declarations, as the runtime leaves them.
+    lowering.write_declarations(CreateMode().state_dict(), workdir)
     monkeypatch.setattr(sandbox, "smoke", real_smoke)
-    monkeypatch.setattr(create_ops, "project_for_nodes", lambda: tmp_path / "project")
+    monkeypatch.setattr(create_ops, "project_for_nodes", lambda: project)
     monkeypatch.setattr(create_ops, "_model_context", lambda ctx: {})
-    knobs = {name: str(manifest) if value == "MANIFEST" else value for name, value in knobs.items()}
+    knobs = {name: str(project / "parts.json") if value == "MANIFEST" else value
+             for name, value in knobs.items()}
     monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"smoke_items": 3, **knobs}))
-    run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
+    run_node(f"refactory_dsh.create_ops:{node}", workdir=workdir, node_id="smoke")
+    return workdir
+
+
+def _ran(workdir) -> list[str]:
     receipt = json.loads((workdir / "smoke.json").read_text())
-    assert receipt["ok"], receipt
-    ran = sorted(json.loads(path.read_text())["id"]
-                 for path in Path(receipt["workdir"]).glob("passes/data/*/span.json"))
-    assert ran == expected
+    return sorted(json.loads(path.read_text())["id"]
+                  for path in Path(receipt["workdir"]).glob("passes/data/*/span.json"))
+
+
+@pytest.mark.parametrize(("knobs", "expected", "source"), [
+    # LiveMath's own settings (`livemath/mode.py`): its parts manifest, holdout 0. A
+    # fraction split of holdout 0 would sample 202503:1 too, which is val.
+    ({"holdout": 0, "parts_manifest": "MANIFEST"}, ["202501:1", "202501:2"], "knobs"),
+    # No manifest: the holdout fraction the mode's runs use, not the outer loop's default.
+    ({"holdout": 0.6}, ["202501:1", "202501:2"], "knobs"),
+    ({"holdout": 0}, ["202501:1", "202501:2", "202503:1"], "knobs"),
+    # A relative manifest path is the project's, not the node's working directory.
+    ({"parts_manifest": "parts.json"}, ["202501:1", "202501:2"], "knobs"),
+])
+def test_create_smokes_a_task_bound_mode_on_the_train_part_its_runs_use(
+        tmp_path, monkeypatch, knobs, expected, source):
+    """Create's smoke node samples the produced mode's train part as that mode's runs
+    define it -- its ``holdout`` and ``parts_manifest`` -- through the real sandboxed
+    smoke, so no val or test item runs; ``smoke.json`` says which split and items."""
+    workdir = _livemath_smoke(tmp_path, monkeypatch, knobs)
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["ok"] and receipt["status"] == "pass", receipt
+    assert _ran(workdir) == expected
+    assert receipt["sampled_items"] == {"data": expected}
+    assert receipt["split"]["source"] == source
+    assert receipt["warnings"] == []
+
+
+def test_create_smokes_on_the_split_of_a_saved_optimize_profile(tmp_path, monkeypatch):
+    """The ``profile`` knob reads holdout and parts_manifest from the saved optimize
+    profile, the one place a mode's runs take them from; a knob given beside it wins."""
+    project = tmp_path / "project"
+    workdir = _livemath_smoke(tmp_path, monkeypatch, {"profile": "livemath-b"}, profile=(
+        "livemath-b", {"parts_manifest": "parts.json", "holdout": 0}))
+    split = json.loads((workdir / "smoke.json").read_text())["split"]
+    assert _ran(workdir) == ["202501:1", "202501:2"]
+    assert split["source"] == "profile" and split["profile"] == "livemath-b"
+    assert split["parts_manifest_from"] == "profile" and split["holdout"] == 0.0
+    assert split["parts_manifest"] == str(project / "parts.json")
+
+
+def test_a_holdout_knob_wins_over_the_profile(tmp_path, monkeypatch):
+    workdir = _livemath_smoke(tmp_path, monkeypatch, {"profile": "fraction", "holdout": "0.6"},
+                              profile=("fraction", {"holdout": 0}))
+    split = json.loads((workdir / "smoke.json").read_text())["split"]
+    assert _ran(workdir) == ["202501:1", "202501:2"]
+    assert split["holdout"] == 0.6 and split["holdout_from"] == "knobs" and split["source"] == "knobs"
+
+
+def test_a_profile_that_cannot_be_read_is_refused_before_any_smoke(tmp_path, monkeypatch):
+    with pytest.raises(create_ops.SplitRefused, match="profile 'missing'"):
+        _livemath_smoke(tmp_path, monkeypatch, {"profile": "missing"})
+    receipt = json.loads((tmp_path / "run" / "smoke.json").read_text())
+    assert receipt["status"] == "split_refused" and receipt["ok"] is False
+
+
+def test_a_smoke_on_the_default_split_says_val_or_test_items_may_have_run(tmp_path, monkeypatch):
+    """No profile, holdout or parts_manifest: the smoke samples the default fraction,
+    records that, and the run's report (``create.json``) carries the warning."""
+    from refactory_dsh import authoring_evidence
+    from refactory_dsh.run import run_node
+
+    workdir = _livemath_smoke(tmp_path, monkeypatch, {})
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert receipt["split"]["source"] == "default" and receipt["status"] == "pass"
+    assert len(receipt["warnings"]) == 1
+    assert "default holdout fraction (0.3)" in receipt["warnings"][0]
+    assert "val or test" in receipt["warnings"][0]
+    monkeypatch.setattr(authoring_evidence, "require_completion", lambda ctx: None)
+    monkeypatch.setattr(create_ops, "_mode_contracts", lambda name: {})
+    run_node("refactory_dsh.create_ops:write_result", workdir=workdir, node_id="report")
+    report = json.loads((workdir / "create.json").read_text())
+    assert report["smoke_warnings"] == receipt["warnings"]
+    assert report["smoke_split"]["source"] == "default"
+
+
+def test_a_manifest_none_of_whose_train_ids_the_task_has_is_refused_not_passed(tmp_path, monkeypatch):
+    """The reviewer's stale manifest: its one train id is no item of the Task, so the
+    smoke would run nothing. It is refused, naming the id, and is never a pass; the gate
+    stops rather than repairing code that has nothing wrong with it."""
+    with pytest.raises(create_ops.SplitRefused, match=r"none of the parts manifest's 1 train ids .*stale:1"):
+        _livemath_smoke(tmp_path, monkeypatch, {"parts_manifest": "stale.json"},
+                        extra={"stale.json": json.dumps({"train": ["stale:1"]})})
+    receipt = json.loads((tmp_path / "run" / "smoke.json").read_text())
+    assert receipt["status"] == "split_refused" and receipt["ok"] is False
+    assert "none of the parts manifest's 1 train ids" in receipt["error"]
+    assert _ran(tmp_path / "run") == []
+
+
+@pytest.mark.parametrize("smoke_json", [{"status": "split_refused", "ok": False},
+                                        {"status": "pass", "ok": True}])
+def test_gate_smoke_stops_on_a_refused_split_and_does_not_repair(tmp_path, monkeypatch, smoke_json):
+    """A refused split -- the new mode's, or the revision source's after the new mode
+    passed -- is no defect of the produced code: the gate stops, and no repair is spent."""
+    ctx = _gate_smoke_context(tmp_path)
+    repairs: list[object] = []
+
+    def _refused(ctx_inner):
+        ctx_inner.write_json("smoke.json", smoke_json)
+        raise create_ops.SplitRefused("data node data: none of the parts manifest's 1 train ids")
+
+    monkeypatch.setattr(create_ops, "smoke", _refused)
+    monkeypatch.setattr(create_ops, "repair", lambda *a, **kw: repairs.append(a) or "reloop")
+    with pytest.raises(ValueError, match="validation split_refused: SplitRefused: data node data"):
+        create_ops.gate_smoke(ctx)
+    assert repairs == []
+
+
+def test_a_manifest_some_of_whose_train_ids_the_task_lacks_is_warned_about(tmp_path, monkeypatch):
+    workdir = _livemath_smoke(tmp_path, monkeypatch, {"parts_manifest": "part.json"}, extra={
+        "part.json": json.dumps({"train": ["202501:1", "stale:1"], "val": ["202503:1"]})})
+    receipt = json.loads((workdir / "smoke.json").read_text())
+    assert _ran(workdir) == ["202501:1"] and receipt["status"] == "pass"
+    assert receipt["warnings"] == [
+        "data node data: 1 of the parts manifest's 2 train ids are not among its items (stale:1)"]
 
 
 @pytest.mark.parametrize("body", ['{"val": ["202503:1"]}', "not json"])
@@ -1547,9 +1667,30 @@ def test_create_refuses_a_parts_manifest_it_cannot_sample_before_any_smoke(
     monkeypatch.setattr(sandbox, "smoke", lambda identifier, *a, **kw: calls.append(identifier))
     (tmp_path / "parts.json").write_text(body)
     monkeypatch.setenv(lowering.KNOBS_ENV, json.dumps({"parts_manifest": str(tmp_path / "parts.json")}))
-    with pytest.raises(ValueError, match="parts_manifest"):
+    with pytest.raises(create_ops.SplitRefused, match="parts_manifest"):
         run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
     assert calls == []
+    assert json.loads((workdir / "smoke.json").read_text())["status"] == "split_refused"
+
+
+def test_a_revision_source_whose_sample_is_refused_stops_the_smoke(tmp_path, monkeypatch):
+    """The source of a revision may lack the manifest's train ids the revision has: its
+    refused sample is a refused split, not a score or a code failure."""
+    from refactory_dsh.run import run_node
+    from refactory_dsh.sandbox import SandboxResult
+    from test_edit_design import _smoke_run
+
+    def stub(identifier, workdir_, **kwargs):
+        if Path(workdir_).name == "smoke-source":
+            return SandboxResult(ok=True, payload={
+                "exit_ok": False, "sample_refused": True,
+                "error": "data node data: none of the parts manifest's 1 train ids"})
+        return SandboxResult(ok=True, payload={"score": 1.0, "iterations": 2})
+
+    workdir = _smoke_run(tmp_path, monkeypatch, revision="circle_packing/adaptive", scores={})
+    monkeypatch.setattr(sandbox, "smoke", stub)
+    with pytest.raises(create_ops.SplitRefused, match="the revision source circle_packing/adaptive: data node"):
+        run_node("refactory_dsh.create_ops:smoke", workdir=workdir, node_id="smoke")
 
 
 def test_a_smoke_that_hit_its_cpu_limit_is_uncertain_and_says_so(tmp_path, monkeypatch):

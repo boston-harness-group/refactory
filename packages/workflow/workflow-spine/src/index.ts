@@ -3134,18 +3134,21 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(`${stopped}; a CEO redo cannot spend more attempts. Use `
           + '`refactory graph-control rerun --acknowledge-failure` to have a person spend more attempts.')
       }
-      // Nor is redoing the gate itself, or a node it reads from, after a halt verdict
-      // from a gate the runtime evaluates (a code gate, such as a smoke whose outcome is
-      // uncertain): nothing it checks would have changed. Redoing a node further
-      // upstream can change that, and stays the CEO's; so does any redo after a halt at
-      // an agent or user gate.
-      if (halted?.reason === 'verdict' && halted.gate !== undefined
-          && config.executeCommands && isDeterministic(spine.view(halted.gate))
-          && (args.node === halted.gate || spine.feeders(halted.gate).includes(args.node))) {
-        throw new Error(`gate ${halted.gate} halted the run${halted.detail ? `: ${halted.detail}` : ''}. `
-          + `Redoing ${args.node === halted.gate ? 'the gate' : `${args.node}, which the gate checks,`} `
-          + 'without changing what it checks would repeat the halt. Change an upstream node, '
-          + 'or have a person rerun with `refactory graph-control rerun`.')
+      // Nor is a redo that would only repeat a halt verdict from a gate the runtime
+      // evaluates (a code gate, such as a smoke whose outcome is uncertain): one where the
+      // redone node, the gate and every node between them are deterministic. Each of those
+      // runs its command again on what it read before, so the gate decides as it did. An
+      // agent node on the way can produce something new, so a redo through one stays the
+      // CEO's, as does any redo after a halt at an agent or user gate.
+      const rerun = halted?.reason === 'verdict' && halted.gate !== undefined
+        && config.executeCommands && isDeterministic(spine.view(halted.gate))
+        ? spine.between(args.node, halted.gate) : []
+      if (rerun.length > 0 && rerun.every(nid => isDeterministic(spine.view(nid)))) {
+        throw new Error(`gate ${halted!.gate} halted the run${halted!.detail ? `: ${halted!.detail}` : ''}. `
+          + `Redoing ${args.node === halted!.gate ? 'the gate' : args.node} reruns only commands `
+          + `(${rerun.join(', ')}) on what they read before, so it would repeat the halt. `
+          + 'Redo an agent node upstream of the gate, or have a person rerun with '
+          + '`refactory graph-control rerun`.')
       }
       const plan = spine.planRedo(args.node)
       if (dataCommand !== '' && workdir === undefined) {

@@ -1219,11 +1219,71 @@ describe('applyControls integration', () => {
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
       .rejects.toThrow(/gate gate_smoke halted the run: smoke timed out/)
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/Redoing smoke, which the gate checks, without changing what it checks would repeat the halt/)
+      .rejects.toThrow(/Redoing smoke reruns only commands \(smoke, gate_smoke\) on what they read before, so it would repeat the halt/)
     await expect(call(ctx, 'wf_redo', { node: 'gate_smoke' }))
-      .rejects.toThrow(/Redoing the gate without changing what it checks would repeat the halt/)
+      .rejects.toThrow(/Redoing the gate reruns only commands \(gate_smoke\)/)
+    // Further upstream, but still only commands: the same halt again.
+    await expect(call(ctx, 'wf_redo', { node: 'build' }))
+      .rejects.toThrow(/Redoing build reruns only commands \(build, smoke, gate_smoke\)/)
     expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
-    // A node further upstream can change what the gate checks: its redo is the CEO's.
+    expect(readFileSync(join(workdir, 'builds'), 'utf8')).toBe('built\n')
+  })
+
+  it('after a fn gate halts, a redo through an agent node upstream of it is the CEO\'s', async () => {
+    const workdir = scratch()
+    const reason = 'smoke timed out (inactivity, limit 3600s); code repair was not attempted'
+    // An agent node feeds the gate directly; a command runs before the agent.
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'build',
+      nodes: {
+        build: { _type: 'FnNode', id: 'build', command: `echo built >> ${join(workdir, 'builds')}`, reads: [], writes: [] },
+        draft: { _type: 'AgentNode', id: 'draft', role: 'builder', prompt_template: 'D', reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
+                      evaluator_command: `printf '%s\\n%s\\n' '${reason}' halt`, reads: [] },
+        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'build', target: 'draft' },
+        { source: 'draft', target: 'gate_smoke' },
+        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+        { source: 'gate_smoke', target: 'draft', condition: 'reloop' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir, executeCommands: true })
+    ctx.provide('shell', realShell())
+    await call(ctx, 'wf_next')
+    await call(ctx, 'wf_done', { node: 'draft' })
+    const next = await call(ctx, 'wf_next') as { status: string; halted?: { gate?: string; reason: string } }
+    expect(next.halted).toMatchObject({ gate: 'gate_smoke', reason: 'verdict' })
+    await expect(call(ctx, 'wf_redo', { node: 'gate_smoke' }))
+      .rejects.toThrow(/Redoing the gate reruns only commands/)
+    // The agent feeder can answer differently.
+    const viaAgent = await call(ctx, 'wf_redo', { node: 'draft' }) as { status: string }
+    expect(viaAgent.status).toBe('redone')
+  })
+
+  it('a command upstream of an agent feeder of a fn gate may be redone after its halt', async () => {
+    const workdir = scratch()
+    const graph: WorkflowGraph = {
+      name: 't', start_node: 'build',
+      nodes: {
+        build: { _type: 'FnNode', id: 'build', command: `echo built >> ${join(workdir, 'builds')}`, reads: [], writes: [] },
+        draft: { _type: 'AgentNode', id: 'draft', role: 'builder', prompt_template: 'D', reads: [], writes: [] },
+        gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
+                      evaluator_command: `printf '%s\\n%s\\n' 'no' halt`, reads: [] },
+        register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
+      },
+      edges: [
+        { source: 'build', target: 'draft' },
+        { source: 'draft', target: 'gate_smoke' },
+        { source: 'gate_smoke', target: 'register', condition: 'proceed' },
+      ],
+    }
+    const ctx = await mount(graph, { workdir, executeCommands: true })
+    ctx.provide('shell', realShell())
+    await call(ctx, 'wf_next')
+    await call(ctx, 'wf_done', { node: 'draft' })
+    await call(ctx, 'wf_next')
     const redone = await call(ctx, 'wf_redo', { node: 'build' }) as { status: string }
     expect(redone.status).toBe('redone')
   })

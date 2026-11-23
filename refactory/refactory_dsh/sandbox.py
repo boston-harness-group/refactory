@@ -428,6 +428,9 @@ def _limits(memory_mb: int, cpu_s: int, file_mb: int, *,
             pass
         caps = (
             (resource.RLIMIT_CPU, (soft, ceiling)),
+            # SIGXCPU (and SIGXFSZ) end a process with a core dump by default; a sandboxed
+            # child leaves none.
+            (resource.RLIMIT_CORE, (0, 0)),
             (resource.RLIMIT_FSIZE, (file_mb * 1024 * 1024,) * 2),
         )
         for which, value in caps:
@@ -1078,6 +1081,16 @@ def smoke_wall_s(timeout_s: float) -> float:
     return smoke_backstop_s(timeout_s) + STOP_GRACE_S + 5
 
 
+class SampleRefused(ValueError):
+    """A smoke's sample cannot be drawn: a Task-bound node has no train item to run."""
+
+
+def _some(ids: Any, shown: int = 10) -> str:
+    listed = sorted(str(item) for item in ids)
+    more = f", and {len(listed) - shown} more" if len(listed) > shown else ""
+    return ", ".join(listed[:shown]) + more
+
+
 def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None = None,
                  parts_manifest: Path | str | None = None) -> dict[str, Any]:
     """Cut ``mode`` down to a smoke's sample: ``items`` items of each Task's train part.
@@ -1101,8 +1114,12 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     Runs in the smoke's sandboxed process, before the run. What it sets is state and the
     run directory's part, which the walker and DSH read the same way
     (`nn.executor.load_items`, `Node.effective_parallelism`).
-    Returns ``{"item_limit": items, "nodes": [...], "items": [...]}`` for the nodes cut,
-    or ``{}``.
+    A node that would run nothing is `SampleRefused`, naming why: under a manifest, none
+    of its train ids is one of the node's items; otherwise the node has no train item. A
+    manifest some of whose train ids the node lacks is sampled from the rest, with a
+    warning naming the missing ids.
+    Returns ``{"item_limit": items, "nodes": [...], "items": [...], "per_node": {...},
+    "warnings": [...]}`` for the nodes cut, or ``{}``.
     """
     from refactory_dsh import task as task_module
     from refactory_dsh.nn.edits import configure
@@ -1122,6 +1139,7 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     sampled: list[str] = []
     chosen: list[str] = []
     per_node: dict[str, list[str]] = {}
+    warnings: list[str] = []
     # The part, before any manifest or sample of the smoke's own is written, so a Task
     # whose items depend on it sees it (`full_items`).
     (Path(workdir) / task_module.MANIFEST).unlink(missing_ok=True)
@@ -1132,12 +1150,25 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
         if node.kind != "data" or not node.task_ref:
             continue
         every = full_items(node, Path(workdir))
-        keyed = [(str(item.get("id") or index), item) for index, item in enumerate(every)]
+        keyed = [(task_module._item_key(item, index), item) for index, item in enumerate(every)]  # noqa: SLF001
         if manifest_train is not None:
             train = [key for key, _item in keyed if key in manifest_train]
+            missing = manifest_train - {key for key, _item in keyed}
+            if not train:
+                raise SampleRefused(
+                    f"data node {node_id}: none of the parts manifest's {len(manifest_train)} "
+                    f"train ids is one of its {len(keyed)} items ({_some(manifest_train)}); "
+                    "the manifest is not this Task's")
+            if missing:
+                warnings.append(
+                    f"data node {node_id}: {len(missing)} of the parts manifest's "
+                    f"{len(manifest_train)} train ids are not among its items ({_some(missing)})")
         else:
             held = {id(item) for item in task_module.partition(every, fraction)[task_module.HOLDOUT]}
             train = [key for key, item in keyed if id(item) not in held]
+            if not train:
+                raise SampleRefused(f"data node {node_id} has no train item to run "
+                                    f"({len(keyed)} items, holdout {fraction})")
         per_node[node_id] = sorted(train)[:items]
         chosen.extend(key for key in per_node[node_id] if key not in chosen)
         knob = node.parallelism_knob or node.bound_knob("parallelism")
@@ -1167,7 +1198,8 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     sample_file = Path(workdir) / SMOKE_SAMPLE
     sample_file.parent.mkdir(parents=True, exist_ok=True)
     sample_file.write_text(json.dumps(per_node, indent=2))
-    return {"item_limit": items, "nodes": sampled, "items": chosen}
+    return {"item_limit": items, "nodes": sampled, "items": chosen, "per_node": per_node,
+            "warnings": warnings}
 
 
 def smoke(
@@ -1270,9 +1302,15 @@ def smoke(
         "    for name, value in overrides.items():\n"
         "        state = configure(state, name, value)\n"
         "    mode.load_state_dict(state)\n"
-        "from refactory_dsh.sandbox import smoke_sample\n"
-        f"sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items)!r}, "
+        "from refactory_dsh.sandbox import SampleRefused, smoke_sample\n"
+        "try:\n"
+        f"    sample = smoke_sample(mode, Path({str(Path(workdir))!r}), {int(smoke_items)!r}, "
         f"holdout={holdout!r}, parts_manifest={str(parts_manifest) if parts_manifest else None!r})\n"
+        # Refused before the run: said as the result, so the caller stops rather than
+        # repairing code that has nothing wrong with it.
+        "except SampleRefused as refused:\n"
+        "    print(json.dumps({'exit_ok': False, 'error': str(refused), 'sample_refused': True}))\n"
+        "    raise SystemExit(0)\n"
         f"{watch}"
         f"result = {evaluation}\n"
         # The knob values the run used, so a comparison can say what differed (dm-263).
@@ -1285,7 +1323,7 @@ def smoke(
         "print(json.dumps({'exit_ok': result.exit_ok, 'error': result.error,"
         " 'score': result.score, 'iterations': result.iterations, 'knobs': knobs,"
         " 'timeout_kind': getattr(result, 'timeout_kind', None),"
-        " 'item_limit': sample.get('item_limit')}, default=str))\n"
+        " 'item_limit': sample.get('item_limit'), 'sample': sample}, default=str))\n"
     )
     from refactory_dsh import toolchain
 

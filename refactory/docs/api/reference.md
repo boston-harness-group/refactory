@@ -714,6 +714,7 @@ Running code we did not write.
 
 | kind | name | signature |
 |---|---|---|
+| class | `SampleRefused` | `` |
 | class | `SandboxError` | `` |
 | class | `SandboxResult` | `(ok: 'bool', payload: 'dict[str, Any]' = <factory>, returncode: 'int' = 0, stdout: 'str' = '', stderr: 'str' = '', timed_out: 'bool' = False, timeout_s: 'int \| None' = None, elapsed_s: 'float \| None' = None, progress: 'dict[str, Any]' = <factory>, prep_failure: 'dict[str, Any] \| None' = None, cwd_outside: 'str \| None' = None, change_caused_prep: 'dict[str, Any] \| None' = None, timeout_kind: 'str \| None' = None, output_bytes: 'int \| None' = None) -> None` |
 | function | `ast_check` | `(name: 'str', project: 'Path \| None' = None) -> 'list[str]'` |
@@ -738,6 +739,7 @@ Running code we did not write.
 | function | `usage` | `() -> 'str'` |
 | function | `verify_sandboxed` | `(name: 'str', *, project: 'Path \| None' = None, shared_project: 'Path \| None' = None, requires_data_node: 'bool' = False, requires_task_ref: 'str' = '', requires_task_refs: 'tuple[str, ...]' = (), requires_input: 'tuple[str, ...]' = (), **kwargs: 'Any') -> 'SandboxResult'` |
 
+- **`SampleRefused`** — A smoke's sample cannot be drawn: a Task-bound node has no train item to run.
 - **`SandboxError`** — A sandboxed run could not be carried out.
 - **`SandboxResult`** — What a sandboxed run produced.
 - **`ast_check`** — Everything wrong with a package that can be seen without importing it.

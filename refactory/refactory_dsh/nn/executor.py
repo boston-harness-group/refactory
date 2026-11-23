@@ -650,16 +650,19 @@ def load_items(node: Node, workdir: Path) -> list[dict[str, Any]]:
     :func:`refactory_dsh.task.select_subset`; both runtimes load through this
     function, so both iterate the same part of the same items.
     """
-    from refactory_dsh.task import select_subset
+    from refactory_dsh.task import _item_key, select_subset
 
-    items = select_subset(full_items(node, workdir), workdir)
+    every = full_items(node, workdir)
+    items = select_subset(every, workdir)
     # A smoke's sample (`sandbox.smoke_sample`) names, per Task-bound node, the items it
-    # runs; any other run iterates the whole selected part, as it always has.
+    # runs; any other run iterates the whole selected part, as it always has. An item is
+    # named as the sample and the selection name it: by id, else by its position among
+    # all the node's items (`task._item_key`), never its position in the selection.
     if node.task_ref:
         sample = smoke_sample_ids(workdir, node.id)
         if sample is not None:
-            items = [item for index, item in enumerate(items)
-                     if str(item.get("id") or index) in sample]
+            keys = {id(item): _item_key(item, index) for index, item in enumerate(every)}
+            items = [item for item in items if keys.get(id(item)) in sample]
     return items
 
 

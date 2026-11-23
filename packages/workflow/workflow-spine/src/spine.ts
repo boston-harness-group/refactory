@@ -607,12 +607,30 @@ export class Spine {
   }
 
   /**
-   * The nodes with an edge into `nid`: what a gate checks comes from them.
-   * @param nid - the node.
+   * The nodes on some path from `from` to `to`, both included, never leaving `to` (so a
+   * gate's own reloop edge adds nothing): what a redo of `from` reruns before `to`
+   * decides again. Empty when `to` cannot be reached from `from`.
+   * @param from - the node a redo starts at.
+   * @param to - the node the path ends at.
    * @returns their ids.
    */
-  feeders(nid: string): string[] {
-    return [...new Set(this.edges.filter(edge => edge.target === nid).map(edge => edge.source))]
+  between(from: string, to: string): string[] {
+    const walk = (start: string, step: (nid: string) => string[], stop: string): Set<string> => {
+      const seen = new Set([start])
+      const queue = [start]
+      while (queue.length > 0) {
+        const nid = queue.shift()!
+        if (nid === stop) continue
+        for (const next of step(nid)) {
+          if (!seen.has(next)) { seen.add(next); queue.push(next) }
+        }
+      }
+      return seen
+    }
+    const forward = walk(from, nid => this.outgoing(nid).map(edge => edge.target), to)
+    if (!forward.has(to)) return []
+    const backward = walk(to, nid => this.edges.filter(edge => edge.target === nid).map(edge => edge.source), from)
+    return [...forward].filter(nid => backward.has(nid))
   }
 
   private unconditionalTarget(nid: string): string | undefined {

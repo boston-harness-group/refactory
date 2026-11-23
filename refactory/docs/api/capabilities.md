@@ -7849,6 +7849,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "profile",
         "holdout",
         "parts_manifest",
         "attempts",
@@ -8027,15 +8028,15 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "values": []
     },
     "holdout": {
-      "default": 0.3,
-      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
       "frozen": false,
-      "kind": "float",
+      "kind": "str",
       "range": [
-        0.0,
-        0.99
+        null,
+        null
       ],
-      "value": 0.3,
+      "value": "",
       "values": []
     },
     "name": {
@@ -8064,7 +8065,19 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8263,7 +8276,7 @@ Build a reusable mode package from a brief, name and task/single-shot inputs. Ca
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a reusable mode package from a brief, name and task/single-shot inputs. Canonical smoke runs before separate QA and Overwatch; repair shares the attempt bound and completion needs current validation and intent evidence.",
-    "reviewed_schema": "255aeb58aa328bf12ffa3bdf0e1aee100acbb8d5382fcca6a99ebe8531794719"
+    "reviewed_schema": "c779b8ccc770b5983f4443eb85e626ee713f00afa14066f73d4c32acb25fc82a"
   }
 }
 ```
@@ -8461,6 +8474,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "profile",
         "holdout",
         "parts_manifest",
         "repair_attempts",
@@ -8597,15 +8611,15 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "values": []
     },
     "holdout": {
-      "default": 0.3,
-      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
       "frozen": false,
-      "kind": "float",
+      "kind": "str",
       "range": [
-        0.0,
-        0.99
+        null,
+        null
       ],
-      "value": 0.3,
+      "value": "",
       "values": []
     },
     "name": {
@@ -8622,7 +8636,19 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -8773,7 +8799,7 @@ Build a small reusable package with a strategist, coder and focused QA. Canonica
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a small reusable package with a strategist, coder and focused QA. Canonical smoke precedes focused QA; structural, runtime and review failures share repair_attempts. Supply a brief, name and task/single-shot inputs.",
-    "reviewed_schema": "dda9d05d648104e525a90cef14858b56e4a63af9cd55c2172a79a02796b7ba30"
+    "reviewed_schema": "260bec8e4446ecd5afeee080b5014640742ab248482db5b380e729d2116d7105"
   }
 }
 ```
@@ -11192,6 +11218,7 @@ Revise an existing mode package and validate the revision before separate QA and
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "profile",
         "holdout",
         "parts_manifest",
         "attempts",
@@ -11370,15 +11397,15 @@ Revise an existing mode package and validate the revision before separate QA and
       "values": []
     },
     "holdout": {
-      "default": 0.3,
-      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
       "frozen": false,
-      "kind": "float",
+      "kind": "str",
       "range": [
-        0.0,
-        0.99
+        null,
+        null
       ],
-      "value": 0.3,
+      "value": "",
       "values": []
     },
     "name": {
@@ -11407,7 +11434,19 @@ Revise an existing mode package and validate the revision before separate QA and
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -11606,7 +11645,7 @@ Revise an existing mode package and validate the revision before separate QA and
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise an existing mode package and validate the revision before separate QA and Overwatch. Supply revision_of, name and brief. allow_regression=true skips original execution and numerical comparison, while revised execution and intent evidence remain mandatory.",
-    "reviewed_schema": "b0575e71f3bbc4e5a026316b878105bd454b42c5c90478769da22b755824234f"
+    "reviewed_schema": "a5efd87748c500466b5dba7d64336aac7337fbcbe1dd263bc0499e90fe3aa4b0"
   }
 }
 ```
@@ -11799,6 +11838,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
         "sample_knobs",
         "smoke_timeout_s",
         "smoke_items",
+        "profile",
         "holdout",
         "parts_manifest",
         "repair_attempts",
@@ -11925,15 +11965,15 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "values": []
     },
     "holdout": {
-      "default": 0.3,
-      "description": "the holdout fraction the produced mode's runs use; the smoke samples only the train part of that split. Ignored for the split when parts_manifest is given",
+      "default": "",
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
       "frozen": false,
-      "kind": "float",
+      "kind": "str",
       "range": [
-        0.0,
-        0.99
+        null,
+        null
       ],
-      "value": 0.3,
+      "value": "",
       "values": []
     },
     "name": {
@@ -11950,7 +11990,19 @@ Revise a small mode package with a coder and focused QA after canonical validati
     },
     "parts_manifest": {
       "default": "",
-      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids (empty: the holdout fraction's split)",
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path is the project's (empty: the profile's, else the holdout fraction's split)",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "profile": {
+      "default": "",
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
       "frozen": false,
       "kind": "str",
       "range": [
@@ -12089,7 +12141,7 @@ Revise a small mode package with a coder and focused QA after canonical validati
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Revise a small mode package with a coder and focused QA after canonical validation. Supply revision_of, name and brief. allow_regression=true skips original execution/comparison but still requires revised validation and intent evidence.",
-    "reviewed_schema": "a68809779026522a7d408e69c3af5584888319de9215e15470c32281d045187d"
+    "reviewed_schema": "b44ffeea4e8292da66d3961253dede3e8b1c6043f165adca20af828479bb0fc6"
   }
 }
 ```

@@ -1413,3 +1413,91 @@ def test_each_task_bound_node_of_a_smoke_runs_only_its_own_sample(tmp_path):
                    for node_id, entry in mode.state_dict()["graph"]["nodes"].items()}
     assert [item["id"] for item in load_items(graph_nodes["first"], tmp_path)] == ["a1"]
     assert [item["id"] for item in load_items(graph_nodes["second"], tmp_path)] == ["a2"]
+
+
+def test_a_smoke_of_id_less_items_runs_the_items_its_sample_names(tmp_path):
+    """Items with no id are named by their position among all the node's items, by the
+    sample, the run's part and the loader alike: a sample of 12 id-less items names
+    "0", "1" and "10" (ids sort as text), and those three run -- not the item at
+    position 2 of the selection, which is item 10."""
+    from refactory_dsh import nn
+    from refactory_dsh.nn import Node
+    from refactory_dsh.nn.executor import load_items
+
+    class Unnamed(nn.Mode):
+        name = "unnamed"
+
+        def build(self):
+            graph = nn.Graph()
+            graph.add(nn.Node("data", "data", subgraph_entry="work", subgraph_exit="work",
+                              task_ref="test_sandbox:OverlapA", writes=("current_item.json",),
+                              produces=("item_scores",),
+                              inline_items=tuple({"n": n} for n in range(12))))
+            graph.add(nn.Node("work", "op", call="loop_ops:noop"))
+            return graph
+
+        def score(self, result):
+            return 1.0
+
+    mode = Unnamed()
+    sample = sandbox.smoke_sample(mode, tmp_path, 3, holdout=0.0)
+    assert sample["per_node"] == {"data": ["0", "1", "10"]}
+    node = Node.from_state({**mode.state_dict()["graph"]["nodes"]["data"], "id": "data"})
+    assert [item["n"] for item in load_items(node, tmp_path)] == [0, 1, 10]
+
+
+def test_a_task_bound_node_with_no_train_item_is_refused_before_the_run(tmp_path):
+    """A node that would run nothing is refused, naming it, rather than run empty."""
+    from refactory_dsh import nn
+
+    class Empty(nn.Mode):
+        name = "empty"
+
+        def build(self):
+            graph = nn.Graph()
+            graph.add(nn.Node("data", "data", subgraph_entry="work", subgraph_exit="work",
+                              task_ref="test_sandbox:Nothing", writes=("current_item.json",),
+                              produces=("item_scores",)))
+            graph.add(nn.Node("work", "op", call="loop_ops:noop"))
+            return graph
+
+        def score(self, result):
+            return 1.0
+
+    with pytest.raises(sandbox.SampleRefused, match="data node data has no train item to run"):
+        sandbox.smoke_sample(Empty(), tmp_path, 3)
+
+
+class Nothing(_Listed):
+    name = "nothing"
+    IDS = ()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CORE is POSIX")
+def test_a_sandboxed_process_leaves_no_core_dump():
+    """SIGXCPU ends a process with a core dump by default: the sandbox allows none."""
+    import subprocess
+
+    probe = "import resource; print(*resource.getrlimit(resource.RLIMIT_CORE))"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         check=True, preexec_fn=sandbox._limits(0, 7, 10))
+    assert out.stdout.split() == ["0", "0"]
+
+
+@pytest.mark.parametrize("mode", ["create", "create_fast", "edit", "edit_fast"])
+def test_the_smoke_node_of_each_create_mode_consumes_the_split_knobs(mode):
+    """The split knobs are the smoke node's: a node consumes only the knobs it lists, and
+    a declared knob no node consumes fails validation (V7)."""
+    from refactory_dsh import registry
+    from refactory_dsh.nn.validate import validate_state
+
+    package = registry.load("default_pack")
+    mode_class = next(cls for cls in package.modes if cls.name == mode)
+    graph = mode_class().build()
+    consumers = graph.knob_consumers()
+    for name in ("profile", "holdout", "parts_manifest", "smoke_items"):
+        assert "smoke" in consumers.get(name, ()), (mode, name)
+    issues = [issue for issue in validate_state(mode_class().state_dict(), resolve_calls=False)
+              if getattr(issue, "code", "") == "V7" and getattr(issue, "knob", "") in
+              ("profile", "holdout", "parts_manifest")]
+    assert not issues, issues

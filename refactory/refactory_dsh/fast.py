@@ -286,7 +286,8 @@ class CreateFastMode(CreateMode):
         graph.add(replace(full.nodes["register"], resource_role="work"))
         graph.add(replace(full.nodes["smoke"], evaluator="refactory_dsh.create_ops:gate_smoke",
                           knobs=("allow_regression", "sample_knobs", "smoke_timeout_s", "smoke_items",
-                                "holdout", "parts_manifest", "repair_attempts", "check_attempt_cap"),
+                                "profile", "holdout", "parts_manifest", "repair_attempts",
+                                "check_attempt_cap"),
                           writes=(*full.nodes["smoke"].writes, "repair.txt", "fast-report.json"),
                           produces=(*full.nodes["smoke"].produces, "repair_feedback", "repairs_used",
                                     "check_repairs_used", "review_repairs_used",
