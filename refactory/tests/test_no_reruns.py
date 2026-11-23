@@ -353,7 +353,7 @@ def test_deselect_stops_at_its_size_limit(monkeypatch):
     monkeypatch.setattr(base_check, "DESELECT_LIMIT_BYTES", 100)
     ids = [f"tests/test_a.py::test_{n:03}" for n in range(10)]
     _, used = base_check.with_deselected("pytest tests", ids)
-    assert 0 < len(used) < len(ids) and used == ids[:len(used)]
+    assert 0 < len(used) < len(ids) - 1 and used == ids[:len(used)]
 
 
 # ── 4. guardedness runs only test files whose content changed ─────────────────
