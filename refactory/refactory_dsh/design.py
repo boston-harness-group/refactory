@@ -1343,7 +1343,8 @@ class DesignMode(Mode):
                   "(120 s each, 600 s total, shared with the base rerun); the same probes "
                   "run on the base in parallel for discrimination (wall-clock seconds in "
                   "probe-results.json); a failing probe is a blocking defect, a PROBED "
-                  "claim without a probe file of its own is unverified",
+                  "claim without a probe file of its own is unverified, a requirement "
+                  "no probe tells apart from the base is advisory",
         ))
         # ── the reviews report, and two judges decide (refactory_dsh.judges) ──
         graph.add(Node(

@@ -3509,7 +3509,8 @@ def synthesize_qa(ctx: Any) -> dict[str, Any]:
         body += (f"\n\n## {RESULTS_MD} (the verifier's probe files, rerun by the runtime)\n\n"
                  "A failing probe is a defect the QA gate sends back unless the QA judge names "
                  "it a brief conflict; a PROBED claim with no probe file of its own is "
-                 "UNVERIFIED.\n\n" + probe_text + "\n")
+                 "UNVERIFIED; a requirement whose probes all pass on the base too is "
+                 "listed for the person (advisory).\n\n" + probe_text + "\n")
     body += _not_built_section(ctx)
     body += _updated_tests_section(ctx)
     ctx.write_text(QA_SYNTHESIS, body)
@@ -3926,7 +3927,9 @@ def gate_qa(ctx: Any) -> Any:
     any remaining must-fix items go to the pull request. A judge file that is missing or
     is not one JSON verdict is reread once (`_read_judge`); if it is still unreadable the
     change goes on with a note in the gate's status and the follow-ups, because the
-    overwatch still judges it.
+    overwatch still judges it. A requirement none of whose probes fails with the change
+    reverted (`probe_rerun.base_revert_findings`) is a follow-up on every path: never a
+    send-back and never a coverage re-run.
 
     Before the judge is read, two things are structural rather than judged, as they were:
     a review that left no report, or whose sign-off is not current for this attempt, sends
@@ -3964,7 +3967,10 @@ def gate_qa(ctx: Any) -> Any:
 
     from refactory_dsh import probe_rerun
 
-    failing = probe_rerun.defects(probe_rerun.read_results(ctx))
+    probe_results = probe_rerun.read_results(ctx)
+    failing = probe_rerun.defects(probe_results)
+    # A requirement no probe verified against the base: advisory, for the pull request.
+    not_on_base = probe_rerun.base_revert_findings(probe_results)
     conflicts = judges.brief_conflicts(judgment) if judgment is not None else {}
     settle = [(item, conflicts[Path(item["where"]).name]) for item in failing
               if Path(item["where"]).name in conflicts]
@@ -3988,7 +3994,7 @@ def gate_qa(ctx: Any) -> Any:
                                 "reloop: " + judges.feedback(judgment, "QA judge"), into=QA_DRAFT)
             if isinstance(ctx.facts.get(QA_DRAFT), dict):
                 # On as a draft: the judge's non-blocking items still go to the pull request.
-                record_follow_ups(ctx, "qa", [*judgment.follow_ups, *brief_conflicts])
+                record_follow_ups(ctx, "qa", [*judgment.follow_ups, *brief_conflicts, *not_on_base])
             return routed
         # Nothing holds the change back. The items the judge named go to the pull request.
         held = ("the QA judge asked for a redo, but nothing it named holds the change back: "
@@ -4004,6 +4010,7 @@ def gate_qa(ctx: Any) -> Any:
         note = _quoting(ctx, note + "; the change went on to the overwatch without it",
                         judges.QA_JUDGE)
         follow, summary, dismissed = [note], note, []
+    follow = [*follow, *not_on_base]
     # Nothing the QA judge named holds the change back any more.
     _note_unresolved(ctx, QA_UNRESOLVED, "QA judge", [])
     _note_unresolved(ctx, QA_UNRESOLVED, "QA gate", [])
