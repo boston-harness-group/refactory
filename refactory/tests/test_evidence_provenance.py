@@ -401,7 +401,7 @@ class _Recorder:
 def skillopt_calls(records: list[dict[str, Any]], trace_path: Path) -> list[tuple[str, str]]:
     """The SkillOpt port's analyst calls (system, user) over ``records``, default env."""
     from refactory_packages.skillopt import analysts as skillopt_analysts
-    from refactory_packages.skillopt.trace import TraceRecorder
+    from refactory_dsh.strategy_trace import TraceRecorder
 
     client = _Recorder()
     skillopt_analysts.reflect(client, records, "SKILL", 4, "META", seed=1, group_size=2,

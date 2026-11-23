@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from refactory_packages.skillopt.trace import current_call_key, optimizer_call
+from refactory_dsh.strategy_trace import current_call_key, optimizer_call
 from refactory_packages.skillopt.replay import (
     CallMatcher,
     ReplayClient,
@@ -45,7 +45,7 @@ def _no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """``trace.ask`` waits 1, 2, 4 s after failed attempts, as SkillOpt does; the
     suite records the waits instead of sleeping them."""
     waits: list[float] = []
-    monkeypatch.setattr("refactory_packages.skillopt.trace._sleep", waits.append)
+    monkeypatch.setattr("refactory_dsh.strategy_trace._sleep", waits.append)
     return waits
 
 
@@ -2039,7 +2039,7 @@ def test_replay_client_gives_solver_calls_five_attempts_and_optimizer_calls_thre
     replays one of A's, so A's three failures fail B's call and A's next
     answer goes to B's next call."""
     from refactory_packages.skillopt.replay import ReplayedCallFailure
-    from refactory_packages.skillopt.trace import TraceRecorder, ask
+    from refactory_dsh.strategy_trace import TraceRecorder, ask
 
     entries = [("s", "solver", "E", 1)] * 4 + [("s", "solver", "ok", 0)]
     entries += [("s", "opt", "E", 1)] * 3 + [("s", "opt", "ok", 0)]
@@ -2105,7 +2105,8 @@ def test_events_are_conceded_by_the_replay_runner_alone():
 
     import refactory_packages
     from refactory_packages.livemath import mode, ops, skillopt_view
-    from refactory_packages.skillopt import analysts, env, loop, merge, prompts, trace
+    from refactory_dsh import strategy_trace as trace
+    from refactory_packages.skillopt import analysts, env, loop, merge, prompts
 
     for module in (loop, analysts, merge, prompts, trace, env, mode, ops, skillopt_view):
         source = inspect.getsource(module)
@@ -2571,7 +2572,8 @@ def test_replay_runs_the_loop_without_retry_waits():
     skipped around the replayed run, and restored after it."""
     import inspect
 
-    from refactory_packages.skillopt import replay_runner, trace
+    from refactory_dsh import strategy_trace as trace
+    from refactory_packages.skillopt import replay_runner
 
     source = inspect.getsource(replay_runner.run_replay)
     assert "with skillopt_trace.no_retry_waits():\n            loop_report = loop.run()" in source

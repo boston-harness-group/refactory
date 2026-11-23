@@ -16,6 +16,7 @@ from refactory_dsh.task import Task, TaskInstance, VerifyResult
 
 TRAIN_IDS = [f"t{i}" for i in range(1, 9)]
 VAL_IDS = [f"v{i}" for i in range(1, 7)]
+TEST_IDS = [f"x{i}" for i in range(1, 5)]
 KNOBS = ("instruction", "alpha_rule", "beta_rule")
 
 
@@ -45,7 +46,7 @@ class PlantedTask(Task):
     name = "gepa_planted_task"
 
     def instances(self, **kw: Any) -> list[TaskInstance]:
-        return [TaskInstance(id=i, metadata={}) for i in TRAIN_IDS + VAL_IDS]
+        return [TaskInstance(id=i, metadata={}) for i in TRAIN_IDS + VAL_IDS + TEST_IDS]
 
     def setup(self, instance: TaskInstance, workspace: Any, **kw: Any) -> None:
         pass
