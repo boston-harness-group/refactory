@@ -232,9 +232,11 @@ def test_a_tree_git_could_not_name_is_asked_for_again(tmp_path, monkeypatch):
     root = _repo(tmp_path / "repo")
     head = _git(root, "rev-parse", "HEAD").strip()
     target_guard._TREES.clear()
-    monkeypatch.setattr(target_guard, "_git", lambda *args: None)
-    assert target_guard._tree(str(root), head, "lib") is None
-    monkeypatch.undo()
+    # Only this patch is undone: `monkeypatch.undo()` would also undo the suite's own
+    # (conftest's sealed DSH home), and the next git call would run with the real one.
+    with monkeypatch.context() as patch:
+        patch.setattr(target_guard, "_git", lambda *args: None)
+        assert target_guard._tree(str(root), head, "lib") is None
 
     assert target_guard._tree(str(root), head, "lib") == _git(root, "rev-parse", f"{head}:lib").strip()
 

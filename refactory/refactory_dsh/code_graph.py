@@ -366,11 +366,7 @@ def cli_graph(args: Any) -> int:
     elif (graph_dir / GRAPH_SUBDIR).is_dir():
         graph_dir = graph_dir / GRAPH_SUBDIR
 
-    status = _read_status(graph_dir)
-    st = status.get("status", "absent")
-
-    if st == "building":
-        st = _building_state(status)
+    st, status = _graph_state(graph_dir)
 
     command = args.graph_command
     if command == "path":
@@ -960,9 +956,19 @@ def _run_dir(ctx: Any) -> Path:
 
 
 def _graph_state(graph_dir: Path) -> tuple[str, dict[str, Any]]:
+    """The build's state and its status record. A build whose process is gone is read
+    again before it is called dead: its last act is to write its outcome and exit, so it
+    can have done both between the read and the process check."""
     status = _read_status(graph_dir)
     state = str(status.get("status", "absent"))
-    return (_building_state(status) if state == "building" else state), status
+    if state != "building":
+        return state, status
+    state = _building_state(status)
+    if state != "building":
+        again = _read_status(graph_dir)
+        if again.get("status") != "building":
+            return str(again.get("status", "absent")), again
+    return state, status
 
 
 def await_code_graph(ctx: Any) -> dict[str, Any]:

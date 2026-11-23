@@ -784,6 +784,90 @@ def test_status_shows_the_retries(tmp_path):
     assert status(tmp_path)["activity"]["node_retries"] == {"verifier": 1}
 
 
+def test_the_retry_count_reads_only_what_was_appended_and_follows_a_new_journal(tmp_path):
+    """`console.status` counts retries on every poll: a warm count reads the journal's
+    new lines, not its history, and agrees with a full count after appends, a write
+    still in flight, and a journal a new invocation put in the old one's place."""
+    from refactory_dsh import live
+    from refactory_dsh.live import emit
+
+    def full_count() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in live.events(tmp_path)[0]:
+            if event.get("kind") == RETRY_EVENT and event.get("node_id"):
+                counts[event["node_id"]] = counts.get(event["node_id"], 0) + 1
+        return counts
+
+    for i in range(2000):
+        emit(tmp_path, "node_started", node_id=f"n{i}", summary="x" * 200)
+    emit(tmp_path, RETRY_EVENT, node_id="verifier", attempt=2)
+    assert retries(tmp_path) == full_count() == {"verifier": 1}
+
+    journal = tmp_path / live.EVENTS
+    read: list[int] = []
+    real_open = Path.open
+
+    class Counted:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def read(self, *args):
+            data = self._handle.read(*args)
+            read.append(len(data))
+            return data
+
+        def readline(self, *args):
+            data = self._handle.readline(*args)
+            read.append(len(data))
+            return data
+
+    emit(tmp_path, RETRY_EVENT, node_id="builder", attempt=2)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", lambda self, *a, **k: Counted(real_open(self, *a, **k)))
+        assert retries(tmp_path) == {"verifier": 1, "builder": 1}
+    assert 0 < sum(read) < journal.stat().st_size // 20, "only the new line and the anchor"
+
+    with journal.open("ab") as handle:
+        handle.write(b'{"kind": "node_retried", "node_id": "half')  # a write in flight
+    assert retries(tmp_path) == full_count() == {"verifier": 1, "builder": 1}
+    with journal.open("ab") as handle:
+        handle.write(b'"}\n')
+    assert retries(tmp_path) == full_count() == {"verifier": 1, "builder": 1, "half": 1}
+
+    # A new invocation's journal, longer than the bytes the old count covers: only its
+    # identity says the count is not its own.
+    journal.rename(tmp_path / "archived-events.jsonl")
+    for i in range(2100):
+        emit(tmp_path, "node_started", node_id=f"m{i}", summary="y" * 200)
+    emit(tmp_path, RETRY_EVENT, node_id="reviewer", attempt=2)
+    assert retries(tmp_path) == full_count() == {"reviewer": 1}
+
+    # The same file rewritten in place, longer again: its first record says so.
+    text = journal.read_bytes()
+    journal.write_bytes(text.replace(b'"node_id": "m0"', b'"node_id": "z0"', 1)
+                        .replace(b'"node_id": "reviewer"', b'"node_id": "other"') + text[:2000].split(b"\n")[0] + b"\n")
+    assert retries(tmp_path) == full_count() == {"other": 1}
+
+    # Cut short in place to its first record and grown again past the counted bytes,
+    # with the same first record: the last counted line is no longer where it was.
+    first_line = journal.read_bytes().split(b"\n", 1)[0] + b"\n"
+    journal.write_bytes(first_line)
+    for i in range(2300):
+        emit(tmp_path, "node_started", node_id=f"k{i}", summary="w" * 200)
+    emit(tmp_path, RETRY_EVENT, node_id="last", attempt=2)
+    assert retries(tmp_path) == full_count() == {"last": 1}
+
+
 def test_a_session_that_ignores_its_shutdown_is_not_retried(tmp_path, monkeypatch):
     """A session that does not stop within the grace is a forced exit with cleanup
     unconfirmed (`owned_process.shutdown`): its tools may still be writing, so it is

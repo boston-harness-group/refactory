@@ -47,6 +47,20 @@ PIN = "tests/test_pin.py::test_pin"
 pytestmark = pytest.mark.usefixtures("fake_gh")
 
 
+@pytest.fixture(autouse=True)
+def _own_pytest_temproot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checks these runs start are pytest sessions in a temporary directory of this
+    test's own (`TMPDIR`, which a check's environment keeps): at exit a session deletes the
+    finished sessions' directories it finds in the shared ``pytest-of-<user>`` beyond the
+    newest three, and on a machine running many suites that took minutes, past the
+    self-check's limit. This process's own temporary directory is fixed first, so only the
+    sessions it starts move."""
+    tempfile.gettempdir()
+    root = tmp_path / "check-tmp"
+    root.mkdir()
+    monkeypatch.setenv("TMPDIR", str(root))
+
+
 def _target(root: Path, files: dict[str, str]) -> Path:
     """A repository on main with ``files`` committed over `git_repo`'s one file."""
     repo = git_repo(root)
