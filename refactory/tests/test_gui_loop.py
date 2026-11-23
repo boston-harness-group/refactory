@@ -284,6 +284,14 @@ def test_a_run_in_flight_is_listed_too(tmp_path):
     console.stop(run)
 
 
+def _answers_sigint() -> None:
+    """The stand-in run's preexec: SIGINT at its default, as the real supervisor answers it
+    with its own handler (`supervisor.py`). A child inherits an ignored SIGINT, and a test
+    session started in the background by a non-interactive shell (`cmd &`) ignores it, so
+    the stand-in would outlive console.stop's SIGINT there."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 def test_stop_finds_checkpoint_owner_when_console_record_is_absent(monkeypatch, tmp_path):
     """A resumed run's owner is recorded in console.json by recovery.start.
 
@@ -317,7 +325,7 @@ def test_stop_finds_checkpoint_owner_when_console_record_is_absent(monkeypatch, 
     def sleep_popen(args, **kwargs):
         return real_popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
-            **kwargs,
+            preexec_fn=_answers_sigint, **kwargs,
         )
     monkeypatch.setattr(subprocess, "Popen", sleep_popen)
 
@@ -353,7 +361,7 @@ def test_stop_falls_back_to_checkpoint_owner(tmp_path):
     # Spawn a real child process in its own session
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
-        start_new_session=True,
+        start_new_session=True, preexec_fn=_answers_sigint,
     )
     try:
         # Write only the checkpoint — no console.json with a pid.

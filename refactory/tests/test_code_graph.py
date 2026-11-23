@@ -42,6 +42,32 @@ from tests_support import (
 )
 
 
+def _graphify_unusable() -> str | None:
+    """Why the machine's graphify cannot run in this environment; None when it can.
+
+    Not installed is one reason. The other is an install that this environment cannot
+    see: a ``pip install --user`` script imports its package from the user site under
+    HOME, so with HOME moved (a design run's check does that) the script is on PATH but
+    its package is not. Any other failure is left to the tests, which then fail.
+    """
+    found = _find_graphify()
+    if not found:
+        return "graphify not installed"
+    try:
+        probe = subprocess.run([found, "--help"], capture_output=True, text=True, timeout=120,
+                               check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode != 0 and "No module named 'graphify'" in probe.stderr:
+        return (f"graphify at {found} cannot import its package with HOME={Path.home()}: "
+                "a user-site install made under another HOME")
+    return None
+
+
+_GRAPHIFY_UNUSABLE = _graphify_unusable()
+needs_graphify = pytest.mark.skipif(_GRAPHIFY_UNUSABLE is not None, reason=str(_GRAPHIFY_UNUSABLE))
+
+
 # ── graph.json fixture in the real graphify shape ──────────────────────────────
 
 def _fixture_graph() -> dict:
@@ -187,7 +213,7 @@ def test_references_links_ignored(tmp_path):
 
 
 @pytest.mark.real_graphify
-@pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
+@needs_graphify
 def test_real_graphify_output(tmp_path):
     repo = tmp_path / "tiny"
     repo.mkdir()
@@ -318,6 +344,26 @@ def test_a_build_that_died_as_an_unreaped_child_is_failed(tmp_path, capsys):
         child.wait()
 
 
+def test_a_build_that_finished_while_it_was_checked_is_ready(tmp_path, monkeypatch):
+    """The build's last act is to write its outcome and exit: when that falls between the
+    read of ``building`` and the check of its process, the outcome is what is reported,
+    not a build that died without one."""
+    from refactory_dsh import code_graph
+
+    graph_dir = tmp_path / "code-graph"
+    graph_dir.mkdir()
+    _write_status(graph_dir / "status.json", {"status": "building", "started": time.time(),
+                                              "timeout_s": 300, "pid": 12345})
+
+    def finishes_then_is_gone(pid: int) -> bool:
+        _write_status(graph_dir / "status.json", {"status": "ready", "nodes": 4, "edges": 2})
+        return False
+
+    monkeypatch.setattr(code_graph, "_process_alive", finishes_then_is_gone)
+    state, status = code_graph._graph_state(graph_dir)
+    assert (state, status.get("nodes")) == ("ready", 4)
+
+
 def test_a_live_build_is_still_building(tmp_path, capsys):
     graph_dir = tmp_path / "code-graph"
     graph_dir.mkdir()
@@ -404,7 +450,7 @@ def test_op_returns_empty_paragraph_when_graphify_missing(tmp_path, monkeypatch)
 
 
 @pytest.mark.real_graphify
-@pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
+@needs_graphify
 def test_op_writes_ready_on_tiny_repo(tmp_path):
     source = git_repo(tmp_path / "repo")
     ctx = _FakeCtx(tmp_path / "run", facts={"source": str(source), "target": str(source)},
@@ -463,7 +509,7 @@ def test_op_writes_failed_when_graphify_missing(tmp_path, monkeypatch):
 
 
 @pytest.mark.real_graphify
-@pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
+@needs_graphify
 def test_worktree_stays_clean(tmp_path):
     source = git_repo(tmp_path / "repo")
     before = subprocess.run(["git", "status", "--porcelain"], cwd=source,
@@ -507,7 +553,7 @@ def test_worktree_stays_clean(tmp_path):
 
 
 @pytest.mark.real_graphify
-@pytest.mark.skipif(not _find_graphify(), reason="graphify not installed")
+@needs_graphify
 def test_second_build_same_target_reuses_cache(tmp_path):
     source1 = git_repo(tmp_path / "repo")
     run1 = tmp_path / "runs" / "run1"
