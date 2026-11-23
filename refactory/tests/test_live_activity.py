@@ -1008,22 +1008,18 @@ def test_page_cost_does_not_grow_with_the_journal(tmp_path, monkeypatch):
     assert passes[20000] < passes[500] * 40 * 2, passes
 
 
-def test_page_cost_separates_journal_size_from_worker_count(tmp_path):
+def test_page_cost_separates_journal_size_from_worker_count(tmp_path, monkeypatch):
     """T-3b: with the index warm, N does not move a page; receipts cost separately.
 
     The journal bound (i) is measured on `live.page`, which reads records only.
     The receipt slope (ii) is measured on `console.status`, which is where the
     `O(workers + deliveries)` member R-1.5 names is actually paid; asserting it
     of `live.page` would be asserting a cost that function does not have.
-    """
-    def timed(page_read, rounds: int = 5) -> float:
-        for _ in range(rounds):
-            page_read()
-        started = time.perf_counter()
-        for _ in range(rounds):
-            page_read()
-        return (time.perf_counter() - started) / rounds
 
+    Bytes read, not seconds, as T-3 counts them: on a loaded machine the 500-receipt
+    status of the larger journal timed at 0.28 s against 0.018 s for the smaller one
+    (2026-11-23), for the same bytes.
+    """
     def receipted(root: Path, count: int) -> None:
         workers = root / '.refactory/workers'
         workers.mkdir(parents=True, exist_ok=True)
@@ -1036,21 +1032,29 @@ def test_page_cost_separates_journal_size_from_worker_count(tmp_path):
             root = tmp_path / f'{name}-{receipts}'
             _journal(root, [_record(i=i) for i in range(size)])
             receipted(root, receipts)
-            # Warm the index, then measure the second page onwards.
+            # Warm the index (and the retry counts a status keeps), then measure.
             assert len(live.page(root)['events']) == min(size, live.PAGE_DEFAULT)
+            console.status(root, activity_after=0)
             trees[name, receipts] = root
+
+    def read(action: object) -> int:
+        return _bytes_read(monkeypatch, action)
 
     journal_page = lambda root: lambda: live.page(root, after=200, limit=200)   # noqa: E731
     status_page = lambda root: lambda: console.status(root, activity_after=0)   # noqa: E731
+    allowance = 4096
 
     # (i) journal size does not move a warm page, at the same receipt count.
-    assert timed(journal_page(trees['large', 1])) < max(timed(journal_page(trees['small', 1])) * 10, 0.25)
+    small_page, large_page = read(journal_page(trees['small', 1])), read(journal_page(trees['large', 1]))
+    assert large_page <= small_page + allowance, (small_page, large_page)
 
     # (ii) the receipt member grows with the receipt count, and is not claimed flat.
-    one, many = timed(status_page(trees['small', 1])), timed(status_page(trees['small', 500]))
+    one, many = read(status_page(trees['small', 1])), read(status_page(trees['small', 500]))
     assert many > one, (one, many)
     # And the journal bound is independent of it: both trees pay the same receipts cost.
-    assert timed(status_page(trees['large', 500])) < many * 10
+    large_many = read(status_page(trees['large', 500]))
+    assert large_many <= many + allowance, (many, large_many)
+    print('BYTES', small_page, large_page, one, many, large_many)
 
 
 def test_every_page_carries_the_summary_members(tmp_path):

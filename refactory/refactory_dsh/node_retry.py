@@ -465,15 +465,90 @@ def _record_retry(workdir: Path, node: str, *, attempt: int, tries: int, waited_
                  f"(attempt {attempt} of {tries})")
 
 
-def retries(workdir: Path) -> dict[str, int]:
-    """How many times each node of the run was retried, from its events."""
-    from refactory_dsh.live import events
+#: The counts :func:`retries` derived from the journal, with the bytes they cover and
+#: what identifies that journal, so a status poll reads only what was appended since.
+RETRY_COUNTS = Path(".refactory/node-retries.json")
 
-    counts: dict[str, int] = {}
-    for event in events(Path(workdir))[0]:
-        if event.get("kind") == RETRY_EVENT and event.get("node_id"):
-            counts[str(event["node_id"])] = counts.get(str(event["node_id"]), 0) + 1
+
+def retries(workdir: Path) -> dict[str, int]:
+    """How many times each node of the run was retried, from its events.
+
+    `console.status` asks on every poll, and a poll must not read the whole history
+    (`live.snapshot`): the counts are kept in :data:`RETRY_COUNTS` with the journal bytes
+    they cover, and only the journal after those bytes is read. A journal that is not the
+    one they were counted from (a new invocation moved it away: another file, or another
+    first record) is counted again from its start, as is a journal shorter than the
+    bytes they cover.
+    """
+    from refactory_dsh import live
+
+    root = Path(workdir).resolve()
+    journal = root / live.EVENTS
+    try:
+        size = journal.stat().st_size
+    except FileNotFoundError:
+        return {}
+    link = live._link(journal)
+    kept = _kept_counts(root)
+    trusted = (kept is not None and kept["link"] == (list(link) if link else None)
+               and kept["size"] <= size
+               and live._anchor(journal, kept["first_end"]) == kept["first"])
+    counts: dict[str, int] = dict(kept["counts"]) if trusted and kept else {}
+    covered = kept["size"] if trusted and kept else 0
+    first, first_end = (kept["first"], kept["first_end"]) if trusted and kept else (None, 0)
+    if covered == size and trusted:
+        return counts
+    import hashlib
+
+    end = covered
+    with journal.open("rb") as handle:
+        handle.seek(covered)
+        while line := handle.readline():
+            if not line.endswith(b"\n"):
+                break  # a write still in flight: counted once it is complete
+            end = handle.tell()
+            if not line.strip():
+                continue
+            if first is None:
+                first, first_end = hashlib.sha256(line).hexdigest(), end
+            if RETRY_EVENT.encode() not in line:
+                continue
+            event = live._record(root, line)
+            if event.get("kind") == RETRY_EVENT and event.get("node_id"):
+                counts[str(event["node_id"])] = counts.get(str(event["node_id"]), 0) + 1
+    if first is not None and end != covered:
+        _keep_counts(root, {"link": list(link) if link else None, "size": end, "first": first,
+                            "first_end": first_end, "counts": counts})
     return counts
+
+
+def _kept_counts(root: Path) -> dict[str, Any] | None:
+    try:
+        kept = json.loads((root / RETRY_COUNTS).read_text())
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(kept, dict) or not isinstance(kept.get("size"), int)
+            or not isinstance(kept.get("first_end"), int) or not isinstance(kept.get("first"), str)
+            or not isinstance(kept.get("counts"), dict)
+            or not all(isinstance(n, int) for n in kept["counts"].values())):
+        return None
+    return kept
+
+
+def _keep_counts(root: Path, kept: dict[str, Any]) -> None:
+    """Publish the counts whole, through a temporary of this writer's own; a run directory
+    that cannot be written keeps none, and the next poll counts again."""
+    import os
+    import uuid
+
+    temp = root / f"{RETRY_COUNTS}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        temp.write_text(json.dumps(kept, sort_keys=True))
+        os.replace(temp, root / RETRY_COUNTS)
+    except OSError:
+        pass
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def deliver(
