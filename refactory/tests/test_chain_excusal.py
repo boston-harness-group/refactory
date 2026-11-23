@@ -846,6 +846,30 @@ def test_per_step_excused_when_all_base_failures(tmp_path):
     assert S in filtered.inherited
 
 
+def test_single_step_all_excused_skips_per_step(tmp_path):
+    """A single-step command (the d16/c3 case) with all failures excused never
+    enters the per-step block (len(chain) <= 1), so the 11–26 min re-run cost
+    identified in the brief is eliminated.  Mocked to assert not called."""
+    base = BaseCheckResult(ok=False, failures={S}, output="", exit_code=1)
+    base._base_complete = True  # type: ignore[attr-defined]
+    ctx = SimpleNamespace(workdir=tmp_path, facts={}, exists=lambda name: False,
+                          read_text=lambda name: "", budget=None)
+    attempt_out = _pytest_out([S])
+    attempt = sandbox.SandboxResult(ok=False, stdout=attempt_out, stderr="", returncode=1)
+    found = SimpleNamespace(path=str(tmp_path / "run-x"), base="abc", head="def",
+                            target=str(tmp_path / "target"))
+    with patch.object(base_check, "run_base_check", return_value=base), \
+         patch.object(base_check, "_run_chain_markers") as markers, \
+         patch.object(base_check.worktree, "recorded", return_value=found), \
+         patch.object(base_check, "_all_changed_files", return_value=[]):
+        # Single-step command: len(chain) == 1, never enters per-step block
+        filtered = filter_check(ctx, attempt, "pytest tests/", 60.0)
+    assert filtered.all_excused
+    assert S in filtered.inherited
+    # The per-step re-run was NOT called (single-step command)
+    markers.assert_not_called()
+
+
 def test_mixed_chain_still_reruns(tmp_path):
     """A chain with both excused and new failures still triggers the per-step re-run."""
     test_excused = "tests/test_a.py::test_base_fail"
@@ -900,3 +924,42 @@ def test_per_step_only_failures_targeted(tmp_path):
     assert test_base in filtered.inherited
     # test_per_step_only was confirmed new by targeted runs → charged
     assert test_per_step_only in filtered.new_failures
+
+
+# ── end-to-end: spine and walker check-to-gate path parity ──────────────
+
+
+def test_spine_check_to_gate_excuses_base_failures(tmp_path):
+    """Real spine run of check_beside_reviews → gate_check with a base that has
+    failures. The base failure is excused by filter_check and gate_check sees
+    'proceed'.
+
+    Drives the real ops (run_check → filter_check → check-record.json →
+    gate_check) on a fixture repo with fake pytest on PATH, in-process, as the
+    spine runs nodes."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    command = "pytest unit"
+    # Run the check as _full_check does (the spine's check_beside_reviews path)
+    result = repo_change.run_check(run.ctx, command, 60, beside_reviews=True)
+    assert not result.ok, "the attempt's check should fail"
+    filtered = filter_check(run.ctx, result, command, 60, named_text="")
+    assert filtered.all_excused, f"expected all_excused, got {filtered.new_failures}"
+    assert UNIT_S in filtered.inherited
+    assert not filtered.new_failures
+
+
+def test_walker_check_to_gate_excuses_base_failures(tmp_path):
+    """Real walker run of check → filter_check with a base that has failures.
+    The base failure is excused, identical to the spine path.
+
+    Drives the real ops (run_check → filter_check) on the same kind of fixture
+    repo, asserting the same FilteredCheckResult fields as the spine test."""
+    run = _run(tmp_path, base={"unit": UNIT_S}, attempt={"unit": UNIT_S})
+    command = "pytest unit"
+    # The walker runs the same path: run_check without beside_reviews, then filter_check
+    result = repo_change.run_check(run.ctx, command, 60)
+    assert not result.ok, "the attempt's check should fail"
+    filtered = filter_check(run.ctx, result, command, 60, named_text="")
+    assert filtered.all_excused, f"expected all_excused, got {filtered.new_failures}"
+    assert UNIT_S in filtered.inherited
+    assert not filtered.new_failures

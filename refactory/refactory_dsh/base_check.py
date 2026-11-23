@@ -760,18 +760,24 @@ def extract_failure_signatures(output: str, test_ids: set[str]) -> dict[str, str
         block_end = headers[i + 1].start() if i + 1 < len(headers) else len(section_text)
         block = section_text[block_start:block_end]
 
-        # Match header name to test IDs — the header may be just the test name part
+        # Match header name to test IDs — the header may be just the test name part.
+        # Use exact segment matching, not endswith, to avoid matching
+        # 'base_test_foo' to 'test_foo' (review finding m1-sig-4).
         matched_tid = None
         for tid in test_ids:
-            # Header can be the full node id or just the last part
-            if header_name == tid or tid.endswith("::" + header_name) or header_name.endswith(tid.split("::")[-1]):
+            if header_name == tid or tid.endswith("::" + header_name):
+                matched_tid = tid
+                break
+            # The last :: segment must match exactly
+            last_part = tid.split("::")[-1]
+            if header_name == last_part:
                 matched_tid = tid
                 break
         if matched_tid is None:
-            # Try a less strict match
+            # Try matching on any :: segment exactly
             for tid in test_ids:
                 parts = tid.split("::")
-                if any(header_name == p or header_name.endswith(p) for p in parts[1:]):
+                if any(header_name == p for p in parts[1:]):
                     matched_tid = tid
                     break
         if matched_tid is None:
@@ -3186,20 +3192,20 @@ def _extract_failure_blocks(output: str, test_ids: set[str]) -> list[str]:
         header_name = hdr.group(1).strip()
         block_start = hdr.start()
         block_end = headers[i + 1].start() if i + 1 < len(headers) else len(section_text)
-        # Check if this header belongs to a charged test ID using strict matching
-        # (same logic as extract_failure_signatures). No substring matching that
-        # would leak an excused test's block into charged output.
+        # Check if this header belongs to a charged test ID using strict matching.
+        # Use exact segment matching, not endswith, to avoid leaking an excused
+        # test's block into charged output (review finding m1-blocks-3).
         for tid in test_ids:
             if (header_name == tid
                     or tid.endswith("::" + header_name)
-                    or header_name.endswith(tid.split("::")[-1])):
+                    or header_name == tid.split("::")[-1]):
                 blocks.append(section_text[block_start:block_end].strip())
                 break
         else:
-            # Fallback: try matching on the last :: segment
+            # Fallback: try matching on any :: segment exactly
             for tid in test_ids:
                 parts = tid.split("::")
-                if any(header_name == p or header_name.endswith(p) for p in parts[1:]):
+                if any(header_name == p for p in parts[1:]):
                     blocks.append(section_text[block_start:block_end].strip())
                     break
     return blocks
@@ -3429,6 +3435,10 @@ def filter_check(
         # A base cache written before per-step results existed: the whole-command path.
         chain = None
     if chain is not None and len(chain) > 1:
+        # The per-step comparison runs for multi-step chains to detect "earlier
+        # step ending differently" scenarios.  Single-step commands (the d16/c3
+        # cases) never enter this block (len(chain) <= 1), so the 11–26 min
+        # re-run cost identified in the brief is already eliminated.
         revised, why = _per_step_comparison(
             ctx, chain, base_result, attempt_failures, timeout,
             named_text, changed_files, brief_text, design_text,
