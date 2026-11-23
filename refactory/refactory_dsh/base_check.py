@@ -47,14 +47,33 @@ def strip_ansi(text: str) -> str:
 
 # ── parse test failures ──────────────────────────────────────────────────
 
-_PYTEST_FAILED = re.compile(r"^FAILED\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)+)", re.MULTILINE)
+_PYTEST_FAILED = re.compile(r"^FAILED\s+(\S+::.+)$", re.MULTILINE)
 _VITEST_FAIL = re.compile(r"^\s*(?:FAIL|×)\s+(.+)$", re.MULTILINE)
 _TEST_FILE_PATTERNS = re.compile(
     r"(?:^|/)(?:test_[\w]+\.py|[\w]+_test\.py|[\w]+\.test\.[tj]sx?|[\w]+\.spec\.[tj]sx?|test_[\w]+\.[tj]s)$"
 )
 _PYTEST_ERROR = re.compile(
-    r"^(?:ERROR|ERRORS?)\s+([\w/.:\[\]-]+(?:::[\w\[\]-]+)*)\s*[-–—]", re.MULTILINE
+    r"^(?:ERROR|ERRORS?)\s+(\S+\.py\b.*)$",
+    re.MULTILINE,
 )
+
+
+def _strip_pytest_reason(raw: str) -> str:
+    """Strip trailing `` - reason`` from a pytest FAILED/ERROR line.
+
+    Respects balanced brackets so that parametrised IDs like ``test[a - b]``
+    are not truncated.
+    """
+    raw = raw.strip()
+    idx = len(raw)
+    while True:
+        pos = raw.rfind(" - ", 0, idx)
+        if pos < 0:
+            return raw
+        before = raw[:pos]
+        if before.count("[") <= before.count("]"):
+            return before.rstrip()
+        idx = pos
 
 CACHE_FILE = Path(".refactory") / "base-check.json"
 BASE_WORKTREE_PREFIX = "base-"
@@ -69,10 +88,20 @@ def parse_test_failures(output: str) -> set[str]:
     output = strip_ansi(output)
     found: set[str] = set()
     for m in _PYTEST_FAILED.finditer(output):
-        found.add(m.group(1).strip())
+        found.add(_strip_pytest_reason(m.group(1)))
     # An error (a module that does not import, a fixture that fails) is a failure too.
     for m in _PYTEST_ERROR.finditer(output):
-        found.add(m.group(1).strip())
+        tid = _strip_pytest_reason(m.group(1))
+        # Reject log-capture lines.  A pytest ERROR line's ID is a bare file path
+        # (``tests/test_x.py``) or a node ID (``tests/test_x.py::test_x``).  Log
+        # lines look like ``root:module.py:12 msg`` or ``conftest.py:12 msg``
+        # (colon-digit after ``.py``).
+        if re.search(r"\.py:\d", tid):
+            continue  # ``file.py:12`` is a log line, not a pytest node ID
+        if "::" not in tid and "/" not in tid:
+            if re.match(r"^\w+:", tid):
+                continue  # logger:module pattern
+        found.add(tid)
     for m in _VITEST_FAIL.finditer(output):
         candidate = m.group(1).strip()
         if " > " in candidate:
@@ -571,6 +600,37 @@ def _accounted(runner: str, output: str, failures: set[str]) -> bool:
     return int(tests[-1]) == len(failures) and (not files or int(files[-1]) <= len(named_files))
 
 
+def chain_incomplete(command: str, run: Callable[[str], Any],
+                     roots: list[tuple[str, str]] = ()) -> str | None:  # type: ignore[assignment]
+    """Why a failed ``command`` may not have run all its steps; None when it did.
+
+    A chain such as ``pytest a && pytest b`` stops at its first failing step, so a
+    failure the base also has can hide that the steps after it never ran. The chain's
+    steps run again one by one (`_run_chain_markers`, through ``run``), and the shell's
+    own rule says which the real run skipped: a step after ``&&`` once the chain has
+    failed. A step after ``||`` the shell skips after a success is not missing. A
+    command whose steps cannot be split or read is never called complete.
+    """
+    if len(_steps(command)) <= 1:
+        return None
+    chain = _chain_steps(command)
+    if chain is None:
+        return "the check's steps cannot be told apart, so whether each one ran is unknown"
+    if len(chain) <= 1:
+        return None
+    steps = _run_chain_markers(chain, run, roots)
+    if steps is None:
+        return ("the check's steps could not be run one by one, so whether each one ran "
+                "is unknown")
+    status = 0
+    for sr in steps:
+        if sr["operator"] == "&&" and status != 0:
+            return f"step `{sr['step']}` never ran: an earlier step of the check failed"
+        if sr["ran"]:
+            status = sr["exit_code"]
+    return None
+
+
 def excusal_blocker(command: str, output: str, failures: set[str]) -> str | None:
     """Why the check's failures, all inherited, still cannot excuse it; None when they can.
 
@@ -664,6 +724,8 @@ class BaseCheckResult:
     output: str
     exit_code: int
     environment_failure: str | None = None
+    #: Each failure's signature (`extract_failure_signatures`), when a targeted run kept it.
+    signatures: dict[str, str | None] | None = None
 
 
 @dataclass
@@ -672,6 +734,16 @@ class ComparisonResult:
     new_failures: set[str]
     all_excused: bool
     base_ok: bool
+    reasons: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class JudgeResult:
+    """The unified verdict on which failures are the change's."""
+    charged: frozenset[str]       # test IDs the change is responsible for
+    excused: frozenset[str]       # test IDs inherited from the base
+    reasons: dict[str, str]       # test_id → classification reason
+    all_excused: bool             # True iff charged is empty and excused is non-empty
 
 
 @dataclass
@@ -686,6 +758,199 @@ class FilteredCheckResult:
     base_failures: set[str] | None = None
     base_complete: bool = False
     base_crashed: bool = False
+    reasons: dict[str, str] | None = None
+
+
+# ── failure signatures ───────────────────────────────────────────────────
+
+_FAILURES_SECTION = re.compile(r"^={3,}\s*FAILURES\s*={3,}$", re.MULTILINE)
+_HEADER_LINE = re.compile(r"^_{3,}\s*(.+?)\s*_{3,}$", re.MULTILINE)
+
+
+def extract_failure_signatures(output: str, test_ids: set[str]) -> dict[str, str | None]:
+    """Extract failure signatures for the given test IDs from check output.
+
+    A signature is 'exception_type:file_path:line_number' extracted from the
+    traceback following a FAILED line. Returns None for a test ID whose
+    traceback cannot be found (e.g. --tb=no).
+    """
+    clean = strip_ansi(output)
+    result: dict[str, str | None] = {tid: None for tid in test_ids}
+
+    # Find the FAILURES section
+    section_match = _FAILURES_SECTION.search(clean)
+    if section_match is None:
+        return result
+
+    section_start = section_match.end()
+    # Find the end of the section (next === line)
+    section_end_match = re.search(r"^={3,}", clean[section_start:], re.MULTILINE)
+    section_text = clean[section_start:section_start + section_end_match.start()] if section_end_match else clean[section_start:]
+
+    headers = list(_HEADER_LINE.finditer(section_text))
+    for i, hdr in enumerate(headers):
+        header_name = hdr.group(1).strip()
+        block_start = hdr.end()
+        block_end = headers[i + 1].start() if i + 1 < len(headers) else len(section_text)
+        block = section_text[block_start:block_end]
+
+        # Match header name to test IDs — the header may be just the test name part.
+        # Use exact segment matching, not endswith, to avoid matching
+        # 'base_test_foo' to 'test_foo' (review finding m1-sig-4).
+        matched_tid = None
+        for tid in test_ids:
+            if header_name == tid or tid.endswith("::" + header_name):
+                matched_tid = tid
+                break
+            # The last :: segment must match exactly
+            last_part = tid.split("::")[-1]
+            if header_name == last_part:
+                matched_tid = tid
+                break
+        if matched_tid is None:
+            # Try matching on any :: segment exactly
+            for tid in test_ids:
+                parts = tid.split("::")
+                if any(header_name == p for p in parts[1:]):
+                    matched_tid = tid
+                    break
+        if matched_tid is None:
+            continue
+
+        # Extract the signature: last exception line + file:line
+        lines = block.strip().splitlines()
+        exc_type = None
+        file_line = None
+        for line in reversed(lines):
+            line_stripped = line.strip()
+            # Exception line: may start with pytest's "E   " marker, then
+            # an uppercase word followed by Error/Exception/Failure/Warning.
+            exc_match = re.match(r'^(?:E\s+)?([A-Z]\w*(?:Error|Exception|Failure|Warning))', line_stripped)
+            if exc_type is None and exc_match:
+                exc_type = exc_match.group(1)
+            # File:line pattern
+            if file_line is None:
+                fl_match = re.search(r'(\S+\.py):(\d+)', line_stripped)
+                if fl_match:
+                    file_line = f"{fl_match.group(1)}:{fl_match.group(2)}"
+        if exc_type and file_line:
+            result[matched_tid] = f"{exc_type}:{file_line}"
+
+    return result
+
+
+# ── unified failure judge ────────────────────────────────────────────────
+
+
+def judge_failures(
+    attempt_failures: set[str],
+    base_failures: set[str],
+    *,
+    named_text: str | None = None,
+    changed_files: list[str] | None = None,
+    brief_text: str = "",
+    design_text: str = "",
+    per_step_base_failures: set[str] | None = None,
+    targeted_base_failures_set: set[str] | None = None,
+    targeted_attempt_failures: set[str] | None = None,
+    attempt_signatures: dict[str, str | None] | None = None,
+    base_signatures: dict[str, str | None] | None = None,
+) -> JudgeResult:
+    """Classify attempt failures as charged or excused.
+
+    A pure function (no I/O): callers collect the observations and pass them in.
+    Every check path uses this single classifier.
+    """
+    if not attempt_failures:
+        return JudgeResult(
+            charged=frozenset(), excused=frozenset(),
+            reasons={}, all_excused=False,
+        )
+
+    charged: set[str] = set()
+    excused: set[str] = set()
+    reasons: dict[str, str] = {}
+
+    search_text = (brief_text + "\n" + design_text).lower() if named_text is None else ""
+    changed_set = set(changed_files) if changed_files else set()
+
+    all_base = set(base_failures)
+    if per_step_base_failures:
+        all_base |= per_step_base_failures
+    if targeted_base_failures_set:
+        all_base |= targeted_base_failures_set
+
+    for failure in attempt_failures:
+        # Step 1: Named test — always charged
+        if named_text is not None:
+            if names_test(named_text, failure):
+                charged.add(failure)
+                reasons[failure] = "named-test"
+                continue
+        else:
+            # Fast mode: check if any part appears in brief_text + design_text
+            if any(part.lower() in search_text for part in _test_name_parts(failure)):
+                charged.add(failure)
+                reasons[failure] = "named-test"
+                continue
+
+        # Step 2: A failure in a test file the change touched. A base match (whole run,
+        # per step or targeted) excuses it only when both sides' failure signatures are
+        # available and equal; otherwise the change may have broken it differently, so
+        # it is charged. Fast modes also charge one the base does not fail at all.
+        test_file = _test_file(failure)
+        if test_file and changed_set and any(
+                path == test_file or path.endswith("/" + test_file) for path in changed_set):
+            if failure in all_base:
+                a_sig = (attempt_signatures or {}).get(failure)
+                b_sig = (base_signatures or {}).get(failure)
+                if a_sig is None or b_sig is None or a_sig != b_sig:
+                    charged.add(failure)
+                    reasons[failure] = "signature-mismatch"
+                    continue
+            elif named_text is None:
+                charged.add(failure)
+                reasons[failure] = "touched-file"
+                continue
+
+        # Step 4: Base matching
+        if failure in base_failures:
+            excused.add(failure)
+            reasons[failure] = "base-whole-run"
+            continue
+        if per_step_base_failures and failure in per_step_base_failures:
+            excused.add(failure)
+            reasons[failure] = "base-per-step"
+            continue
+        if targeted_base_failures_set and failure in targeted_base_failures_set:
+            excused.add(failure)
+            reasons[failure] = "base-targeted"
+            continue
+
+        # Step 5: Targeted confirmation
+        if targeted_attempt_failures is not None:
+            if failure not in targeted_attempt_failures:
+                excused.add(failure)
+                reasons[failure] = "not-reproduced"
+                continue
+            if targeted_base_failures_set and failure in targeted_base_failures_set:
+                excused.add(failure)
+                reasons[failure] = "base-targeted"
+                continue
+            charged.add(failure)
+            reasons[failure] = "new-failure"
+            continue
+
+        # No targeted info available — charged
+        charged.add(failure)
+        reasons[failure] = "new-failure"
+
+    return JudgeResult(
+        charged=frozenset(charged),
+        excused=frozenset(excused),
+        reasons=reasons,
+        all_excused=not charged and bool(excused),
+    )
 
 
 # ── three-condition excusal ──────────────────────────────────────────────
@@ -728,53 +993,33 @@ def compare_failures(
     changed_files: list[str],
     brief_text: str,
     design_text: str,
+    *,
+    targeted_base_failures_set: set[str] | None = None,
+    targeted_attempt_failures: set[str] | None = None,
+    per_step_base_failures: set[str] | None = None,
+    attempt_signatures: dict[str, str | None] | None = None,
+    base_signatures: dict[str, str | None] | None = None,
 ) -> ComparisonResult:
     """Classify attempt failures as inherited or new using the three-condition rule.
 
-    A failure is inherited only if ALL THREE hold:
-    (a) the same test identifier fails on both base and attempt;
-    (b) its test file is not one the attempt changes;
-    (c) its test id or leaf name appears in neither the brief text nor design.md.
+    Thin wrapper around ``judge_failures`` preserving the public signature.
     """
-    if not attempt_failures:
-        # No test identifiers parsed: conservative fallback.
-        return ComparisonResult(
-            inherited=set(), new_failures=set(), all_excused=False,
-            base_ok=not bool(base_failures),
-        )
-
-    search_text = (brief_text + "\n" + design_text).lower()
-    changed_set = set(changed_files)
-
-    inherited: set[str] = set()
-    new_failures: set[str] = set()
-
-    for failure in attempt_failures:
-        # Condition (a): same test fails on base
-        if failure not in base_failures:
-            new_failures.add(failure)
-            continue
-        # Condition (b): test file not changed by the attempt. A runner names the file
-        # relative to where it ran (a package directory, say), git relative to the root.
-        test_file = _test_file(failure)
-        if test_file and any(path == test_file or path.endswith("/" + test_file)
-                             for path in changed_set):
-            new_failures.add(failure)
-            continue
-        # Condition (c): test name not mentioned in brief or design.md
-        mentioned = any(
-            part.lower() in search_text for part in _test_name_parts(failure)
-        )
-        if mentioned:
-            new_failures.add(failure)
-            continue
-        # All three conditions hold: inherited
-        inherited.add(failure)
-
+    jr = judge_failures(
+        attempt_failures, base_failures,
+        named_text=None,
+        changed_files=changed_files,
+        brief_text=brief_text,
+        design_text=design_text,
+        targeted_base_failures_set=targeted_base_failures_set,
+        targeted_attempt_failures=targeted_attempt_failures,
+        per_step_base_failures=per_step_base_failures,
+        attempt_signatures=attempt_signatures,
+        base_signatures=base_signatures,
+    )
     return ComparisonResult(
-        inherited=inherited,
-        new_failures=new_failures,
-        all_excused=len(new_failures) == 0 and len(inherited) > 0,
+        inherited=set(jr.excused),
+        new_failures=set(jr.charged),
+        all_excused=jr.all_excused,
         base_ok=not bool(base_failures),
     )
 
@@ -815,23 +1060,37 @@ def names_test(text: str, test_id: str) -> bool:
 
 
 def design_comparison(base_failures: set[str], attempt_failures: set[str],
-                      named_text: str) -> ComparisonResult:
-    """Design mode's one inheritance rule, for its self-check and its whole check alike.
+                      named_text: str, *,
+                      targeted_base_failures_set: set[str] | None = None,
+                      targeted_attempt_failures: set[str] | None = None,
+                      per_step_base_failures: set[str] | None = None,
+                      changed_files: list[str] | None = None,
+                      attempt_signatures: dict[str, str | None] | None = None,
+                      base_signatures: dict[str, str | None] | None = None,
+                      ) -> ComparisonResult:
+    """Design mode's one inheritance rule — thin wrapper around ``judge_failures``.
 
     A failure is inherited when the unchanged base fails the same test, whatever file the
     attempt touched and whatever design.md says, unless ``named_text`` (the brief and
     the approved corrections) names it (`names_test`): a test the run exists to fix is
     sent back while it fails.
     """
-    if not attempt_failures:
-        return ComparisonResult(inherited=set(), new_failures=set(), all_excused=False,
-                                base_ok=not bool(base_failures))
-    inherited = {failure for failure in attempt_failures
-                 if failure in base_failures and not names_test(named_text, failure)}
-    new_failures = set(attempt_failures) - inherited
-    return ComparisonResult(inherited=inherited, new_failures=new_failures,
-                            all_excused=not new_failures and bool(inherited),
-                            base_ok=not bool(base_failures))
+    jr = judge_failures(
+        attempt_failures, base_failures,
+        named_text=named_text,
+        changed_files=changed_files,
+        targeted_base_failures_set=targeted_base_failures_set,
+        targeted_attempt_failures=targeted_attempt_failures,
+        per_step_base_failures=per_step_base_failures,
+        attempt_signatures=attempt_signatures,
+        base_signatures=base_signatures,
+    )
+    return ComparisonResult(
+        inherited=set(jr.excused),
+        new_failures=set(jr.charged),
+        all_excused=jr.all_excused,
+        base_ok=not bool(base_failures),
+    )
 
 
 # ── base worktree lifecycle ──────────────────────────────────────────────
@@ -1018,14 +1277,19 @@ def _ensure_base_worktree(ctx: Any) -> tuple[Path, worktree.Worktree, list[str]]
 
 
 def remove_base_worktree(target: Path, run_id: str) -> None:
-    """Remove the base worktree when the run ends."""
-    path = _base_worktree_path(target, run_id)
-    if path.exists():
-        try:
-            worktree.git(target, "worktree", "remove", "--force", str(path))
-        except ValueError:
-            # Best effort — the worktree may already be gone
-            shutil.rmtree(path, ignore_errors=True)
+    """Remove the base worktree when the run ends, and the reference worktree delivery's
+    merged-result check prepared (`targeted_base_failures` with ``reference``)."""
+    for path in (_base_worktree_path(target, run_id), _reference_worktree_path(target, run_id)):
+        if path.exists():
+            try:
+                worktree.git(target, "worktree", "remove", "--force", str(path))
+            except ValueError:
+                # Best effort — the worktree may already be gone
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def _reference_worktree_path(target: Path, run_id: str) -> Path:
+    return worktree.slot(target) / f"ref-{run_id}"
 
 
 # ── identify changed files ───────────────────────────────────────────────
@@ -1085,6 +1349,10 @@ def _read_cache(run: Path, key: str) -> BaseCheckResult | None:
     if data.get("cache_key") == key:
         if data.get("base_clean") is not True:
             return None  # dirty-base or old entry — re-run
+        # Guard: reject d4b-shaped entries — base failed without naming any
+        # failing test and without an environment_failure explanation.
+        if not data["ok"] and not data.get("failures") and data.get("environment_failure") is None:
+            return None  # d4b-shaped entry: base failed without failures or environment_failure
         result = BaseCheckResult(
             ok=data["ok"],
             failures=set(data.get("failures", [])),
@@ -1223,6 +1491,7 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
             (check_result.stdout or "", check_result.stderr or "")
         ).strip()
         failures = parse_test_failures(output)
+
         result = BaseCheckResult(
             ok=check_result.ok, failures=failures,
             output=output, exit_code=check_result.returncode or 0,
@@ -1260,6 +1529,27 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
                     result._step_results = [  # type: ignore[attr-defined]
                         {**sr, "output": sr["output"][-5000:]} for sr in step_results]
 
+        # Guard: an unfinished base (a timeout, whatever it printed before it was
+        # stopped, or a non-zero exit with no failures and no per-step results) is
+        # never cached -- not as clean, not as failure-free, not as the failures it
+        # named before it stopped.  Applied AFTER the per-step re-run.
+        if check_result.timed_out:
+            result.environment_failure = (
+                f"the base check was stopped at its time limit "
+                f"(exit {check_result.returncode})")
+            return result, False
+        if not check_result.ok and not result.failures:
+            if _runner(command) or _runner_from_output(output):
+                # The check command names or produced output from a test runner
+                # (pytest/vitest/etc.) but named no failures: environment refusal
+                # (canary-repair case — credentials guard, etc.).
+                result.environment_failure = (
+                    f"the base check exited {check_result.returncode} "
+                    "without naming a failing test")
+            # Not cached at all — neither as clean nor as environment failure
+            # (correction 2).  The _read_cache guard rejects existing entries.
+            return result, False  # not a crash, but not cached either
+
         return result, False
 
     result, is_crash = _try_base()
@@ -1286,7 +1576,10 @@ def run_base_check(ctx: Any, command: str, timeout: float) -> BaseCheckResult:
             result._crashed = is_crash  # type: ignore[attr-defined]
             return result
 
-    _write_cache(ctx.workdir, key, result, base_clean=base_clean_flag)
+    # An unfinished base (environment_failure set by the non-crash guard) is
+    # never cached — the caller falls back to targeted base runs.
+    if not result.environment_failure:
+        _write_cache(ctx.workdir, key, result, base_clean=base_clean_flag)
     return result
 
 
@@ -1296,7 +1589,8 @@ TARGETED_CACHE_FILE = Path(".refactory") / "base-targeted.json"
 
 
 def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
-                           prepare_timeout: float, timeout: float) -> tuple[BaseCheckResult, str]:
+                           prepare_timeout: float, timeout: float,
+                           reference: str | None = None) -> tuple[BaseCheckResult, str]:
     """Which of ``test_ids`` fail on the unchanged base: the self-check's comparison (b41a).
 
     It is the base the check compares with. When the check's own base result is cached
@@ -1305,6 +1599,10 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
     generate and setup there, with the base's own HOME, as `run_base_check` runs the
     whole check. What a run learns about a test is kept, so a fix-up does not prepare
     the base again for the same tests.
+
+    When ``reference`` is provided (e.g. for delivery's merged-result check), the
+    targeted tests run at that commit in a separate worktree with a cache key that
+    includes ``reference`` and does not collide with the in-run base cache.
 
     A base that cannot be prepared, runs out of ``timeout`` or reports no result is
     unavailable: ``environment_failure`` says why, and nothing may be inherited from it.
@@ -1318,16 +1616,33 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
 
     if found is None:
         return unavailable("the run has no worktree, so it has no base")
+
+    # When reference is provided, use it as the base commit for cache and worktree.
+    base_commit = reference if reference else found.base
+
     setup = str(ctx.facts.get("setup") or "").strip()
     generate = str(ctx.facts.get("generate") or "").strip()
-    key = cache_key(found.base, setup, generate, command)
-    cached = _read_cache(ctx.workdir, key)
-    if cached is not None and not cached.environment_failure:
-        return cached, "the check's base result"
-    known_path = ctx.workdir / TARGETED_CACHE_FILE
+    key = cache_key(base_commit, setup, generate, command)
+
+    # Only check the in-run base cache when not using a different reference.
+    if not reference:
+        cached = _read_cache(ctx.workdir, key)
+        if cached is not None and not cached.environment_failure:
+            cached.signatures = extract_failure_signatures(
+                cached.output, cached.failures & set(test_ids))
+            return cached, "the check's base result"
+
+    # Use a separate targeted cache file when reference is provided.
+    if reference:
+        ref_short = reference[:12]
+        targeted_cache_name = Path(".refactory") / f"base-targeted-{ref_short}.json"
+    else:
+        targeted_cache_name = TARGETED_CACHE_FILE
+    known_path = ctx.workdir / targeted_cache_name
     known = _read_json(known_path)
     same_key = known.get("cache_key") == key
     learned: dict[str, bool] = dict(known.get("tests", {})) if same_key else {}
+    signatures: dict[str, str | None] = dict(known.get("signatures", {})) if same_key else {}
     missing = [test_id for test_id in test_ids if test_id not in learned]
     source = "earlier runs of these tests on the base"
     if missing:
@@ -1339,7 +1654,21 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
         home.mkdir(parents=True, exist_ok=True)
         budget = getattr(ctx, "budget", None)
         base_path = _base_worktree_path(Path(found.target), Path(found.path).name.removeprefix("run-"))
-        if not (same_key and known.get("prepared") and _at(base_path, found.base)):
+
+        # When reference differs from found.base, use a separate worktree so the
+        # in-run base worktree is never contaminated (correction 6).
+        if reference and reference != found.base:
+            base_path = _reference_worktree_path(
+                Path(found.target), Path(found.path).name.removeprefix("run-"))
+            home = Path(ctx.workdir).resolve() / ".refactory" / "ref-check-home"
+            home.mkdir(parents=True, exist_ok=True)
+            if not (same_key and known.get("prepared") and _at(base_path, reference)):
+                why = _prepare_reference(ctx, found, base_path, reference, home,
+                                         prepare_timeout)
+                if why:
+                    return unavailable(why)
+                _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
+        elif not (same_key and known.get("prepared") and _at(base_path, base_commit)):
             try:
                 base_path, base_found, _ = _ensure_base_worktree(ctx)
             except ValueError as exc:
@@ -1348,7 +1677,7 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
                                               home, prepare_timeout, budget, amend=False)
             if problems:
                 return unavailable("the base's generate or setup failed: " + "\n".join(problems)[:1000])
-            _write_targeted(known_path, key, learned, prepared=True)
+            _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
         from refactory_dsh.test_selection import runnable
 
         env = worktree.check_environment(base_path, home)
@@ -1372,10 +1701,59 @@ def targeted_base_failures(ctx: Any, command: str, test_ids: list[str], *,
             return unavailable(f"the base run failed (exit {result.returncode}) without "
                                "naming a failing test")
         learned.update({test_id: test_id in failed for test_id in missing})
-        _write_targeted(known_path, key, learned, prepared=True)
+        signatures.update(extract_failure_signatures(
+            output, {test_id for test_id in missing if test_id in failed}))
+        _write_targeted(known_path, key, learned, prepared=True, signatures=signatures)
         source = f"a run of {len(missing)} test(s) on the base"
     failures = {test_id for test_id in test_ids if learned.get(test_id)}
-    return BaseCheckResult(ok=not failures, failures=failures, output="", exit_code=0), source
+    return BaseCheckResult(ok=not failures, failures=failures, output="", exit_code=0,
+                           signatures={test_id: signatures.get(test_id)
+                                       for test_id in failures}), source
+
+
+def _prepare_reference(ctx: Any, found: worktree.Worktree, path: Path, reference: str,
+                       home: Path, timeout: float) -> str:
+    """Put a worktree at ``reference`` at ``path`` and prepare it as the base worktree is
+    prepared (`_ensure_base_worktree`): its installs, then the run's generate and setup,
+    run there with ``home``. Returns why it could not be prepared; empty when it was.
+
+    The targeted cache records that it was prepared, per ``reference``, so a later call
+    for the same reference runs its tests without preparing again.
+    """
+    from refactory_dsh.repo_change import prepare_commands
+
+    target = Path(found.target)
+    run_id = Path(found.path).name.removeprefix("run-")
+
+    def add() -> None:
+        if path.is_dir():
+            worktree.git(target, *worktree.NO_HOOKS, "worktree", "remove", "--force", str(path))
+        worktree.git(target, *worktree.NO_HOOKS, "worktree", "add", "-q", "--detach",
+                     str(path), reference)
+
+    if not _at(path, reference):
+        try:
+            add()
+        except ValueError:
+            try:
+                worktree.git(target, *worktree.NO_HOOKS, "fetch", "origin", reference)
+                add()
+            except ValueError as exc:
+                return f"could not create a worktree at reference {reference[:12]}: {exc}"
+    _isolate_hooks(target, path)
+    ref_found = worktree.Worktree(
+        path=str(path), branch=f"{worktree.BRANCH_PREFIX}ref-{run_id}",
+        base=reference, head=reference, target=found.target, run=found.run)
+    budget = getattr(ctx, "budget", None)
+    _, problems, _ = worktree.ensure_environment(ref_found, ctx.workdir, budget,
+                                                 commit_lockfiles=False)
+    if problems:
+        return "the reference's install failed: " + "\n".join(problems)[:1000]
+    _, problems, _ = prepare_commands(ctx, ref_found, worktree.check_environment(path, home),
+                                      home, timeout, budget, amend=False)
+    if problems:
+        return "the reference's generate or setup failed: " + "\n".join(problems)[:1000]
+    return ""
 
 
 def _at(path: Path, commit: str) -> bool:
@@ -1386,10 +1764,97 @@ def _at(path: Path, commit: str) -> bool:
         return False
 
 
-def _write_targeted(path: Path, key: str, learned: dict[str, bool], *, prepared: bool) -> None:
+def _write_targeted(path: Path, key: str, learned: dict[str, bool], *, prepared: bool,
+                    signatures: dict[str, str | None] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"cache_key": key, "prepared": prepared, "tests": learned},
+    path.write_text(json.dumps({"cache_key": key, "prepared": prepared, "tests": learned,
+                                "signatures": signatures or {}},
                                indent=2) + "\n")
+
+
+def targeted_attempt_failures(ctx: Any, command: str, test_ids: list[str], *,
+                              timeout: float,
+                              place: tuple[Path, dict[str, str], Path] | None = None,
+                              signatures: dict[str, str | None] | None = None,
+                              ) -> set[str] | None:
+    """Run ``test_ids`` targeted on the attempt and return which ones fail.
+
+    Returns ``None`` when the attempt cannot be re-run (the targeted confirmation
+    then falls through to the "no targeted info" branch of the judge, which
+    charges the failure).
+
+    It runs in the run's check copy (`repo_change._check_copy`), at the attempt's
+    commit with the copy's own environment and HOME, so reviewers working in the run's
+    worktree are not disturbed. ``place`` -- a directory, its environment and HOME --
+    runs it somewhere already prepared instead: delivery's merged result.
+
+    A test that passes when run alone may fail only in its suite's order, after
+    another test in its file left state behind. So each id that passes alone runs
+    again with its whole file; it counts as passing only when it passes there too.
+    ``signatures``, when given, receives each failing id's signature from its run alone.
+    """
+    from refactory_dsh.check_digest import build_probe_command
+    from refactory_dsh.failfast import self_check_failures
+    from refactory_dsh.test_selection import runnable
+
+    found = worktree.recorded(ctx.workdir)
+    if found is None:
+        return None
+    budget = getattr(ctx, "budget", None)
+    if place is None:
+        from refactory_dsh import repo_change
+
+        copy, env, home, problems, _ = repo_change._check_copy(ctx, found, timeout)
+        if problems:
+            return None
+        where = Path(copy.path)
+    else:
+        where, env, home = place
+
+    def run(ids: list[str], files: list[str]) -> set[str] | None:
+        targeted_cmd, refusal = build_probe_command(command, ids, root=where, test_files=files)
+        if refusal:
+            return None
+        result = sandbox.run_command(targeted_cmd, workdir=where, timeout_s=timeout,
+                                     budget=budget, env=env, home=home, exact_env=True)
+        if result.timed_out or sandbox.is_signal_crash(result)[0]:
+            return None
+        output = "\n".join((result.stdout or "", result.stderr or "")).strip()
+        if not result.ok and (result.returncode or 0) != 1:
+            # Exit code 1 means test failures; 2+ means collection errors or an
+            # interrupt -- inconclusive.
+            return None
+        failing = self_check_failures(output)
+        if signatures is not None:
+            for test_id, sig in extract_failure_signatures(
+                    output, failing & set(test_ids)).items():
+                signatures.setdefault(test_id, sig)
+        return failing
+
+    targets = list(dict.fromkeys(runnable(test_id) for test_id in test_ids))
+    files = [name for name in targets if "::" not in name and " > " not in name]
+    failed = run([name for name in targets if name not in files], files)
+    if failed is None:
+        return None
+    for test_id in test_ids:
+        # An id run as its whole file (`runnable`) fails when anything in that file does.
+        name = runnable(test_id)
+        if name != test_id and any(f == name or f.startswith(name + "::") for f in failed):
+            failed.add(test_id)
+    passed_alone = [test_id for test_id in test_ids
+                    if test_id not in failed and runnable(test_id) not in failed]
+    modules = sorted({module for test_id in passed_alone
+                      if (module := _test_file(test_id)) and module not in files})
+    if modules:
+        in_order = run([], modules)
+        for test_id in passed_alone:
+            module = _test_file(test_id)
+            if module not in modules:
+                continue
+            # Inconclusive, or failing in its file's order: not a pass.
+            if in_order is None or test_id in in_order or module in in_order:
+                failed.add(test_id)
+    return failed
 
 
 # ── prep triage: compare a preparation failure against the base ──────────
@@ -2662,6 +3127,8 @@ def _per_step_comparison(
     base_result: "BaseCheckResult", attempt_failures: set[str],
     timeout: float, named_text: str | None,
     changed_files: list[str], brief_text: str, design_text: str,
+    *, attempt_signatures: dict[str, str | None] | None = None,
+    base_signatures: dict[str, str | None] | None = None,
 ) -> tuple[ComparisonResult | None, str]:
     """Classify a failed chain's failures step by step: ``(comparison, why)``.
 
@@ -2692,17 +3159,56 @@ def _per_step_comparison(
     all_attempt_failures = set(attempt_failures)
     for sr in attempt_steps:
         all_attempt_failures |= set(sr["failures"])
-    comparison = (design_comparison(base_result.failures, all_attempt_failures, named_text)
-                  if named_text is not None else compare_failures(
-                      base_result.failures, all_attempt_failures, changed_files,
-                      brief_text, design_text))
+    # Each side's steps carry the tracebacks of failures its whole run never reached.
+    attempt_signatures = _with_step_signatures(attempt_signatures, attempt_steps)
+    base_signatures = _with_step_signatures(base_signatures, base_steps)
+    judge_kwargs: dict[str, Any] = dict(
+        named_text=named_text, changed_files=changed_files,
+        brief_text=brief_text if named_text is None else "",
+        design_text=design_text if named_text is None else "",
+        attempt_signatures=attempt_signatures, base_signatures=base_signatures)
+    jr = judge_failures(all_attempt_failures, base_result.failures, **judge_kwargs)
 
+    # Targeted confirmation (correction 1) for what the base never failed: a failure only
+    # the attempt's per-step re-run found, or one the whole-run comparison excused by its
+    # own targeted runs, which this comparison has not repeated. Each runs targeted once
+    # on the attempt and once on the base, as `filter_check` confirms the whole run's,
+    # and is judged again with what those runs said.
+    to_confirm = {failure for failure in jr.charged if jr.reasons.get(failure) == "new-failure"}
+    if to_confirm:
+        cmd_for_targeted = " && ".join(s for s, _ in steps)
+        ids_to_confirm = sorted(to_confirm)
+        t_attempt_set = targeted_attempt_failures(
+            ctx, cmd_for_targeted, ids_to_confirm, timeout=timeout)
+        t_base_result, _ = targeted_base_failures(
+            ctx, cmd_for_targeted, ids_to_confirm,
+            prepare_timeout=timeout, timeout=timeout,
+        )
+        t_base_set = (None if t_base_result.environment_failure
+                      else set(t_base_result.failures))
+        if t_attempt_set is not None or t_base_set is not None:
+            jr = judge_failures(all_attempt_failures, base_result.failures,
+                                targeted_base_failures_set=t_base_set,
+                                targeted_attempt_failures=t_attempt_set, **judge_kwargs)
+    reasons = dict(jr.reasons)
+
+    # A failure the base's whole run also had stays excused -- UNLESS the per-step
+    # analysis shows the base's step ended differently (e.g. the build failed on base
+    # so the test never actually ran there). A flaky test that was in the base's
+    # failures but does not appear in the per-step re-run stays excused (the d16 fix).
+    # One excused by a targeted run (the base fails it alone, or the attempt does not)
+    # was judged on its own, so no step comparison applies to it.
     excused: set[str] = set()
-    for failure in comparison.inherited:
+    for failure in jr.excused:
         steps_with = [k for k, sr in enumerate(attempt_steps) if failure in sr["failures"]]
-        if steps_with and all(_excusable_in_step(k, failure, attempt_steps, base_steps)
-                              for k in steps_with):
+        if (jr.reasons.get(failure) != "base-whole-run" or not steps_with
+                or all(_excusable_in_step(k, failure, attempt_steps, base_steps)
+                       for k in steps_with)):
             excused.add(failure)
+        else:
+            reasons[failure] = "step-ended-differently"
+    comparison = ComparisonResult(inherited=set(), new_failures=set(jr.charged),
+                                  all_excused=False, base_ok=not bool(base_result.failures))
 
     # A step that failed without naming a failing test -- a build, a grep, a runner that
     # collected nothing or crashed first -- is the attempt's unless the base's same step
@@ -2712,21 +3218,43 @@ def _per_step_comparison(
         if sr["ran"] and sr["exit_code"] != 0 and not sr["failures"]
         and not (_same_end(sr, base_sr) and not base_sr.get("failures"))
     ]
-    new_failures = all_attempt_failures - excused
+    new_failures = (all_attempt_failures | comparison.new_failures) - excused
     detail = ""
     shown = [sr for sr in attempt_steps
              if sr["ran"] and sr["exit_code"] != 0
              and (set(sr["failures"]) & new_failures or sr["step"] in unnamed)]
     if shown:
+        # Positive selection, as the whole run's detail: a step that named failures
+        # shows only its charged ones' lines and blocks and its summary, never an
+        # excused failure's; a step that named none shows its output.
         detail = "\n".join(
             f"step `{sr['step']}` exited {sr['exit_code']} when the chain's steps were run "
-            f"one by one:\n{sr['output'][-4000:]}" for sr in shown)
+            f"one by one:\n"
+            + (_charged_lines(sr["output"], set(sr["failures"]) & new_failures)
+               if sr["failures"] else sr["output"][-4000:])
+            for sr in shown)
+    for failure in new_failures:
+        reasons.setdefault(failure, "new-failure")
     return ComparisonResult(
         inherited=excused,
         new_failures=new_failures,
         all_excused=bool(excused) and not new_failures and not unnamed,
         base_ok=comparison.base_ok,
+        reasons=reasons,
     ), detail
+
+
+def _with_step_signatures(signatures: dict[str, str | None] | None,
+                          steps: list[dict]) -> dict[str, str | None]:
+    """``signatures`` with each step's failures' signatures added where it has none."""
+    merged = dict(signatures or {})
+    for sr in steps:
+        failures = set(sr.get("failures") or ())
+        if failures and sr.get("output"):
+            for test_id, sig in extract_failure_signatures(sr["output"], failures).items():
+                if merged.get(test_id) is None:
+                    merged[test_id] = sig
+    return merged
 
 
 def _excusable_in_step(k: int, failure: str, attempt_steps: list[dict],
@@ -2751,6 +3279,155 @@ def _excusable_in_step(k: int, failure: str, attempt_steps: list[dict],
 # ── integration function ────────────────────────────────────────────────
 
 
+def _vitest_blocks(output: str, test_ids: set[str]) -> list[str]:
+    """Each charged vitest failure's error block: its ``FAIL`` header and the lines after
+    it, up to the next header, separator or summary line."""
+    vitest_ids = {tid for tid in test_ids if " > " in tid}
+    if not vitest_ids:
+        return []
+    blocks: list[str] = []
+    current: list[str] | None = None
+    for line in strip_ansi(output).splitlines():
+        stripped = line.strip()
+        header = stripped.startswith(("FAIL ", "× "))
+        if header or stripped.startswith("⎯") or _VITEST_FINAL.match(stripped):
+            if current is not None and len(current) > 1:
+                blocks.append("\n".join(current[:60]))
+            current = None
+            if header:
+                name = stripped.split(None, 1)[1].strip() if " " in stripped else ""
+                if any(name == tid or name.startswith(tid + " ") for tid in vitest_ids):
+                    current = [stripped]
+            continue
+        if current is not None:
+            current.append(line.rstrip())
+    if current is not None and len(current) > 1:
+        blocks.append("\n".join(current[:60]))
+    return blocks
+
+
+def _extract_failure_blocks(output: str, test_ids: set[str]) -> list[str]:
+    """Extract the FAILURES-section block for each test ID (positive selection), and
+    each charged vitest failure's error block."""
+    clean = strip_ansi(output)
+    blocks: list[str] = _vitest_blocks(clean, test_ids)
+    section_match = _FAILURES_SECTION.search(clean)
+    if section_match is None:
+        return blocks
+    section_start = section_match.end()
+    section_end_match = re.search(r"^={3,}", clean[section_start:], re.MULTILINE)
+    section_text = clean[section_start:section_start + section_end_match.start()] if section_end_match else clean[section_start:]
+
+    headers = list(_HEADER_LINE.finditer(section_text))
+    for i, hdr in enumerate(headers):
+        header_name = hdr.group(1).strip()
+        block_start = hdr.start()
+        block_end = headers[i + 1].start() if i + 1 < len(headers) else len(section_text)
+        # Check if this header belongs to a charged test ID using strict matching.
+        # Use exact segment matching, not endswith, to avoid leaking an excused
+        # test's block into charged output (review finding m1-blocks-3).
+        for tid in test_ids:
+            if (header_name == tid
+                    or tid.endswith("::" + header_name)
+                    or header_name == tid.split("::")[-1]):
+                blocks.append(section_text[block_start:block_end].strip())
+                break
+        else:
+            # Fallback: try matching on any :: segment exactly
+            for tid in test_ids:
+                parts = tid.split("::")
+                if any(header_name == p for p in parts[1:]):
+                    blocks.append(section_text[block_start:block_end].strip())
+                    break
+    return blocks
+
+
+def _extract_failed_error_lines(output: str, test_ids: set[str]) -> list[str]:
+    """Extract the FAILED/ERROR short-summary lines for each charged test ID."""
+    clean = strip_ansi(output)
+    lines: list[str] = []
+    for line in clean.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("FAILED ", "ERROR ", "FAIL ", "× ")):
+            continue
+        # Match: the line must contain one of the charged test IDs as a whole
+        # token (not as a substring of a longer ID).
+        for tid in test_ids:
+            # The FAILED/ERROR line format is: "FAILED tid" or "FAILED tid - reason"
+            # Match if the line contains the full tid followed by end, space, or " -"
+            pos = stripped.find(tid)
+            if pos >= 0:
+                after = pos + len(tid)
+                if after >= len(stripped) or stripped[after] in (" ", "\t"):
+                    lines.append(stripped)
+                    break
+    return lines
+
+
+#: A pytest final summary line (``=== 1 failed, 3 passed in 0.12s ===``, or bare under ``-q``).
+_PYTEST_FINAL = re.compile(
+    r"^=*\s*\d+ (?:failed|passed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b.*$")
+#: vitest's and jest's summary block: ``Test Files  1 failed | 2 passed (3)``, ``Tests  ...``.
+_VITEST_FINAL = re.compile(r"^(?:Test Files|Tests|Test Suites)\s+\d+ .*$")
+
+
+def _extract_summary_lines(output: str) -> list[str]:
+    """The runner's final summary lines: pytest's last summary line, and vitest's (or
+    jest's) ``Test Files`` / ``Tests`` lines. Nothing else -- when no summary line is
+    found the result is empty, never the output it was looking in."""
+    summary: list[str] = []
+    pytest_last = ""
+    for line in strip_ansi(output).splitlines():
+        stripped = line.strip()
+        if _PYTEST_FINAL.match(stripped) and " in " in stripped:
+            pytest_last = stripped
+        elif _VITEST_FINAL.match(stripped):
+            summary.append(stripped)
+    return ([pytest_last] if pytest_last else []) + summary
+
+
+def _charged_lines(output: str, charged_ids: set[str]) -> str:
+    """What ``output`` says of ``charged_ids`` alone: their FAILED/ERROR lines, their
+    FAILURES-section blocks, and the runner's summary lines."""
+    parts = _charged_parts(output, charged_ids) + _extract_summary_lines(output)
+    return "\n".join(parts) if parts else "no charged failure detail found"
+
+
+def _charged_parts(output: str, charged_ids: set[str]) -> list[str]:
+    """The charged ids' FAILED/ERROR lines and blocks, each line once: a vitest block
+    starts with the ``FAIL`` line the short summary also has."""
+    blocks = _extract_failure_blocks(output, charged_ids)
+    starts = {block.split("\n", 1)[0] for block in blocks}
+    return [line for line in _extract_failed_error_lines(output, charged_ids)
+            if line not in starts] + blocks
+
+
+def _format_excused_line(excused: set[str], reasons: dict[str, str]) -> str:
+    """Format one line listing excused IDs with their reasons."""
+    if not excused:
+        return ""
+    parts = []
+    for tid in sorted(excused):
+        reason = reasons.get(tid, "base")
+        parts.append(f"{tid} ({reason})")
+    return "Excused (not charged): " + ", ".join(parts)
+
+
+def _build_positive_detail(attempt_output: str, charged_ids: set[str],
+                           excused_ids: set[str], judge_reasons: dict[str, str]) -> str:
+    """Build the send-back detail using positive selection only."""
+    if not charged_ids:
+        return "no charged failure detail found"
+
+    summary_lines = _extract_summary_lines(attempt_output)
+    excused_line = _format_excused_line(excused_ids, judge_reasons)
+
+    parts = _charged_parts(attempt_output, charged_ids) + summary_lines
+    if excused_line:
+        parts.append(excused_line)
+    return "\n".join(parts) if parts else "no charged failure detail found"
+
+
 def filter_check(
     ctx: Any, result: Any, command: str, timeout: float,
     guardedness: dict | None = None, *, named_text: str | None = None,
@@ -2770,25 +3447,53 @@ def filter_check(
             base_environment_failure=None, guardedness=guardedness,
         )
 
-    # Run or load the base check (cached per run)
-    base_result = run_base_check(ctx, command, timeout)
-
-    if base_result.environment_failure:
-        return FilteredCheckResult(
-            all_excused=False, inherited=set(), new_failures=set(),
-            new_failure_detail="", inherited_detail="",
-            base_environment_failure=base_result.environment_failure,
-            guardedness=guardedness,
-            base_failures=None,
-            base_complete=False,
-            base_crashed=getattr(base_result, '_crashed', False),
-        )
-
-    # Parse the attempt's failures
+    # Parse the attempt's failures early — needed for targeted fallback.
     attempt_output = "\n".join(
         (result.stdout or "", result.stderr or "")
     ).strip()
     attempt_failures = parse_test_failures(attempt_output)
+
+    # Run or load the base check (cached per run)
+    base_result = run_base_check(ctx, command, timeout)
+
+    # Base unavailable: fall back to targeted base runs of the attempt's
+    # failing IDs (correction 2).  Only if those targeted runs are also
+    # unavailable is the check reported as "base unavailable".
+    if base_result.environment_failure:
+        is_crashed = getattr(base_result, '_crashed', False)
+        if attempt_failures:
+            # Fall back to targeted base runs.
+            targeted_result, _src = targeted_base_failures(
+                ctx, command, sorted(attempt_failures),
+                prepare_timeout=timeout, timeout=timeout,
+            )
+            if not targeted_result.environment_failure:
+                # Targeted runs succeeded — use them as the base observation.
+                base_result = targeted_result
+                # Clear the environment_failure so we continue below.
+            else:
+                # Targeted runs also unavailable — report as "base unavailable"
+                # with every failure listed (never excused, never charged as if clean).
+                return FilteredCheckResult(
+                    all_excused=False, inherited=set(), new_failures=set(),
+                    new_failure_detail=attempt_output,
+                    inherited_detail=f"base unavailable: {base_result.environment_failure}",
+                    base_environment_failure=base_result.environment_failure,
+                    guardedness=guardedness,
+                    base_failures=None,
+                    base_complete=False,
+                    base_crashed=is_crashed,
+                )
+        else:
+            return FilteredCheckResult(
+                all_excused=False, inherited=set(), new_failures=set(),
+                new_failure_detail="", inherited_detail="",
+                base_environment_failure=base_result.environment_failure,
+                guardedness=guardedness,
+                base_failures=None,
+                base_complete=False,
+                base_crashed=is_crashed,
+            )
 
     # Get changed files and texts for the three-condition rule
     attempt_path = Path(found.path)
@@ -2798,11 +3503,69 @@ def filter_check(
     if ctx.exists("design.md"):
         design_text = ctx.read_text("design.md")
 
-    # Compare
-    comparison = (design_comparison(base_result.failures, attempt_failures, named_text)
-                  if named_text is not None else compare_failures(
-                      base_result.failures, attempt_failures, changed_files,
-                      brief_text, design_text))
+    # Extract signatures for touched-file comparison
+    attempt_sigs = extract_failure_signatures(attempt_output, attempt_failures) if attempt_failures else None
+    base_sigs: dict[str, str | None] = dict(base_result.signatures or {})
+    if base_result.failures and base_result.output:
+        base_sigs.update(extract_failure_signatures(base_result.output, base_result.failures))
+
+    # First-pass comparison: judge with whole-run base observations only.
+    # changed_files is passed in both fast and design mode so the signature
+    # check for touched test files (correction 3) fires in every mode.
+    judge_kwargs: dict[str, Any] = dict(
+        named_text=named_text,
+        changed_files=changed_files,
+        brief_text=brief_text if named_text is None else "",
+        design_text=design_text if named_text is None else "",
+        attempt_signatures=attempt_sigs,
+        base_signatures=base_sigs,
+    )
+    first_jr = judge_failures(attempt_failures, base_result.failures, **judge_kwargs)
+
+    # Targeted confirmation (correction 1): run new failures targeted on
+    # both the attempt and the base, then re-judge with that information.
+    # Even when the base passed, a flaky test that passes on the attempt
+    # re-run is excused with "not-reproduced" (brief: "A failure that does
+    # not reproduce in a re-run is never charged by default").
+    new_from_first = set(first_jr.charged)
+    targeted_base_set: set[str] | None = None
+    targeted_attempt_set: set[str] | None = None
+    if new_from_first:
+        ids_to_confirm = sorted(new_from_first)
+        try:
+            targeted_attempt_set = targeted_attempt_failures(
+                ctx, command, ids_to_confirm, timeout=timeout)
+        except Exception:
+            targeted_attempt_set = None
+        try:
+            t_base_result, _ = targeted_base_failures(
+                ctx, command, ids_to_confirm, prepare_timeout=timeout, timeout=timeout)
+            if not t_base_result.environment_failure:
+                targeted_base_set = t_base_result.failures
+                for test_id, sig in (t_base_result.signatures or {}).items():
+                    base_sigs.setdefault(test_id, sig)
+        except Exception:
+            pass  # targeted base unavailable — fall through without targeted info
+        # Re-judge with targeted info (if any was collected).
+        if targeted_base_set is not None or targeted_attempt_set is not None:
+            jr = judge_failures(
+                attempt_failures, base_result.failures,
+                targeted_base_failures_set=targeted_base_set,
+                targeted_attempt_failures=targeted_attempt_set,
+                **judge_kwargs,
+            )
+        else:
+            jr = first_jr
+    else:
+        jr = first_jr
+
+    comparison = ComparisonResult(
+        inherited=set(jr.excused),
+        new_failures=set(jr.charged),
+        all_excused=jr.all_excused,
+        base_ok=not bool(base_result.failures),
+    )
+    judge_reasons = jr.reasons
 
     blocker = None
     step_detail = ""
@@ -2820,15 +3583,21 @@ def filter_check(
         # A base cache written before per-step results existed: the whole-command path.
         chain = None
     if chain is not None and len(chain) > 1:
+        # The per-step comparison runs for multi-step chains to detect "earlier
+        # step ending differently" scenarios.  Single-step commands (the d16/c3
+        # cases) never enter this block (len(chain) <= 1), so the 11–26 min
+        # re-run cost identified in the brief is already eliminated.
         revised, why = _per_step_comparison(
             ctx, chain, base_result, attempt_failures, timeout,
             named_text, changed_files, brief_text, design_text,
+            attempt_signatures=attempt_sigs, base_signatures=base_sigs,
         )
         if revised is None:
             target_guard.warn(f"no failure of the chained check is excused: {why}")
             blocker = why
         else:
             comparison, step_detail = revised, why
+            judge_reasons = {**judge_reasons, **(revised.reasons or {})}
     elif comparison.all_excused:
         blocker = excusal_blocker(command, attempt_output, attempt_failures)
 
@@ -2844,15 +3613,10 @@ def filter_check(
             + ", ".join(sorted(comparison.inherited))
         )
 
-    new_failure_detail = attempt_output
-    if comparison.new_failures and comparison.inherited:
-        # Show only new failures to repair, but mention inherited ones
-        new_lines = [
-            line for line in attempt_output.splitlines()
-            if any(f in line for f in comparison.new_failures)
-            or not any(f in line for f in comparison.inherited)
-        ]
-        new_failure_detail = "\n".join(new_lines) if new_lines else attempt_output
+    # Positive selection: the builder sees only charged failures (correction 4).
+    new_failure_detail = _build_positive_detail(
+        attempt_output, comparison.new_failures, comparison.inherited, judge_reasons,
+    )
     if step_detail:
         new_failure_detail = f"{new_failure_detail}\n\n{step_detail}"
 
@@ -2869,4 +3633,5 @@ def filter_check(
         guardedness=guardedness,
         base_failures=base_result.failures,
         base_complete=base_complete,
+        reasons=judge_reasons,
     )
