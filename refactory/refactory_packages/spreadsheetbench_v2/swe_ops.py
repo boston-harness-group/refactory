@@ -72,7 +72,7 @@ def finalize(ctx: Any) -> dict[str, Any]:
     ends the item with no answer (`ops.NoReply`), as in the agent mode; one stopped at its
     turn cap answers with the adapter's note, and its ``output.xlsx`` is graded."""
     turn = ctx.read_json(TURN, {}) or {}
-    fail_reason, n_turns, capped = "", 0, {}
+    fail_reason, n_turns, capped, missing = "", 0, {}, {}
     if turn.get("status") == "no_case":
         fail_reason = "no-test-cases"
     else:
@@ -81,6 +81,8 @@ def finalize(ctx: Any) -> dict[str, Any]:
                               "answer, so the item ends here")
         reply = ctx.read_text(REPLY)
         session = session_facts(ctx)
+        if not session:
+            missing = {"session_facts": "missing"}
         n_turns = session.get("num_turns")
         if session.get("turn_limit_reached"):
             capped = {"turn_limit": session.get("max_turns")}
@@ -97,15 +99,16 @@ def finalize(ctx: Any) -> dict[str, Any]:
             fail_reason = NO_OUTPUT
     elapsed = time.time() - float(turn.get("start") or time.time())
     limit = ops.item_limit_s()
-    ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns, **capped,
+    ctx.write_json(FINAL, {"fail_reason": fail_reason, "n_turns": n_turns, **capped, **missing,
                            "elapsed_s": round(elapsed, 3), "backstop": elapsed > limit,
                            "limit_s": limit})
     return {"finished": True}
 
 
 def session_facts(ctx: Any) -> dict[str, Any]:
-    """What the adapter recorded of the session (`swe_port.SESSION_PATH`), or ``{}`` when it
-    left nothing (a stand-in model). Its turn count is Claude Code's own (``num_turns``),
+    """What the adapter recorded of the session (`swe_port.SESSION_PATH`, collected from
+    beside the sealed workspace), or ``{}`` when it left nothing: then `finalize` flags the
+    item (``session_facts: missing``) and its verdict says so. Its turn count is Claude Code's own (``num_turns``),
     ``None`` when it reported none."""
     facts = ctx.read_json(swe_port.SESSION_PATH, {}) if ctx.exists(swe_port.SESSION_PATH) else {}
     if not isinstance(facts, dict) or not facts:

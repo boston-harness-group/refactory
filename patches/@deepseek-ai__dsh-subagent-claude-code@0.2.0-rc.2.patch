@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17eb95595ae 100644
+index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..4c21056976314cf13879f27b95360a730e58264d 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -6,6 +6,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -80,7 +80,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  /**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion.
-@@ -231,20 +276,281 @@ function successfulResult(message) {
+@@ -231,20 +276,290 @@ function successfulResult(message) {
  * @param onResult - records that the SDK supplied a terminal result message.
  * @returns the completed shared result.
  */
@@ -113,26 +113,35 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
 +		if (!finished) await iterator.return?.();
 +	}
 +}
-+/** Where a sealed session's result facts are written, in its workspace (`recordSealedSession`). */
-+const SEALED_SESSION_FILE = ".refactory-session.json";
 +/**
-+* Write a sealed session's result facts into its workspace, where a step that declares the
-+* file collects them (refactory_dsh.workspace.collect): the result's subtype, Claude Code's
-+* own turn count (`num_turns`), the route's turn cap and whether the session stopped there.
-+* Written after each result (the last one stands), through a temporary file and a rename.
++* Where a sealed session's result facts are written: beside its workspace, where no sealed
++* command can read or write them (refactory_dsh.workspace.session_path), never inside it.
++*/
++function sealedSessionPath(seal) {
++	return `${seal.root}.session.json`;
++}
++/**
++* Write a sealed session's result facts beside its workspace, where refactory collects them
++* for a step that declares them (refactory_dsh.workspace.collect): the result's subtype,
++* Claude Code's own turn count (`num_turns`), the route's turn cap, whether the session
++* stopped there, and its tool calls. Written after each result (the last one stands),
++* through a temporary file and a rename; a write that fails fails the step.
 +*/
 +function recordSealedSession(seal, message, maxTurns, turnLimit) {
 +	const facts = { subtype: typeof message.subtype === "string" ? message.subtype : null,
 +		num_turns: Number.isSafeInteger(message.num_turns) ? message.num_turns : null,
 +		max_turns: maxTurns ?? null, turn_limit_reached: turnLimit === true,
 +		tool_calls: (seal.toolCalls ?? []).map(({ id, ...call }) => call) };
++	const target = sealedSessionPath(seal);
++	const partial = `${target}.${process.pid}.partial`;
 +	try {
-+		const target = join(seal.root, SEALED_SESSION_FILE);
-+		const partial = `${target}.${process.pid}.partial`;
 +		rmSync(partial, { force: true });
 +		writeFileSync(partial, `${JSON.stringify(facts)}\n`, { flag: "wx" });
 +		renameSync(partial, target);
-+	} catch {}
++	} catch (error) {
++		throw new ClaudeCodeFailure({ stage: "query-run", category: "invalid-result",
++			detail: `the session's facts could not be recorded at ${target}: ${error?.message ?? error}` });
++	}
 +}
 +/** How much of a tool call's input and of its output a sealed session's record keeps. */
 +const SEALED_CALL_CHARS = 2000;
@@ -339,7 +348,10 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
 +				stopQuiet();
 +				releaseInput?.();
 +			}
-+		}
+ 		}
+-		if (message.type !== "result") continue;
+-		onResult?.();
+-		answer = successfulResult(message);
 +	} finally {
 +		// Whatever ended the stream -- a failure, an abort, the CLI exiting -- must not
 +		// leave the prompt input waiting.
@@ -356,10 +368,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
 +			const asked = reasked ? ", also when asked once more for it" : "";
 +			const interim = answer === void 0 ? "" : `; its last text, written while background tasks still ran, was: ${answer.length > 300 ? `${answer.slice(0, 300)}...` : answer}`;
 +			throw new ClaudeCodeFailure({ ...emptyFacts, detail: `${emptyFacts.detail}${asked}${interim}` });
- 		}
--		if (message.type !== "result") continue;
--		onResult?.();
--		answer = successfulResult(message);
++		}
 +		answer = settled;
 +		onRefactoryMetadata?.({ answer_from_earlier_turn: true });
  	}
@@ -371,7 +380,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  	});
  	return {
  		output: [{
-@@ -295,15 +601,43 @@ async function disposeClaudeCodeChild(query, child) {
+@@ -295,15 +610,43 @@ async function disposeClaudeCodeChild(query, child) {
  * @returns options that inherit native settings while disabling persistence and user questions.
  */
  function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
@@ -420,7 +429,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  		disallowedTools: spec.permissionMode === "plan" ? ["AskUserQuestion", "ExitPlanMode"] : ["AskUserQuestion"],
  		permissionMode: spec.permissionMode,
  		...spec.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : { canUseTool: () => {
-@@ -327,8 +661,294 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -327,8 +670,296 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  			const process = new ManagedClaudeCodeProcess(child);
  			capture(child, process);
  			return process;
@@ -505,6 +514,8 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
 +		const seal = { tools, runner, root, decided: new Set(), workspace: _rfSealWorkspace,
 +			configDir, project: join(configDir, "projects", slug),
 +			temporary: join(tmpRoot, `claude-${process.getuid?.() ?? ""}`, slug), sessionId: void 0 };
++		// No earlier session's facts stand for this one's.
++		rmSync(sealedSessionPath(seal), { force: true });
 +		options.cwd = _rfSealWorkspace;
 +		options.additionalDirectories = [_rfSealWorkspace];
 +		options.tools = tools;
@@ -716,7 +727,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  }
  /**
  * Start one official Claude Agent SDK query and publish its one-shot run.
-@@ -338,6 +958,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
+@@ -338,6 +969,45 @@ function claudeQueryOptions(spec, controller, capture, captureDiagnostic) {
  */
  async function startClaudeCodeRun(request, spec) {
  	const prompt = textTask(request.prompt);
@@ -762,7 +773,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  	if (request.signal.aborted) throw new Error("subagent-claude-code: request was aborted before SDK startup");
  	const controller = new AbortController();
  	const requestCancel = () => {
-@@ -358,6 +1017,8 @@ async function startClaudeCodeRun(request, spec) {
+@@ -358,6 +1028,8 @@ async function startClaudeCodeRun(request, spec) {
  	let query$1;
  	let managedProcess;
  	let diagnostic;
@@ -771,7 +782,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  	const capturePermissionDiagnostic = (value) => {
  		diagnostic = value;
  	};
-@@ -375,13 +1036,39 @@ async function startClaudeCodeRun(request, spec) {
+@@ -375,13 +1047,39 @@ async function startClaudeCodeRun(request, spec) {
  		childProcessFailure.catch(() => {});
  	};
  	try {
@@ -813,7 +824,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  		request.signal.removeEventListener("abort", onAbort);
  		const cancelledBeforeCleanup = controller.signal.aborted;
  		await Promise.resolve();
-@@ -434,7 +1121,10 @@ async function startClaudeCodeRun(request, spec) {
+@@ -434,7 +1132,10 @@ async function startClaudeCodeRun(request, spec) {
  					capturePermissionDiagnostic(unattendedDiagnostic(spec.permissionMode, "tool permission", "denied", "Claude Code denied the request before an interactive prompt"));
  				}, () => {
  					receivedResult = true;
@@ -825,7 +836,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  			} catch (error) {
  				const processOutcome = managedProcess?.outcome;
  				let facts;
-@@ -458,7 +1148,7 @@ async function startClaudeCodeRun(request, spec) {
+@@ -458,7 +1159,7 @@ async function startClaudeCodeRun(request, spec) {
  		},
  		collectOutput: () => [],
  		collectDiagnostic: () => diagnostic,
@@ -834,7 +845,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  		onError: spec.onError,
  		signal: request.signal,
  		onAbort
-@@ -470,12 +1160,16 @@ async function startClaudeCodeRun(request, spec) {
+@@ -470,12 +1171,16 @@ async function startClaudeCodeRun(request, spec) {
  		onAbort,
  		requestCancel,
  		teardown: async () => {
@@ -851,7 +862,7 @@ index 9efd305a475c8ae4d1dd8411664f84d221a0f9fe..5a3a375005fc16a0e3fa8a1c3d63b17e
  			}
  		}
  	});
-@@ -529,6 +1223,12 @@ var ClaudeCodeProvider = class {
+@@ -529,6 +1234,12 @@ var ClaudeCodeProvider = class {
  			env: this.config.env,
  			disposeGraceMs: this.config.disposeGraceMs,
  			spawn: (spawnSpec) => this.ctx.subprocess.spawn(spawnSpec),

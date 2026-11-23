@@ -82,9 +82,11 @@ INPUT_PATH = "input.xlsx"
 OUTPUT_PATH = "output.xlsx"
 #: The skill file in the workspace (`skill_section`).
 SKILL_PATH = "SKILL.md"
-#: What the Claude Code adapter leaves in a sealed session's workspace after its result:
-#: the result's subtype, Claude Code's turn count, the turn cap and whether it was reached.
-SESSION_PATH = ".refactory-session.json"
+#: The session's facts as the solve step's collected write: what the Claude Code adapter
+#: records beside the sealed workspace after the result (the result's subtype, Claude Code's
+#: turn count, the turn cap, whether it was reached, the tool calls), never a file the
+#: session could write (`refactory_dsh.workspace.SEALED_SESSION`).
+from refactory_dsh.workspace import SEALED_SESSION as SESSION_PATH  # noqa: E402
 #: Upstream's call cap (spreadsheet.yaml:111 ``per_instance_call_limit``), Claude Code's
 #: turn cap here.
 MAX_TURNS = 50

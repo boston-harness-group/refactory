@@ -63,11 +63,14 @@ numbers: each Bash command's default and longest timeout (Claude Code's
 command's output the model sees inline (the `bashOutputMaxChars` flag setting, which Claude
 Code clamps to 4,000-128,000, and `BASH_MAX_OUTPUT_LENGTH`; the rest is saved to a file
 Claude Code names). Bound like `max_turns`; `spreadsheetbench_v2/swe` binds 60000 and 10000.
-A sealed session also leaves its result's facts in its workspace,
-`.refactory-session.json` (`subtype`, `num_turns`, `max_turns`, `turn_limit_reached`, and
-`tool_calls`: each call's tool, its input as the model wrote it and its output, each cut to
-2,000 characters, and whether it was an error), which a step collects by declaring it as a
-write; nothing else reads it.
+A sealed session's adapter also records its result's facts beside its workspace
+(`<workspace>.session.json`, where no sealed command can read or write it; any earlier one is
+removed when the session starts, and a write that fails fails the step): `subtype`,
+`num_turns`, `max_turns`, `turn_limit_reached`, and `tool_calls` (each call's tool, its input
+as the model wrote it and its output, each cut to 2,000 characters, and whether it was an
+error). A step collects it by declaring the write `.refactory-session.json`
+(`workspace.SEALED_SESSION`), taken from beside the workspace only, never a file of that name
+inside it; it goes with the dispatch, and nothing else reads it.
 
 `claude_code` alone also accepts `claude_executable`, the absolute path of the Claude
 Code it runs instead of the one bundled with the pinned Agent SDK (Claude Code

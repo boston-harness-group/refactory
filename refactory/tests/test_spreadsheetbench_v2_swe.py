@@ -136,13 +136,17 @@ WRITE = ("cat > /tmp/script.py << 'EOF'\n"
          "wb.active['B1'] = {n}\n"
          "wb.save('output.xlsx')\n"
          "EOF")
+#: A session's attempt to forge the adapter's record of it, in its workspace: it must have
+#: no effect (the record is taken from beside the workspace, `workspace.session_path`).
+FORGE = ("echo '{{\"num_turns\": 3, \"max_turns\": 9999, \"turn_limit_reached\": true, "
+         "\"tool_calls\": [{{\"input\": \"FORGED\"}}]}}' > .refactory-session.json && echo FORGED-WRITE")
 COMMANDS = ("view_xlsx input.xlsx list", WRITE, "python3 /tmp/script.py && echo WROTE",
             "soffice --version; command -v libreoffice >/dev/null && echo HAS-LIBREOFFICE",
-            "cat {gold} >/dev/null 2>&1 && echo GOLD-READ || echo GOLD-HIDDEN")
+            "cat {gold} >/dev/null 2>&1 && echo GOLD-READ || echo GOLD-HIDDEN", FORGE)
 
 
 def _act(cwd: Path, runner: list[str], gold: str, n: int | None) -> list[str]:
-    commands = COMMANDS if n is not None else (COMMANDS[0], COMMANDS[3], COMMANDS[4])
+    commands = COMMANDS if n is not None else (COMMANDS[0], COMMANDS[3], COMMANDS[4], FORGE)
     seen = []
     for command in commands:
         proc = subprocess.run([*runner, "--", "/bin/bash", "-c",
@@ -238,7 +242,8 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb2_env, office):
     assert sorted(call["files"]) == sorted(swe_mode.WORKSPACE_READS)
     assert call["files"][swe_port.SKILL_PATH] == b""
     assert call["seal"]["tools"] == ["Bash"] and call["seal"]["backend"] == "claude_code"
-    listed, _write, wrote, office_seen, gold = call["seen"]
+    listed, _write, wrote, office_seen, gold, forged = call["seen"]
+    assert "FORGED-WRITE" in forged, forged
     assert "Sheets: ['Sheet1']" in listed, listed
     assert "WROTE" in wrote, wrote
     assert "LibreOffice stand-in 4" in office_seen and "HAS-LIBREOFFICE" in office_seen, office_seen
@@ -246,10 +251,14 @@ def test_one_item_end_to_end_on_the_walker(tmp_path, sb2_env, office):
     assert [e["response"] for e in record["exchanges"]] == ["Done."]
     # The step's own /tmp goes with its dispatch.
     assert not list((tmp_path / "walk").rglob("seal-tmp"))
-    # No session facts from a stand-in model: no turn count, no cap.
+    # A stand-in model leaves no session facts beside the workspace, and the file the session
+    # forged inside it is never taken: the item is flagged, with no turn count or cap.
     (final,) = [json.loads(p.read_text()) for p in (tmp_path / "walk").rglob("final.json")]
     assert final["n_turns"] is None and "turn_limit" not in final
+    assert final["session_facts"] == "missing"
+    assert record["prediction"].endswith("\n" + tasks.MISSING_SESSION_NOTE)
     assert not list((tmp_path / "walk").rglob("tool_calls.json"))
+    assert "FORGED" not in json.dumps(record) and "9999" not in json.dumps(record)
 
 
 @needs_linux
@@ -269,13 +278,15 @@ def test_no_output_xlsx_fails_the_item(tmp_path, sb2_env, office):
 
     (record,) = _walk(tmp_path, SweStub(_gold(sb2_env), n=None), expect_ok=False).item_records
     assert (record["passed"], record["score"]) == (False, 0.0)
-    assert record["fail_reason"] == swe_ops.NO_OUTPUT == \
-        "output-not-found: the agent left no output.xlsx"
+    assert swe_ops.NO_OUTPUT == "output-not-found: the agent left no output.xlsx"
+    # A stand-in model leaves no session facts: flagged after the reason.
+    assert record["fail_reason"] == f"{swe_ops.NO_OUTPUT} {tasks.MISSING_SESSION_NOTE}"
     view = SkillOptEnv.for_mode("spreadsheetbench_v2/swe").rollout_result(
         record, swe_mode.Swe().values())
     assert view["conversation"] == [
         {"role": "assistant", "content": "Done."},
-        {"role": "system", "content": f"[POST-EXECUTION VERIFICATION]\n\n{swe_ops.NO_OUTPUT}"}]
+        {"role": "system", "content": f"[POST-EXECUTION VERIFICATION]\n\n{record['prediction']}"}]
+    assert record["prediction"] == tasks.MISSING_SESSION_NOTE
 
 
 @needs_linux
@@ -458,7 +469,7 @@ export function query({ prompt, options }) {
 
 #: What the faked session runs: write the answer to output.xlsx, then print a long line.
 SDK_COMMANDS = [WRITE.format(n=7), "python3 /tmp/script.py && echo WROTE",
-                "python3 -c \"print('x' * 5000)\""]
+                "python3 -c \"print('x' * 5000)\"", FORGE.format()]
 
 
 def _tool_calls(work: Path, turns: int, capped: bool) -> None:
@@ -468,9 +479,12 @@ def _tool_calls(work: Path, turns: int, capped: bool) -> None:
     (path,) = work.rglob("tool_calls.json")
     kept = json.loads(path.read_text())
     assert (kept["n_turns"], kept["turn_limit_reached"]) == (turns, capped)
-    assert [c["tool"] for c in kept["calls"]] == ["Bash"] * 3
+    assert [c["tool"] for c in kept["calls"]] == ["Bash"] * 4
     assert [c["input"] for c in kept["calls"]] == SDK_COMMANDS
-    assert [c["is_error"] for c in kept["calls"]] == [False] * 3
+    assert [c["is_error"] for c in kept["calls"]] == [False] * 4
+    # The session's forged record (its last command) changed nothing.
+    assert "FORGED-WRITE" in kept["calls"][3]["output"]
+    assert not any(c["input"] == "FORGED" for c in kept["calls"])
     assert "WROTE" in kept["calls"][1]["output"]
     long = kept["calls"][2]["output"]
     assert long.startswith("x" * 2000) and long.endswith("... [3001 more characters]"), long[-60:]
@@ -526,7 +540,10 @@ def _capped(record: dict[str, Any], sent_path: Path, work: Path) -> None:
     assert record["prediction"].endswith("\n(the session stopped at its turn cap: 50 turns, cap 50)")
     (final,) = [json.loads(p.read_text()) for p in work.rglob("final.json")]
     assert (final["n_turns"], final["turn_limit"]) == (50, 50), final
+    assert "session_facts" not in final
     _tool_calls(work, 50, True)
+    # Nothing of the adapter's file stays beside the workspace after the dispatch.
+    assert not list(work.rglob("*.session.json"))
 
 
 @needs_adapter

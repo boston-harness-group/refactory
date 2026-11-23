@@ -560,11 +560,13 @@ grade grades (no `solution.py`, nothing run afterwards). No `output.xlsx` fails 
   output shown inline (`bash_output_chars`, Claude Code's `bashOutputMaxChars` setting).
   The last two were read from Claude Code 2.1.299's code, not run against it.
 - **Turn cap reached**: the session ends with a fixed note as its answer and the
-  `output.xlsx` it left is graded. The adapter leaves the session's facts in its workspace
-  (`.refactory-session.json`: Claude Code's turn count, the cap, whether it was reached);
-  the item's `final.json` records `n_turns` and `turn_limit`, and its verdict ends with
+  `output.xlsx` it left is graded. The adapter records the session's facts beside its workspace,
+  out of the session's reach (Claude Code's turn count, the cap, whether it was reached);
+  a file the session writes in its workspace under the same name is ignored. The item's
+  `final.json` records `n_turns` and `turn_limit`, and its verdict ends with
   `(the session stopped at its turn cap: 50 turns, cap 50)`, which the analysts and reports
-  see.
+  see. When the adapter left no facts (a stand-in model), `final.json` says
+  `session_facts: missing` and the verdict says the turn count is unknown.
 - **Tool calls**: each item's folder keeps `tool_calls.json`, the session's tool calls in
   order (tool, the command as the model wrote it, output cut to 2,000 characters, whether it
   was an error) with Claude Code's turn count, to compare runs step by step with V2's

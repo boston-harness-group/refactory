@@ -266,19 +266,28 @@ class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
     def verify(self, instance: TaskInstance, workspace: Path, *, part: str | None = None,
                seed: int | None = None) -> VerifyResult:
         """V2's verdict; when the session stopped at its turn cap (`tasks.FINAL`'s
-        ``turn_limit``, `swe_ops.finalize`), it says so after the verdict's text, where the
+        ``turn_limit``, `swe_ops.finalize`), or the adapter left no facts of it
+        (``session_facts: missing``), it says so after the verdict's text, where the
         analysts and reports read it."""
         import dataclasses
 
         result = super().verify(instance, workspace, part=part, seed=seed)
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
-        if not final.get("turn_limit"):
+        if final.get("turn_limit"):
+            note = turn_limit_note(final.get("n_turns"), final["turn_limit"])
+        elif final.get("session_facts") == "missing":
+            note = MISSING_SESSION_NOTE
+        else:
             return result
-        note = turn_limit_note(final.get("n_turns"), final["turn_limit"])
         return dataclasses.replace(
             result, prediction=f"{result.prediction}\n{note}" if result.prediction else note,
             details=f"{result.details} {note}".strip())
+
+
+#: What a record says when Claude Code's adapter left no facts of the session.
+MISSING_SESSION_NOTE = ("(no session facts from Claude Code's adapter: the turn count and "
+                        "whether the turn cap was reached are unknown)")
 
 
 def turn_limit_note(turns: Any, cap: Any) -> str:
