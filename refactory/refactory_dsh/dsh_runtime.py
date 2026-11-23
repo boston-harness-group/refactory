@@ -446,6 +446,11 @@ def run_on_dsh(
                                   timeout_kind=_timeout_kind)
                 raise
             untrack_run(process)
+            # DSH ended on its own: what it left running in its group, and every node
+            # command group the run recorded that is still there, end as on any other
+            # exit.
+            _kill_run_group(run_group)
+            activity.end_recorded(watch)
             activity.forget_process(child_record)
             for reader in readers:
                 reader.join()

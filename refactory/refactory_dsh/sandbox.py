@@ -1081,9 +1081,11 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     ``holdout`` fraction's split (`task.partition`; by default the outer loop's own,
     ``task.DEFAULT_HOLDOUT``). Of that part the sample takes the ``items`` lowest ids --
     the split holds out the highest ids, so these stay train under any larger holdout
-    too while the part has room -- and names exactly them in the run directory's
-    ``parts.json``, with its part (`task.write_subset`), so no held-out item can be run.
-    A part with fewer items runs them all. Each such node runs its sample at once. A
+    too while the part has room. The run directory names them: all nodes' samples as
+    its ``parts.json`` train part (`task.write_subset`), so no held-out item can be run,
+    and each node's own in ``SMOKE_SAMPLE``, which only a smoke writes, so each node
+    runs only its sample (`nn.executor.load_items`). A part with fewer items runs them
+    all. Each such node runs its sample at once. A
     node whose parallelism is a knob (``parallelism_knob``, or a ``parallelism`` field
     binding) gets that knob set, held to the knob's own value as a ceiling, since a node
     may not carry both; any other node gets ``parallelism``, held to the value it
@@ -1098,7 +1100,7 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     """
     from refactory_dsh import task as task_module
     from refactory_dsh.nn.edits import configure
-    from refactory_dsh.nn.executor import full_items
+    from refactory_dsh.nn.executor import SMOKE_SAMPLE, full_items
     from refactory_dsh.nn.graph import MAX_PARALLELISM, Node
 
     if items <= 0:
@@ -1113,9 +1115,11 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     knob_widths: dict[str, int] = {}
     sampled: list[str] = []
     chosen: list[str] = []
-    # The part, before any manifest of the sample's own is written, so a Task whose items
-    # depend on it sees it (`full_items`).
+    per_node: dict[str, list[str]] = {}
+    # The part, before any manifest or sample of the smoke's own is written, so a Task
+    # whose items depend on it sees it (`full_items`).
     (Path(workdir) / task_module.MANIFEST).unlink(missing_ok=True)
+    (Path(workdir) / SMOKE_SAMPLE).unlink(missing_ok=True)
     task_module.write_subset(workdir, task_module.TRAIN, fraction)
     for node_id, entry in nodes.items():
         node = Node.from_state({**entry, "id": node_id})
@@ -1128,8 +1132,8 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
         else:
             held = {id(item) for item in task_module.partition(every, fraction)[task_module.HOLDOUT]}
             train = [key for key, item in keyed if id(item) not in held]
-        chosen.extend(key for key in sorted(train)[:items] if key not in chosen)
-        entry["limit"] = min(items, node.limit) if node.limit else items
+        per_node[node_id] = sorted(train)[:items]
+        chosen.extend(key for key in per_node[node_id] if key not in chosen)
         knob = node.parallelism_knob or node.bound_knob("parallelism")
         if knob:
             entry_of_knob = (state.get("knobs") or {}).get(knob, {})
@@ -1151,7 +1155,12 @@ def smoke_sample(mode: Any, workdir: Path, items: int, *, holdout: float | None 
     for knob, width in knob_widths.items():
         state = configure(state, knob, max(1, min(width, MAX_PARALLELISM)))
     mode.load_state_dict(state)
+    # The part names the union, so the run's selection holds every node's sample; each
+    # node then runs only its own (`nn.executor.load_items`).
     task_module.make_manifest(Path(workdir), train_ids=chosen)
+    sample_file = Path(workdir) / SMOKE_SAMPLE
+    sample_file.parent.mkdir(parents=True, exist_ok=True)
+    sample_file.write_text(json.dumps(per_node, indent=2))
     return {"item_limit": items, "nodes": sampled, "items": chosen}
 
 
@@ -1205,6 +1214,12 @@ def smoke(
     model gets a slightly shorter limit of its own, so it stops itself first and says
     why; it is the one that looks at those signs, and it marks what it sees in
     ``ACTIVITY_FILE`` for this sandbox to see.
+
+    Its CPU limit, unless ``cpu_s`` sets one, is the backstop on every core, as a
+    command's is (`run_command`, PIT-001), and every process of the smoke inherits it.
+    The inactivity limit and the backstop are what stop a runaway smoke; the CPU limit
+    no longer ends a working one before the backstop, and only catches a run that keeps
+    every core busy for the whole of it.
     """
     project = Path(project or project_for_nodes())
     client = (

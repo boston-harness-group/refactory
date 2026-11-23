@@ -496,3 +496,81 @@ def test_a_watched_node_whose_tee_dies_still_gets_its_output_and_verdict_out(tmp
     result = _node(tmp_path, body, watched=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.decode().splitlines() == ["after the tee", "two tests failed", "reloop"]
+
+
+@pytest.mark.no_integration
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_a_recorded_group_whose_id_now_names_another_group_is_left_alone(tmp_path):
+    """A node command that is gone, whose group's id now leads another process's group
+    (the id was reused), is not signalled: the leader started at another time."""
+    import sys
+
+    watch = activity.watch_dir(tmp_path)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        (watch / activity.PROCESSES).mkdir(parents=True)
+        (watch / activity.PROCESSES / f"{gone.pid}.json").write_text(json.dumps(
+            {"pid": gone.pid, "start": "when it ran", "group": stranger.pid,
+             "group_start": "when the group's first leader ran"}))
+        assert activity.end_recorded(watch) == []
+        time.sleep(0.2)
+        assert stranger.poll() is None
+    finally:
+        stranger.kill()  # only what this test started
+        stranger.wait()
+
+
+@pytest.mark.no_integration
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+def test_a_run_whose_dsh_ends_on_its_own_leaves_nothing_running(tmp_path, monkeypatch):
+    """DSH exits by itself, leaving a process in its own group and a node command in a
+    group of its own that recorded itself: both are ended before `run_on_dsh` returns."""
+    import sys
+
+    from refactory_dsh import dsh_profile, dsh_runtime, lowering
+
+    left, detached = tmp_path / "left.pid", tmp_path / "detached.pid"
+    node = ("import os, pathlib, sys, time\n"
+            "from refactory_dsh import activity\n"
+            "activity.record_process()\n"
+            f"pathlib.Path({str(detached)!r}).write_text(str(os.getpid()))\n"
+            "time.sleep(60)\n")
+    # Neither holds DSH's output open, so nothing but the cleanup can end them in time.
+    child = ("import os, pathlib, subprocess, sys, time\n"
+             "quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+             "kept = subprocess.Popen(['sleep', '60'], **quiet)\n"
+             f"pathlib.Path({str(left)!r}).write_text(str(kept.pid))\n"
+             f"subprocess.Popen([sys.executable, '-c', {node!r}], start_new_session=True, **quiet)\n"
+             f"while not pathlib.Path({str(detached)!r}).exists():\n"
+             "    time.sleep(0.05)\n")
+    monkeypatch.setattr(dsh_profile, "requirement", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "require_build", lambda **kw: None)
+    monkeypatch.setattr(dsh_runtime, "dsh_command", lambda **kw: [sys.executable, "-c", child])
+    monkeypatch.setattr(lowering, "write_mode_graph", lambda *a, **kw: None)
+    monkeypatch.setattr(lowering, "write_declarations", lambda *a, **kw: None)
+    started = time.monotonic()
+    run = dsh_runtime.run_on_dsh({"knobs": {}}, tmp_path / "run", timeout_s=60, inactivity=True)
+    pids = [int(left.read_text()), int(detached.read_text())]
+    try:
+        assert run.returncode == 0, run.stderr
+        assert time.monotonic() - started < 20
+        deadline = time.monotonic() + 5
+        while any(_alive(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not any(_alive(pid) for pid in pids)
+    finally:
+        for pid in pids:  # only what this test started, should an assertion above fail
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True

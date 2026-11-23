@@ -1319,3 +1319,84 @@ def test_a_watchers_look_interval_follows_its_limit():
     assert activity.look_interval(3600, sandbox.WATCH_INTERVAL_S) == 10.0
     assert activity.look_interval(60, sandbox.WATCH_INTERVAL_S) == 3.0
     assert activity.look_interval(3, sandbox.WATCH_INTERVAL_S) == sandbox.WATCH_INTERVAL_S
+
+
+# ── a smoke's sample cuts only a smoke's run ───────────────────────────────
+
+from refactory_dsh.task import Task as _Task  # noqa: E402
+from refactory_dsh.task import TaskInstance as _TaskInstance  # noqa: E402
+from refactory_dsh.task import VerifyResult as _VerifyResult  # noqa: E402
+
+
+class _Listed(_Task):
+    IDS: tuple[str, ...] = ()
+
+    def instances(self, **kw):
+        return [_TaskInstance(id=item, metadata={}) for item in self.IDS]
+
+    def setup(self, instance, workspace, **kw):
+        pass
+
+    def verify(self, instance, workspace, **kw):
+        return _VerifyResult(passed=True, score=1.0)
+
+
+class OverlapA(_Listed):
+    """Shares ``a2`` with `OverlapB`, whose lowest id it is."""
+    name = "overlap_a"
+    IDS = ("a1", "a2", "z9")
+
+
+class OverlapB(_Listed):
+    name = "overlap_b"
+    IDS = ("b1", "a2")
+
+
+def _two_task_nodes():
+    from refactory_dsh import nn
+
+    class TwoTasks(nn.Mode):
+        name = "two_tasks"
+
+        def build(self):
+            graph = nn.Graph()
+            for node_id, task in (("first", "OverlapA"), ("second", "OverlapB")):
+                graph.add(nn.Node(node_id, "data", subgraph_entry=f"{node_id}_work",
+                                  subgraph_exit=f"{node_id}_work", task_ref=f"test_sandbox:{task}",
+                                  writes=("current_item.json",), produces=("item_scores",),
+                                  limit=2))
+                graph.add(nn.Node(f"{node_id}_work", "op", call="loop_ops:noop"))
+            graph.connect("first", "second")
+            return graph
+
+        def score(self, result):
+            return 1.0
+
+    return TwoTasks()
+
+
+def test_a_task_bound_node_outside_a_smoke_runs_its_whole_part(tmp_path):
+    """Outside a smoke a Task-bound node iterates its whole selected part, its own
+    ``limit`` included, as before smokes were sampled: only a smoke cuts it."""
+    from refactory_dsh.nn import Node
+    from refactory_dsh.nn.executor import load_items
+
+    mode = _two_task_nodes()
+    nodes = mode.build().nodes
+    assert [item["id"] for item in load_items(nodes["first"], tmp_path)] == ["a1", "a2", "z9"]
+    assert isinstance(nodes["first"], Node) and nodes["first"].limit == 2
+
+
+def test_each_task_bound_node_of_a_smoke_runs_only_its_own_sample(tmp_path):
+    """Two Task-bound nodes whose ids overlap: the run's part names both samples, yet
+    each node runs only its own -- `first` would otherwise also run `a2`, `second`'s."""
+    from refactory_dsh.nn import Node
+    from refactory_dsh.nn.executor import load_items
+
+    mode = _two_task_nodes()
+    sample = sandbox.smoke_sample(mode, tmp_path, 1, holdout=0.0)
+    assert sample["items"] == ["a1", "a2"]
+    graph_nodes = {node_id: Node.from_state({**entry, "id": node_id})
+                   for node_id, entry in mode.state_dict()["graph"]["nodes"].items()}
+    assert [item["id"] for item in load_items(graph_nodes["first"], tmp_path)] == ["a1"]
+    assert [item["id"] for item in load_items(graph_nodes["second"], tmp_path)] == ["a2"]

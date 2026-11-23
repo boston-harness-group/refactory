@@ -1186,14 +1186,16 @@ describe('applyControls integration', () => {
    */
   function smokeGraph(workdir: string, reason: string): WorkflowGraph {
     return {
-      name: 't', start_node: 'smoke',
+      name: 't', start_node: 'build',
       nodes: {
+        build: { _type: 'FnNode', id: 'build', command: `echo built >> ${join(workdir, 'builds')}`, reads: [], writes: [] },
         smoke: { _type: 'FnNode', id: 'smoke', command: `echo ran >> ${join(workdir, 'smoke-runs')}`, reads: [], writes: [] },
         gate_smoke: { _type: 'GateNode', id: 'gate_smoke', evaluator_type: 'fn',
                       evaluator_command: `printf '%s\\n%s\\n' '${reason}' halt`, reads: [] },
         register: { _type: 'AgentNode', id: 'register', role: 'builder', prompt_template: 'R', reads: [], writes: [] },
       },
       edges: [
+        { source: 'build', target: 'smoke' },
         { source: 'smoke', target: 'gate_smoke' },
         { source: 'gate_smoke', target: 'register', condition: 'proceed' },
         { source: 'gate_smoke', target: 'smoke', condition: 'reloop' },
@@ -1217,8 +1219,13 @@ describe('applyControls integration', () => {
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
       .rejects.toThrow(/gate gate_smoke halted the run: smoke timed out/)
     await expect(call(ctx, 'wf_redo', { node: 'smoke' }))
-      .rejects.toThrow(/verdict comes from code, so a redo would reach the same halt/)
+      .rejects.toThrow(/Redoing smoke, which the gate checks, without changing what it checks would repeat the halt/)
+    await expect(call(ctx, 'wf_redo', { node: 'gate_smoke' }))
+      .rejects.toThrow(/Redoing the gate without changing what it checks would repeat the halt/)
     expect(readFileSync(join(workdir, 'smoke-runs'), 'utf8')).toBe('ran\n')
+    // A node further upstream can change what the gate checks: its redo is the CEO's.
+    const redone = await call(ctx, 'wf_redo', { node: 'build' }) as { status: string }
+    expect(redone.status).toBe('redone')
   })
 
   it('a halt at an agent gate is still the CEO\'s to redo, as before', async () => {

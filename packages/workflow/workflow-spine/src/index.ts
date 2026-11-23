@@ -3045,7 +3045,10 @@ export function apply(ctx: Context, config: Config): void {
         }
         spine.verdict(args.gate, result.verdict, result.feedback || args.feedback || '')
         if (spine.isHalted()) recordStatus(spine, workdir, 'halted')
-        const limit = limitMessage(spine, workdir)
+        // The reply's message is a reloop limit's, as before; a person's own halt is
+        // already in the reply as their feedback.
+        const halt = spine.state().halted as { reason?: string } | undefined
+        const limit = halt?.reason === 'max_iterations' ? limitMessage(spine, workdir) : undefined
         return json({
           status: 'routed', gate: args.gate, verdict: result.verdict, answered_by: 'user',
           ...(result.feedback ? { feedback: result.feedback } : {}),
@@ -3131,14 +3134,18 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(`${stopped}; a CEO redo cannot spend more attempts. Use `
           + '`refactory graph-control rerun --acknowledge-failure` to have a person spend more attempts.')
       }
-      // Nor is a halt verdict from a gate the runtime evaluates (a code gate, such as a
-      // smoke whose outcome is uncertain): its verdict comes from code, so a redo would
-      // reach the same halt. A halt at an agent or user gate stays the CEO's to redo.
+      // Nor is redoing the gate itself, or a node it reads from, after a halt verdict
+      // from a gate the runtime evaluates (a code gate, such as a smoke whose outcome is
+      // uncertain): nothing it checks would have changed. Redoing a node further
+      // upstream can change that, and stays the CEO's; so does any redo after a halt at
+      // an agent or user gate.
       if (halted?.reason === 'verdict' && halted.gate !== undefined
-          && config.executeCommands && isDeterministic(spine.view(halted.gate))) {
+          && config.executeCommands && isDeterministic(spine.view(halted.gate))
+          && (args.node === halted.gate || spine.feeders(halted.gate).includes(args.node))) {
         throw new Error(`gate ${halted.gate} halted the run${halted.detail ? `: ${halted.detail}` : ''}. `
-          + 'Its verdict comes from code, so a redo would reach the same halt, and a CEO redo is refused. '
-          + 'Once what it reports is addressed, a person can rerun the node with `refactory graph-control rerun`.')
+          + `Redoing ${args.node === halted.gate ? 'the gate' : `${args.node}, which the gate checks,`} `
+          + 'without changing what it checks would repeat the halt. Change an upstream node, '
+          + 'or have a person rerun with `refactory graph-control rerun`.')
       }
       const plan = spine.planRedo(args.node)
       if (dataCommand !== '' && workdir === undefined) {

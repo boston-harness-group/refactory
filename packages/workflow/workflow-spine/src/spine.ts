@@ -605,6 +605,15 @@ export class Spine {
     return this.edges.filter(edge => edge.source === nid)
   }
 
+  /**
+   * The nodes with an edge into `nid`: what a gate checks comes from them.
+   * @param nid - the node.
+   * @returns their ids.
+   */
+  feeders(nid: string): string[] {
+    return [...new Set(this.edges.filter(edge => edge.target === nid).map(edge => edge.source))]
+  }
+
   private unconditionalTarget(nid: string): string | undefined {
     return this.outgoing(nid).find(edge => edge.condition == null)?.target
   }
