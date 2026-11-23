@@ -74,6 +74,8 @@ def _end_stale_processes(workdir: Path, node: str) -> None:
     if not ws_path.is_dir():
         return
     ws_str = str(ws_path)
+    # Trailing separator prevents ``/workspace2`` matching ``/workspace``.
+    ws_prefix = ws_str if ws_str.endswith("/") else ws_str + "/"
     my_pid = os.getpid()
     stale: list[int] = []
     proc_path = Path("/proc")
@@ -86,28 +88,31 @@ def _end_stale_processes(workdir: Path, node: str) -> None:
         if pid == my_pid:
             continue
         try:
-            cwd = (entry / "cwd").resolve()
-            if str(cwd).startswith(ws_str):
+            cwd = str((entry / "cwd").resolve())
+            if cwd == ws_str or cwd.startswith(ws_prefix):
                 stale.append(pid)
         except (OSError, PermissionError):
             continue
+    if not stale:
+        return
+    print(f"refactory: workspace: ending {len(stale)} stale process(es) in {ws_str}",
+          flush=True)
     for pid in stale:
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             continue
-    if stale:
-        import time as _time
-        _time.sleep(0.5)
-        for pid in stale:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                continue
-            try:
-                os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                pass
+    import time as _time
+    _time.sleep(0.5)
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            continue
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
 
 
 def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
