@@ -654,7 +654,9 @@ def command_timeout_s(node: Any, state: dict[str, Any]) -> int | None:
             return _delivery_envelope_s(state)
     elif node.kind == "gate" and getattr(node, "gate_kind", "fn") == "fn":
         if _is_smoke_node(node):
-            return _smoke_envelope_s(state, 2)
+            # The new mode's smoke, the empty-input run (`empty_input`) and the
+            # revision source's smoke.
+            return _smoke_envelope_s(state, 3)
         if _is_check_node(node):
             return _check_envelope_s(state)
     return None
