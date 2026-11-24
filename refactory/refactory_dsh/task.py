@@ -842,7 +842,7 @@ def select_subset(
                 allowed_ids = set(ids)
                 selected = [
                     item for i, item in enumerate(items)
-                    if str(item.get("id") or i) in allowed_ids
+                    if _item_key(item, i) in allowed_ids
                 ]
                 seed = record.get("seed")
                 if seed is not None:

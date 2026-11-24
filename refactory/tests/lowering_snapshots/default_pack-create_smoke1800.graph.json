@@ -365,7 +365,7 @@
       "evaluator_type": "fn",
       "evaluator_role": null,
       "evaluator_command": "python -m refactory_dsh.run refactory_dsh.create_ops:gate_smoke",
-      "command_timeout_s": 15000,
+      "command_timeout_s": 22395,
       "gate_prompt": "run the new mode once, and compare a revision with the mode it revises; a mode that cannot score is not finished",
       "max_iterations": 12,
       "_type": "GateNode"
@@ -620,6 +620,10 @@
     "task_ref": "",
     "single_shot": 0.0,
     "smoke_timeout_s": 1800.0,
+    "smoke_items": 3.0,
+    "profile": "",
+    "holdout": "",
+    "parts_manifest": "",
     "check_attempt_cap": 8.0,
     "sample_knobs": "",
     "requires_input": "",
@@ -724,7 +728,51 @@
       "enum": [],
       "values": [],
       "frozen": false,
-      "description": "wall-clock seconds allowed for each full mode validation pass, including its model calls; timeout fails creation",
+      "description": "seconds a smoke pass may go with no sign of work before it is stopped. Work is: any output of the smoke or of a node command; a node's declared writes; the run's own state files (status, checkpoint, events, progress, facts); a worker's receipt and activity file; an item pass's marker and record, up to four levels of nested passes. A plain file written anywhere else, or output a node captures from its own subprocesses, is not. A wall-clock backstop (four times this, capped at 4 hours by default) still ends each pass",
+      "required": false
+    },
+    "smoke_items": {
+      "default": 3,
+      "kind": "int",
+      "lo": 1,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "number of items to run from a task-bound data node during smoke; the full item set is not exercised",
+      "required": false
+    },
+    "profile": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "a saved optimize profile (`refactory profile-save`) whose holdout and parts_manifest the smoke samples by; holdout and parts_manifest given here win (empty: none)",
+      "required": false
+    },
+    "holdout": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the holdout fraction the produced mode's runs use, from 0 to below 1; the smoke samples only the train part of that split. Ignored for the split when a parts manifest is given (empty: the profile's, else the outer loop's default 0.3)",
+      "required": false
+    },
+    "parts_manifest": {
+      "default": "",
+      "kind": "str",
+      "lo": null,
+      "hi": null,
+      "enum": [],
+      "values": [],
+      "frozen": false,
+      "description": "the parts manifest (parts.json with train/val/test id lists) the produced mode's runs use; the smoke samples only its train ids. A relative path, here or in the profile, is the project's (`refactory optimize` reads one against its working directory) (empty: the profile's, else the holdout fraction's split)",
       "required": false
     },
     "check_attempt_cap": {

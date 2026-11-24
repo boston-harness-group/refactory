@@ -349,7 +349,7 @@ def run_data_concurrent(
                 cancelled.set()
                 raise
             except HaltStop as exc:
-                result.stop, result.error = "halted", str(exc)
+                result.stop, result.error = "halted", exc.detail()
                 cancelled.set()
                 return result
             except GateStop as exc:

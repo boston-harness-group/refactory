@@ -40,12 +40,12 @@ def test_smoke_predicate_is_sole_discriminator():
         "ports": [],
         "memory": [],
     }
-    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
-    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-
-    # With the predicate active, the gate gets the smoke envelope (backstop-based).
+    # With the predicate active, the gate gets the smoke envelope: three smokes (the new
+    # mode, its empty-input run, the revision source), each to its backstop and stop
+    # window (`sandbox.smoke_wall_s`).
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
+    expected = lowering._smoke_envelope_s(state, 3)
+    assert expected > 3 * 3600 + 600
     assert workflow.nodes["smoke"].command_timeout_s == expected, (
         f"expected {expected}, got {workflow.nodes['smoke'].command_timeout_s}"
     )
@@ -89,12 +89,9 @@ def test_smoke_predicate_op_path():
         "ports": [],
         "memory": [],
     }
-    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
-    from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-
     workflow = lowering.to_workflow(state, name="test_mode")
-    expected = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
-    assert workflow.nodes["smoke_op"].command_timeout_s == expected
+    assert workflow.nodes["smoke_op"].command_timeout_s == lowering._smoke_envelope_s(state, 3)
+    assert lowering._smoke_envelope_s(state, 3) > lowering._smoke_envelope_s(state, 2)
 
 
 def test_smoke_timeout_s_out_of_range_is_refused():
@@ -253,21 +250,26 @@ def test_lowered_graph_byte_identical_smoke_modes_at_1800():
 
 
 def test_a_smoke_envelope_never_shrinks_below_its_sandboxed_runs():
-    """A smoke op or gate makes up to three sandboxed runs, each on a wall clock of the smoke budget
-    (`sandbox.run_sandboxed`); past a budget of 4800 s that exceeds the backstop envelope,
-    and the envelope follows the larger of the two."""
+    """A smoke op or gate makes up to three sandboxed runs (the gate's: the new mode, its
+    empty-input run and the revision source). The smoke budget is an inactivity limit, so
+    each can run to its backstop and then take its stop window (`sandbox.smoke_wall_s`);
+    the envelope covers that for each run, and never shrinks below the backstop envelope
+    a command gets."""
+    import math
+
     from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S
-    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S
+    from refactory_dsh.sandbox import COMMAND_BACKSTOP_S, STOP_GRACE_S, smoke_wall_s
 
     backstop = COMMAND_BACKSTOP_S + NODE_DISPATCH_OVERHEAD_S
-    for budget in (1800, 6000, 20000):
+    for budget in (1, 1800, 6000, 20000):
         state = {"knobs": {"smoke_timeout_s": {"value": budget}}}
         op = Node("smoke_op", "op", call="m:f", produces=("smoke_score", "smoke_ok"),
                   knobs=("smoke_timeout_s",))
         gate = Node("smoke", "gate", evaluator="m:g", produces=("smoke_score", "smoke_ok"),
                     knobs=("smoke_timeout_s",))
-        assert lowering.command_timeout_s(op, state) == max(3 * budget + 600, backstop)
-        # The smoke gate's three: the new mode, its empty-input run, the revision source.
-        assert lowering.command_timeout_s(gate, state) == max(3 * budget + 600, backstop)
-    state = {"knobs": {"smoke_timeout_s": {"value": 6000}}}
-    assert lowering.command_timeout_s(op, state) == 18600 > backstop
+        per_run = math.ceil(smoke_wall_s(budget))
+        assert per_run > min(4 * budget, COMMAND_BACKSTOP_S) + STOP_GRACE_S
+        assert lowering.command_timeout_s(op, state) == max(3 * per_run + 600, backstop)
+        assert lowering.command_timeout_s(gate, state) == max(3 * per_run + 600, backstop)
+    state = {"knobs": {"smoke_timeout_s": {"value": 3600}}}
+    assert lowering.command_timeout_s(gate, state) > 3 * (COMMAND_BACKSTOP_S + STOP_GRACE_S) > backstop

@@ -288,14 +288,21 @@ def run(
     identifier: str, workdir: Path, *, project: Path, samples: dict[str, str],
     declared: tuple[str, ...] | list[str], model: bool, timeout_s: int,
     model_context: dict[str, str] | None = None, run_root: Path | None = None,
+    smoke_items: int = 0, split: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the mode once with its inputs empty and return the receipt.
 
     ``run_root`` is the run's folder, a scratch location for `plan` (default: the
     empty-input run's own ``workdir``).
 
-    Describing the mode and the run share ``timeout_s``: the describe gets at most
-    `DESCRIBE_TIMEOUT_S` of it and the run what is left.
+    ``smoke_items`` and ``split`` (``holdout``, ``parts_manifest``) are the canonical
+    smoke's sample, passed on as they are: a Task-bound node keeps its items, and they
+    are the same train items the smoke ran, never a val or test item.
+
+    ``timeout_s`` is the smoke's inactivity limit. Describing the mode and the run share
+    one smoke's wall clock (`sandbox.smoke_wall_s`): the describe gets at most
+    `DESCRIBE_TIMEOUT_S` of the smoke's backstop and the run's backstop is what is left,
+    so the check fits one run of the smoke gate's envelope.
     """
     from refactory_dsh import sandbox
     from refactory_dsh.items import write_source
@@ -303,10 +310,11 @@ def run(
     workdir = Path(workdir)
     receipt: dict[str, Any] = {"mode": identifier, "workdir": str(workdir.resolve()),
                                "declared": list(declared), "timeout_s": int(timeout_s)}
+    backstop = sandbox.smoke_backstop_s(int(timeout_s))
     started = time.monotonic()
     try:
         described = describe(identifier, project,
-                             timeout_s=max(1, min(DESCRIBE_TIMEOUT_S, int(timeout_s))))
+                             timeout_s=max(1, min(DESCRIBE_TIMEOUT_S, int(backstop))))
     except Exception as exc:  # noqa: BLE001 - any failure to describe leaves it unjudged
         return {**receipt, "status": "inconclusive",
                 "reason": f"the mode could not be described, so the empty-input run did "
@@ -325,7 +333,7 @@ def run(
                           f"existing path, so an empty-input run would still read it: "
                           f"{', '.join(planned['undeclared'])}. Declare each input with "
                           "--input, or give the knob a --sample"}
-    remaining = int(timeout_s) - math.ceil(time.monotonic() - started)
+    remaining = int(backstop) - math.ceil(time.monotonic() - started)
     if remaining < 1:
         return {**receipt, "status": "inconclusive",
                 "reason": "describing the mode used the whole smoke budget, so the "
@@ -335,7 +343,8 @@ def run(
     result = sandbox.smoke(
         identifier, workdir, project=project, model=model,
         knobs={**samples, **planned["knobs"]}, model_context=model_context,
-        timeout_s=remaining,
+        timeout_s=int(timeout_s), backstop_s=remaining, smoke_items=int(smoke_items),
+        **(split or {}),
     )
     ok = result.ok and result.payload.get("exit_ok") is not False
     error = result.problem() if not result.ok else str(result.payload.get("error") or "")
@@ -344,7 +353,8 @@ def run(
                              produced=produced)
     return {**receipt, "status": status, "reason": reason, "exit_ok": ok,
             "timed_out": result.timed_out, "returncode": result.returncode,
-            "elapsed_s": result.elapsed_s, "run_timeout_s": remaining, "error": error,
+            "elapsed_s": result.elapsed_s, "run_backstop_s": remaining, "error": error,
+            "sample": result.payload.get("sample"),
             "produced": produced,
             "knobs": planned["knobs"], "sources": planned["sources"]}
 

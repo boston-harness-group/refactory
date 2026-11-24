@@ -587,12 +587,13 @@ def test_a_describe_that_fails_is_inconclusive_not_a_failure(tmp_path, project, 
     assert "could not be described" in receipt["reason"]
 
 
-def test_describe_and_the_run_share_one_smoke_budget(tmp_path, monkeypatch):
-    """Describing gets at most what the smoke budget allows, and the run what is left, so
-    the three sandboxed runs the lowered smoke gate's envelope covers stay three."""
+def test_describe_and_the_run_share_one_smoke_wall_clock(tmp_path, monkeypatch):
+    """Describing gets at most what one smoke's backstop allows, and the run's backstop is
+    what is left, so the empty-input check fits one of the three runs the lowered smoke
+    gate's envelope covers (`sandbox.smoke_wall_s`). The inactivity limit is the smoke's."""
     from refactory_dsh import sandbox
 
-    seen: dict[str, int] = {}
+    seen: dict = {}
     described = {"knobs": ["input_dir"], "values": {"input_dir": ""}, "data_nodes": [],
                  "writes": []}
 
@@ -600,24 +601,111 @@ def test_describe_and_the_run_share_one_smoke_budget(tmp_path, monkeypatch):
         seen["describe"] = timeout_s
         return described
 
-    def smoke(*_args, timeout_s, **_kwargs):
-        seen["run"] = timeout_s
+    def smoke(*_args, timeout_s, backstop_s, smoke_items, holdout=None, parts_manifest=None,
+              **_rest):
+        seen["run"] = (timeout_s, backstop_s, smoke_items,
+                       {"holdout": holdout, "parts_manifest": parts_manifest})
         return sandbox.SandboxResult(ok=False, timed_out=True)
 
+    backstop = int(sandbox.smoke_backstop_s(100))
     clock = iter([1000.0, 1050.0])
     monkeypatch.setattr(empty_input, "describe", describe)
     monkeypatch.setattr(sandbox, "smoke", smoke)
     monkeypatch.setattr(empty_input.time, "monotonic", lambda: next(clock))
+    split = {"holdout": 0.25, "parts_manifest": None}
     empty_input.run("p/m", tmp_path / "run", project=tmp_path, samples={},
-                    declared=("input_dir",), model=False, timeout_s=100)
-    assert seen == {"describe": 100, "run": 50}
+                    declared=("input_dir",), model=False, timeout_s=100, smoke_items=3,
+                    split=split)
+    assert seen == {"describe": min(empty_input.DESCRIBE_TIMEOUT_S, backstop),
+                    "run": (100, backstop - 50, 3, split)}
+
+    # A short smoke's backstop is below the describe's own limit, and caps it.
+    seen.clear()
+    clock = iter([1000.0, 1000.0])
+    small = int(sandbox.smoke_backstop_s(10))
+    assert small < empty_input.DESCRIBE_TIMEOUT_S
+    empty_input.run("p/m", tmp_path / "run3", project=tmp_path, samples={},
+                    declared=("input_dir",), model=False, timeout_s=10)
+    assert seen["describe"] == small
 
     seen.clear()
-    clock = iter([1000.0, 1100.0])
+    clock = iter([1000.0, 1000.0 + backstop])
     receipt = empty_input.run("p/m", tmp_path / "run2", project=tmp_path, samples={},
                               declared=("input_dir",), model=False, timeout_s=100)
-    assert seen == {"describe": 100}, "no budget was left for the run"
+    assert "run" not in seen, "no wall clock was left for the run"
     assert receipt["status"] == "inconclusive"
+
+
+#: A Task-bound mode with a declared input it never reads: on emptied input it still
+#: runs its Task's items and exits 0. The Task lists 40 ids, highest first.
+_TASK_FILES = {
+    "__init__.py": (
+        "from refactory_dsh.nn import Package\n"
+        "from .mode import Bound\n\n"
+        "PACKAGE = Package(name='bound_pkg', modes=(Bound,), ops=('refactory_packages.bound_pkg.ops',))\n"
+    ),
+    "task.py": (
+        "from refactory_dsh.task import Task, TaskInstance, VerifyResult\n\n"
+        "class Many(Task):\n"
+        "    name = 'many'\n"
+        "    def instances(self, **kw):\n"
+        "        return [TaskInstance(id=f'item_{i:03d}', metadata={}) for i in reversed(range(40))]\n"
+        "    def setup(self, instance, workspace, **kw):\n"
+        "        pass\n"
+        "    def verify(self, instance, workspace, **kw):\n"
+        "        return VerifyResult(passed=True, score=1.0)\n"
+    ),
+    "ops.py": (
+        "def work(ctx):\n"
+        "    item = ctx.read_json('current_item.json', {}) or {}\n"
+        "    ctx.write_json('seen.json', {'id': item.get('id')})\n"
+        "    return {}\n\n"
+        "def finish(ctx):\n"
+        "    ctx.write_json('best.json', {'best': 1.0})\n"
+        "    return {'best': 1.0}\n"
+    ),
+    "mode.py": (
+        "from refactory_dsh import nn\n"
+        "OPS = 'refactory_packages.bound_pkg.ops'\n"
+        "TASK = 'refactory_packages.bound_pkg.task:Many'\n\n"
+        "class Bound(nn.Mode):\n"
+        "    name = 'bound'\n"
+        "    @classmethod\n"
+        "    def declare(cls):\n"
+        "        return {'input_dir': nn.Knob('', 'str', description='unused input')}\n"
+        "    def build(self):\n"
+        "        g = nn.Graph()\n"
+        "        g.add(nn.Node('data', 'data', subgraph_entry='work', subgraph_exit='work',"
+        " task_ref=TASK, writes=('current_item.json',), produces=('item_scores',)))\n"
+        "        g.add(nn.Node('work', 'op', call=OPS + ':work', reads=('current_item.json',),"
+        " writes=('seen.json',)))\n"
+        "        g.add(nn.Node('finish', 'op', call=OPS + ':finish', knobs=('input_dir',),"
+        " writes=('best.json',), produces=('best',)))\n"
+        "        g.connect('data', 'finish')\n"
+        "        return g\n"
+        "    def score(self, result):\n"
+        "        return 1.0\n"
+    ),
+}
+
+
+def test_the_empty_input_run_uses_the_smokes_sample_never_val_or_test(tmp_path, project):
+    """The canonical smoke's split reaches the empty-input run: a Task-bound node runs
+    only train ids of the parts manifest, never its val or test ids."""
+    _install(project, "bound_pkg", _TASK_FILES)
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({
+        "train": [f"item_{i:03d}" for i in range(20, 40)],
+        "val": [f"item_{i:03d}" for i in range(0, 10)],
+        "test": [f"item_{i:03d}" for i in range(10, 20)],
+    }))
+    receipt = empty_input.run("bound_pkg/bound", tmp_path / "empty-run", project=project,
+                              samples={}, declared=("input_dir",), model=False, timeout_s=120,
+                              smoke_items=3, split={"holdout": 0.0, "parts_manifest": manifest})
+    assert receipt["status"] == "finding", receipt
+    ran = sorted(json.loads(p.read_text())["id"]
+                 for p in (tmp_path / "empty-run").glob("passes/data/*/seen.json"))
+    assert ran == ["item_020", "item_021", "item_022"], ran
 
 
 # ── wired into create mode's smoke gate ───────────────────────────────────
@@ -776,3 +864,27 @@ def test_every_create_graph_lowers_the_check_into_its_smoke_gate(mode):
     assert smoke.evaluator_command.endswith("refactory_dsh.create_ops:gate_smoke")
     budget = int(state["knobs"]["smoke_timeout_s"]["value"])
     assert smoke.command_timeout_s >= 3 * budget
+
+
+def test_the_smoke_gates_check_passes_the_smokes_split_on(tmp_path, project):
+    """`check_empty_input` draws the split the canonical smoke used (`_smoke_split`: the
+    `parts_manifest`, `holdout` and `smoke_items` knobs) and runs only its train ids."""
+    _install(project, "bound_pkg", _TASK_FILES)
+    manifest = tmp_path / "parts.json"
+    manifest.write_text(json.dumps({
+        "train": [f"item_{i:03d}" for i in range(20, 40)],
+        "val": [f"item_{i:03d}" for i in range(0, 10)],
+        "test": [f"item_{i:03d}" for i in range(10, 20)],
+    }))
+    package = registry.workspace_root(project) / "bound_pkg"
+    ctx = Ctx(tmp_path / "run", {"name": "bound_pkg", "package_path": str(package)})
+    ctx.workdir.mkdir()
+    ctx.write_json("smoke.json", {"mode": "bound_pkg/bound"})
+    ctx.write_json("brief.json", {"requires_input": ["input_dir"]})
+    ctx.knobs.update({"parts_manifest": str(manifest), "smoke_items": 2,
+                      "smoke_timeout_s": 120})
+    with pytest.raises(empty_input.Finding):
+        create_ops.check_empty_input(ctx)
+    ran = sorted(json.loads(p.read_text())["id"]
+                 for p in ctx.workdir.glob("smoke-empty-input/*/passes/data/*/seen.json"))
+    assert ran == ["item_020", "item_021"], ran
