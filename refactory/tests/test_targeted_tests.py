@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,9 +46,16 @@ def _agent_env(place: workspace.Workspace) -> dict[str, str]:
 
 
 def _command(place: workspace.Workspace, *args: str) -> subprocess.CompletedProcess:
-    """The command as the builder runs it: by name, from its workspace, on its PATH."""
-    return subprocess.run(["refactory-targeted-tests", *args], cwd=place.path, env=_agent_env(place),
-                          capture_output=True, text=True, timeout=300)
+    """The command as the builder runs it: by name, from its workspace, on its PATH. A run
+    cut off at the limit fails with what it printed, a stalled session's stack included."""
+    try:
+        return subprocess.run(["refactory-targeted-tests", *args], cwd=place.path,
+                              env=_agent_env(place), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as cut:
+        said = [part.decode(errors="replace") if isinstance(part, bytes) else part or ""
+                for part in (cut.stdout, cut.stderr)]
+        pytest.fail(f"refactory-targeted-tests ran past 300 s; it printed:\n{''.join(said)}")
 
 
 def _emission(place: workspace.Workspace) -> str:
@@ -306,19 +314,39 @@ NESTED = {
         "                if part.endswith(os.path.join('.refactory', 'plugins'))]\n"
         "    inner = tmp_path / 'test_inner.py'\n"
         "    inner.write_text('def test_inner():\\n    pass\\n')\n"
+        "    own = tmp_path / 'inner-tmp'\n"
+        "    own.mkdir()\n"
         "    done = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',\n"
-        "                           str(inner)], cwd=tmp_path, capture_output=True, text=True,\n"
-        "                          env={**os.environ, 'PYTHONPATH': str(tmp_path)})\n"
+        "                           '-o', 'faulthandler_timeout=60', str(inner)], cwd=tmp_path,\n"
+        "                          stdin=subprocess.DEVNULL, capture_output=True, text=True,\n"
+        "                          timeout=120,\n"
+        "                          env={**os.environ, 'PYTHONPATH': str(tmp_path),\n"
+        "                               'PYTEST_DEBUG_TEMPROOT': str(own), 'TMPDIR': str(own)})\n"
         "    assert done.returncode == 0, done.stdout + done.stderr\n"
         "    assert tool.VERSION == 2\n"),
 }
 
 
-@pytest.mark.parametrize("check", [CHECK, "python -m pytest -q -n 2 -p no:cacheprovider tests"],
+#: A stalled session prints every thread's stack after this long, well inside `_command`'s 300 s.
+STALL = "-o faulthandler_timeout=120"
+
+
+@pytest.mark.parametrize("check", [f"python -m pytest -q {STALL} -p no:cacheprovider tests",
+                                   f"python -m pytest -q -n 2 {STALL} -p no:cacheprovider tests"],
                          ids=["serial", "xdist"])
-def test_a_repo_test_that_runs_pytest_itself_does_not_see_the_plugin(tmp_path, check):
+def test_a_repo_test_that_runs_pytest_itself_does_not_see_the_plugin(tmp_path, monkeypatch, check):
     """The plugin is the command's alone: a pytest the repo's own test starts, with its own
-    PYTHONPATH, neither loads it nor fails importing it."""
+    PYTHONPATH, neither loads it nor fails importing it.
+
+    The sessions the command starts keep their temporary directories under this test's
+    own root (`PYTEST_DEBUG_TEMPROOT`, `TMPDIR`), not the machine's shared
+    ``pytest-of-<user>``, whose cleanup at exit another suite's sessions can hold up. This
+    process's own temporary directory is fixed first, so only the sessions it starts move."""
+    tempfile.gettempdir()
+    own = tmp_path / "check-tmp"
+    own.mkdir()
+    monkeypatch.setenv("PYTEST_DEBUG_TEMPROOT", str(own))
+    monkeypatch.setenv("TMPDIR", str(own))
     run, _, _ = _run_with_worktree(tmp_path, NESTED)
     place = workspace.prepare(run, "emit", BUILDER_WORKSPACE, facts={"check": check})
     (place.path / "tool.py").write_text("VERSION = 2\n")

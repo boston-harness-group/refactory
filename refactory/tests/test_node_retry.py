@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from refactory_dsh import lowering, workers
+from refactory_dsh import lowering, node_retry, workers
 from refactory_dsh.model import NODE_DISPATCH_OVERHEAD_S, CompletionTimeout, DshModelClient
 from refactory_dsh.nn import Graph, GraphError, Node
 from refactory_dsh.nn.graph import retry_declaration
@@ -397,11 +397,25 @@ def test_the_spine_reserves_every_attempt_and_one_overhead(tmp_path):
 
 
 @pytest.mark.parametrize("runtime", RUNTIMES)
-def test_the_run_wall_shortens_the_retry(tmp_path, runtime):
+def test_the_run_wall_shortens_the_retry(tmp_path, runtime, monkeypatch):
     from refactory_dsh.budgets import ResourceLimits, RunBudget
 
     workdir = tmp_path / "run"
     workdir.mkdir()
+    if runtime == "walker":
+        clock = _FakeClock()
+        monkeypatch.setattr(node_retry, "_clock", clock)
+        client = _TimesOutOnce(5, clock)
+        budget = _ClockBudget(40, clock)
+        ok, error = _run(runtime, workdir,
+                         _graph(_node(retry={**RULE, "timeout_factor": 10}, timeout_s=8)),
+                         client, budget=budget)
+        assert ok, error
+        assert client.calls == 2
+        [event] = _retried(workdir)
+        # 5 s spent; budget leaves 35 s, below the declared 80 s retry: exactly 35.
+        assert event["wall_s"] == 35
+        return
     budget = RunBudget.create(workdir, ResourceLimits(max_elapsed_s=40))
     budget.resume()
     # Streams for 4 s, then goes silent: it times out after about 5 s.
@@ -459,6 +473,41 @@ class _Slow:
         else:
             time.sleep(self.seconds)
         raise CompletionTimeout(f"model completion timed out after {self.seconds}s")
+
+
+class _TimesOutOnce:
+    """First call advances the clock and raises; second call advances and answers."""
+
+    def __init__(self, seconds: float, clock: _FakeClock):
+        self.seconds, self.calls = seconds, 0
+        self._clock = clock
+
+    def complete(self, prompt, **kwargs):
+        self.calls += 1
+        self._clock.advance(self.seconds)
+        if self.calls == 1:
+            raise CompletionTimeout(f"model completion timed out after {self.seconds}s of inactivity")
+        return "in time"
+
+
+class _ClockBudget:
+    """A budget whose remaining_s tracks a :class:`_FakeClock`, not real time."""
+
+    def __init__(self, max_s: float, clock: _FakeClock):
+        self._max, self._start = max_s, clock()
+        self._clock = clock
+
+    def remaining_s(self, phase=None):
+        return max(0.0, self._max - (self._clock() - self._start))
+
+    def checkpoint(self, phase=None):
+        pass
+
+    def checkpoint_node(self, phase=None):
+        pass
+
+    def require_usage_capability(self, available):
+        pass
 
 
 def test_the_retry_stays_inside_the_nodes_envelope(tmp_path, monkeypatch):
