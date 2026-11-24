@@ -706,7 +706,9 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "base": "base",
       "brief": "brief",
       "check": "check",
+      "finish": "finish",
       "generate": "generate",
+      "items": "items",
       "model": "model",
       "name": "name",
       "noPr": "no_pr",
@@ -730,6 +732,8 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "noPr",
       "refine",
       "reviewComments",
+      "finish",
+      "items",
       "attempts",
       "approve",
       "provider",
@@ -771,6 +775,16 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
         "review_comments": true
       },
       "explanation": "Follow up an open pull request: the run starts from its branch, designs straight from the pull request (its description and diff; no research or strategy step), goes through the full review, and pushes onto that branch, fast-forward only. The pull request's title and description are left as they are."
+    },
+    {
+      "arguments": {
+        "brief": "Finish the pull request's open items",
+        "check": "python -m pytest -q",
+        "finish": true,
+        "name": "report_format",
+        "refine": "https://github.com/owner/repository/pull/12"
+      },
+      "explanation": "Finish a pull request a run left as a draft with an Open items section: a truncated refine that works on its open items (every one that is not a judgment_call, or those items names), in one fix round, pushes onto the same branch and marks each item resolved or still open, with its evidence, in the description. Environment items are re-checked by the run's check, never given to the builder; the approval gate is skipped when every item worked on is concrete and the design review passed; an item is resolved only on evidence, and every other line of the description is left as written."
     }
   ],
   "interfaces": {
@@ -834,11 +848,33 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "finish": {
+      "default": false,
+      "description": "with --refine: finish the pull request's Open items in one fix round",
+      "flags": [
+        "--finish"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
+    },
     "generate": {
       "default": "",
       "description": "a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
       "flags": [
         "--generate"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "items": {
+      "default": "",
+      "description": "with --finish: the Open items to work on",
+      "flags": [
+        "--items"
       ],
       "nargs": null,
       "positional": false,
@@ -982,7 +1018,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Build and check software from a brief and a check command, on its own branch in a git worktree: of the repository `target` names, or of a new project. Once its reviews pass it opens a pull request (a new project's private GitHub repository is created then), unless noPr. No reusable mode is required. Prefer wf_open default_pack/design with user gates.",
-  "reviewed_schema": "3ef0b8b154a559cefd20015bde750558aa5e267b2d8f3a0e5c1e99b9c8475c65"
+  "reviewed_schema": "8f4f591b73ac9b1a0a3a20b4484d07f7a372b526f025afef037caa956fe1d49c"
 }
 ```
 
@@ -5299,6 +5335,16 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     {
       "arguments": {
         "check": "python -m pytest -q",
+        "finish": true,
+        "mode": "design",
+        "refine": "https://github.com/owner/repository/pull/12",
+        "what": "finish the pull request's open items"
+      },
+      "explanation": "Finish a pull request's Open items: a truncated refine (no research or strategy) that works on every open item that is not a judgment_call (--items id1,id2 to choose), gets one fix round, pushes onto the same branch and updates each item in the description as resolved or still open, with its evidence. It skips the approval gate when every item worked on is concrete and the design review passed, resolves an item only on evidence (its tests passed, or the QA judge confirmed it), and re-checks environment items with the run's check instead of giving them to the builder."
+    },
+    {
+      "arguments": {
+        "check": "python -m pytest -q",
         "mode": "design_fast",
         "target": "/path/to/repository",
         "what": "add a --json flag to the report command"
@@ -5367,6 +5413,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "required": false,
       "type": "string"
     },
+    "finish": {
+      "default": false,
+      "description": "design only, with --refine: finish the pull request's Open items in one fix round and update them in its description; the approval gate is skipped when every item worked on is concrete",
+      "flags": [
+        "--finish"
+      ],
+      "nargs": 0,
+      "positional": false,
+      "required": false,
+      "type": "boolean"
+    },
     "generate": {
       "default": "",
       "description": "design and design_fast: a command run in the worktree after dependencies are installed, before setup and each check; whatever it changes in tracked files is amended into the attempt. A generator that itself needs a build includes that build in its own command",
@@ -5394,6 +5451,17 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
       "description": "run a mode: what this run is for, in your words; authored runs take the brief itself as the intent",
       "flags": [
         "--intent"
+      ],
+      "nargs": null,
+      "positional": false,
+      "required": false,
+      "type": "string"
+    },
+    "items": {
+      "default": "",
+      "description": "with --finish: the Open items to work on (default: every open item that is not a judgment_call)",
+      "flags": [
+        "--items"
       ],
       "nargs": null,
       "positional": false,
@@ -5799,7 +5867,7 @@ Documentation: [refactory/docs/cli.md](../../../refactory/docs/cli.md)
     }
   },
   "purpose": "Run a named mode or author a package/artifact from a brief in the terminal; worker file defaults apply at preparation. CEO conversation and graph worker routes are distinct. Its run flags are the walker mains' own (python -m refactory_dsh.design, create, edit): the same knobs, route and limits either way; --verdict is an alias of --approve, and --attempts of the mode's attempts knob.",
-  "reviewed_schema": "84b6d35bf2c83341c9ac6e4624b606f4a8179e9ba2721d89275805cd8b5cf712"
+  "reviewed_schema": "13eb1f7f4a830574d922bf9dcba3ab8b7acea778745af4ecab9923bf2313c63d"
 }
 ```
 
@@ -9558,7 +9626,9 @@ Build a software artifact from a brief, name and acceptance command, as commits 
         "repo_owner",
         "repo_visibility",
         "refine",
-        "review_comments"
+        "review_comments",
+        "finish",
+        "finish_items"
       ],
       "notes": "read the brief and the command that decides whether it is done",
       "role": "ceo"
@@ -9664,7 +9734,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "id": "route_refine_design",
       "kind": "gate",
       "knobs": [],
-      "notes": "on a refine, skip research and strategy and go straight to design_doc",
+      "notes": "on a refine, skip research and strategy and go straight to design_doc; on a finish whose items are all concrete, answer gate_strategy proceed up front",
       "role": "ceo"
     },
     {
@@ -9964,6 +10034,30 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "default": "",
       "description": "system prompt for explore_code",
       "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "finish": {
+      "default": false,
+      "description": "with refine: a truncated refine that fixes the pull request's Open items, in one fix round, and updates them in its description (`refactory_dsh.finish`)",
+      "frozen": true,
+      "kind": "bool",
+      "range": [
+        null,
+        null
+      ],
+      "value": false,
+      "values": []
+    },
+    "finish_items": {
+      "default": "",
+      "description": "with finish: the ids of the Open items to work on, comma separated (default: every open item that is not a judgment_call)",
+      "frozen": true,
       "kind": "str",
       "range": [
         null,
@@ -10331,6 +10425,19 @@ Build a software artifact from a brief, name and acceptance command, as commits 
           "name": "report_format",
           "refine": "https://github.com/owner/repository/pull/12"
         }
+      },
+      {
+        "explanation": "Finish a pull request's Open items in one fix round, on its own branch, and update them in its description; its approval gate is answered for one visit when every item worked on is concrete and the design review passed.",
+        "knobs": {
+          "brief": "Finish the pull request's open items",
+          "check": "python -m pytest -q",
+          "check_attempt_cap": 0,
+          "check_attempts": 2,
+          "finish": true,
+          "name": "report_format",
+          "refine": "https://github.com/owner/repository/pull/12",
+          "self_check_fixups": 0
+        }
       }
     ],
     "interfaces": {
@@ -10339,7 +10446,7 @@ Build a software artifact from a brief, name and acceptance command, as commits 
       "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
     },
     "purpose": "Build a software artifact from a brief, name and acceptance command, as commits on the run's own branch in a git worktree: of the repository `target` names, or of a new project when it names none. Research, strategy and the design go straight to the approval gate, with no design reviewer: the design is written once to a light template (Summary, Changes, Tests), a claims check lists what it cannot confirm, and only a design with no ## Changes goes back for a rewrite (`design_review_attempts`, default 1); everything else is shown on the approval card. Before research, a bounded change sizer (`size_change`, 600 s, read only) reads the code the change touches, and the research footprint rule turns its verdict into the research scope, full unless the code proves it small; a lean research whose footprint reaches further is widened once at full scope, and both scales are on the approval card. A scoped change (a refine, or one whose research footprint is small) skips the perspectives step, and a refine skips the sizer, research and pitfalls too: its design starts from the pull request's description and diff. The builder works in a prepared clone of the last attempt (installs, setup and generate done), where it changes the code and runs the tests its change touches and the brief's own example (the full check runs beside the reviews in fork_qa); the clone's diff becomes the attempt. Every attempt \u2014 first or fix-up \u2014 runs only the tests the change touches in the self-check. The full check runs beside the three reviews, the verifier and the early asks judge in fork_qa. gate_check composes one send-back from check failures and early-asks findings without spending an attempt (`self_check_fixups` times an attempt; past that, failures stop the attempt and not-built items alone go on to the reviews, listed for the QA judge and Overwatch), a fix-up's self-check runs the last failures and what the fix-up changed within `self_check_timeout_s`, and a failure the base shares is inherited unless the brief or a correction names it. The command runs in that worktree beside the separate QA reviews (on the commit both see, running the full check beside them) and stays binding; a QA judge then reads the reviews and decides whether the build goes on or back, and Overwatch judges acceptance with an audit of the person's gate corrections as evidence (a correction given after the approval is applied to the design before the builder's next round, because every send-back to the builder goes through the corrections step, and Overwatch does not pass the change while one is unapplied); final current validation evidence is required. Only an ask, a correction, a failed health check or a critical or high defect sends the build back, and a correction Overwatch finds unmet always does; other findings are listed on the pull request as follow-ups. A judge whose verdict cannot be read is asked again once (`judge_rereads`), with no builder round. Once they pass, the branch is delivered as a pull request (into the branch its base came from, or the default branch), which the approval gate's question names first (`pr=0` keeps it local, with its pull request text in pull-request.md and finishing commands in delivery.json; `refine` updates an open one, rewriting only the sections delivery wrote in its description). When a limit stops the build (the check's, the reviews', all attempts', or refused emissions') at an applied commit with current check evidence, that commit is delivered as a draft pull request listing what is unresolved, marked [check failing] when its check fails. Before sizing, a code knowledge graph of the worktree is built in the background (on by default; `code_graph=0`, --no-graph, REFACTORY_CODE_GRAPH=0 or the \"code_graph\" object in refactory.workers.json turn it off) (graphify, outside the checkout; `code_graph_timeout_s` and `code_graph_max_files` bound the build), and before sizing a code explorer (`explore_code`, 600 s, read only) waits up to `code_graph_wait_s` for it, maps the code the brief names with `refactory graph query|explain|path` (or, without a graph, from the files) into graph-context.md, headed by which it was made from; the sizer (told to confirm it in the code), research, strategy, design and the builder read it, and may query the graph for more; design.json counts the queries per node.",
-    "reviewed_schema": "0d0b0663b5349d230a8140476bcb6513dfcd419064d4769ebcef146d27570901"
+    "reviewed_schema": "fcf5b46756a3420583349244586a3bf680c51938b40555b524e5d38d823edced"
   }
 }
 ```

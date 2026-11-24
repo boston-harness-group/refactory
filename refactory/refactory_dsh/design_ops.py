@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from refactory_dsh import delivery, repo_change, sandbox, unbuilt_check, worktree
+from refactory_dsh import delivery, finish, repo_change, sandbox, unbuilt_check, worktree
 from refactory_dsh.code_graph import GRAPH_CONTEXT
 from refactory_dsh.invocations import CHECK_PREP, CHECK_VERDICT, SELF_CHECK_RECORD
 from refactory_dsh.nn import Verdict
@@ -370,6 +370,8 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
         ctx.write_text("pitfalls-review.txt",
                        "not run: initial pitfalls analysis; no prior review\n")
     planned = delivery.plan_run(ctx, task=task) if deliver else {}
+    # A finish (`finish.py`): the pull request's Open items it works on, read once here.
+    finishing = finish.prepare(ctx, task.get("refining")) if deliver else {}
     pitfalls_facts = {
         "has_pitfalls_step": True,
         "pitfalls": "(no pitfalls analysis yet)",
@@ -425,7 +427,7 @@ def prepare_design(ctx: Any, *, deliver: bool = True, in_worktree: bool | None =
             "requirements_and_corrections": requirements_and_corrections,
             **pitfalls_facts,
             **claims_facts,
-            **UNREFUSED, **located, **planned}
+            **UNREFUSED, **located, **planned, **finishing}
 
 
 #: What the builder's briefing says about the time of its targeted tests before any self-check
@@ -525,13 +527,22 @@ def route_refine_design(ctx: Any) -> Any:
 
         print(f"refactory: warning: a light refine's diff stat is unavailable: {error}", file=sys.stderr)
         diff_stat = changed_files = DIFF_UNAVAILABLE
+    finishing = finish.fact(ctx)
+    if finishing is not None and "body" in pull:
+        # The items reach design_doc selected (`finish.context_block`); an environment item
+        # never does, so the description it is shown has no Open items section.
+        pull = {**pull, "body": finish.shown_description(str(pull["body"] or ""))}
     refine_context = (
         "## The pull request this refines\n"
         f"{LIGHT_REFINE_STRATEGY_PLAN}\n\n"
         f"### Its description\n{_pull_request_description(pull)}\n\n"
         f"### Diff stat against the pull request's base\n```\n{diff_stat}\n```\n\n"
         f"### Changed files\n```\n{changed_files}\n```\n\n"
+        + (finish.context_block(finishing) if finishing is not None else "")
     )
+    # Whether a finish may skip the approval gate: every item it fixes concrete. The skip
+    # itself waits for the design review (`finish.after_design_review`).
+    ctx.set_fact("finish_gate", finish.decide_gate(ctx, finishing) if finishing is not None else "")
 
     # Write sentinel facts.  The pull request goes to design_doc as `refine_context`,
     # which a reloop leaves alone: synthesize_strategy then replaces `strategy`, and
@@ -876,6 +887,7 @@ def gate_design_review(ctx: Any) -> str:
         ctx.set_fact("design_review_findings", "(none: nothing blocks the build)" + coverage_block)
         ctx.set_fact("design_review_status", design_review_status(ctx.facts))
         ctx.set_fact("design_card", design_card(ctx.facts, design_text))
+        finish.after_design_review(ctx, passed=True)
         return "proceed"
 
     report = "\n".join(f"- {p}" for p in problems)
@@ -896,6 +908,7 @@ def gate_design_review(ctx: Any) -> str:
     ctx.set_fact("design_review_findings", report + coverage_block)
     ctx.set_fact("design_review_status", design_review_status(ctx.facts))
     ctx.set_fact("design_card", design_card(ctx.facts, design_text))
+    finish.after_design_review(ctx, passed=False)
     return "proceed"
 
 
@@ -2202,7 +2215,8 @@ def prepare_check(ctx: Any) -> Any:
     A limit that stops the build here -- the check attempts, or all attempts, spent on a
     failing self-check or preparation -- delivers the attempt as a draft marked check
     failing (`_draft_for_stop`), and the run goes straight to the report (``draft``).
-    So does the refusal bound, which `design_materialise` has already made a draft.
+    So does the refusal bound, which `design_materialise` has already made a draft, and,
+    on a finish run, a send-back once its one fix round is spent.
     """
     from refactory_dsh.run import BuildLoopStop
 
@@ -2212,7 +2226,14 @@ def prepare_check(ctx: Any) -> Any:
     if ctx.facts.get("draft_delivery"):
         return "draft"
     try:
-        return _prepare_attempt(ctx)
+        verdict = _prepare_attempt(ctx)
+        if str(verdict) == "reloop" and not repo_change.refused(ctx):
+            # A send-back from the self-check is a finish run's round (`finish.allows_round`);
+            # a refused emission's retry is not, as nothing was applied.
+            if not finish.allows_round(ctx):
+                raise BuildLoopStop(f"{finish.ROUND_SPENT}: {getattr(verdict, 'reason', '') or verdict}")
+            verdict = finish.sent_back(ctx, verdict)
+        return verdict
     except BuildLoopStop as stop:
         if _draft_for_stop(ctx, stop, check_failing=True) is None:
             raise
@@ -2940,13 +2961,14 @@ def _gate_check_early_asks(ctx: Any) -> Any:
     # must not end in a draft marked check failing.
     count = int(ctx.facts.get("early_asks_sendback_count") or 0) + 1
     ctx.set_fact("early_asks_sendback_count", count)
-    if count >= _combined_sendback_bound(ctx):
+    if count >= _combined_sendback_bound(ctx) or not finish.allows_round(ctx):
         stop = BuildLoopStop(
-            f"asks not built after {count} send-back(s)")
+            f"asks not built after {count} send-back(s)"
+            + ("" if finish.allows_round(ctx) else f" ({finish.ROUND_SPENT})"))
         if _draft_for_stop(ctx, stop, check_failing=False) is not None:
             return "draft"
         raise stop
-    return Verdict("reloop", detail)
+    return finish.sent_back(ctx, Verdict("reloop", detail))
 
 
 def _combined_sendback_bound(ctx: Any) -> int:
@@ -3045,13 +3067,14 @@ def _gate_check_combined_sendback(ctx: Any, check_reason: str) -> Any:
     ctx.set_fact("validation", detail)
     count = int(ctx.facts.get("combined_sendback_count") or 0) + 1
     ctx.set_fact("combined_sendback_count", count)
-    if count >= _combined_sendback_bound(ctx):
+    if count >= _combined_sendback_bound(ctx) or not finish.allows_round(ctx):
         stop = BuildLoopStop(
-            f"check failures exhausted after {count} combined send-back(s)")
+            f"check failures exhausted after {count} combined send-back(s)"
+            + ("" if finish.allows_round(ctx) else f" ({finish.ROUND_SPENT})"))
         if _draft_for_stop(ctx, stop, check_failing=True) is not None:
             return "draft"
         raise stop
-    return Verdict("reloop", detail)
+    return finish.sent_back(ctx, Verdict("reloop", detail))
 
 
 def _changed_test_fns(root: Path, base: str, test_file: str) -> list[str]:
@@ -3818,7 +3841,9 @@ def _send_back(ctx: Any, gate_file: str, fact: str, reason: str, *,
     ctx.write_text(gate_file, reason + "\n")
     ctx.set_fact(fact, reason)
     try:
-        return repair(ctx, [reason], kind="review")
+        if not finish.allows_round(ctx):
+            raise BuildLoopStop(f"{finish.ROUND_SPENT}: {reason}")
+        return finish.sent_back(ctx, repair(ctx, [reason], kind="review"))
     except BuildLoopStop as stop:
         # The check passed on this commit and nothing rewrote its receipt since.
         if _draft_for_stop(ctx, stop, check_failing=False, restore=False, into=into) is None:

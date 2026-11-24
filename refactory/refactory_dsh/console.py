@@ -1628,6 +1628,10 @@ def _parser() -> argparse.ArgumentParser:
                                "starts from its branch and updates it")
     artifact.add_argument("--review-comments", action="store_true",
                           help="with --refine: add the pull request's reviews and comments to the steering")
+    artifact.add_argument("--finish", action="store_true",
+                          help="with --refine: finish the pull request's Open items in one fix round")
+    artifact.add_argument("--items", default="", metavar="ID[,ID...]",
+                          help="with --finish: the Open items to work on")
     artifact.add_argument(
         "--verdict", action="append", default=[], metavar="GATE=VALUE",
         help="answer a gate a person owns, as <gate>=<value> (repeatable)",
@@ -2165,7 +2169,10 @@ def main(argv: list[str] | None = None) -> int:
                 forwarded = _resume_argv(args)
             payload = _forward("edit", forwarded)
         elif args.verb == "design":
-            forwarded = ["--name", args.name, "--brief", args.brief, "--attempts", str(args.attempts)]
+            forwarded = ["--name", args.name, "--brief", args.brief]
+            if not args.finish:
+                # A finish sets its own round knobs (`finish.ROUND_KNOBS`), and refuses --attempts.
+                forwarded += ["--attempts", str(args.attempts)]
             if args.workdir:
                 forwarded += ["--workdir", args.workdir]
             if args.resume:
@@ -2173,12 +2180,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.check:
                 forwarded += ["--check", args.check]
             for flag, value in (("--target", args.target), ("--base", args.base), ("--setup", args.setup),
-                                ("--generate", args.generate), ("--refine", args.refine)):
+                                ("--generate", args.generate), ("--refine", args.refine),
+                                ("--items", args.items)):
                 if value:
                     # Absolute, because the run resolves it from its own directory.
                     forwarded += [flag, str(Path(value).expanduser().resolve()) if flag == "--target" else value]
             for flag, on in (("--no-worktree", args.no_worktree), ("--no-pr", args.no_pr),
-                             ("--review-comments", args.review_comments)):
+                             ("--review-comments", args.review_comments), ("--finish", args.finish)):
                 if on:
                     forwarded += [flag]
             for pair in args.verdict:
