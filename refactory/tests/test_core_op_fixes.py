@@ -9,12 +9,12 @@ Each holds for any graph and on both runtimes where it runs."""
 
 from __future__ import annotations
 
-import json
-
-import pytest
-
 import copy as _copy
 import functools as _functools
+import json
+from typing import Any
+
+import pytest
 
 import structure_fuzz as sf
 from refactory_dsh.nn import core_ops, validate_state
