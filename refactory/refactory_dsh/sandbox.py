@@ -1345,7 +1345,11 @@ def smoke(
         remaining = budget.remaining_s()
         if remaining is not None:
             kwargs["timeout_s"] = min(kwargs["timeout_s"], remaining)
-            kwargs.setdefault("backstop_s", min(smoke_backstop_s(kwargs["timeout_s"]), remaining))
+            # A caller's own backstop (the empty-input run's share of a smoke) is capped
+            # by the run's budget too, never allowed past it.
+            given = kwargs.get("backstop_s")
+            kwargs["backstop_s"] = min(
+                smoke_backstop_s(kwargs["timeout_s"]) if given is None else given, remaining)
         forwarded["REFACTORY_BUDGET_LEDGER"] = str(budget.path)
     if model:
         # Leave time for the inner runtime to shut down before sandbox termination.
