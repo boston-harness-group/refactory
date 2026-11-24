@@ -274,15 +274,45 @@ class SpreadsheetBenchV2SweTask(SpreadsheetBenchV2Task):
         result = super().verify(instance, workspace, part=part, seed=seed)
         final_path = Path(workspace) / FINAL
         final = json.loads(final_path.read_text()) if final_path.exists() else {}
-        if final.get("turn_limit"):
-            note = turn_limit_note(final.get("n_turns"), final["turn_limit"])
-        elif final.get("session_facts") == "missing":
-            note = MISSING_SESSION_NOTE
-        else:
+        note = self.session_note(final)
+        if not note:
             return result
         return dataclasses.replace(
             result, prediction=f"{result.prediction}\n{note}" if result.prediction else note,
             details=f"{result.details} {note}".strip())
+
+
+    def session_note(self, final: dict[str, Any]) -> str:
+        """What the verdict says of the session after its text: the turn cap reached, or no
+        facts from the adapter; ``""`` for neither."""
+        if final.get("turn_limit"):
+            return turn_limit_note(final.get("n_turns"), final["turn_limit"])
+        if final.get("session_facts") == "missing":
+            return MISSING_SESSION_NOTE
+        return ""
+
+
+class SpreadsheetBenchV2StepsTask(SpreadsheetBenchV2SweTask):
+    """The swe Task for the steps mode (`steps_mode`): the same items, grade and tool
+    environment; the verdict names each step stopped at its turn cap (`tasks.FINAL`'s
+    ``turn_limits``) and each step the adapter left no facts of (``session_facts_missing``,
+    `steps_ops.finalize`)."""
+
+    def session_note(self, final: dict[str, Any]) -> str:
+        step_turns = final.get("step_turns") or {}
+        notes = [f"(the {step} step stopped at its turn cap: "
+                 + (f"{step_turns.get(step)} turns, " if step_turns.get(step) is not None else "")
+                 + f"cap {cap})"
+                 for step, cap in (final.get("turn_limits") or {}).items()]
+        missing = final.get("session_facts_missing") or []
+        if missing:
+            many = len(missing) > 1
+            notes.append(f"(no session facts from Claude Code's adapter for the "
+                         f"{', '.join(missing)} step{'s' if many else ''}: "
+                         + ("their turn counts and whether they" if many else
+                            "its turn count and whether it")
+                         + " reached the turn cap are unknown)")
+        return "\n".join(notes)
 
 
 #: What a record says when Claude Code's adapter left no facts of the session.

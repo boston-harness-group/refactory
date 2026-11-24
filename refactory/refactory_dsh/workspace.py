@@ -51,7 +51,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
 
 from refactory_dsh import git_exe
@@ -73,6 +73,35 @@ def is_sealed(node: Any) -> bool:
     return (get("kind") == "agent" and bool(tools) and sealed_backend(tools) != ""
             and get("tool_policy") is None and declared is not None
             and declared["kind"] == "scratch")
+
+
+def optional_reads(graph: Any, node_id: str) -> tuple[str, ...]:
+    """The reads of agent ``node_id`` it runs without when they are absent, on both
+    runtimes: none unless it is a sealed Claude Code step, and then each read that only
+    sealed Claude Code steps write, each as a file it may leave out (a write after its
+    reply, `optional_writes`). What such a step may not leave, its reader may not find:
+    one step's notes that a session stopped at its turn cap never wrote. Every other read
+    is required, as before (``required worker input is missing``)."""
+    node = graph.nodes[node_id]
+    if not is_sealed(node) or sealed_backend(node.tools) != "claude_code":
+        return ()
+    writers: dict[str, list[Any]] = {}
+    for other in graph.nodes.values():
+        for name in other.writes:
+            writers.setdefault(name, []).append(other)
+    return tuple(name for name in node.reads
+                 if writers.get(name) and all(
+                     is_sealed(w) and sealed_backend(w.tools) == "claude_code"
+                     and name in w.writes[1:] for w in writers[name]))
+
+
+def present_reads(workdir: Path, reads: Any, optional: Any) -> list[str]:
+    """``reads`` without the optional ones (`optional_reads`) the run directory lacks:
+    what a sealed step's workspace is given."""
+    from refactory_dsh.agent_delivery import _path
+
+    return [name for name in reads or ()
+            if name not in set(optional or ()) or _path(Path(workdir), name).exists()]
 
 
 def sealed_backend(tools: Any) -> str:
@@ -575,6 +604,13 @@ TOOL_BIN = "tool-bin"
 SEALED_SESSION = ".refactory-session.json"
 #: What follows the workspace's path in the adapter's file beside it.
 SESSION_SUFFIX = ".session.json"
+
+
+def is_session_log(name: str) -> bool:
+    """Whether the declared write ``name`` is a sealed step's session facts: `SEALED_SESSION`
+    itself, or that name in a folder of the pass (``inspect/.refactory-session.json``), so
+    several sealed steps of one pass each keep their own."""
+    return PurePosixPath(str(name)).name == SEALED_SESSION
 
 
 def session_path(workspace: str | Path) -> Path:
@@ -1357,7 +1393,7 @@ def collect(workspace: Workspace, workdir: Path, writes: list[str], *,
         root = os.open(workspace.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for name in (writes[1:] if replies else writes):
-                if replies and name == SEALED_SESSION:
+                if replies and is_session_log(name):
                     # The adapter's record of the session, from beside the workspace: what
                     # the session left inside it under this name is never taken.
                     _collect_session(session, _path(workdir, name))

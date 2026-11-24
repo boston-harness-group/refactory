@@ -85,7 +85,7 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
     if spec.get('schema_version') != 1:
         raise ValueError('unsupported worker spec version')
     for name in spec['reads']:
-        if not _path(workdir, name).exists():
+        if name not in (spec.get('optional_reads') or ()) and not _path(workdir, name).exists():
             raise ValueError(f'required worker input is missing: {name}')
     from refactory_dsh.run import NODE_ENV, _knobs, _read_facts
     manifest = json.loads(os.environ.get(NODE_ENV, '{}'))
@@ -157,7 +157,9 @@ def execute(spec: dict[str, Any], workdir: Path) -> dict[str, Any]:
             workdir, node, spec.get('workspace'), knobs=context.knobs, facts=context.facts,
             route=client.route(), fresh=retrying and not kept,
             runtime_root=Path(runtime_root) if runtime_root else None,
-            tools=spec.get('tools') or (), reads=spec.get('reads') or ())
+            tools=spec.get('tools') or (),
+            reads=workspaces.present_reads(workdir, spec.get('reads') or (),
+                                           spec.get('optional_reads')))
 
     system = render(spec.get('system_prompt', ''), context)
     # Pre-flight: refuse a non-empty system prompt on a route that cannot carry it.

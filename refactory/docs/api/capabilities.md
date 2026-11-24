@@ -15070,6 +15070,337 @@ solve a SpreadsheetBench 2 task with SkillOpt's Claude Code agent harness (the g
 }
 ```
 
+## spreadsheetbench_v2/steps
+
+solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.
+
+```json
+{
+  "description": "solve a SpreadsheetBench 2 task with V2's agent setup split into its workflow's steps: four sealed Claude Code sessions (inspect, plan, implement, verify), each with its own prompt, hand on notes, a plan and output.xlsx",
+  "edges": [
+    {
+      "condition": "skip",
+      "source": "has_case",
+      "target": "finalize"
+    },
+    {
+      "condition": "proceed",
+      "source": "has_case",
+      "target": "inspect"
+    },
+    {
+      "condition": null,
+      "source": "implement",
+      "target": "verify"
+    },
+    {
+      "condition": null,
+      "source": "inspect",
+      "target": "plan"
+    },
+    {
+      "condition": null,
+      "source": "plan",
+      "target": "implement"
+    },
+    {
+      "condition": null,
+      "source": "prepare",
+      "target": "has_case"
+    },
+    {
+      "condition": null,
+      "source": "verify",
+      "target": "finalize"
+    }
+  ],
+  "gates": [
+    {
+      "id": "has_case",
+      "user": false
+    }
+  ],
+  "guidance": "Four sealed steps run in order -- inspect, plan, implement, verify -- each with its own prompt (<step>__task) and system prompt (<step>__system_prompt); they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after the last step is graded. The skill is one SKILL.md every step reads. The graph can be edited too (only data and finalize are protected). Keep every change general -- it must help on items no rollout saw.",
+  "id": "spreadsheetbench_v2/steps",
+  "nodes": [
+    {
+      "call": "",
+      "id": "data",
+      "kind": "data",
+      "knobs": [
+        "data_parallelism"
+      ],
+      "notes": "",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.steps_ops:finalize",
+      "id": "finalize",
+      "kind": "op",
+      "knobs": [],
+      "notes": "take the last step's output.xlsx as the item's output",
+      "role": "ceo"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench.ops:has_case",
+      "gate_kind": "fn",
+      "id": "has_case",
+      "kind": "gate",
+      "knobs": [],
+      "notes": "an item with no test case skips the steps",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "implement",
+      "kind": "agent",
+      "knobs": [
+        "implement__task",
+        "implement__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the implement step, writes output.xlsx",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "inspect",
+      "kind": "agent",
+      "knobs": [
+        "inspect__task",
+        "inspect__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the inspect step, writes inspect_notes.md",
+      "role": "solver"
+    },
+    {
+      "call": "",
+      "id": "plan",
+      "kind": "agent",
+      "knobs": [
+        "plan__task",
+        "plan__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the plan step, writes plan.md",
+      "role": "solver"
+    },
+    {
+      "call": "refactory_packages.spreadsheetbench_v2.steps_ops:prepare",
+      "id": "prepare",
+      "kind": "op",
+      "knobs": [
+        "skill"
+      ],
+      "notes": "record the item's start and lay the steps' workspace files",
+      "role": "ceo"
+    },
+    {
+      "call": "",
+      "id": "verify",
+      "kind": "agent",
+      "knobs": [
+        "verify__task",
+        "verify__system_prompt",
+        "max_turns",
+        "bash_timeout_ms",
+        "bash_output_chars"
+      ],
+      "notes": "a sealed Claude Code session (Bash): the verify step, writes verify_report.md, output.xlsx",
+      "role": "solver"
+    }
+  ],
+  "parameters": {
+    "bash_output_chars": {
+      "default": 10000,
+      "description": "the most of a command's output the model sees (V2's max_observation_length)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 10000,
+      "values": []
+    },
+    "bash_timeout_ms": {
+      "default": 60000,
+      "description": "each Bash command's timeout in ms (V2's execution_timeout)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 60000,
+      "values": []
+    },
+    "data_parallelism": {
+      "default": 8,
+      "description": "concurrent items",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        64
+      ],
+      "value": 8,
+      "values": []
+    },
+    "implement__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the implement step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "implement__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the implement step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n3. **Implement**: Create a python script (e.g., `process_data.py`) that performs the edit.\n   - You can use `Bash` tool to write Python code directly, e.g., cat > /tmp/script.py << 'EOF' ... EOF), which can then be used to verify syntax correctness.\n\n4. **Execute**: Run the python script using `python3 /tmp/script.py`\n\n## This Step\nThis is step 3 of 4 (Implement and Execute). Read `inspect_notes.md` (the Inspect step's notes) and `plan.md` (the Plan step's plan), then write {{output_path}} from {{spreadsheet_path}} as planned. The next step verifies it. When {{output_path}} is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "inspect__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the inspect step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "inspect__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the inspect step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n1. **Inspect**: Use `view_xlsx` to inspect the data. This will allow you to understand the structure and contents of the spreadsheet.\n   - You must choose mode `list` or `content` to inspect the data.\n   - List all sheets: `view_xlsx {{spreadsheet_path}} list`\n   - View specific sheet: `view_xlsx {{spreadsheet_path}} content \"Sheet1\"`\n   - View row range: `view_xlsx {{spreadsheet_path}} content \"Sheet1\" 1 50`\n\n## This Step\nThis is step 1 of 4 (Inspect). Later steps plan, implement and verify the edit, each in a new session that starts from the files named here. Inspect the input and write your notes to `inspect_notes.md` in the working directory: the workbook's structure, the sheets and cells relevant to the instruction, and the conventions you see (formulas, formats, layout). Do not write {{output_path}}: a later step does. When the notes are written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "max_turns": {
+      "default": 50,
+      "description": "each step's turn cap (V2's per_instance_call_limit, Claude Code's --max-turns)",
+      "frozen": true,
+      "kind": "int",
+      "range": [
+        1,
+        null
+      ],
+      "value": 50,
+      "values": []
+    },
+    "plan__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the plan step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "plan__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the plan step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n2. **Plan**: Decide how to manipulate the data using `openpyxl` or `LibreOffice`.\n\n## This Step\nThis is step 2 of 4 (Plan). The Inspect step's notes are in `inspect_notes.md`: read them first (you may also view {{spreadsheet_path}}). Write your plan to `plan.md` in the working directory: which cells to change and how. Do not write {{output_path}}: the next step implements your plan. When the plan is written, end your turn with a short final reply.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    },
+    "skill": {
+      "default": "",
+      "description": "the skill, written to SKILL.md, which every step reads; empty, no prompt mentions it",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "",
+      "values": []
+    },
+    "verify__system_prompt": {
+      "default": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "description": "text appended to Claude Code's system prompt for the verify step: V2's system template",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "You are a helpful Spreadsheet Automation Engineer that interacts with a computer shell to solve data tasks.\nYou operate in a REPL (Read-Eval-Print Loop) environment where you must issue exactly ONE command at a time.",
+      "values": []
+    },
+    "verify__task": {
+      "default": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "description": "the verify step's prompt: V2's instance template with its workflow cut to this step's stages",
+      "frozen": false,
+      "kind": "str",
+      "range": [
+        null,
+        null
+      ],
+      "value": "<task_context>\n\n## Important\n- When completing spreadsheet tasks, strictly avoid altering any cells that already contain values unless explicitly instructed. Modify only the cells that are required for the task.\n- You need to complete the instructions and ensure that the original formatting is preserved as much as possible.\n\n## Tools\nYou are provided with four tools: `Bash`, `view_xlsx` and `submit`. You must use these tools to complete the target task.\n**Important: You can only call ONE tool at a time per response.**\n- `Bash`: run shell commands (e.g., file operations, calling Python scripts with `python3`)\n- `view_xlsx`: inspect `.xlsx` files (list sheets, view sheet contents, see original formulas and values); a command on your PATH: run it with `Bash`\n- `submit`: finalize and submit your solution after verification; to submit, end your turn with a short final reply (there is no `submit` command)\n\n## Environment\nYou can complete the corresponding spreadsheet tasks using the following Python environment:\n`Pandas`, `openpyxl`, `numpy` and `LibreOffice`\nYou can use these environments to manipulate the spreadsheet data.\n\n## Recommended Workflow\n5. **Verify**: Check the output file exists, ensure the answer is correct.\n   - Do NOT combine verify and submit commands (e.g., `python3 script.py && submit`). Run them separately to ensure verification is complete before submission.\n   - Ensure the existing structure, layout, and formatting of the model are preserved throughout the process.\n\n6. **Submit**: When verification is successful, submit: end your turn with a short final reply.\n\n## This Step\nThis is step 4 of 4 (Verify and Submit). {{output_path}} was written by the Implement step from `plan.md` (the Plan step's plan) and `inspect_notes.md` (the Inspect step's notes). Check it against the instruction and {{spreadsheet_path}}, recalculating with LibreOffice as needed, and correct {{output_path}} where it is wrong: it is graded as you leave it. Write what you checked and found to `verify_report.md` in the working directory, then submit.\n\n{{skill_section}}</task_context>\n\n<instructions>\n\n## Task instructions\nYou need to process a spreadsheet file based on specific instructions.\n**Instruction:** {{instruction}}\n\n## Input and Output\nYou are provided with an input spreadsheet file and you need to generate an output spreadsheet file based on the output_path.\n**Input File:** {{spreadsheet_path}}\n**Output Path:** {{output_path}}\n\n</instructions>",
+      "values": []
+    }
+  },
+  "ports": [],
+  "scored": true,
+  "usage": {
+    "doc": "refactory/docs/spreadsheetbench.md",
+    "examples": [
+      {
+        "explanation": "Solve SpreadsheetBench 2 tasks with V2's agent setup split into its workflow's steps: four sealed Claude Code sessions per item (inspect, plan, implement, verify), each with Claude Code's Bash, view_xlsx and LibreOffice on its PATH and its own prompt; they hand on inspect_notes.md, plan.md and output.xlsx, and the output.xlsx left after verify is graded by V2's pipeline. Route it to the claude_code worker in skip (bypassPermissions) mode. Prepare the release once with python -m refactory_packages.spreadsheetbench_v2.prepare prepare SOURCE OUT then python -m refactory_packages.spreadsheetbench_v2.prepare check --grades OUT (required), and set SB2_DATA to OUT; LibreOffice must be installed (or named by SB_SOFFICE). Linux only (the sessions get a /tmp of their own).",
+        "knobs": {
+          "bash_output_chars": 10000,
+          "bash_timeout_ms": 60000,
+          "data_parallelism": 8,
+          "max_turns": 50
+        }
+      }
+    ],
+    "interfaces": {
+      "chat": "wf_open mode=spreadsheetbench_v2/steps; use refactory help topic=spreadsheetbench_v2/steps first",
+      "cli": "refactory ceo spreadsheetbench_v2/steps",
+      "panel": "Mode picker; Run once executes enabled modes including authoring; Optimize requires a scored mode. Use chat for stepwise gates."
+    },
+    "purpose": "solve a SpreadsheetBench 2 task with V2's agent setup (as spreadsheetbench_v2/swe) split into its workflow's steps: inspect -> plan -> implement -> verify, four sealed Claude Code sessions with Bash, view_xlsx and LibreOffice on the PATH. Each step's prompt is V2's instance template with the workflow cut to its stages plus a section naming its files, and V2's system template appended; both are the step's own open knobs (<step>__task, <step>__system_prompt). Steps hand on inspect_notes.md, plan.md and output.xlsx; verify may correct output.xlsx, which is graded by V2's pipeline after the last step; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Each step has the 50-turn cap, 60 s per Bash command and 10,000 characters of output shown; final.json records each step's turns and the total. The skill (one SKILL.md every step reads; empty by default) and the eight step texts are open knobs; the graph is editable too. A different starting point from V2's one session: baseline to be measured. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA, LibreOffice and Linux. Optimize only when scored; higher is better.",
+    "reviewed_schema": "6f1603a7836c6a4cd60bd3a48cc83d7ace374908e1c000cbd63a0e8f074e9678"
+  }
+}
+```
+
 ## spreadsheetbench_v2/swe
 
 solve a SpreadsheetBench 2 task with V2's own agent setup (SWE-agent/config/spreadsheet.yaml ported to one sealed Claude Code session): V2's instance template as the prompt (Bash for bash, view_xlsx run as a command, submit meaning ending the turn) and V2's system template appended to Claude Code's; the session has Claude Code's Bash, view_xlsx and LibreOffice on its PATH and a /tmp of its own, edits the workbook and writes output.xlsx, which is recalculated by LibreOffice as V2's open_spreadsheet.py does and graded by V2's evaluation.py; no output.xlsx fails the item. Same 277 items and split as spreadsheetbench_v2/agent. Turn cap 50 (V2's call cap, Claude Code's --max-turns), 60 s per Bash command and 10,000 characters of output shown (V2's); a session stopped at the cap is graded on what it left and its record says so. No gold feedback. Needs the claude_code worker in skip (bypassPermissions) mode, SB2_DATA (a prepared directory), LibreOffice and Linux. The skill (empty by default, then not mentioned) is the only unfrozen knob; the graph around it is editable too. Optimize only when scored; higher is better.

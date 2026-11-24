@@ -43,6 +43,12 @@ def prepare(ctx: Any) -> dict[str, Any]:
     """Record the item's start; write the workspace files and, for the analysts, the
     session's system prompt (upstream's system template), its prompt and the input's
     preview; return the prompt's slots."""
+    return lay_workspace(ctx, prompts=True)
+
+
+def lay_workspace(ctx: Any, *, prompts: bool) -> dict[str, Any]:
+    """`prepare`'s work; without ``prompts`` the session's prompts are not written (the
+    steps mode's prompts are its steps' own knobs, `steps_mode`)."""
     started = time.time()
     item = ops._item(ctx)  # noqa: SLF001 - the solver's reader of the item
     source = ops._input(ctx)  # noqa: SLF001
@@ -59,8 +65,9 @@ def prepare(ctx: Any) -> dict[str, Any]:
     shutil.copyfile(source, ctx._writable(swe_port.INPUT_PATH))  # noqa: SLF001
     ctx.write_text(swe_port.SKILL_PATH, skill if skill.strip() else "")
     ctx.write_text(ops.PREVIEW_FILE, preview)
-    ctx.write_text(ops.SYSTEM_FILE, swe_port.SYSTEM_TEMPLATE)
-    ctx.write_text(ops.USER_FILE, swe_port.render(str(item.get("instruction", "")), skill))
+    if prompts:
+        ctx.write_text(ops.SYSTEM_FILE, swe_port.SYSTEM_TEMPLATE)
+        ctx.write_text(ops.USER_FILE, swe_port.render(str(item.get("instruction", "")), skill))
     ctx.write_json(TURN, {"start": started, "status": ""})
     return {**facts, "has_case": True}
 
@@ -105,12 +112,12 @@ def finalize(ctx: Any) -> dict[str, Any]:
     return {"finished": True}
 
 
-def session_facts(ctx: Any) -> dict[str, Any]:
-    """What the adapter recorded of the session (`swe_port.SESSION_PATH`, collected from
-    beside the sealed workspace), or ``{}`` when it left nothing: then `finalize` flags the
+def session_facts(ctx: Any, path: str = swe_port.SESSION_PATH) -> dict[str, Any]:
+    """What the adapter recorded of the session (``path``, `swe_port.SESSION_PATH` by default,
+    collected from beside the sealed workspace), or ``{}`` when it left nothing: then `finalize` flags the
     item (``session_facts: missing``) and its verdict says so. Its turn count is Claude Code's own (``num_turns``),
     ``None`` when it reported none."""
-    facts = ctx.read_json(swe_port.SESSION_PATH, {}) if ctx.exists(swe_port.SESSION_PATH) else {}
+    facts = ctx.read_json(path, {}) if ctx.exists(path) else {}
     if not isinstance(facts, dict) or not facts:
         return {}
     turns = facts.get("num_turns")
