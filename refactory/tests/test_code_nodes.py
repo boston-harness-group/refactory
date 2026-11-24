@@ -848,17 +848,16 @@ def test_spine_relooops_like_the_walker(monkeypatch, tmp_path):
 # ── the request ───────────────────────────────────────────────────────────
 
 
-def test_the_request_describes_the_primitives_with_examples_from_this_graph():
+def test_the_request_describes_the_primitives_and_the_operators_give_this_graphs_examples():
     from refactory_dsh.nn import edits as edits_mod
+    from refactory_dsh.optim import base as base_mod
     from refactory_dsh.optim.base import composition_section, operation_lines
 
     applier = _applier()
     nodes = [dict(state, id=node_id) for node_id, state in applier.seed_state["graph"]["nodes"].items()]
     edges = applier.seed_state["graph"]["edges"]
-    on = "\n".join(composition_section(edits_mod.catalogue(), nodes, edges,
-                                       protected=applier.protected, code_nodes=True))
-    off = "\n".join(composition_section(edits_mod.catalogue(), nodes, edges,
-                                        protected=applier.protected, code_nodes=False))
+    on = "\n".join(composition_section(edits_mod.catalogue(), nodes, edges, code_nodes=True))
+    off = "\n".join(composition_section(edits_mod.catalogue(), nodes, edges, code_nodes=False))
     for text in (on, off):
         assert snippet.VERDICT in text and "parallel" in text and "max_iterations" in text
         assert "single-word condition" in text
@@ -870,24 +869,15 @@ def test_the_request_describes_the_primitives_with_examples_from_this_graph():
         assert "`on_exhausted`" in text and "fails that item only" in text
         assert "ends the whole run (no later item runs)" in text
         assert "wire what the branches make into the step after the join" in text
-        assert '"steps": ["compare"]' in text  # an example built from this graph's ids
-        assert "compose your own" in text
-        # The core operators are listed once, in the single op list, not here again.
-        assert "## Structural operators" not in text
+        # Facts only: the operators and their examples are under the operations.
+        assert "compose your own" not in text and '  {"' not in text
+        assert base_mod.STRUCTURAL_LEAD not in text
     ops = "\n".join(operation_lines(edits_mod.catalogue(), nodes, edges,
                                     protected=applier.protected))
-    assert ops.count("## Structural operators") == 1
-    assert '"step": "compare"' in ops  # its examples are built from this graph's ids too
+    assert ops.count(base_mod.STRUCTURAL_LEAD) == 1
+    assert '"step": "compare"' in ops  # its examples are built from this graph's ids
     assert snippet.RUN in on and snippet.RUN not in off and snippet.GATE not in off
     assert composition_section([{"op": "set_knob", "kind": "knob", "fields": []}], nodes, edges) == []
-    # Every example in it is a proposal this graph accepts.
-    for line in on.splitlines():
-        if line.startswith('  {"'):
-            example = json.loads(line)
-            outcome = _propose(example.get("edits") or [example], applier=_applier())
-            assert not isinstance(outcome, list) or not any(
-                r.startswith(("E-op", "E-shape", "V1", "V2", "V3", "V4", "V5", "V10", "V12", "V16", "V18"))
-                for r in outcome), (example, outcome)
 
 
 def _composition(code_nodes: bool, state: dict | None = None) -> str:
@@ -900,8 +890,7 @@ def _composition(code_nodes: bool, state: dict | None = None) -> str:
     text_knobs = [name for name, entry in state["knobs"].items()
                   if entry["spec"]["kind"] == "str"]
     return "\n".join(composition_section(edits_mod.catalogue(), nodes, state["graph"]["edges"],
-                                         protected=applier.protected, code_nodes=code_nodes,
-                                         text_knobs=text_knobs))
+                                         code_nodes=code_nodes, text_knobs=text_knobs))
 
 
 @pytest.mark.parametrize("code_nodes", [True, False])
@@ -930,24 +919,4 @@ def test_the_request_says_agents_read_no_files_and_where_a_fact_is_filled_in(cod
     plain = plain[plain.index("where `{{fact}}` is filled in"):].split("\n")[0]
     assert "_task`" not in plain.replace("`<id>__task`", "") and "fills facts" not in plain
 
-
-def test_the_code_examples_pass_the_code_check_and_run():
-    """The compositions' code (a simulation step, a code judge for iterative fitting) pass
-    the static code check (V18) and run: the step returns its own fact, the judge a
-    verdict."""
-    text = _composition(True)
-    examples = [json.loads(line) for line in text.splitlines() if line.startswith('  {"')]
-    edits = [edit for example in examples for edit in (example.get("edits") or [example])]
-    coded = [edit for edit in edits if edit.get("judge") == "code" or edit.get("kind") == "code"]
-    assert {edit["op"] for edit in coded} == {"insert", "loop"}
-    for edit in coded:
-        code = edit["text"]
-        assert snippet.static_issues(code) == []
-        namespace: dict = {}
-        exec(code, namespace)  # noqa: S102 - the example's own code, checked above
-        out = namespace["main"]({"files": {"x.txt": "text"}, "facts": {"a": "1"}})
-        if edit["op"] == "loop":
-            assert out["verdict"] in ("proceed", "reloop") and out["reason"]
-        else:
-            assert list(out["facts"]) == [edit["id"]]
 

@@ -6123,7 +6123,7 @@ class Loop(OuterLoop):
             frozen=list(self.config.frozen),
             protected=list(self.protected),
             graders=list(self.graders),
-            edit_check=self._edit_check(board),
+            graph_facts=self._graph_facts(board, described),
             # A refusal a slim repair fixed is not fed back: its fix is the candidate.
             rejections=summarise_reasons(
                 [
@@ -6799,11 +6799,10 @@ class Loop(OuterLoop):
             **({"rejected": dict(rejected)} if rejected else {})}
 
         gated = self.selection_mode() or False
-        # The tally of each change tried against the noise (`memory.change_tally_lines`):
-        # one source for this call and, with the note it writes, the proposer's request.
+        # The tally of each change tried against the noise (`memory.change_tally_lines`),
+        # for this call; the proposer reads every change in its own ledger.
         tally = memory.change_tally_lines(tried, val_items=len(self._manifest_val_ids()),
                                           spread=self._rescore_spread(prev.id), gated=gated)
-        self._pending_tally = tally
         lineage = self._lineage_edits(prev, current)
         # The candidates whose edits the changes section shows whole (`memory.changes_lines`).
         section = (memory.changes_heading(rejected.get("noun") if rejected else None)
@@ -6931,9 +6930,7 @@ class Loop(OuterLoop):
                             "generation": record.get("generation"), "prev": record.get("prev"),
                             "curr": record.get("curr"),
                             **({"rejected": dict(record["rejected"])}
-                               if record.get("rejected") else {}),
-                            **({"tally": list(self._pending_tally)}
-                               if getattr(self, "_pending_tally", None) else {})}
+                               if record.get("rejected") else {})}
             record = {**record, "updated": True, "chars": len(note["text"])}
         else:
             self._memory = {**self._memory, "not_updated": {
@@ -7594,15 +7591,28 @@ class Loop(OuterLoop):
         parent = by_id.get(str(parent_id)) if parent_id else None
         return parent if parent is not None or not board else board[0]
 
-    def _edit_check(self, board: list[Candidate]) -> Any:
-        """The request's operator table's verdict on one edit: `Run.mechanics` on the
-        edited candidate (the seed when none is known), so the table says what an
-        attempt would, recording nothing and without the code dry run (a sandbox
-        process per edit and request; the table marks an accepted code change so)."""
+    def _graph_facts(self, board: list[Candidate], described: dict[str, Any]) -> list[str]:
+        """`optim.base.graph_facts` for the request: each edit tried by `Run.mechanics` on
+        the edited candidate (the seed when none is known), recording nothing and without
+        the code dry run (a sandbox process per edit). A fact not worked out is said in
+        its row and journaled (``graph_facts_not_worked_out``)."""
+        from .optim.base import graph_facts
+
         parent = self._edited_candidate(board) or Candidate.from_state(self.mode.state_dict())
         run = Run(_loop=self)
-        return lambda edit: run.mechanics(Proposal(edit=edit), parent, record=False,
-                                          dry_run_code=False)
+        catalogue = [op for op in nn_edits.catalogue(self.config.edit_preset)
+                     if not self.config.allowed_ops or op["op"] in self.config.allowed_ops]
+        knobs = [{"name": name, **spec} for name, spec in described["knobs"].items()]
+        failures: list[dict[str, str]] = []
+        facts = graph_facts(described.get("node_states", []), described["edges"], knobs,
+                            catalogue, lambda edit: run.mechanics(
+                                Proposal(edit=edit), parent, record=False, dry_run_code=False),
+                            failures)
+        if failures:
+            # Said in the request's rows too; journaled so the run's record keeps it.
+            self._journal("graph_facts_not_worked_out", candidate=parent.id,
+                          failures=failures)
+        return facts
 
     def _describe_parent(self, board: list[Candidate]) -> tuple[dict[str, Any], str]:
         """The graph and knobs of the candidate this step edits, and a note when not.

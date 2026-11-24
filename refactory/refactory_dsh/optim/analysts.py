@@ -14,19 +14,21 @@ and ``merge.py`` port SkillOpt's ``reflect.py``, ``aggregate.py`` and ``clip.py`
   step's settings, as SkillOpt's analyst sees the current skill) and each item's full trace
   (`evidence.TRACE_FORM`). It writes at most
   ``FINDINGS_PER_ANALYST`` findings (SkillOpt's analyst edit budget L, 4): what goes
-  wrong, where in the graph (nodes, edges, settings, the structure) and what change
-  would fix it.
+  wrong, where in the graph (nodes, edges, settings, the structure), on which items,
+  with quotes and its impact. Analysts report and never prescribe: a finding says what
+  happens, not what to do (the proposer alone chooses the change).
 - **Success analysts**: the passed items, likewise (seed + 1, as SkillOpt): what made
-  them work and what must be kept.
+  them work.
 - **Merge**: failure findings merged level by level in batches of ``merge_batch_size``
-  (SkillOpt's, 8), then success findings, then a final merge with failure priority
-  that returns one de-duplicated list ranked by how many items each covers and its
-  impact. SkillOpt's shortcuts hold: one list is not merged, and the final merge runs
+  (SkillOpt's, 8), then success findings, then a final merge that keeps both sides'
+  findings in one list ordered by how many items each covers and its impact. SkillOpt's shortcuts hold: one list is not merged, and the final merge runs
   only when both sides found something. An unreadable merge reply keeps every input
   finding (SkillOpt's fallback concatenation).
 
 SkillOpt's patch and slow-update steps are not here: the proposer writes the edits (it
-is the step SkillOpt's rank and patch are). Its meta skill is the loop's memory pass
+is the step SkillOpt's rank and patch are), so unlike SkillOpt's analysts (ported
+unchanged in ``refactory_packages/skillopt``) ours write no suggested change. Its meta
+skill is the loop's memory pass
 (`optim.memory`): the per-epoch note every analyst and merge call reads here. The
 ranked findings reach the proposal request as "What the analysts found, ranked" and
 replace the readers' summaries (``AutoresearchOptimizer._analyse``).
@@ -45,7 +47,7 @@ from typing import Any, Callable, Mapping, Sequence
 from . import evidence
 from .base import (
     TRAJECTORY_INPUT_KEYS, _choice_lines, _clip, _expected, shown_label,
-    _ordered_items, _outcome, _table, NO_ANSWER_CAUSES,
+    _ordered_items, _outcome, NO_ANSWER_CAUSES,
 )
 
 #: SkillOpt's defaults (``_base_/default.yaml``: ``minibatch_size: 8``,
@@ -89,15 +91,8 @@ def context_overflow(error: str) -> bool:
 #: (the two sides' merges run side by side): 8 runs SkillOpt's 35 train items (about 5
 #: or 6 batches of 8) in one wave.
 CONCURRENCY = 8
-#: The ranked findings the proposal request shows, and their room.
-SHOWN_FINDINGS = 16
-SECTION_CHARS = 30000
-#: The least a finding's text or suggested change is cut to when the shown findings do
-#: not fit ``SECTION_CHARS`` whole (`section_lines`); each cut says how much it cut.
-FINDING_FLOOR = 100
 #: The evidence quotes a finding keeps (twice SkillOpt's three, for a merged finding).
 EVIDENCE_PER_FINDING = 6
-ITEM_IDS = 20
 
 KINDS = ("failure", "success")
 IMPACTS = ("high", "medium", "low")
@@ -297,29 +292,6 @@ def pipeline_text(ctx: Any, text_chars: int = PIPELINE_TEXT_CHARS) -> str:
     return "\n".join([*view, "", *_settings_lines(ctx.knobs, text_chars, exact=False)]).rstrip()
 
 
-def _changes_text(ctx: Any, kind: str = "failure") -> str:
-    """The changes the optimizer can make, in the proposer's own lines from the same
-    source (`base.operation_lines`), so a finding names only what the proposer is shown,
-    and, for a failure analyst (who recommends changes), which operators apply at each
-    step (`base.applicability_lines`)."""
-    from .base import applicability_lines, compute_policy, operation_lines
-
-    if not ctx.catalogue:
-        return "(not listed)"
-    return "\n".join([*operation_lines(
-        ctx.catalogue, ctx.node_states, ctx.edges, protected=getattr(ctx, "protected", ()),
-        knob_values={k.get("name"): k.get("value") for k in ctx.knobs},
-        step_routes=getattr(ctx, "step_routes", None),
-        tools=bool(getattr(ctx, "new_node_tools", False)),
-        policy=compute_policy(getattr(ctx, "parsimony", None),
-                              item_mean=bool(getattr(ctx, "score_is_item_mean", False)),
-                              gated=getattr(ctx, "selection", "") or False)),
-        *(applicability_lines(ctx.catalogue, ctx.node_states, ctx.edges, ctx.knobs,
-                              getattr(ctx, "edit_check", None),
-                              tools=bool(getattr(ctx, "new_node_tools", False)))
-          if kind == "failure" else ())])
-
-
 def _memory_text(ctx: Any) -> str:
     """The loop's memory note (`optim.memory`), as SkillOpt's analysts and merges read
     its optimizer meta skill; empty without one."""
@@ -351,8 +323,8 @@ important COMMON failure patterns across the batch.
 1. Read ALL items in the batch, every step of each.
 2. Identify the most prevalent, systematic failure patterns across them.
 3. For each, find where it starts: a step (node), the data passed along an edge, a
-   setting, or the pipeline's structure (a missing, redundant or misordered step, a
-   check or loop that is absent, work that should run in parallel).
+   setting, or the pipeline's structure (which steps run, in what order, what each one
+   sees), and say what happens there.
 4. Say how the steps took part, as far as the items show it: the step where things
    first went wrong for these items (in a loop or a long multi-turn run, the first step
    that did), any later step whose output replaced good work from an earlier step with
@@ -362,14 +334,8 @@ important COMMON failure patterns across the batch.
    it. A check, verify or vote step confirming an answer, or parallel attempts agreeing,
    is not repetition: agreement is what such a step reports.
    Leave out what the items cannot show.
-5. Say what change to the pipeline would fix it: a prompt or setting change, or a
-   structural change (add, remove, rewire, split, loop or parallelise steps).
-6. Address the COMMON patterns, not individual edge cases. A change must hold across
-   items; do not hardcode item-specific values.
-7. Do not ask for what the pipeline already does, or for retries or any other change
-   aimed at harness timeouts: a timeout is the harness's, not the pipeline's, and no
-   such item is here. A retry, a check or a loop aimed at a wrong answer is a change
-   like any other.
+5. Report the COMMON patterns, not individual edge cases.
+6. Do not propose changes: say what happens, not what to do.
 
 {claims}
 
@@ -381,17 +347,15 @@ connected by edges, each step configured by settings (knobs) such as its prompt.
 
 You are given the pipeline and a batch of items it answered right, each with its full
 trace (how a trace reads is said with the items).
-Identify what made them work: the behaviour COMMON across the batch, which step or
-part of the structure produces it, and what a change to the pipeline must preserve so
-these items keep passing.
+Identify what made them work: the behaviour COMMON across the batch and which step or
+part of the structure produces it.
 
 ## Rules
 - Focus on patterns that appear across MULTIPLE items in the batch.
 - Say where each pattern comes from: a step (node), an edge, a setting, or the
   pipeline's structure.
 - Patterns must generalise beyond specific items.
-- A pattern says what produced these passes, not a reason to avoid adding or changing
-  steps: "preserve" names what a change must keep, never that the structure stay as is.
+- Do not propose changes: say what happens, not what to do.
 
 {claims}
 
@@ -421,7 +385,6 @@ FAILURE_ANSWER = f"""Write one JSON object and nothing else:
  "findings": [{{"finding": "<what goes wrong, in one or two sentences>",
                {_WHERE},
                {_STEPS},
-               "change": "<the change to the pipeline that would fix it>",
                "items": ["<item id>", ...],
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote from a trace>", ...]}}]}}
@@ -432,7 +395,7 @@ Rules:
 - Every finding names the items it covers (ids from this batch) and quotes them.
 - "steps" is optional: give the parts the items show, with step ids from the pipeline;
   leave out any part that does not apply or cannot be told from them.
-- "impact": how much fixing it would raise the score.
+- "impact": how much of the score it costs.
 """
 
 SUCCESS_ANSWER = f"""Write one JSON object and nothing else:
@@ -440,7 +403,6 @@ SUCCESS_ANSWER = f"""Write one JSON object and nothing else:
 {{"batch_size": <number of items you read>,
  "findings": [{{"finding": "<what the passing items do right, in one or two sentences>",
                {_WHERE},
-               "preserve": "<what a change to the pipeline must keep so these items pass>",
                "items": ["<item id>", ...],
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote from a trace>", ...]}}]}}
@@ -448,7 +410,7 @@ SUCCESS_ANSWER = f"""Write one JSON object and nothing else:
 Rules:
 - At most {{limit}} findings, the most important first; fewer if warranted.
 - Every finding names the items it covers (ids from this batch) and quotes them.
-- "impact": how much losing it would lower the score.
+- "impact": how much of the score it carries.
 """
 
 
@@ -495,8 +457,7 @@ def analyst_prompt(ctx: Any, kind: str, index: int, total: int,
 def analyst_batch(ctx: Any, kind: str, index: int, total: int,
                   group: Sequence[dict[str, Any]], pipeline: str,
                   room: int = ANALYST_ROOM) -> tuple[str, dict[str, int]]:
-    """One analyst's request -- the pipeline, the changes possible, the optimizer's
-    memory note and the batch's items in full -- and what was clipped:
+    """One analyst's request -- the pipeline, the optimizer's memory note and the batch's items in full -- and what was clipped:
     ``{"items", "chars"}``. The items share what ``room`` (``ANALYST_ROOM``) leaves after
     the system prompt and the rest of the prompt. A batch made by `packer` fits whole;
     only an item longer than the room on its own (alone in its batch), or a call retried
@@ -531,7 +492,6 @@ def _analyst_frame(ctx: Any, kind: str, index: int, total: int, count: int,
     return ((f"# Analysing {label} items -- batch {index} of {total}\n\n"
              f"Mode: `{ctx.mode_name}`.\n\n"
              f"## The pipeline\n{pipeline}\n\n"
-             f"## The changes the optimizer can make\n{_changes_text(ctx, kind)}\n\n"
              f"{_objective_text(ctx)}{_memory_text(ctx)}"
              f"## The {label} items ({count} total)\n"
              f"Each item in full: {evidence.TRACE_FORM}.\n\n"),
@@ -585,8 +545,8 @@ def _steps(value: Any) -> dict[str, Any]:
 
 
 def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
-    """One finding normalised: its ``source``, text, ``where``, change (failure) or what
-    to keep (success), the cited items checked against ``items`` (an id outside them is
+    """One finding normalised: its ``source``, text, ``where``, its step attribution, the
+    cited items checked against ``items`` (an id outside them is
     dropped and kept under ``not_in_batch``), ``support`` (the items it covers),
     ``impact``, ``batches`` and evidence. ``None`` for an entry with no text."""
     if not isinstance(raw, dict):
@@ -604,8 +564,6 @@ def finding(raw: Any, kind: str, items: set[str]) -> dict[str, Any] | None:
     kept = [i for i in cited if i in items]
     return {"source": source, "finding": text, "where": _where(raw.get("where")),
             "steps": _steps(raw.get("steps")),
-            "change": str(raw.get("change") or "").strip(),
-            "preserve": str(raw.get("preserve") or "").strip(),
             "items": kept, "not_in_batch": [i for i in cited if i not in items],
             "support": len(kept), "impact": impact if impact in IMPACTS else "",
             "batches": merged_from, "evidence": _strings(raw.get("evidence"))[:EVIDENCE_PER_FINDING]}
@@ -635,50 +593,42 @@ Merge them into ONE coherent, de-duplicated list, ranked.
 Merge guidelines:
 1. Deduplicate: findings about the same problem in the same place become one; keep the
    clearest wording, list the union of their items and keep the best evidence.
-2. Resolve conflicts: if findings disagree on the cause or the change, choose the one
-   with stronger evidence or combine them.
-3. Preserve unique insights: keep every non-redundant finding.
-4. Prevalent-pattern bias: findings reported by several lists or covering many items are
-   systematic; rank them highest. A finding about one item may be dropped if it is
-   item-specific.
-5. Rank by how many items a finding covers and its impact, most important first.
-6. For each merged finding, "batches" is how many source findings support it (add up
+2. When findings disagree on the cause, keep the one with stronger evidence, or both.
+3. Keep every non-redundant finding.
+4. Order the list by how many items a finding covers, then its impact.
+5. For each merged finding, "batches" is how many source findings support it (add up
    the "batches" of the findings merged into it).
+6. Do not propose changes: say what happens, not what to do.
 
 You reply with JSON only."""
 
 MERGE_SUCCESS_SYSTEM = """\
 You coordinate the analysis of what a multi-step AI pipeline does right. You receive
 several lists of findings, each from an analyst who read a different batch of passed
-items. Merge them into ONE de-duplicated list of what works and must be preserved,
-ranked.
+items. Merge them into ONE de-duplicated list of what works, ranked.
 
 Merge guidelines:
 1. Deduplicate: keep the most general version of similar patterns, list the union of
    their items and keep the best evidence.
-2. Prevalent-pattern bias: patterns seen across many items and lists rank highest.
-3. Rank by how many items a finding covers and its impact, most important first.
-4. For each merged finding, "batches" is how many source findings support it (add up
+2. Order the list by how many items a finding covers, then its impact.
+3. For each merged finding, "batches" is how many source findings support it (add up
    the "batches" of the findings merged into it).
+4. Do not propose changes: say what happens, not what to do.
 
 You reply with JSON only."""
 
 MERGE_FINAL_SYSTEM = """\
 You coordinate the FINAL merge of the analysis of a multi-step AI pipeline. You receive
 two merged lists:
-1. Failure findings: what goes wrong and the change that would fix it (high priority).
-2. Success findings: what works and must be preserved (lower priority).
+1. Failure findings: what goes wrong.
+2. Success findings: what works.
 
 Merge guidelines:
-1. FAILURE FINDINGS TAKE PRIORITY: the goal is to fix failures. Keep the failure findings
-   unless one directly conflicts with a well-supported success finding; then say, in its
-   change, what it must preserve.
-2. Deduplicate: when a failure and a success finding cover the same point, keep the
-   failure one and fold what must be preserved into it.
-3. Preserve success insights not covered by any failure finding.
-4. Rank the whole list by how many items a finding covers and its impact, most important
-   first; findings with more "batches" represent broader consensus.
-5. Keep each finding's "source" ("failure" or "success"), "items" and "batches".
+1. Keep every finding of both lists: a failure finding and a success finding about the
+   same step are two facts, and both stay.
+2. Order the whole list by how many items a finding covers, then its impact.
+3. Keep each finding's "source" ("failure" or "success"), "items" and "batches".
+4. Do not propose changes: say what happens, not what to do.
 
 You reply with JSON only."""
 
@@ -689,22 +639,19 @@ MERGE_ANSWER = f"""Write one JSON object and nothing else:
                "finding": "<...>",
                {_WHERE},
                {_STEPS},
-               "change": "<failure: the change that would fix it>",
-               "preserve": "<success: what must be kept>",
                "items": ["<item id>", ...],
                "batches": <int>,
                "impact": "high|medium|low",
                "evidence": ["<a short verbatim quote>", ...]}}]}}
 
-The list is ranked: the most important finding first. "steps" is optional: keep it
+The list is ordered by how many items a finding covers, then its impact. "steps" is optional: keep it
 from the findings merged (each part's union; the first "first_wrong" when they differ).
 """
 
 
 def _for_merge(found: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Findings as a merge call reads them (without the checker's bookkeeping)."""
-    keys = ("source", "finding", "where", "steps", "change", "preserve", "items", "batches",
-            "impact", "evidence")
+    keys = ("source", "finding", "where", "steps", "items", "batches", "impact", "evidence")
     return [{key: f[key] for key in keys if f.get(key) not in (None, "", [], {})} for f in found]
 
 
@@ -752,66 +699,39 @@ def merge_system(step: str) -> str:
 # ── the request section ────────────────────────────────────────────────────
 
 
-def _where_text(where: Mapping[str, Any], cap: int | None = None) -> str:
+def _where_text(where: Mapping[str, Any]) -> str:
     parts = [f"step `{n}`" for n in where.get("nodes") or ()]
     parts += [f"edge `{e}`" for e in where.get("edges") or ()]
     parts += [f"setting `{k}`" for k in where.get("knobs") or ()]
     if where.get("structure"):
-        parts.append(f"structure: {_cut(where['structure'], cap)}")
+        parts.append(f"structure: {_cut(where['structure'])}")
     return "; ".join(parts) or "unclear"
 
 
-def _cut(text: Any, cap: int | None) -> str:
-    """``text`` whole, its line breaks kept (a proposed prompt keeps its layout); past
-    ``cap`` characters, cut there with how much was cut said (``… [cut: N chars]``); of
-    several lines, fenced byte-exact (`evidence.quoted`)."""
-    text = str(text or "").strip()
-    if cap is not None and len(text) > cap:
-        text = f"{text[:cap]}… [cut: {len(text) - cap} chars]"
-    # A text of several lines goes byte-exact in a fence of its own (`evidence.quoted`):
-    # a proposed prompt's "## Rules" reads as no heading and is copied back unchanged.
-    return evidence.quoted(text)
+def _cut(text: Any) -> str:
+    """``text`` whole, its line breaks kept (a quoted text keeps its layout); of several
+    lines, fenced byte-exact (`evidence.quoted`), so a quoted prompt's "## Rules" reads as
+    no heading."""
+    return evidence.quoted(str(text or "").strip())
 
 
-def _actions(entry: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """A finding's advice, each part it carries: what to change and what to keep, the
-    one its side leads with first (a success finding's keep, a failure's change)."""
-    parts = [("change", str(entry.get("change") or "").strip()),
-             ("keep", str(entry.get("preserve") or "").strip())]
-    if entry.get("source") == "success":
-        parts.reverse()
-    return [(label, text) for label, text in parts if text]
-
-
-def _texts(entry: Mapping[str, Any]) -> list[str]:
-    """Every text of a finding the section may have to cut: the finding, its advice,
-    where it places itself in the structure, and each evidence quote."""
-    return [str(entry.get("finding") or "").strip(),
-            *(text for _label, text in _actions(entry)),
-            str((entry.get("where") or {}).get("structure") or "").strip(),
-            *(str(q).strip() for q in entry.get("evidence") or ())]
-
-
-def finding_line(rank: int, entry: Mapping[str, Any], cap: int | None = None) -> str:
-    """One ranked finding with every text whole -- the finding, what to change and what
-    to keep, where, all its evidence quotes, line breaks kept (SkillOpt never cuts its
-    analysts' edits); each text cut to ``cap`` only when the section must fit."""
+def finding_line(rank: int, entry: Mapping[str, Any]) -> str:
+    """One finding with every text whole -- the finding, where, how the steps took part,
+    every item id and every evidence quote, line breaks kept (SkillOpt never cuts its
+    analysts' edits)."""
     ids = list(entry.get("items") or ())
-    id_text = ", ".join(ids[:ITEM_IDS]) + (f" and {len(ids) - ITEM_IDS} more"
-                                           if len(ids) > ITEM_IDS else "")
+    id_text = ", ".join(ids)
     head = [f"{entry.get('source', 'failure')}",
             f"{len(ids)} item(s)" + (f": {id_text}" if ids else "")]
     if entry.get("impact"):
         head.append(f"impact {entry['impact']}")
     if int(entry.get("batches") or 1) > 1:
         head.append(f"from {entry['batches']} findings")
-    action = "".join(f" -- {label}: {_cut(text, cap)}" for label, text in _actions(entry))
     roles = steps_text(entry.get("steps")) if entry.get("source", "failure") == "failure" else ""
-    if roles:
-        action = f" -- steps: {roles}{action}"
-    quotes = [f'"{_cut(q, cap)}"' for q in entry.get("evidence") or ()]
-    return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'), cap)} "
-            f"-- where: {_where_text(entry.get('where') or {}, cap)}{action}"
+    action = f" -- steps: {roles}" if roles else ""
+    quotes = [f'"{_cut(q)}"' for q in entry.get("evidence") or ()]
+    return (f"{rank}. [{'; '.join(head)}] {_cut(entry.get('finding'))} "
+            f"-- where: {_where_text(entry.get('where') or {})}{action}"
             + (" -- evidence: " + " | ".join(quotes) if quotes else ""))
 
 
@@ -830,200 +750,6 @@ def steps_text(steps: Any) -> str:
     return "; ".join(parts)
 
 
-def flow_order(nodes: Sequence[Any], edges: Sequence[Any] = ()) -> list[str]:
-    """The pipeline's node ids in the order work flows through them: a topological order
-    of the edges once each edge that closes a loop (back to a step on the current path)
-    is set aside, ties kept in the listed order. The path search starts from the nodes
-    no edge enters, then from other steps, then from gates -- every loop passes through a
-    gate (rule V10), so a gate is never taken for the start of the loop it closes,
-    whatever its id. Malformed entries are skipped."""
-    listed = [str(n.get("id")) for n in nodes if isinstance(n, Mapping) and n.get("id")]
-    gates = {str(n.get("id")) for n in nodes
-             if isinstance(n, Mapping) and n.get("kind") == "gate"}
-    rank = {node: index for index, node in enumerate(listed)}
-    out_edges: dict[str, list[str]] = {node: [] for node in listed}
-    for edge in edges or ():
-        if not isinstance(edge, Mapping):
-            continue
-        source, target = str(edge.get("source")), str(edge.get("target"))
-        if source in rank and target in rank and target not in out_edges[source]:
-            out_edges[source].append(target)
-    # Edges back to a step on the current depth-first path close a loop.
-    entered = {target for targets in out_edges.values() for target in targets}
-    starts = ([n for n in listed if n not in entered]
-              + [n for n in listed if n in entered and n not in gates]
-              + [n for n in listed if n in entered and n in gates])
-    back: set[tuple[str, str]] = set()
-    state: dict[str, int] = {}
-    for root in starts:
-        if root in state:
-            continue
-        stack = [(root, iter(out_edges[root]))]
-        state[root] = 1
-        while stack:
-            node, children = stack[-1]
-            child = next(children, None)
-            if child is None:
-                state[node] = 2
-                stack.pop()
-            elif state.get(child) == 1:
-                back.add((node, child))
-            elif child not in state:
-                state[child] = 1
-                stack.append((child, iter(out_edges[child])))
-    indegree = {node: 0 for node in listed}
-    for source, targets in out_edges.items():
-        for target in targets:
-            if (source, target) not in back:
-                indegree[target] += 1
-    ready = sorted((n for n in listed if not indegree[n]), key=rank.__getitem__)
-    order: list[str] = []
-    while ready:
-        node = ready.pop(0)
-        order.append(node)
-        for target in out_edges[node]:
-            if (node, target) in back:
-                continue
-            indegree[target] -= 1
-            if not indegree[target]:
-                ready.append(target)
-                ready.sort(key=rank.__getitem__)
-    return order + [n for n in listed if n not in order]
-
-
-def _known_steps(steps: Mapping[str, Any], known: set[str]) -> dict[str, Any]:
-    """A finding's step attribution with the step ids the pipeline lacks dropped (all
-    kept when ``known`` is empty)."""
-    out: dict[str, Any] = {}
-    for role in STEP_ROLES:
-        ids = [s for s in _step_ids(steps.get(role)) if not known or s in known]
-        if ids:
-            out[role] = ids
-    return out
-
-
-def step_map(findings: Sequence[Any], nodes: Sequence[Any] = (),
-             edges: Sequence[Any] = ()) -> list[dict[str, Any]]:
-    """Per step, from the failure findings: the items and findings that name it
-    (``where.nodes``) and that give it each role of `STEP_ROLES`, an item counted once per
-    step and role however many findings cite it. Rows in the pipeline's flow order
-    (`flow_order` of ``nodes`` and ``edges``), only steps with a count; a step id the
-    pipeline does not have is ignored (when ``nodes`` is known). Robust: a finding of any
-    odd shape counts for what reads in it, never raises."""
-    order = flow_order(nodes, edges)
-    known = set(order)
-    roles = ("named", *STEP_ROLES)
-    cells: dict[str, dict[str, tuple[set[str], set[int]]]] = {}
-    for index, entry in enumerate(findings or ()):
-        if not isinstance(entry, Mapping) or entry.get("source", "failure") != "failure":
-            continue
-        items = {str(i) for i in entry.get("items") or ()
-                 if isinstance(i, (str, int))} if isinstance(entry.get("items"), list) else set()
-        where = entry.get("where") if isinstance(entry.get("where"), Mapping) else {}
-        given = _steps(entry.get("steps"))
-        by_role = {"named": _step_ids(where.get("nodes")),
-                   **{role: _step_ids(given.get(role)) for role in STEP_ROLES}}
-        for role in roles:
-            for step in by_role[role]:
-                if known and step not in known:
-                    continue
-                seen, found = cells.setdefault(step, {}).setdefault(role, (set(), set()))
-                seen.update(items)
-                found.add(index)
-    steps = [s for s in order if s in cells] + sorted(s for s in cells if s not in known)
-    return [{"step": step, **{role: {"items": len(cells[step][role][0]),
-                                     "findings": len(cells[step][role][1])}
-                              for role in roles if role in cells[step]}}
-            for step in steps]
-
-
-def reader_failures(reader_findings: Sequence[Any] | None) -> list[dict[str, Any]]:
-    """The readers' failure patterns (``ProposalContext.reader_findings``) as failure
-    findings `step_map` reads: the step a pattern says it starts in (``"unclear"`` and
-    empty dropped) and its items. Readers give no step attribution."""
-    out: list[dict[str, Any]] = []
-    for found in reader_findings or ():
-        if not isinstance(found, Mapping):
-            continue
-        for pattern in found.get("failure_patterns") or ():
-            if not isinstance(pattern, Mapping):
-                continue
-            steps = [s for s in _step_ids(pattern.get("step")) if s.lower() != "unclear"]
-            items = pattern.get("items")
-            out.append({"source": "failure", "where": {"nodes": steps},
-                        "items": list(items) if isinstance(items, (list, tuple)) else []})
-    return out
-
-
-#: Where the step map's findings come from, as its caption names them.
-_MAP_SOURCES = {
-    "analysts": ("the analysts' failure findings", "failure finding(s)",
-                 "\"What the analysts found, ranked\""),
-    "readers": ("the readers' failure patterns", "failure pattern(s)",
-                "\"What the readers found\""),
-}
-
-
-def step_map_lines(findings: Sequence[Any], nodes: Sequence[Any] = (),
-                   edges: Sequence[Any] = (), *, source: str = "analysts",
-                   shown: int | None = None, code_nodes: bool = False,
-                   structural: bool = True) -> list[str]:
-    """"Where the pipeline fails, step by step", for the proposal request: `step_map` over
-    every failure finding (or reader pattern, ``source``), in the pipeline's flow order.
-    ``shown`` is how many findings of either kind the ranked list below shows, said when
-    the map counts more. With ``structural`` (the run permits structural operations),
-    when a step replaced earlier good work or repeated others' output, one line names
-    the two places such a cause can lie, with examples of each. Nothing without a
-    failure finding that names a step of the pipeline."""
-    found = [f for f in findings or ()
-             if isinstance(f, Mapping) and f.get("source", "failure") == "failure"]
-    if source == "readers":
-        # A reader names one step or none ("unclear", dropped): only those that name one
-        # are counted, and readers give no roles, so only the first column is shown.
-        found = [f for f in found if _step_ids((f.get("where") or {}).get("nodes"))]
-    rows = step_map(found, nodes, edges)
-    if not rows:
-        return []
-    known = set(flow_order(nodes, edges))
-    what, unit, where = _MAP_SOURCES.get(source, _MAP_SOURCES["analysts"])
-    roles = ("named",) if source == "readers" else ("named", *STEP_ROLES)
-    headers = {"named": "named in failure findings",
-               "first_wrong": "where things first went wrong",
-               "overrode": "replaced good work from an earlier step with worse",
-               "repeated": "repeated other steps' output without adding to it"}
-
-    def cell(row: Mapping[str, Any], role: str) -> str:
-        counts = row.get(role)
-        return f"{counts['items']} ({counts['findings']})" if counts else "-"
-
-    counted = (f"Counted over all {len(found)} {unit}"
-               + (f"; the list below shows the top {shown} findings of either kind"
-                  if shown is not None and len(findings or ()) > shown else "") + ".")
-    lines = [
-        "## Where the pipeline fails, step by step",
-        f"From {what} for this candidate (in full under {where}). Each cell is the failed "
-        "train items, then in brackets the findings, that give the step that role; an item "
-        f"counts once per cell and may be in several cells. {counted}",
-        _table(["step", *(headers[role] for role in roles)],
-               [[row["step"], *(cell(row, role) for role in roles)] for row in rows])]
-    attributed = sum(1 for f in found if _known_steps(_steps(f.get("steps")), known))
-    if source != "readers" and attributed < len(found):
-        lines.append(f"({len(found) - attributed} of {len(found)} {unit} say only where "
-                     "they start, not how the steps took part.)")
-    interacts = any(row.get("overrode") or row.get("repeated") for row in rows)
-    if structural and interacts:
-        lines.append(
-            "Where a step replaced earlier good work or repeated other steps' output, the "
-            "cause can lie in what the step is told (its instructions) or in what it is "
-            "given and how the work is split between steps. For example: instructions on "
-            "what to keep from earlier steps and when to depart from it; independent "
-            "attempts that do not see each other's output; a vote or a check across "
-            "attempts; a check that sends a step back with a reason"
-            + ("; a deterministic code step" if code_nodes else "")
-            + ". Choose by the evidence.")
-    return [*lines, ""]
-
-
 def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
     """"What the analysts found, ranked", for the proposal request; nothing without an
     analysis."""
@@ -1039,35 +765,13 @@ def section_lines(analysis: Mapping[str, Any] | None) -> list[str]:
         f"{len(by_kind['failure'])} batch(es) and "
         f"{sum(len(b['items']) for b in by_kind['success'])} passed item(s) in "
         f"{len(by_kind['success'])} batch(es) of up to {analysis.get('group_size')}. Their "
-        "findings were merged and ranked, failures first, by how many items each covers "
-        "and its impact. Each says where in the pipeline it starts and what change would "
-        "fix it (or, for what works, what to keep). Choose your change from them and the "
-        "evidence below; the ranking is advice, not a rule."]
+        "findings were merged and ordered by how many items each covers, then its impact; "
+        "every finding is shown. Each says what happens, where in the pipeline, on which items, "
+        "with quotes from the traces; none says what to change."]
     found = list(analysis.get("findings") or ())
     if not found:
         lines.append("(The analysts found no common pattern.)")
-    used = len("\n".join(lines))
-    shown = found[:SHOWN_FINDINGS]
-    whole = [finding_line(rank, entry) for rank, entry in enumerate(shown, 1)]
-    cap = None
-    if used + sum(len(line) + 1 for line in whole) > SECTION_CHARS:
-        # Too long whole: the findings' texts and suggested changes share the room left
-        # after everything else on their lines (each cut is said), longest cut first.
-        texts = [len(text) for entry in shown for text in _texts(entry)]
-        fixed = sum(len(line) + 1 for line in whole) - sum(texts)
-        marks = len(texts) * len("… [cut: 00000 chars]")
-        cap = item_cap(texts, SECTION_CHARS - used - fixed - marks, floor=FINDING_FLOOR)
-    for rank, entry in enumerate(shown, 1):
-        line = whole[rank - 1] if cap is None else finding_line(rank, entry, cap)
-        if used + len(line) + 1 > SECTION_CHARS:
-            lines.append(f"({len(found) - rank + 1} more finding(s) not shown: the findings "
-                         f"are kept within {SECTION_CHARS} characters)")
-            break
-        lines.append(line)
-        used += len(line) + 1
-    else:
-        if len(found) > SHOWN_FINDINGS:
-            lines.append(f"({len(found) - SHOWN_FINDINGS} lower-ranked finding(s) not shown)")
+    lines += [finding_line(rank, entry) for rank, entry in enumerate(found, 1)]
     for batch in analysis.get("batches") or ():
         if batch.get("error"):
             label = "failed" if batch.get("kind") == "failure" else "passed"

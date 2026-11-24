@@ -166,8 +166,8 @@ class Run:
         rejection recorded (``record`` False records no optimizer call either;
         ``dry_run_code`` False skips running new code on recorded inputs): the catalogue (an unknown or unpermitted operation), then
         `Optimizer.attempt` with this run's invariants, frozen knobs, tried states,
-        protected and grading steps. The request's operator table asks it for each
-        operator it lists, so the table says what an attempt would."""
+        protected and grading steps. The request's "What this graph allows" asks it for
+        each edit it lists (`Loop._graph_facts`), so the facts are what an attempt says."""
         # Unknown and unpermitted are two facts with two fixes; see Loop._refinement.
         reason = proposal_refusal(
             proposal, permitted=self._loop.permitted_ops(),

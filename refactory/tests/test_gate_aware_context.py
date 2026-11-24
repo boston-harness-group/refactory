@@ -182,7 +182,7 @@ def _run_reasoning(tmp_path: Path, monkeypatch: Any, **overrides: Any):
 
 def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkeypatch):
     """Epoch 3 edits 7, whose child 6 the gate rejected: 6 against 7 on their shared
-    train items, t5 broken, with both trajectories, the edit, the gate's decision
+    train items, t5 broken in one line with both outcomes, the edit, the gate's decision
     and the noise warning; no val or test item appears."""
     loop, proposer = _run_reasoning(tmp_path, monkeypatch)
     text = proposer.contexts[2].render()
@@ -190,8 +190,9 @@ def test_the_last_edit_is_compared_item_by_item_with_its_parent(tmp_path, monkey
     ids = {_level(c): c.id for c in loop.population}
     assert f"### Child {ids[6]} of {ids[7]} -- gate: rejected" in section
     assert "On 8 shared train item(s): 0 fixed (parent wrong, child right), 1 broken" in section
-    head = section.split(f"#### Item t5 -- broken (child {ids[6]})\n", 1)[1].split("\n", 1)[0]
-    assert "Parent: passed (score" in head and "Child: answered wrong (score" in head, head
+    line = next(line for line in section.splitlines()
+                if line.startswith(f"- Item t5 -- broken (child {ids[6]})"))
+    assert "parent passed" in line and "child answered wrong" in line, line
     assert 'name="level" -- value: 6' in section and "different seeds" in section
     assert not any(f"Item {v}" in section for v in ("v1", "v2", "v3", "v4", "x1", "x2", "x3"))
 
@@ -225,12 +226,11 @@ def test_graded_changes_list_the_largest_moves_each_way():
     assert change["up"] == ["i7", "i6", "i5"] and change["down"] == ["i0", "i1", "i2"]
 
 
-def test_every_changed_item_is_named_and_a_few_are_shown_whole_never_cut():
-    """Twenty broken items with long replies: every one is named, with its answers and the
-    step whose reply changed; the first ``EDIT_ITEMS_WHOLE`` that fit the room show that
-    step whole, parent beside child, the kept step only named -- items chosen, no text
-    cut."""
-    from refactory_dsh.optim.base import EDIT_ITEMS_WHOLE, _edit_change_lines
+def test_every_changed_item_is_named_in_one_line_and_two_show_their_replies():
+    """Twenty broken items with long replies: every one is named in one line, with its
+    answers and the step whose reply changed; the first broken item shows the reply that
+    moved, parent's and child's, each within ``EDIT_REPLY_CHARS``; the rest show none."""
+    from refactory_dsh.optim.base import EDIT_REPLY_CHARS, _edit_change_lines
 
     def rec(item: str, passed: bool, reply: str) -> dict[str, Any]:
         return {"id": item, "passed": passed, "score": float(passed),
@@ -241,28 +241,14 @@ def test_every_changed_item_is_named_and_a_few_are_shown_whole_never_cut():
     pair = {"child": "c", "parent": "p", "edit": [],
             "parent_records": [rec(f"i{k}", True, f"OLD-{k} " + "z" * 9000) for k in range(20)],
             "child_records": [rec(f"i{k}", False, f"NEW-{k} " + "y" * 9000) for k in range(20)]}
-    omissions: list = []
-    text = "\n".join(_edit_change_lines([pair], omissions=omissions, room=10 ** 6))
-    whole = [k for k in range(20) if f"#### Item i{k} -- broken (child c)" in text]
-    # The first of the broken items in their listed (id) order.
-    assert [f"i{k}" for k in whole] == sorted(f"i{k}" for k in range(20))[:EDIT_ITEMS_WHOLE]
+    text = "\n".join(_edit_change_lines([pair]))
     for k in range(20):
-        shown = k in whole
-        assert (f"OLD-{k} " + "z" * 9000 in text) is shown
-        assert (f"NEW-{k} " + "y" * 9000 in text) is shown
-        assert text.count(f"QUESTION i{k}\n") == int(shown) and f"KEPT i{k}" not in text
-        if not shown:
-            assert (f"- Item i{k} -- broken (child c), score 1 -> 0: parent passed; child "
-                    "answered wrong; `t` 1 -> 1 run(s), reply changed (not shown whole: 4 "
-                    "items, the most shown whole, came first).") in text
-    assert text.count("Same reply in parent and child: `s`.") == EDIT_ITEMS_WHOLE
-    listed = sorted(f"i{k}" for k in whole)
-    assert f"20 changed item(s); shown whole below: {', '.join(listed)}" in text
-    assert omissions == [] and "chars omitted" not in text
-    # A room for two: two shown whole, the rest still named.
-    small = "\n".join(_edit_change_lines([pair], room=2 * 18800))
-    assert small.count("#### Item ") == 2 and small.count("\n- Item ") == 18
-
+        assert (f"- Item i{k} -- broken (child c), score 1 -> 0: parent passed; child "
+                "answered wrong; `t` 1 -> 1 run(s), reply changed.") in text
+        assert (f"OLD-{k} " in text) is (k == 0) and (f"NEW-{k} " in text) is (k == 0)
+        assert f"KEPT i{k}" not in text, "a reply that did not move is not shown"
+    assert "#### Replies that moved on item i0 (broken, child c)" in text
+    assert "z" * (EDIT_REPLY_CHARS + 1) not in text and "y" * (EDIT_REPLY_CHARS + 1) not in text
 
 def test_the_optimizer_sees_its_earlier_reasoning_beside_what_happened(tmp_path, monkeypatch):
     """The latest round's proposals in full -- the rationale, prediction and diagnosis
@@ -364,9 +350,10 @@ def test_the_gate_note_states_its_resolution_and_when_a_rejected_change_may_be_b
     assert ("the mean over 25 validation items, so one item is 1/25 = 0.04 of it, and a "
             "rejection can come down to a single item") in known
     assert "must not be proposed again unchanged" in known
-    # Building on a rejected change is about a fixable mechanism, not its net count.
-    assert ("A rejected change can hold the right idea with a fixable mechanism, whatever its "
-            "net count") in known
+    # A rejected change is said as a fact: where its edits and moved items are.
+    assert ("The latest rejected change's full edits and the items it moved are under "
+            "\"Your earlier reasoning\".") in known
+    assert "fixable mechanism" not in known and "build on" not in known
     assert "strongly positive" not in known
     assert "did not generalise" not in known and "do not build on" not in known
     unknown = ProposalContext(history=rows, leaderboard=rows[:1]).render()
@@ -431,7 +418,9 @@ def test_the_latest_rejected_candidate_is_shown_in_full_whatever_its_net():
     assert full.startswith("### Full edits of mine, the latest rejected candidate "
                            "(1 fixed / 7 broken)")
     # Its edits are whole once, in its own block, which the full-edits heading points to.
-    assert text.count(long) == 1 and long not in full and "Whole in its block above" in full
+    assert text.count(long) == 1 and long not in full
+    assert "Its edits are whole in its block above. It was rejected" in full
+    assert "built on" not in full and "fix what went wrong" not in full
     assert "OLDVALUE" not in full and "KEPTVALUE" not in full
     huge = [entry("big", 3, 0, "Z" * 9000)]
     big = ProposalContext(reasoning=huge).render()
@@ -476,7 +465,7 @@ def test_the_latest_rejected_change_says_what_went_wrong_in_it():
                            ).render()
     block = text[text.index("### Full edits of loopy"):].split("\n## ", 1)[0]
     assert "CHECK-CRITERIA" in block
-    assert "What went wrong in it (how it moved the items it changed):" in block
+    assert "How it moved the items it changed:" in block
     assert "gate solve_check gave" in block and "first reply was already right" in block
     assert 'reviewed under "Did the added steps contribute?"' in block
     # Pointed to only when that section reviews this candidate's step.
@@ -484,14 +473,12 @@ def test_the_latest_rejected_change_says_what_went_wrong_in_it():
                             ).render()
     other = other[other.index("### Full edits of loopy"):].split("\n## ", 1)[0]
     assert "Did the added steps contribute?" not in other
-    # A text-only rejected change says what there is: its counts, and that no step-level
-    # account is available.
+    # A text-only rejected change says what there is: its counts.
     knob = [{**rows[0], "id": "words", "effect": {}, "added": False,
              "edit": [{"op": "set_knob", "name": "k", "value": "NEW"}]}, *rows[1:]]
     words = ProposalContext(reasoning=knob).render()
     words = words[words.index("### Full edits of words"):].split("\n## ", 1)[0]
-    assert ("What went wrong in it: it broke 7 train item(s) and fixed 1 against its parent; "
-            "no step-by-step account") in words
+    assert "What it did: it broke 7 train item(s) and fixed 1 against its parent." in words
 
 
 #: A child whose structural edit made items fail mechanically (LiveMath B-s42, round 2):
@@ -622,27 +609,3 @@ def test_a_rationale_shown_in_full_is_not_repeated_in_every_change_so_far(tmp_pa
     assert '(in full under "Your earlier reasoning")' in ledger and "RATIONALE-1" in ledger
 
 
-def test_a_changed_item_s_cut_texts_are_recorded_and_replies_match_by_attempt():
-    """In "What the last edit changed": a child's answer, grader reason or reply over
-    ITEM_TEXT_MAX is cut, marked and recorded; a reply the child kept is the same as the
-    parent's only at the same step and attempt (a loop's retries are told apart)."""
-    from refactory_dsh.optim.base import ITEM_TEXT_MAX, _moved_block, _Quoted
-
-    huge = "H" * (ITEM_TEXT_MAX + 500)
-    parent = {"id": "i1", "passed": True, "score": 1.0, "prediction": "B",
-              "exchanges": [{"node": "s", "prompt": "p", "response": "FIRST"},
-                            {"node": "s", "prompt": "p", "response": "SECOND"}]}
-    child = {"id": "i1", "passed": False, "score": 0.0, "prediction": huge,
-             "fail_reason": huge,
-             "exchanges": [{"node": "s", "prompt": "p", "response": "SECOND"},
-                           {"node": "s", "prompt": "p", "response": "SECOND"},
-                           {"node": "t", "prompt": "p", "response": huge}]}
-    omissions: list = []
-    block = _moved_block(parent, child, "broken", "c", _Quoted({}), omissions)
-    assert {o["step"] for o in omissions} == {"prediction", "grader", "t"}, omissions
-    assert block.count("chars omitted]") == 3
-    assert "Same reply in parent and child: `s` (run 2)." in block
-    steps = block.split("##### Step ")[1:]
-    assert steps[0].startswith("`s` (1 of 3 in the child, run 1; reply changed)"), steps[0]
-    assert "FIRST" in steps[0] and "SECOND" in steps[0], "run 1 differs from run 1"
-    assert steps[1].startswith("`t` (3 of 3 in the child; new: the parent did not run it)")

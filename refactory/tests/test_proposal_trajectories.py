@@ -770,17 +770,6 @@ def test_the_room_is_not_the_reader_findings_room():
     assert _full(text) == ["w20", "w23", "w24", "p09"]
 
 
-def test_another_section_names_only_the_items_the_room_kept_as_shown_below():
-    """``trajectories_whole`` (what other sections point to as shown under
-    "Trajectories") follows the same room, so nothing points at an item left out."""
-    records = _sized_records()
-    room = _whole_size(records, "w20", "p09") + 10
-    kept = base.trajectories_whole(records, findings=_CITING, shown_room=room)
-    assert [r["id"] for r in kept] == ["w20", "p09"]
-    assert [r["id"] for r in base.trajectories_whole(records, findings=_CITING)] == [
-        "w20", "w23", "w24", "p09"]
-
-
 def test_the_proposal_room_is_the_analysts_room():
     """Both are the whole request's size for the same optimizer model's context."""
     from refactory_dsh.optim import analysts
@@ -1025,7 +1014,6 @@ def test_the_analysts_read_no_harness_timeout():
     failures, successes = analysts.split([_record("w1"), _timed_out("t1"),
                                           _record("p1", passed=True)], seed=1)
     assert [r["id"] for r in failures] == ["w1"] and [r["id"] for r in successes] == ["p1"]
-    assert "any other change\n   aimed at harness timeouts" in analysts.FAILURE_SYSTEM
 
 
 def test_how_nodes_compose_says_a_timeout_in_one_sentence():

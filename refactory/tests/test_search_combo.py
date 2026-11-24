@@ -469,23 +469,6 @@ def test_portfolio_needs_the_model_proposer(tmp_path):
              project=Path("."), model=ComboModel())
 
 
-def test_the_request_shows_one_example_per_composition():
-    from refactory_dsh.nn import edits as nn_edits
-    from refactory_dsh.optim.base import composition_section
-
-    state = nn_edits.apply({"op": "insert_after", "target": "solve", "node": {
-        "id": "post", "kind": "op", "call": "combo_ops:finish", "produces": ["post_done"]}},
-        Combo().state_dict())  # solve then needs a plain out-edge for the examples
-    nodes = [dict(n, id=i) for i, n in state["graph"]["nodes"].items()]
-    text = "\n".join(composition_section(nn_edits.catalogue(), nodes, state["graph"]["edges"],
-                                         code_nodes=True))
-    examples = [json.loads(line.strip()) for line in text.splitlines() if line.startswith('  {"')]
-    ops = [e.get("op") or e["edits"][0]["op"] for e in examples]
-    # Built only from the core operators (`nn.core_ops`), one per composition.
-    assert {"parallelize", "insert", "loop"} <= set(ops) and "parallel" not in ops
-    assert len(examples) >= 6 and "none is the preferred shape" in text
-
-
 # ── 2. every parent picker x autoresearch ──────────────────────────────────
 
 
