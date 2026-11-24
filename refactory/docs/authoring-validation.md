@@ -48,22 +48,21 @@ default names one, and is the empty string otherwise; a data node reading a
 so an output folder or a settings file given with `--sample` is never emptied, and
 a path the graph writes is left alone. The check then judges the run:
 
-- it stopped with its own error: pass;
-- it finished and every declared file it wrote is empty: pass. Empty means no
-  content; a CSV/TSV header with no rows; a Markdown or text file holding one short
-  message (at most 120 characters, no digit); or JSON (or JSONL lines) holding only
-  `null`, `[]`, `{}`, `""` and `0`. At the top level only, a JSON object may also
-  carry one boolean flag and the status strings `status`, `reason`, `error` and
-  `message`, each a short message. So `{"status": "no input", "reason": "input
-  folder empty"}` is an honest report, while a status that quotes numbers, a status
-  key inside a result, or several flags is a result;
-- it finished and wrote a result: a repairable finding, sent back to the builder.
+- it stopped with its own error (a non-zero exit): pass;
+- it exited 0 and every declared file it wrote is empty: pass. Empty means zero
+  bytes, or a CSV/TSV holding only its header row;
+- it exited 0 and wrote anything else: a repairable finding, sent back to the
+  builder, whatever the content says. This includes a "no input" report: no rule
+  can tell an honest status from a fabricated verdict, so a mode with no input must
+  stop with an error naming what is missing and write no results file.
 
 The check is inconclusive when the run timed out, the model was unavailable, the
 mode could not be described, or an undeclared knob defaults to an existing path
 that looks like input (then the mode is not run, since it would still read that
-data). A path under the project looks like input; a scratch location (`/tmp`, the
-system temp folder), the run folder and a path the graph writes do not. A relative
+data). Only a file or folder under the project or the home folder looks like
+input; a system location (`/usr`, `/bin`, `/opt`, `/Library`, `/System`), an
+executable, a scratch location (`/tmp`, the system temp folder), the run folder
+and a path the graph writes do not. A relative
 default is resolved against the project on both runtimes. It is not
 applicable when the mode declares no input. Both are run warnings and appear in
 `create.json`'s `warnings`. Describing the mode and the run share one smoke budget.

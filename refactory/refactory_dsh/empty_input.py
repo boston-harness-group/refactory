@@ -6,10 +6,14 @@ it. The canonical smoke cannot see that: it runs the mode on real input. So afte
 smoke passes, create mode runs the mode once more with its declared inputs empty, and
 judges the run by what it did:
 
-* it stopped with an error of its own -- **pass**, the mode refused to run without input;
-* it finished and every declared file it wrote is empty (`is_empty_output`) -- **pass**,
-  the mode said there was nothing to report;
-* it finished and wrote a result -- **finding**: the result came from no input;
+* it stopped with an error of its own (a non-zero exit) -- **pass**, the mode refused to
+  run without input;
+* it finished and every declared file it wrote is empty (`is_empty_output`: zero bytes,
+  or a CSV/TSV holding only its header) -- **pass**, it produced nothing;
+* it finished and wrote anything else -- **finding**, whatever the content says. A
+  "no input" report written on a zero exit is a finding too, on purpose: no rule can
+  tell an honest status from a fabricated verdict ("plate passes QC"), so a mode with
+  no input must stop with an error naming what is missing, and write no report;
 * it was stopped, could not start, or could not be described (a timeout, a missing
   model) -- **inconclusive**, recorded and warned about, not held against the mode.
 
@@ -27,9 +31,9 @@ crash and pass. A path the graph declares as a write is never emptied. A data no
 bound to a Task takes its items from the Task, so it has no empty equivalent.
 
 A mode with no declared input at all is **not applicable**. A mode whose undeclared
-knob defaults to an existing path that looks like input -- under the project or the
-person's data, not a scratch location, the run folder or a path the graph writes --
-is **inconclusive** and is not run: emptying the declared input would still leave it
+knob defaults to an existing path that looks like input -- a file or folder under the
+project or the person's home folder; never a system or scratch location, an executable,
+the run folder or a path the graph writes -- is **inconclusive** and is not run: emptying the declared input would still leave it
 reading real data, and a run on real data says nothing about empty input. Both are
 warnings, never findings.
 
@@ -40,7 +44,6 @@ takes longer than one smoke.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import time
@@ -62,21 +65,12 @@ DESCRIBE_TIMEOUT_S = 180
 #: The statuses a person is warned about: the check did not judge the mode.
 UNJUDGED = ("inconclusive", "not_applicable")
 
-#: Keys of a JSON object that state a status, not a result: ``{"status": "no input",
-#: "reason": "input_dir holds no CSV files"}`` is a report that there was nothing to do.
-STATUS_KEYS = frozenset({"status", "reason", "error", "message"})
-
-#: The longest a status string or a text output may be and still be a message.
-SHORT_MESSAGE = 120
-
-#: Text outputs whose whole content may be a short message saying there was no input.
-_TEXT_SUFFIXES = (".md", ".txt", ".markdown", ".rst", ".log")
-
 #: Files read as tables: a header line and no rows is no result.
 _TABLE_SUFFIXES = (".csv", ".tsv")
 
-#: Files read as one JSON value per line.
-_LINES_SUFFIXES = (".jsonl", ".ndjson")
+#: System locations: a default pointing under one names a tool, not input.
+_SYSTEM_PREFIXES = ("/usr", "/bin", "/sbin", "/opt", "/etc", "/Library", "/System",
+                    "/Applications")
 
 
 class Finding(ValueError):
@@ -147,21 +141,29 @@ def _temp_roots() -> tuple[Path, ...]:
     return tuple(sorted({root.resolve() for root in roots if root.exists()}))
 
 
+def _under(path: Path, roots: Any) -> bool:
+    return any(path == root or path.is_relative_to(root) for root in roots)
+
+
 def _looks_like_input(path: Path, *, project: Path, run_root: Path) -> bool:
     """Whether an existing path an undeclared knob defaults to could be real input.
 
-    Never anything under the run folder, nor the project folder or the home folder as
-    a whole. A file or folder under the project could be input, wherever the project
-    lives; elsewhere, a scratch location (`_temp_roots`) is not, and anything else --
-    the person's data -- could be.
+    Only a file or folder under the project, or under the person's home folder, could
+    be; never the project or home folder as a whole, anything under the run folder, a
+    scratch location (`_temp_roots`), a system location (`_SYSTEM_PREFIXES`) or an
+    executable file. So ``/``, ``/usr/bin/env`` and ``/tmp`` never stop the check.
     """
     resolved, root = Path(path).resolve(), Path(project).resolve()
-    run = Path(run_root).resolve()
-    if resolved in (root, Path.home().resolve()) or resolved.is_relative_to(run):
+    home = Path.home().resolve()
+    if resolved in (root, home) or _under(resolved, (Path(run_root).resolve(),)):
         return False
-    if resolved.is_relative_to(root):
+    if resolved.is_file() and os.access(resolved, os.X_OK):
+        return False
+    if _under(resolved, (root,)):
         return True
-    return not any(resolved.is_relative_to(scratch) for scratch in _temp_roots())
+    system = tuple(Path(prefix).resolve() for prefix in _SYSTEM_PREFIXES if Path(prefix).exists())
+    return (_under(resolved, (home,)) and not _under(resolved, _temp_roots())
+            and not _under(resolved, system))
 
 
 def _normal(value: Any) -> str:
@@ -244,76 +246,13 @@ def plan(
             "undeclared": undeclared}
 
 
-def short_message(text: str) -> bool:
-    """A status message, not a result: at most `SHORT_MESSAGE` characters, no digit.
-
-    "no input: the folder holds no CSV files" is a message; "mean 0.42 over 96 wells"
-    carries numbers, and a paragraph carries more than a status.
-    """
-    stripped = text.strip()
-    return len(stripped) <= SHORT_MESSAGE and not any(ch.isdigit() for ch in stripped)
-
-
-def _empty_value(value: Any) -> bool:
-    """Whether a JSON value below the top level carries no result.
-
-    A flag, a status string and anything else that is not blank, zero or empty is a
-    result here: only the top level may state a status (`_empty_document`).
-    """
-    if value is None:
-        return True
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return value == 0
-    if isinstance(value, str):
-        return not value.strip()
-    if isinstance(value, list):
-        return all(_empty_value(item) for item in value)
-    if isinstance(value, dict):
-        return all(_empty_value(item) for item in value.values())
-    return False
-
-
-def _empty_document(value: Any) -> bool:
-    """Whether a whole JSON document carries no result (see `is_empty_output`)."""
-    if isinstance(value, bool):
-        return True
-    if not isinstance(value, dict):
-        return _empty_value(value)
-    flags = [name for name, item in value.items() if isinstance(item, bool)]
-    if len(flags) > 1:
-        return False
-    for name, item in value.items():
-        if name in flags:
-            continue
-        if name in STATUS_KEYS and isinstance(item, str):
-            if not short_message(item):
-                return False
-        elif not _empty_value(item):
-            return False
-    return True
-
-
 def is_empty_output(path: Path) -> bool:
-    """Whether a file the run wrote reports nothing: no derived result in it.
+    """Whether a file the run wrote is empty: the one rule, mechanical on purpose.
 
-    The rule is mechanical:
-
-    * a file with no content but whitespace, or a folder whose files are all empty;
-    * ``.json``: a value with no result in it -- ``null``, ``[]``, ``{}``, ``""``, ``0``,
-      or a list or object made only of those. At the top level only, an object may
-      also carry one boolean flag and the status strings ``status``, ``reason``,
-      ``error`` and ``message``, each a short message (`short_message`: at most 120
-      characters, no digit). So ``{"status": "no input", "reason": "input folder
-      empty", "rows": 0}`` is empty, and a status that quotes numbers, a status key
-      nested in a result, or a list of flags is a result;
-    * ``.jsonl`` / ``.ndjson``: every line such a document;
-    * ``.csv`` / ``.tsv``: a header and no rows;
-    * ``.md`` / ``.txt`` (and ``.markdown``, ``.rst``, ``.log``): a short message.
-
-    Anything else with content -- a row, a count above zero, a non-status string, text
-    with numbers or more than a sentence -- is a result.
+    Empty is zero bytes, or a ``.csv`` / ``.tsv`` holding at most its header line; a
+    folder is empty when every file in it is. Anything else is output -- a "no input"
+    status, a verdict, a single space -- because content can say anything, and a rule
+    that reads it can be talked past.
     """
     path = Path(path)
     if path.is_dir():
@@ -322,25 +261,14 @@ def is_empty_output(path: Path) -> bool:
         data = path.read_bytes()
     except OSError:
         return False
-    if not data.strip():
+    if not data:
         return True
-    suffix = path.suffix.lower()
-    try:
-        text = data.decode()
-    except UnicodeDecodeError:
-        return False
-    lines = [line for line in text.splitlines() if line.strip()]
-    if suffix in _TABLE_SUFFIXES:
+    if path.suffix.lower() in _TABLE_SUFFIXES:
+        try:
+            lines = [line for line in data.decode().splitlines() if line.strip()]
+        except UnicodeDecodeError:
+            return False
         return len(lines) <= 1
-    if suffix in _TEXT_SUFFIXES:
-        return short_message(text)
-    try:
-        if suffix == ".json":
-            return _empty_document(json.loads(text))
-        if suffix in _LINES_SUFFIXES:
-            return all(_empty_document(json.loads(line)) for line in lines)
-    except json.JSONDecodeError:
-        return False
     return False
 
 
@@ -379,12 +307,12 @@ def verdict(*, ok: bool, timed_out: bool, error: str, results: list[str],
             "with its input empty the mode finished and wrote results "
             f"({', '.join(results)}). A created mode must not fabricate, simulate or "
             "sample stand-in input data when its real input is missing or empty; it must "
-            "stop with an error that names the missing input, or write an empty result "
-            "or a status saying there was no input"
+            "stop with an error that names the missing input and write no results file, "
+            "not even a report that there was no input"
         )
     if empty:
-        return "pass", ("the mode finished on empty input and reported no result "
-                        f"({', '.join(empty)} empty)")
+        return "pass", ("the mode finished on empty input and wrote only empty files "
+                        f"({', '.join(empty)})")
     return "pass", "the mode finished on empty input and wrote none of its declared files"
 
 

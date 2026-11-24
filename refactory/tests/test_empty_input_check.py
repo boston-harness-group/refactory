@@ -99,7 +99,8 @@ def summarise(ctx):
 '''
 
 
-#: Says there was no input in a status report instead of raising: an honest exit 0.
+#: Says there was no input in a status report instead of raising, and exits 0. Not
+#: accepted: a report on empty input is output, whatever it says.
 REPORTS_NONE = _READ + '''
 
 def summarise(ctx):
@@ -414,9 +415,12 @@ def test_which_undeclared_defaults_look_like_input(tmp_path, monkeypatch):
     elsewhere = project / "sub"
     (elsewhere / "only_here").mkdir(parents=True)
     monkeypatch.chdir(elsewhere)
+    (project / "tool.sh").write_text("#!/bin/sh\n")
+    (project / "tool.sh").chmod(0o755)
     values = {"input_dir": "", "system_temp": tempfile.gettempdir(), "tmp": "/tmp",
               "run_cache": str(run / "cache"), "written": "data", "cwd_only": "only_here",
-              "project_data": "data", "project_root": "."}
+              "project_data": "data", "project_root": ".", "env": "/usr/bin/env",
+              "root": "/", "executable": "tool.sh", "usr": "/usr", "home": str(Path.home())}
     described = {"knobs": sorted(values), "values": values, "data_nodes": [],
                  "writes": []}
     planned = empty_input.plan(described, {}, ("input_dir",), empty_root=run / "e",
@@ -428,6 +432,32 @@ def test_which_undeclared_defaults_look_like_input(tmp_path, monkeypatch):
     assert planned["undeclared"] == []
 
 
+def test_data_under_the_home_folder_looks_like_input(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "plates").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    (home / "tmp" / "scratch").mkdir(parents=True)
+    monkeypatch.setattr(empty_input, "_temp_roots", lambda: (home / "tmp",))
+    project = tmp_path / "proj"
+    project.mkdir()
+    looks = lambda p: empty_input._looks_like_input(p, project=project,  # noqa: E731
+                                                     run_root=project / "run")
+    assert looks(home / "plates")
+    assert not looks(home), "the home folder as a whole is not input"
+    assert not looks(home / "tmp" / "scratch"), "a temp folder under home is scratch"
+
+
+@pytest.mark.parametrize("default", ["/usr/bin/env", "/"])
+def test_a_system_default_never_skips_the_check(tmp_path, project, plates, default):
+    """An undeclared knob defaulting to a system path is not input: the check runs and
+    the fabricating mode is a finding."""
+    knobs = _CONFIG_KNOBS.replace('"reference": nn.Knob("", ', f'"reference": nn.Knob({default!r}, ')
+    _install(project, NAME, plate_files(NAME, FABRICATES, knobs=knobs))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["undeclared"] == []
+    assert receipt["status"] == "finding", receipt
+
+
 def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
     described = {"knobs": ["input_dir", "report"], "values": {"report": "report.json"},
                  "data_nodes": [], "writes": ["report.json"]}
@@ -437,69 +467,82 @@ def test_a_declared_input_that_the_graph_writes_is_left_alone(tmp_path):
     assert "names a file the graph writes" in planned["kept"][0]
 
 
-# ── an honest report of no input passes (M1) ──────────────────────────────
+# ── the one rule: on empty input, an error or empty files (M1) ───────────
 
 
-#: The two ways a status report was made to carry a fabricated result (the review of
-#: #748): status keys inside the result, and numbers and flags at the top.
-FABRICATED_REPORTS = (
-    {"status": "done", "wells": [{"status": "high", "reason": "above threshold"},
-                                 {"status": "low", "reason": "below threshold"}]},
-    {"status": "summarised plate with mean value 0.42", "passed": True, "control_ok": True},
-)
+#: Results a mode wrote on empty input while saying, in words, that all was well or that
+#: there was nothing: each is output on a zero exit, so each is a finding.
+FABRICATED_REPORTS = {
+    "nested-status": {"status": "done", "wells": [
+        {"status": "high", "reason": "above threshold"},
+        {"status": "low", "reason": "below threshold"}]},
+    "numbers-and-flags": {"status": "summarised plate with mean value 0.42", "passed": True,
+                          "control_ok": True},
+    "short-verdict": {"status": "plate passes QC", "message": "all wells within range"},
+    "done-flag": {"status": "done", "passed": True},
+    "no-input-report": {"status": "no input", "reason": "input_dir holds no CSV files",
+                        "tables": [], "rows": 0},
+}
+
+#: A 73-character verdict with no digit, written as Markdown.
+SHORT_SUMMARY = "Plate passes QC: every well is within range and the controls look healthy"
 
 
-@pytest.mark.parametrize("report", FABRICATED_REPORTS, ids=["nested-status", "numbers-and-flags"])
-def test_a_fabricated_result_dressed_as_a_status_is_a_finding(tmp_path, project, plates, report):
-    ops = REPORTS_NONE.replace(
-        '''ctx.write_json("summary.json", {"status": "no input",
+def _writes_on_empty(write: str) -> str:
+    """The plate ops with ``write`` (a statement) as what they do on empty input."""
+    ops = REPORTS_NONE.replace('''ctx.write_json("summary.json", {"status": "no input",
                                         "reason": "input_dir holds no CSV files",
-                                        "tables": [], "rows": 0})''',
-        f'ctx.write_json("summary.json", {report!r})')
+                                        "tables": [], "rows": 0})''', write)
     assert ops != REPORTS_NONE
-    _install(project, NAME, plate_files(NAME, ops))
+    return ops
+
+
+@pytest.mark.parametrize("report", list(FABRICATED_REPORTS.values()),
+                         ids=list(FABRICATED_REPORTS))
+def test_any_report_on_empty_input_is_a_finding(tmp_path, project, plates, report):
+    """A verdict, a status or a "no input" report written on a zero exit is a finding,
+    whatever it says. The last case changes what passed before, on purpose."""
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(
+        f'ctx.write_json("summary.json", {report!r})')))
     receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["exit_ok"] is True
     assert receipt["status"] == "finding", receipt
     assert receipt["results"] == ["summary.json"]
 
 
-def test_a_mode_that_reports_no_input_passes(tmp_path, project, plates):
-    _install(project, NAME, plate_files(NAME, REPORTS_NONE))
+def test_a_short_markdown_verdict_is_a_finding(tmp_path, project, plates):
+    assert len(SHORT_SUMMARY) == 73 and not any(ch.isdigit() for ch in SHORT_SUMMARY)
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(
+        f'ctx.write_text("summary.md", {SHORT_SUMMARY!r})'), writes="summary.md"))
+    receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
+    assert receipt["status"] == "finding", receipt
+
+
+@pytest.mark.parametrize("write, writes", [
+    ('ctx.write_text("summary.json", "")', "summary.json"),
+    ('ctx.write_text("summary.csv", "well,value\\n")', "summary.csv"),
+], ids=["zero-bytes", "csv-header"])
+def test_a_mode_that_writes_only_empty_files_passes(tmp_path, project, plates, write, writes):
+    _install(project, NAME, plate_files(NAME, _writes_on_empty(write), writes=writes))
     receipt = _run(project, tmp_path, f"{NAME}/plate", {"input_dir": str(plates)})
     assert receipt["exit_ok"] is True
     assert receipt["status"] == "pass", receipt
-    assert receipt["empty_outputs"] == ["summary.json"] and receipt["results"] == []
+    assert receipt["empty_outputs"] == [writes] and receipt["results"] == []
 
 
 @pytest.mark.parametrize("name, content, empty", [
-    ("a.txt", "", True),
-    ("a.txt", "  \n", True),
-    ("a.json", "[]", True),
-    ("a.json", '{"count": 0, "items": []}', True),
-    ("a.json", '{"status": "no input", "reason": "the folder is empty", "rows": 0}', True),
-    ("a.jsonl", "\n{}\n", True),
+    ("a.json", "", True),
     ("a.csv", "well,value\n", True),
-    ("a.json", '{"rows": 2}', False),
-    ("a.json", '{"tables": ["synthetic.csv"]}', False),
-    ("a.json", "not json", False),
-    # The status strings are a report only at the top level, short and without numbers;
-    # a list of flags or a second flag is a result.
-    ("a.json", '{"status": "no input", "reason": "input folder empty"}', True),
-    ("a.json", '{"ok": false, "rows": 0}', True),
-    ("a.json", '{"status": "done", "wells": [{"status": "high", "reason": "above"}]}', False),
-    ("a.json", '{"status": "summarised plate with mean value 0.42"}', False),
-    ("a.json", '{"status": "' + "x" * 121 + '"}', False),
-    ("a.json", '{"ok": true, "control_ok": true}', False),
-    ("a.json", '{"wells": [true, false]}', False),
-    ("a.json", '{"summary": {"plate": {"status": "high", "reason": "above"}}}', False),
-    ("a.md", "No input: the folder holds no CSV files.\n", True),
-    ("a.txt", "no input", True),
-    ("a.md", "Plate summary: 3 wells", False),
-    ("a.md", "no input " + "and more " * 20, False),
-    ("a.jsonl", '{"id": "x"}\n', False),
+    ("a.tsv", "well\tvalue\n\n", True),
     ("a.csv", "well,value\nA1,0.5\n", False),
-    ("a.txt", "mean 0.5", False),
-    ("a.log", "the run read nothing and wrote a long account of plates " * 3, False),
+    ("a.txt", " ", False),
+    ("a.json", "[]", False),
+    ("a.json", "{}", False),
+    ("a.json", '{"status": "no input", "reason": "input folder empty"}', False),
+    ("a.json", '{"status": "plate passes QC", "message": "all wells within range"}', False),
+    ("a.json", '{"status": "done", "passed": true}', False),
+    ("a.md", SHORT_SUMMARY, False),
+    ("a.md", "no input", False),
 ])
 def test_what_counts_as_an_empty_output(tmp_path, name, content, empty):
     path = tmp_path / name
@@ -511,8 +554,9 @@ def test_a_folder_output_is_empty_only_when_every_file_is(tmp_path):
     folder = tmp_path / "out"
     (folder / "nested").mkdir(parents=True)
     (folder / "nested" / "rows.csv").write_text("well,value\n")
+    (folder / "blank.json").write_text("")
     assert empty_input.is_empty_output(folder)
-    (folder / "result.json").write_text('{"rows": 1}')
+    (folder / "result.json").write_text("{}")
     assert not empty_input.is_empty_output(folder)
 
 

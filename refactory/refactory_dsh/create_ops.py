@@ -144,11 +144,10 @@ given is missing or empty -- an input folder with no files, an empty file, a Tas
 with no data -- the operation raises an error naming what is missing. It never
 fabricates, simulates or samples stand-in input data and never reports on a
 substitute: a run on invented data that exits 0 reads as a result and is not one.
-Canonical validation runs the mode once more with its input empty and refuses a mode
-that then finishes with results. To report no input instead of raising, write each
-declared output empty -- an empty list, a zero count, a CSV header only -- or as a
-top-level `{"status": "no input", "reason": "<what is missing>"}` with no numbers,
-and nothing else.
+When required input is missing or empty, the mode stops with an error naming what is
+missing (a non-zero exit) and writes no results file -- not even a report that there
+was no input. Canonical validation runs the mode once more with its input empty and
+refuses a mode that then exits 0 having written anything but empty files.
 
 An agent's reply is text, and a model wraps more than JSON around its answer: prose, a
 fence, even a tool-call transcript it invented. An operation that reads an agent's JSON
