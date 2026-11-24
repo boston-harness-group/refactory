@@ -675,7 +675,8 @@ def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_p
     """Every test of the check passed in the self-check on this commit: all are deselected,
     none runs again, and pytest's exit 5 for the empty step is read as the pass it is --
     for a single step and as a step of a chain."""
-    for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok"):
+    for check in (f"{PYTEST} -q tests", f"{PYTEST} -q tests && echo lint ok",
+                  f"{PYTEST} -q -n 2 tests"):
         root = tmp_path / str(len(check))
         root.mkdir()
         fx = Fixture(root, {"tests/test_three.py": MORE}, {"change.txt": "x\n"}, check=check)
@@ -688,10 +689,17 @@ def test_a_step_whose_every_test_was_deselected_passes_without_running_one(tmp_p
 
 
 def test_a_step_that_collected_nothing_still_fails():
-    """No test collected at all is not a deselected step: it stays failing."""
+    """A step that collected nothing without deselecting anything stays failing; so does
+    one whose exit 5 pytest did not explain."""
     result = sandbox.SandboxResult(ok=False, returncode=5, stdout="no tests ran in 0.01s\n")
     base_check.settle_deselected(result, "pytest -q tests")
     assert not result.ok and result.returncode == 5
+    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="crashed\n")
+    base_check.settle_deselected(result, "pytest -q tests --deselect=tests/test_a.py::test_x")
+    assert not result.ok and result.returncode == 5
+    result = sandbox.SandboxResult(ok=False, returncode=5, stdout="no tests ran in 0.70s\n")
+    base_check.settle_deselected(result, "pytest -q -n 4 tests --deselect=tests/test_a.py::test_x")
+    assert result.ok and result.returncode == 0  # xdist's word for all deselected
 
 
 ORDER_BASE = ("STATE = []\n\n\ndef test_a_sets():\n    pass\n\n\n"
@@ -767,8 +775,8 @@ def test_the_guardedness_cache_is_kept_per_check_command(tmp_path):
 @pytest.mark.usefixtures("fake_gh")
 def test_a_check_that_passed_with_deselection_is_run_whole_at_delivery_on_the_walker(tmp_path):
     """One QA pass whose full check deselects what the self-check passed and passes: that
-    pass is not recorded as a whole run, so delivery runs the whole suite once on the
-    reviewed commit, in the run's worktree (`delivery.whole_suite_owed`)."""
+    pass is not recorded as a whole run of its commit, and the whole suite runs once more,
+    in the run's worktree, at delivery."""
     import test_self_check as T
     from tests_support import FakeModel
 
@@ -789,3 +797,7 @@ def test_a_check_that_passed_with_deselection_is_run_whole_at_delivery_on_the_wa
     run = tmp_path / "run"
     owed = json.loads((run / delivery.DESELECTED_CHECKS).read_text())["commits"]
     assert len(owed) == 1
+    # The deselected pass is never recorded as a whole run of its commit.
+    ledger = run / delivery.PASSED_CHECKS
+    whole_runs = json.loads(ledger.read_text()) if ledger.exists() else {}
+    assert owed[0] not in {entry["commit"] for entry in whole_runs.values()}, whole_runs

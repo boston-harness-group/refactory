@@ -44,6 +44,15 @@ def _judged(model: FakeModel) -> list[str]:
     return [prompt for prompt in model.prompts if JUDGE in prompt]
 
 
+def _is_check(command: str, check: str = CHECK) -> bool:
+    """Whether ``command`` is the whole check: as written, or with the tests the self-check
+    passed on the same commit deselected (`base_check.with_deselected`)."""
+    import shlex
+
+    return command == check or (command.startswith(check + " ") and all(
+        word.startswith("--deselect=") for word in shlex.split(command[len(check) + 1:])))
+
+
 def _whole_runs(monkeypatch, command: str = CHECK) -> list[dict]:
     """Every whole-check run, wherever it runs: the first self-check's, in the attempt's
     worktree, and the check beside the reviews', in its check copy."""
@@ -51,7 +60,7 @@ def _whole_runs(monkeypatch, command: str = CHECK) -> list[dict]:
     real = repo_change.run_check
 
     def spy(ctx, cmd, timeout, **kwargs):
-        if cmd == command:
+        if _is_check(cmd, command):
             calls.append({"commit": str(ctx.facts.get("commit")), **kwargs})
         return real(ctx, cmd, timeout, **kwargs)
 
@@ -223,7 +232,7 @@ def test_a_failing_check_that_names_no_test_goes_back_from_the_full_check(tmp_pa
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and command == CHECK:
+        if kwargs.get("beside_reviews") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 
@@ -604,7 +613,7 @@ def test_check_that_always_fails_terminates_at_bound(tmp_path, monkeypatch):
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and command == CHECK:
+        if kwargs.get("beside_reviews") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 
@@ -755,7 +764,7 @@ def test_past_the_budget_a_build_error_still_stops(
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("prepared") and command == CHECK:
+        if kwargs.get("prepared") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 
@@ -852,7 +861,7 @@ def test_combined_sendback_carries_check_failures_and_review_findings(tmp_path, 
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and command == CHECK:
+        if kwargs.get("beside_reviews") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 
@@ -1043,7 +1052,7 @@ def test_no_attempt_sendback_through_graph_to_draft(tmp_path, monkeypatch):
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and command == CHECK:
+        if kwargs.get("beside_reviews") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 
@@ -1093,7 +1102,7 @@ def test_sendback_names_failing_test_and_review_finding(tmp_path, monkeypatch):
     real = repo_change.run_check
 
     def run_check(ctx, command, timeout, **kwargs):
-        if kwargs.get("beside_reviews") and command == CHECK:
+        if kwargs.get("beside_reviews") and _is_check(command):
             return broken
         return real(ctx, command, timeout, **kwargs)
 

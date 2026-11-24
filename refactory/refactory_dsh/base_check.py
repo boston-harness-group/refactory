@@ -814,25 +814,34 @@ def chain_status(steps: list[dict]) -> int:
     return status
 
 
+def _ran_nothing(output: str) -> bool:
+    """pytest's own word that no test ran: every one deselected (``3 deselected in 0.01s``),
+    or, under xdist, whose workers do the deselecting, ``no tests ran``."""
+    return _all_deselected(output) or bool(re.search(r"^=*\s*no tests ran\b", strip_ansi(output),
+                                                     re.MULTILINE))
+
+
 def settle_deselected(result: Any, command: str) -> None:
     """A check whose pytest step deselected every test it collected (`with_deselected`):
     that step ran nothing and exited 5, which is no failure -- every test in it passed in
-    the self-check on this commit. Its exit becomes 0 and the command's status is worked
-    out again (`chain_status`). A step that collected nothing at all ("no tests ran") is
-    not this and stays failing."""
+    the self-check on this commit, in a copy holding the same files (`residue`), so the
+    step's collection holds them and an exit 5 there can only mean all were deselected.
+    Its exit becomes 0 and the command's status is worked out again (`chain_status`).
+    Only the step that carries the ``--deselect`` arguments is read so; any other step
+    that collected nothing stays failing."""
     steps = getattr(result, "step_results", None)
     if steps is not None:
         changed = False
         for sr in steps:
-            if sr["ran"] and sr["exit_code"] == 5 and sr["runner"] == "pytest" \
-                    and _all_deselected(sr["output"]):
+            if sr["ran"] and sr["exit_code"] == 5 and "--deselect=" in sr["step"] \
+                    and _ran_nothing(sr["output"]):
                 sr.update(exit_code=0, accounted=True)
                 changed = True
         if not changed:
             return
         status = chain_status(steps)
-    elif result.returncode == 5 and _runner(command) == "pytest" \
-            and _all_deselected("\n".join((result.stdout or "", result.stderr or ""))):
+    elif result.returncode == 5 and "--deselect=" in command and _runner(command) == "pytest" \
+            and _ran_nothing("\n".join((result.stdout or "", result.stderr or ""))):
         status = 0
     else:
         return
